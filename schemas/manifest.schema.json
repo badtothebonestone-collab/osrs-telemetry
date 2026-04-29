@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://osrs-telemetry.local/schemas/manifest.schema.json",
+  "title": "OSRS Telemetry Manifest",
+  "type": "object",
+  "required": [
+    "sessionId",
+    "startedAtUtc",
+    "schemaVersion",
+    "active",
+    "currentTickSegment",
+    "currentEventSegment",
+    "tickSegmentIndex",
+    "eventSegmentIndex",
+    "tickCount",
+    "eventCount",
+    "droppedRecords",
+    "lastUpdatedUtc"
+  ],
+  "properties": {
+    "sessionId": { "type": "string", "minLength": 1 },
+    "startedAtUtc": { "type": "string", "minLength": 1 },
+    "endedAtUtc": { "type": ["string", "null"] },
+    "schemaVersion": { "type": "string", "minLength": 1 },
+    "active": { "type": "boolean" },
+    "currentTickSegment": { "type": "string", "minLength": 1 },
+    "currentEventSegment": { "type": "string", "minLength": 1 },
+    "tickSegmentIndex": { "type": "integer", "minimum": 1 },
+    "eventSegmentIndex": { "type": "integer", "minimum": 1 },
+    "tickCount": { "type": "integer", "minimum": 0 },
+    "eventCount": { "type": "integer", "minimum": 0 },
+    "droppedRecords": { "type": "integer", "minimum": 0 },
+    "lastUpdatedUtc": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": true
+}

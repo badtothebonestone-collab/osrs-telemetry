@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://osrs-telemetry.local/schemas/event.schema.json",
+  "title": "OSRS Telemetry Event",
+  "type": "object",
+  "required": ["schemaVersion", "tickId", "timestampUtc", "eventType"],
+  "properties": {
+    "schemaVersion": { "type": "string", "minLength": 1 },
+    "tickId": { "type": "integer", "minimum": 0 },
+    "eventSeq": { "type": ["integer", "null"], "minimum": 0 },
+    "timestampUtc": { "type": "string", "minLength": 1 },
+    "eventType": { "type": "string", "minLength": 1 },
+    "payload": { "type": ["object", "array", "string", "number", "boolean", "null"] }
+  },
+  "additionalProperties": true
+}
