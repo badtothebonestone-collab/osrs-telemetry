@@ -84,3 +84,20 @@ Future screenshot or frame capture should attach to ticks using `tickId`, for
 example by adding a `framePath` field to a tick or by writing a separate frame
 index keyed by `tickId`. The current layout leaves room for a future `frames\`
 folder without changing tick/event segment consumption.
+
+## Latest-State Cache
+
+`telemetry-viewer\latest_state.py` can follow the newest active segmented
+session and maintain a small cache for live consumers:
+
+```text
+latest\
+  latest_tick.json
+  latest_status.json
+  latest_events.json
+```
+
+Writes are atomic: the tool writes a temporary file and replaces the final JSON
+file after the write completes. Consumers can poll these files without parsing
+the full session stream. The cache is derived from telemetry files only; it does
+not interact with RuneLite.
