@@ -102,6 +102,19 @@ def read_recent_events(session: Path, limit: int) -> list[dict]:
     return events[-limit:]
 
 
+def recent_event_counts(session: Path, event_types: list[str], max_records: int = 500) -> dict[str, int]:
+    counts = {event_type: 0 for event_type in event_types}
+    events = read_recent_events(session, max_records)
+
+    for event in events:
+        event_type = event.get("eventType")
+
+        if event_type in counts:
+            counts[event_type] += 1
+
+    return {event_type: count for event_type, count in counts.items() if count > 0}
+
+
 def newest_tick_file(session: Path) -> Path | None:
     files = tick_files(session)
     return files[-1] if files else None
@@ -166,6 +179,26 @@ def summarize_tick(tick: dict):
     skills = tick.get("skills") or []
     hp = next((skill for skill in skills if skill.get("name") == "HITPOINTS"), None)
     prayer = next((skill for skill in skills if skill.get("name") == "PRAYER"), None)
+    status = tick.get("status") or {}
+    active_prayers = [
+        prayer_snapshot
+        for prayer_snapshot in (tick.get("activePrayers") or [])
+        if prayer_snapshot.get("active")
+    ]
+    active_prayer_names = [prayer_snapshot.get("name", "?") for prayer_snapshot in active_prayers[:4]]
+    hp_current = status.get("hitpointsBoosted", hp.get("boostedLevel") if hp else "?")
+    hp_real = status.get("hitpointsReal", hp.get("realLevel") if hp else "?")
+    prayer_current = status.get("prayerBoosted", prayer.get("boostedLevel") if prayer else "?")
+    prayer_real = status.get("prayerReal", prayer.get("realLevel") if prayer else "?")
+    run_percent = status.get("runEnergyPercent")
+    run_display = f"{run_percent:.1f}%" if isinstance(run_percent, (int, float)) else "?"
+    interacting = status.get("interactingType")
+
+    if interacting and interacting != "UNKNOWN":
+        target_name = status.get("interactingName") or status.get("interactingId") or "?"
+        interacting_display = f"{interacting}:{target_name}"
+    else:
+        interacting_display = "none"
 
     print(
         f"tick={tick_id} | "
@@ -174,8 +207,11 @@ def summarize_tick(tick: dict):
         f"anim={animation} | "
         f"inventory={len(filled_slots)}/28 | "
         f"equipped={len(equipped_slots)} | "
-        f"hp={hp.get('boostedLevel') if hp else '?'} "
-        f"prayer={prayer.get('boostedLevel') if prayer else '?'} | "
+        f"run={run_display} | "
+        f"hp={hp_current}/{hp_real} | "
+        f"prayer={prayer_current}/{prayer_real} | "
+        f"activePrayers={len(active_prayers)}[{','.join(active_prayer_names)}] | "
+        f"target={interacting_display} | "
         f"npcs={len(tick.get('npcs') or [])} | "
         f"players={len(tick.get('players') or [])} | "
         f"sceneObjects={len(tick.get('sceneObjects') or [])} | "
@@ -231,6 +267,20 @@ def main():
     print()
 
     events = read_recent_events(session, 10)
+    event_counts = recent_event_counts(session, [
+        "AnimationChanged",
+        "InteractingChanged",
+        "HitsplatApplied",
+        "ProjectileMoved",
+        "GraphicsObjectCreated",
+    ])
+
+    if event_counts:
+        print(
+            "Recent combat/effect events: "
+            + " ".join(f"{name}={count}" for name, count in event_counts.items())
+        )
+        print()
 
     if events:
         menu_opened_count = sum(1 for event in events if event.get("eventType") == "MenuOpened")

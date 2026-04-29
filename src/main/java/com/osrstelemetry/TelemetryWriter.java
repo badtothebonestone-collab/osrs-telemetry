@@ -16,8 +16,11 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -66,6 +69,10 @@ public class TelemetryWriter implements Closeable
 	private final Path sessionDir;
 	private final Path ticksDir;
 	private final Path eventsDir;
+	private final Path dictionariesDir;
+	private final Path itemsDictionaryFile;
+	private final Path npcsDictionaryFile;
+	private final Path objectsDictionaryFile;
 	private final Path manifestFile;
 	private final String sessionId;
 	private final long maxSegmentBytes;
@@ -75,6 +82,10 @@ public class TelemetryWriter implements Closeable
 	private final boolean preservePinnedSessions;
 	private final boolean allowDeletingClosedSegmentsFromActiveSession;
 	private final AtomicLong droppedRecords = new AtomicLong();
+	private final AtomicBoolean dictionariesDirty = new AtomicBoolean(false);
+	private final Map<Integer, String> itemDictionary = new ConcurrentHashMap<>();
+	private final Map<Integer, String> npcDictionary = new ConcurrentHashMap<>();
+	private final Map<Integer, String> objectDictionary = new ConcurrentHashMap<>();
 	private final Manifest manifest = new Manifest();
 
 	private volatile boolean running = false;
@@ -86,6 +97,7 @@ public class TelemetryWriter implements Closeable
 	private long currentTickBytes;
 	private long currentEventBytes;
 	private long nextCleanupAtMillis;
+	private long nextDictionaryFlushAtMillis;
 
 	public TelemetryWriter(
 			String outputDirectory,
@@ -103,6 +115,10 @@ public class TelemetryWriter implements Closeable
 		this.sessionDir = sessionsRoot.resolve(sessionId);
 		this.ticksDir = sessionDir.resolve(STREAM_TICKS);
 		this.eventsDir = sessionDir.resolve(STREAM_EVENTS);
+		this.dictionariesDir = sessionDir.resolve("dictionaries");
+		this.itemsDictionaryFile = dictionariesDir.resolve("items.json");
+		this.npcsDictionaryFile = dictionariesDir.resolve("npcs.json");
+		this.objectsDictionaryFile = dictionariesDir.resolve("objects.json");
 		this.manifestFile = sessionDir.resolve("manifest.json");
 		this.maxSegmentBytes = Math.max(1L, maxSegmentMb) * 1024L * 1024L;
 		this.retentionEnabled = retentionEnabled;
@@ -116,6 +132,7 @@ public class TelemetryWriter implements Closeable
 	{
 		Files.createDirectories(ticksDir);
 		Files.createDirectories(eventsDir);
+		Files.createDirectories(dictionariesDir);
 
 		manifest.sessionId = sessionId;
 		manifest.startedAtUtc = Instant.now().toString();
@@ -130,6 +147,7 @@ public class TelemetryWriter implements Closeable
 
 		running = true;
 		nextCleanupAtMillis = System.currentTimeMillis() + cleanupIntervalMillis;
+		nextDictionaryFlushAtMillis = System.currentTimeMillis() + 5000L;
 		worker = new Thread(this::runWriterLoop, "telemetry-writer");
 		worker.setDaemon(true);
 		worker.start();
@@ -155,6 +173,34 @@ public class TelemetryWriter implements Closeable
 	public long getDroppedRecords()
 	{
 		return droppedRecords.get();
+	}
+
+	public void rememberItem(int id, String name)
+	{
+		rememberDictionaryEntry(itemDictionary, id, name);
+	}
+
+	public void rememberNpc(int id, String name)
+	{
+		rememberDictionaryEntry(npcDictionary, id, name);
+	}
+
+	public void rememberObject(int id, String name)
+	{
+		rememberDictionaryEntry(objectDictionary, id, name);
+	}
+
+	private void rememberDictionaryEntry(Map<Integer, String> dictionary, int id, String name)
+	{
+		if (id < 0 || name == null || name.isBlank() || "null".equalsIgnoreCase(name))
+		{
+			return;
+		}
+
+		if (dictionary.putIfAbsent(id, name) == null)
+		{
+			dictionariesDirty.set(true);
+		}
 	}
 
 	private void enqueue(QueuedLine line)
@@ -184,6 +230,7 @@ public class TelemetryWriter implements Closeable
 				}
 
 				maybeRunRetention();
+				maybeFlushDictionaries();
 			}
 		}
 		catch (InterruptedException e)
@@ -203,6 +250,7 @@ public class TelemetryWriter implements Closeable
 			manifest.active = false;
 			manifest.endedAtUtc = Instant.now().toString();
 			manifest.droppedRecords = droppedRecords.get();
+			flushDictionariesQuietly();
 			writeManifestQuietly();
 		}
 	}
@@ -370,6 +418,51 @@ public class TelemetryWriter implements Closeable
 
 		nextCleanupAtMillis = now + cleanupIntervalMillis;
 		runRetention();
+	}
+
+	private void maybeFlushDictionaries()
+	{
+		long now = System.currentTimeMillis();
+
+		if (now < nextDictionaryFlushAtMillis)
+		{
+			return;
+		}
+
+		nextDictionaryFlushAtMillis = now + 5000L;
+
+		if (!dictionariesDirty.compareAndSet(true, false))
+		{
+			return;
+		}
+
+		flushDictionariesQuietly();
+	}
+
+	private void flushDictionariesQuietly()
+	{
+		try
+		{
+			Files.createDirectories(dictionariesDir);
+			writeDictionary(itemsDictionaryFile, itemDictionary);
+			writeDictionary(npcsDictionaryFile, npcDictionary);
+			writeDictionary(objectsDictionaryFile, objectDictionary);
+		}
+		catch (IOException e)
+		{
+			dictionariesDirty.set(true);
+			log.warn("Failed to flush telemetry dictionaries", e);
+		}
+	}
+
+	private void writeDictionary(Path file, Map<Integer, String> dictionary) throws IOException
+	{
+		Files.writeString(
+				file,
+				gson.toJson(dictionary),
+				StandardCharsets.UTF_8,
+				StandardOpenOption.CREATE,
+				StandardOpenOption.TRUNCATE_EXISTING);
 	}
 
 	private void runRetention()

@@ -16,6 +16,8 @@ public class TickSnapshot
     public WidgetSnapshot[] widgets;
     public SceneObjectSnapshot[] sceneObjects;
     public GroundItemSnapshot[] groundItems;
+    public StatusSnapshot status;
+    public ActivePrayerSnapshot[] activePrayers;
     public String[] captureErrors;
     public int writerQueueSize;
     public long writerDroppedRecords;
@@ -110,5 +112,32 @@ public class TickSnapshot
         public int plane;
         public int sceneX;
         public int sceneY;
+    }
+
+    public static class StatusSnapshot
+    {
+        public int runEnergyRaw;
+        public double runEnergyPercent;
+        public int weight;
+        public int hitpointsBoosted;
+        public int hitpointsReal;
+        public int prayerBoosted;
+        public int prayerReal;
+        public int localHealthRatio;
+        public int localHealthScale;
+        public String interactingType;
+        public int interactingIndex;
+        public int interactingId;
+        public String interactingName;
+        public int interactingWorldX;
+        public int interactingWorldY;
+        public int interactingPlane;
+    }
+
+    public static class ActivePrayerSnapshot
+    {
+        public String name;
+        public int varbit;
+        public boolean active;
     }
 }

@@ -8,20 +8,30 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Actor;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.GameObject;
+import net.runelite.api.GraphicsObject;
+import net.runelite.api.Hitsplat;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
+import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.MenuEntry;
 import net.runelite.api.NPC;
+import net.runelite.api.NPCComposition;
+import net.runelite.api.ObjectComposition;
 import net.runelite.api.Player;
 import net.runelite.api.Point;
+import net.runelite.api.Prayer;
+import net.runelite.api.Projectile;
 import net.runelite.api.Scene;
 import net.runelite.api.Skill;
 import net.runelite.api.Tile;
@@ -29,12 +39,32 @@ import net.runelite.api.TileItem;
 import net.runelite.api.TileObject;
 import net.runelite.api.WallObject;
 import net.runelite.api.WorldView;
+import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.ActorDeath;
+import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GraphicsObjectCreated;
+import net.runelite.api.events.HitsplatApplied;
+import net.runelite.api.events.InteractingChanged;
 import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.ItemDespawned;
+import net.runelite.api.events.ItemQuantityChanged;
+import net.runelite.api.events.ItemSpawned;
 import net.runelite.api.events.MenuOpened;
+import net.runelite.api.events.NpcChanged;
+import net.runelite.api.events.NpcDespawned;
+import net.runelite.api.events.NpcSpawned;
+import net.runelite.api.events.OverheadTextChanged;
+import net.runelite.api.events.PlayerChanged;
+import net.runelite.api.events.PlayerDespawned;
+import net.runelite.api.events.PlayerSpawned;
+import net.runelite.api.events.ProjectileMoved;
 import net.runelite.api.events.StatChanged;
+import net.runelite.api.events.VarClientIntChanged;
+import net.runelite.api.events.VarClientStrChanged;
+import net.runelite.api.events.VarbitChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
@@ -67,6 +97,9 @@ public class TelemetryPlugin extends Plugin
 	private TelemetryWriter writer;
 	private long tickId = 0;
 	private long eventSeq = 0;
+	private final Set<Integer> knownItemIds = new HashSet<>();
+	private final Set<Integer> knownNpcIds = new HashSet<>();
+	private final Set<Integer> knownObjectIds = new HashSet<>();
 
 	@Provides
 	TelemetryConfig provideConfig(ConfigManager configManager)
@@ -144,6 +177,8 @@ public class TelemetryPlugin extends Plugin
 				safeCapture(captureErrors, "players", () -> capturePlayers(snapshot));
 				safeCapture(captureErrors, "widgets", () -> captureWidgets(snapshot));
 				safeCapture(captureErrors, "scene", () -> captureScene(snapshot));
+				safeCapture(captureErrors, "status", () -> captureStatus(snapshot));
+				safeCapture(captureErrors, "activePrayers", () -> captureActivePrayers(snapshot));
 			}
 		}
 		finally
@@ -198,6 +233,201 @@ public class TelemetryPlugin extends Plugin
 	}
 
 	@Subscribe
+	public void onVarbitChanged(VarbitChanged event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("index", event.getIndex());
+		payload.put("varpId", event.getVarpId());
+		payload.put("varbitId", event.getVarbitId());
+		payload.put("value", event.getValue());
+
+		logEvent("VarbitChanged", payload);
+	}
+
+	@Subscribe
+	public void onVarClientIntChanged(VarClientIntChanged event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		int index = event.getIndex();
+		payload.put("index", index);
+		payload.put("value", client.getVarcIntValue(index));
+
+		logEvent("VarClientIntChanged", payload);
+	}
+
+	@Subscribe
+	public void onVarClientStrChanged(VarClientStrChanged event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		int index = event.getIndex();
+		payload.put("index", index);
+		payload.put("value", truncate(client.getVarcStrValue(index), 256));
+
+		logEvent("VarClientStrChanged", payload);
+	}
+
+	@Subscribe
+	public void onAnimationChanged(AnimationChanged event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("actor", actorPayload(event.getActor()));
+
+		logEvent("AnimationChanged", payload);
+	}
+
+	@Subscribe
+	public void onInteractingChanged(InteractingChanged event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("source", actorPayload(event.getSource()));
+		payload.put("target", actorPayload(event.getTarget()));
+
+		logEvent("InteractingChanged", payload);
+	}
+
+	@Subscribe
+	public void onHitsplatApplied(HitsplatApplied event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		Hitsplat hitsplat = event.getHitsplat();
+		payload.put("actor", actorPayload(event.getActor()));
+
+		if (hitsplat != null)
+		{
+			payload.put("hitsplatType", hitsplat.getHitsplatType());
+			payload.put("amount", hitsplat.getAmount());
+			payload.put("disappearsOnGameCycle", hitsplat.getDisappearsOnGameCycle());
+			payload.put("mine", hitsplat.isMine());
+			payload.put("others", hitsplat.isOthers());
+		}
+
+		logEvent("HitsplatApplied", payload);
+	}
+
+	@Subscribe
+	public void onProjectileMoved(ProjectileMoved event)
+	{
+		Map<String, Object> payload = projectilePayload(event.getProjectile());
+		LocalPoint position = event.getPosition();
+		payload.put("z", event.getZ());
+
+		if (position != null)
+		{
+			payload.put("localX", position.getX());
+			payload.put("localY", position.getY());
+			WorldPoint worldPoint = WorldPoint.fromLocal(client, position);
+
+			if (worldPoint != null)
+			{
+				payload.put("worldX", worldPoint.getX());
+				payload.put("worldY", worldPoint.getY());
+				payload.put("plane", worldPoint.getPlane());
+			}
+		}
+
+		logEvent("ProjectileMoved", payload);
+	}
+
+	@Subscribe
+	public void onGraphicsObjectCreated(GraphicsObjectCreated event)
+	{
+		logEvent("GraphicsObjectCreated", graphicsObjectPayload(event.getGraphicsObject()));
+	}
+
+	@Subscribe
+	public void onOverheadTextChanged(OverheadTextChanged event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("actor", actorPayload(event.getActor()));
+		payload.put("text", truncate(event.getOverheadText(), 256));
+
+		logEvent("OverheadTextChanged", payload);
+	}
+
+	@Subscribe
+	public void onNpcSpawned(NpcSpawned event)
+	{
+		rememberNpc(event.getNpc());
+		logEvent("NpcSpawned", actorPayload(event.getNpc()));
+	}
+
+	@Subscribe
+	public void onNpcDespawned(NpcDespawned event)
+	{
+		rememberNpc(event.getNpc());
+		logEvent("NpcDespawned", actorPayload(event.getNpc()));
+	}
+
+	@Subscribe
+	public void onNpcChanged(NpcChanged event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		rememberNpc(event.getNpc());
+		payload.put("npc", actorPayload(event.getNpc()));
+
+		if (event.getOld() != null)
+		{
+			payload.put("oldId", event.getOld().getId());
+			payload.put("oldName", event.getOld().getName());
+		}
+
+		logEvent("NpcChanged", payload);
+	}
+
+	@Subscribe
+	public void onActorDeath(ActorDeath event)
+	{
+		if (event.getActor() instanceof NPC)
+		{
+			rememberNpc((NPC) event.getActor());
+			logEvent("NpcDeath", actorPayload(event.getActor()));
+		}
+	}
+
+	@Subscribe
+	public void onPlayerSpawned(PlayerSpawned event)
+	{
+		logEvent("PlayerSpawned", actorPayload(event.getPlayer()));
+	}
+
+	@Subscribe
+	public void onPlayerDespawned(PlayerDespawned event)
+	{
+		logEvent("PlayerDespawned", actorPayload(event.getPlayer()));
+	}
+
+	@Subscribe
+	public void onPlayerChanged(PlayerChanged event)
+	{
+		logEvent("PlayerChanged", actorPayload(event.getPlayer()));
+	}
+
+	@Subscribe
+	public void onItemSpawned(ItemSpawned event)
+	{
+		rememberItem(event.getItem());
+		logEvent("ItemSpawned", itemEventPayload(event.getTile(), event.getItem()));
+	}
+
+	@Subscribe
+	public void onItemDespawned(ItemDespawned event)
+	{
+		rememberItem(event.getItem());
+		logEvent("ItemDespawned", itemEventPayload(event.getTile(), event.getItem()));
+	}
+
+	@Subscribe
+	public void onItemQuantityChanged(ItemQuantityChanged event)
+	{
+		Map<String, Object> payload = itemEventPayload(event.getTile(), event.getItem());
+		payload.put("oldQuantity", event.getOldQuantity());
+		payload.put("newQuantity", event.getNewQuantity());
+		rememberItem(event.getItem());
+
+		logEvent("ItemQuantityChanged", payload);
+	}
+
+	@Subscribe
 	public void onWidgetLoaded(WidgetLoaded event)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
@@ -213,6 +443,67 @@ public class TelemetryPlugin extends Plugin
 		payload.put("groupId", event.getGroupId());
 
 		logEvent("WidgetClosed", payload);
+	}
+
+	private void captureStatus(TickSnapshot snapshot)
+	{
+		TickSnapshot.StatusSnapshot status = new TickSnapshot.StatusSnapshot();
+		Player localPlayer = client.getLocalPlayer();
+		status.runEnergyRaw = client.getEnergy();
+		status.runEnergyPercent = status.runEnergyRaw / 100.0;
+		status.weight = client.getWeight();
+		status.hitpointsBoosted = client.getBoostedSkillLevel(Skill.HITPOINTS);
+		status.hitpointsReal = client.getRealSkillLevel(Skill.HITPOINTS);
+		status.prayerBoosted = client.getBoostedSkillLevel(Skill.PRAYER);
+		status.prayerReal = client.getRealSkillLevel(Skill.PRAYER);
+		status.interactingIndex = -1;
+		status.interactingId = -1;
+		status.interactingWorldX = -1;
+		status.interactingWorldY = -1;
+		status.interactingPlane = -1;
+
+		if (localPlayer != null)
+		{
+			status.localHealthRatio = localPlayer.getHealthRatio();
+			status.localHealthScale = localPlayer.getHealthScale();
+
+			Actor interacting = localPlayer.getInteracting();
+			Map<String, Object> interactingPayload = actorPayload(interacting);
+			status.interactingType = (String) interactingPayload.get("actorType");
+			status.interactingName = interactingPayload.containsKey("name")
+					? (String) interactingPayload.get("name")
+					: (String) interactingPayload.get("nameHash");
+			status.interactingIndex = getInt(interactingPayload.get("index"), -1);
+			status.interactingId = getInt(interactingPayload.get("id"), -1);
+			status.interactingWorldX = getInt(interactingPayload.get("worldX"), -1);
+			status.interactingWorldY = getInt(interactingPayload.get("worldY"), -1);
+			status.interactingPlane = getInt(interactingPayload.get("plane"), -1);
+		}
+
+		snapshot.status = status;
+	}
+
+	private void captureActivePrayers(TickSnapshot snapshot)
+	{
+		List<TickSnapshot.ActivePrayerSnapshot> prayers = new ArrayList<>();
+
+		for (Prayer prayer : Prayer.values())
+		{
+			int varbit = prayer.getVarbit();
+
+			if (varbit < 0)
+			{
+				continue;
+			}
+
+			TickSnapshot.ActivePrayerSnapshot prayerSnapshot = new TickSnapshot.ActivePrayerSnapshot();
+			prayerSnapshot.name = prayer.name();
+			prayerSnapshot.varbit = varbit;
+			prayerSnapshot.active = client.getVarbitValue(varbit) == 1;
+			prayers.add(prayerSnapshot);
+		}
+
+		snapshot.activePrayers = prayers.toArray(new TickSnapshot.ActivePrayerSnapshot[0]);
 	}
 
 	private void captureWidgets(TickSnapshot snapshot)
@@ -315,6 +606,7 @@ public class TelemetryPlugin extends Plugin
 			slot.slot = i;
 			slot.itemId = item == null ? -1 : item.getId();
 			slot.quantity = item == null ? 0 : item.getQuantity();
+			rememberItem(slot.itemId);
 
 			snapshot.inventory[i] = slot;
 		}
@@ -340,6 +632,7 @@ public class TelemetryPlugin extends Plugin
 			slot.slot = i;
 			slot.itemId = item == null ? -1 : item.getId();
 			slot.quantity = item == null ? 0 : item.getQuantity();
+			rememberItem(slot.itemId);
 
 			snapshot.equipment[i] = slot;
 		}
@@ -388,6 +681,7 @@ public class TelemetryPlugin extends Plugin
 			}
 
 			TickSnapshot.NpcSnapshot npcSnapshot = new TickSnapshot.NpcSnapshot();
+			rememberNpc(npc);
 			npcSnapshot.index = npc.getIndex();
 			npcSnapshot.id = npc.getId();
 			npcSnapshot.name = npc.getName();
@@ -551,6 +845,7 @@ public class TelemetryPlugin extends Plugin
 		TickSnapshot.SceneObjectSnapshot snapshot = new TickSnapshot.SceneObjectSnapshot();
 		snapshot.kind = kind;
 		snapshot.id = object.getId();
+		rememberObject(snapshot.id);
 		snapshot.orientation = orientation;
 		snapshot.sceneX = sceneLocation == null ? -1 : sceneLocation.getX();
 		snapshot.sceneY = sceneLocation == null ? -1 : sceneLocation.getY();
@@ -609,6 +904,7 @@ public class TelemetryPlugin extends Plugin
 			TickSnapshot.GroundItemSnapshot snapshot = new TickSnapshot.GroundItemSnapshot();
 			snapshot.id = item.getId();
 			snapshot.quantity = item.getQuantity();
+			rememberItem(snapshot.id);
 			snapshot.sceneX = sceneLocation == null ? -1 : sceneLocation.getX();
 			snapshot.sceneY = sceneLocation == null ? -1 : sceneLocation.getY();
 
@@ -708,6 +1004,312 @@ public class TelemetryPlugin extends Plugin
 		{
 			log.warn("Failed to enqueue event telemetry: {}", eventType, e);
 		}
+	}
+
+	private Map<String, Object> actorPayload(Actor actor)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("actorType", actorType(actor));
+		payload.put("index", actorIndex(actor));
+		payload.put("id", actorId(actor));
+
+		if (actor instanceof Player)
+		{
+			payload.put("nameHash", hashName(actor.getName()));
+		}
+		else if (actor instanceof NPC)
+		{
+			payload.put("name", safeString(actor.getName()));
+		}
+
+		WorldPoint worldLocation = actor == null ? null : actor.getWorldLocation();
+
+		if (worldLocation != null)
+		{
+			payload.put("worldX", worldLocation.getX());
+			payload.put("worldY", worldLocation.getY());
+			payload.put("plane", worldLocation.getPlane());
+		}
+
+		if (actor != null)
+		{
+			payload.put("animation", actor.getAnimation());
+			payload.put("healthRatio", actor.getHealthRatio());
+			payload.put("healthScale", actor.getHealthScale());
+			Actor interacting = actor.getInteracting();
+
+			if (interacting != null)
+			{
+				Map<String, Object> target = new LinkedHashMap<>();
+				target.put("actorType", actorType(interacting));
+				target.put("index", actorIndex(interacting));
+				target.put("id", actorId(interacting));
+
+				if (interacting instanceof Player)
+				{
+					target.put("nameHash", hashName(interacting.getName()));
+				}
+				else if (interacting instanceof NPC)
+				{
+					target.put("name", safeString(interacting.getName()));
+				}
+
+				payload.put("interacting", target);
+			}
+		}
+
+		return payload;
+	}
+
+	private String actorType(Actor actor)
+	{
+		if (actor == null)
+		{
+			return "UNKNOWN";
+		}
+
+		if (actor == client.getLocalPlayer())
+		{
+			return "LOCAL_PLAYER";
+		}
+
+		if (actor instanceof Player)
+		{
+			return "PLAYER";
+		}
+
+		if (actor instanceof NPC)
+		{
+			return "NPC";
+		}
+
+		return "UNKNOWN";
+	}
+
+	private int actorIndex(Actor actor)
+	{
+		if (actor instanceof NPC)
+		{
+			return ((NPC) actor).getIndex();
+		}
+
+		if (actor instanceof Player)
+		{
+			return ((Player) actor).getId();
+		}
+
+		return -1;
+	}
+
+	private int actorId(Actor actor)
+	{
+		if (actor instanceof NPC)
+		{
+			return ((NPC) actor).getId();
+		}
+
+		return -1;
+	}
+
+	private Map<String, Object> projectilePayload(Projectile projectile)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+
+		if (projectile == null)
+		{
+			return payload;
+		}
+
+		payload.put("id", projectile.getId());
+		payload.put("x", projectile.getX());
+		payload.put("y", projectile.getY());
+		payload.put("projectileZ", projectile.getZ());
+		payload.put("floor", projectile.getFloor());
+		payload.put("height", projectile.getHeight());
+		payload.put("startCycle", projectile.getStartCycle());
+		payload.put("endCycle", projectile.getEndCycle());
+		payload.put("remainingCycles", projectile.getRemainingCycles());
+		payload.put("source", actorPayload(projectile.getSourceActor()));
+		payload.put("target", actorPayload(projectile.getTargetActor()));
+		addWorldPoint(payload, "source", projectile.getSourcePoint());
+		addWorldPoint(payload, "target", projectile.getTargetPoint());
+		return payload;
+	}
+
+	private Map<String, Object> graphicsObjectPayload(GraphicsObject graphicsObject)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+
+		if (graphicsObject == null)
+		{
+			return payload;
+		}
+
+		payload.put("id", graphicsObject.getId());
+		payload.put("startCycle", graphicsObject.getStartCycle());
+		payload.put("level", graphicsObject.getLevel());
+		payload.put("z", graphicsObject.getZ());
+		payload.put("finished", graphicsObject.finished());
+		payload.put("animationFrame", graphicsObject.getAnimationFrame());
+
+		LocalPoint localPoint = graphicsObject.getLocation();
+
+		if (localPoint != null)
+		{
+			payload.put("localX", localPoint.getX());
+			payload.put("localY", localPoint.getY());
+			WorldPoint worldPoint = graphicsObject.getWorldView() == null
+					? WorldPoint.fromLocal(client, localPoint)
+					: WorldPoint.fromLocal(graphicsObject.getWorldView(), localPoint.getX(), localPoint.getY(), graphicsObject.getLevel());
+			addWorldPoint(payload, "", worldPoint);
+		}
+
+		return payload;
+	}
+
+	private Map<String, Object> itemEventPayload(Tile tile, TileItem item)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+
+		if (item != null)
+		{
+			payload.put("id", item.getId());
+			payload.put("quantity", item.getQuantity());
+			payload.put("visibleTime", item.getVisibleTime());
+			payload.put("despawnTime", item.getDespawnTime());
+			payload.put("ownership", item.getOwnership());
+			payload.put("private", item.isPrivate());
+		}
+
+		if (tile != null)
+		{
+			WorldPoint worldLocation = tile.getWorldLocation();
+			Point sceneLocation = tile.getSceneLocation();
+			addWorldPoint(payload, "", worldLocation);
+
+			if (sceneLocation != null)
+			{
+				payload.put("sceneX", sceneLocation.getX());
+				payload.put("sceneY", sceneLocation.getY());
+			}
+		}
+
+		return payload;
+	}
+
+	private void addWorldPoint(Map<String, Object> payload, String prefix, WorldPoint worldPoint)
+	{
+		if (worldPoint == null)
+		{
+			return;
+		}
+
+		if (prefix == null || prefix.isEmpty())
+		{
+			payload.put("worldX", worldPoint.getX());
+			payload.put("worldY", worldPoint.getY());
+			payload.put("plane", worldPoint.getPlane());
+			return;
+		}
+
+		payload.put(prefix + "WorldX", worldPoint.getX());
+		payload.put(prefix + "WorldY", worldPoint.getY());
+		payload.put(prefix + "Plane", worldPoint.getPlane());
+	}
+
+	private void rememberItem(TileItem item)
+	{
+		if (item != null)
+		{
+			rememberItem(item.getId());
+		}
+	}
+
+	private void rememberItem(int itemId)
+	{
+		TelemetryWriter currentWriter = writer;
+
+		if (currentWriter == null || itemId < 0 || !knownItemIds.add(itemId))
+		{
+			return;
+		}
+
+		try
+		{
+			ItemComposition itemComposition = client.getItemDefinition(itemId);
+			currentWriter.rememberItem(itemId, itemComposition == null ? null : itemComposition.getName());
+		}
+		catch (Exception e)
+		{
+			log.debug("Failed to remember item definition {}", itemId, e);
+		}
+	}
+
+	private void rememberNpc(NPC npc)
+	{
+		if (npc == null)
+		{
+			return;
+		}
+
+		TelemetryWriter currentWriter = writer;
+
+		if (currentWriter == null || npc.getId() < 0 || !knownNpcIds.add(npc.getId()))
+		{
+			return;
+		}
+
+		try
+		{
+			String name = npc.getName();
+			NPCComposition composition = npc.getComposition();
+
+			if ((name == null || name.isBlank()) && composition != null)
+			{
+				name = composition.getName();
+			}
+
+			currentWriter.rememberNpc(npc.getId(), name);
+		}
+		catch (Exception e)
+		{
+			log.debug("Failed to remember npc definition {}", npc.getId(), e);
+		}
+	}
+
+	private void rememberObject(int objectId)
+	{
+		TelemetryWriter currentWriter = writer;
+
+		if (currentWriter == null || objectId < 0 || !knownObjectIds.add(objectId))
+		{
+			return;
+		}
+
+		try
+		{
+			ObjectComposition objectComposition = client.getObjectDefinition(objectId);
+			currentWriter.rememberObject(objectId, objectComposition == null ? null : objectComposition.getName());
+		}
+		catch (Exception e)
+		{
+			log.debug("Failed to remember object definition {}", objectId, e);
+		}
+	}
+
+	private int getInt(Object value, int fallback)
+	{
+		return value instanceof Number ? ((Number) value).intValue() : fallback;
+	}
+
+	private String truncate(String value, int maxLength)
+	{
+		if (value == null)
+		{
+			return "";
+		}
+
+		return value.length() <= maxLength ? value : value.substring(0, maxLength);
 	}
 
 	private Map<String, Object> itemContainerPayload(ItemContainerChanged event)
