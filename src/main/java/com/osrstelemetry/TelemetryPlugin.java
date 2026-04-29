@@ -1,5 +1,6 @@
 package com.osrstelemetry;
 
+import java.util.ArrayList;
 import com.google.gson.Gson;
 import com.google.inject.Provides;
 import java.nio.charset.StandardCharsets;
@@ -29,6 +30,9 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.api.events.WidgetClosed;
+import net.runelite.api.events.WidgetLoaded;
+import net.runelite.api.widgets.Widget;
 
 @Slf4j
 @PluginDescriptor(
@@ -117,6 +121,7 @@ public class TelemetryPlugin extends Plugin
 				safeCapture(captureErrors, "skills", () -> captureSkills(snapshot));
 				safeCapture(captureErrors, "npcs", () -> captureNpcs(snapshot));
 				safeCapture(captureErrors, "players", () -> capturePlayers(snapshot));
+				safeCapture(captureErrors, "widgets", () -> captureWidgets(snapshot));
 			}
 		}
 		finally
@@ -124,6 +129,7 @@ public class TelemetryPlugin extends Plugin
 			snapshot.captureErrors = captureErrors.toArray(new String[0]);
 			snapshot.writerQueueSize = currentWriter.getQueueSize();
 			snapshot.writerDroppedRecords = currentWriter.getDroppedRecords();
+			snapshot.captureErrors = captureErrors.toArray(new String[0]);
 
 			try
 			{
@@ -161,6 +167,79 @@ public class TelemetryPlugin extends Plugin
 		payload.put("boostedLevel", event.getBoostedLevel());
 
 		logEvent("StatChanged", payload);
+	}
+
+	@Subscribe
+	public void onWidgetLoaded(WidgetLoaded event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("groupId", event.getGroupId());
+
+		logEvent("WidgetLoaded", payload);
+	}
+
+	@Subscribe
+	public void onWidgetClosed(WidgetClosed event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("groupId", event.getGroupId());
+
+		logEvent("WidgetClosed", payload);
+	}
+
+	private void captureWidgets(TickSnapshot snapshot)
+	{
+		Widget[] roots = client.getWidgetRoots();
+
+		if (roots == null || roots.length == 0)
+		{
+			snapshot.widgets = new TickSnapshot.WidgetSnapshot[0];
+			return;
+		}
+
+		TickSnapshot.WidgetSnapshot[] widgets = new TickSnapshot.WidgetSnapshot[roots.length];
+
+		for (int i = 0; i < roots.length; i++)
+		{
+			Widget widget = roots[i];
+
+			if (widget == null)
+			{
+				continue;
+			}
+
+			TickSnapshot.WidgetSnapshot widgetSnapshot = new TickSnapshot.WidgetSnapshot();
+			widgetSnapshot.index = i;
+			widgetSnapshot.id = widget.getId();
+			widgetSnapshot.type = widget.getType();
+			widgetSnapshot.hidden = widget.isHidden();
+			widgetSnapshot.text = cleanWidgetText(widget.getText());
+			widgetSnapshot.name = cleanWidgetText(widget.getName());
+			widgetSnapshot.x = widget.getCanvasLocation() != null ? widget.getCanvasLocation().getX() : -1;
+			widgetSnapshot.y = widget.getCanvasLocation() != null ? widget.getCanvasLocation().getY() : -1;
+			widgetSnapshot.width = widget.getWidth();
+			widgetSnapshot.height = widget.getHeight();
+
+			Widget[] children = widget.getChildren();
+			widgetSnapshot.childCount = children == null ? 0 : children.length;
+
+			widgets[i] = widgetSnapshot;
+		}
+
+		snapshot.widgets = widgets;
+	}
+
+	private String cleanWidgetText(String value)
+	{
+		if (value == null)
+		{
+			return "";
+		}
+
+		return value
+				.replaceAll("<[^>]*>", "")
+				.replace('\u00A0', ' ')
+				.trim();
 	}
 
 	private void captureLocalPlayer(TickSnapshot snapshot)

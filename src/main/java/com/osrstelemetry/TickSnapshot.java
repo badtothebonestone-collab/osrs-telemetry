@@ -13,10 +13,25 @@ public class TickSnapshot
     public SkillSnapshot[] skills;
     public NpcSnapshot[] npcs;
     public PlayerSnapshot[] players;
+    public WidgetSnapshot[] widgets;
     public String[] captureErrors;
     public int writerQueueSize;
     public long writerDroppedRecords;
 
+    public static class WidgetSnapshot
+    {
+        public int index;
+        public int id;
+        public int type;
+        public boolean hidden;
+        public String text;
+        public String name;
+        public int x;
+        public int y;
+        public int width;
+        public int height;
+        public int childCount;
+    }
     public static class LocalPlayer
     {
         public int worldX;
