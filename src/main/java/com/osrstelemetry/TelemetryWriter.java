@@ -82,9 +82,13 @@ public class TelemetryWriter implements Closeable
 		long droppedRecords;
 		long frameCount;
 		long droppedFrameCount;
+		long deletedFrameCount;
 		int screenshotEveryTicks;
 		String screenshotFormat;
 		int maxFrameStorageMb;
+		int frameCleanupIntervalSeconds;
+		String frameCaptureMode;
+		boolean allowScreenRectangleFallback;
 		String lastUpdatedUtc;
 	}
 
@@ -113,8 +117,12 @@ public class TelemetryWriter implements Closeable
 	private final float jpegQuality;
 	private final boolean deleteOldFrames;
 	private final long maxFrameStorageBytes;
+	private final long frameCleanupIntervalMillis;
+	private final String frameCaptureMode;
+	private final boolean allowScreenRectangleFallback;
 	private final AtomicLong droppedRecords = new AtomicLong();
 	private final AtomicLong droppedFrameCount = new AtomicLong();
+	private final AtomicLong deletedFrameCount = new AtomicLong();
 	private final AtomicBoolean dictionariesDirty = new AtomicBoolean(false);
 	private final Map<Integer, String> itemDictionary = new ConcurrentHashMap<>();
 	private final Map<Integer, String> npcDictionary = new ConcurrentHashMap<>();
@@ -130,6 +138,7 @@ public class TelemetryWriter implements Closeable
 	private long currentTickBytes;
 	private long currentEventBytes;
 	private long nextCleanupAtMillis;
+	private long nextFrameCleanupAtMillis;
 	private long nextDictionaryFlushAtMillis;
 	private volatile Path currentFrameWrite;
 
@@ -146,8 +155,11 @@ public class TelemetryWriter implements Closeable
 			String screenshotFormat,
 			double jpegQuality,
 			int maxFrameStorageMb,
+			int frameCleanupIntervalSeconds,
 			boolean deleteOldFrames,
-			int maxFrameQueueSize)
+			int maxFrameQueueSize,
+			String frameCaptureMode,
+			boolean allowScreenRectangleFallback)
 	{
 		this.gson = gson;
 		this.frameQueue = new LinkedBlockingQueue<>(Math.max(1, maxFrameQueueSize));
@@ -173,6 +185,9 @@ public class TelemetryWriter implements Closeable
 		this.jpegQuality = (float) Math.max(0.0, Math.min(1.0, jpegQuality));
 		this.deleteOldFrames = deleteOldFrames;
 		this.maxFrameStorageBytes = Math.max(1L, maxFrameStorageMb) * 1024L * 1024L;
+		this.frameCleanupIntervalMillis = Duration.ofSeconds(Math.max(1L, frameCleanupIntervalSeconds)).toMillis();
+		this.frameCaptureMode = normalizeFrameCaptureMode(frameCaptureMode);
+		this.allowScreenRectangleFallback = allowScreenRectangleFallback;
 	}
 
 	public void start() throws IOException
@@ -191,6 +206,9 @@ public class TelemetryWriter implements Closeable
 		manifest.screenshotEveryTicks = screenshotEveryTicks;
 		manifest.screenshotFormat = this.screenshotFormat;
 		manifest.maxFrameStorageMb = (int) (maxFrameStorageBytes / (1024L * 1024L));
+		manifest.frameCleanupIntervalSeconds = (int) (frameCleanupIntervalMillis / 1000L);
+		manifest.frameCaptureMode = frameCaptureMode;
+		manifest.allowScreenRectangleFallback = allowScreenRectangleFallback;
 
 		openTickSegment();
 		openEventSegment();
@@ -198,6 +216,7 @@ public class TelemetryWriter implements Closeable
 
 		running = true;
 		nextCleanupAtMillis = System.currentTimeMillis() + cleanupIntervalMillis;
+		nextFrameCleanupAtMillis = System.currentTimeMillis() + frameCleanupIntervalMillis;
 		nextDictionaryFlushAtMillis = System.currentTimeMillis() + 5000L;
 		worker = new Thread(this::runWriterLoop, "telemetry-writer");
 		worker.setDaemon(true);
@@ -314,6 +333,7 @@ public class TelemetryWriter implements Closeable
 				}
 
 				maybeRunRetention();
+				maybeRunFrameCleanup();
 				maybeFlushDictionaries();
 			}
 		}
@@ -370,7 +390,6 @@ public class TelemetryWriter implements Closeable
 			manifest.frameCount++;
 			manifest.droppedFrameCount = droppedFrameCount.get();
 			writeManifest();
-			maybeDeleteOldFrames();
 		}
 		finally
 		{
@@ -564,6 +583,7 @@ public class TelemetryWriter implements Closeable
 		manifest.lastUpdatedUtc = Instant.now().toString();
 		manifest.droppedRecords = droppedRecords.get();
 		manifest.droppedFrameCount = droppedFrameCount.get();
+		manifest.deletedFrameCount = deletedFrameCount.get();
 		Files.writeString(
 				manifestFile,
 				gson.toJson(manifest),
@@ -602,7 +622,25 @@ public class TelemetryWriter implements Closeable
 		runRetention();
 	}
 
-	private void maybeDeleteOldFrames()
+	private void maybeRunFrameCleanup()
+	{
+		if (!deleteOldFrames)
+		{
+			return;
+		}
+
+		long now = System.currentTimeMillis();
+
+		if (now < nextFrameCleanupAtMillis)
+		{
+			return;
+		}
+
+		nextFrameCleanupAtMillis = now + frameCleanupIntervalMillis;
+		deleteOldFrames();
+	}
+
+	private void deleteOldFrames()
 	{
 		if (!deleteOldFrames)
 		{
@@ -632,17 +670,28 @@ public class TelemetryWriter implements Closeable
 			}
 
 			candidates.sort(Comparator.comparingLong(this::lastModifiedMillis));
+			boolean deletedAny = false;
 
 			for (Path candidate : candidates)
 			{
 				if (frameSize <= maxFrameStorageBytes)
 				{
-					return;
+					break;
 				}
 
 				long size = fileSize(candidate);
-				safeDelete(candidate);
-				frameSize -= size;
+				if (safeDelete(candidate))
+				{
+					deletedAny = true;
+					deletedFrameCount.incrementAndGet();
+					manifest.deletedFrameCount = deletedFrameCount.get();
+					frameSize -= size;
+				}
+			}
+
+			if (deletedAny)
+			{
+				writeManifestQuietly();
 			}
 		}
 		catch (IOException e)
@@ -955,15 +1004,16 @@ public class TelemetryWriter implements Closeable
 		}
 	}
 
-	private void safeDelete(Path path)
+	private boolean safeDelete(Path path)
 	{
 		try
 		{
-			Files.deleteIfExists(path);
+			return Files.deleteIfExists(path);
 		}
 		catch (IOException e)
 		{
 			log.debug("Failed to delete old telemetry frame {}", path, e);
+			return false;
 		}
 	}
 
@@ -976,6 +1026,17 @@ public class TelemetryWriter implements Closeable
 
 		String normalized = format.trim().toLowerCase();
 		return "png".equals(normalized) ? "png" : "jpg";
+	}
+
+	private String normalizeFrameCaptureMode(String mode)
+	{
+		if (mode == null)
+		{
+			return "RUNELITE_ONLY";
+		}
+
+		String normalized = mode.trim().toUpperCase();
+		return "SCREEN_RECTANGLE".equals(normalized) ? "SCREEN_RECTANGLE" : "RUNELITE_ONLY";
 	}
 
 	private void closeWriter(BufferedWriter writer, String stream)

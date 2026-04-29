@@ -33,6 +33,8 @@ Common optional top-level fields:
 - `activePrayers`
 - `framePath`
 - `frameCaptureStatus`
+- `frameCaptureSource`
+- `frameCaptureWarning`
 - `captureErrors`
 - `writerQueueSize`
 - `writerDroppedRecords`
@@ -56,7 +58,16 @@ data, so the path may reference a file that has since expired.
 - `DISABLED`: frame capture disabled or interval invalid.
 - `SKIPPED_INTERVAL`: tick did not match the configured screenshot interval.
 - `DROPPED_QUEUE_FULL`: frame queue was full; tick was still written.
-- `CAPTURE_FAILED`: canvas copy failed; tick was still written.
+- `CAPTURE_FAILED`: frame capture failed; tick was still written.
+
+`frameCaptureSource` identifies how the frame was captured:
+
+- `RUNELITE_ONLY`: default. Captured from RuneLite's rendered frame image.
+- `SCREEN_RECTANGLE`: opt-in Java `Robot` screen rectangle fallback.
+
+`frameCaptureWarning` is normally absent. For `SCREEN_RECTANGLE`, tools should
+show that overlapping windows may be captured because the fallback reads screen
+pixels.
 
 ## Event Records
 

@@ -20,6 +20,8 @@ public class TickSnapshot
     public ActivePrayerSnapshot[] activePrayers;
     public String framePath;
     public String frameCaptureStatus;
+    public String frameCaptureSource;
+    public String frameCaptureWarning;
     public String[] captureErrors;
     public int writerQueueSize;
     public long writerDroppedRecords;

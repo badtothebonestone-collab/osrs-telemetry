@@ -74,9 +74,13 @@ reading the new one.
 - `droppedRecords`: records dropped because the writer queue was full.
 - `frameCount`: frame files successfully written by this session.
 - `droppedFrameCount`: frames dropped because the frame queue was full.
+- `deletedFrameCount`: frame files deleted by frame-specific cleanup.
 - `screenshotEveryTicks`: configured screenshot tick interval.
 - `screenshotFormat`: configured frame file format, `jpg` or `png`.
 - `maxFrameStorageMb`: active-session frame folder cleanup cap.
+- `frameCleanupIntervalSeconds`: how often active frame cleanup runs.
+- `frameCaptureMode`: configured capture mode, usually `RUNELITE_ONLY`.
+- `allowScreenRectangleFallback`: whether screen-rectangle fallback is enabled.
 - `lastUpdatedUtc`: UTC timestamp of the last manifest write.
 
 ## Dictionaries
@@ -92,8 +96,8 @@ name lookup.
 
 ## Frames
 
-Screenshot frames are copied from RuneLite's canvas once per configured game
-tick and written off the client thread:
+Screenshot frames are requested from RuneLite's draw manager once per configured
+game tick and written off the client thread:
 
 ```text
 frames\frame-tick-00000001.jpg
@@ -104,6 +108,19 @@ Tick records reference frames with a relative `framePath`, for example
 `frames/frame-tick-00000001.jpg`. Frame cleanup may delete old files when
 `maxFrameStorageMb` is exceeded. Consumers should treat a missing referenced
 frame as expired frame data, not corrupt telemetry.
+
+`RUNELITE_ONLY` is the default capture mode. It uses RuneLite's rendered frame
+image and follows the current RuneLite/game canvas size without reading random
+desktop pixels.
+
+`SCREEN_RECTANGLE` is an opt-in fallback. It uses Java `Robot` to capture the
+current screen rectangle occupied by the RuneLite canvas. Because it reads
+screen pixels, overlapping windows can appear in the frame. Tick records mark
+this with `frameCaptureSource="SCREEN_RECTANGLE"` and a `frameCaptureWarning`.
+
+Frame cleanup is separate from global retention and runs every
+`frameCleanupIntervalSeconds`. It deletes oldest frame files first and does not
+delete a frame currently being written.
 
 ## Latest-State Cache
 

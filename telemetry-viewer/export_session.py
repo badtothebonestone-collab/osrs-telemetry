@@ -202,6 +202,8 @@ def tick_summary(session: Path, source: Path, tick: dict) -> dict:
         "framePath": tick.get("framePath"),
         "frameExists": frame_exists(session, tick.get("framePath")),
         "frameCaptureStatus": tick.get("frameCaptureStatus"),
+        "frameCaptureSource": tick.get("frameCaptureSource"),
+        "frameCaptureWarning": tick.get("frameCaptureWarning"),
         "captureErrorCount": len(tick.get("captureErrors") or []),
         "source": str(source),
     }

@@ -181,6 +181,8 @@ def summarize_status(session: Path, tick: dict) -> dict:
         "framePath": tick.get("framePath"),
         "frameExists": frame_exists(session, tick),
         "frameCaptureStatus": tick.get("frameCaptureStatus"),
+        "frameCaptureSource": tick.get("frameCaptureSource"),
+        "frameCaptureWarning": tick.get("frameCaptureWarning"),
         "captureErrorCount": len(tick.get("captureErrors") or []),
     }
 
@@ -284,6 +286,7 @@ def write_latest_tick(session: Path, tick: dict):
         f"hp={status['hp'].get('boosted')}/{status['hp'].get('real')} "
         f"prayer={status['prayer'].get('boosted')}/{status['prayer'].get('real')} "
         f"frame={status.get('framePath') or status.get('frameCaptureStatus')} "
+        f"source={status.get('frameCaptureSource')} "
         f"events->{LATEST_EVENTS_FILE}",
         flush=True,
     )

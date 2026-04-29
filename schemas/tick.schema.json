@@ -33,6 +33,11 @@
         null
       ]
     },
+    "frameCaptureSource": {
+      "type": ["string", "null"],
+      "enum": ["RUNELITE_ONLY", "SCREEN_RECTANGLE", null]
+    },
+    "frameCaptureWarning": { "type": ["string", "null"] },
     "captureErrors": {
       "type": ["array", "null"],
       "items": { "type": "string" }

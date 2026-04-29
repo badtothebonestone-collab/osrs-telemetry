@@ -128,16 +128,6 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
-			keyName = "maxFrameWidth",
-			name = "Max frame width",
-			description = "Scale captured frames down to this width; 0 keeps the original size"
-	)
-	default int maxFrameWidth()
-	{
-		return 0;
-	}
-
-	@ConfigItem(
 			keyName = "includeFramePathInTicks",
 			name = "Include frame path in ticks",
 			description = "Write the relative frame path into each captured tick record"
@@ -158,6 +148,16 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			keyName = "frameCleanupIntervalSeconds",
+			name = "Frame cleanup interval seconds",
+			description = "How often old frame cleanup checks the active frames folder"
+	)
+	default int frameCleanupIntervalSeconds()
+	{
+		return 10;
+	}
+
+	@ConfigItem(
 			keyName = "deleteOldFrames",
 			name = "Delete old frames",
 			description = "Delete oldest frame files when the frame storage cap is exceeded"
@@ -175,5 +175,35 @@ public interface TelemetryConfig extends Config
 	default int maxFrameQueueSize()
 	{
 		return 250;
+	}
+
+	@ConfigItem(
+			keyName = "frameCaptureMode",
+			name = "Frame capture mode",
+			description = "Preferred frame capture mode: RUNELITE_ONLY"
+	)
+	default String frameCaptureMode()
+	{
+		return "RUNELITE_ONLY";
+	}
+
+	@ConfigItem(
+			keyName = "allowScreenRectangleFallback",
+			name = "Allow screen rectangle fallback",
+			description = "Allow opt-in Robot screen rectangle capture if RuneLite-only capture is unavailable"
+	)
+	default boolean allowScreenRectangleFallback()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			keyName = "includeClientFrame",
+			name = "Include client frame",
+			description = "Include RuneLite client chrome around the game frame when supported"
+	)
+	default boolean includeClientFrame()
+	{
+		return false;
 	}
 }

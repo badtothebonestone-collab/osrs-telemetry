@@ -26,6 +26,8 @@ Example questions:
   entity/object counts or the original tick record.
 
 - Is there a screenshot for a tick?
-  Read `framePath`, `frameExists`, and `frameCaptureStatus` from
-  `exports\tick_summary.jsonl`. Missing files with a historical `framePath`
-  usually mean frame retention has expired the image.
+  Read `framePath`, `frameExists`, `frameCaptureStatus`, and
+  `frameCaptureSource` from `exports\tick_summary.jsonl`. Missing files with a
+  historical `framePath` usually mean frame retention has expired the image.
+  If `frameCaptureSource` is `SCREEN_RECTANGLE`, check `frameCaptureWarning`
+  because overlapping windows may appear in that frame.

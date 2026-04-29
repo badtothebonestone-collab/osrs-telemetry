@@ -193,6 +193,7 @@ def validate_session(session: Path):
     event_type_counts = Counter()
     tick_schema_counts = Counter()
     event_schema_counts = Counter()
+    frame_capture_source_counts = Counter()
     sampled_tick_required_missing = Counter()
     sampled_event_required_missing = Counter()
     tick_samples_checked = 0
@@ -239,6 +240,11 @@ def validate_session(session: Path):
             if not (session / frame_path).exists():
                 missing_referenced_frames += 1
 
+        frame_source = record.get("frameCaptureSource")
+
+        if frame_source:
+            frame_capture_source_counts[frame_source] += 1
+
     if capture_error_count:
         problems.append(f"captureErrors present: {capture_error_count}")
 
@@ -278,9 +284,13 @@ def validate_session(session: Path):
             "droppedRecords",
             "frameCount",
             "droppedFrameCount",
+            "deletedFrameCount",
             "screenshotEveryTicks",
             "screenshotFormat",
             "maxFrameStorageMb",
+            "frameCleanupIntervalSeconds",
+            "frameCaptureMode",
+            "allowScreenRectangleFallback",
             "lastUpdatedUtc",
         ]
 
@@ -301,6 +311,7 @@ def validate_session(session: Path):
     print(f"Existing frame files: {len(frames)}")
     print(f"Missing referenced frames: {missing_referenced_frames}")
     print(f"Frames folder size MB: {directory_size(session / 'frames') / (1024 * 1024):.2f}")
+    print(f"Frame capture source counts: {dict(frame_capture_source_counts)}")
     print(f"Session size MB: {directory_size(session) / (1024 * 1024):.2f}")
     print(f"JSON decode errors: {json_error_count}")
     print(f"Tick schemaVersion counts: {dict(tick_schema_counts)}")

@@ -204,13 +204,18 @@ def summarize_tick(session: Path, tick: dict):
     interacting = status.get("interactingType")
     frame_path = tick.get("framePath")
     frame_status = tick.get("frameCaptureStatus")
+    frame_source = tick.get("frameCaptureSource")
+    frame_warning = tick.get("frameCaptureWarning")
     frame_present = frame_exists(session, tick)
     frame_display = "none"
 
     if frame_path:
-        frame_display = f"{frame_path} exists={frame_present}"
+        frame_display = f"{frame_path} exists={frame_present} source={frame_source or '?'}"
     elif frame_status:
-        frame_display = frame_status
+        frame_display = f"{frame_status} source={frame_source or '?'}"
+
+    if frame_warning:
+        frame_display = f"{frame_display} warning={frame_warning}"
 
     if interacting and interacting != "UNKNOWN":
         target_name = status.get("interactingName") or status.get("interactingId") or "?"

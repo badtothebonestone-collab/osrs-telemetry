@@ -3,8 +3,10 @@ package com.osrstelemetry;
 import com.google.gson.Gson;
 import com.google.inject.Provides;
 import java.awt.Canvas;
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
+import java.awt.Dimension;
+import java.awt.Image;
+import java.awt.Rectangle;
+import java.awt.Robot;
 import java.awt.image.BufferedImage;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -73,6 +75,9 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.ui.DrawManager;
+import net.runelite.client.util.ImageCapture;
+import net.runelite.client.util.ImageUtil;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.widgets.Widget;
@@ -97,6 +102,12 @@ public class TelemetryPlugin extends Plugin
 
 	@Inject
 	private TelemetryConfig config;
+
+	@Inject
+	private DrawManager drawManager;
+
+	@Inject
+	private ImageCapture imageCapture;
 
 	private TelemetryWriter writer;
 	private long tickId = 0;
@@ -127,8 +138,11 @@ public class TelemetryPlugin extends Plugin
 				config.screenshotFormat(),
 				config.jpegQuality(),
 				config.maxFrameStorageMb(),
+				config.frameCleanupIntervalSeconds(),
 				config.deleteOldFrames(),
-				config.maxFrameQueueSize());
+				config.maxFrameQueueSize(),
+				config.frameCaptureMode(),
+				config.allowScreenRectangleFallback());
 		writer.start();
 
 		log.info("Telemetry Collector started");
@@ -419,10 +433,32 @@ public class TelemetryPlugin extends Plugin
 
 		String format = normalizeScreenshotFormat(config.screenshotFormat());
 		String relativePath = String.format("frames/frame-tick-%08d.%s", snapshot.tickId, format);
+		String captureMode = normalizeFrameCaptureMode(config.frameCaptureMode());
+		snapshot.frameCaptureSource = captureMode;
 
 		try
 		{
-			BufferedImage frame = copyCanvasFrame();
+			if ("RUNELITE_ONLY".equals(captureMode))
+			{
+				if (config.includeFramePathInTicks())
+				{
+					snapshot.framePath = relativePath;
+				}
+
+				requestRuneliteOnlyFrame(relativePath, currentWriter);
+				snapshot.frameCaptureStatus = "QUEUED";
+				return;
+			}
+
+			if (!config.allowScreenRectangleFallback())
+			{
+				snapshot.frameCaptureStatus = "CAPTURE_FAILED";
+				snapshot.frameCaptureWarning = "Screen rectangle fallback is disabled";
+				captureErrors.add("frame");
+				return;
+			}
+
+			BufferedImage frame = captureScreenRectangle();
 
 			if (frame == null)
 			{
@@ -430,6 +466,9 @@ public class TelemetryPlugin extends Plugin
 				captureErrors.add("frame");
 				return;
 			}
+
+			snapshot.frameCaptureSource = "SCREEN_RECTANGLE";
+			snapshot.frameCaptureWarning = "Screen rectangle capture may include overlapping windows";
 
 			if (config.includeFramePathInTicks())
 			{
@@ -453,7 +492,38 @@ public class TelemetryPlugin extends Plugin
 		}
 	}
 
-	private BufferedImage copyCanvasFrame()
+	private void requestRuneliteOnlyFrame(String relativePath, TelemetryWriter currentWriter)
+	{
+		drawManager.requestNextFrameListener((image) ->
+		{
+			try
+			{
+				BufferedImage frame = copyRuneliteFrame(image);
+				currentWriter.enqueueFrame(relativePath, frame);
+			}
+			catch (Exception e)
+			{
+				log.warn("Telemetry RuneLite-only frame capture failed", e);
+			}
+		});
+	}
+
+	private BufferedImage copyRuneliteFrame(Image image)
+	{
+		if (image == null)
+		{
+			return null;
+		}
+
+		if (config.includeClientFrame())
+		{
+			return imageCapture.addClientFrame(image);
+		}
+
+		return ImageUtil.bufferedImageFromImage(image);
+	}
+
+	private BufferedImage captureScreenRectangle() throws Exception
 	{
 		Canvas canvas = client.getCanvas();
 
@@ -462,48 +532,16 @@ public class TelemetryPlugin extends Plugin
 			return null;
 		}
 
-		int width = canvas.getWidth();
-		int height = canvas.getHeight();
+		Dimension size = canvas.getSize();
 
-		if (width <= 0 || height <= 0)
+		if (size.width <= 0 || size.height <= 0 || !canvas.isShowing())
 		{
 			return null;
 		}
 
-		BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-		Graphics2D graphics = image.createGraphics();
-
-		try
-		{
-			canvas.paint(graphics);
-		}
-		finally
-		{
-			graphics.dispose();
-		}
-
-		int maxFrameWidth = config.maxFrameWidth();
-
-		if (maxFrameWidth <= 0 || width <= maxFrameWidth)
-		{
-			return image;
-		}
-
-		int scaledHeight = Math.max(1, (int) Math.round(height * (maxFrameWidth / (double) width)));
-		BufferedImage scaled = new BufferedImage(maxFrameWidth, scaledHeight, BufferedImage.TYPE_INT_RGB);
-		Graphics2D scaledGraphics = scaled.createGraphics();
-
-		try
-		{
-			scaledGraphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-			scaledGraphics.drawImage(image, 0, 0, maxFrameWidth, scaledHeight, null);
-		}
-		finally
-		{
-			scaledGraphics.dispose();
-		}
-
-		return scaled;
+		java.awt.Point location = canvas.getLocationOnScreen();
+		Rectangle rectangle = new Rectangle(location.x, location.y, size.width, size.height);
+		return new Robot().createScreenCapture(rectangle);
 	}
 
 	private String normalizeScreenshotFormat(String format)
@@ -515,6 +553,17 @@ public class TelemetryPlugin extends Plugin
 
 		String normalized = format.trim().toLowerCase();
 		return "png".equals(normalized) ? "png" : "jpg";
+	}
+
+	private String normalizeFrameCaptureMode(String mode)
+	{
+		if (mode == null)
+		{
+			return "RUNELITE_ONLY";
+		}
+
+		String normalized = mode.trim().toUpperCase();
+		return "SCREEN_RECTANGLE".equals(normalized) ? "SCREEN_RECTANGLE" : "RUNELITE_ONLY";
 	}
 
 	@Subscribe
