@@ -24,6 +24,9 @@ def find_newest_session() -> Path | None:
 def read_latest_tick(file_path: Path) -> dict | None:
     latest_tick = None
 
+    if not file_path.exists() or file_path.stat().st_size == 0:
+        return None
+
     with file_path.open("r", encoding="utf-8") as file:
         for line in file:
             line = line.strip()
@@ -37,6 +40,27 @@ def read_latest_tick(file_path: Path) -> dict | None:
                 continue
 
     return latest_tick
+
+
+def read_last_records(file_path: Path, limit: int) -> list[dict]:
+    records: list[dict] = []
+
+    if not file_path.exists() or file_path.stat().st_size == 0:
+        return records
+
+    with file_path.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+
+            if not line:
+                continue
+
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    return records[-limit:]
 
 
 def follow_jsonl(file_path: Path):
@@ -96,6 +120,28 @@ def summarize_tick(tick: dict):
     )
 
 
+def summarize_event(event: dict):
+    event_seq = event.get("eventSeq")
+    tick_id = event.get("tickId")
+    event_type = event.get("eventType")
+    payload = event.get("payload") or {}
+
+    detail = ""
+
+    if event_type == "GameStateChanged":
+        detail = f"gameState={payload.get('gameState')}"
+    elif event_type == "ItemContainerChanged":
+        detail = f"containerId={payload.get('containerId')} size={payload.get('size')}"
+    elif event_type == "StatChanged":
+        detail = (
+            f"skill={payload.get('skill')} "
+            f"level={payload.get('level')} "
+            f"boosted={payload.get('boostedLevel')}"
+        )
+
+    print(f"event={event_seq} | tick={tick_id} | type={event_type} | {detail}".rstrip())
+
+
 def main():
     session = find_newest_session()
 
@@ -104,16 +150,29 @@ def main():
         return
 
     tick_file = session / "ticks.jsonl"
+    event_file = session / "events.jsonl"
 
     print(f"Reading newest session:")
-    print(tick_file)
+    print(session)
     print()
+
+    events = read_last_records(event_file, 10)
+
+    if events:
+        print("Last events:")
+        for event in events:
+            summarize_event(event)
+        print()
 
     latest_tick = read_latest_tick(tick_file)
 
     if latest_tick is not None:
         print("Latest existing tick:")
         summarize_tick(latest_tick)
+        print()
+    else:
+        print(f"No ticks have been written yet: {tick_file}")
+        print("Keep this viewer running; new ticks will appear here once RuneLite emits GameTick events.")
         print()
 
     print("Waiting for new ticks...")

@@ -10,12 +10,12 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import lombok.extern.slf4j.Slf4j;
 
+@Slf4j
 public class TelemetryWriter implements Closeable
 {
-    public void enqueue(String json) {
-    }
-
     private static class QueuedLine
     {
         final String stream;
@@ -32,6 +32,7 @@ public class TelemetryWriter implements Closeable
     private final Path sessionDir;
     private final Path tickFile;
     private final Path eventFile;
+    private final AtomicLong droppedRecords = new AtomicLong();
 
     private volatile boolean running = false;
     private Thread worker;
@@ -63,12 +64,35 @@ public class TelemetryWriter implements Closeable
 
     public void enqueueTick(String json)
     {
-        queue.offer(new QueuedLine("ticks", json));
+        enqueue(new QueuedLine("ticks", json));
     }
 
     public void enqueueEvent(String json)
     {
-        queue.offer(new QueuedLine("events", json));
+        enqueue(new QueuedLine("events", json));
+    }
+
+    public int getQueueSize()
+    {
+        return queue.size();
+    }
+
+    public long getDroppedRecords()
+    {
+        return droppedRecords.get();
+    }
+
+    private void enqueue(QueuedLine line)
+    {
+        if (!queue.offer(line))
+        {
+            long dropped = droppedRecords.incrementAndGet();
+
+            if (dropped == 1 || dropped % 1000 == 0)
+            {
+                log.warn("Telemetry writer queue full; dropped {} records", dropped);
+            }
+        }
     }
 
     private void runWriterLoop()
@@ -77,7 +101,7 @@ public class TelemetryWriter implements Closeable
         {
             while (running || !queue.isEmpty())
             {
-                QueuedLine line = queue.poll(250, TimeUnit.MILLISECONDS);
+                QueuedLine line = running ? queue.poll(250, TimeUnit.MILLISECONDS) : queue.poll();
 
                 if (line == null)
                 {
@@ -101,9 +125,19 @@ public class TelemetryWriter implements Closeable
             tickWriter.flush();
             eventWriter.flush();
         }
-        catch (Exception e)
+        catch (InterruptedException e)
         {
-            e.printStackTrace();
+            drainQueue();
+            Thread.currentThread().interrupt();
+        }
+        catch (IOException e)
+        {
+            log.warn("Telemetry writer failed", e);
+        }
+        finally
+        {
+            closeWriter(tickWriter, "ticks");
+            closeWriter(eventWriter, "events");
         }
     }
 
@@ -114,26 +148,60 @@ public class TelemetryWriter implements Closeable
 
         if (worker != null)
         {
+            worker.interrupt();
+            worker = null;
+        }
+    }
+
+    private void drainQueue()
+    {
+        QueuedLine line;
+
+        while ((line = queue.poll()) != null)
+        {
             try
             {
-                worker.join(2000);
+                writeLine(line);
             }
-            catch (InterruptedException e)
+            catch (IOException e)
             {
-                Thread.currentThread().interrupt();
+                log.warn("Telemetry writer failed while draining queue", e);
+                return;
             }
         }
+    }
 
-        if (tickWriter != null)
+    private void writeLine(QueuedLine line) throws IOException
+    {
+        if ("ticks".equals(line.stream))
         {
+            tickWriter.write(line.json);
+            tickWriter.newLine();
             tickWriter.flush();
-            tickWriter.close();
+        }
+        else if ("events".equals(line.stream))
+        {
+            eventWriter.write(line.json);
+            eventWriter.newLine();
+            eventWriter.flush();
+        }
+    }
+
+    private void closeWriter(BufferedWriter writer, String stream)
+    {
+        if (writer == null)
+        {
+            return;
         }
 
-        if (eventWriter != null)
+        try
         {
-            eventWriter.flush();
-            eventWriter.close();
+            writer.flush();
+            writer.close();
+        }
+        catch (IOException e)
+        {
+            log.warn("Failed to close telemetry {} writer", stream, e);
         }
     }
 }

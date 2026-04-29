@@ -20,10 +20,10 @@ public interface TelemetryConfig extends Config
 	@ConfigItem(
 			keyName = "outputDirectory",
 			name = "Output directory",
-			description = "Folder where telemetry sessions are written"
+			description = "Sessions root where telemetry session folders are written"
 	)
 	default String outputDirectory()
 	{
-		return System.getProperty("user.home") + "/.osrs-telemetry";
+		return System.getProperty("user.home") + "/.osrs-telemetry/sessions";
 	}
 }

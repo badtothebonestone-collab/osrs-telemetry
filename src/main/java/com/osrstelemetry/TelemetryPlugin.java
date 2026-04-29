@@ -2,35 +2,33 @@ package com.osrstelemetry;
 
 import com.google.gson.Gson;
 import com.google.inject.Provides;
-import java.time.Instant;
-import javax.inject.Inject;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.List;
+import java.time.Instant;
 import java.util.ArrayList;
-import lombok.extern.slf4j.Slf4j;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
-import net.runelite.api.events.GameStateChanged;
-import net.runelite.api.events.ItemContainerChanged;
-import net.runelite.api.events.StatChanged;
+import javax.inject.Inject;
+import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
-import net.runelite.api.Player;
 import net.runelite.api.NPC;
+import net.runelite.api.Player;
 import net.runelite.api.Skill;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameTick;
+import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.StatChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
-
-import static net.runelite.http.api.RuneLiteAPI.GSON;
 
 @Slf4j
 @PluginDescriptor(
@@ -83,7 +81,9 @@ public class TelemetryPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick event)
 	{
-		if (!config.enabled() || writer == null)
+		TelemetryWriter currentWriter = writer;
+
+		if (!config.enabled() || currentWriter == null)
 		{
 			return;
 		}
@@ -91,23 +91,51 @@ public class TelemetryPlugin extends Plugin
 		tickId++;
 
 		TickSnapshot snapshot = new TickSnapshot();
+		List<String> captureErrors = new ArrayList<>();
 		snapshot.schemaVersion = "0.1.0";
 		snapshot.tickId = tickId;
 		snapshot.timestampUtc = Instant.now().toString();
-		snapshot.gameState = String.valueOf(client.getGameState());
+		GameState gameState = null;
 
-		if (client.getGameState() == GameState.LOGGED_IN)
+		try
 		{
-			captureLocalPlayer(snapshot);
-			captureInventory(snapshot);
-			captureEquipment(snapshot);
-			captureSkills(snapshot);
-			captureNpcs(snapshot);
-			capturePlayers(snapshot);
+			gameState = client.getGameState();
+			snapshot.gameState = String.valueOf(gameState);
+		}
+		catch (Exception e)
+		{
+			recordCaptureFailure(captureErrors, "gameState", e);
 		}
 
-		writer.enqueue(gson.toJson(snapshot));
+		try
+		{
+			if (gameState == GameState.LOGGED_IN)
+			{
+				safeCapture(captureErrors, "localPlayer", () -> captureLocalPlayer(snapshot));
+				safeCapture(captureErrors, "inventory", () -> captureInventory(snapshot));
+				safeCapture(captureErrors, "equipment", () -> captureEquipment(snapshot));
+				safeCapture(captureErrors, "skills", () -> captureSkills(snapshot));
+				safeCapture(captureErrors, "npcs", () -> captureNpcs(snapshot));
+				safeCapture(captureErrors, "players", () -> capturePlayers(snapshot));
+			}
+		}
+		finally
+		{
+			snapshot.captureErrors = captureErrors.toArray(new String[0]);
+			snapshot.writerQueueSize = currentWriter.getQueueSize();
+			snapshot.writerDroppedRecords = currentWriter.getDroppedRecords();
+
+			try
+			{
+				currentWriter.enqueueTick(gson.toJson(snapshot));
+			}
+			catch (Exception e)
+			{
+				log.warn("Failed to enqueue tick telemetry", e);
+			}
+		}
 	}
+
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
@@ -147,9 +175,12 @@ public class TelemetryPlugin extends Plugin
 		WorldPoint wp = player.getWorldLocation();
 
 		TickSnapshot.LocalPlayer localPlayer = new TickSnapshot.LocalPlayer();
-		localPlayer.worldX = wp.getX();
-		localPlayer.worldY = wp.getY();
-		localPlayer.plane = wp.getPlane();
+		if (wp != null)
+		{
+			localPlayer.worldX = wp.getX();
+			localPlayer.worldY = wp.getY();
+			localPlayer.plane = wp.getPlane();
+		}
 		localPlayer.animation = player.getAnimation();
 		localPlayer.poseAnimation = player.getPoseAnimation();
 		localPlayer.combatLevel = player.getCombatLevel();
@@ -175,8 +206,8 @@ public class TelemetryPlugin extends Plugin
 
 			TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
 			slot.slot = i;
-			slot.itemId = item.getId();
-			slot.quantity = item.getQuantity();
+			slot.itemId = item == null ? -1 : item.getId();
+			slot.quantity = item == null ? 0 : item.getQuantity();
 
 			snapshot.inventory[i] = slot;
 		}
@@ -200,8 +231,8 @@ public class TelemetryPlugin extends Plugin
 
 			TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
 			slot.slot = i;
-			slot.itemId = item.getId();
-			slot.quantity = item.getQuantity();
+			slot.itemId = item == null ? -1 : item.getId();
+			slot.quantity = item == null ? 0 : item.getQuantity();
 
 			snapshot.equipment[i] = slot;
 		}
@@ -244,17 +275,24 @@ public class TelemetryPlugin extends Plugin
 		{
 			NPC npc = npcs.get(i);
 
+			if (npc == null)
+			{
+				continue;
+			}
+
 			TickSnapshot.NpcSnapshot npcSnapshot = new TickSnapshot.NpcSnapshot();
 			npcSnapshot.index = npc.getIndex();
 			npcSnapshot.id = npc.getId();
 			npcSnapshot.name = npc.getName();
 			npcSnapshot.combatLevel = npc.getCombatLevel();
 
-			if (npc.getWorldLocation() != null)
+			WorldPoint worldLocation = npc.getWorldLocation();
+
+			if (worldLocation != null)
 			{
-				npcSnapshot.worldX = npc.getWorldLocation().getX();
-				npcSnapshot.worldY = npc.getWorldLocation().getY();
-				npcSnapshot.plane = npc.getWorldLocation().getPlane();
+				npcSnapshot.worldX = worldLocation.getX();
+				npcSnapshot.worldY = worldLocation.getY();
+				npcSnapshot.plane = worldLocation.getPlane();
 			}
 
 			npcSnapshot.animation = npc.getAnimation();
@@ -293,11 +331,13 @@ public class TelemetryPlugin extends Plugin
 		playerSnapshot.nameHash = hashName(player.getName());
 		playerSnapshot.combatLevel = player.getCombatLevel();
 
-		if (player.getWorldLocation() != null)
+		WorldPoint worldLocation = player.getWorldLocation();
+
+		if (worldLocation != null)
 		{
-			playerSnapshot.worldX = player.getWorldLocation().getX();
-			playerSnapshot.worldY = player.getWorldLocation().getY();
-			playerSnapshot.plane = player.getWorldLocation().getPlane();
+			playerSnapshot.worldX = worldLocation.getX();
+			playerSnapshot.worldY = worldLocation.getY();
+			playerSnapshot.plane = worldLocation.getPlane();
 		}
 
 		playerSnapshot.animation = player.getAnimation();
@@ -336,20 +376,29 @@ public class TelemetryPlugin extends Plugin
 	}
 	private void logEvent(String eventType, Object payload)
 	{
-		if (!config.enabled() || writer == null)
+		TelemetryWriter currentWriter = writer;
+
+		if (!config.enabled() || currentWriter == null)
 		{
 			return;
 		}
 
-		EventRecord record = new EventRecord();
-		record.schemaVersion = "0.1.0";
-		record.tickId = tickId;
-		record.eventSeq = ++eventSeq;
-		record.timestampUtc = Instant.now().toString();
-		record.eventType = eventType;
-		record.payload = payload;
+		try
+		{
+			EventRecord record = new EventRecord();
+			record.schemaVersion = "0.1.0";
+			record.tickId = tickId;
+			record.eventSeq = ++eventSeq;
+			record.timestampUtc = Instant.now().toString();
+			record.eventType = eventType;
+			record.payload = payload;
 
-		writer.enqueueEvent(GSON.toJson(record));
+			currentWriter.enqueueEvent(gson.toJson(record));
+		}
+		catch (Exception e)
+		{
+			log.warn("Failed to enqueue event telemetry: {}", eventType, e);
+		}
 	}
 
 	private Map<String, Object> itemContainerPayload(ItemContainerChanged event)
@@ -363,5 +412,23 @@ public class TelemetryPlugin extends Plugin
 		}
 
 		return payload;
+	}
+
+	private void safeCapture(List<String> captureErrors, String section, Runnable capture)
+	{
+		try
+		{
+			capture.run();
+		}
+		catch (Exception e)
+		{
+			recordCaptureFailure(captureErrors, section, e);
+		}
+	}
+
+	private void recordCaptureFailure(List<String> captureErrors, String section, Exception e)
+	{
+		captureErrors.add(section);
+		log.warn("Telemetry capture section failed: {}", section, e);
 	}
 }

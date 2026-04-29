@@ -13,6 +13,9 @@ public class TickSnapshot
     public SkillSnapshot[] skills;
     public NpcSnapshot[] npcs;
     public PlayerSnapshot[] players;
+    public String[] captureErrors;
+    public int writerQueueSize;
+    public long writerDroppedRecords;
 
     public static class LocalPlayer
     {
