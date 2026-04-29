@@ -72,13 +72,27 @@ def summarize_tick(tick: dict):
         item for item in inventory
         if item.get("itemId", -1) > 0 and item.get("quantity", 0) > 0
     ]
+    equipment = tick.get("equipment") or []
+    equipped_slots = [
+        item for item in equipment
+        if item.get("itemId", -1) > 0 and item.get("quantity", 0) > 0
+    ]
+
+    skills = tick.get("skills") or []
+    hp = next((skill for skill in skills if skill.get("name") == "HITPOINTS"), None)
+    prayer = next((skill for skill in skills if skill.get("name") == "PRAYER"), None)
 
     print(
         f"tick={tick_id} | "
         f"state={game_state} | "
         f"pos=({world_x}, {world_y}, {plane}) | "
         f"anim={animation} | "
-        f"inventory={len(filled_slots)}/28"
+        f"inventory={len(filled_slots)}/28 | "
+        f"equipped={len(equipped_slots)} | "
+        f"hp={hp.get('boostedLevel') if hp else '?'} "
+        f"prayer={prayer.get('boostedLevel') if prayer else '?'} | "
+        f"npcs={len(tick.get('npcs') or [])} | "
+        f"players={len(tick.get('players') or [])}"
     )
 
 

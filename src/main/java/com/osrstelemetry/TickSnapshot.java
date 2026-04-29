@@ -9,6 +9,8 @@ public class TickSnapshot
 
     public LocalPlayer localPlayer;
     public InventorySlot[] inventory;
+    public InventorySlot[] equipment;
+    public SkillSnapshot[] skills;
     public NpcSnapshot[] npcs;
     public PlayerSnapshot[] players;
 
@@ -27,6 +29,13 @@ public class TickSnapshot
         public int slot;
         public int itemId;
         public int quantity;
+    }
+    public static class SkillSnapshot
+    {
+        public String name;
+        public int realLevel;
+        public int boostedLevel;
+        public int xp;
     }
     public static class NpcSnapshot
     {

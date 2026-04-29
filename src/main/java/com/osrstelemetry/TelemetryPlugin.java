@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.List;
+import java.util.ArrayList;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
@@ -16,6 +17,7 @@ import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.Player;
 import net.runelite.api.NPC;
+import net.runelite.api.Skill;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameTick;
 import net.runelite.client.config.ConfigManager;
@@ -90,6 +92,8 @@ public class TelemetryPlugin extends Plugin
 		{
 			captureLocalPlayer(snapshot);
 			captureInventory(snapshot);
+			captureEquipment(snapshot);
+			captureSkills(snapshot);
 			captureNpcs(snapshot);
 			capturePlayers(snapshot);
 		}
@@ -142,6 +146,53 @@ public class TelemetryPlugin extends Plugin
 
 			snapshot.inventory[i] = slot;
 		}
+	}
+	private void captureEquipment(TickSnapshot snapshot)
+	{
+		ItemContainer equipment = client.getItemContainer(InventoryID.EQUIPMENT);
+
+		if (equipment == null)
+		{
+			snapshot.equipment = new TickSnapshot.InventorySlot[0];
+			return;
+		}
+
+		Item[] items = equipment.getItems();
+		snapshot.equipment = new TickSnapshot.InventorySlot[items.length];
+
+		for (int i = 0; i < items.length; i++)
+		{
+			Item item = items[i];
+
+			TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
+			slot.slot = i;
+			slot.itemId = item.getId();
+			slot.quantity = item.getQuantity();
+
+			snapshot.equipment[i] = slot;
+		}
+	}
+	private void captureSkills(TickSnapshot snapshot)
+	{
+		ArrayList<TickSnapshot.SkillSnapshot> skills = new ArrayList<>();
+
+		for (Skill skill : Skill.values())
+		{
+			if (skill == Skill.OVERALL)
+			{
+				continue;
+			}
+
+			TickSnapshot.SkillSnapshot skillSnapshot = new TickSnapshot.SkillSnapshot();
+			skillSnapshot.name = skill.name();
+			skillSnapshot.realLevel = client.getRealSkillLevel(skill);
+			skillSnapshot.boostedLevel = client.getBoostedSkillLevel(skill);
+			skillSnapshot.xp = client.getSkillExperience(skill);
+
+			skills.add(skillSnapshot);
+		}
+
+		snapshot.skills = skills.toArray(new TickSnapshot.SkillSnapshot[0]);
 	}
 	private void captureNpcs(TickSnapshot snapshot)
 	{
