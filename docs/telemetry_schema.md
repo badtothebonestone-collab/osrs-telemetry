@@ -31,6 +31,8 @@ Common optional top-level fields:
 - `groundItems`
 - `status`
 - `activePrayers`
+- `framePath`
+- `frameCaptureStatus`
 - `captureErrors`
 - `writerQueueSize`
 - `writerDroppedRecords`
@@ -42,6 +44,19 @@ prayer, health ratio, and current interacting target.
 
 `captureErrors` is normally empty. If a capture layer fails, the tick still gets
 written and the failed layer name is listed here.
+
+`framePath` is a session-relative path to the captured frame for the tick, such
+as `frames/frame-tick-00000001.jpg`. Frame files are retention-managed side
+data, so the path may reference a file that has since expired.
+
+`frameCaptureStatus` is one of:
+
+- `QUEUED`: frame copied and queued for off-thread writing.
+- `WRITTEN`: reserved for tools that post-process completed frame writes.
+- `DISABLED`: frame capture disabled or interval invalid.
+- `SKIPPED_INTERVAL`: tick did not match the configured screenshot interval.
+- `DROPPED_QUEUE_FULL`: frame queue was full; tick was still written.
+- `CAPTURE_FAILED`: canvas copy failed; tick was still written.
 
 ## Event Records
 

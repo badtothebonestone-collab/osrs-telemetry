@@ -20,6 +20,19 @@
     "groundItems": { "type": ["array", "null"] },
     "status": { "type": ["object", "null"] },
     "activePrayers": { "type": ["array", "null"] },
+    "framePath": { "type": ["string", "null"] },
+    "frameCaptureStatus": {
+      "type": ["string", "null"],
+      "enum": [
+        "QUEUED",
+        "WRITTEN",
+        "DISABLED",
+        "SKIPPED_INTERVAL",
+        "DROPPED_QUEUE_FULL",
+        "CAPTURE_FAILED",
+        null
+      ]
+    },
     "captureErrors": {
       "type": ["array", "null"],
       "items": { "type": "string" }

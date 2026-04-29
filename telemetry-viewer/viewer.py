@@ -120,6 +120,15 @@ def newest_tick_file(session: Path) -> Path | None:
     return files[-1] if files else None
 
 
+def frame_exists(session: Path, tick: dict) -> bool | None:
+    frame_path = tick.get("framePath")
+
+    if not frame_path:
+        return None
+
+    return (session / frame_path).exists()
+
+
 def follow_ticks(session: Path):
     current_file = newest_tick_file(session)
 
@@ -155,7 +164,7 @@ def follow_ticks(session: Path):
         file.close()
 
 
-def summarize_tick(tick: dict):
+def summarize_tick(session: Path, tick: dict):
     tick_id = tick.get("tickId")
     game_state = tick.get("gameState")
 
@@ -193,6 +202,15 @@ def summarize_tick(tick: dict):
     run_percent = status.get("runEnergyPercent")
     run_display = f"{run_percent:.1f}%" if isinstance(run_percent, (int, float)) else "?"
     interacting = status.get("interactingType")
+    frame_path = tick.get("framePath")
+    frame_status = tick.get("frameCaptureStatus")
+    frame_present = frame_exists(session, tick)
+    frame_display = "none"
+
+    if frame_path:
+        frame_display = f"{frame_path} exists={frame_present}"
+    elif frame_status:
+        frame_display = frame_status
 
     if interacting and interacting != "UNKNOWN":
         target_name = status.get("interactingName") or status.get("interactingId") or "?"
@@ -215,7 +233,8 @@ def summarize_tick(tick: dict):
         f"npcs={len(tick.get('npcs') or [])} | "
         f"players={len(tick.get('players') or [])} | "
         f"sceneObjects={len(tick.get('sceneObjects') or [])} | "
-        f"groundItems={len(tick.get('groundItems') or [])}"
+        f"groundItems={len(tick.get('groundItems') or [])} | "
+        f"frame={frame_display}"
     )
 
 
@@ -294,7 +313,7 @@ def main():
 
     if latest_tick is not None:
         print("Latest existing tick:")
-        summarize_tick(latest_tick)
+        summarize_tick(session, latest_tick)
         print()
     else:
         print("No ticks have been written yet.")
@@ -304,7 +323,7 @@ def main():
     print("Waiting for new ticks...")
 
     for tick in follow_ticks(session):
-        summarize_tick(tick)
+        summarize_tick(session, tick)
 
 
 if __name__ == "__main__":

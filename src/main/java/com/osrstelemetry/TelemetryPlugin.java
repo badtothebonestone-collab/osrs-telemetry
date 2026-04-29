@@ -2,6 +2,10 @@ package com.osrstelemetry;
 
 import com.google.gson.Gson;
 import com.google.inject.Provides;
+import java.awt.Canvas;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -118,7 +122,13 @@ public class TelemetryPlugin extends Plugin
 				config.maxTelemetryGb(),
 				config.cleanupIntervalSeconds(),
 				config.preservePinnedSessions(),
-				config.allowDeletingClosedSegmentsFromActiveSession());
+				config.allowDeletingClosedSegmentsFromActiveSession(),
+				config.screenshotEveryTicks(),
+				config.screenshotFormat(),
+				config.jpegQuality(),
+				config.maxFrameStorageMb(),
+				config.deleteOldFrames(),
+				config.maxFrameQueueSize());
 		writer.start();
 
 		log.info("Telemetry Collector started");
@@ -186,6 +196,7 @@ public class TelemetryPlugin extends Plugin
 			snapshot.captureErrors = captureErrors.toArray(new String[0]);
 			snapshot.writerQueueSize = currentWriter.getQueueSize();
 			snapshot.writerDroppedRecords = currentWriter.getDroppedRecords();
+			captureFrame(snapshot, captureErrors, currentWriter);
 			snapshot.captureErrors = captureErrors.toArray(new String[0]);
 
 			try
@@ -382,6 +393,128 @@ public class TelemetryPlugin extends Plugin
 			rememberNpc((NPC) event.getActor());
 			logEvent("NpcDeath", actorPayload(event.getActor()));
 		}
+	}
+
+	private void captureFrame(TickSnapshot snapshot, List<String> captureErrors, TelemetryWriter currentWriter)
+	{
+		if (!config.captureScreenshots())
+		{
+			snapshot.frameCaptureStatus = "DISABLED";
+			return;
+		}
+
+		int interval = config.screenshotEveryTicks();
+
+		if (interval <= 0)
+		{
+			snapshot.frameCaptureStatus = "DISABLED";
+			return;
+		}
+
+		if (snapshot.tickId % interval != 0)
+		{
+			snapshot.frameCaptureStatus = "SKIPPED_INTERVAL";
+			return;
+		}
+
+		String format = normalizeScreenshotFormat(config.screenshotFormat());
+		String relativePath = String.format("frames/frame-tick-%08d.%s", snapshot.tickId, format);
+
+		try
+		{
+			BufferedImage frame = copyCanvasFrame();
+
+			if (frame == null)
+			{
+				snapshot.frameCaptureStatus = "CAPTURE_FAILED";
+				captureErrors.add("frame");
+				return;
+			}
+
+			if (config.includeFramePathInTicks())
+			{
+				snapshot.framePath = relativePath;
+			}
+
+			if (currentWriter.enqueueFrame(relativePath, frame))
+			{
+				snapshot.frameCaptureStatus = "QUEUED";
+			}
+			else
+			{
+				snapshot.frameCaptureStatus = "DROPPED_QUEUE_FULL";
+			}
+		}
+		catch (Exception e)
+		{
+			snapshot.frameCaptureStatus = "CAPTURE_FAILED";
+			captureErrors.add("frame");
+			log.warn("Telemetry frame capture failed", e);
+		}
+	}
+
+	private BufferedImage copyCanvasFrame()
+	{
+		Canvas canvas = client.getCanvas();
+
+		if (canvas == null)
+		{
+			return null;
+		}
+
+		int width = canvas.getWidth();
+		int height = canvas.getHeight();
+
+		if (width <= 0 || height <= 0)
+		{
+			return null;
+		}
+
+		BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+		Graphics2D graphics = image.createGraphics();
+
+		try
+		{
+			canvas.paint(graphics);
+		}
+		finally
+		{
+			graphics.dispose();
+		}
+
+		int maxFrameWidth = config.maxFrameWidth();
+
+		if (maxFrameWidth <= 0 || width <= maxFrameWidth)
+		{
+			return image;
+		}
+
+		int scaledHeight = Math.max(1, (int) Math.round(height * (maxFrameWidth / (double) width)));
+		BufferedImage scaled = new BufferedImage(maxFrameWidth, scaledHeight, BufferedImage.TYPE_INT_RGB);
+		Graphics2D scaledGraphics = scaled.createGraphics();
+
+		try
+		{
+			scaledGraphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+			scaledGraphics.drawImage(image, 0, 0, maxFrameWidth, scaledHeight, null);
+		}
+		finally
+		{
+			scaledGraphics.dispose();
+		}
+
+		return scaled;
+	}
+
+	private String normalizeScreenshotFormat(String format)
+	{
+		if (format == null)
+		{
+			return "jpg";
+		}
+
+		String normalized = format.trim().toLowerCase();
+		return "png".equals(normalized) ? "png" : "jpg";
 	}
 
 	@Subscribe

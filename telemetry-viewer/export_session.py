@@ -151,11 +151,18 @@ def dictionary_counts(session: Path) -> dict[str, int]:
     return counts
 
 
+def frame_exists(session: Path, frame_path: str | None) -> bool | None:
+    if not frame_path:
+        return None
+
+    return (session / frame_path).exists()
+
+
 def count_items(items: list[dict]) -> int:
     return sum(1 for item in items if item.get("itemId", -1) > 0 and item.get("quantity", 0) > 0)
 
 
-def tick_summary(source: Path, tick: dict) -> dict:
+def tick_summary(session: Path, source: Path, tick: dict) -> dict:
     local_player = tick.get("localPlayer") or {}
     status = tick.get("status") or {}
     active_prayers = [
@@ -192,6 +199,9 @@ def tick_summary(source: Path, tick: dict) -> dict:
         "groundItemsCount": len(tick.get("groundItems") or []),
         "activePrayerNames": active_prayers,
         "interactingTarget": interacting,
+        "framePath": tick.get("framePath"),
+        "frameExists": frame_exists(session, tick.get("framePath")),
+        "frameCaptureStatus": tick.get("frameCaptureStatus"),
         "captureErrorCount": len(tick.get("captureErrors") or []),
         "source": str(source),
     }
@@ -310,7 +320,7 @@ def export_session(session: Path):
     last_tick_id = None
 
     for source, tick in iter_jsonl(ticks):
-        summary = tick_summary(source, tick)
+        summary = tick_summary(session, source, tick)
         tick_rows.append(summary)
         tick_id = summary.get("tickId")
 

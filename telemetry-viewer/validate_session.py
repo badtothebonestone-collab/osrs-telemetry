@@ -102,6 +102,15 @@ def directory_size(path: Path) -> int:
     return total
 
 
+def frame_files(session: Path) -> list[Path]:
+    frames = session / "frames"
+
+    if not frames.exists():
+        return []
+
+    return sorted(path for path in frames.iterdir() if path.is_file())
+
+
 def dictionary_summary(session: Path) -> list[str]:
     dictionaries = session / "dictionaries"
     lines = []
@@ -189,6 +198,8 @@ def validate_session(session: Path):
     tick_samples_checked = 0
     event_samples_checked = 0
     json_error_count = 0
+    ticks_with_frame_path = 0
+    missing_referenced_frames = 0
 
     for file_path, line_number, record, error in iter_jsonl(ticks):
         if error is not None:
@@ -219,6 +230,14 @@ def validate_session(session: Path):
 
         if capture_errors:
             capture_error_count += len(capture_errors)
+
+        frame_path = record.get("framePath")
+
+        if frame_path:
+            ticks_with_frame_path += 1
+
+            if not (session / frame_path).exists():
+                missing_referenced_frames += 1
 
     if capture_error_count:
         problems.append(f"captureErrors present: {capture_error_count}")
@@ -257,6 +276,11 @@ def validate_session(session: Path):
             "tickCount",
             "eventCount",
             "droppedRecords",
+            "frameCount",
+            "droppedFrameCount",
+            "screenshotEveryTicks",
+            "screenshotFormat",
+            "maxFrameStorageMb",
             "lastUpdatedUtc",
         ]
 
@@ -272,6 +296,11 @@ def validate_session(session: Path):
     print(f"Total captureErrors count: {capture_error_count}")
     print(f"Tick segment count: {len(ticks)}")
     print(f"Event segment count: {len(events)}")
+    frames = frame_files(session)
+    print(f"Ticks with framePath: {ticks_with_frame_path}")
+    print(f"Existing frame files: {len(frames)}")
+    print(f"Missing referenced frames: {missing_referenced_frames}")
+    print(f"Frames folder size MB: {directory_size(session / 'frames') / (1024 * 1024):.2f}")
     print(f"Session size MB: {directory_size(session) / (1024 * 1024):.2f}")
     print(f"JSON decode errors: {json_error_count}")
     print(f"Tick schemaVersion counts: {dict(tick_schema_counts)}")

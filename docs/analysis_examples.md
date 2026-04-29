@@ -24,3 +24,8 @@ Example questions:
 - What was nearby when an event happened?
   Join `event_summary.tickId` to `tick_summary.tickId`, then inspect nearby
   entity/object counts or the original tick record.
+
+- Is there a screenshot for a tick?
+  Read `framePath`, `frameExists`, and `frameCaptureStatus` from
+  `exports\tick_summary.jsonl`. Missing files with a historical `framePath`
+  usually mean frame retention has expired the image.

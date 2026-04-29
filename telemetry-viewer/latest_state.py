@@ -119,7 +119,16 @@ def count_items(items: list[dict]) -> int:
     return sum(1 for item in items if item.get("itemId", -1) > 0 and item.get("quantity", 0) > 0)
 
 
-def summarize_status(tick: dict) -> dict:
+def frame_exists(session: Path, tick: dict) -> bool | None:
+    frame_path = tick.get("framePath")
+
+    if not frame_path:
+        return None
+
+    return (session / frame_path).exists()
+
+
+def summarize_status(session: Path, tick: dict) -> dict:
     local_player = tick.get("localPlayer") or {}
     status = tick.get("status") or {}
     active_prayers = [
@@ -169,6 +178,9 @@ def summarize_status(tick: dict) -> dict:
         "playerCount": len(tick.get("players") or []),
         "sceneObjectsCount": len(tick.get("sceneObjects") or []),
         "groundItemsCount": len(tick.get("groundItems") or []),
+        "framePath": tick.get("framePath"),
+        "frameExists": frame_exists(session, tick),
+        "frameCaptureStatus": tick.get("frameCaptureStatus"),
         "captureErrorCount": len(tick.get("captureErrors") or []),
     }
 
@@ -260,15 +272,18 @@ def open_at_end(path: Path):
     return file
 
 
-def write_latest_tick(tick: dict):
-    atomic_write_json(LATEST_TICK_FILE, tick)
-    status = summarize_status(tick)
+def write_latest_tick(session: Path, tick: dict):
+    latest_tick = dict(tick)
+    latest_tick["frameExists"] = frame_exists(session, tick)
+    atomic_write_json(LATEST_TICK_FILE, latest_tick)
+    status = summarize_status(session, tick)
     atomic_write_json(LATEST_STATUS_FILE, status)
     print(
         f"tick={status.get('tickId')} state={status.get('gameState')} "
         f"pos={status['position'].get('worldX')},{status['position'].get('worldY')},{status['position'].get('plane')} "
         f"hp={status['hp'].get('boosted')}/{status['hp'].get('real')} "
         f"prayer={status['prayer'].get('boosted')}/{status['prayer'].get('real')} "
+        f"frame={status.get('framePath') or status.get('frameCaptureStatus')} "
         f"events->{LATEST_EVENTS_FILE}",
         flush=True,
     )
@@ -289,7 +304,7 @@ def seed_latest(session: Path) -> tuple[Path | None, Path | None, deque]:
         recent_events.append(summarize_event(event))
 
     if latest_tick is not None:
-        write_latest_tick(latest_tick)
+        write_latest_tick(session, latest_tick)
 
     write_latest_events(recent_events)
     return newest_file(tick_files(session)), newest_file(event_files(session)), recent_events
@@ -315,7 +330,7 @@ def follow_session(session: Path):
 
                 if line:
                     try:
-                        write_latest_tick(json.loads(line))
+                        write_latest_tick(session, json.loads(line))
                         updated = True
                     except json.JSONDecodeError:
                         pass

@@ -86,4 +86,94 @@ public interface TelemetryConfig extends Config
 	{
 		return true;
 	}
+
+	@ConfigItem(
+			keyName = "captureScreenshots",
+			name = "Capture screenshots",
+			description = "Capture one read-only canvas frame per configured game tick"
+	)
+	default boolean captureScreenshots()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "screenshotEveryTicks",
+			name = "Screenshot tick interval",
+			description = "Capture a frame every N game ticks"
+	)
+	default int screenshotEveryTicks()
+	{
+		return 1;
+	}
+
+	@ConfigItem(
+			keyName = "screenshotFormat",
+			name = "Screenshot format",
+			description = "Frame image format: jpg or png"
+	)
+	default String screenshotFormat()
+	{
+		return "jpg";
+	}
+
+	@ConfigItem(
+			keyName = "jpegQuality",
+			name = "JPEG quality",
+			description = "JPEG frame quality from 0.0 to 1.0"
+	)
+	default double jpegQuality()
+	{
+		return 0.75;
+	}
+
+	@ConfigItem(
+			keyName = "maxFrameWidth",
+			name = "Max frame width",
+			description = "Scale captured frames down to this width; 0 keeps the original size"
+	)
+	default int maxFrameWidth()
+	{
+		return 0;
+	}
+
+	@ConfigItem(
+			keyName = "includeFramePathInTicks",
+			name = "Include frame path in ticks",
+			description = "Write the relative frame path into each captured tick record"
+	)
+	default boolean includeFramePathInTicks()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "maxFrameStorageMb",
+			name = "Max frame storage MB",
+			description = "Maximum storage for frame files in the active session"
+	)
+	default int maxFrameStorageMb()
+	{
+		return 1024;
+	}
+
+	@ConfigItem(
+			keyName = "deleteOldFrames",
+			name = "Delete old frames",
+			description = "Delete oldest frame files when the frame storage cap is exceeded"
+	)
+	default boolean deleteOldFrames()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "maxFrameQueueSize",
+			name = "Max frame queue size",
+			description = "Maximum pending frame writes before new frames are dropped"
+	)
+	default int maxFrameQueueSize()
+	{
+		return 250;
+	}
 }

@@ -30,6 +30,11 @@
     "tickCount": { "type": "integer", "minimum": 0 },
     "eventCount": { "type": "integer", "minimum": 0 },
     "droppedRecords": { "type": "integer", "minimum": 0 },
+    "frameCount": { "type": "integer", "minimum": 0 },
+    "droppedFrameCount": { "type": "integer", "minimum": 0 },
+    "screenshotEveryTicks": { "type": "integer", "minimum": 0 },
+    "screenshotFormat": { "type": "string", "enum": ["jpg", "png"] },
+    "maxFrameStorageMb": { "type": "integer", "minimum": 1 },
     "lastUpdatedUtc": { "type": "string", "minLength": 1 }
   },
   "additionalProperties": true

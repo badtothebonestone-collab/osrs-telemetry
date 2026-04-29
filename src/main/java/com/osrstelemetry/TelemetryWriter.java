@@ -1,6 +1,7 @@
 package com.osrstelemetry;
 
 import com.google.gson.Gson;
+import java.awt.image.BufferedImage;
 import java.io.BufferedWriter;
 import java.io.Closeable;
 import java.io.IOException;
@@ -15,6 +16,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -24,6 +26,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import javax.imageio.IIOImage;
+import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
@@ -31,6 +38,7 @@ public class TelemetryWriter implements Closeable
 {
 	private static final String STREAM_TICKS = "ticks";
 	private static final String STREAM_EVENTS = "events";
+	private static final String FRAMES_DIR = "frames";
 	private static final String SCHEMA_VERSION = "0.1.0";
 	private static final int QUEUE_CAPACITY = 100_000;
 
@@ -43,6 +51,18 @@ public class TelemetryWriter implements Closeable
 		{
 			this.stream = stream;
 			this.json = json;
+		}
+	}
+
+	private static class QueuedFrame
+	{
+		final String relativePath;
+		final BufferedImage image;
+
+		QueuedFrame(String relativePath, BufferedImage image)
+		{
+			this.relativePath = relativePath;
+			this.image = image;
 		}
 	}
 
@@ -60,15 +80,22 @@ public class TelemetryWriter implements Closeable
 		long tickCount;
 		long eventCount;
 		long droppedRecords;
+		long frameCount;
+		long droppedFrameCount;
+		int screenshotEveryTicks;
+		String screenshotFormat;
+		int maxFrameStorageMb;
 		String lastUpdatedUtc;
 	}
 
 	private final Gson gson;
 	private final LinkedBlockingQueue<QueuedLine> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
+	private final LinkedBlockingQueue<QueuedFrame> frameQueue;
 	private final Path sessionsRoot;
 	private final Path sessionDir;
 	private final Path ticksDir;
 	private final Path eventsDir;
+	private final Path framesDir;
 	private final Path dictionariesDir;
 	private final Path itemsDictionaryFile;
 	private final Path npcsDictionaryFile;
@@ -81,7 +108,13 @@ public class TelemetryWriter implements Closeable
 	private final long cleanupIntervalMillis;
 	private final boolean preservePinnedSessions;
 	private final boolean allowDeletingClosedSegmentsFromActiveSession;
+	private final int screenshotEveryTicks;
+	private final String screenshotFormat;
+	private final float jpegQuality;
+	private final boolean deleteOldFrames;
+	private final long maxFrameStorageBytes;
 	private final AtomicLong droppedRecords = new AtomicLong();
+	private final AtomicLong droppedFrameCount = new AtomicLong();
 	private final AtomicBoolean dictionariesDirty = new AtomicBoolean(false);
 	private final Map<Integer, String> itemDictionary = new ConcurrentHashMap<>();
 	private final Map<Integer, String> npcDictionary = new ConcurrentHashMap<>();
@@ -98,6 +131,7 @@ public class TelemetryWriter implements Closeable
 	private long currentEventBytes;
 	private long nextCleanupAtMillis;
 	private long nextDictionaryFlushAtMillis;
+	private volatile Path currentFrameWrite;
 
 	public TelemetryWriter(
 			String outputDirectory,
@@ -107,14 +141,22 @@ public class TelemetryWriter implements Closeable
 			int maxTelemetryGb,
 			int cleanupIntervalSeconds,
 			boolean preservePinnedSessions,
-			boolean allowDeletingClosedSegmentsFromActiveSession)
+			boolean allowDeletingClosedSegmentsFromActiveSession,
+			int screenshotEveryTicks,
+			String screenshotFormat,
+			double jpegQuality,
+			int maxFrameStorageMb,
+			boolean deleteOldFrames,
+			int maxFrameQueueSize)
 	{
 		this.gson = gson;
+		this.frameQueue = new LinkedBlockingQueue<>(Math.max(1, maxFrameQueueSize));
 		this.sessionsRoot = Path.of(outputDirectory);
 		this.sessionId = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"));
 		this.sessionDir = sessionsRoot.resolve(sessionId);
 		this.ticksDir = sessionDir.resolve(STREAM_TICKS);
 		this.eventsDir = sessionDir.resolve(STREAM_EVENTS);
+		this.framesDir = sessionDir.resolve(FRAMES_DIR);
 		this.dictionariesDir = sessionDir.resolve("dictionaries");
 		this.itemsDictionaryFile = dictionariesDir.resolve("items.json");
 		this.npcsDictionaryFile = dictionariesDir.resolve("npcs.json");
@@ -126,12 +168,18 @@ public class TelemetryWriter implements Closeable
 		this.cleanupIntervalMillis = Duration.ofSeconds(Math.max(1L, cleanupIntervalSeconds)).toMillis();
 		this.preservePinnedSessions = preservePinnedSessions;
 		this.allowDeletingClosedSegmentsFromActiveSession = allowDeletingClosedSegmentsFromActiveSession;
+		this.screenshotEveryTicks = screenshotEveryTicks;
+		this.screenshotFormat = normalizeScreenshotFormat(screenshotFormat);
+		this.jpegQuality = (float) Math.max(0.0, Math.min(1.0, jpegQuality));
+		this.deleteOldFrames = deleteOldFrames;
+		this.maxFrameStorageBytes = Math.max(1L, maxFrameStorageMb) * 1024L * 1024L;
 	}
 
 	public void start() throws IOException
 	{
 		Files.createDirectories(ticksDir);
 		Files.createDirectories(eventsDir);
+		Files.createDirectories(framesDir);
 		Files.createDirectories(dictionariesDir);
 
 		manifest.sessionId = sessionId;
@@ -140,6 +188,9 @@ public class TelemetryWriter implements Closeable
 		manifest.active = true;
 		manifest.tickSegmentIndex = 1;
 		manifest.eventSegmentIndex = 1;
+		manifest.screenshotEveryTicks = screenshotEveryTicks;
+		manifest.screenshotFormat = this.screenshotFormat;
+		manifest.maxFrameStorageMb = (int) (maxFrameStorageBytes / (1024L * 1024L));
 
 		openTickSegment();
 		openEventSegment();
@@ -165,6 +216,28 @@ public class TelemetryWriter implements Closeable
 		enqueue(new QueuedLine(STREAM_EVENTS, json));
 	}
 
+	public boolean enqueueFrame(String relativePath, BufferedImage image)
+	{
+		if (!running || relativePath == null || image == null)
+		{
+			return false;
+		}
+
+		if (!frameQueue.offer(new QueuedFrame(relativePath, image)))
+		{
+			long dropped = droppedFrameCount.incrementAndGet();
+
+			if (dropped == 1 || dropped % 100 == 0)
+			{
+				log.warn("Telemetry frame queue full; dropped {} frames", dropped);
+			}
+
+			return false;
+		}
+
+		return true;
+	}
+
 	public int getQueueSize()
 	{
 		return queue.size();
@@ -173,6 +246,11 @@ public class TelemetryWriter implements Closeable
 	public long getDroppedRecords()
 	{
 		return droppedRecords.get();
+	}
+
+	public long getDroppedFrameCount()
+	{
+		return droppedFrameCount.get();
 	}
 
 	public void rememberItem(int id, String name)
@@ -220,13 +298,19 @@ public class TelemetryWriter implements Closeable
 	{
 		try
 		{
-			while (running || !queue.isEmpty())
+			while (running || !queue.isEmpty() || !frameQueue.isEmpty())
 			{
 				QueuedLine line = running ? queue.poll(250, TimeUnit.MILLISECONDS) : queue.poll();
 
 				if (line != null)
 				{
 					writeLine(line);
+				}
+
+				QueuedFrame frame;
+				while ((frame = frameQueue.poll()) != null)
+				{
+					writeFrame(frame);
 				}
 
 				maybeRunRetention();
@@ -264,6 +348,88 @@ public class TelemetryWriter implements Closeable
 		else if (STREAM_EVENTS.equals(line.stream))
 		{
 			writeEvent(line.json);
+		}
+	}
+
+	private void writeFrame(QueuedFrame frame) throws IOException
+	{
+		Path path = sessionDir.resolve(frame.relativePath).normalize();
+
+		if (!path.startsWith(framesDir))
+		{
+			log.warn("Refusing to write telemetry frame outside frames directory: {}", frame.relativePath);
+			return;
+		}
+
+		currentFrameWrite = path;
+
+		try
+		{
+			Files.createDirectories(path.getParent());
+			writeImage(path, frame.image);
+			manifest.frameCount++;
+			manifest.droppedFrameCount = droppedFrameCount.get();
+			writeManifest();
+			maybeDeleteOldFrames();
+		}
+		finally
+		{
+			currentFrameWrite = null;
+		}
+	}
+
+	private void writeImage(Path path, BufferedImage image) throws IOException
+	{
+		if ("png".equals(screenshotFormat))
+		{
+			ImageIO.write(image, "png", path.toFile());
+			return;
+		}
+
+		BufferedImage rgb = image.getType() == BufferedImage.TYPE_INT_RGB
+				? image
+				: new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
+
+		if (rgb != image)
+		{
+			java.awt.Graphics graphics = rgb.getGraphics();
+
+			try
+			{
+				graphics.drawImage(image, 0, 0, null);
+			}
+			finally
+			{
+				graphics.dispose();
+			}
+		}
+
+		Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpg");
+
+		if (!writers.hasNext())
+		{
+			ImageIO.write(rgb, "jpg", path.toFile());
+			return;
+		}
+
+		ImageWriter writer = writers.next();
+
+		try (ImageOutputStream output = ImageIO.createImageOutputStream(path.toFile()))
+		{
+			ImageWriteParam params = writer.getDefaultWriteParam();
+
+			if (params.canWriteCompressed())
+			{
+				params.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+				params.setCompressionQuality(jpegQuality);
+			}
+
+			writer.setOutput(output);
+			writer.write(null, new IIOImage(rgb, null, null), params);
+		}
+		finally
+		{
+			writer.dispose();
 		}
 	}
 
@@ -376,12 +542,28 @@ public class TelemetryWriter implements Closeable
 				return;
 			}
 		}
+
+		QueuedFrame frame;
+
+		while ((frame = frameQueue.poll()) != null)
+		{
+			try
+			{
+				writeFrame(frame);
+			}
+			catch (IOException e)
+			{
+				log.warn("Telemetry writer failed while draining frame queue", e);
+				return;
+			}
+		}
 	}
 
 	private void writeManifest() throws IOException
 	{
 		manifest.lastUpdatedUtc = Instant.now().toString();
 		manifest.droppedRecords = droppedRecords.get();
+		manifest.droppedFrameCount = droppedFrameCount.get();
 		Files.writeString(
 				manifestFile,
 				gson.toJson(manifest),
@@ -418,6 +600,55 @@ public class TelemetryWriter implements Closeable
 
 		nextCleanupAtMillis = now + cleanupIntervalMillis;
 		runRetention();
+	}
+
+	private void maybeDeleteOldFrames()
+	{
+		if (!deleteOldFrames)
+		{
+			return;
+		}
+
+		try
+		{
+			long frameSize = directorySize(framesDir);
+
+			if (frameSize <= maxFrameStorageBytes)
+			{
+				return;
+			}
+
+			List<Path> candidates = new ArrayList<>();
+
+			try (DirectoryStream<Path> stream = Files.newDirectoryStream(framesDir))
+			{
+				for (Path path : stream)
+				{
+					if (Files.isRegularFile(path) && !path.equals(currentFrameWrite))
+					{
+						candidates.add(path);
+					}
+				}
+			}
+
+			candidates.sort(Comparator.comparingLong(this::lastModifiedMillis));
+
+			for (Path candidate : candidates)
+			{
+				if (frameSize <= maxFrameStorageBytes)
+				{
+					return;
+				}
+
+				long size = fileSize(candidate);
+				safeDelete(candidate);
+				frameSize -= size;
+			}
+		}
+		catch (IOException e)
+		{
+			log.warn("Telemetry frame cleanup failed", e);
+		}
 	}
 
 	private void maybeFlushDictionaries()
@@ -523,8 +754,10 @@ public class TelemetryWriter implements Closeable
 
 			Path ticks = session.resolve(STREAM_TICKS);
 			Path events = session.resolve(STREAM_EVENTS);
+			Path frames = session.resolve(FRAMES_DIR);
 			addClosedSegmentCandidates(candidates, ticks, currentTickSegment);
 			addClosedSegmentCandidates(candidates, events, currentEventSegment);
+			addFrameCandidates(candidates, frames);
 		}
 
 		candidates.sort(Comparator.comparingLong(this::lastModifiedMillis));
@@ -543,6 +776,25 @@ public class TelemetryWriter implements Closeable
 			for (Path path : stream)
 			{
 				if (!path.equals(currentOpenSegment))
+				{
+					candidates.add(path);
+				}
+			}
+		}
+	}
+
+	private void addFrameCandidates(List<Path> candidates, Path dir) throws IOException
+	{
+		if (!Files.isDirectory(dir))
+		{
+			return;
+		}
+
+		try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir))
+		{
+			for (Path path : stream)
+			{
+				if (Files.isRegularFile(path) && !path.equals(currentFrameWrite))
 				{
 					candidates.add(path);
 				}
@@ -701,6 +953,29 @@ public class TelemetryWriter implements Closeable
 		{
 			Files.deleteIfExists(path);
 		}
+	}
+
+	private void safeDelete(Path path)
+	{
+		try
+		{
+			Files.deleteIfExists(path);
+		}
+		catch (IOException e)
+		{
+			log.debug("Failed to delete old telemetry frame {}", path, e);
+		}
+	}
+
+	private String normalizeScreenshotFormat(String format)
+	{
+		if (format == null)
+		{
+			return "jpg";
+		}
+
+		String normalized = format.trim().toLowerCase();
+		return "png".equals(normalized) ? "png" : "jpg";
 	}
 
 	private void closeWriter(BufferedWriter writer, String stream)

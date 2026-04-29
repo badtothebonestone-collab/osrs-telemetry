@@ -18,6 +18,8 @@ public class TickSnapshot
     public GroundItemSnapshot[] groundItems;
     public StatusSnapshot status;
     public ActivePrayerSnapshot[] activePrayers;
+    public String framePath;
+    public String frameCaptureStatus;
     public String[] captureErrors;
     public int writerQueueSize;
     public long writerDroppedRecords;
