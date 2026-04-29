@@ -1,4 +1,5 @@
 import json
+import os
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -274,11 +275,28 @@ def event_summary(source: Path, event: dict) -> dict:
     }
 
 
+def atomic_replace(path: Path, writer):
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    writer(temp_path)
+    os.replace(temp_path, path)
+
+
+def write_json(path: Path, data):
+    def writer(temp_path: Path):
+        with temp_path.open("w", encoding="utf-8") as file:
+            json.dump(data, file, indent=2)
+
+    atomic_replace(path, writer)
+
+
 def write_jsonl(path: Path, rows):
-    with path.open("w", encoding="utf-8") as file:
-        for row in rows:
-            file.write(json.dumps(row, separators=(",", ":")))
-            file.write("\n")
+    def writer(temp_path: Path):
+        with temp_path.open("w", encoding="utf-8") as file:
+            for row in rows:
+                file.write(json.dumps(row, separators=(",", ":")))
+                file.write("\n")
+
+    atomic_replace(path, writer)
 
 
 def export_session(session: Path):
@@ -321,10 +339,7 @@ def export_session(session: Path):
         "topEventTypeCounts": dict(event_type_counts.most_common(20)),
     }
 
-    (EXPORT_DIR / "session_index.json").write_text(
-        json.dumps(session_index, indent=2),
-        encoding="utf-8",
-    )
+    write_json(EXPORT_DIR / "session_index.json", session_index)
     write_jsonl(EXPORT_DIR / "tick_summary.jsonl", tick_rows)
     write_jsonl(EXPORT_DIR / "event_summary.jsonl", event_rows)
 
