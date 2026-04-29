@@ -109,6 +109,12 @@ Tick records reference frames with a relative `framePath`, for example
 `maxFrameStorageMb` is exceeded. Consumers should treat a missing referenced
 frame as expired frame data, not corrupt telemetry.
 
+`framePath` is assigned when the capture request is queued. The tick JSON can be
+written before RuneLite's next-frame callback and the frame writer finish the
+JPG/PNG file. For a newest active tick, `frameCaptureStatus="QUEUED"` with
+`frameExists=false` is usually pending, not a missing frame. Older missing
+referenced frames usually mean frame retention deleted the image.
+
 `RUNELITE_ONLY` is the default capture mode. It uses RuneLite's rendered frame
 image and follows the current RuneLite/game canvas size without reading random
 desktop pixels.

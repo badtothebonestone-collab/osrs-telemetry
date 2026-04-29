@@ -31,3 +31,8 @@ Example questions:
   historical `framePath` usually mean frame retention has expired the image.
   If `frameCaptureSource` is `SCREEN_RECTANGLE`, check `frameCaptureWarning`
   because overlapping windows may appear in that frame.
+
+- Why does `frameExists` briefly show false?
+  Tick records are written before asynchronous frame writes necessarily finish.
+  For the newest active tick, `frameCaptureStatus == "QUEUED"` and
+  `framePending == true` means the image may still be arriving.

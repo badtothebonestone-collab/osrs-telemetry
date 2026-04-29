@@ -1,9 +1,13 @@
 import json
+import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 TELEMETRY_ROOT = Path(r"C:\Users\stone\.osrs-telemetry\sessions")
+FRAME_PENDING_GRACE_SECONDS = 2.0
+VERBOSE_FRAMES = os.environ.get("OSRS_TELEMETRY_VERBOSE_FRAMES") == "1"
 
 
 def tick_files(session: Path) -> list[Path]:
@@ -129,6 +133,41 @@ def frame_exists(session: Path, tick: dict) -> bool | None:
     return (session / frame_path).exists()
 
 
+def tick_age_seconds(tick: dict) -> float | None:
+    timestamp = tick.get("timestampUtc")
+
+    if not timestamp:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    return (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+
+
+def frame_state(session: Path, tick: dict, is_latest: bool) -> dict:
+    frame_path = tick.get("framePath")
+    exists = frame_exists(session, tick)
+    pending = False
+    expired_or_missing = False
+
+    if frame_path and exists is False:
+        age = tick_age_seconds(tick)
+        fresh = age is None or age <= FRAME_PENDING_GRACE_SECONDS
+        pending = tick.get("frameCaptureStatus") == "QUEUED" and is_latest and fresh
+        expired_or_missing = not pending
+
+    return {
+        "framePath": frame_path,
+        "frameExists": exists,
+        "framePending": pending,
+        "frameExpiredOrMissing": expired_or_missing,
+        "absoluteFramePath": str((session / frame_path).resolve()) if frame_path else None,
+    }
+
+
 def follow_ticks(session: Path):
     current_file = newest_tick_file(session)
 
@@ -164,7 +203,7 @@ def follow_ticks(session: Path):
         file.close()
 
 
-def summarize_tick(session: Path, tick: dict):
+def summarize_tick(session: Path, tick: dict, is_latest: bool = True):
     tick_id = tick.get("tickId")
     game_state = tick.get("gameState")
 
@@ -202,15 +241,23 @@ def summarize_tick(session: Path, tick: dict):
     run_percent = status.get("runEnergyPercent")
     run_display = f"{run_percent:.1f}%" if isinstance(run_percent, (int, float)) else "?"
     interacting = status.get("interactingType")
-    frame_path = tick.get("framePath")
     frame_status = tick.get("frameCaptureStatus")
     frame_source = tick.get("frameCaptureSource")
     frame_warning = tick.get("frameCaptureWarning")
-    frame_present = frame_exists(session, tick)
+    frame = frame_state(session, tick, is_latest)
+    frame_path = frame["framePath"]
     frame_display = "none"
 
     if frame_path:
-        frame_display = f"{frame_path} exists={frame_present} source={frame_source or '?'}"
+        frame_display = (
+            f"{frame_path} exists={frame['frameExists']} "
+            f"pending={frame['framePending']} "
+            f"expiredOrMissing={frame['frameExpiredOrMissing']} "
+            f"source={frame_source or '?'}"
+        )
+
+        if VERBOSE_FRAMES:
+            frame_display = f"{frame_display} absolute={frame['absoluteFramePath']}"
     elif frame_status:
         frame_display = f"{frame_status} source={frame_source or '?'}"
 

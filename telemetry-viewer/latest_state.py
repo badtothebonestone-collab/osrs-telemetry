@@ -128,6 +128,19 @@ def frame_exists(session: Path, tick: dict) -> bool | None:
     return (session / frame_path).exists()
 
 
+def frame_state(session: Path, tick: dict) -> dict:
+    frame_path = tick.get("framePath")
+    exists = frame_exists(session, tick)
+    pending = bool(frame_path and exists is False and tick.get("frameCaptureStatus") == "QUEUED")
+
+    return {
+        "framePath": frame_path,
+        "frameExists": exists,
+        "framePending": pending,
+        "frameExpiredOrMissing": bool(frame_path and exists is False and not pending),
+    }
+
+
 def summarize_status(session: Path, tick: dict) -> dict:
     local_player = tick.get("localPlayer") or {}
     status = tick.get("status") or {}
@@ -151,6 +164,8 @@ def summarize_status(session: Path, tick: dict) -> dict:
         }
     else:
         interacting = None
+
+    frame = frame_state(session, tick)
 
     return {
         "tickId": tick.get("tickId"),
@@ -178,8 +193,10 @@ def summarize_status(session: Path, tick: dict) -> dict:
         "playerCount": len(tick.get("players") or []),
         "sceneObjectsCount": len(tick.get("sceneObjects") or []),
         "groundItemsCount": len(tick.get("groundItems") or []),
-        "framePath": tick.get("framePath"),
-        "frameExists": frame_exists(session, tick),
+        "framePath": frame["framePath"],
+        "frameExists": frame["frameExists"],
+        "framePending": frame["framePending"],
+        "frameExpiredOrMissing": frame["frameExpiredOrMissing"],
         "frameCaptureStatus": tick.get("frameCaptureStatus"),
         "frameCaptureSource": tick.get("frameCaptureSource"),
         "frameCaptureWarning": tick.get("frameCaptureWarning"),
@@ -275,8 +292,11 @@ def open_at_end(path: Path):
 
 
 def write_latest_tick(session: Path, tick: dict):
+    frame = frame_state(session, tick)
     latest_tick = dict(tick)
-    latest_tick["frameExists"] = frame_exists(session, tick)
+    latest_tick["frameExists"] = frame["frameExists"]
+    latest_tick["framePending"] = frame["framePending"]
+    latest_tick["frameExpiredOrMissing"] = frame["frameExpiredOrMissing"]
     atomic_write_json(LATEST_TICK_FILE, latest_tick)
     status = summarize_status(session, tick)
     atomic_write_json(LATEST_STATUS_FILE, status)

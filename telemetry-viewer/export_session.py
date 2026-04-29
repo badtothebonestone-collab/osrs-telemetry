@@ -158,6 +158,18 @@ def frame_exists(session: Path, frame_path: str | None) -> bool | None:
     return (session / frame_path).exists()
 
 
+def frame_state(session: Path, tick: dict) -> dict:
+    frame_path = tick.get("framePath")
+    exists = frame_exists(session, frame_path)
+
+    return {
+        "framePath": frame_path,
+        "frameExists": exists,
+        "framePending": False,
+        "frameExpiredOrMissing": bool(frame_path and exists is False),
+    }
+
+
 def count_items(items: list[dict]) -> int:
     return sum(1 for item in items if item.get("itemId", -1) > 0 and item.get("quantity", 0) > 0)
 
@@ -177,6 +189,8 @@ def tick_summary(session: Path, source: Path, tick: dict) -> dict:
         interacting = f"{interacting_type}:{interacting_name}"
     else:
         interacting = None
+
+    frame = frame_state(session, tick)
 
     return {
         "tickId": tick.get("tickId"),
@@ -199,8 +213,10 @@ def tick_summary(session: Path, source: Path, tick: dict) -> dict:
         "groundItemsCount": len(tick.get("groundItems") or []),
         "activePrayerNames": active_prayers,
         "interactingTarget": interacting,
-        "framePath": tick.get("framePath"),
-        "frameExists": frame_exists(session, tick.get("framePath")),
+        "framePath": frame["framePath"],
+        "frameExists": frame["frameExists"],
+        "framePending": frame["framePending"],
+        "frameExpiredOrMissing": frame["frameExpiredOrMissing"],
         "frameCaptureStatus": tick.get("frameCaptureStatus"),
         "frameCaptureSource": tick.get("frameCaptureSource"),
         "frameCaptureWarning": tick.get("frameCaptureWarning"),

@@ -51,6 +51,13 @@ written and the failed layer name is listed here.
 as `frames/frame-tick-00000001.jpg`. Frame files are retention-managed side
 data, so the path may reference a file that has since expired.
 
+The collector assigns `framePath` when the capture request is made. Frame
+writing is asynchronous, so tools may briefly see `frameCaptureStatus="QUEUED"`
+and `frameExists=false` for the newest active tick. Tools should mark that as
+pending. If the tick is older, or the session has moved on, a missing referenced
+frame should be treated as expired/deleted side data rather than corrupt tick
+telemetry.
+
 `frameCaptureStatus` is one of:
 
 - `QUEUED`: frame copied and queued for off-thread writing.

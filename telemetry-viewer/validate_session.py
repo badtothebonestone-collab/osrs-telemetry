@@ -201,6 +201,7 @@ def validate_session(session: Path):
     json_error_count = 0
     ticks_with_frame_path = 0
     missing_referenced_frames = 0
+    missing_frame_records = []
 
     for file_path, line_number, record, error in iter_jsonl(ticks):
         if error is not None:
@@ -239,6 +240,12 @@ def validate_session(session: Path):
 
             if not (session / frame_path).exists():
                 missing_referenced_frames += 1
+                missing_frame_records.append({
+                    "tickId": tick_id,
+                    "status": record.get("frameCaptureStatus"),
+                    "framePath": frame_path,
+                    "source": record.get("frameCaptureSource"),
+                })
 
         frame_source = record.get("frameCaptureSource")
 
@@ -247,6 +254,18 @@ def validate_session(session: Path):
 
     if capture_error_count:
         problems.append(f"captureErrors present: {capture_error_count}")
+
+    pending_queued_frames = 0
+    expired_or_deleted_frames = 0
+    active_session = bool(manifest and manifest.get("active"))
+
+    for missing in missing_frame_records:
+        is_newest_active_tick = active_session and missing.get("tickId") == last_tick_id
+
+        if is_newest_active_tick and missing.get("status") == "QUEUED":
+            pending_queued_frames += 1
+        else:
+            expired_or_deleted_frames += 1
 
     for file_path, line_number, record, error in iter_jsonl(events):
         if error is not None:
@@ -307,9 +326,11 @@ def validate_session(session: Path):
     print(f"Tick segment count: {len(ticks)}")
     print(f"Event segment count: {len(events)}")
     frames = frame_files(session)
-    print(f"Ticks with framePath: {ticks_with_frame_path}")
-    print(f"Existing frame files: {len(frames)}")
-    print(f"Missing referenced frames: {missing_referenced_frames}")
+    print(f"ticksWithFramePath: {ticks_with_frame_path}")
+    print(f"existingFrameFiles: {len(frames)}")
+    print(f"missingReferencedFrames: {missing_referenced_frames}")
+    print(f"pendingQueuedFrames: {pending_queued_frames}")
+    print(f"expiredOrDeletedFrames: {expired_or_deleted_frames}")
     print(f"Frames folder size MB: {directory_size(session / 'frames') / (1024 * 1024):.2f}")
     print(f"Frame capture source counts: {dict(frame_capture_source_counts)}")
     print(f"Session size MB: {directory_size(session) / (1024 * 1024):.2f}")
