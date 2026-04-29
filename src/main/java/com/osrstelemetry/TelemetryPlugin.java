@@ -10,6 +10,11 @@ import java.security.NoSuchAlgorithmException;
 import java.util.List;
 import java.util.ArrayList;
 import lombok.extern.slf4j.Slf4j;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.StatChanged;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.InventoryID;
@@ -24,6 +29,8 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+
+import static net.runelite.http.api.RuneLiteAPI.GSON;
 
 @Slf4j
 @PluginDescriptor(
@@ -44,6 +51,7 @@ public class TelemetryPlugin extends Plugin
 
 	private TelemetryWriter writer;
 	private long tickId = 0;
+	private long eventSeq = 0;
 
 	@Provides
 	TelemetryConfig provideConfig(ConfigManager configManager)
@@ -99,6 +107,32 @@ public class TelemetryPlugin extends Plugin
 		}
 
 		writer.enqueue(gson.toJson(snapshot));
+	}
+	@Subscribe
+	public void onGameStateChanged(GameStateChanged event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("gameState", String.valueOf(event.getGameState()));
+
+		logEvent("GameStateChanged", payload);
+	}
+
+	@Subscribe
+	public void onItemContainerChanged(ItemContainerChanged event)
+	{
+		logEvent("ItemContainerChanged", itemContainerPayload(event));
+	}
+
+	@Subscribe
+	public void onStatChanged(StatChanged event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("skill", String.valueOf(event.getSkill()));
+		payload.put("xp", event.getXp());
+		payload.put("level", event.getLevel());
+		payload.put("boostedLevel", event.getBoostedLevel());
+
+		logEvent("StatChanged", payload);
 	}
 
 	private void captureLocalPlayer(TickSnapshot snapshot)
@@ -299,5 +333,35 @@ public class TelemetryPlugin extends Plugin
 		{
 			return "";
 		}
+	}
+	private void logEvent(String eventType, Object payload)
+	{
+		if (!config.enabled() || writer == null)
+		{
+			return;
+		}
+
+		EventRecord record = new EventRecord();
+		record.schemaVersion = "0.1.0";
+		record.tickId = tickId;
+		record.eventSeq = ++eventSeq;
+		record.timestampUtc = Instant.now().toString();
+		record.eventType = eventType;
+		record.payload = payload;
+
+		writer.enqueueEvent(GSON.toJson(record));
+	}
+
+	private Map<String, Object> itemContainerPayload(ItemContainerChanged event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("containerId", event.getContainerId());
+
+		if (event.getItemContainer() != null)
+		{
+			payload.put("size", event.getItemContainer().size());
+		}
+
+		return payload;
 	}
 }
