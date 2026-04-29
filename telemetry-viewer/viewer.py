@@ -6,44 +6,58 @@ from pathlib import Path
 TELEMETRY_ROOT = Path(r"C:\Users\stone\.osrs-telemetry\sessions")
 
 
+def tick_files(session: Path) -> list[Path]:
+    segmented = sorted((session / "ticks").glob("ticks-*.jsonl"))
+
+    if segmented:
+        return segmented
+
+    legacy = session / "ticks.jsonl"
+    return [legacy] if legacy.exists() else []
+
+
+def event_files(session: Path) -> list[Path]:
+    segmented = sorted((session / "events").glob("events-*.jsonl"))
+
+    if segmented:
+        return segmented
+
+    legacy = session / "events.jsonl"
+    return [legacy] if legacy.exists() else []
+
+
+def file_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0
+
+
+def session_mtime(session: Path) -> float:
+    manifest = session / "manifest.json"
+    files = tick_files(session) + event_files(session)
+    mtimes = [file_mtime(manifest)] if manifest.exists() else []
+    mtimes.extend(file_mtime(path) for path in files)
+    return max(mtimes) if mtimes else file_mtime(session)
+
+
 def find_newest_session() -> Path | None:
     if not TELEMETRY_ROOT.exists():
         return None
 
     sessions = [
         path for path in TELEMETRY_ROOT.iterdir()
-        if path.is_dir() and (path / "ticks.jsonl").exists()
+        if path.is_dir() and (tick_files(path) or event_files(path) or (path / "manifest.json").exists())
     ]
 
     if not sessions:
         return None
 
-    return max(sessions, key=lambda path: (path / "ticks.jsonl").stat().st_mtime)
+    return max(sessions, key=session_mtime)
 
 
-def read_latest_tick(file_path: Path) -> dict | None:
-    latest_tick = None
-
-    if not file_path.exists() or file_path.stat().st_size == 0:
-        return None
-
-    with file_path.open("r", encoding="utf-8") as file:
-        for line in file:
-            line = line.strip()
-
-            if not line:
-                continue
-
-            try:
-                latest_tick = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-    return latest_tick
-
-
-def read_last_records(file_path: Path, limit: int) -> list[dict]:
-    records: list[dict] = []
+def read_records(file_path: Path) -> list[dict]:
+    records = []
 
     if not file_path.exists() or file_path.stat().st_size == 0:
         return records
@@ -60,25 +74,72 @@ def read_last_records(file_path: Path, limit: int) -> list[dict]:
             except json.JSONDecodeError:
                 continue
 
-    return records[-limit:]
+    return records
 
 
-def follow_jsonl(file_path: Path):
-    with file_path.open("r", encoding="utf-8") as file:
-        # Jump to end of file so we only see new ticks.
-        file.seek(0, 2)
+def read_latest_tick(session: Path) -> dict | None:
+    for file_path in reversed(tick_files(session)):
+        records = read_records(file_path)
 
+        if records:
+            return records[-1]
+
+    return None
+
+
+def read_recent_events(session: Path, limit: int) -> list[dict]:
+    events: list[dict] = []
+
+    for file_path in reversed(event_files(session)):
+        records = read_records(file_path)
+
+        if records:
+            events = records + events
+
+        if len(events) >= limit:
+            break
+
+    return events[-limit:]
+
+
+def newest_tick_file(session: Path) -> Path | None:
+    files = tick_files(session)
+    return files[-1] if files else None
+
+
+def follow_ticks(session: Path):
+    current_file = newest_tick_file(session)
+
+    if current_file is None:
+        print("No tick files found yet.")
+        return
+
+    file = current_file.open("r", encoding="utf-8")
+    file.seek(0, 2)
+
+    try:
         while True:
             line = file.readline()
 
-            if not line:
-                time.sleep(0.25)
+            if line:
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    print("Skipped bad JSON line.")
                 continue
 
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                print("Skipped bad JSON line.")
+            latest_file = newest_tick_file(session)
+
+            if latest_file is not None and latest_file != current_file:
+                file.close()
+                current_file = latest_file
+                print(f"Switched to tick segment: {current_file.name}")
+                file = current_file.open("r", encoding="utf-8")
+                continue
+
+            time.sleep(0.25)
+    finally:
+        file.close()
 
 
 def summarize_tick(tick: dict):
@@ -165,14 +226,11 @@ def main():
         print(f"No sessions found in: {TELEMETRY_ROOT}")
         return
 
-    tick_file = session / "ticks.jsonl"
-    event_file = session / "events.jsonl"
-
-    print(f"Reading newest session:")
+    print("Reading newest session:")
     print(session)
     print()
 
-    events = read_last_records(event_file, 10)
+    events = read_recent_events(session, 10)
 
     if events:
         menu_opened_count = sum(1 for event in events if event.get("eventType") == "MenuOpened")
@@ -182,20 +240,20 @@ def main():
             summarize_event(event)
         print()
 
-    latest_tick = read_latest_tick(tick_file)
+    latest_tick = read_latest_tick(session)
 
     if latest_tick is not None:
         print("Latest existing tick:")
         summarize_tick(latest_tick)
         print()
     else:
-        print(f"No ticks have been written yet: {tick_file}")
+        print("No ticks have been written yet.")
         print("Keep this viewer running; new ticks will appear here once RuneLite emits GameTick events.")
         print()
 
     print("Waiting for new ticks...")
 
-    for tick in follow_jsonl(tick_file):
+    for tick in follow_ticks(session):
         summarize_tick(tick)
 
 

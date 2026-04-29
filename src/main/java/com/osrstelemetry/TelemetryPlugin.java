@@ -77,7 +77,15 @@ public class TelemetryPlugin extends Plugin
 	@Override
 	protected void startUp() throws Exception
 	{
-		writer = new TelemetryWriter(config.outputDirectory());
+		writer = new TelemetryWriter(
+				config.outputDirectory(),
+				gson,
+				config.maxSegmentMb(),
+				config.retentionEnabled(),
+				config.maxTelemetryGb(),
+				config.cleanupIntervalSeconds(),
+				config.preservePinnedSessions(),
+				config.allowDeletingClosedSegmentsFromActiveSession());
 		writer.start();
 
 		log.info("Telemetry Collector started");
