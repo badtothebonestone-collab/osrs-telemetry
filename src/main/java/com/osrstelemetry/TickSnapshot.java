@@ -14,6 +14,8 @@ public class TickSnapshot
     public NpcSnapshot[] npcs;
     public PlayerSnapshot[] players;
     public WidgetSnapshot[] widgets;
+    public SceneObjectSnapshot[] sceneObjects;
+    public GroundItemSnapshot[] groundItems;
     public String[] captureErrors;
     public int writerQueueSize;
     public long writerDroppedRecords;
@@ -85,5 +87,28 @@ public class TickSnapshot
         public int orientation;
         public int healthRatio;
         public int healthScale;
+    }
+
+    public static class SceneObjectSnapshot
+    {
+        public String kind;
+        public int id;
+        public int worldX;
+        public int worldY;
+        public int plane;
+        public int orientation;
+        public int sceneX;
+        public int sceneY;
+    }
+
+    public static class GroundItemSnapshot
+    {
+        public int id;
+        public int quantity;
+        public int worldX;
+        public int worldY;
+        public int plane;
+        public int sceneX;
+        public int sceneY;
     }
 }

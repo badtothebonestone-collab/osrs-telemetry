@@ -1,6 +1,5 @@
 package com.osrstelemetry;
 
-import java.util.ArrayList;
 import com.google.gson.Gson;
 import com.google.inject.Provides;
 import java.nio.charset.StandardCharsets;
@@ -15,16 +14,26 @@ import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
+import net.runelite.api.GameObject;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.MenuEntry;
 import net.runelite.api.NPC;
 import net.runelite.api.Player;
+import net.runelite.api.Point;
+import net.runelite.api.Scene;
 import net.runelite.api.Skill;
+import net.runelite.api.Tile;
+import net.runelite.api.TileItem;
+import net.runelite.api.TileObject;
+import net.runelite.api.WallObject;
+import net.runelite.api.WorldView;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.StatChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -42,6 +51,10 @@ import net.runelite.api.widgets.Widget;
 )
 public class TelemetryPlugin extends Plugin
 {
+	private static final int SCENE_CAPTURE_RADIUS = 12;
+	private static final int MAX_SCENE_OBJECTS = 250;
+	private static final int MAX_GROUND_ITEMS = 250;
+
 	@Inject
 	private Client client;
 
@@ -122,6 +135,7 @@ public class TelemetryPlugin extends Plugin
 				safeCapture(captureErrors, "npcs", () -> captureNpcs(snapshot));
 				safeCapture(captureErrors, "players", () -> capturePlayers(snapshot));
 				safeCapture(captureErrors, "widgets", () -> captureWidgets(snapshot));
+				safeCapture(captureErrors, "scene", () -> captureScene(snapshot));
 			}
 		}
 		finally
@@ -167,6 +181,12 @@ public class TelemetryPlugin extends Plugin
 		payload.put("boostedLevel", event.getBoostedLevel());
 
 		logEvent("StatChanged", payload);
+	}
+
+	@Subscribe
+	public void onMenuOpened(MenuOpened event)
+	{
+		logEvent("MenuOpened", menuOpenedPayload(event));
 	}
 
 	@Subscribe
@@ -402,6 +422,208 @@ public class TelemetryPlugin extends Plugin
 				.toArray(TickSnapshot.PlayerSnapshot[]::new);
 	}
 
+	private void captureScene(TickSnapshot snapshot)
+	{
+		Player localPlayer = client.getLocalPlayer();
+
+		if (localPlayer == null || localPlayer.getWorldLocation() == null)
+		{
+			snapshot.sceneObjects = new TickSnapshot.SceneObjectSnapshot[0];
+			snapshot.groundItems = new TickSnapshot.GroundItemSnapshot[0];
+			return;
+		}
+
+		WorldView worldView = client.getTopLevelWorldView();
+		Scene scene = worldView == null ? client.getScene() : worldView.getScene();
+
+		if (scene == null || scene.getTiles() == null)
+		{
+			snapshot.sceneObjects = new TickSnapshot.SceneObjectSnapshot[0];
+			snapshot.groundItems = new TickSnapshot.GroundItemSnapshot[0];
+			return;
+		}
+
+		WorldPoint localWorld = localPlayer.getWorldLocation();
+		int plane = localWorld.getPlane();
+		Tile[][][] tiles = scene.getTiles();
+
+		if (plane < 0 || plane >= tiles.length || tiles[plane] == null)
+		{
+			snapshot.sceneObjects = new TickSnapshot.SceneObjectSnapshot[0];
+			snapshot.groundItems = new TickSnapshot.GroundItemSnapshot[0];
+			return;
+		}
+
+		int baseX = worldView == null ? scene.getBaseX() : worldView.getBaseX();
+		int baseY = worldView == null ? scene.getBaseY() : worldView.getBaseY();
+		int centerSceneX = localWorld.getX() - baseX;
+		int centerSceneY = localWorld.getY() - baseY;
+		Tile[][] planeTiles = tiles[plane];
+		List<TickSnapshot.SceneObjectSnapshot> sceneObjects = new ArrayList<>();
+		List<TickSnapshot.GroundItemSnapshot> groundItems = new ArrayList<>();
+
+		int minSceneX = Math.max(0, centerSceneX - SCENE_CAPTURE_RADIUS);
+		int maxSceneX = Math.min(planeTiles.length - 1, centerSceneX + SCENE_CAPTURE_RADIUS);
+
+		for (int sceneX = minSceneX; sceneX <= maxSceneX; sceneX++)
+		{
+			Tile[] column = planeTiles[sceneX];
+
+			if (column == null)
+			{
+				continue;
+			}
+
+			int minSceneY = Math.max(0, centerSceneY - SCENE_CAPTURE_RADIUS);
+			int maxSceneY = Math.min(column.length - 1, centerSceneY + SCENE_CAPTURE_RADIUS);
+
+			for (int sceneY = minSceneY; sceneY <= maxSceneY; sceneY++)
+			{
+				Tile tile = column[sceneY];
+
+				if (tile == null)
+				{
+					continue;
+				}
+
+				captureTileObjects(tile, sceneObjects);
+				captureTileGroundItems(tile, groundItems);
+
+				if (sceneObjects.size() >= MAX_SCENE_OBJECTS && groundItems.size() >= MAX_GROUND_ITEMS)
+				{
+					break;
+				}
+			}
+		}
+
+		snapshot.sceneObjects = sceneObjects.toArray(new TickSnapshot.SceneObjectSnapshot[0]);
+		snapshot.groundItems = groundItems.toArray(new TickSnapshot.GroundItemSnapshot[0]);
+	}
+
+	private void captureTileObjects(Tile tile, List<TickSnapshot.SceneObjectSnapshot> sceneObjects)
+	{
+		if (sceneObjects.size() >= MAX_SCENE_OBJECTS)
+		{
+			return;
+		}
+
+		WallObject wallObject = tile.getWallObject();
+
+		addSceneObject(sceneObjects, "WALL_OBJECT", wallObject, wallObject == null ? -1 : wallObject.getOrientationA());
+		addSceneObject(sceneObjects, "GROUND_OBJECT", tile.getGroundObject(), -1);
+		addSceneObject(sceneObjects, "DECORATIVE_OBJECT", tile.getDecorativeObject(), -1);
+
+		GameObject[] gameObjects = tile.getGameObjects();
+
+		if (gameObjects == null)
+		{
+			return;
+		}
+
+		for (GameObject gameObject : gameObjects)
+		{
+			if (sceneObjects.size() >= MAX_SCENE_OBJECTS)
+			{
+				return;
+			}
+
+			addSceneObject(sceneObjects, "GAME_OBJECT", gameObject, gameObject == null ? -1 : gameObject.getOrientation());
+		}
+	}
+
+	private void addSceneObject(List<TickSnapshot.SceneObjectSnapshot> sceneObjects, String kind, TileObject object, int orientation)
+	{
+		if (object == null || sceneObjects.size() >= MAX_SCENE_OBJECTS)
+		{
+			return;
+		}
+
+		WorldPoint worldLocation = object.getWorldLocation();
+		Point sceneLocation = worldLocationToSceneLocation(object);
+		TickSnapshot.SceneObjectSnapshot snapshot = new TickSnapshot.SceneObjectSnapshot();
+		snapshot.kind = kind;
+		snapshot.id = object.getId();
+		snapshot.orientation = orientation;
+		snapshot.sceneX = sceneLocation == null ? -1 : sceneLocation.getX();
+		snapshot.sceneY = sceneLocation == null ? -1 : sceneLocation.getY();
+
+		if (worldLocation != null)
+		{
+			snapshot.worldX = worldLocation.getX();
+			snapshot.worldY = worldLocation.getY();
+			snapshot.plane = worldLocation.getPlane();
+		}
+		else
+		{
+			snapshot.plane = object.getPlane();
+		}
+
+		sceneObjects.add(snapshot);
+	}
+
+	private Point worldLocationToSceneLocation(TileObject object)
+	{
+		WorldPoint worldLocation = object.getWorldLocation();
+		WorldView worldView = object.getWorldView();
+
+		if (worldLocation == null || worldView == null)
+		{
+			return null;
+		}
+
+		return new Point(worldLocation.getX() - worldView.getBaseX(), worldLocation.getY() - worldView.getBaseY());
+	}
+
+	private void captureTileGroundItems(Tile tile, List<TickSnapshot.GroundItemSnapshot> groundItems)
+	{
+		if (groundItems.size() >= MAX_GROUND_ITEMS)
+		{
+			return;
+		}
+
+		List<TileItem> tileItems = tile.getGroundItems();
+
+		if (tileItems == null || tileItems.isEmpty())
+		{
+			return;
+		}
+
+		WorldPoint worldLocation = tile.getWorldLocation();
+		Point sceneLocation = tile.getSceneLocation();
+
+		for (TileItem item : tileItems)
+		{
+			if (item == null)
+			{
+				continue;
+			}
+
+			TickSnapshot.GroundItemSnapshot snapshot = new TickSnapshot.GroundItemSnapshot();
+			snapshot.id = item.getId();
+			snapshot.quantity = item.getQuantity();
+			snapshot.sceneX = sceneLocation == null ? -1 : sceneLocation.getX();
+			snapshot.sceneY = sceneLocation == null ? -1 : sceneLocation.getY();
+
+			if (worldLocation != null)
+			{
+				snapshot.worldX = worldLocation.getX();
+				snapshot.worldY = worldLocation.getY();
+				snapshot.plane = worldLocation.getPlane();
+			}
+			else
+			{
+				snapshot.plane = tile.getPlane();
+			}
+
+			groundItems.add(snapshot);
+
+			if (groundItems.size() >= MAX_GROUND_ITEMS)
+			{
+				return;
+			}
+		}
+	}
+
 	private TickSnapshot.PlayerSnapshot toPlayerSnapshot(Player player)
 	{
 		TickSnapshot.PlayerSnapshot playerSnapshot = new TickSnapshot.PlayerSnapshot();
@@ -491,6 +713,57 @@ public class TelemetryPlugin extends Plugin
 		}
 
 		return payload;
+	}
+
+	private Map<String, Object> menuOpenedPayload(MenuOpened event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		MenuEntry[] entries = event.getMenuEntries();
+
+		payload.put("menuEntryCount", entries == null ? 0 : entries.length);
+
+		List<Map<String, Object>> entrySummaries = new ArrayList<>();
+
+		if (entries != null)
+		{
+			for (MenuEntry entry : entries)
+			{
+				if (entry != null)
+				{
+					entrySummaries.add(menuEntryPayload(entry));
+				}
+			}
+		}
+
+		payload.put("entries", entrySummaries);
+		return payload;
+	}
+
+	private Map<String, Object> menuEntryPayload(MenuEntry entry)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		Widget widget = entry.getWidget();
+
+		payload.put("option", safeString(entry.getOption()));
+		payload.put("target", safeString(entry.getTarget()));
+		payload.put("type", String.valueOf(entry.getType()));
+		payload.put("identifier", entry.getIdentifier());
+		payload.put("itemId", entry.getItemId());
+		payload.put("param0", entry.getParam0());
+		payload.put("param1", entry.getParam1());
+		payload.put("worldViewId", entry.getWorldViewId());
+
+		if (widget != null)
+		{
+			payload.put("widgetId", widget.getId());
+		}
+
+		return payload;
+	}
+
+	private String safeString(String value)
+	{
+		return value == null ? "" : value;
 	}
 
 	private void safeCapture(List<String> captureErrors, String section, Runnable capture)

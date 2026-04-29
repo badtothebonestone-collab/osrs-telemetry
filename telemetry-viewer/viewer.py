@@ -116,7 +116,9 @@ def summarize_tick(tick: dict):
         f"hp={hp.get('boostedLevel') if hp else '?'} "
         f"prayer={prayer.get('boostedLevel') if prayer else '?'} | "
         f"npcs={len(tick.get('npcs') or [])} | "
-        f"players={len(tick.get('players') or [])}"
+        f"players={len(tick.get('players') or [])} | "
+        f"sceneObjects={len(tick.get('sceneObjects') or [])} | "
+        f"groundItems={len(tick.get('groundItems') or [])}"
     )
 
 
@@ -137,6 +139,20 @@ def summarize_event(event: dict):
             f"skill={payload.get('skill')} "
             f"level={payload.get('level')} "
             f"boosted={payload.get('boostedLevel')}"
+        )
+    elif event_type == "MenuOpened":
+        entries = payload.get("entries") or []
+        preview = []
+
+        for entry in entries[:3]:
+            option = entry.get("option") or ""
+            target = entry.get("target") or ""
+            entry_type = entry.get("type") or ""
+            preview.append(f"{option} {target} ({entry_type})".strip())
+
+        detail = (
+            f"menuEntryCount={payload.get('menuEntryCount', len(entries))} "
+            f"entries={'; '.join(preview)}"
         )
 
     print(f"event={event_seq} | tick={tick_id} | type={event_type} | {detail}".rstrip())
@@ -159,6 +175,8 @@ def main():
     events = read_last_records(event_file, 10)
 
     if events:
+        menu_opened_count = sum(1 for event in events if event.get("eventType") == "MenuOpened")
+        print(f"Recent MenuOpened events: {menu_opened_count}")
         print("Last events:")
         for event in events:
             summarize_event(event)
