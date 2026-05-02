@@ -210,16 +210,12 @@ public class TelemetryPlugin extends Plugin
 			snapshot.captureErrors = captureErrors.toArray(new String[0]);
 			snapshot.writerQueueSize = currentWriter.getQueueSize();
 			snapshot.writerDroppedRecords = currentWriter.getDroppedRecords();
-			captureFrame(snapshot, captureErrors, currentWriter);
+			boolean tickEnqueuedAsync = captureFrame(snapshot, captureErrors, currentWriter);
 			snapshot.captureErrors = captureErrors.toArray(new String[0]);
 
-			try
+			if (!tickEnqueuedAsync)
 			{
-				currentWriter.enqueueTick(gson.toJson(snapshot));
-			}
-			catch (Exception e)
-			{
-				log.warn("Failed to enqueue tick telemetry", e);
+				enqueueTickSnapshot(currentWriter, snapshot);
 			}
 		}
 	}
@@ -409,12 +405,12 @@ public class TelemetryPlugin extends Plugin
 		}
 	}
 
-	private void captureFrame(TickSnapshot snapshot, List<String> captureErrors, TelemetryWriter currentWriter)
+	private boolean captureFrame(TickSnapshot snapshot, List<String> captureErrors, TelemetryWriter currentWriter)
 	{
 		if (!config.captureScreenshots())
 		{
 			snapshot.frameCaptureStatus = "DISABLED";
-			return;
+			return false;
 		}
 
 		int interval = config.screenshotEveryTicks();
@@ -422,13 +418,13 @@ public class TelemetryPlugin extends Plugin
 		if (interval <= 0)
 		{
 			snapshot.frameCaptureStatus = "DISABLED";
-			return;
+			return false;
 		}
 
 		if (snapshot.tickId % interval != 0)
 		{
 			snapshot.frameCaptureStatus = "SKIPPED_INTERVAL";
-			return;
+			return false;
 		}
 
 		String format = normalizeScreenshotFormat(config.screenshotFormat());
@@ -445,9 +441,9 @@ public class TelemetryPlugin extends Plugin
 					snapshot.framePath = relativePath;
 				}
 
-				requestRuneliteOnlyFrame(relativePath, currentWriter);
 				snapshot.frameCaptureStatus = "QUEUED";
-				return;
+				requestRuneliteOnlyFrame(relativePath, currentWriter, snapshot, captureErrors);
+				return true;
 			}
 
 			if (!config.allowScreenRectangleFallback())
@@ -455,7 +451,7 @@ public class TelemetryPlugin extends Plugin
 				snapshot.frameCaptureStatus = "CAPTURE_FAILED";
 				snapshot.frameCaptureWarning = "Screen rectangle fallback is disabled";
 				captureErrors.add("frame");
-				return;
+				return false;
 			}
 
 			BufferedImage frame = captureScreenRectangle();
@@ -464,7 +460,7 @@ public class TelemetryPlugin extends Plugin
 			{
 				snapshot.frameCaptureStatus = "CAPTURE_FAILED";
 				captureErrors.add("frame");
-				return;
+				return false;
 			}
 
 			snapshot.frameCaptureSource = "SCREEN_RECTANGLE";
@@ -490,22 +486,56 @@ public class TelemetryPlugin extends Plugin
 			captureErrors.add("frame");
 			log.warn("Telemetry frame capture failed", e);
 		}
+
+		return false;
 	}
 
-	private void requestRuneliteOnlyFrame(String relativePath, TelemetryWriter currentWriter)
+	private void requestRuneliteOnlyFrame(String relativePath, TelemetryWriter currentWriter, TickSnapshot snapshot, List<String> captureErrors)
 	{
 		drawManager.requestNextFrameListener((image) ->
 		{
 			try
 			{
 				BufferedImage frame = copyRuneliteFrame(image);
-				currentWriter.enqueueFrame(relativePath, frame);
+
+				if (frame == null)
+				{
+					snapshot.frameCaptureStatus = "CAPTURE_FAILED";
+					captureErrors.add("frame");
+				}
+				else if (currentWriter.enqueueFrame(relativePath, frame))
+				{
+					snapshot.frameCaptureStatus = "QUEUED";
+				}
+				else
+				{
+					snapshot.frameCaptureStatus = "DROPPED_QUEUE_FULL";
+				}
 			}
 			catch (Exception e)
 			{
+				snapshot.frameCaptureStatus = "CAPTURE_FAILED";
+				captureErrors.add("frame");
 				log.warn("Telemetry RuneLite-only frame capture failed", e);
 			}
+			finally
+			{
+				snapshot.captureErrors = captureErrors.toArray(new String[0]);
+				enqueueTickSnapshot(currentWriter, snapshot);
+			}
 		});
+	}
+
+	private void enqueueTickSnapshot(TelemetryWriter currentWriter, TickSnapshot snapshot)
+	{
+		try
+		{
+			currentWriter.enqueueTick(gson.toJson(snapshot));
+		}
+		catch (Exception e)
+		{
+			log.warn("Failed to enqueue tick telemetry", e);
+		}
 	}
 
 	private BufferedImage copyRuneliteFrame(Image image)

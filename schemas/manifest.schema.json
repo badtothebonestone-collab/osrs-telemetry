@@ -18,28 +18,113 @@
     "lastUpdatedUtc"
   ],
   "properties": {
-    "sessionId": { "type": "string", "minLength": 1 },
-    "startedAtUtc": { "type": "string", "minLength": 1 },
-    "endedAtUtc": { "type": ["string", "null"] },
-    "schemaVersion": { "type": "string", "minLength": 1 },
-    "active": { "type": "boolean" },
-    "currentTickSegment": { "type": "string", "minLength": 1 },
-    "currentEventSegment": { "type": "string", "minLength": 1 },
-    "tickSegmentIndex": { "type": "integer", "minimum": 1 },
-    "eventSegmentIndex": { "type": "integer", "minimum": 1 },
-    "tickCount": { "type": "integer", "minimum": 0 },
-    "eventCount": { "type": "integer", "minimum": 0 },
-    "droppedRecords": { "type": "integer", "minimum": 0 },
-    "frameCount": { "type": "integer", "minimum": 0 },
-    "droppedFrameCount": { "type": "integer", "minimum": 0 },
-    "deletedFrameCount": { "type": "integer", "minimum": 0 },
-    "screenshotEveryTicks": { "type": "integer", "minimum": 0 },
-    "screenshotFormat": { "type": "string", "enum": ["jpg", "png"] },
-    "maxFrameStorageMb": { "type": "integer", "minimum": 1 },
-    "frameCleanupIntervalSeconds": { "type": "integer", "minimum": 1 },
-    "frameCaptureMode": { "type": "string", "enum": ["RUNELITE_ONLY", "SCREEN_RECTANGLE"] },
-    "allowScreenRectangleFallback": { "type": "boolean" },
-    "lastUpdatedUtc": { "type": "string", "minLength": 1 }
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Folder/session identifier."
+    },
+    "startedAtUtc": {
+      "type": "string",
+      "minLength": 1,
+      "description": "UTC timestamp when the session started."
+    },
+    "endedAtUtc": {
+      "type": ["string", "null"],
+      "description": "UTC timestamp when the session closed, or null/absent while active."
+    },
+    "schemaVersion": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Telemetry schema version for records in this session."
+    },
+    "active": {
+      "type": "boolean",
+      "description": "True while the collector is writing this session."
+    },
+    "currentTickSegment": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Session-relative path to the open tick segment, for example ticks/ticks-000001.jsonl."
+    },
+    "currentEventSegment": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Session-relative path to the open event segment, for example events/events-000001.jsonl."
+    },
+    "tickSegmentIndex": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Current tick segment number."
+    },
+    "eventSegmentIndex": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Current event segment number."
+    },
+    "tickCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total tick records written by this session."
+    },
+    "eventCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total event records written by this session."
+    },
+    "droppedRecords": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Telemetry records dropped because the writer queue was full."
+    },
+    "frameCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Frame files successfully written by this session."
+    },
+    "droppedFrameCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Frames dropped because the frame queue was full."
+    },
+    "deletedFrameCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Frame files deleted by frame-specific cleanup."
+    },
+    "screenshotEveryTicks": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Configured screenshot tick interval."
+    },
+    "screenshotFormat": {
+      "type": "string",
+      "enum": ["jpg", "png"],
+      "description": "Configured frame file format."
+    },
+    "maxFrameStorageMb": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Active-session frame folder cleanup cap in megabytes."
+    },
+    "frameCleanupIntervalSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How often active frame cleanup runs."
+    },
+    "frameCaptureMode": {
+      "type": "string",
+      "enum": ["RUNELITE_ONLY", "SCREEN_RECTANGLE"],
+      "description": "Configured frame capture mode."
+    },
+    "allowScreenRectangleFallback": {
+      "type": "boolean",
+      "description": "Whether opt-in screen-rectangle fallback is enabled."
+    },
+    "lastUpdatedUtc": {
+      "type": "string",
+      "minLength": 1,
+      "description": "UTC timestamp of the last manifest write."
+    }
   },
   "additionalProperties": true
 }

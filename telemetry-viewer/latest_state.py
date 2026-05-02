@@ -1,15 +1,19 @@
+import argparse
 import json
 import os
 import time
 from collections import deque
 from pathlib import Path
 
+from telemetry_paths import (
+    classify_frame_state,
+    find_newest_session,
+    get_sessions_dir,
+    iter_jsonl,
+    list_event_files,
+    list_tick_files,
+)
 
-TELEMETRY_ROOT = Path(r"C:\Users\stone\.osrs-telemetry\sessions")
-LATEST_DIR = Path("latest")
-LATEST_TICK_FILE = LATEST_DIR / "latest_tick.json"
-LATEST_STATUS_FILE = LATEST_DIR / "latest_status.json"
-LATEST_EVENTS_FILE = LATEST_DIR / "latest_events.json"
 MAX_EVENTS = 50
 
 
@@ -52,93 +56,24 @@ def atomic_write_json(path: Path, data):
     os.replace(temp_path, path)
 
 
-def read_manifest(session: Path) -> dict | None:
-    path = session / "manifest.json"
-
-    if not path.exists():
-        return None
-
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-
-
 def tick_files(session: Path) -> list[Path]:
-    return sorted((session / "ticks").glob("ticks-*.jsonl"))
+    return list_tick_files(session)
 
 
 def event_files(session: Path) -> list[Path]:
-    return sorted((session / "events").glob("events-*.jsonl"))
-
-
-def file_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0
-
-
-def find_newest_active_session() -> Path | None:
-    if not TELEMETRY_ROOT.exists():
-        return None
-
-    active_sessions = []
-
-    for session in TELEMETRY_ROOT.iterdir():
-        if not session.is_dir():
-            continue
-
-        manifest = read_manifest(session)
-
-        if manifest and manifest.get("active"):
-            active_sessions.append(session)
-
-    if not active_sessions:
-        return None
-
-    return max(active_sessions, key=lambda session: file_mtime(session / "manifest.json"))
+    return list_event_files(session)
 
 
 def iter_existing_records(files: list[Path]):
-    for file_path in files:
-        with file_path.open("r", encoding="utf-8") as file:
-            for line in file:
-                line = line.strip()
-
-                if not line:
-                    continue
-
-                try:
-                    yield file_path, json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+    yield from iter_jsonl(files)
 
 
 def count_items(items: list[dict]) -> int:
     return sum(1 for item in items if item.get("itemId", -1) > 0 and item.get("quantity", 0) > 0)
 
 
-def frame_exists(session: Path, tick: dict) -> bool | None:
-    frame_path = tick.get("framePath")
-
-    if not frame_path:
-        return None
-
-    return (session / frame_path).exists()
-
-
 def frame_state(session: Path, tick: dict) -> dict:
-    frame_path = tick.get("framePath")
-    exists = frame_exists(session, tick)
-    pending = bool(frame_path and exists is False and tick.get("frameCaptureStatus") == "QUEUED")
-
-    return {
-        "framePath": frame_path,
-        "frameExists": exists,
-        "framePending": pending,
-        "frameExpiredOrMissing": bool(frame_path and exists is False and not pending),
-    }
+    return classify_frame_state(session, tick, is_latest=True, active_session=True)
 
 
 def summarize_status(session: Path, tick: dict) -> dict:
@@ -197,9 +132,9 @@ def summarize_status(session: Path, tick: dict) -> dict:
         "frameExists": frame["frameExists"],
         "framePending": frame["framePending"],
         "frameExpiredOrMissing": frame["frameExpiredOrMissing"],
-        "frameCaptureStatus": tick.get("frameCaptureStatus"),
-        "frameCaptureSource": tick.get("frameCaptureSource"),
-        "frameCaptureWarning": tick.get("frameCaptureWarning"),
+        "frameCaptureStatus": frame["frameCaptureStatus"],
+        "frameCaptureSource": frame["frameCaptureSource"],
+        "frameCaptureWarning": frame["frameCaptureWarning"],
         "captureErrorCount": len(tick.get("captureErrors") or []),
     }
 
@@ -291,15 +226,31 @@ def open_at_end(path: Path):
     return file
 
 
+def latest_dir(session: Path) -> Path:
+    return session / "latest"
+
+
+def latest_tick_file(session: Path) -> Path:
+    return latest_dir(session) / "latest_tick.json"
+
+
+def latest_status_file(session: Path) -> Path:
+    return latest_dir(session) / "latest_status.json"
+
+
+def latest_events_file(session: Path) -> Path:
+    return latest_dir(session) / "latest_events.json"
+
+
 def write_latest_tick(session: Path, tick: dict):
     frame = frame_state(session, tick)
     latest_tick = dict(tick)
     latest_tick["frameExists"] = frame["frameExists"]
     latest_tick["framePending"] = frame["framePending"]
     latest_tick["frameExpiredOrMissing"] = frame["frameExpiredOrMissing"]
-    atomic_write_json(LATEST_TICK_FILE, latest_tick)
+    atomic_write_json(latest_tick_file(session), latest_tick)
     status = summarize_status(session, tick)
-    atomic_write_json(LATEST_STATUS_FILE, status)
+    atomic_write_json(latest_status_file(session), status)
     print(
         f"tick={status.get('tickId')} state={status.get('gameState')} "
         f"pos={status['position'].get('worldX')},{status['position'].get('worldY')},{status['position'].get('plane')} "
@@ -307,13 +258,13 @@ def write_latest_tick(session: Path, tick: dict):
         f"prayer={status['prayer'].get('boosted')}/{status['prayer'].get('real')} "
         f"frame={status.get('framePath') or status.get('frameCaptureStatus')} "
         f"source={status.get('frameCaptureSource')} "
-        f"events->{LATEST_EVENTS_FILE}",
+        f"events->{latest_events_file(session)}",
         flush=True,
     )
 
 
-def write_latest_events(events: deque):
-    atomic_write_json(LATEST_EVENTS_FILE, {"events": list(events)})
+def write_latest_events(session: Path, events: deque):
+    atomic_write_json(latest_events_file(session), {"events": list(events)})
 
 
 def seed_latest(session: Path) -> tuple[Path | None, Path | None, deque]:
@@ -329,7 +280,7 @@ def seed_latest(session: Path) -> tuple[Path | None, Path | None, deque]:
     if latest_tick is not None:
         write_latest_tick(session, latest_tick)
 
-    write_latest_events(recent_events)
+    write_latest_events(session, recent_events)
     return newest_file(tick_files(session)), newest_file(event_files(session)), recent_events
 
 
@@ -337,7 +288,7 @@ def follow_session(session: Path):
     tick_file_path, event_file_path, recent_events = seed_latest(session)
 
     if tick_file_path is None and event_file_path is None:
-        print(f"No tick or event segments found in active session: {session}")
+        print(f"No tick or event files found in active session: {session}")
         return
 
     tick_file = open_at_end(tick_file_path) if tick_file_path else None
@@ -364,7 +315,7 @@ def follow_session(session: Path):
                 if line:
                     try:
                         recent_events.append(summarize_event(json.loads(line)))
-                        write_latest_events(recent_events)
+                        write_latest_events(session, recent_events)
                         updated = True
                     except json.JSONDecodeError:
                         pass
@@ -396,11 +347,19 @@ def follow_session(session: Path):
             event_file.close()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Write latest-state JSON for the newest active OSRS telemetry session.")
+    parser.add_argument("--sessions-dir", help="Override the telemetry sessions directory.")
+    return parser.parse_args()
+
+
 def main():
-    session = find_newest_active_session()
+    args = parse_args()
+    sessions_dir = get_sessions_dir(args.sessions_dir)
+    session = find_newest_session(sessions_dir, active_only=True)
 
     if session is None:
-        print(f"No active sessions found in: {TELEMETRY_ROOT}", flush=True)
+        print(f"No active sessions found in: {sessions_dir}", flush=True)
         return
 
     follow_session(session)

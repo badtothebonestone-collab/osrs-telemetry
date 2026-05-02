@@ -1,59 +1,26 @@
+import argparse
 import json
 from collections import Counter
 from pathlib import Path
 
-
-TELEMETRY_ROOT = Path(r"C:\Users\stone\.osrs-telemetry\sessions")
+from telemetry_paths import (
+    classify_frame_state,
+    directory_size,
+    find_newest_session,
+    get_sessions_dir,
+    iter_jsonl,
+    list_event_files,
+    list_tick_files,
+    session_size_mb,
+)
 
 
 def tick_files(session: Path) -> list[Path]:
-    segmented = sorted((session / "ticks").glob("ticks-*.jsonl"))
-
-    if segmented:
-        return segmented
-
-    legacy = session / "ticks.jsonl"
-    return [legacy] if legacy.exists() else []
+    return list_tick_files(session)
 
 
 def event_files(session: Path) -> list[Path]:
-    segmented = sorted((session / "events").glob("events-*.jsonl"))
-
-    if segmented:
-        return segmented
-
-    legacy = session / "events.jsonl"
-    return [legacy] if legacy.exists() else []
-
-
-def file_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0
-
-
-def session_mtime(session: Path) -> float:
-    manifest = session / "manifest.json"
-    files = tick_files(session) + event_files(session)
-    mtimes = [file_mtime(manifest)] if manifest.exists() else []
-    mtimes.extend(file_mtime(path) for path in files)
-    return max(mtimes) if mtimes else file_mtime(session)
-
-
-def find_newest_session() -> Path | None:
-    if not TELEMETRY_ROOT.exists():
-        return None
-
-    sessions = [
-        path for path in TELEMETRY_ROOT.iterdir()
-        if path.is_dir() and (tick_files(path) or event_files(path) or (path / "manifest.json").exists())
-    ]
-
-    if not sessions:
-        return None
-
-    return max(sessions, key=session_mtime)
+    return list_event_files(session)
 
 
 def read_manifest(session: Path) -> tuple[dict | None, list[str]]:
@@ -63,43 +30,12 @@ def read_manifest(session: Path) -> tuple[dict | None, list[str]]:
         return None, ["missing manifest"]
 
     try:
-        return json.loads(manifest_path.read_text(encoding="utf-8")), []
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return manifest if isinstance(manifest, dict) else None, []
     except json.JSONDecodeError as error:
         return None, [f"manifest JSON decode error: {error}"]
-
-
-def iter_jsonl(file_paths: list[Path]):
-    for file_path in file_paths:
-        try:
-            with file_path.open("r", encoding="utf-8") as file:
-                for line_number, line in enumerate(file, start=1):
-                    line = line.strip()
-
-                    if not line:
-                        continue
-
-                    try:
-                        yield file_path, line_number, json.loads(line), None
-                    except json.JSONDecodeError as error:
-                        yield file_path, line_number, None, error
-        except OSError as error:
-            yield file_path, 0, None, error
-
-
-def directory_size(path: Path) -> int:
-    total = 0
-
-    if not path.exists():
-        return total
-
-    for child in path.rglob("*"):
-        if child.is_file():
-            try:
-                total += child.stat().st_size
-            except OSError:
-                pass
-
-    return total
+    except OSError as error:
+        return None, [f"manifest read error: {error}"]
 
 
 def frame_files(session: Path) -> list[Path]:
@@ -203,7 +139,7 @@ def validate_session(session: Path):
     missing_referenced_frames = 0
     missing_frame_records = []
 
-    for file_path, line_number, record, error in iter_jsonl(ticks):
+    for file_path, line_number, record, error in iter_jsonl(ticks, with_errors=True):
         if error is not None:
             json_error_count += 1
             problems.append(f"tick JSON error in {file_path.name}:{line_number}: {error}")
@@ -238,10 +174,13 @@ def validate_session(session: Path):
         if frame_path:
             ticks_with_frame_path += 1
 
-            if not (session / frame_path).exists():
+            frame = classify_frame_state(session, record)
+
+            if frame["frameExists"] is False:
                 missing_referenced_frames += 1
                 missing_frame_records.append({
                     "tickId": tick_id,
+                    "tick": record,
                     "status": record.get("frameCaptureStatus"),
                     "framePath": frame_path,
                     "source": record.get("frameCaptureSource"),
@@ -261,13 +200,19 @@ def validate_session(session: Path):
 
     for missing in missing_frame_records:
         is_newest_active_tick = active_session and missing.get("tickId") == last_tick_id
+        frame = classify_frame_state(
+            session,
+            missing["tick"],
+            is_latest=is_newest_active_tick,
+            active_session=active_session,
+        )
 
-        if is_newest_active_tick and missing.get("status") == "QUEUED":
+        if frame["framePending"]:
             pending_queued_frames += 1
         else:
             expired_or_deleted_frames += 1
 
-    for file_path, line_number, record, error in iter_jsonl(events):
+    for file_path, line_number, record, error in iter_jsonl(events, with_errors=True):
         if error is not None:
             json_error_count += 1
             problems.append(f"event JSON error in {file_path.name}:{line_number}: {error}")
@@ -333,7 +278,7 @@ def validate_session(session: Path):
     print(f"expiredOrDeletedFrames: {expired_or_deleted_frames}")
     print(f"Frames folder size MB: {directory_size(session / 'frames') / (1024 * 1024):.2f}")
     print(f"Frame capture source counts: {dict(frame_capture_source_counts)}")
-    print(f"Session size MB: {directory_size(session) / (1024 * 1024):.2f}")
+    print(f"Session size MB: {session_size_mb(session):.2f}")
     print(f"JSON decode errors: {json_error_count}")
     print(f"Tick schemaVersion counts: {dict(tick_schema_counts)}")
     print(f"Event schemaVersion counts: {dict(event_schema_counts)}")
@@ -366,11 +311,19 @@ def validate_session(session: Path):
         print("  none detected")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Validate the newest OSRS telemetry session.")
+    parser.add_argument("--sessions-dir", help="Override the telemetry sessions directory.")
+    return parser.parse_args()
+
+
 def main():
-    session = find_newest_session()
+    args = parse_args()
+    sessions_dir = get_sessions_dir(args.sessions_dir)
+    session = find_newest_session(sessions_dir)
 
     if session is None:
-        print(f"No sessions found in: {TELEMETRY_ROOT}")
+        print(f"No sessions found in: {sessions_dir}")
         return
 
     validate_session(session)

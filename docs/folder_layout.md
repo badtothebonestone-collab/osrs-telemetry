@@ -6,8 +6,8 @@ Telemetry sessions are written under:
 C:\Users\stone\.osrs-telemetry\sessions
 ```
 
-Each session has a timestamp-like session id and owns its own manifest, tick
-segments, event segments, frame files, and dictionaries:
+Each session has a timestamp-like session id. The segmented layout below is the
+canonical current writer output:
 
 ```text
 sessions\<session_id>\
@@ -26,6 +26,14 @@ sessions\<session_id>\
     items.json
     npcs.json
     objects.json
+  latest\
+    latest_tick.json
+    latest_status.json
+    latest_events.json
+  exports\
+    session_index.json
+    tick_summary.jsonl
+    event_summary.jsonl
 ```
 
 Older sessions may use the legacy flat layout:
@@ -36,7 +44,8 @@ sessions\<session_id>\
   events.jsonl
 ```
 
-Tools should support both layouts.
+Tools support both layouts. New writer output remains segmented; the flat files
+are a read-only compatibility fallback.
 
 Frame files are optional side data referenced by tick records. A tick remains
 valid if its referenced frame has been deleted by retention cleanup.
@@ -65,8 +74,8 @@ reading the new one.
 - `endedAtUtc`: UTC shutdown timestamp when the session is closed.
 - `schemaVersion`: schema version for telemetry records.
 - `active`: true while the session is being written.
-- `currentTickSegment`: relative path to the open tick segment.
-- `currentEventSegment`: relative path to the open event segment.
+- `currentTickSegment`: session-relative path to the open tick segment.
+- `currentEventSegment`: session-relative path to the open event segment.
 - `tickSegmentIndex`: current tick segment number.
 - `eventSegmentIndex`: current event segment number.
 - `tickCount`: total tick records written by this session.
@@ -109,11 +118,12 @@ Tick records reference frames with a relative `framePath`, for example
 `maxFrameStorageMb` is exceeded. Consumers should treat a missing referenced
 frame as expired frame data, not corrupt telemetry.
 
-`framePath` is assigned when the capture request is queued. The tick JSON can be
-written before RuneLite's next-frame callback and the frame writer finish the
-JPG/PNG file. For a newest active tick, `frameCaptureStatus="QUEUED"` with
-`frameExists=false` is usually pending, not a missing frame. Older missing
-referenced frames usually mean frame retention deleted the image.
+`framePath` means a frame was requested or associated with the tick.
+`frameCaptureStatus="QUEUED"` means frame capture/write was requested. The frame
+file may still be pending briefly while the asynchronous writer finishes. For a
+newest active tick, `QUEUED` with `frameExists=false` inside the tool grace
+window is usually pending, not missing. Older missing referenced frames usually
+mean frame retention deleted the image.
 
 `RUNELITE_ONLY` is the default capture mode. It uses RuneLite's rendered frame
 image and follows the current RuneLite/game canvas size without reading random
@@ -130,8 +140,8 @@ delete a frame currently being written.
 
 ## Latest-State Cache
 
-`telemetry-viewer\latest_state.py` can follow the newest active segmented
-session and maintain a small cache for live consumers:
+`telemetry-viewer\latest_state.py` can follow the newest active session and
+maintain a small generated cache for live consumers:
 
 ```text
 latest\
@@ -144,3 +154,18 @@ Writes are atomic: the tool writes a temporary file and replaces the final JSON
 file after the write completes. Consumers can poll these files without parsing
 the full session stream. The cache is derived from telemetry files only; it does
 not interact with RuneLite.
+
+## Exports
+
+`telemetry-viewer\export_session.py` writes generated summaries under the
+session:
+
+```text
+exports\
+  session_index.json
+  tick_summary.jsonl
+  event_summary.jsonl
+```
+
+These files are derived outputs and can be regenerated from the source session
+records.

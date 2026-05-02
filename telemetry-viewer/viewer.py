@@ -1,63 +1,28 @@
+import argparse
 import json
 import os
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
+from telemetry_paths import (
+    classify_frame_state,
+    find_newest_session,
+    get_sessions_dir,
+    iter_jsonl,
+    list_event_files,
+    list_tick_files,
+    safe_read_json,
+)
 
-TELEMETRY_ROOT = Path(r"C:\Users\stone\.osrs-telemetry\sessions")
-FRAME_PENDING_GRACE_SECONDS = 2.0
 VERBOSE_FRAMES = os.environ.get("OSRS_TELEMETRY_VERBOSE_FRAMES") == "1"
 
 
 def tick_files(session: Path) -> list[Path]:
-    segmented = sorted((session / "ticks").glob("ticks-*.jsonl"))
-
-    if segmented:
-        return segmented
-
-    legacy = session / "ticks.jsonl"
-    return [legacy] if legacy.exists() else []
+    return list_tick_files(session)
 
 
 def event_files(session: Path) -> list[Path]:
-    segmented = sorted((session / "events").glob("events-*.jsonl"))
-
-    if segmented:
-        return segmented
-
-    legacy = session / "events.jsonl"
-    return [legacy] if legacy.exists() else []
-
-
-def file_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0
-
-
-def session_mtime(session: Path) -> float:
-    manifest = session / "manifest.json"
-    files = tick_files(session) + event_files(session)
-    mtimes = [file_mtime(manifest)] if manifest.exists() else []
-    mtimes.extend(file_mtime(path) for path in files)
-    return max(mtimes) if mtimes else file_mtime(session)
-
-
-def find_newest_session() -> Path | None:
-    if not TELEMETRY_ROOT.exists():
-        return None
-
-    sessions = [
-        path for path in TELEMETRY_ROOT.iterdir()
-        if path.is_dir() and (tick_files(path) or event_files(path) or (path / "manifest.json").exists())
-    ]
-
-    if not sessions:
-        return None
-
-    return max(sessions, key=session_mtime)
+    return list_event_files(session)
 
 
 def read_records(file_path: Path) -> list[dict]:
@@ -66,17 +31,8 @@ def read_records(file_path: Path) -> list[dict]:
     if not file_path.exists() or file_path.stat().st_size == 0:
         return records
 
-    with file_path.open("r", encoding="utf-8") as file:
-        for line in file:
-            line = line.strip()
-
-            if not line:
-                continue
-
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    for _, record in iter_jsonl([file_path]):
+        records.append(record)
 
     return records
 
@@ -124,48 +80,13 @@ def newest_tick_file(session: Path) -> Path | None:
     return files[-1] if files else None
 
 
-def frame_exists(session: Path, tick: dict) -> bool | None:
-    frame_path = tick.get("framePath")
-
-    if not frame_path:
-        return None
-
-    return (session / frame_path).exists()
-
-
-def tick_age_seconds(tick: dict) -> float | None:
-    timestamp = tick.get("timestampUtc")
-
-    if not timestamp:
-        return None
-
-    try:
-        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-    return (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
-
-
-def frame_state(session: Path, tick: dict, is_latest: bool) -> dict:
-    frame_path = tick.get("framePath")
-    exists = frame_exists(session, tick)
-    pending = False
-    expired_or_missing = False
-
-    if frame_path and exists is False:
-        age = tick_age_seconds(tick)
-        fresh = age is None or age <= FRAME_PENDING_GRACE_SECONDS
-        pending = tick.get("frameCaptureStatus") == "QUEUED" and is_latest and fresh
-        expired_or_missing = not pending
-
-    return {
-        "framePath": frame_path,
-        "frameExists": exists,
-        "framePending": pending,
-        "frameExpiredOrMissing": expired_or_missing,
-        "absoluteFramePath": str((session / frame_path).resolve()) if frame_path else None,
-    }
+def frame_state(session: Path, tick: dict, is_latest: bool, active_session: bool) -> dict:
+    return classify_frame_state(
+        session,
+        tick,
+        is_latest=is_latest,
+        active_session=active_session,
+    )
 
 
 def follow_ticks(session: Path):
@@ -203,7 +124,7 @@ def follow_ticks(session: Path):
         file.close()
 
 
-def summarize_tick(session: Path, tick: dict, is_latest: bool = True):
+def summarize_tick(session: Path, tick: dict, is_latest: bool = True, active_session: bool = False):
     tick_id = tick.get("tickId")
     game_state = tick.get("gameState")
 
@@ -241,10 +162,10 @@ def summarize_tick(session: Path, tick: dict, is_latest: bool = True):
     run_percent = status.get("runEnergyPercent")
     run_display = f"{run_percent:.1f}%" if isinstance(run_percent, (int, float)) else "?"
     interacting = status.get("interactingType")
-    frame_status = tick.get("frameCaptureStatus")
-    frame_source = tick.get("frameCaptureSource")
-    frame_warning = tick.get("frameCaptureWarning")
-    frame = frame_state(session, tick, is_latest)
+    frame = frame_state(session, tick, is_latest, active_session)
+    frame_status = frame["frameCaptureStatus"]
+    frame_source = frame["frameCaptureSource"]
+    frame_warning = frame["frameCaptureWarning"]
     frame_path = frame["framePath"]
     frame_display = "none"
 
@@ -326,16 +247,26 @@ def summarize_event(event: dict):
     print(f"event={event_seq} | tick={tick_id} | type={event_type} | {detail}".rstrip())
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Follow the newest OSRS telemetry session.")
+    parser.add_argument("--sessions-dir", help="Override the telemetry sessions directory.")
+    return parser.parse_args()
+
+
 def main():
-    session = find_newest_session()
+    args = parse_args()
+    sessions_dir = get_sessions_dir(args.sessions_dir)
+    session = find_newest_session(sessions_dir)
 
     if session is None:
-        print(f"No sessions found in: {TELEMETRY_ROOT}")
+        print(f"No sessions found in: {sessions_dir}")
         return
 
     print("Reading newest session:")
     print(session)
     print()
+    manifest = safe_read_json(session / "manifest.json")
+    active_session = bool(isinstance(manifest, dict) and manifest.get("active"))
 
     events = read_recent_events(session, 10)
     event_counts = recent_event_counts(session, [
@@ -365,7 +296,7 @@ def main():
 
     if latest_tick is not None:
         print("Latest existing tick:")
-        summarize_tick(session, latest_tick)
+        summarize_tick(session, latest_tick, active_session=active_session)
         print()
     else:
         print("No ticks have been written yet.")
@@ -375,7 +306,7 @@ def main():
     print("Waiting for new ticks...")
 
     for tick in follow_ticks(session):
-        summarize_tick(session, tick)
+        summarize_tick(session, tick, active_session=active_session)
 
 
 if __name__ == "__main__":

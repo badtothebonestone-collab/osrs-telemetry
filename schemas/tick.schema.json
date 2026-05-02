@@ -5,9 +5,21 @@
   "type": "object",
   "required": ["schemaVersion", "tickId", "timestampUtc"],
   "properties": {
-    "schemaVersion": { "type": "string", "minLength": 1 },
-    "tickId": { "type": "integer", "minimum": 0 },
-    "timestampUtc": { "type": "string", "minLength": 1 },
+    "schemaVersion": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Telemetry tick schema version."
+    },
+    "tickId": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic tick identifier within the session."
+    },
+    "timestampUtc": {
+      "type": "string",
+      "minLength": 1,
+      "description": "UTC timestamp when the tick snapshot was captured."
+    },
     "gameState": { "type": ["string", "null"] },
     "localPlayer": { "type": ["object", "null"] },
     "inventory": { "type": ["array", "null"] },
@@ -20,9 +32,13 @@
     "groundItems": { "type": ["array", "null"] },
     "status": { "type": ["object", "null"] },
     "activePrayers": { "type": ["array", "null"] },
-    "framePath": { "type": ["string", "null"] },
+    "framePath": {
+      "type": ["string", "null"],
+      "description": "Session-relative path associated with the tick's requested frame, for example frames/frame-tick-00000001.jpg. The referenced file may later be deleted by retention."
+    },
     "frameCaptureStatus": {
       "type": ["string", "null"],
+      "description": "Frame capture/write status. QUEUED means capture/write was requested, not that the file is guaranteed to exist yet.",
       "enum": [
         "QUEUED",
         "WRITTEN",
@@ -35,15 +51,28 @@
     },
     "frameCaptureSource": {
       "type": ["string", "null"],
+      "description": "Source used for frame capture.",
       "enum": ["RUNELITE_ONLY", "SCREEN_RECTANGLE", null]
     },
-    "frameCaptureWarning": { "type": ["string", "null"] },
+    "frameCaptureWarning": {
+      "type": ["string", "null"],
+      "description": "Optional warning about frame capture fidelity, such as screen-rectangle overlap risk."
+    },
     "captureErrors": {
       "type": ["array", "null"],
+      "description": "Capture section names that failed while still allowing the tick record to be written.",
       "items": { "type": "string" }
     },
-    "writerQueueSize": { "type": ["integer", "null"], "minimum": 0 },
-    "writerDroppedRecords": { "type": ["integer", "null"], "minimum": 0 }
+    "writerQueueSize": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Approximate telemetry record queue size observed when the tick was captured."
+    },
+    "writerDroppedRecords": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Total telemetry records dropped because the writer queue was full."
+    }
   },
   "additionalProperties": true
 }

@@ -1,12 +1,20 @@
+import argparse
 import json
 import os
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-
-TELEMETRY_ROOT = Path(r"C:\Users\stone\.osrs-telemetry\sessions")
-EXPORT_DIR = Path("exports")
+from telemetry_paths import (
+    classify_frame_state,
+    find_newest_session,
+    get_sessions_dir,
+    iter_jsonl,
+    list_event_files,
+    list_tick_files,
+    safe_read_json,
+    session_size_mb,
+)
 
 
 CATEGORY_BY_EVENT_TYPE = {
@@ -39,96 +47,16 @@ CATEGORY_BY_EVENT_TYPE = {
 
 
 def tick_files(session: Path) -> list[Path]:
-    segmented = sorted((session / "ticks").glob("ticks-*.jsonl"))
-
-    if segmented:
-        return segmented
-
-    legacy = session / "ticks.jsonl"
-    return [legacy] if legacy.exists() else []
+    return list_tick_files(session)
 
 
 def event_files(session: Path) -> list[Path]:
-    segmented = sorted((session / "events").glob("events-*.jsonl"))
-
-    if segmented:
-        return segmented
-
-    legacy = session / "events.jsonl"
-    return [legacy] if legacy.exists() else []
-
-
-def file_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0
-
-
-def session_mtime(session: Path) -> float:
-    manifest = session / "manifest.json"
-    files = tick_files(session) + event_files(session)
-    mtimes = [file_mtime(manifest)] if manifest.exists() else []
-    mtimes.extend(file_mtime(path) for path in files)
-    return max(mtimes) if mtimes else file_mtime(session)
-
-
-def find_newest_session() -> Path | None:
-    if not TELEMETRY_ROOT.exists():
-        return None
-
-    sessions = [
-        path for path in TELEMETRY_ROOT.iterdir()
-        if path.is_dir() and (tick_files(path) or event_files(path) or (path / "manifest.json").exists())
-    ]
-
-    if not sessions:
-        return None
-
-    return max(sessions, key=session_mtime)
-
-
-def iter_jsonl(files: list[Path]):
-    for file_path in files:
-        with file_path.open("r", encoding="utf-8") as file:
-            for line in file:
-                line = line.strip()
-
-                if not line:
-                    continue
-
-                try:
-                    yield file_path, json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+    return list_event_files(session)
 
 
 def read_manifest(session: Path) -> dict | None:
-    path = session / "manifest.json"
-
-    if not path.exists():
-        return None
-
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-
-
-def directory_size(path: Path) -> int:
-    total = 0
-
-    if not path.exists():
-        return total
-
-    for child in path.rglob("*"):
-        if child.is_file():
-            try:
-                total += child.stat().st_size
-            except OSError:
-                pass
-
-    return total
+    manifest = safe_read_json(session / "manifest.json")
+    return manifest if isinstance(manifest, dict) else None
 
 
 def dictionary_counts(session: Path) -> dict[str, int]:
@@ -151,30 +79,20 @@ def dictionary_counts(session: Path) -> dict[str, int]:
     return counts
 
 
-def frame_exists(session: Path, frame_path: str | None) -> bool | None:
-    if not frame_path:
-        return None
-
-    return (session / frame_path).exists()
-
-
-def frame_state(session: Path, tick: dict) -> dict:
-    frame_path = tick.get("framePath")
-    exists = frame_exists(session, frame_path)
-
-    return {
-        "framePath": frame_path,
-        "frameExists": exists,
-        "framePending": False,
-        "frameExpiredOrMissing": bool(frame_path and exists is False),
-    }
+def frame_state(session: Path, tick: dict, is_latest: bool, active_session: bool) -> dict:
+    return classify_frame_state(
+        session,
+        tick,
+        is_latest=is_latest,
+        active_session=active_session,
+    )
 
 
 def count_items(items: list[dict]) -> int:
     return sum(1 for item in items if item.get("itemId", -1) > 0 and item.get("quantity", 0) > 0)
 
 
-def tick_summary(session: Path, source: Path, tick: dict) -> dict:
+def tick_summary(session: Path, source: Path, tick: dict, is_latest: bool, active_session: bool) -> dict:
     local_player = tick.get("localPlayer") or {}
     status = tick.get("status") or {}
     active_prayers = [
@@ -190,7 +108,7 @@ def tick_summary(session: Path, source: Path, tick: dict) -> dict:
     else:
         interacting = None
 
-    frame = frame_state(session, tick)
+    frame = frame_state(session, tick, is_latest, active_session)
 
     return {
         "tickId": tick.get("tickId"),
@@ -217,9 +135,9 @@ def tick_summary(session: Path, source: Path, tick: dict) -> dict:
         "frameExists": frame["frameExists"],
         "framePending": frame["framePending"],
         "frameExpiredOrMissing": frame["frameExpiredOrMissing"],
-        "frameCaptureStatus": tick.get("frameCaptureStatus"),
-        "frameCaptureSource": tick.get("frameCaptureSource"),
-        "frameCaptureWarning": tick.get("frameCaptureWarning"),
+        "frameCaptureStatus": frame["frameCaptureStatus"],
+        "frameCaptureSource": frame["frameCaptureSource"],
+        "frameCaptureWarning": frame["frameCaptureWarning"],
         "captureErrorCount": len(tick.get("captureErrors") or []),
         "source": str(source),
     }
@@ -328,7 +246,8 @@ def write_jsonl(path: Path, rows):
 
 
 def export_session(session: Path):
-    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    export_dir = session / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
     ticks = tick_files(session)
     events = event_files(session)
     tick_rows = []
@@ -336,9 +255,13 @@ def export_session(session: Path):
     event_type_counts = Counter()
     first_tick_id = None
     last_tick_id = None
+    raw_ticks = list(iter_jsonl(ticks))
+    manifest = read_manifest(session)
+    active_session = bool(manifest and manifest.get("active"))
+    latest_tick = raw_ticks[-1][1] if raw_ticks else None
 
-    for source, tick in iter_jsonl(ticks):
-        summary = tick_summary(session, source, tick)
+    for source, tick in raw_ticks:
+        summary = tick_summary(session, source, tick, tick is latest_tick, active_session)
         tick_rows.append(summary)
         tick_id = summary.get("tickId")
 
@@ -354,34 +277,42 @@ def export_session(session: Path):
 
     session_index = {
         "sessionPath": str(session),
-        "manifest": read_manifest(session),
+        "manifest": manifest,
         "exportedAtUtc": datetime.now(timezone.utc).isoformat(),
         "tickCount": len(tick_rows),
         "eventCount": len(event_rows),
         "tickSegmentCount": len(ticks),
         "eventSegmentCount": len(events),
         "dictionaryCounts": dictionary_counts(session),
-        "sessionSizeMb": round(directory_size(session) / (1024 * 1024), 3),
+        "sessionSizeMb": round(session_size_mb(session), 3),
         "firstTickId": first_tick_id,
         "lastTickId": last_tick_id,
         "topEventTypeCounts": dict(event_type_counts.most_common(20)),
     }
 
-    write_json(EXPORT_DIR / "session_index.json", session_index)
-    write_jsonl(EXPORT_DIR / "tick_summary.jsonl", tick_rows)
-    write_jsonl(EXPORT_DIR / "event_summary.jsonl", event_rows)
+    write_json(export_dir / "session_index.json", session_index)
+    write_jsonl(export_dir / "tick_summary.jsonl", tick_rows)
+    write_jsonl(export_dir / "event_summary.jsonl", event_rows)
 
     print(f"Exported session: {session}")
-    print(f"  {EXPORT_DIR / 'session_index.json'}")
-    print(f"  {EXPORT_DIR / 'tick_summary.jsonl'} ({len(tick_rows)} rows)")
-    print(f"  {EXPORT_DIR / 'event_summary.jsonl'} ({len(event_rows)} rows)")
+    print(f"  {export_dir / 'session_index.json'}")
+    print(f"  {export_dir / 'tick_summary.jsonl'} ({len(tick_rows)} rows)")
+    print(f"  {export_dir / 'event_summary.jsonl'} ({len(event_rows)} rows)")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Export summaries for the newest OSRS telemetry session.")
+    parser.add_argument("--sessions-dir", help="Override the telemetry sessions directory.")
+    return parser.parse_args()
 
 
 def main():
-    session = find_newest_session()
+    args = parse_args()
+    sessions_dir = get_sessions_dir(args.sessions_dir)
+    session = find_newest_session(sessions_dir)
 
     if session is None:
-        print(f"No sessions found in: {TELEMETRY_ROOT}")
+        print(f"No sessions found in: {sessions_dir}")
         return
 
     export_session(session)

@@ -4,12 +4,13 @@ Telemetry is stored as JSON Lines. Each line is one complete JSON object.
 
 ## Tick Records
 
-Tick records are ordered by `tickId` and live in either:
+Tick records are ordered by `tickId`. The canonical current writer layout is:
 
 ```text
-ticks.jsonl
 ticks\ticks-*.jsonl
 ```
+
+Older read-only sessions may use legacy flat `ticks.jsonl`.
 
 Required top-level fields:
 
@@ -47,20 +48,21 @@ prayer, health ratio, and current interacting target.
 `captureErrors` is normally empty. If a capture layer fails, the tick still gets
 written and the failed layer name is listed here.
 
-`framePath` is a session-relative path to the captured frame for the tick, such
-as `frames/frame-tick-00000001.jpg`. Frame files are retention-managed side
-data, so the path may reference a file that has since expired.
+`framePath` is a session-relative path associated with the tick's requested
+frame, such as `frames/frame-tick-00000001.jpg`. Frame files are
+retention-managed side data, so the path may reference a file that has since
+expired.
 
-The collector assigns `framePath` when the capture request is made. Frame
-writing is asynchronous, so tools may briefly see `frameCaptureStatus="QUEUED"`
-and `frameExists=false` for the newest active tick. Tools should mark that as
-pending. If the tick is older, or the session has moved on, a missing referenced
-frame should be treated as expired/deleted side data rather than corrupt tick
-telemetry.
+`frameCaptureStatus="QUEUED"` means frame capture/write was requested, not that
+the file is guaranteed to exist yet. Frame writing is asynchronous, so tools may
+briefly see `QUEUED` and `frameExists=false` for the newest active tick. Tools
+should mark that as pending only inside their freshness grace window. If the
+tick is older, or the session has moved on, a missing referenced frame should be
+treated as expired/deleted side data rather than corrupt tick telemetry.
 
 `frameCaptureStatus` is one of:
 
-- `QUEUED`: frame copied and queued for off-thread writing.
+- `QUEUED`: frame capture/write requested.
 - `WRITTEN`: reserved for tools that post-process completed frame writes.
 - `DISABLED`: frame capture disabled or interval invalid.
 - `SKIPPED_INTERVAL`: tick did not match the configured screenshot interval.
@@ -78,12 +80,13 @@ pixels.
 
 ## Event Records
 
-Event records live in either:
+Event records live in the canonical current writer layout:
 
 ```text
-events.jsonl
 events\events-*.jsonl
 ```
+
+Older read-only sessions may use legacy flat `events.jsonl`.
 
 Required top-level fields:
 
@@ -113,3 +116,22 @@ Analysis tools should use `tickId` as the primary timeline key:
 Read segment files in sorted filename order. A single session's `tickId` values
 should increase across segment boundaries. If following a live session, reopen
 the newest segment only after a newer segment appears.
+
+## Generated Tool Outputs
+
+`telemetry-viewer\latest_state.py` writes session-local generated cache files
+under `latest\`. `telemetry-viewer\export_session.py` writes generated summaries
+under `exports\`:
+
+```text
+latest\latest_tick.json
+latest\latest_status.json
+latest\latest_events.json
+exports\session_index.json
+exports\tick_summary.jsonl
+exports\event_summary.jsonl
+```
+
+These outputs are derived from source tick/event records. Exported frame fields
+such as `frameExists`, `framePending`, and `frameExpiredOrMissing` are
+point-in-time tool-derived values.

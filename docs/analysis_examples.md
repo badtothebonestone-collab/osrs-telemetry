@@ -1,7 +1,12 @@
 # Analysis Examples
 
-The export tool writes `exports\tick_summary.jsonl` and
-`exports\event_summary.jsonl` for lightweight scripts.
+The export tool writes generated summaries under the selected session:
+
+```text
+exports\session_index.json
+exports\tick_summary.jsonl
+exports\event_summary.jsonl
+```
 
 Example questions:
 
@@ -26,13 +31,16 @@ Example questions:
   entity/object counts or the original tick record.
 
 - Is there a screenshot for a tick?
-  Read `framePath`, `frameExists`, `frameCaptureStatus`, and
-  `frameCaptureSource` from `exports\tick_summary.jsonl`. Missing files with a
-  historical `framePath` usually mean frame retention has expired the image.
+  Read `framePath`, `frameExists`, `framePending`,
+  `frameExpiredOrMissing`, `frameCaptureStatus`, and `frameCaptureSource` from
+  `exports\tick_summary.jsonl`. Missing files with a historical `framePath`
+  usually mean frame retention has expired the image.
   If `frameCaptureSource` is `SCREEN_RECTANGLE`, check `frameCaptureWarning`
   because overlapping windows may appear in that frame.
 
 - Why does `frameExists` briefly show false?
-  Tick records are written before asynchronous frame writes necessarily finish.
-  For the newest active tick, `frameCaptureStatus == "QUEUED"` and
-  `framePending == true` means the image may still be arriving.
+  Frame writes are asynchronous. `frameCaptureStatus == "QUEUED"` means the
+  frame capture/write was requested. For the newest active tick, `framePending
+  == true` means the image may still be arriving inside the shared freshness
+  grace window. For older ticks, a missing frame is reported as
+  `frameExpiredOrMissing == true`.
