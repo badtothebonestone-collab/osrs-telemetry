@@ -155,6 +155,10 @@ file after the write completes. Consumers can poll these files without parsing
 the full session stream. The cache is derived from telemetry files only; it does
 not interact with RuneLite.
 
+Legacy flat sessions are readable by the general tools, but `latest_state.py`
+follows newest active sessions and may not consider a legacy session active
+unless manifest/active metadata exists.
+
 ## Exports
 
 `telemetry-viewer\export_session.py` writes generated summaries under the
