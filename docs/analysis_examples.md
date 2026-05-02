@@ -8,6 +8,17 @@ exports\tick_summary.jsonl
 exports\event_summary.jsonl
 ```
 
+`telemetry-viewer\replay_viewer.py` is a local browser-based replay viewer for
+already-collected telemetry. It is read-only and uses `telemetry_paths.py` for
+segmented canonical sessions and legacy flat fallback where applicable:
+
+```text
+python telemetry-viewer\replay_viewer.py
+python telemetry-viewer\replay_viewer.py --session "C:\path\to\session"
+python telemetry-viewer\replay_viewer.py --sessions-dir "C:\path\to\sessions"
+python telemetry-viewer\replay_viewer.py --port 8765
+```
+
 Example questions:
 
 - When did HP drop?
