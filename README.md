@@ -7,6 +7,7 @@ Telemetry sessions use the segmented layout as the canonical writer output:
 ```text
 C:\Users\stone\.osrs-telemetry\sessions\<session_id>\
   manifest.json
+  frame_index.jsonl
   ticks\ticks-*.jsonl
   events\events-*.jsonl
   frames\frame-tick-XXXXXXXX.jpg

@@ -41,6 +41,11 @@ def list_event_files(session_path: Path) -> list[Path]:
     return [legacy] if legacy.exists() else []
 
 
+def list_frame_index_files(session_path: Path) -> list[Path]:
+    frame_index = session_path / "frame_index.jsonl"
+    return [frame_index] if frame_index.exists() else []
+
+
 def is_segmented_session(session_path: Path) -> bool:
     return bool(
         sorted((session_path / "ticks").glob("ticks-*.jsonl"))

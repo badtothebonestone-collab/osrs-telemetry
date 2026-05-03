@@ -430,6 +430,7 @@ public class TelemetryPlugin extends Plugin
 		String format = normalizeScreenshotFormat(config.screenshotFormat());
 		String relativePath = String.format("frames/frame-tick-%08d.%s", snapshot.tickId, format);
 		String captureMode = normalizeFrameCaptureMode(config.frameCaptureMode());
+		String requestedAtUtc = Instant.now().toString();
 		snapshot.frameCaptureSource = captureMode;
 
 		try
@@ -451,15 +452,32 @@ public class TelemetryPlugin extends Plugin
 				snapshot.frameCaptureStatus = "CAPTURE_FAILED";
 				snapshot.frameCaptureWarning = "Screen rectangle fallback is disabled";
 				captureErrors.add("frame");
+				currentWriter.recordFrameIndex(
+						snapshot.tickId,
+						relativePath,
+						captureMode,
+						snapshot.frameCaptureStatus,
+						requestedAtUtc,
+						Instant.now().toString(),
+						snapshot.frameCaptureWarning);
 				return false;
 			}
 
 			BufferedImage frame = captureScreenRectangle();
+			String capturedAtUtc = Instant.now().toString();
 
 			if (frame == null)
 			{
 				snapshot.frameCaptureStatus = "CAPTURE_FAILED";
 				captureErrors.add("frame");
+				currentWriter.recordFrameIndex(
+						snapshot.tickId,
+						relativePath,
+						"SCREEN_RECTANGLE",
+						snapshot.frameCaptureStatus,
+						requestedAtUtc,
+						capturedAtUtc,
+						"screen rectangle capture returned null");
 				return false;
 			}
 
@@ -471,7 +489,13 @@ public class TelemetryPlugin extends Plugin
 				snapshot.framePath = relativePath;
 			}
 
-			if (currentWriter.enqueueFrame(relativePath, frame))
+			if (currentWriter.enqueueFrame(
+					snapshot.tickId,
+					relativePath,
+					frame,
+					snapshot.frameCaptureSource,
+					requestedAtUtc,
+					capturedAtUtc))
 			{
 				snapshot.frameCaptureStatus = "QUEUED";
 			}
@@ -484,6 +508,14 @@ public class TelemetryPlugin extends Plugin
 		{
 			snapshot.frameCaptureStatus = "CAPTURE_FAILED";
 			captureErrors.add("frame");
+			currentWriter.recordFrameIndex(
+					snapshot.tickId,
+					relativePath,
+					captureMode,
+					snapshot.frameCaptureStatus,
+					requestedAtUtc,
+					Instant.now().toString(),
+					e.toString());
 			log.warn("Telemetry frame capture failed", e);
 		}
 
@@ -492,18 +524,35 @@ public class TelemetryPlugin extends Plugin
 
 	private void requestRuneliteOnlyFrame(String relativePath, TelemetryWriter currentWriter, TickSnapshot snapshot, List<String> captureErrors)
 	{
+		String requestedAtUtc = Instant.now().toString();
+
 		drawManager.requestNextFrameListener((image) ->
 		{
 			try
 			{
 				BufferedImage frame = copyRuneliteFrame(image);
+				String capturedAtUtc = Instant.now().toString();
 
 				if (frame == null)
 				{
 					snapshot.frameCaptureStatus = "CAPTURE_FAILED";
 					captureErrors.add("frame");
+					currentWriter.recordFrameIndex(
+							snapshot.tickId,
+							relativePath,
+							snapshot.frameCaptureSource,
+							snapshot.frameCaptureStatus,
+							requestedAtUtc,
+							capturedAtUtc,
+							"RuneLite frame capture returned null");
 				}
-				else if (currentWriter.enqueueFrame(relativePath, frame))
+				else if (currentWriter.enqueueFrame(
+						snapshot.tickId,
+						relativePath,
+						frame,
+						snapshot.frameCaptureSource,
+						requestedAtUtc,
+						capturedAtUtc))
 				{
 					snapshot.frameCaptureStatus = "QUEUED";
 				}
@@ -516,6 +565,14 @@ public class TelemetryPlugin extends Plugin
 			{
 				snapshot.frameCaptureStatus = "CAPTURE_FAILED";
 				captureErrors.add("frame");
+				currentWriter.recordFrameIndex(
+						snapshot.tickId,
+						relativePath,
+						snapshot.frameCaptureSource,
+						snapshot.frameCaptureStatus,
+						requestedAtUtc,
+						Instant.now().toString(),
+						e.toString());
 				log.warn("Telemetry RuneLite-only frame capture failed", e);
 			}
 			finally

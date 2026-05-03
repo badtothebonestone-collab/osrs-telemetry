@@ -10,6 +10,7 @@ from telemetry_paths import (
     get_sessions_dir,
     iter_jsonl,
     list_event_files,
+    list_frame_index_files,
     list_tick_files,
     session_size_mb,
 )
@@ -21,6 +22,10 @@ def tick_files(session: Path) -> list[Path]:
 
 def event_files(session: Path) -> list[Path]:
     return list_event_files(session)
+
+
+def frame_index_files(session: Path) -> list[Path]:
+    return list_frame_index_files(session)
 
 
 def read_manifest(session: Path) -> tuple[dict | None, list[str]]:
@@ -138,6 +143,16 @@ def validate_session(session: Path):
     ticks_with_frame_path = 0
     missing_referenced_frames = 0
     missing_frame_records = []
+    frame_index_count = 0
+    frame_index_status_counts = Counter()
+    frame_index_source_counts = Counter()
+    frame_index_missing_required = Counter()
+    frame_index_latency_ranges = {
+        "captureLatencyMs": [],
+        "queueLatencyMs": [],
+        "writeLatencyMs": [],
+        "totalLatencyMs": [],
+    }
 
     for file_path, line_number, record, error in iter_jsonl(ticks, with_errors=True):
         if error is not None:
@@ -228,6 +243,25 @@ def validate_session(session: Path):
             for field in missing_fields(record, ("schemaVersion", "tickId", "timestampUtc", "eventType")):
                 sampled_event_required_missing[field] += 1
 
+    for file_path, line_number, record, error in iter_jsonl(frame_index_files(session), with_errors=True):
+        if error is not None:
+            json_error_count += 1
+            problems.append(f"frame index JSON error in {file_path.name}:{line_number}: {error}")
+            continue
+
+        frame_index_count += 1
+        frame_index_status_counts[record.get("status", "MISSING")] += 1
+        frame_index_source_counts[record.get("captureSource", "MISSING")] += 1
+
+        for field in missing_fields(record, ("schemaVersion", "tickId", "status")):
+            frame_index_missing_required[field] += 1
+
+        for key in frame_index_latency_ranges:
+            value = record.get(key)
+
+            if isinstance(value, (int, float)):
+                frame_index_latency_ranges[key].append(value)
+
     print(f"Session: {session}")
     print()
     print("Manifest:")
@@ -276,8 +310,20 @@ def validate_session(session: Path):
     print(f"missingReferencedFrames: {missing_referenced_frames}")
     print(f"pendingQueuedFrames: {pending_queued_frames}")
     print(f"expiredOrDeletedFrames: {expired_or_deleted_frames}")
+    print(f"frameIndexRecords: {frame_index_count}")
     print(f"Frames folder size MB: {directory_size(session / 'frames') / (1024 * 1024):.2f}")
     print(f"Frame capture source counts: {dict(frame_capture_source_counts)}")
+    print(f"Frame index status counts: {dict(frame_index_status_counts)}")
+    print(f"Frame index source counts: {dict(frame_index_source_counts)}")
+    print(f"Frame index required-field misses: {dict(frame_index_missing_required)}")
+    print("Frame timing ranges ms:")
+
+    for key, values in frame_index_latency_ranges.items():
+        if values:
+            print(f"  {key}: min={min(values):.0f} max={max(values):.0f} avg={sum(values) / len(values):.1f}")
+        else:
+            print(f"  {key}: none")
+
     print(f"Session size MB: {session_size_mb(session):.2f}")
     print(f"JSON decode errors: {json_error_count}")
     print(f"Tick schemaVersion counts: {dict(tick_schema_counts)}")

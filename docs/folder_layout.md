@@ -12,6 +12,7 @@ canonical current writer output:
 ```text
 sessions\<session_id>\
   manifest.json
+  frame_index.jsonl
   ticks\
     ticks-000001.jsonl
     ticks-000002.jsonl
@@ -92,6 +93,29 @@ reading the new one.
 - `allowScreenRectangleFallback`: whether screen-rectangle fallback is enabled.
 - `lastUpdatedUtc`: UTC timestamp of the last manifest write.
 
+## Frame Index
+
+`frame_index.jsonl` is a session-local diagnostic sidecar for frame timing. It
+contains one JSON record for each requested frame once the request reaches a
+terminal collector state such as `WRITTEN`, `DROPPED_QUEUE_FULL`,
+`CAPTURE_FAILED`, `WRITE_FAILED`, or `WRITE_REJECTED`.
+
+Common fields:
+
+- `tickId`: tick associated with the frame request.
+- `framePath`: session-relative frame path when one was assigned.
+- `captureSource`: `RUNELITE_ONLY` or `SCREEN_RECTANGLE`.
+- `status`: terminal frame diagnostic status.
+- `requestedAtUtc`, `capturedAtUtc`, `enqueuedAtUtc`, `writtenAtUtc`: UTC timing
+  checkpoints when available.
+- `captureLatencyMs`: time from frame request to captured image.
+- `queueLatencyMs`: time from writer enqueue to written file.
+- `writeLatencyMs`: image encode/write duration measured by the writer.
+- `totalLatencyMs`: time from frame request to written file.
+- `width`, `height`, `sizeBytes`: written or dropped frame dimensions and file
+  size when available.
+- `error`: diagnostic message for failed/rejected states.
+
 ## Dictionaries
 
 Dictionaries map IDs to names discovered during collection:
@@ -169,6 +193,7 @@ exports\
   session_index.json
   tick_summary.jsonl
   event_summary.jsonl
+  frame_index_summary.jsonl
 ```
 
 These files are derived outputs and can be regenerated from the source session

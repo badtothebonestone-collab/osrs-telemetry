@@ -11,6 +11,7 @@ from telemetry_paths import (
     get_sessions_dir,
     iter_jsonl,
     list_event_files,
+    list_frame_index_files,
     list_tick_files,
     safe_read_json,
     session_size_mb,
@@ -52,6 +53,10 @@ def tick_files(session: Path) -> list[Path]:
 
 def event_files(session: Path) -> list[Path]:
     return list_event_files(session)
+
+
+def frame_index_files(session: Path) -> list[Path]:
+    return list_frame_index_files(session)
 
 
 def read_manifest(session: Path) -> dict | None:
@@ -221,6 +226,28 @@ def event_summary(source: Path, event: dict) -> dict:
     }
 
 
+def frame_index_summary(source: Path, frame: dict) -> dict:
+    return {
+        "tickId": frame.get("tickId"),
+        "framePath": frame.get("framePath"),
+        "captureSource": frame.get("captureSource"),
+        "status": frame.get("status"),
+        "requestedAtUtc": frame.get("requestedAtUtc"),
+        "capturedAtUtc": frame.get("capturedAtUtc"),
+        "enqueuedAtUtc": frame.get("enqueuedAtUtc"),
+        "writtenAtUtc": frame.get("writtenAtUtc"),
+        "captureLatencyMs": frame.get("captureLatencyMs"),
+        "queueLatencyMs": frame.get("queueLatencyMs"),
+        "writeLatencyMs": frame.get("writeLatencyMs"),
+        "totalLatencyMs": frame.get("totalLatencyMs"),
+        "width": frame.get("width"),
+        "height": frame.get("height"),
+        "sizeBytes": frame.get("sizeBytes"),
+        "error": frame.get("error"),
+        "source": str(source),
+    }
+
+
 def atomic_replace(path: Path, writer):
     temp_path = path.with_suffix(path.suffix + ".tmp")
     writer(temp_path)
@@ -252,7 +279,9 @@ def export_session(session: Path):
     events = event_files(session)
     tick_rows = []
     event_rows = []
+    frame_index_rows = []
     event_type_counts = Counter()
+    frame_status_counts = Counter()
     first_tick_id = None
     last_tick_id = None
     raw_ticks = list(iter_jsonl(ticks))
@@ -275,12 +304,18 @@ def export_session(session: Path):
         event_rows.append(summary)
         event_type_counts[summary.get("eventType", "UNKNOWN")] += 1
 
+    for source, frame in iter_jsonl(frame_index_files(session)):
+        summary = frame_index_summary(source, frame)
+        frame_index_rows.append(summary)
+        frame_status_counts[summary.get("status", "UNKNOWN")] += 1
+
     session_index = {
         "sessionPath": str(session),
         "manifest": manifest,
         "exportedAtUtc": datetime.now(timezone.utc).isoformat(),
         "tickCount": len(tick_rows),
         "eventCount": len(event_rows),
+        "frameIndexCount": len(frame_index_rows),
         "tickSegmentCount": len(ticks),
         "eventSegmentCount": len(events),
         "dictionaryCounts": dictionary_counts(session),
@@ -288,16 +323,19 @@ def export_session(session: Path):
         "firstTickId": first_tick_id,
         "lastTickId": last_tick_id,
         "topEventTypeCounts": dict(event_type_counts.most_common(20)),
+        "frameIndexStatusCounts": dict(frame_status_counts.most_common()),
     }
 
     write_json(export_dir / "session_index.json", session_index)
     write_jsonl(export_dir / "tick_summary.jsonl", tick_rows)
     write_jsonl(export_dir / "event_summary.jsonl", event_rows)
+    write_jsonl(export_dir / "frame_index_summary.jsonl", frame_index_rows)
 
     print(f"Exported session: {session}")
     print(f"  {export_dir / 'session_index.json'}")
     print(f"  {export_dir / 'tick_summary.jsonl'} ({len(tick_rows)} rows)")
     print(f"  {export_dir / 'event_summary.jsonl'} ({len(event_rows)} rows)")
+    print(f"  {export_dir / 'frame_index_summary.jsonl'} ({len(frame_index_rows)} rows)")
 
 
 def parse_args():

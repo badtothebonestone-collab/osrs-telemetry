@@ -78,6 +78,49 @@ treated as expired/deleted side data rather than corrupt tick telemetry.
 show that overlapping windows may be captured because the fallback reads screen
 pixels.
 
+## Frame Index Records
+
+Frame timing diagnostics live in:
+
+```text
+frame_index.jsonl
+```
+
+Each line is a session-local sidecar record for one requested frame after the
+collector knows the terminal frame state. These records are not required to
+parse tick/event telemetry, but they are useful for diagnosing capture delay,
+writer queue delay, encoding time, and dropped frames.
+
+Common fields:
+
+- `schemaVersion`
+- `tickId`
+- `framePath`
+- `captureSource`
+- `status`
+- `requestedAtUtc`
+- `capturedAtUtc`
+- `enqueuedAtUtc`
+- `writtenAtUtc`
+- `captureLatencyMs`
+- `queueLatencyMs`
+- `writeLatencyMs`
+- `totalLatencyMs`
+- `width`
+- `height`
+- `sizeBytes`
+- `droppedFrameCount`
+- `error`
+
+`status` is one of:
+
+- `WRITTEN`: frame image was encoded and written.
+- `DROPPED_QUEUE_FULL`: frame image was captured but not accepted by the frame
+  writer queue.
+- `CAPTURE_FAILED`: frame capture failed before queueing.
+- `WRITE_FAILED`: frame image reached the writer but could not be written.
+- `WRITE_REJECTED`: writer rejected an invalid frame path.
+
 ## Event Records
 
 Event records live in the canonical current writer layout:
@@ -130,8 +173,9 @@ latest\latest_events.json
 exports\session_index.json
 exports\tick_summary.jsonl
 exports\event_summary.jsonl
+exports\frame_index_summary.jsonl
 ```
 
-These outputs are derived from source tick/event records. Exported frame fields
+These outputs are derived from source session records. Exported frame fields
 such as `frameExists`, `framePending`, and `frameExpiredOrMissing` are
 point-in-time tool-derived values.

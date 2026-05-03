@@ -38,7 +38,9 @@ public class TelemetryWriter implements Closeable
 {
 	private static final String STREAM_TICKS = "ticks";
 	private static final String STREAM_EVENTS = "events";
+	private static final String STREAM_FRAME_INDEX = "frame_index";
 	private static final String FRAMES_DIR = "frames";
+	private static final String FRAME_INDEX_FILE = "frame_index.jsonl";
 	private static final String SCHEMA_VERSION = "0.1.0";
 	private static final int QUEUE_CAPACITY = 100_000;
 
@@ -56,14 +58,53 @@ public class TelemetryWriter implements Closeable
 
 	private static class QueuedFrame
 	{
+		final long tickId;
 		final String relativePath;
 		final BufferedImage image;
+		final String captureSource;
+		final String requestedAtUtc;
+		final String capturedAtUtc;
+		final String enqueuedAtUtc;
 
-		QueuedFrame(String relativePath, BufferedImage image)
+		QueuedFrame(
+				long tickId,
+				String relativePath,
+				BufferedImage image,
+				String captureSource,
+				String requestedAtUtc,
+				String capturedAtUtc,
+				String enqueuedAtUtc)
 		{
+			this.tickId = tickId;
 			this.relativePath = relativePath;
 			this.image = image;
+			this.captureSource = captureSource;
+			this.requestedAtUtc = requestedAtUtc;
+			this.capturedAtUtc = capturedAtUtc;
+			this.enqueuedAtUtc = enqueuedAtUtc;
 		}
+	}
+
+	private static class FrameIndexRecord
+	{
+		String schemaVersion;
+		long tickId;
+		String framePath;
+		String captureSource;
+		String status;
+		String requestedAtUtc;
+		String capturedAtUtc;
+		String enqueuedAtUtc;
+		String writtenAtUtc;
+		Long captureLatencyMs;
+		Long queueLatencyMs;
+		Long writeLatencyMs;
+		Long totalLatencyMs;
+		Integer width;
+		Integer height;
+		Long sizeBytes;
+		Long droppedFrameCount;
+		String error;
 	}
 
 	private static class Manifest
@@ -100,6 +141,7 @@ public class TelemetryWriter implements Closeable
 	private final Path ticksDir;
 	private final Path eventsDir;
 	private final Path framesDir;
+	private final Path frameIndexFile;
 	private final Path dictionariesDir;
 	private final Path itemsDictionaryFile;
 	private final Path npcsDictionaryFile;
@@ -133,6 +175,7 @@ public class TelemetryWriter implements Closeable
 	private Thread worker;
 	private BufferedWriter tickWriter;
 	private BufferedWriter eventWriter;
+	private BufferedWriter frameIndexWriter;
 	private Path currentTickSegment;
 	private Path currentEventSegment;
 	private long currentTickBytes;
@@ -169,6 +212,7 @@ public class TelemetryWriter implements Closeable
 		this.ticksDir = sessionDir.resolve(STREAM_TICKS);
 		this.eventsDir = sessionDir.resolve(STREAM_EVENTS);
 		this.framesDir = sessionDir.resolve(FRAMES_DIR);
+		this.frameIndexFile = sessionDir.resolve(FRAME_INDEX_FILE);
 		this.dictionariesDir = sessionDir.resolve("dictionaries");
 		this.itemsDictionaryFile = dictionariesDir.resolve("items.json");
 		this.npcsDictionaryFile = dictionariesDir.resolve("npcs.json");
@@ -212,6 +256,7 @@ public class TelemetryWriter implements Closeable
 
 		openTickSegment();
 		openEventSegment();
+		openFrameIndex();
 		writeManifest();
 
 		running = true;
@@ -237,14 +282,48 @@ public class TelemetryWriter implements Closeable
 
 	public boolean enqueueFrame(String relativePath, BufferedImage image)
 	{
+		return enqueueFrame(-1L, relativePath, image, null, null, null);
+	}
+
+	public boolean enqueueFrame(
+			long tickId,
+			String relativePath,
+			BufferedImage image,
+			String captureSource,
+			String requestedAtUtc,
+			String capturedAtUtc)
+	{
 		if (!running || relativePath == null || image == null)
 		{
 			return false;
 		}
 
-		if (!frameQueue.offer(new QueuedFrame(relativePath, image)))
+		String enqueuedAtUtc = Instant.now().toString();
+
+		if (!frameQueue.offer(new QueuedFrame(
+				tickId,
+				relativePath,
+				image,
+				captureSource,
+				requestedAtUtc,
+				capturedAtUtc,
+				enqueuedAtUtc)))
 		{
 			long dropped = droppedFrameCount.incrementAndGet();
+			enqueueFrameIndex(frameIndexRecord(
+					tickId,
+					relativePath,
+					captureSource,
+					"DROPPED_QUEUE_FULL",
+					requestedAtUtc,
+					capturedAtUtc,
+					enqueuedAtUtc,
+					null,
+					null,
+					image.getWidth(),
+					image.getHeight(),
+					null,
+					null));
 
 			if (dropped == 1 || dropped % 100 == 0)
 			{
@@ -255,6 +334,31 @@ public class TelemetryWriter implements Closeable
 		}
 
 		return true;
+	}
+
+	public void recordFrameIndex(
+			long tickId,
+			String relativePath,
+			String captureSource,
+			String status,
+			String requestedAtUtc,
+			String capturedAtUtc,
+			String error)
+	{
+		enqueueFrameIndex(frameIndexRecord(
+				tickId,
+				relativePath,
+				captureSource,
+				status,
+				requestedAtUtc,
+				capturedAtUtc,
+				null,
+				null,
+				null,
+				null,
+				null,
+				null,
+				error));
 	}
 
 	public int getQueueSize()
@@ -351,6 +455,7 @@ public class TelemetryWriter implements Closeable
 			drainQueue();
 			closeWriter(tickWriter, "ticks");
 			closeWriter(eventWriter, "events");
+			closeWriter(frameIndexWriter, "frame index");
 			manifest.active = false;
 			manifest.endedAtUtc = Instant.now().toString();
 			manifest.droppedRecords = droppedRecords.get();
@@ -369,15 +474,34 @@ public class TelemetryWriter implements Closeable
 		{
 			writeEvent(line.json);
 		}
+		else if (STREAM_FRAME_INDEX.equals(line.stream))
+		{
+			writeFrameIndex(line.json);
+		}
 	}
 
 	private void writeFrame(QueuedFrame frame) throws IOException
 	{
 		Path path = sessionDir.resolve(frame.relativePath).normalize();
+		long writeStartedMillis = System.currentTimeMillis();
 
 		if (!path.startsWith(framesDir))
 		{
 			log.warn("Refusing to write telemetry frame outside frames directory: {}", frame.relativePath);
+			enqueueFrameIndex(frameIndexRecord(
+					frame.tickId,
+					frame.relativePath,
+					frame.captureSource,
+					"WRITE_REJECTED",
+					frame.requestedAtUtc,
+					frame.capturedAtUtc,
+					frame.enqueuedAtUtc,
+					null,
+					null,
+					frame.image.getWidth(),
+					frame.image.getHeight(),
+					null,
+					"frame path escapes frames directory"));
 			return;
 		}
 
@@ -387,9 +511,42 @@ public class TelemetryWriter implements Closeable
 		{
 			Files.createDirectories(path.getParent());
 			writeImage(path, frame.image);
+			String writtenAtUtc = Instant.now().toString();
 			manifest.frameCount++;
 			manifest.droppedFrameCount = droppedFrameCount.get();
+			enqueueFrameIndex(frameIndexRecord(
+					frame.tickId,
+					frame.relativePath,
+					frame.captureSource,
+					"WRITTEN",
+					frame.requestedAtUtc,
+					frame.capturedAtUtc,
+					frame.enqueuedAtUtc,
+					writtenAtUtc,
+					System.currentTimeMillis() - writeStartedMillis,
+					frame.image.getWidth(),
+					frame.image.getHeight(),
+					Files.size(path),
+					null));
 			writeManifest();
+		}
+		catch (IOException e)
+		{
+			enqueueFrameIndex(frameIndexRecord(
+					frame.tickId,
+					frame.relativePath,
+					frame.captureSource,
+					"WRITE_FAILED",
+					frame.requestedAtUtc,
+					frame.capturedAtUtc,
+					frame.enqueuedAtUtc,
+					Instant.now().toString(),
+					System.currentTimeMillis() - writeStartedMillis,
+					frame.image.getWidth(),
+					frame.image.getHeight(),
+					null,
+					e.toString()));
+			throw e;
 		}
 		finally
 		{
@@ -480,6 +637,11 @@ public class TelemetryWriter implements Closeable
 		}
 	}
 
+	private void writeFrameIndex(String json) throws IOException
+	{
+		writeJsonLine(frameIndexWriter, json);
+	}
+
 	private long writeJsonLine(BufferedWriter writer, String json) throws IOException
 	{
 		writer.write(json);
@@ -510,6 +672,15 @@ public class TelemetryWriter implements Closeable
 				StandardOpenOption.APPEND);
 		currentEventBytes = Files.size(currentEventSegment);
 		manifest.currentEventSegment = sessionDir.relativize(currentEventSegment).toString().replace('\\', '/');
+	}
+
+	private void openFrameIndex() throws IOException
+	{
+		frameIndexWriter = Files.newBufferedWriter(
+				frameIndexFile,
+				StandardCharsets.UTF_8,
+				StandardOpenOption.CREATE,
+				StandardOpenOption.APPEND);
 	}
 
 	private void rotateTickSegment() throws IOException
@@ -575,6 +746,83 @@ public class TelemetryWriter implements Closeable
 				log.warn("Telemetry writer failed while draining frame queue", e);
 				return;
 			}
+		}
+
+		while ((line = queue.poll()) != null)
+		{
+			try
+			{
+				writeLine(line);
+			}
+			catch (IOException e)
+			{
+				log.warn("Telemetry writer failed while draining frame diagnostics", e);
+				return;
+			}
+		}
+	}
+
+	private void enqueueFrameIndex(FrameIndexRecord record)
+	{
+		if (record == null)
+		{
+			return;
+		}
+
+		enqueue(new QueuedLine(STREAM_FRAME_INDEX, gson.toJson(record)));
+	}
+
+	private FrameIndexRecord frameIndexRecord(
+			long tickId,
+			String relativePath,
+			String captureSource,
+			String status,
+			String requestedAtUtc,
+			String capturedAtUtc,
+			String enqueuedAtUtc,
+			String writtenAtUtc,
+			Long writeLatencyMs,
+			Integer width,
+			Integer height,
+			Long sizeBytes,
+			String error)
+	{
+		FrameIndexRecord record = new FrameIndexRecord();
+		record.schemaVersion = SCHEMA_VERSION;
+		record.tickId = tickId;
+		record.framePath = relativePath;
+		record.captureSource = captureSource;
+		record.status = status;
+		record.requestedAtUtc = requestedAtUtc;
+		record.capturedAtUtc = capturedAtUtc;
+		record.enqueuedAtUtc = enqueuedAtUtc;
+		record.writtenAtUtc = writtenAtUtc;
+		record.captureLatencyMs = millisBetween(requestedAtUtc, capturedAtUtc);
+		record.queueLatencyMs = millisBetween(enqueuedAtUtc, writtenAtUtc);
+		record.writeLatencyMs = writeLatencyMs;
+		record.totalLatencyMs = millisBetween(requestedAtUtc, writtenAtUtc);
+		record.width = width;
+		record.height = height;
+		record.sizeBytes = sizeBytes;
+		record.droppedFrameCount = droppedFrameCount.get();
+		record.error = error;
+		return record;
+	}
+
+	private Long millisBetween(String start, String end)
+	{
+		if (start == null || end == null)
+		{
+			return null;
+		}
+
+		try
+		{
+			return Duration.between(Instant.parse(start), Instant.parse(end)).toMillis();
+		}
+		catch (RuntimeException e)
+		{
+			return null;
 		}
 	}
 
