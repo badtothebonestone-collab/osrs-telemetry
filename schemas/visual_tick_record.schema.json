@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://osrs-telemetry.local/schemas/visual_tick_record.schema.json",
+  "title": "OSRS Telemetry Visual Tick Record",
+  "type": "object",
+  "description": "Derived per-tick visual preparation record built from existing perception bundles and screen region metadata.",
+  "required": [
+    "schemaVersion",
+    "sessionId",
+    "tickId",
+    "timestampUtc",
+    "frame",
+    "stateSummary",
+    "signals",
+    "regions",
+    "promptContext",
+    "recommendedReview"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "visual_perception.tick_record.v1"
+    },
+    "sessionId": {
+      "type": ["string", "null"]
+    },
+    "tickId": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "timestampUtc": {
+      "type": ["string", "null"]
+    },
+    "frame": {
+      "type": "object",
+      "properties": {
+        "path": { "type": ["string", "null"] },
+        "exists": { "type": ["boolean", "null"] },
+        "width": { "type": ["integer", "null"], "minimum": 0 },
+        "height": { "type": ["integer", "null"], "minimum": 0 },
+        "status": { "type": ["string", "null"] },
+        "captureSource": { "type": ["string", "null"] },
+        "writeDelayMs": { "type": ["number", "null"], "minimum": 0 },
+        "totalLatencyMs": { "type": ["number", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "stateSummary": {
+      "type": "object",
+      "properties": {
+        "gameState": { "type": ["string", "null"] },
+        "position": {
+          "type": "object",
+          "properties": {
+            "worldX": { "type": ["integer", "null"] },
+            "worldY": { "type": ["integer", "null"] },
+            "plane": { "type": ["integer", "null"] }
+          },
+          "additionalProperties": true
+        },
+        "hp": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "prayer": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "runEnergyPercent": { "type": ["number", "null"] },
+        "interacting": { "type": ["string", "null"] },
+        "inventoryCount": { "type": "integer", "minimum": 0 },
+        "equipmentCount": { "type": "integer", "minimum": 0 },
+        "npcCount": { "type": "integer", "minimum": 0 },
+        "playerCount": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "signals": {
+      "type": "object",
+      "properties": {
+        "hasCombatSignal": { "type": "boolean" },
+        "hasInventorySignal": { "type": "boolean" },
+        "hasUiSignal": { "type": "boolean" },
+        "hasVarSignal": { "type": "boolean" },
+        "hasFrameIssue": { "type": "boolean" },
+        "hasCaptureError": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "regions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "normalizedBox", "pixelBox", "cropPath", "exists"],
+        "properties": {
+          "name": { "type": "string" },
+          "normalizedBox": {
+            "type": ["object", "null"],
+            "additionalProperties": true
+          },
+          "pixelBox": {
+            "type": ["object", "null"],
+            "properties": {
+              "x": { "type": "integer", "minimum": 0 },
+              "y": { "type": "integer", "minimum": 0 },
+              "w": { "type": "integer", "minimum": 0 },
+              "h": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": true
+          },
+          "cropPath": { "type": ["string", "null"] },
+          "exists": { "type": "boolean" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "promptContext": {
+      "type": "string"
+    },
+    "recommendedReview": {
+      "type": "object",
+      "properties": {
+        "priority": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH"]
+        },
+        "reasons": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

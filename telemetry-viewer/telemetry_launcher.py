@@ -89,6 +89,12 @@ PROCESS_SPECS = {
         ["python", "telemetry-viewer\\build_perception_dataset.py"],
         False,
     ),
+    "visual_perception": ProcessSpec(
+        "visual_perception",
+        "Prepare Visual Perception",
+        ["python", "telemetry-viewer\\prepare_visual_perception.py"],
+        False,
+    ),
     "tests": ProcessSpec(
         "tests",
         "Path Regression Tests",
@@ -234,6 +240,7 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
         "frame_dropped_count": "0",
         "frame_deleted_count": "0",
         "perception_bundle_count": "not built",
+        "visual_perception_record_count": "not built",
         "session_size": "-",
         "capture_errors": "-",
         "validation": validation_result,
@@ -302,6 +309,17 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
         bundle_count = perception_index.get("tickBundleCount")
         values["perception_bundle_count"] = (
             str(bundle_count) if bundle_count is not None else "unknown"
+        )
+
+    visual_perception_index = safe_read_json(session / "perception" / "visual_perception_index.json")
+
+    if isinstance(visual_perception_index, dict):
+        record_count = (
+            visual_perception_index.get("selectedTickCount")
+            or visual_perception_index.get("visualRecordCount")
+        )
+        values["visual_perception_record_count"] = (
+            str(record_count) if record_count is not None else "unknown"
         )
 
     paths["session"] = str(session)
@@ -495,6 +513,7 @@ class LauncherApp(Tk):
                 ("Run Validate Session", lambda: self.start_process("validate"), None),
                 ("Run Export Session", lambda: self.start_process("export"), None),
                 ("Build Perception Dataset", lambda: self.start_process("perception"), None),
+                ("Prepare Visual Perception", lambda: self.start_process("visual_perception"), None),
                 ("Run Path Regression Tests", lambda: self.start_process("tests"), None),
             ],
         )
@@ -611,6 +630,7 @@ class LauncherApp(Tk):
             ("frame_dropped_count", "FrameDropped count"),
             ("frame_deleted_count", "FrameDeleted count"),
             ("perception_bundle_count", "Perception bundle count"),
+            ("visual_perception_record_count", "Visual perception records"),
             ("frames_size", "Frames folder size MB"),
             ("session_size", "Session size MB"),
             ("capture_errors", "Capture errors"),

@@ -35,6 +35,31 @@ images. The perception dataset is read-only derived data from existing
 telemetry and performs no automation, clicking, input hooks, overlays, or
 client-state mutation.
 
+To prepare tick-aligned visual review records from the derived perception
+dataset:
+
+```text
+python telemetry-viewer\prepare_visual_perception.py
+```
+
+The default mode writes `perception\visual_perception_index.json` and
+`perception\visual_tick_records.jsonl` with normalized and pixel screen-region
+metadata only. It uses Python standard library code and does not crop images.
+
+To attempt derived crop files for a small sample:
+
+```text
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --limit 25
+```
+
+Crop mode requires Pillow to already be available. The script does not install
+dependencies. If Pillow is unavailable, it prints a warning and continues in
+metadata-only mode. Generated crops, when possible, are derived outputs under
+`perception\crops\`; source frame images and raw telemetry files are not
+modified. The visual prep tool is read-only derived analysis data and performs
+no automation, clicking, input hooks, overlays, menu actions, or client-state
+mutation.
+
 The replay viewer includes a read-only **Analysis** panel derived from the
 existing tick, event, frame, and frame-index telemetry. It does not collect new
 gameplay data and does not add overlays, input hooks, clicking, menu
