@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://osrs-telemetry.local/schemas/perception_tick_bundle.schema.json",
+  "title": "OSRS Telemetry Perception Tick Bundle",
+  "type": "object",
+  "description": "Derived per-tick bundle joining existing tick state, event context, frame path, and frame timing. This is generated read-only analysis data.",
+  "required": [
+    "schemaVersion",
+    "sessionId",
+    "tickId",
+    "timestampUtc",
+    "sourceFiles",
+    "frame",
+    "state",
+    "events",
+    "derived"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "perception.tick_bundle.v1"
+    },
+    "sessionId": {
+      "type": ["string", "null"]
+    },
+    "tickId": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "timestampUtc": {
+      "type": ["string", "null"]
+    },
+    "sourceFiles": {
+      "type": "object",
+      "properties": {
+        "tick": { "type": ["string", "null"] },
+        "events": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "frameIndex": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "frame": {
+      "type": "object",
+      "properties": {
+        "path": { "type": ["string", "null"] },
+        "absolutePath": { "type": ["string", "null"] },
+        "exists": { "type": ["boolean", "null"] },
+        "pending": { "type": "boolean" },
+        "expiredOrMissing": { "type": "boolean" },
+        "width": { "type": ["integer", "null"], "minimum": 0 },
+        "height": { "type": ["integer", "null"], "minimum": 0 },
+        "captureSource": { "type": ["string", "null"] },
+        "captureStatus": { "type": ["string", "null"] },
+        "frameIndexAvailable": { "type": "boolean" },
+        "frameIndexStatus": { "type": ["string", "null"] },
+        "frameIndexEventType": { "type": ["string", "null"] },
+        "writeDelayMs": { "type": ["number", "null"], "minimum": 0 },
+        "totalLatencyMs": { "type": ["number", "null"], "minimum": 0 },
+        "captureLatencyMs": { "type": ["number", "null"], "minimum": 0 },
+        "queueLatencyMs": { "type": ["number", "null"], "minimum": 0 },
+        "pathEscapesSession": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "state": {
+      "type": "object",
+      "properties": {
+        "gameState": { "type": ["string", "null"] },
+        "position": {
+          "type": "object",
+          "properties": {
+            "worldX": { "type": ["integer", "null"] },
+            "worldY": { "type": ["integer", "null"] },
+            "plane": { "type": ["integer", "null"] }
+          },
+          "additionalProperties": true
+        },
+        "hp": {
+          "type": "object",
+          "properties": {
+            "boosted": { "type": ["integer", "null"] },
+            "real": { "type": ["integer", "null"] }
+          },
+          "additionalProperties": true
+        },
+        "prayer": {
+          "type": "object",
+          "properties": {
+            "boosted": { "type": ["integer", "null"] },
+            "real": { "type": ["integer", "null"] }
+          },
+          "additionalProperties": true
+        },
+        "runEnergyPercent": { "type": ["number", "null"] },
+        "activePrayerNames": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "interacting": { "type": ["string", "null"] },
+        "inventoryCount": { "type": "integer", "minimum": 0 },
+        "equipmentCount": { "type": "integer", "minimum": 0 },
+        "npcCount": { "type": "integer", "minimum": 0 },
+        "playerCount": { "type": "integer", "minimum": 0 },
+        "widgetCount": { "type": "integer", "minimum": 0 },
+        "sceneObjectsCount": { "type": "integer", "minimum": 0 },
+        "groundItemsCount": { "type": "integer", "minimum": 0 },
+        "captureErrorCount": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "events": {
+      "type": "object",
+      "properties": {
+        "onTickEventTypes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "nearbyEventSummaries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "countsByCategory": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "derived": {
+      "type": "object",
+      "properties": {
+        "hasCombatSignal": { "type": "boolean" },
+        "hasInventorySignal": { "type": "boolean" },
+        "hasUiSignal": { "type": "boolean" },
+        "hasVarSignal": { "type": "boolean" },
+        "hasFrameIssue": { "type": "boolean" },
+        "hasCaptureError": { "type": "boolean" },
+        "healthState": {
+          "type": "string",
+          "enum": ["OK", "WARNING", "ISSUE"]
+        },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "issues": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "summary": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

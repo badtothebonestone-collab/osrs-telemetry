@@ -54,6 +54,8 @@ Buttons:
 - Open Replay Viewer in Browser: opens `http://127.0.0.1:8765/`.
 - Run Validate Session: runs `telemetry-viewer\validate_session.py`.
 - Run Export Session: writes generated summaries with `telemetry-viewer\export_session.py`.
+- Build Perception Dataset: writes derived per-tick perception bundles with
+  `telemetry-viewer\build_perception_dataset.py`.
 - Run Path Regression Tests: runs `telemetry-viewer\test_telemetry_paths.py`.
 - Open Sessions Folder: opens the configured sessions directory.
 - Open Newest Session Folder: opens the newest discovered session.
@@ -64,8 +66,9 @@ Buttons:
 The Telemetry Health panel shows the newest session path, active status, latest
 tick id and age, game state, position, HP/prayer/run, tick/event/frame file
 counts, latest frame write delay, latest total frame latency, latest frame index
-status, FrameWritten/FrameDropped/FrameDeleted counts, frame and session sizes,
-capture errors, and the last validation result.
+status, FrameWritten/FrameDropped/FrameDeleted counts, perception bundle count
+when built, frame and session sizes, capture errors, and the last validation
+result.
 
 Health status colors:
 

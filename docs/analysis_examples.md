@@ -20,6 +20,21 @@ python telemetry-viewer\replay_viewer.py --sessions-dir "C:\path\to\sessions"
 python telemetry-viewer\replay_viewer.py --port 8765
 ```
 
+To build a derived perception dataset for the newest session:
+
+```text
+python telemetry-viewer\build_perception_dataset.py
+```
+
+`perception\tick_bundles.jsonl` contains one derived record per tick. Each
+bundle joins the authoritative tick JSON with nearby event context, the
+session-relative frame path, frame existence at build time, and frame-index
+timing when available. `perception\screen_regions.json` is an approximate
+normalized region map for review tooling; it does not crop or edit frame
+images. The perception dataset is read-only derived data from existing
+telemetry and performs no automation, clicking, input hooks, overlays, or
+client-state mutation.
+
 The replay viewer includes a read-only **Analysis** panel derived from the
 existing tick, event, frame, and frame-index telemetry. It does not collect new
 gameplay data and does not add overlays, input hooks, clicking, menu
@@ -37,6 +52,18 @@ The Analysis panel provides:
   inspection and replay review only.
 - Internally scrolling tables so the frame display and replay controls remain
   usable while reviewing longer sessions.
+
+The right side of the replay viewer is organized into State, Analysis, Events,
+and Raw tabs. State shows the selected tick and frame timing, Analysis shows the
+derived session/timeline view, Events shows nearby event records, and Raw keeps
+tick/event JSON collapsed until opened.
+
+Keyboard shortcuts are local to the replay page and are ignored while typing in
+search or jump inputs:
+
+- `ArrowLeft` / `ArrowRight`: previous or next tick.
+- `Space`: play or pause replay.
+- `S`, `A`, `E`, `R`: switch to State, Analysis, Events, or Raw.
 
 Example questions:
 

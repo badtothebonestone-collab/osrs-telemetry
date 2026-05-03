@@ -83,6 +83,12 @@ PROCESS_SPECS = {
         ["python", "telemetry-viewer\\export_session.py"],
         False,
     ),
+    "perception": ProcessSpec(
+        "perception",
+        "Build Perception Dataset",
+        ["python", "telemetry-viewer\\build_perception_dataset.py"],
+        False,
+    ),
     "tests": ProcessSpec(
         "tests",
         "Path Regression Tests",
@@ -227,6 +233,7 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
         "frame_written_count": "0",
         "frame_dropped_count": "0",
         "frame_deleted_count": "0",
+        "perception_bundle_count": "not built",
         "session_size": "-",
         "capture_errors": "-",
         "validation": validation_result,
@@ -288,6 +295,15 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
     values["frame_files"] = str(count_frame_files(session))
     values["frames_size"] = format_mb(directory_size(session / "frames") / (1024 * 1024))
     values["session_size"] = format_mb(session_size_mb(session))
+
+    perception_index = safe_read_json(session / "perception" / "perception_index.json")
+
+    if isinstance(perception_index, dict):
+        bundle_count = perception_index.get("tickBundleCount")
+        values["perception_bundle_count"] = (
+            str(bundle_count) if bundle_count is not None else "unknown"
+        )
+
     paths["session"] = str(session)
     paths["latest_frame"] = str(latest_frame) if latest_frame else None
     paths["latest_status"] = str(session / "latest" / "latest_status.json")
@@ -478,6 +494,7 @@ class LauncherApp(Tk):
                 ("Open Replay Viewer in Browser", self.open_replay_viewer, None),
                 ("Run Validate Session", lambda: self.start_process("validate"), None),
                 ("Run Export Session", lambda: self.start_process("export"), None),
+                ("Build Perception Dataset", lambda: self.start_process("perception"), None),
                 ("Run Path Regression Tests", lambda: self.start_process("tests"), None),
             ],
         )
@@ -593,6 +610,7 @@ class LauncherApp(Tk):
             ("frame_written_count", "FrameWritten count"),
             ("frame_dropped_count", "FrameDropped count"),
             ("frame_deleted_count", "FrameDeleted count"),
+            ("perception_bundle_count", "Perception bundle count"),
             ("frames_size", "Frames folder size MB"),
             ("session_size", "Session size MB"),
             ("capture_errors", "Capture errors"),
@@ -812,8 +830,13 @@ class LauncherApp(Tk):
 
         status = health.get("status", "unknown")
         message = health.get("message", "Health unknown")
+        hint = ""
+
+        if status == "stale" and not self.managed["runelite"].is_running():
+            hint = " Start Core Stack to resume live telemetry."
+
         self.health_status_label.configure(
-            text=f"{status.upper()}: {message}",
+            text=f"{status.upper()}: {message}{hint}",
             background=health.get("background", "#eeeeee"),
             foreground=health.get("foreground", "#202124"),
         )

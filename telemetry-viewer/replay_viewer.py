@@ -910,9 +910,8 @@ def html_page() -> bytes:
     .detail-panel {
       display: flex;
       flex-direction: column;
-      gap: 0.75rem;
-      overflow-y: auto;
-      padding-right: 0.15rem;
+      gap: 0.55rem;
+      overflow: hidden;
     }
 
     .section {
@@ -924,22 +923,71 @@ def html_page() -> bytes:
       flex: 0 0 auto;
     }
 
+    .side-tabs {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.35rem;
+      flex: 0 0 auto;
+    }
+
+    .side-tab {
+      padding: 0.45rem 0.35rem;
+      font-weight: 700;
+    }
+
+    .side-tab.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+
+    .shortcut-hint {
+      color: var(--muted);
+      font-size: 0.75rem;
+      line-height: 1.25;
+      flex: 0 0 auto;
+    }
+
+    .tab-content {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .tab-pane {
+      display: none;
+      height: 100%;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .tab-pane.active {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .tab-pane > .section {
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+
+    .section.state-section,
     .section.events-section {
       display: flex;
       flex-direction: column;
       min-height: 0;
-      max-height: 34vh;
     }
 
     .section.analysis-section {
       display: flex;
       flex-direction: column;
       min-height: 0;
-      max-height: 44vh;
     }
 
     .section.raw-section {
-      overflow: visible;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
     }
 
     .section h2 {
@@ -969,6 +1017,27 @@ def html_page() -> bytes:
       font-size: 0.9rem;
     }
 
+    .state-scroll,
+    .raw-body {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+    }
+
+    .frame-timing-card {
+      border-top: 1px solid var(--line);
+    }
+
+    .frame-timing-card h3 {
+      margin: 0;
+      padding: 0.65rem 0.75rem 0;
+      font-size: 0.88rem;
+    }
+
+    .frame-timing-grid {
+      padding-top: 0.5rem;
+    }
+
     .metric {
       min-width: 0;
     }
@@ -984,6 +1053,7 @@ def html_page() -> bytes:
     }
 
     .analysis-body {
+      flex: 1 1 auto;
       display: flex;
       flex-direction: column;
       gap: 0.65rem;
@@ -1056,7 +1126,7 @@ def html_page() -> bytes:
     }
 
     .analysis-table-wrap {
-      max-height: 18vh;
+      flex: 1 1 18rem;
     }
 
     .analysis-table {
@@ -1136,7 +1206,7 @@ def html_page() -> bytes:
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 0.5rem;
-      max-height: 16vh;
+      max-height: 15vh;
       padding: 0.5rem;
     }
 
@@ -1188,10 +1258,24 @@ def html_page() -> bytes:
     }
 
     .events-list {
-      max-height: 28vh;
+      flex: 1 1 auto;
+      min-height: 0;
       overflow: auto;
       padding: 0.5rem 0.75rem;
       font-size: 0.86rem;
+    }
+
+    .event-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
+
+    .event-heading button {
+      padding: 0.2rem 0.35rem;
+      font-size: 0.72rem;
+      flex: 0 0 auto;
     }
 
     .event-row {
@@ -1210,6 +1294,28 @@ def html_page() -> bytes:
     .event-meta {
       color: var(--muted);
       font-size: 0.78rem;
+    }
+
+    .raw-body {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      padding: 0.75rem;
+    }
+
+    .raw-block {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+      background: #fbfcfa;
+      flex: 0 0 auto;
+    }
+
+    .raw-block summary {
+      cursor: pointer;
+      padding: 0.55rem 0.65rem;
+      font-weight: 700;
+      font-size: 0.86rem;
     }
 
     pre {
@@ -1317,75 +1423,108 @@ def html_page() -> bytes:
       <section class="detail-panel">
         <div id="loadWarning" class="warning"></div>
 
-        <section class="section">
-          <h2>Tick Summary</h2>
-          <div class="summary-grid" id="summaryGrid"></div>
-        </section>
+        <div class="side-tabs" role="tablist" aria-label="Replay details">
+          <button class="side-tab active" type="button" data-side-tab="state" role="tab" aria-controls="stateTab" aria-selected="true">State</button>
+          <button class="side-tab" type="button" data-side-tab="analysis" role="tab" aria-controls="analysisTab" aria-selected="false">Analysis</button>
+          <button class="side-tab" type="button" data-side-tab="events" role="tab" aria-controls="eventsTab" aria-selected="false">Events</button>
+          <button class="side-tab" type="button" data-side-tab="raw" role="tab" aria-controls="rawTab" aria-selected="false">Raw</button>
+        </div>
+        <div class="shortcut-hint">Shortcuts: ArrowLeft/ArrowRight tick, Space play/pause, S State, A Analysis, E Events, R Raw</div>
 
-        <section class="section analysis-section">
-          <h2>Analysis</h2>
-          <div class="analysis-body">
-            <div class="analysis-cards" id="analysisCards"></div>
-            <div class="analysis-controls">
-              <input id="analysisEventSearch" type="search" placeholder="Filter event type">
-              <div class="analysis-filter-row" id="analysisCategories">
-                <label><input type="checkbox" data-analysis-category="combat"> combat</label>
-                <label><input type="checkbox" data-analysis-category="inventory"> inventory</label>
-                <label><input type="checkbox" data-analysis-category="ui"> ui</label>
-                <label><input type="checkbox" data-analysis-category="var"> var</label>
-                <label><input type="checkbox" data-analysis-category="entity"> entity</label>
-                <label><input type="checkbox" data-analysis-category="skills"> skills</label>
-                <label><input type="checkbox" data-analysis-category="world"> world</label>
-                <label><input type="checkbox" data-analysis-category="unknown"> unknown</label>
+        <div class="tab-content">
+          <div class="tab-pane active" id="stateTab" data-tab-panel="state" role="tabpanel">
+            <section class="section state-section">
+              <h2>Current Tick State</h2>
+              <div class="state-scroll">
+                <div class="summary-grid" id="summaryGrid"></div>
+                <div class="frame-timing-card">
+                  <h3>Frame Timing</h3>
+                  <div class="summary-grid frame-timing-grid" id="frameTimingGrid"></div>
+                </div>
               </div>
-              <div class="analysis-filter-row">
-                <label><input id="analysisOnlyEvents" type="checkbox"> only ticks with events</label>
-                <label><input id="analysisOnlyIssues" type="checkbox"> only frame/capture issues</label>
-              </div>
-            </div>
-            <div class="analysis-table-wrap">
-              <table class="analysis-table">
-                <thead>
-                  <tr>
-                    <th>Tick</th>
-                    <th>Vitals</th>
-                    <th>Target</th>
-                    <th>Events</th>
-                    <th>Frame</th>
-                  </tr>
-                </thead>
-                <tbody id="analysisTimeline"></tbody>
-              </table>
-            </div>
-            <div class="analysis-quick-grid">
-              <div class="analysis-quick-panel">
-                <h3>Combat Events</h3>
-                <div id="analysisCombat"></div>
-              </div>
-              <div class="analysis-quick-panel">
-                <h3>Inventory/Skilling Events</h3>
-                <div id="analysisInventory"></div>
-              </div>
-              <div class="analysis-quick-panel">
-                <h3>UI/Menu Events</h3>
-                <div id="analysisUi"></div>
-              </div>
-            </div>
+            </section>
           </div>
-        </section>
 
-        <section class="section events-section">
-          <div class="events-head">
-            <h2>Recent Events</h2>
-            <input id="eventFilter" type="search" placeholder="Filter event type">
+          <div class="tab-pane" id="analysisTab" data-tab-panel="analysis" role="tabpanel" hidden>
+            <section class="section analysis-section">
+              <h2>Analysis</h2>
+              <div class="analysis-body">
+                <div class="analysis-cards" id="analysisCards"></div>
+                <div class="analysis-controls">
+                  <input id="analysisEventSearch" type="search" placeholder="Filter event type">
+                  <div class="analysis-filter-row" id="analysisCategories">
+                    <label><input type="checkbox" data-analysis-category="combat"> combat</label>
+                    <label><input type="checkbox" data-analysis-category="inventory"> inventory</label>
+                    <label><input type="checkbox" data-analysis-category="ui"> ui</label>
+                    <label><input type="checkbox" data-analysis-category="var"> var</label>
+                    <label><input type="checkbox" data-analysis-category="entity"> entity</label>
+                    <label><input type="checkbox" data-analysis-category="skills"> skills</label>
+                    <label><input type="checkbox" data-analysis-category="world"> world</label>
+                    <label><input type="checkbox" data-analysis-category="unknown"> unknown</label>
+                  </div>
+                  <div class="analysis-filter-row">
+                    <label><input id="analysisOnlyEvents" type="checkbox"> only ticks with events</label>
+                    <label><input id="analysisOnlyIssues" type="checkbox"> only frame/capture issues</label>
+                  </div>
+                </div>
+                <div class="analysis-table-wrap">
+                  <table class="analysis-table">
+                    <thead>
+                      <tr>
+                        <th>Tick</th>
+                        <th>Vitals</th>
+                        <th>Target</th>
+                        <th>Events</th>
+                        <th>Frame</th>
+                      </tr>
+                    </thead>
+                    <tbody id="analysisTimeline"></tbody>
+                  </table>
+                </div>
+                <div class="analysis-quick-grid">
+                  <div class="analysis-quick-panel">
+                    <h3>Combat Events</h3>
+                    <div id="analysisCombat"></div>
+                  </div>
+                  <div class="analysis-quick-panel">
+                    <h3>Inventory/Skilling Events</h3>
+                    <div id="analysisInventory"></div>
+                  </div>
+                  <div class="analysis-quick-panel">
+                    <h3>UI/Menu Events</h3>
+                    <div id="analysisUi"></div>
+                  </div>
+                </div>
+              </div>
+            </section>
           </div>
-          <div class="events-list" id="eventsList"></div>
-        </section>
 
-        <details class="section raw-section">
-          <summary>Raw Tick JSON</summary>
-          <pre id="rawJson">{}</pre>
-        </details>
+          <div class="tab-pane" id="eventsTab" data-tab-panel="events" role="tabpanel" hidden>
+            <section class="section events-section">
+              <div class="events-head">
+                <h2>Recent Events</h2>
+                <input id="eventFilter" type="search" placeholder="Filter event type">
+              </div>
+              <div class="events-list" id="eventsList"></div>
+            </section>
+          </div>
+
+          <div class="tab-pane" id="rawTab" data-tab-panel="raw" role="tabpanel" hidden>
+            <section class="section raw-section">
+              <h2>Raw JSON</h2>
+              <div class="raw-body">
+                <details class="raw-block" id="rawTickDetails">
+                  <summary>Raw Tick JSON</summary>
+                  <pre id="rawJson">{}</pre>
+                </details>
+                <details class="raw-block" id="rawEventsDetails">
+                  <summary>Raw Event JSON</summary>
+                  <pre id="rawEventsJson">[]</pre>
+                </details>
+              </div>
+            </section>
+          </div>
+        </div>
       </section>
     </main>
 
@@ -1411,6 +1550,9 @@ def html_page() -> bytes:
   <script>
     const ANALYSIS_CATEGORIES = ["combat", "inventory", "ui", "var", "entity", "skills", "world", "unknown"];
     const ANALYSIS_FILTER_STORAGE_KEY = "osrsTelemetryReplayAnalysisFilters";
+    const UI_PREF_STORAGE_KEY = "osrsTelemetryReplayUiPrefs";
+    const VALID_SIDE_TABS = ["state", "analysis", "events", "raw"];
+    const initialUiPrefs = loadUiPrefs();
 
     const state = {
       session: null,
@@ -1424,8 +1566,9 @@ def html_page() -> bytes:
       analysisInventory: null,
       analysisUi: null,
       analysisFilters: loadAnalysisFilters(),
+      uiPrefs: initialUiPrefs,
       playTimer: null,
-      frameFit: "contain"
+      frameFit: initialUiPrefs.frameFit
     };
 
     const el = {
@@ -1436,7 +1579,10 @@ def html_page() -> bytes:
       frameImage: document.getElementById("frameImage"),
       missingFrame: document.getElementById("missingFrame"),
       loadWarning: document.getElementById("loadWarning"),
+      tabButtons: Array.from(document.querySelectorAll("[data-side-tab]")),
+      tabPanes: Array.from(document.querySelectorAll("[data-tab-panel]")),
       summaryGrid: document.getElementById("summaryGrid"),
+      frameTimingGrid: document.getElementById("frameTimingGrid"),
       analysisCards: document.getElementById("analysisCards"),
       analysisEventSearch: document.getElementById("analysisEventSearch"),
       analysisCategoryInputs: Array.from(document.querySelectorAll("[data-analysis-category]")),
@@ -1449,6 +1595,9 @@ def html_page() -> bytes:
       eventsList: document.getElementById("eventsList"),
       eventFilter: document.getElementById("eventFilter"),
       rawJson: document.getElementById("rawJson"),
+      rawEventsJson: document.getElementById("rawEventsJson"),
+      rawTickDetails: document.getElementById("rawTickDetails"),
+      rawEventsDetails: document.getElementById("rawEventsDetails"),
       prevTick: document.getElementById("prevTick"),
       nextTick: document.getElementById("nextTick"),
       playPause: document.getElementById("playPause"),
@@ -1488,11 +1637,19 @@ def html_page() -> bytes:
     }
 
     function metric(label, value) {
-      return `<div class="metric"><span>${label}</span><strong>${valueOrDash(value)}</strong></div>`;
+      return `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
     }
 
     function formatMs(value) {
       return value === null || value === undefined ? "-" : `${value} ms`;
+    }
+
+    function stateFlag(value) {
+      if (value === null || value === undefined) {
+        return "-";
+      }
+
+      return value ? "yes" : "no";
     }
 
     function formatDuration(seconds) {
@@ -1505,6 +1662,52 @@ def html_page() -> bytes:
       const remaining = total % 60;
 
       return minutes ? `${minutes}m ${remaining}s` : `${remaining}s`;
+    }
+
+    function defaultUiPrefs() {
+      return {
+        activeTab: "state",
+        frameFit: "contain",
+        rawTickOpen: false,
+        rawEventsOpen: false
+      };
+    }
+
+    function normalizeUiPrefs(prefs) {
+      const defaults = defaultUiPrefs();
+      const merged = {
+        ...defaults,
+        ...(prefs || {})
+      };
+
+      if (!VALID_SIDE_TABS.includes(merged.activeTab)) {
+        merged.activeTab = defaults.activeTab;
+      }
+
+      if (!["contain", "actual"].includes(merged.frameFit)) {
+        merged.frameFit = defaults.frameFit;
+      }
+
+      merged.rawTickOpen = Boolean(merged.rawTickOpen);
+      merged.rawEventsOpen = Boolean(merged.rawEventsOpen);
+
+      return merged;
+    }
+
+    function loadUiPrefs() {
+      try {
+        return normalizeUiPrefs(JSON.parse(localStorage.getItem(UI_PREF_STORAGE_KEY) || "{}"));
+      } catch (error) {
+        return defaultUiPrefs();
+      }
+    }
+
+    function saveUiPrefs() {
+      try {
+        localStorage.setItem(UI_PREF_STORAGE_KEY, JSON.stringify(state.uiPrefs));
+      } catch (error) {
+        // localStorage can be unavailable in some browser contexts; UI preferences still work in memory.
+      }
     }
 
     function defaultAnalysisFilters() {
@@ -1569,6 +1772,47 @@ def html_page() -> bytes:
       state.analysisFilters = readAnalysisFilterControls();
       saveAnalysisFilters();
       renderAnalysisTimeline();
+    }
+
+    function showSideTab(name, persist = true) {
+      const requested = VALID_SIDE_TABS.includes(name) ? name : "state";
+
+      for (const button of el.tabButtons) {
+        const isActive = button.dataset.sideTab === requested;
+        button.classList.toggle("active", isActive);
+        button.setAttribute("aria-selected", isActive ? "true" : "false");
+      }
+
+      for (const pane of el.tabPanes) {
+        const isActive = pane.dataset.tabPanel === requested;
+        pane.classList.toggle("active", isActive);
+        pane.hidden = !isActive;
+      }
+
+      if (persist) {
+        state.uiPrefs.activeTab = requested;
+        saveUiPrefs();
+      }
+    }
+
+    function applyFrameFit() {
+      state.uiPrefs.frameFit = state.frameFit;
+      el.fitToggle.textContent = state.frameFit === "contain" ? "Fit: contain" : "Fit: actual width";
+      el.frameImage.classList.toggle("actual-width", state.frameFit === "actual");
+    }
+
+    function applyUiPrefs() {
+      showSideTab(state.uiPrefs.activeTab, false);
+      state.frameFit = state.uiPrefs.frameFit;
+      applyFrameFit();
+      el.rawTickDetails.open = Boolean(state.uiPrefs.rawTickOpen);
+      el.rawEventsDetails.open = Boolean(state.uiPrefs.rawEventsOpen);
+    }
+
+    function saveRawSectionPrefs() {
+      state.uiPrefs.rawTickOpen = el.rawTickDetails.open;
+      state.uiPrefs.rawEventsOpen = el.rawEventsDetails.open;
+      saveUiPrefs();
     }
 
     function firstKey(counts) {
@@ -1865,9 +2109,6 @@ def html_page() -> bytes:
       const position = [tick.worldX, tick.worldY, tick.plane].map(valueOrDash).join(", ");
       const hp = `${valueOrDash(tick.hpBoosted)} / ${valueOrDash(tick.hpReal)}`;
       const prayer = `${valueOrDash(tick.prayerBoosted)} / ${valueOrDash(tick.prayerReal)}`;
-      const activePrayers = Array.isArray(tick.activePrayerNames) && tick.activePrayerNames.length
-        ? tick.activePrayerNames.join(", ")
-        : "-";
       const frameState = tick.frameExists
         ? "exists"
         : tick.framePending
@@ -1877,29 +2118,29 @@ def html_page() -> bytes:
             : "-";
 
       el.summaryGrid.innerHTML = [
+        metric("tickId", tick.tickId),
         metric("Game state", tick.gameState),
         metric("Position", position),
         metric("HP", hp),
         metric("Prayer", prayer),
         metric("Run", tick.runEnergyPercent),
-        metric("Active prayers", activePrayers),
         metric("Interacting", tick.interactingTarget),
-        metric("Inventory", tick.inventoryCount),
-        metric("Equipment", tick.equipmentCount),
+        metric("Inventory / Equipment", `${valueOrDash(tick.inventoryCount)} / ${valueOrDash(tick.equipmentCount)}`),
         metric("NPCs / players", `${valueOrDash(tick.npcCount)} / ${valueOrDash(tick.playerCount)}`),
-        metric("Scene / ground", `${valueOrDash(tick.sceneObjectsCount)} / ${valueOrDash(tick.groundItemsCount)}`),
-        metric("Widgets", tick.widgetCount),
-        metric("Frame state", frameState),
-        metric("Capture source", tick.frameCaptureSource),
-        metric("Capture status", tick.frameCaptureStatus),
-        metric("Frame index", frameIndexState(tick)),
-        metric("Frame lifecycle", frameLifecycle(tick)),
-        metric("Frame index status", tick.frameIndexStatus),
+        metric("Frame state", frameState)
+      ].join("");
+
+      el.frameTimingGrid.innerHTML = [
+        metric("Requested", stateFlag(tick.frameRequested)),
+        metric("Captured", stateFlag(tick.frameCaptured)),
+        metric("Queued", stateFlag(tick.frameQueued)),
+        metric("Written", stateFlag(tick.frameWritten)),
         metric("Write delay", formatMs(tick.frameWriteDelayMs)),
         metric("Total latency", formatMs(tick.frameTotalLatencyMs)),
         metric("Capture latency", formatMs(tick.frameCaptureLatencyMs)),
         metric("Queue latency", formatMs(tick.frameQueueLatencyMs)),
-        metric("Capture errors", tick.captureErrorCount)
+        metric("Frame index status", tick.frameIndexStatus),
+        metric("Lifecycle", frameLifecycle(tick))
       ].join("");
     }
 
@@ -1919,12 +2160,26 @@ def html_page() -> bytes:
         return;
       }
 
-      el.eventsList.innerHTML = events.map((event) => `
+      el.eventsList.innerHTML = events.map((event) => {
+        const category = event.category || "";
+        const typeKind = eventTypeToBadgeKind(event.eventType) || category;
+        const jumpButton = event.tickId === null || event.tickId === undefined
+          ? ""
+          : `<button type="button" data-tick-id="${escapeHtml(event.tickId)}">Jump</button>`;
+
+        return `
         <div class="event-row">
-          <div><span class="event-type">${valueOrDash(event.eventType)}</span> ${valueOrDash(event.summary)}</div>
+          <div class="event-heading">
+            <div>
+              ${badge(event.eventType, typeKind)} ${category ? badge(category, category) : ""}
+              <div>${escapeHtml(event.summary)}</div>
+            </div>
+            ${jumpButton}
+          </div>
           <div class="event-meta">tick ${valueOrDash(event.tickId)} - ${valueOrDash(event.category)} - ${valueOrDash(event.timestampUtc)}</div>
         </div>
-      `).join("");
+      `;
+      }).join("");
     }
 
     function setFrame(tick) {
@@ -1972,6 +2227,7 @@ def html_page() -> bytes:
         state.rawTick = rawTick;
         state.currentEvents = eventPayload.events || [];
         el.rawJson.textContent = JSON.stringify(rawTick, null, 2);
+        el.rawEventsJson.textContent = JSON.stringify(state.currentEvents, null, 2);
         renderEvents();
       } catch (error) {
         setWarning(error.message);
@@ -2013,8 +2269,8 @@ def html_page() -> bytes:
 
     function toggleFrameFit() {
       state.frameFit = state.frameFit === "contain" ? "actual" : "contain";
-      el.fitToggle.textContent = state.frameFit === "contain" ? "Fit: contain" : "Fit: actual width";
-      el.frameImage.classList.toggle("actual-width", state.frameFit === "actual");
+      applyFrameFit();
+      saveUiPrefs();
     }
 
     function isTextInput(target) {
@@ -2025,6 +2281,8 @@ def html_page() -> bytes:
 
     async function init() {
       try {
+        applyUiPrefs();
+
         const [
           session,
           ticks,
@@ -2102,6 +2360,7 @@ def html_page() -> bytes:
     el.analysisCombat.addEventListener("click", handleAnalysisJump);
     el.analysisInventory.addEventListener("click", handleAnalysisJump);
     el.analysisUi.addEventListener("click", handleAnalysisJump);
+    el.eventsList.addEventListener("click", handleAnalysisJump);
     el.analysisEventSearch.addEventListener("input", updateAnalysisFilters);
     el.analysisOnlyEvents.addEventListener("change", updateAnalysisFilters);
     el.analysisOnlyIssues.addEventListener("change", updateAnalysisFilters);
@@ -2110,9 +2369,15 @@ def html_page() -> bytes:
       input.addEventListener("change", updateAnalysisFilters);
     }
 
+    for (const button of el.tabButtons) {
+      button.addEventListener("click", () => showSideTab(button.dataset.sideTab));
+    }
+
+    el.rawTickDetails.addEventListener("toggle", saveRawSectionPrefs);
+    el.rawEventsDetails.addEventListener("toggle", saveRawSectionPrefs);
     el.eventFilter.addEventListener("input", renderEvents);
     document.addEventListener("keydown", (event) => {
-      if (isTextInput(event.target)) {
+      if (isTextInput(event.target) || event.ctrlKey || event.metaKey || event.altKey) {
         return;
       }
 
@@ -2130,6 +2395,14 @@ def html_page() -> bytes:
         } else {
           startPlayback();
         }
+      } else if (event.key.toLowerCase() === "s") {
+        showSideTab("state");
+      } else if (event.key.toLowerCase() === "a") {
+        showSideTab("analysis");
+      } else if (event.key.toLowerCase() === "e") {
+        showSideTab("events");
+      } else if (event.key.toLowerCase() === "r") {
+        showSideTab("raw");
       }
     });
 
