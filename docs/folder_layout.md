@@ -12,7 +12,6 @@ canonical current writer output:
 ```text
 sessions\<session_id>\
   manifest.json
-  frame_index.jsonl
   ticks\
     ticks-000001.jsonl
     ticks-000002.jsonl
@@ -20,6 +19,7 @@ sessions\<session_id>\
     events-000001.jsonl
     events-000002.jsonl
   frames\
+    frame_index.jsonl
     frame-tick-00000001.jpg
     frame-tick-00000002.jpg
     frame-tick-00000003.jpg
@@ -49,7 +49,9 @@ Tools support both layouts. New writer output remains segmented; the flat files
 are a read-only compatibility fallback.
 
 Frame files are optional side data referenced by tick records. A tick remains
-valid if its referenced frame has been deleted by retention cleanup.
+valid if its referenced frame has been deleted by retention cleanup. Current
+sessions write frame lifecycle diagnostics to `frames\frame_index.jsonl`; tools
+also tolerate older sessions without this file.
 
 ## Rolling Segments
 
@@ -95,26 +97,37 @@ reading the new one.
 
 ## Frame Index
 
-`frame_index.jsonl` is a session-local diagnostic sidecar for frame timing. It
-contains one JSON record for each requested frame once the request reaches a
-terminal collector state such as `WRITTEN`, `DROPPED_QUEUE_FULL`,
-`CAPTURE_FAILED`, `WRITE_FAILED`, or `WRITE_REJECTED`.
+`frames\frame_index.jsonl` is a session-local, line-oriented JSONL diagnostic
+sidecar for frame lifecycle and timing. Each line is one JSON object. Records
+may describe requested, written, dropped, failed, deleted, or expired frame
+states. Normal deleted/expired frame records are informational and do not make
+the tick telemetry invalid.
 
 Common fields:
 
+- `eventType`: lifecycle event label when present, such as `FrameRequested`,
+  `FrameWritten`, `FrameDropped`, `FrameDeleted`, or `FrameFailed`.
 - `tickId`: tick associated with the frame request.
 - `framePath`: session-relative frame path when one was assigned.
 - `captureSource`: `RUNELITE_ONLY` or `SCREEN_RECTANGLE`.
-- `status`: terminal frame diagnostic status.
-- `requestedAtUtc`, `capturedAtUtc`, `enqueuedAtUtc`, `writtenAtUtc`: UTC timing
-  checkpoints when available.
+- `status`: frame diagnostic status when present.
+- `requestedAtUtc`, `capturedAtUtc`, `enqueuedAtUtc`, `writtenAtUtc`,
+  `deletedAtUtc`: UTC lifecycle checkpoints when available.
 - `captureLatencyMs`: time from frame request to captured image.
 - `queueLatencyMs`: time from writer enqueue to written file.
 - `writeLatencyMs`: image encode/write duration measured by the writer.
-- `totalLatencyMs`: time from frame request to written file.
-- `width`, `height`, `sizeBytes`: written or dropped frame dimensions and file
-  size when available.
-- `error`: diagnostic message for failed/rejected states.
+- `writeDelayMs` or `frameWriteDelayMs`: request-to-write delay when available.
+- `totalLatencyMs` or `frameTotalLatencyMs`: request-to-terminal latency when
+  available.
+- `width`, `height`, `bytes` or `sizeBytes`: written or dropped frame dimensions
+  and file size when available.
+- `error` or `reason`: diagnostic detail for failed, rejected, dropped, or
+  deleted states.
+
+Shared Python tools normalize frame-index records into fields such as
+`frameWritten`, `frameWriteDelayMs`, `frameTotalLatencyMs`,
+`frameCaptureLatencyMs`, `frameQueueLatencyMs`, `frameIndexStatus`, and
+`latestFrameIndexEvent`.
 
 ## Dictionaries
 
@@ -179,6 +192,12 @@ file after the write completes. Consumers can poll these files without parsing
 the full session stream. The cache is derived from telemetry files only; it does
 not interact with RuneLite.
 
+When `frames\frame_index.jsonl` is available, `latest_state.py` includes the
+latest frame timing fields in `latest_tick.json` and `latest_status.json`:
+`frameWritten`, `frameWriteDelayMs`, `frameTotalLatencyMs`,
+`frameCaptureLatencyMs`, `frameQueueLatencyMs`, `frameIndexStatus`, and
+`latestFrameIndexEvent`.
+
 Legacy flat sessions are readable by the general tools, but `latest_state.py`
 follows newest active sessions and may not consider a legacy session active
 unless manifest/active metadata exists.
@@ -197,4 +216,12 @@ exports\
 ```
 
 These files are derived outputs and can be regenerated from the source session
-records.
+records. `frame_index_summary.jsonl` mirrors normalized frame lifecycle records.
+`session_index.json` includes frame-index counts and timing statistics, and
+`tick_summary.jsonl` includes frame timing and frame-index status joined by
+`tickId` when available.
+
+`telemetry-viewer\validate_session.py` reports frame-index requested, written,
+dropped, failed, and deleted counts clearly. Dropped or failed frame counts are
+diagnostic; normal expired/deleted frame records are not validation-fatal by
+themselves.

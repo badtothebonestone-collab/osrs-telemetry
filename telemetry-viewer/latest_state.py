@@ -7,11 +7,16 @@ from pathlib import Path
 
 from telemetry_paths import (
     classify_frame_state,
+    frame_index_by_tick,
+    frame_timing_fields,
     find_newest_session,
     get_sessions_dir,
     iter_jsonl,
     list_event_files,
+    list_frame_index_files,
     list_tick_files,
+    load_frame_index_summaries,
+    summarize_frame_index_record,
 )
 
 MAX_EVENTS = 50
@@ -64,6 +69,10 @@ def event_files(session: Path) -> list[Path]:
     return list_event_files(session)
 
 
+def frame_index_files(session: Path) -> list[Path]:
+    return list_frame_index_files(session)
+
+
 def iter_existing_records(files: list[Path]):
     yield from iter_jsonl(files)
 
@@ -76,7 +85,12 @@ def frame_state(session: Path, tick: dict) -> dict:
     return classify_frame_state(session, tick, is_latest=True, active_session=True)
 
 
-def summarize_status(session: Path, tick: dict) -> dict:
+def summarize_status(
+    session: Path,
+    tick: dict,
+    frame_index: dict | None = None,
+    latest_frame_index_event: dict | None = None,
+) -> dict:
     local_player = tick.get("localPlayer") or {}
     status = tick.get("status") or {}
     active_prayers = [
@@ -101,8 +115,9 @@ def summarize_status(session: Path, tick: dict) -> dict:
         interacting = None
 
     frame = frame_state(session, tick)
+    timing = frame_timing_fields(frame_index)
 
-    return {
+    status_summary = {
         "tickId": tick.get("tickId"),
         "timestampUtc": tick.get("timestampUtc"),
         "gameState": tick.get("gameState"),
@@ -137,6 +152,16 @@ def summarize_status(session: Path, tick: dict) -> dict:
         "frameCaptureWarning": frame["frameCaptureWarning"],
         "captureErrorCount": len(tick.get("captureErrors") or []),
     }
+    status_summary.update({
+        "frameWritten": timing["frameWritten"],
+        "frameWriteDelayMs": timing["frameWriteDelayMs"],
+        "frameTotalLatencyMs": timing["frameTotalLatencyMs"],
+        "frameCaptureLatencyMs": timing["frameCaptureLatencyMs"],
+        "frameQueueLatencyMs": timing["frameQueueLatencyMs"],
+        "frameIndexStatus": timing["frameIndexStatus"],
+        "latestFrameIndexEvent": latest_frame_index_event or timing["latestFrameIndexEvent"],
+    })
+    return status_summary
 
 
 def actor_summary(actor: dict) -> str:
@@ -242,14 +267,28 @@ def latest_events_file(session: Path) -> Path:
     return latest_dir(session) / "latest_events.json"
 
 
-def write_latest_tick(session: Path, tick: dict):
+def write_latest_tick(
+    session: Path,
+    tick: dict,
+    frame_index_lookup: dict | None = None,
+    latest_frame_index_event: dict | None = None,
+):
     frame = frame_state(session, tick)
+    frame_index = (frame_index_lookup or {}).get(tick.get("tickId"))
+    timing = frame_timing_fields(frame_index)
     latest_tick = dict(tick)
     latest_tick["frameExists"] = frame["frameExists"]
     latest_tick["framePending"] = frame["framePending"]
     latest_tick["frameExpiredOrMissing"] = frame["frameExpiredOrMissing"]
+    latest_tick["frameWritten"] = timing["frameWritten"]
+    latest_tick["frameWriteDelayMs"] = timing["frameWriteDelayMs"]
+    latest_tick["frameTotalLatencyMs"] = timing["frameTotalLatencyMs"]
+    latest_tick["frameCaptureLatencyMs"] = timing["frameCaptureLatencyMs"]
+    latest_tick["frameQueueLatencyMs"] = timing["frameQueueLatencyMs"]
+    latest_tick["frameIndexStatus"] = timing["frameIndexStatus"]
+    latest_tick["latestFrameIndexEvent"] = latest_frame_index_event or timing["latestFrameIndexEvent"]
     atomic_write_json(latest_tick_file(session), latest_tick)
-    status = summarize_status(session, tick)
+    status = summarize_status(session, tick, frame_index, latest_frame_index_event)
     atomic_write_json(latest_status_file(session), status)
     print(
         f"tick={status.get('tickId')} state={status.get('gameState')} "
@@ -258,6 +297,8 @@ def write_latest_tick(session: Path, tick: dict):
         f"prayer={status['prayer'].get('boosted')}/{status['prayer'].get('real')} "
         f"frame={status.get('framePath') or status.get('frameCaptureStatus')} "
         f"source={status.get('frameCaptureSource')} "
+        f"frameIndex={status.get('frameIndexStatus')} "
+        f"writeDelayMs={status.get('frameWriteDelayMs')} "
         f"events->{latest_events_file(session)}",
         flush=True,
     )
@@ -267,9 +308,12 @@ def write_latest_events(session: Path, events: deque):
     atomic_write_json(latest_events_file(session), {"events": list(events)})
 
 
-def seed_latest(session: Path) -> tuple[Path | None, Path | None, deque]:
+def seed_latest(session: Path) -> tuple[Path | None, Path | None, Path | None, deque, dict, dict | None, dict | None]:
     latest_tick = None
     recent_events = deque(maxlen=MAX_EVENTS)
+    frame_index_summaries = load_frame_index_summaries(session)
+    frame_lookup = frame_index_by_tick(frame_index_summaries)
+    latest_frame_index_event = frame_index_summaries[-1] if frame_index_summaries else None
 
     for _, tick in iter_existing_records(tick_files(session)):
         latest_tick = tick
@@ -278,14 +322,30 @@ def seed_latest(session: Path) -> tuple[Path | None, Path | None, deque]:
         recent_events.append(summarize_event(event))
 
     if latest_tick is not None:
-        write_latest_tick(session, latest_tick)
+        write_latest_tick(session, latest_tick, frame_lookup, latest_frame_index_event)
 
     write_latest_events(session, recent_events)
-    return newest_file(tick_files(session)), newest_file(event_files(session)), recent_events
+    return (
+        newest_file(tick_files(session)),
+        newest_file(event_files(session)),
+        newest_file(frame_index_files(session)),
+        recent_events,
+        frame_lookup,
+        latest_frame_index_event,
+        latest_tick,
+    )
 
 
 def follow_session(session: Path):
-    tick_file_path, event_file_path, recent_events = seed_latest(session)
+    (
+        tick_file_path,
+        event_file_path,
+        frame_index_file_path,
+        recent_events,
+        frame_index_lookup,
+        latest_frame_index_event,
+        latest_tick,
+    ) = seed_latest(session)
 
     if tick_file_path is None and event_file_path is None:
         print(f"No tick or event files found in active session: {session}")
@@ -293,6 +353,7 @@ def follow_session(session: Path):
 
     tick_file = open_at_end(tick_file_path) if tick_file_path else None
     event_file = open_at_end(event_file_path) if event_file_path else None
+    frame_index_file = open_at_end(frame_index_file_path) if frame_index_file_path else None
     print(f"Following active session: {session}", flush=True)
 
     try:
@@ -304,7 +365,8 @@ def follow_session(session: Path):
 
                 if line:
                     try:
-                        write_latest_tick(session, json.loads(line))
+                        latest_tick = json.loads(line)
+                        write_latest_tick(session, latest_tick, frame_index_lookup, latest_frame_index_event)
                         updated = True
                     except json.JSONDecodeError:
                         pass
@@ -317,6 +379,27 @@ def follow_session(session: Path):
                         recent_events.append(summarize_event(json.loads(line)))
                         write_latest_events(session, recent_events)
                         updated = True
+                    except json.JSONDecodeError:
+                        pass
+
+            if frame_index_file is not None:
+                line = frame_index_file.readline()
+
+                if line:
+                    try:
+                        record = json.loads(line)
+
+                        if isinstance(record, dict):
+                            latest_frame_index_event = summarize_frame_index_record(frame_index_file_path, record)
+                            tick_id = latest_frame_index_event.get("tickId")
+
+                            if tick_id is not None:
+                                frame_index_lookup[tick_id] = latest_frame_index_event
+
+                            if latest_tick is not None:
+                                write_latest_tick(session, latest_tick, frame_index_lookup, latest_frame_index_event)
+
+                            updated = True
                     except json.JSONDecodeError:
                         pass
 
@@ -338,6 +421,15 @@ def follow_session(session: Path):
                 event_file = event_file_path.open("r", encoding="utf-8")
                 print(f"Switched to event segment: {event_file_path.name}", flush=True)
 
+            latest_frame_index_file = newest_file(frame_index_files(session))
+
+            if latest_frame_index_file is not None and latest_frame_index_file != frame_index_file_path:
+                if frame_index_file is not None:
+                    frame_index_file.close()
+                frame_index_file_path = latest_frame_index_file
+                frame_index_file = frame_index_file_path.open("r", encoding="utf-8")
+                print(f"Switched to frame index: {frame_index_file_path.name}", flush=True)
+
             if not updated:
                 time.sleep(0.25)
     finally:
@@ -345,6 +437,8 @@ def follow_session(session: Path):
             tick_file.close()
         if event_file is not None:
             event_file.close()
+        if frame_index_file is not None:
+            frame_index_file.close()
 
 
 def parse_args():

@@ -14,12 +14,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from telemetry_paths import (  # noqa: E402
     classify_frame_state,
+    frame_index_by_tick,
+    frame_index_stats,
+    frame_timing_fields,
     find_newest_session,
     get_sessions_dir,
     is_segmented_session,
     iter_jsonl,
     list_event_files,
     list_tick_files,
+    load_frame_index_summaries,
     resolve_frame_path,
     safe_read_json,
     session_size_mb,
@@ -55,6 +59,33 @@ CATEGORY_BY_EVENT_TYPE = {
 }
 
 MAX_INLINE_DICTIONARY_BYTES = 256 * 1024
+RECENT_EXAMPLE_COUNT = 3
+
+
+COMBAT_EVENT_TYPES = {
+    "HitsplatApplied",
+    "ProjectileMoved",
+    "GraphicsObjectCreated",
+    "InteractingChanged",
+    "AnimationChanged",
+    "NpcDeath",
+}
+INVENTORY_EVENT_TYPES = {
+    "ItemContainerChanged",
+    "ItemSpawned",
+    "ItemDespawned",
+    "ItemQuantityChanged",
+    "StatChanged",
+    "AnimationChanged",
+}
+UI_EVENT_TYPES = {
+    "WidgetLoaded",
+    "WidgetClosed",
+    "MenuOpened",
+    "VarbitChanged",
+    "VarClientIntChanged",
+    "VarClientStrChanged",
+}
 
 
 def count_items(items) -> int:
@@ -171,6 +202,317 @@ def summarize_event(source: Path, event: dict) -> dict:
     }
 
 
+def parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def duration_seconds(ticks: list[dict]) -> float | None:
+    if len(ticks) < 2:
+        return None
+
+    first = parse_timestamp(ticks[0].get("timestampUtc"))
+    last = parse_timestamp(ticks[-1].get("timestampUtc"))
+
+    if first is None or last is None:
+        return None
+
+    return max(0.0, (last - first).total_seconds())
+
+
+def percentile(values: list[float | int], fraction: float) -> float | int | None:
+    numeric = sorted(value for value in values if isinstance(value, (int, float)))
+
+    if not numeric:
+        return None
+
+    index = round((len(numeric) - 1) * fraction)
+    return numeric[index]
+
+
+def compact_counts(counter: Counter, limit: int | None = None) -> dict:
+    items = counter.most_common(limit)
+    return {key: value for key, value in items}
+
+
+def compact_event(event: dict) -> dict:
+    return {
+        "tickId": event.get("tickId"),
+        "timestampUtc": event.get("timestampUtc"),
+        "eventType": event.get("eventType"),
+        "category": event.get("category", "unknown"),
+        "summary": event.get("summary"),
+    }
+
+
+def compact_tick(tick: dict, event_counts_by_category: Counter | None = None, important_event_types=None) -> dict:
+    return {
+        "tickId": tick.get("tickId"),
+        "timestampUtc": tick.get("timestampUtc"),
+        "hp": value_pair(tick.get("hpBoosted"), tick.get("hpReal")),
+        "prayer": value_pair(tick.get("prayerBoosted"), tick.get("prayerReal")),
+        "runEnergyPercent": tick.get("runEnergyPercent"),
+        "position": {
+            "worldX": tick.get("worldX"),
+            "worldY": tick.get("worldY"),
+            "plane": tick.get("plane"),
+        },
+        "interactingTarget": tick.get("interactingTarget"),
+        "activePrayerNames": tick.get("activePrayerNames") or [],
+        "inventoryCount": tick.get("inventoryCount"),
+        "equipmentCount": tick.get("equipmentCount"),
+        "eventCountsByCategory": dict(event_counts_by_category or {}),
+        "importantEventTypes": list(important_event_types or []),
+        "frameStatus": tick.get("frameIndexStatus") or tick.get("frameCaptureStatus"),
+        "frameExists": tick.get("frameExists"),
+        "framePending": tick.get("framePending"),
+        "frameExpiredOrMissing": tick.get("frameExpiredOrMissing"),
+        "frameDropped": tick.get("frameDropped"),
+        "frameDeleted": tick.get("frameDeleted"),
+        "frameFailed": tick.get("frameFailed"),
+        "frameWriteDelayMs": tick.get("frameWriteDelayMs"),
+        "frameTotalLatencyMs": tick.get("frameTotalLatencyMs"),
+        "captureErrorCount": tick.get("captureErrorCount", 0),
+    }
+
+
+def value_pair(current, maximum) -> dict:
+    return {"current": current, "max": maximum}
+
+
+def tick_delta(previous: dict | None, current: dict, key: str):
+    if previous is None:
+        return None
+
+    previous_value = previous.get(key)
+    current_value = current.get(key)
+
+    if previous_value == current_value:
+        return None
+
+    return {"from": previous_value, "to": current_value}
+
+
+def prayer_set(tick: dict) -> set:
+    return set(tick.get("activePrayerNames") or [])
+
+
+def count_frame_files(session_path: Path) -> int:
+    frames_dir = session_path / "frames"
+
+    if not frames_dir.exists():
+        return 0
+
+    try:
+        return sum(
+            1
+            for path in frames_dir.iterdir()
+            if path.is_file() and path.name != "frame_index.jsonl"
+        )
+    except OSError:
+        return 0
+
+
+def event_type_breakdown(events: list[dict]) -> dict:
+    breakdown = {}
+
+    for event in events:
+        event_type = event.get("eventType") or "UNKNOWN"
+        entry = breakdown.setdefault(
+            event_type,
+            {
+                "count": 0,
+                "category": event.get("category", "unknown"),
+                "firstTickId": event.get("tickId"),
+                "lastTickId": event.get("tickId"),
+                "firstExamples": [],
+                "recentExamples": [],
+            },
+        )
+        entry["count"] += 1
+        entry["lastTickId"] = event.get("tickId")
+
+        if len(entry["firstExamples"]) < RECENT_EXAMPLE_COUNT:
+            entry["firstExamples"].append(compact_event(event))
+
+        entry["recentExamples"].append(compact_event(event))
+        entry["recentExamples"] = entry["recentExamples"][-RECENT_EXAMPLE_COUNT:]
+
+    return dict(sorted(breakdown.items(), key=lambda item: (-item[1]["count"], item[0])))
+
+
+def grouped_event_breakdown(events: list[dict], key_name: str) -> dict:
+    breakdown = {}
+
+    for event in events:
+        key = event.get(key_name) or "unknown"
+        entry = breakdown.setdefault(
+            key,
+            {
+                "count": 0,
+                "firstTickId": event.get("tickId"),
+                "lastTickId": event.get("tickId"),
+                "firstExamples": [],
+                "recentExamples": [],
+            },
+        )
+        entry["count"] += 1
+        entry["lastTickId"] = event.get("tickId")
+
+        if len(entry["firstExamples"]) < RECENT_EXAMPLE_COUNT:
+            entry["firstExamples"].append(compact_event(event))
+
+        entry["recentExamples"].append(compact_event(event))
+        entry["recentExamples"] = entry["recentExamples"][-RECENT_EXAMPLE_COUNT:]
+
+    return dict(sorted(breakdown.items(), key=lambda item: (-item[1]["count"], item[0])))
+
+
+def build_analysis(
+    session_path: Path,
+    tick_summaries: list[dict],
+    events: list[dict],
+    events_by_tick: dict,
+    frame_index_summary: dict,
+) -> dict:
+    event_type_counts = Counter(event.get("eventType") or "UNKNOWN" for event in events)
+    category_counts = Counter(event.get("category") or "unknown" for event in events)
+    capture_error_count = sum(tick.get("captureErrorCount", 0) for tick in tick_summaries)
+    frame_write_delays = [
+        tick["frameWriteDelayMs"]
+        for tick in tick_summaries
+        if isinstance(tick.get("frameWriteDelayMs"), (int, float))
+    ]
+    timeline = []
+    combat_timeline = []
+    inventory_timeline = []
+    ui_timeline = []
+    hp_prayer_changes = []
+    active_prayer_changes = []
+    inventory_count_changes = []
+    previous_tick = None
+
+    for tick in tick_summaries:
+        tick_id = tick.get("tickId")
+        tick_events = events_by_tick.get(tick_id, [])
+        event_counts_by_category = Counter(event.get("category") or "unknown" for event in tick_events)
+        important_event_types = sorted({event.get("eventType") for event in tick_events if event.get("eventType")})
+        row = compact_tick(tick, event_counts_by_category, important_event_types)
+        timeline.append(row)
+
+        hp_delta = tick_delta(previous_tick, tick, "hpBoosted")
+        prayer_delta = tick_delta(previous_tick, tick, "prayerBoosted")
+        inventory_delta = tick_delta(previous_tick, tick, "inventoryCount")
+
+        if hp_delta or prayer_delta:
+            hp_prayer_changes.append({
+                "tickId": tick_id,
+                "timestampUtc": tick.get("timestampUtc"),
+                "hp": hp_delta,
+                "prayer": prayer_delta,
+            })
+
+        if previous_tick is not None and prayer_set(previous_tick) != prayer_set(tick):
+            previous_prayers = prayer_set(previous_tick)
+            current_prayers = prayer_set(tick)
+            active_prayer_changes.append({
+                "tickId": tick_id,
+                "timestampUtc": tick.get("timestampUtc"),
+                "activated": sorted(current_prayers - previous_prayers),
+                "deactivated": sorted(previous_prayers - current_prayers),
+                "active": sorted(current_prayers),
+            })
+
+        if inventory_delta:
+            inventory_count_changes.append({
+                "tickId": tick_id,
+                "timestampUtc": tick.get("timestampUtc"),
+                "inventoryCount": inventory_delta,
+            })
+
+        combat_events = [event for event in tick_events if event.get("eventType") in COMBAT_EVENT_TYPES]
+        inventory_events = [event for event in tick_events if event.get("eventType") in INVENTORY_EVENT_TYPES]
+        ui_events = [event for event in tick_events if event.get("eventType") in UI_EVENT_TYPES]
+
+        if combat_events or hp_delta or prayer_delta or (active_prayer_changes and active_prayer_changes[-1].get("tickId") == tick_id):
+            combat_timeline.append({
+                **row,
+                "events": [compact_event(event) for event in combat_events],
+                "hpChange": hp_delta,
+                "prayerChange": prayer_delta,
+                "activePrayerChange": active_prayer_changes[-1] if active_prayer_changes and active_prayer_changes[-1].get("tickId") == tick_id else None,
+            })
+
+        if inventory_events or inventory_delta:
+            inventory_timeline.append({
+                **row,
+                "events": [compact_event(event) for event in inventory_events],
+                "inventoryCountChange": inventory_delta,
+            })
+
+        if ui_events:
+            ui_timeline.append({
+                **row,
+                "events": [compact_event(event) for event in ui_events],
+            })
+
+        previous_tick = tick
+
+    event_breakdown = event_type_breakdown(events)
+    ui_counts = Counter(event.get("eventType") or "UNKNOWN" for event in events if event.get("eventType") in UI_EVENT_TYPES)
+
+    return {
+        "summary": {
+            "tickCount": len(tick_summaries),
+            "eventCount": len(events),
+            "durationEstimateSeconds": duration_seconds(tick_summaries),
+            "firstTickId": tick_summaries[0].get("tickId") if tick_summaries else None,
+            "lastTickId": tick_summaries[-1].get("tickId") if tick_summaries else None,
+            "frameCount": count_frame_files(session_path),
+            "frameIndexCount": frame_index_summary.get("totalRecords", 0),
+            "frameWrittenCount": frame_index_summary.get("FrameWritten", 0),
+            "frameDroppedCount": frame_index_summary.get("FrameDropped", 0),
+            "frameDeletedCount": frame_index_summary.get("FrameDeleted", 0),
+            "avgFrameWriteDelayMs": frame_index_summary.get("avgWriteDelayMs"),
+            "p95FrameWriteDelayMs": percentile(frame_write_delays, 0.95),
+            "maxFrameWriteDelayMs": frame_index_summary.get("maxWriteDelayMs"),
+            "captureErrorCount": capture_error_count,
+            "topEventTypes": compact_counts(event_type_counts, 20),
+            "topEventCategories": compact_counts(category_counts, 20),
+        },
+        "timeline": timeline,
+        "events": {
+            "eventTypeCounts": compact_counts(event_type_counts),
+            "categoryCounts": compact_counts(category_counts),
+            "eventTypes": event_breakdown,
+            "categories": grouped_event_breakdown(events, "category"),
+        },
+        "combat": {
+            "eventTypes": {event_type: event_breakdown.get(event_type, {"count": 0}) for event_type in sorted(COMBAT_EVENT_TYPES)},
+            "timeline": combat_timeline,
+            "hpPrayerChanges": hp_prayer_changes,
+            "activePrayerChanges": active_prayer_changes,
+        },
+        "inventory": {
+            "eventTypes": {event_type: event_breakdown.get(event_type, {"count": 0}) for event_type in sorted(INVENTORY_EVENT_TYPES)},
+            "timeline": inventory_timeline,
+            "inventoryCountChanges": inventory_count_changes,
+            "statChanges": [compact_event(event) for event in events if event.get("eventType") == "StatChanged"],
+        },
+        "ui": {
+            "eventTypeCounts": compact_counts(ui_counts),
+            "eventTypes": {event_type: event_breakdown.get(event_type, {"count": 0}) for event_type in sorted(UI_EVENT_TYPES)},
+            "timeline": ui_timeline,
+            "jumpTicks": sorted({event.get("tickId") for event in events if event.get("eventType") in UI_EVENT_TYPES and event.get("tickId") is not None}),
+        },
+    }
+
+
 def summarize_tick(
     session_path: Path,
     source: Path,
@@ -178,6 +520,8 @@ def summarize_tick(
     *,
     is_latest: bool,
     active_session: bool,
+    frame_index: dict | None = None,
+    frame_index_available: bool = False,
 ) -> dict:
     local_player = tick.get("localPlayer") or {}
     status = tick.get("status") or {}
@@ -192,6 +536,11 @@ def summarize_tick(
         is_latest=is_latest,
         active_session=active_session,
     )
+    frame_timing = frame_timing_fields(frame_index)
+    frame_index_event_type = frame_index.get("eventType") if frame_index else None
+    frame_dropped = frame_index_event_type == "FrameDropped"
+    frame_deleted = frame_index_event_type == "FrameDeleted"
+    frame_failed = frame_index_event_type == "FrameFailed"
 
     return {
         "tickId": tick.get("tickId"),
@@ -220,6 +569,21 @@ def summarize_tick(
         "frameExpiredOrMissing": frame["frameExpiredOrMissing"],
         "frameCaptureStatus": frame["frameCaptureStatus"],
         "frameCaptureSource": frame["frameCaptureSource"],
+        "frameIndexAvailable": frame_index_available,
+        "frameIndexEventType": frame_index_event_type,
+        "frameIndexStatus": frame_timing["frameIndexStatus"],
+        "frameRequested": frame_timing["frameRequested"],
+        "frameCaptured": frame_timing["frameCaptured"],
+        "frameQueued": frame_timing["frameQueued"],
+        "frameWritten": frame_timing["frameWritten"],
+        "frameDropped": frame_dropped,
+        "frameDeleted": frame_deleted,
+        "frameFailed": frame_failed,
+        "frameWriteDelayMs": frame_timing["frameWriteDelayMs"],
+        "frameTotalLatencyMs": frame_timing["frameTotalLatencyMs"],
+        "frameCaptureLatencyMs": frame_timing["frameCaptureLatencyMs"],
+        "frameQueueLatencyMs": frame_timing["frameQueueLatencyMs"],
+        "latestFrameIndexEvent": frame_index,
         "captureErrorCount": len(tick.get("captureErrors") or []),
         "source": str(source),
     }
@@ -269,6 +633,10 @@ def load_replay(session_path: Path) -> dict:
     manifest = manifest if isinstance(manifest, dict) else None
     tick_files = list_tick_files(session_path)
     event_files = list_event_files(session_path)
+    frame_index_summaries = load_frame_index_summaries(session_path)
+    frame_index_lookup = frame_index_by_tick(frame_index_summaries)
+    frame_index_summary = frame_index_stats(frame_index_summaries)
+    frame_index_available = bool(frame_index_summaries)
     raw_ticks = []
     raw_tick_by_id = {}
     tick_summaries = []
@@ -296,6 +664,8 @@ def load_replay(session_path: Path) -> dict:
             tick,
             is_latest=tick is latest_tick,
             active_session=active_session,
+            frame_index=frame_index_lookup.get(tick.get("tickId")),
+            frame_index_available=frame_index_available,
         )
         tick_summaries.append(summary)
 
@@ -316,6 +686,13 @@ def load_replay(session_path: Path) -> dict:
 
     first_tick_id = tick_summaries[0].get("tickId") if tick_summaries else None
     last_tick_id = tick_summaries[-1].get("tickId") if tick_summaries else None
+    analysis = build_analysis(
+        session_path,
+        tick_summaries,
+        events,
+        events_by_tick,
+        frame_index_summary,
+    )
 
     return {
         "sessionPath": session_path,
@@ -323,11 +700,14 @@ def load_replay(session_path: Path) -> dict:
         "layout": "segmented" if is_segmented_session(session_path) else "legacy-flat",
         "tickFiles": tick_files,
         "eventFiles": event_files,
+        "frameIndexSummary": frame_index_summary,
         "rawTickById": raw_tick_by_id,
+        "frameIndexByTick": {str(key): value for key, value in frame_index_lookup.items()},
         "tickSummaries": tick_summaries,
         "events": events,
         "eventsByTick": events_by_tick,
         "eventTypeCounts": dict(event_type_counts.most_common(20)),
+        "analysis": analysis,
         "dictionaries": load_dictionaries(session_path),
         "loadedAtUtc": datetime.now(timezone.utc).isoformat(),
         "firstTickId": first_tick_id,
@@ -551,6 +931,13 @@ def html_page() -> bytes:
       max-height: 34vh;
     }
 
+    .section.analysis-section {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      max-height: 44vh;
+    }
+
     .section.raw-section {
       overflow: visible;
     }
@@ -594,6 +981,192 @@ def html_page() -> bytes:
 
     .metric strong {
       overflow-wrap: anywhere;
+    }
+
+    .analysis-body {
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+      min-height: 0;
+      overflow: hidden;
+      padding: 0.75rem;
+    }
+
+    .analysis-cards {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.45rem;
+    }
+
+    .analysis-card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0.45rem;
+      min-width: 0;
+      background: #fbfcfa;
+    }
+
+    .analysis-card span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.72rem;
+    }
+
+    .analysis-card strong {
+      display: block;
+      font-size: 0.92rem;
+      overflow-wrap: anywhere;
+    }
+
+    .analysis-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      min-width: 0;
+    }
+
+    .analysis-filter-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem 0.55rem;
+      align-items: center;
+      min-width: 0;
+      font-size: 0.78rem;
+    }
+
+    .analysis-filter-row label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      white-space: nowrap;
+    }
+
+    #analysisEventSearch {
+      width: 100%;
+      font-size: 0.82rem;
+      padding: 0.35rem 0.45rem;
+    }
+
+    .analysis-table-wrap,
+    .analysis-quick-grid {
+      min-height: 0;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+
+    .analysis-table-wrap {
+      max-height: 18vh;
+    }
+
+    .analysis-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.78rem;
+    }
+
+    .analysis-table th,
+    .analysis-table td {
+      border-bottom: 1px solid #edf0eb;
+      padding: 0.35rem 0.4rem;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .analysis-table th {
+      position: sticky;
+      top: 0;
+      background: var(--panel);
+      z-index: 1;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .analysis-row {
+      cursor: pointer;
+    }
+
+    .analysis-row:hover {
+      background: #f5f8f4;
+    }
+
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 0.08rem 0.4rem;
+      margin: 0.08rem 0.12rem 0.08rem 0;
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: #f4f5f2;
+      font-size: 0.72rem;
+      white-space: nowrap;
+    }
+
+    .badge.combat {
+      background: #fdecec;
+      border-color: #f1b4b4;
+    }
+
+    .badge.inventory {
+      background: #eef6e8;
+      border-color: #bfdbb3;
+    }
+
+    .badge.ui {
+      background: #eef2fb;
+      border-color: #b9c7ed;
+    }
+
+    .badge.var {
+      background: #f5eefb;
+      border-color: #d4bbe8;
+    }
+
+    .badge.frame {
+      background: #ecf7f7;
+      border-color: #a9d5d7;
+    }
+
+    .badge.error {
+      background: #fff1df;
+      border-color: #edc184;
+    }
+
+    .analysis-quick-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.5rem;
+      max-height: 16vh;
+      padding: 0.5rem;
+    }
+
+    .analysis-quick-panel {
+      min-width: 0;
+    }
+
+    .analysis-quick-panel h3 {
+      margin: 0 0 0.35rem;
+      font-size: 0.82rem;
+    }
+
+    .analysis-jump {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.35rem;
+      padding: 0.25rem 0;
+      border-top: 1px solid #edf0eb;
+      font-size: 0.76rem;
+    }
+
+    .analysis-jump:first-of-type {
+      border-top: 0;
+    }
+
+    .analysis-jump button {
+      padding: 0.2rem 0.35rem;
+      font-size: 0.72rem;
+      flex: 0 0 auto;
     }
 
     .events-head {
@@ -706,6 +1279,14 @@ def html_page() -> bytes:
       footer > * {
         width: 100%;
       }
+
+      .analysis-cards {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .analysis-quick-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -739,6 +1320,58 @@ def html_page() -> bytes:
         <section class="section">
           <h2>Tick Summary</h2>
           <div class="summary-grid" id="summaryGrid"></div>
+        </section>
+
+        <section class="section analysis-section">
+          <h2>Analysis</h2>
+          <div class="analysis-body">
+            <div class="analysis-cards" id="analysisCards"></div>
+            <div class="analysis-controls">
+              <input id="analysisEventSearch" type="search" placeholder="Filter event type">
+              <div class="analysis-filter-row" id="analysisCategories">
+                <label><input type="checkbox" data-analysis-category="combat"> combat</label>
+                <label><input type="checkbox" data-analysis-category="inventory"> inventory</label>
+                <label><input type="checkbox" data-analysis-category="ui"> ui</label>
+                <label><input type="checkbox" data-analysis-category="var"> var</label>
+                <label><input type="checkbox" data-analysis-category="entity"> entity</label>
+                <label><input type="checkbox" data-analysis-category="skills"> skills</label>
+                <label><input type="checkbox" data-analysis-category="world"> world</label>
+                <label><input type="checkbox" data-analysis-category="unknown"> unknown</label>
+              </div>
+              <div class="analysis-filter-row">
+                <label><input id="analysisOnlyEvents" type="checkbox"> only ticks with events</label>
+                <label><input id="analysisOnlyIssues" type="checkbox"> only frame/capture issues</label>
+              </div>
+            </div>
+            <div class="analysis-table-wrap">
+              <table class="analysis-table">
+                <thead>
+                  <tr>
+                    <th>Tick</th>
+                    <th>Vitals</th>
+                    <th>Target</th>
+                    <th>Events</th>
+                    <th>Frame</th>
+                  </tr>
+                </thead>
+                <tbody id="analysisTimeline"></tbody>
+              </table>
+            </div>
+            <div class="analysis-quick-grid">
+              <div class="analysis-quick-panel">
+                <h3>Combat Events</h3>
+                <div id="analysisCombat"></div>
+              </div>
+              <div class="analysis-quick-panel">
+                <h3>Inventory/Skilling Events</h3>
+                <div id="analysisInventory"></div>
+              </div>
+              <div class="analysis-quick-panel">
+                <h3>UI/Menu Events</h3>
+                <div id="analysisUi"></div>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section class="section events-section">
@@ -776,12 +1409,21 @@ def html_page() -> bytes:
   </div>
 
   <script>
+    const ANALYSIS_CATEGORIES = ["combat", "inventory", "ui", "var", "entity", "skills", "world", "unknown"];
+    const ANALYSIS_FILTER_STORAGE_KEY = "osrsTelemetryReplayAnalysisFilters";
+
     const state = {
       session: null,
       ticks: [],
       currentIndex: 0,
       currentEvents: [],
       rawTick: null,
+      analysisSummary: null,
+      analysisTimeline: [],
+      analysisCombat: null,
+      analysisInventory: null,
+      analysisUi: null,
+      analysisFilters: loadAnalysisFilters(),
       playTimer: null,
       frameFit: "contain"
     };
@@ -795,6 +1437,15 @@ def html_page() -> bytes:
       missingFrame: document.getElementById("missingFrame"),
       loadWarning: document.getElementById("loadWarning"),
       summaryGrid: document.getElementById("summaryGrid"),
+      analysisCards: document.getElementById("analysisCards"),
+      analysisEventSearch: document.getElementById("analysisEventSearch"),
+      analysisCategoryInputs: Array.from(document.querySelectorAll("[data-analysis-category]")),
+      analysisOnlyEvents: document.getElementById("analysisOnlyEvents"),
+      analysisOnlyIssues: document.getElementById("analysisOnlyIssues"),
+      analysisTimeline: document.getElementById("analysisTimeline"),
+      analysisCombat: document.getElementById("analysisCombat"),
+      analysisInventory: document.getElementById("analysisInventory"),
+      analysisUi: document.getElementById("analysisUi"),
       eventsList: document.getElementById("eventsList"),
       eventFilter: document.getElementById("eventFilter"),
       rawJson: document.getElementById("rawJson"),
@@ -822,6 +1473,15 @@ def html_page() -> bytes:
       return value === null || value === undefined || value === "" ? "-" : value;
     }
 
+    function escapeHtml(value) {
+      return String(valueOrDash(value))
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
     function setWarning(message) {
       el.loadWarning.textContent = message || "";
       el.loadWarning.style.display = message ? "block" : "none";
@@ -829,6 +1489,376 @@ def html_page() -> bytes:
 
     function metric(label, value) {
       return `<div class="metric"><span>${label}</span><strong>${valueOrDash(value)}</strong></div>`;
+    }
+
+    function formatMs(value) {
+      return value === null || value === undefined ? "-" : `${value} ms`;
+    }
+
+    function formatDuration(seconds) {
+      if (seconds === null || seconds === undefined) {
+        return "-";
+      }
+
+      const total = Math.round(seconds);
+      const minutes = Math.floor(total / 60);
+      const remaining = total % 60;
+
+      return minutes ? `${minutes}m ${remaining}s` : `${remaining}s`;
+    }
+
+    function defaultAnalysisFilters() {
+      return {
+        categories: Object.fromEntries(ANALYSIS_CATEGORIES.map((category) => [category, true])),
+        eventTypeSearch: "",
+        onlyEvents: false,
+        onlyIssues: false
+      };
+    }
+
+    function loadAnalysisFilters() {
+      const defaults = defaultAnalysisFilters();
+
+      try {
+        const stored = JSON.parse(localStorage.getItem(ANALYSIS_FILTER_STORAGE_KEY) || "{}");
+
+        return {
+          ...defaults,
+          ...stored,
+          categories: {
+            ...defaults.categories,
+            ...(stored.categories || {})
+          }
+        };
+      } catch (error) {
+        return defaults;
+      }
+    }
+
+    function saveAnalysisFilters() {
+      try {
+        localStorage.setItem(ANALYSIS_FILTER_STORAGE_KEY, JSON.stringify(state.analysisFilters));
+      } catch (error) {
+        // localStorage can be unavailable in some browser contexts; filtering still works in memory.
+      }
+    }
+
+    function applyAnalysisFilterControls() {
+      const filters = state.analysisFilters;
+      el.analysisEventSearch.value = filters.eventTypeSearch || "";
+      el.analysisOnlyEvents.checked = Boolean(filters.onlyEvents);
+      el.analysisOnlyIssues.checked = Boolean(filters.onlyIssues);
+
+      for (const input of el.analysisCategoryInputs) {
+        input.checked = Boolean(filters.categories?.[input.dataset.analysisCategory]);
+      }
+    }
+
+    function readAnalysisFilterControls() {
+      return {
+        categories: Object.fromEntries(
+          el.analysisCategoryInputs.map((input) => [input.dataset.analysisCategory, input.checked])
+        ),
+        eventTypeSearch: el.analysisEventSearch.value.trim(),
+        onlyEvents: el.analysisOnlyEvents.checked,
+        onlyIssues: el.analysisOnlyIssues.checked
+      };
+    }
+
+    function updateAnalysisFilters() {
+      state.analysisFilters = readAnalysisFilterControls();
+      saveAnalysisFilters();
+      renderAnalysisTimeline();
+    }
+
+    function firstKey(counts) {
+      if (!counts || !Object.keys(counts).length) {
+        return "-";
+      }
+
+      return Object.entries(counts)
+        .sort((left, right) => right[1] - left[1])[0][0];
+    }
+
+    function analysisCard(label, value) {
+      return `<div class="analysis-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+    }
+
+    function badge(label, kind = "") {
+      if (!label) {
+        return "";
+      }
+
+      return `<span class="badge ${kind}">${escapeHtml(label)}</span>`;
+    }
+
+    function categoryBadges(counts) {
+      if (!counts || !Object.keys(counts).length) {
+        return "-";
+      }
+
+      return Object.entries(counts)
+        .map(([category, count]) => badge(`${category}:${count}`, category))
+        .join("");
+    }
+
+    function eventBadges(types) {
+      if (!Array.isArray(types) || !types.length) {
+        return "-";
+      }
+
+      return types.slice(0, 4)
+        .map((eventType) => badge(eventType, eventTypeToBadgeKind(eventType)))
+        .join("");
+    }
+
+    function eventTypeToBadgeKind(eventType) {
+      const mapping = {
+        HitsplatApplied: "combat",
+        ProjectileMoved: "combat",
+        GraphicsObjectCreated: "combat",
+        InteractingChanged: "combat",
+        AnimationChanged: "combat",
+        NpcDeath: "combat",
+        ItemContainerChanged: "inventory",
+        ItemSpawned: "inventory",
+        ItemDespawned: "inventory",
+        ItemQuantityChanged: "inventory",
+        StatChanged: "inventory",
+        WidgetLoaded: "ui",
+        WidgetClosed: "ui",
+        MenuOpened: "ui",
+        VarbitChanged: "var",
+        VarClientIntChanged: "var",
+        VarClientStrChanged: "var"
+      };
+
+      return mapping[eventType] || "";
+    }
+
+    function rowEventCount(row) {
+      return Object.values(row.eventCountsByCategory || {})
+        .reduce((total, count) => total + Number(count || 0), 0);
+    }
+
+    function allAnalysisCategoriesSelected() {
+      return ANALYSIS_CATEGORIES.every((category) => state.analysisFilters.categories?.[category]);
+    }
+
+    function rowMatchesCategoryFilter(row) {
+      const counts = row.eventCountsByCategory || {};
+
+      if (!Object.keys(counts).length) {
+        return allAnalysisCategoriesSelected();
+      }
+
+      return Object.keys(counts).some((category) => state.analysisFilters.categories?.[category]);
+    }
+
+    function rowMatchesEventTypeSearch(row) {
+      const search = (state.analysisFilters.eventTypeSearch || "").toLowerCase();
+
+      if (!search) {
+        return true;
+      }
+
+      return (row.importantEventTypes || [])
+        .some((eventType) => String(eventType || "").toLowerCase().includes(search));
+    }
+
+    function isHighFrameLatency(row) {
+      const p95 = state.analysisSummary?.p95FrameWriteDelayMs;
+
+      if (p95 && row.frameWriteDelayMs >= p95) {
+        return true;
+      }
+
+      return Boolean(row.frameTotalLatencyMs && row.frameTotalLatencyMs >= 1000);
+    }
+
+    function frameIssueLabels(row) {
+      const labels = [];
+
+      if (row.captureErrorCount) {
+        labels.push(`capture errors:${row.captureErrorCount}`);
+      }
+
+      if (row.frameExpiredOrMissing) {
+        labels.push("frame missing/expired");
+      }
+
+      if (row.frameDropped) {
+        labels.push("dropped frame");
+      }
+
+      if (row.frameFailed) {
+        labels.push("frame failed");
+      }
+
+      if (isHighFrameLatency(row)) {
+        labels.push("high frame latency");
+      }
+
+      return labels;
+    }
+
+    function hasFrameOrCaptureIssue(row) {
+      return frameIssueLabels(row).length > 0;
+    }
+
+    function rowMatchesAnalysisFilters(row) {
+      if (state.analysisFilters.onlyEvents && rowEventCount(row) === 0) {
+        return false;
+      }
+
+      if (state.analysisFilters.onlyIssues && !hasFrameOrCaptureIssue(row)) {
+        return false;
+      }
+
+      return rowMatchesCategoryFilter(row) && rowMatchesEventTypeSearch(row);
+    }
+
+    function frameIssueBadges(row) {
+      return frameIssueLabels(row)
+        .map((label) => badge(label, "error"))
+        .join("");
+    }
+
+    function renderAnalysisSummary() {
+      const summary = state.analysisSummary || {};
+      const delay = `${formatMs(summary.avgFrameWriteDelayMs)} / ${formatMs(summary.p95FrameWriteDelayMs)}`;
+      el.analysisCards.innerHTML = [
+        analysisCard("Ticks", summary.tickCount),
+        analysisCard("Events", summary.eventCount),
+        analysisCard("Duration", formatDuration(summary.durationEstimateSeconds)),
+        analysisCard("Frames written", summary.frameWrittenCount),
+        analysisCard("Dropped frames", summary.frameDroppedCount),
+        analysisCard("Capture errors", summary.captureErrorCount),
+        analysisCard("Avg / p95 delay", delay),
+        analysisCard("Top event type", firstKey(summary.topEventTypes))
+      ].join("");
+    }
+
+    function renderAnalysisTimeline() {
+      const rows = (state.analysisTimeline || []).filter(rowMatchesAnalysisFilters);
+
+      if (!rows.length) {
+        el.analysisTimeline.innerHTML = `<tr><td colspan="5">No analysis rows match the current filters.</td></tr>`;
+        return;
+      }
+
+      el.analysisTimeline.innerHTML = rows.map((row) => {
+        const hp = row.hp ? `${valueOrDash(row.hp.current)}/${valueOrDash(row.hp.max)}` : "-";
+        const prayer = row.prayer ? `${valueOrDash(row.prayer.current)}/${valueOrDash(row.prayer.max)}` : "-";
+        const frameBadges = [
+          row.frameStatus ? badge(row.frameStatus, "frame") : "",
+          row.frameWriteDelayMs !== null && row.frameWriteDelayMs !== undefined ? badge(`write ${formatMs(row.frameWriteDelayMs)}`, "frame") : "",
+          row.frameTotalLatencyMs !== null && row.frameTotalLatencyMs !== undefined ? badge(`lat ${formatMs(row.frameTotalLatencyMs)}`, "frame") : "",
+          frameIssueBadges(row)
+        ].join("");
+
+        return `
+          <tr class="analysis-row" data-tick-id="${escapeHtml(row.tickId)}">
+            <td>${escapeHtml(row.tickId)}</td>
+            <td>HP ${escapeHtml(hp)}<br>Pray ${escapeHtml(prayer)}<br>Run ${escapeHtml(valueOrDash(row.runEnergyPercent))}</td>
+            <td>${escapeHtml(row.interactingTarget)}</td>
+            <td>${categoryBadges(row.eventCountsByCategory)}<br>${eventBadges(row.importantEventTypes)}</td>
+            <td>${frameBadges || "-"}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    function timelineRows(source) {
+      return Array.isArray(source?.timeline) ? source.timeline : [];
+    }
+
+    function renderQuickPanel(container, rows) {
+      const visibleRows = rows.slice(0, 8);
+
+      if (!visibleRows.length) {
+        container.innerHTML = `<div class="event-meta">No matching events.</div>`;
+        return;
+      }
+
+      container.innerHTML = visibleRows.map((row) => {
+        const events = Array.isArray(row.events) && row.events.length
+          ? row.events.map((event) => event.eventType).filter(Boolean).slice(0, 2).join(", ")
+          : row.importantEventTypes?.slice(0, 2).join(", ") || "state change";
+
+        return `
+          <div class="analysis-jump">
+            <span>tick ${escapeHtml(row.tickId)}<br><span class="event-meta">${escapeHtml(events)}</span></span>
+            <button type="button" data-tick-id="${escapeHtml(row.tickId)}">Jump</button>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderAnalysisQuickPanels() {
+      renderQuickPanel(el.analysisCombat, timelineRows(state.analysisCombat));
+      renderQuickPanel(el.analysisInventory, timelineRows(state.analysisInventory));
+      renderQuickPanel(el.analysisUi, timelineRows(state.analysisUi));
+    }
+
+    function renderAnalysis() {
+      renderAnalysisSummary();
+      renderAnalysisTimeline();
+      renderAnalysisQuickPanels();
+    }
+
+    function frameIndexState(tick) {
+      if (!tick.frameIndexAvailable) {
+        return "unavailable";
+      }
+
+      if (!tick.frameRequested) {
+        return "no event";
+      }
+
+      return tick.frameIndexEventType || tick.frameIndexStatus || "indexed";
+    }
+
+    function frameLifecycle(tick) {
+      if (!tick.frameIndexAvailable) {
+        return "unavailable";
+      }
+
+      if (!tick.frameRequested) {
+        return "no event";
+      }
+
+      const states = [];
+
+      if (tick.frameRequested) {
+        states.push("requested");
+      }
+
+      if (tick.frameCaptured) {
+        states.push("captured");
+      }
+
+      if (tick.frameQueued) {
+        states.push("queued");
+      }
+
+      if (tick.frameWritten) {
+        states.push("written");
+      }
+
+      if (tick.frameDropped) {
+        states.push("dropped");
+      }
+
+      if (tick.frameDeleted) {
+        states.push("deleted");
+      }
+
+      if (tick.frameFailed) {
+        states.push("failed");
+      }
+
+      return states.join(" / ");
     }
 
     function renderSummary(tick) {
@@ -862,6 +1892,13 @@ def html_page() -> bytes:
         metric("Frame state", frameState),
         metric("Capture source", tick.frameCaptureSource),
         metric("Capture status", tick.frameCaptureStatus),
+        metric("Frame index", frameIndexState(tick)),
+        metric("Frame lifecycle", frameLifecycle(tick)),
+        metric("Frame index status", tick.frameIndexStatus),
+        metric("Write delay", formatMs(tick.frameWriteDelayMs)),
+        metric("Total latency", formatMs(tick.frameTotalLatencyMs)),
+        metric("Capture latency", formatMs(tick.frameCaptureLatencyMs)),
+        metric("Queue latency", formatMs(tick.frameQueueLatencyMs)),
         metric("Capture errors", tick.captureErrorCount)
       ].join("");
     }
@@ -988,14 +2025,34 @@ def html_page() -> bytes:
 
     async function init() {
       try {
-        const [session, ticks] = await Promise.all([
+        const [
+          session,
+          ticks,
+          analysisSummary,
+          analysisTimeline,
+          analysisCombat,
+          analysisInventory,
+          analysisUi
+        ] = await Promise.all([
           fetchJson("/api/session"),
-          fetchJson("/api/ticks")
+          fetchJson("/api/ticks"),
+          fetchJson("/api/analysis/summary"),
+          fetchJson("/api/analysis/timeline"),
+          fetchJson("/api/analysis/combat"),
+          fetchJson("/api/analysis/inventory"),
+          fetchJson("/api/analysis/ui")
         ]);
         state.session = session;
         state.ticks = ticks;
+        state.analysisSummary = analysisSummary;
+        state.analysisTimeline = analysisTimeline;
+        state.analysisCombat = analysisCombat;
+        state.analysisInventory = analysisInventory;
+        state.analysisUi = analysisUi;
         el.sessionMeta.textContent = `${session.layout || "session"} - ${session.tickCount || 0} ticks - ${session.sessionPath || ""}`;
         el.timeline.max = String(Math.max(0, ticks.length - 1));
+        applyAnalysisFilterControls();
+        renderAnalysis();
 
         if (!ticks.length) {
           setWarning("No ticks found in this session.");
@@ -1007,6 +2064,16 @@ def html_page() -> bytes:
         setWarning(error.message);
         el.sessionMeta.textContent = "Unable to load session";
       }
+    }
+
+    function handleAnalysisJump(event) {
+      const target = event.target.closest("[data-tick-id]");
+
+      if (!target) {
+        return;
+      }
+
+      selectByTickId(target.dataset.tickId);
     }
 
     el.prevTick.addEventListener("click", () => selectIndex(state.currentIndex - 1));
@@ -1031,6 +2098,18 @@ def html_page() -> bytes:
         startPlayback();
       }
     });
+    el.analysisTimeline.addEventListener("click", handleAnalysisJump);
+    el.analysisCombat.addEventListener("click", handleAnalysisJump);
+    el.analysisInventory.addEventListener("click", handleAnalysisJump);
+    el.analysisUi.addEventListener("click", handleAnalysisJump);
+    el.analysisEventSearch.addEventListener("input", updateAnalysisFilters);
+    el.analysisOnlyEvents.addEventListener("change", updateAnalysisFilters);
+    el.analysisOnlyIssues.addEventListener("change", updateAnalysisFilters);
+
+    for (const input of el.analysisCategoryInputs) {
+      input.addEventListener("change", updateAnalysisFilters);
+    }
+
     el.eventFilter.addEventListener("input", renderEvents);
     document.addEventListener("keydown", (event) => {
       if (isTextInput(event.target)) {
@@ -1117,6 +2196,10 @@ class ReplayHandler(BaseHTTPRequestHandler):
             self.send_json(self.replay["dictionaries"])
             return
 
+        if path.startswith("/api/analysis/"):
+            self.handle_analysis(path.removeprefix("/api/analysis/"))
+            return
+
         self.send_missing("Not found")
 
     def handle_session(self):
@@ -1131,6 +2214,8 @@ class ReplayHandler(BaseHTTPRequestHandler):
             "eventCount": len(self.replay["events"]),
             "tickSegmentCount": len(self.replay["tickFiles"]),
             "eventSegmentCount": len(self.replay["eventFiles"]),
+            "frameIndexAvailable": self.replay["frameIndexSummary"].get("totalRecords", 0) > 0,
+            "frameIndexSummary": self.replay["frameIndexSummary"],
             "firstTickId": self.replay["firstTickId"],
             "lastTickId": self.replay["lastTickId"],
             "topEventTypeCounts": self.replay["eventTypeCounts"],
@@ -1185,6 +2270,35 @@ class ReplayHandler(BaseHTTPRequestHandler):
                 "events": events,
             }
         )
+
+    def handle_analysis(self, name: str):
+        analysis = self.replay.get("analysis") or {}
+
+        if name == "summary":
+            self.send_json(analysis.get("summary", {}))
+            return
+
+        if name == "timeline":
+            self.send_json(analysis.get("timeline", []))
+            return
+
+        if name == "events":
+            self.send_json(analysis.get("events", {}))
+            return
+
+        if name == "combat":
+            self.send_json(analysis.get("combat", {}))
+            return
+
+        if name == "inventory":
+            self.send_json(analysis.get("inventory", {}))
+            return
+
+        if name == "ui":
+            self.send_json(analysis.get("ui", {}))
+            return
+
+        self.send_missing(f"Analysis endpoint not found: {name}")
 
     def handle_frame(self, tick_id: str):
         tick = self.replay["rawTickById"].get(tick_id)

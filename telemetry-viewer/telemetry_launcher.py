@@ -20,8 +20,10 @@ from telemetry_paths import (  # noqa: E402
     SESSIONS_DIR_ENV,
     directory_size,
     find_newest_session,
+    frame_index_stats,
     list_event_files,
     list_tick_files,
+    load_frame_index_summaries,
     resolve_frame_path,
     safe_read_json,
     session_size_mb,
@@ -114,14 +116,35 @@ def format_mb(value: float | None) -> str:
     return f"{value:.2f}"
 
 
-def read_latest_jsonl_record(files: list[Path]) -> dict | None:
+def format_ms(value: float | int | None) -> str:
+    if not isinstance(value, (int, float)):
+        return "unavailable"
+
+    return f"{value:.0f} ms"
+
+
+def latest_numeric_summary_value(summaries: list[dict], key: str) -> float | int | None:
+    for summary in reversed(summaries):
+        value = summary.get(key)
+
+        if isinstance(value, (int, float)):
+            return value
+
+    return None
+
+
+def read_latest_jsonl_record_with_source(files: list[Path]) -> tuple[Path | None, dict | None]:
     for file_path in reversed(files):
         record = read_last_json_line(file_path)
 
         if record is not None:
-            return record
+            return file_path, record
 
-    return None
+    return None, None
+
+
+def read_latest_jsonl_record(files: list[Path]) -> dict | None:
+    return read_latest_jsonl_record_with_source(files)[1]
 
 
 def read_last_json_line(file_path: Path) -> dict | None:
@@ -198,6 +221,12 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
         "event_files": "0",
         "frame_files": "0",
         "frames_size": "-",
+        "frame_write_delay": "unavailable",
+        "frame_total_latency": "unavailable",
+        "frame_index_status": "unavailable",
+        "frame_written_count": "0",
+        "frame_dropped_count": "0",
+        "frame_deleted_count": "0",
         "session_size": "-",
         "capture_errors": "-",
         "validation": validation_result,
@@ -224,8 +253,24 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
     active = manifest.get("active") if manifest else None
     tick_files = list_tick_files(session)
     event_files = list_event_files(session)
+    frame_index_summaries = load_frame_index_summaries(session)
     latest_tick = read_latest_jsonl_record(tick_files)
     latest_frame = None
+
+    if frame_index_summaries:
+        frame_stats = frame_index_stats(frame_index_summaries)
+        latest_frame_index = frame_stats.get("latestEvent") or {}
+        frame_index_status = latest_frame_index.get("status") or latest_frame_index.get("eventType")
+        values["frame_write_delay"] = format_ms(
+            latest_numeric_summary_value(frame_index_summaries, "frameWriteDelayMs")
+        )
+        values["frame_total_latency"] = format_ms(
+            latest_numeric_summary_value(frame_index_summaries, "frameTotalLatencyMs")
+        )
+        values["frame_index_status"] = str(frame_index_status or "unknown")
+        values["frame_written_count"] = str(frame_stats["FrameWritten"])
+        values["frame_dropped_count"] = str(frame_stats["FrameDropped"])
+        values["frame_deleted_count"] = str(frame_stats["FrameDeleted"])
 
     if latest_tick:
         latest_frame = resolve_frame_path(session, latest_tick.get("framePath"))
@@ -542,15 +587,23 @@ class LauncherApp(Tk):
             ("tick_files", "Tick files"),
             ("event_files", "Event files"),
             ("frame_files", "Frame files"),
+            ("frame_write_delay", "Latest frame write delay"),
+            ("frame_total_latency", "Latest frame total latency"),
+            ("frame_index_status", "Latest frame index status"),
+            ("frame_written_count", "FrameWritten count"),
+            ("frame_dropped_count", "FrameDropped count"),
+            ("frame_deleted_count", "FrameDeleted count"),
             ("frames_size", "Frames folder size MB"),
             ("session_size", "Session size MB"),
             ("capture_errors", "Capture errors"),
             ("validation", "Last validation result"),
         ]
 
+        split_index = (len(fields) + 1) // 2
+
         for index, (key, label) in enumerate(fields, start=1):
-            column_offset = 0 if index <= 7 else 2
-            row = index if index <= 7 else index - 7
+            column_offset = 0 if index <= split_index else 2
+            row = index if index <= split_index else index - split_index
             self.health_values[key] = StringVar(value="-")
             ttk.Label(health_frame, text=label).grid(
                 row=row,
@@ -567,15 +620,16 @@ class LauncherApp(Tk):
                 pady=2,
             )
 
+        button_row = split_index + 1
         ttk.Button(health_frame, text="Refresh Health", command=self.refresh_health).grid(
-            row=8,
+            row=button_row,
             column=0,
             sticky="w",
             padx=8,
             pady=(6, 8),
         )
         quick_actions = ttk.Frame(health_frame)
-        quick_actions.grid(row=8, column=1, columnspan=3, sticky="ew", padx=8, pady=(6, 8))
+        quick_actions.grid(row=button_row, column=1, columnspan=3, sticky="ew", padx=8, pady=(6, 8))
 
         for index, (label, key) in enumerate((
             ("Open latest frame file", "latest_frame"),

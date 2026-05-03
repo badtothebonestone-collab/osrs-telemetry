@@ -7,10 +7,10 @@ Telemetry sessions use the segmented layout as the canonical writer output:
 ```text
 C:\Users\stone\.osrs-telemetry\sessions\<session_id>\
   manifest.json
-  frame_index.jsonl
   ticks\ticks-*.jsonl
   events\events-*.jsonl
   frames\frame-tick-XXXXXXXX.jpg
+  frames\frame_index.jsonl
   dictionaries\
   latest\
   exports\
@@ -63,7 +63,9 @@ Buttons:
 
 The Telemetry Health panel shows the newest session path, active status, latest
 tick id and age, game state, position, HP/prayer/run, tick/event/frame file
-counts, frame and session sizes, capture errors, and the last validation result.
+counts, latest frame write delay, latest total frame latency, latest frame index
+status, FrameWritten/FrameDropped/FrameDeleted counts, frame and session sizes,
+capture errors, and the last validation result.
 
 Health status colors:
 
@@ -84,6 +86,18 @@ them:
 Safety: the launcher only manages processes it started. It does not perform
 game automation, clicking, input hooks, overlays, menu actions, or client-state
 mutation.
+
+Frame timing diagnostics are written as line-oriented JSONL at
+`frames\frame_index.jsonl`. The tools expose normalized frame timing fields
+where available: `frameWritten`, `frameWriteDelayMs`, `frameTotalLatencyMs`,
+`frameCaptureLatencyMs`, `frameQueueLatencyMs`, `frameIndexStatus`, and
+`latestFrameIndexEvent`. `latest_state.py` writes those fields into the
+generated latest-state cache, `replay_viewer.py` shows them for the selected
+tick, `telemetry_launcher.py` shows the latest timing and lifecycle counts in
+Telemetry Health, and `export_session.py` writes
+`exports\frame_index_summary.jsonl` plus session/tick summary fields.
+`validate_session.py` reports dropped, failed, and deleted frame counts clearly;
+normal expired/deleted frames are not validation failures by themselves.
 
 On Windows, Stop Selected Process and Stop All Started Processes stop the
 launcher-started process tree by PID with `taskkill /T /F`. The launcher does

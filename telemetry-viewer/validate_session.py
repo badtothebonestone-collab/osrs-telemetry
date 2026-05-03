@@ -4,14 +4,17 @@ from collections import Counter
 from pathlib import Path
 
 from telemetry_paths import (
+    FRAME_INDEX_REQUIRED_FIELDS,
     classify_frame_state,
     directory_size,
+    frame_index_stats,
     find_newest_session,
     get_sessions_dir,
+    iter_frame_index_records,
     iter_jsonl,
     list_event_files,
-    list_frame_index_files,
     list_tick_files,
+    summarize_frame_index_record,
     session_size_mb,
 )
 
@@ -22,10 +25,6 @@ def tick_files(session: Path) -> list[Path]:
 
 def event_files(session: Path) -> list[Path]:
     return list_event_files(session)
-
-
-def frame_index_files(session: Path) -> list[Path]:
-    return list_frame_index_files(session)
 
 
 def read_manifest(session: Path) -> tuple[dict | None, list[str]]:
@@ -102,6 +101,7 @@ def missing_fields(record: dict, required_fields: tuple[str, ...]) -> list[str]:
 
 def validate_session(session: Path):
     problems = []
+    warnings = []
     manifest, manifest_problems = read_manifest(session)
     problems.extend(manifest_problems)
 
@@ -146,7 +146,9 @@ def validate_session(session: Path):
     frame_index_count = 0
     frame_index_status_counts = Counter()
     frame_index_source_counts = Counter()
+    frame_index_event_type_counts = Counter()
     frame_index_missing_required = Counter()
+    frame_index_summaries = []
     frame_index_latency_ranges = {
         "captureLatencyMs": [],
         "queueLatencyMs": [],
@@ -207,7 +209,7 @@ def validate_session(session: Path):
             frame_capture_source_counts[frame_source] += 1
 
     if capture_error_count:
-        problems.append(f"captureErrors present: {capture_error_count}")
+        warnings.append(f"captureErrors present: {capture_error_count}")
 
     pending_queued_frames = 0
     expired_or_deleted_frames = 0
@@ -243,17 +245,30 @@ def validate_session(session: Path):
             for field in missing_fields(record, ("schemaVersion", "tickId", "timestampUtc", "eventType")):
                 sampled_event_required_missing[field] += 1
 
-    for file_path, line_number, record, error in iter_jsonl(frame_index_files(session), with_errors=True):
+    if sampled_tick_required_missing:
+        problems.append(f"sampled tick required-field misses: {dict(sampled_tick_required_missing)}")
+
+    if sampled_event_required_missing:
+        problems.append(f"sampled event required-field misses: {dict(sampled_event_required_missing)}")
+
+    for file_path, line_number, record, error in iter_frame_index_records(session, with_errors=True):
         if error is not None:
             json_error_count += 1
             problems.append(f"frame index JSON error in {file_path.name}:{line_number}: {error}")
             continue
 
+        if not isinstance(record, dict):
+            problems.append(f"frame index record is not an object in {file_path.name}:{line_number}")
+            continue
+
         frame_index_count += 1
+        summary = summarize_frame_index_record(file_path, record)
+        frame_index_summaries.append(summary)
+        frame_index_event_type_counts[summary.get("eventType", "FrameIndex")] += 1
         frame_index_status_counts[record.get("status", "MISSING")] += 1
         frame_index_source_counts[record.get("captureSource", "MISSING")] += 1
 
-        for field in missing_fields(record, ("schemaVersion", "tickId", "status")):
+        for field in missing_fields(record, FRAME_INDEX_REQUIRED_FIELDS):
             frame_index_missing_required[field] += 1
 
         for key in frame_index_latency_ranges:
@@ -261,6 +276,11 @@ def validate_session(session: Path):
 
             if isinstance(value, (int, float)):
                 frame_index_latency_ranges[key].append(value)
+
+    if frame_index_missing_required:
+        problems.append(f"frame index required-field misses: {dict(frame_index_missing_required)}")
+
+    frame_summary = frame_index_stats(frame_index_summaries)
 
     print(f"Session: {session}")
     print()
@@ -313,9 +333,20 @@ def validate_session(session: Path):
     print(f"frameIndexRecords: {frame_index_count}")
     print(f"Frames folder size MB: {directory_size(session / 'frames') / (1024 * 1024):.2f}")
     print(f"Frame capture source counts: {dict(frame_capture_source_counts)}")
+    print(f"Frame index event type counts: {dict(frame_index_event_type_counts)}")
     print(f"Frame index status counts: {dict(frame_index_status_counts)}")
     print(f"Frame index source counts: {dict(frame_index_source_counts)}")
     print(f"Frame index required-field misses: {dict(frame_index_missing_required)}")
+    print("Frame index summary:")
+    print(f"  totalRecords: {frame_summary['totalRecords']}")
+    print(f"  FrameRequested: {frame_summary['FrameRequested']}")
+    print(f"  FrameWritten: {frame_summary['FrameWritten']}")
+    print(f"  FrameDropped: {frame_summary['FrameDropped']}")
+    print(f"  FrameDeleted: {frame_summary['FrameDeleted']}")
+    print(f"  FrameFailed: {frame_summary['FrameFailed']}")
+    print(f"  latestWriteDelayMs: {frame_summary['latestWriteDelayMs']}")
+    print(f"  maxWriteDelayMs: {frame_summary['maxWriteDelayMs']}")
+    print(f"  avgWriteDelayMs: {frame_summary['avgWriteDelayMs']}")
     print("Frame timing ranges ms:")
 
     for key, values in frame_index_latency_ranges.items():
@@ -348,6 +379,15 @@ def validate_session(session: Path):
         print(f"  {line}")
 
     print()
+    print("Warnings:")
+
+    if warnings:
+        for warning in warnings:
+            print(f"  - {warning}")
+    else:
+        print("  none")
+
+    print()
     print("Problems:")
 
     if problems:
@@ -355,6 +395,8 @@ def validate_session(session: Path):
             print(f"  - {problem}")
     else:
         print("  none detected")
+
+    return problems
 
 
 def parse_args():
@@ -370,10 +412,11 @@ def main():
 
     if session is None:
         print(f"No sessions found in: {sessions_dir}")
-        return
+        return 1
 
-    validate_session(session)
+    problems = validate_session(session)
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

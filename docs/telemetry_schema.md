@@ -83,17 +83,19 @@ pixels.
 Frame timing diagnostics live in:
 
 ```text
-frame_index.jsonl
+frames\frame_index.jsonl
 ```
 
-Each line is a session-local sidecar record for one requested frame after the
-collector knows the terminal frame state. These records are not required to
-parse tick/event telemetry, but they are useful for diagnosing capture delay,
-writer queue delay, encoding time, and dropped frames.
+This is line-oriented JSONL: each line is a complete JSON object. Records are a
+session-local sidecar for frame lifecycle and timing events. They are not
+required to parse tick/event telemetry, but they are useful for diagnosing
+capture delay, writer queue delay, encoding time, dropped frames, and retention
+cleanup.
 
 Common fields:
 
 - `schemaVersion`
+- `eventType`
 - `tickId`
 - `framePath`
 - `captureSource`
@@ -102,15 +104,29 @@ Common fields:
 - `capturedAtUtc`
 - `enqueuedAtUtc`
 - `writtenAtUtc`
+- `deletedAtUtc`
 - `captureLatencyMs`
 - `queueLatencyMs`
 - `writeLatencyMs`
+- `writeDelayMs`
+- `frameWriteDelayMs`
 - `totalLatencyMs`
+- `frameTotalLatencyMs`
 - `width`
 - `height`
+- `bytes`
 - `sizeBytes`
 - `droppedFrameCount`
 - `error`
+- `reason`
+
+`eventType`, when present, describes the lifecycle record:
+
+- `FrameRequested`: frame capture/write was requested.
+- `FrameWritten`: frame image was written.
+- `FrameDropped`: frame was dropped before write completion.
+- `FrameDeleted`: frame file was deleted or expired by retention.
+- `FrameFailed`: frame capture or write failed.
 
 `status` is one of:
 
@@ -120,6 +136,25 @@ Common fields:
 - `CAPTURE_FAILED`: frame capture failed before queueing.
 - `WRITE_FAILED`: frame image reached the writer but could not be written.
 - `WRITE_REJECTED`: writer rejected an invalid frame path.
+- `DELETED`, `EXPIRED`, or related deleted/expired values: frame file was
+  removed by retention or cleanup after the source tick remained valid.
+
+Shared Python tools normalize raw frame-index records into fields including:
+
+- `frameWritten`
+- `frameWriteDelayMs`
+- `frameTotalLatencyMs`
+- `frameCaptureLatencyMs`
+- `frameQueueLatencyMs`
+- `frameIndexStatus`
+- `latestFrameIndexEvent`
+
+`latest_state.py` surfaces the latest frame timing in `latest_tick.json` and
+`latest_status.json`. `replay_viewer.py` shows frame timing for the selected
+tick. `telemetry_launcher.py` shows latest frame write delay, total latency, and
+frame-index status plus FrameWritten, FrameDropped, and FrameDeleted counts in
+Telemetry Health. `validate_session.py` reports dropped, failed, and deleted
+frame counts; normal expired/deleted frames are not fatal by themselves.
 
 ## Event Records
 
@@ -177,5 +212,10 @@ exports\frame_index_summary.jsonl
 ```
 
 These outputs are derived from source session records. Exported frame fields
-such as `frameExists`, `framePending`, and `frameExpiredOrMissing` are
-point-in-time tool-derived values.
+such as `frameExists`, `framePending`, `frameExpiredOrMissing`,
+`frameWritten`, `frameWriteDelayMs`, `frameTotalLatencyMs`,
+`frameCaptureLatencyMs`, `frameQueueLatencyMs`, and `frameIndexStatus` are
+point-in-time tool-derived values. `export_session.py` writes
+`exports\frame_index_summary.jsonl`, adds frame-index counts and timing
+statistics to `session_index.json`, and joins frame timing into
+`tick_summary.jsonl` by `tickId` when available.

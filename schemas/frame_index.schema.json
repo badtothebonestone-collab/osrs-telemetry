@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://osrs-telemetry.local/schemas/frame_index.schema.json",
+  "title": "OSRS Telemetry Frame Index Record",
+  "type": "object",
+  "description": "One line-oriented JSONL record from frames/frame_index.jsonl describing frame lifecycle and timing diagnostics.",
+  "properties": {
+    "schemaVersion": {
+      "type": ["string", "null"],
+      "description": "Telemetry schema version when written on the record."
+    },
+    "eventType": {
+      "type": ["string", "null"],
+      "enum": [
+        "FrameRequested",
+        "FrameWritten",
+        "FrameDropped",
+        "FrameDeleted",
+        "FrameFailed",
+        null
+      ],
+      "description": "Optional lifecycle event label. Tools may derive this from status when absent."
+    },
+    "tickId": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Tick associated with the frame request when available."
+    },
+    "framePath": {
+      "type": ["string", "null"],
+      "description": "Session-relative frame path when one was assigned."
+    },
+    "captureSource": {
+      "type": ["string", "null"],
+      "enum": ["RUNELITE_ONLY", "SCREEN_RECTANGLE", null],
+      "description": "Source used for frame capture."
+    },
+    "status": {
+      "type": ["string", "null"],
+      "description": "Frame diagnostic status, such as WRITTEN, DROPPED_QUEUE_FULL, CAPTURE_FAILED, WRITE_FAILED, WRITE_REJECTED, DELETED, or EXPIRED."
+    },
+    "requestedAtUtc": { "type": ["string", "null"] },
+    "timestampUtc": {
+      "type": ["string", "null"],
+      "description": "Legacy or generic timestamp; tools may treat this as requestedAtUtc."
+    },
+    "capturedAtUtc": { "type": ["string", "null"] },
+    "enqueuedAtUtc": { "type": ["string", "null"] },
+    "writtenAtUtc": { "type": ["string", "null"] },
+    "deletedAtUtc": { "type": ["string", "null"] },
+    "captureLatencyMs": { "type": ["number", "null"], "minimum": 0 },
+    "queueLatencyMs": { "type": ["number", "null"], "minimum": 0 },
+    "writeLatencyMs": { "type": ["number", "null"], "minimum": 0 },
+    "writeDelayMs": { "type": ["number", "null"], "minimum": 0 },
+    "frameWriteDelayMs": { "type": ["number", "null"], "minimum": 0 },
+    "totalLatencyMs": { "type": ["number", "null"], "minimum": 0 },
+    "frameTotalLatencyMs": { "type": ["number", "null"], "minimum": 0 },
+    "width": { "type": ["integer", "null"], "minimum": 0 },
+    "height": { "type": ["integer", "null"], "minimum": 0 },
+    "bytes": { "type": ["integer", "null"], "minimum": 0 },
+    "sizeBytes": { "type": ["integer", "null"], "minimum": 0 },
+    "droppedFrameCount": { "type": ["integer", "null"], "minimum": 0 },
+    "error": { "type": ["string", "null"] },
+    "reason": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}

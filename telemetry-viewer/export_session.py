@@ -7,12 +7,15 @@ from pathlib import Path
 
 from telemetry_paths import (
     classify_frame_state,
+    frame_index_by_tick,
+    frame_index_stats,
+    frame_timing_fields,
     find_newest_session,
     get_sessions_dir,
     iter_jsonl,
     list_event_files,
-    list_frame_index_files,
     list_tick_files,
+    load_frame_index_summaries,
     safe_read_json,
     session_size_mb,
 )
@@ -55,10 +58,6 @@ def event_files(session: Path) -> list[Path]:
     return list_event_files(session)
 
 
-def frame_index_files(session: Path) -> list[Path]:
-    return list_frame_index_files(session)
-
-
 def read_manifest(session: Path) -> dict | None:
     manifest = safe_read_json(session / "manifest.json")
     return manifest if isinstance(manifest, dict) else None
@@ -97,7 +96,14 @@ def count_items(items: list[dict]) -> int:
     return sum(1 for item in items if item.get("itemId", -1) > 0 and item.get("quantity", 0) > 0)
 
 
-def tick_summary(session: Path, source: Path, tick: dict, is_latest: bool, active_session: bool) -> dict:
+def tick_summary(
+    session: Path,
+    source: Path,
+    tick: dict,
+    is_latest: bool,
+    active_session: bool,
+    frame_index: dict | None = None,
+) -> dict:
     local_player = tick.get("localPlayer") or {}
     status = tick.get("status") or {}
     active_prayers = [
@@ -114,8 +120,9 @@ def tick_summary(session: Path, source: Path, tick: dict, is_latest: bool, activ
         interacting = None
 
     frame = frame_state(session, tick, is_latest, active_session)
+    frame_timing = frame_timing_fields(frame_index)
 
-    return {
+    row = {
         "tickId": tick.get("tickId"),
         "timestampUtc": tick.get("timestampUtc"),
         "gameState": tick.get("gameState"),
@@ -146,6 +153,15 @@ def tick_summary(session: Path, source: Path, tick: dict, is_latest: bool, activ
         "captureErrorCount": len(tick.get("captureErrors") or []),
         "source": str(source),
     }
+    row.update({
+        "frameWritten": frame_timing["frameWritten"],
+        "frameWriteDelayMs": frame_timing["frameWriteDelayMs"],
+        "frameTotalLatencyMs": frame_timing["frameTotalLatencyMs"],
+        "frameCaptureLatencyMs": frame_timing["frameCaptureLatencyMs"],
+        "frameQueueLatencyMs": frame_timing["frameQueueLatencyMs"],
+        "frameIndexStatus": frame_timing["frameIndexStatus"],
+    })
+    return row
 
 
 def actor_summary(actor: dict) -> str:
@@ -226,28 +242,6 @@ def event_summary(source: Path, event: dict) -> dict:
     }
 
 
-def frame_index_summary(source: Path, frame: dict) -> dict:
-    return {
-        "tickId": frame.get("tickId"),
-        "framePath": frame.get("framePath"),
-        "captureSource": frame.get("captureSource"),
-        "status": frame.get("status"),
-        "requestedAtUtc": frame.get("requestedAtUtc"),
-        "capturedAtUtc": frame.get("capturedAtUtc"),
-        "enqueuedAtUtc": frame.get("enqueuedAtUtc"),
-        "writtenAtUtc": frame.get("writtenAtUtc"),
-        "captureLatencyMs": frame.get("captureLatencyMs"),
-        "queueLatencyMs": frame.get("queueLatencyMs"),
-        "writeLatencyMs": frame.get("writeLatencyMs"),
-        "totalLatencyMs": frame.get("totalLatencyMs"),
-        "width": frame.get("width"),
-        "height": frame.get("height"),
-        "sizeBytes": frame.get("sizeBytes"),
-        "error": frame.get("error"),
-        "source": str(source),
-    }
-
-
 def atomic_replace(path: Path, writer):
     temp_path = path.with_suffix(path.suffix + ".tmp")
     writer(temp_path)
@@ -279,18 +273,26 @@ def export_session(session: Path):
     events = event_files(session)
     tick_rows = []
     event_rows = []
-    frame_index_rows = []
     event_type_counts = Counter()
-    frame_status_counts = Counter()
     first_tick_id = None
     last_tick_id = None
     raw_ticks = list(iter_jsonl(ticks))
     manifest = read_manifest(session)
     active_session = bool(manifest and manifest.get("active"))
     latest_tick = raw_ticks[-1][1] if raw_ticks else None
+    frame_index_rows = load_frame_index_summaries(session)
+    frame_index_lookup = frame_index_by_tick(frame_index_rows)
+    frame_summary = frame_index_stats(frame_index_rows)
 
     for source, tick in raw_ticks:
-        summary = tick_summary(session, source, tick, tick is latest_tick, active_session)
+        summary = tick_summary(
+            session,
+            source,
+            tick,
+            tick is latest_tick,
+            active_session,
+            frame_index_lookup.get(tick.get("tickId")),
+        )
         tick_rows.append(summary)
         tick_id = summary.get("tickId")
 
@@ -304,11 +306,6 @@ def export_session(session: Path):
         event_rows.append(summary)
         event_type_counts[summary.get("eventType", "UNKNOWN")] += 1
 
-    for source, frame in iter_jsonl(frame_index_files(session)):
-        summary = frame_index_summary(source, frame)
-        frame_index_rows.append(summary)
-        frame_status_counts[summary.get("status", "UNKNOWN")] += 1
-
     session_index = {
         "sessionPath": str(session),
         "manifest": manifest,
@@ -316,6 +313,7 @@ def export_session(session: Path):
         "tickCount": len(tick_rows),
         "eventCount": len(event_rows),
         "frameIndexCount": len(frame_index_rows),
+        "frameIndexSummary": frame_summary,
         "tickSegmentCount": len(ticks),
         "eventSegmentCount": len(events),
         "dictionaryCounts": dictionary_counts(session),
@@ -323,7 +321,11 @@ def export_session(session: Path):
         "firstTickId": first_tick_id,
         "lastTickId": last_tick_id,
         "topEventTypeCounts": dict(event_type_counts.most_common(20)),
-        "frameIndexStatusCounts": dict(frame_status_counts.most_common()),
+        "frameIndexStatusCounts": frame_summary["statusCounts"],
+        "frameIndexEventTypeCounts": frame_summary["eventTypeCounts"],
+        "latestFrameWriteDelayMs": frame_summary["latestWriteDelayMs"],
+        "maxFrameWriteDelayMs": frame_summary["maxWriteDelayMs"],
+        "avgFrameWriteDelayMs": frame_summary["avgWriteDelayMs"],
     }
 
     write_json(export_dir / "session_index.json", session_index)

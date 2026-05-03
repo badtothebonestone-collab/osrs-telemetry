@@ -6,6 +6,7 @@ The export tool writes generated summaries under the selected session:
 exports\session_index.json
 exports\tick_summary.jsonl
 exports\event_summary.jsonl
+exports\frame_index_summary.jsonl
 ```
 
 `telemetry-viewer\replay_viewer.py` is a local browser-based replay viewer for
@@ -18,6 +19,24 @@ python telemetry-viewer\replay_viewer.py --session "C:\path\to\session"
 python telemetry-viewer\replay_viewer.py --sessions-dir "C:\path\to\sessions"
 python telemetry-viewer\replay_viewer.py --port 8765
 ```
+
+The replay viewer includes a read-only **Analysis** panel derived from the
+existing tick, event, frame, and frame-index telemetry. It does not collect new
+gameplay data and does not add overlays, input hooks, clicking, menu
+manipulation, automation, recommendations, or client-state mutation.
+
+The Analysis panel provides:
+
+- Summary cards for session, tick, event, and frame statistics, including frame
+  write-delay diagnostics when available.
+- A compact per-tick timeline that can jump the main replay view to the selected
+  tick without reloading the page.
+- Timeline filters for event category, `eventType` text, ticks with events, and
+  frame/capture issues.
+- Combat Events, Inventory/Skilling Events, and UI/Menu Events quick panels for
+  inspection and replay review only.
+- Internally scrolling tables so the frame display and replay controls remain
+  usable while reviewing longer sessions.
 
 Example questions:
 
@@ -49,9 +68,23 @@ Example questions:
   If `frameCaptureSource` is `SCREEN_RECTANGLE`, check `frameCaptureWarning`
   because overlapping windows may appear in that frame.
 
+- How long did the frame write take?
+  Read `frameWritten`, `frameWriteDelayMs`, `frameTotalLatencyMs`, and
+  `frameIndexStatus` from `exports\tick_summary.jsonl` when available. For
+  earlier pipeline timing, read `frameCaptureLatencyMs` and
+  `frameQueueLatencyMs`. For the full lifecycle record, inspect
+  `exports\frame_index_summary.jsonl` or the raw source sidecar at
+  `frames\frame_index.jsonl`.
+
 - Why does `frameExists` briefly show false?
   Frame writes are asynchronous. `frameCaptureStatus == "QUEUED"` means the
   frame capture/write was requested. For the newest active tick, `framePending
   == true` means the image may still be arriving inside the shared freshness
   grace window. For older ticks, a missing frame is reported as
   `frameExpiredOrMissing == true`.
+
+- Why do deleted or expired frames appear in validation?
+  `validate_session.py` reports deleted/expired frame-index counts so retention
+  behavior is visible. Those records are informational by themselves; the
+  original tick remains valid unless there is a real JSON/schema/required-field
+  problem.
