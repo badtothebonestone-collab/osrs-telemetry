@@ -60,6 +60,26 @@ Buttons:
 - Stop All Started Processes: stops all processes started by this launcher.
 - Clear Log: clears the launcher log panel.
 
+The Telemetry Health panel shows the newest session path, active status, latest
+tick id and age, game state, position, HP/prayer/run, tick/event/frame file
+counts, frame and session sizes, capture errors, and the last validation result.
+
+Health status colors:
+
+- OK: active session and latest tick age is under 10 seconds.
+- Warning: latest tick age is 10-60 seconds.
+- Stale: latest tick is over 60 seconds old or no ticks were found.
+
+Health quick actions open existing telemetry files without creating or editing
+them:
+
+- Open latest frame file
+- Open `latest_status.json`
+- Open `manifest.json`
+- Open newest tick segment
+- Open newest event segment
+- Open newest session folder
+
 Safety: the launcher only manages processes it started. It does not perform
 game automation, clicking, input hooks, overlays, menu actions, or client-state
 mutation.

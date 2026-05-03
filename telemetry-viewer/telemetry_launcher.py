@@ -3,24 +3,37 @@ import queue
 import subprocess
 import sys
 import threading
+import json
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, Tk, messagebox
+from tkinter import BooleanVar, Label, StringVar, Tk, messagebox
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from telemetry_paths import DEFAULT_SESSIONS_DIR, SESSIONS_DIR_ENV, find_newest_session  # noqa: E402
+from telemetry_paths import (  # noqa: E402
+    DEFAULT_SESSIONS_DIR,
+    SESSIONS_DIR_ENV,
+    directory_size,
+    find_newest_session,
+    list_event_files,
+    list_tick_files,
+    resolve_frame_path,
+    safe_read_json,
+    session_size_mb,
+    tick_age_seconds,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPLAY_URL = "http://127.0.0.1:8765/"
 STOP_GRACE_MS = 2500
 MAX_LOG_LINES = 5000
+HEALTH_REFRESH_MS = 5000
 
 
 @dataclass(frozen=True)
@@ -75,6 +88,225 @@ PROCESS_SPECS = {
         False,
     ),
 }
+
+
+def format_bool(value) -> str:
+    if value is True:
+        return "true"
+
+    if value is False:
+        return "false"
+
+    return "unknown"
+
+
+def format_age(seconds: float | None) -> str:
+    if seconds is None:
+        return "-"
+
+    return f"{seconds:.1f}s"
+
+
+def format_mb(value: float | None) -> str:
+    if value is None:
+        return "-"
+
+    return f"{value:.2f}"
+
+
+def read_latest_jsonl_record(files: list[Path]) -> dict | None:
+    for file_path in reversed(files):
+        record = read_last_json_line(file_path)
+
+        if record is not None:
+            return record
+
+    return None
+
+
+def read_last_json_line(file_path: Path) -> dict | None:
+    try:
+        if not file_path.exists() or file_path.stat().st_size == 0:
+            return None
+
+        with file_path.open("rb") as file:
+            file.seek(0, os.SEEK_END)
+            position = file.tell()
+            buffer = b""
+
+            while position > 0:
+                chunk_size = min(8192, position)
+                position -= chunk_size
+                file.seek(position)
+                buffer = file.read(chunk_size) + buffer
+                lines = [line.strip() for line in buffer.splitlines() if line.strip()]
+
+                for line in reversed(lines):
+                    try:
+                        record = json.loads(line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+
+                    if isinstance(record, dict):
+                        return record
+
+                if len(lines) > 1:
+                    break
+    except OSError:
+        return None
+
+    return None
+
+
+def count_frame_files(session: Path) -> int:
+    frames = session / "frames"
+
+    if not frames.exists():
+        return 0
+
+    try:
+        return sum(1 for path in frames.iterdir() if path.is_file())
+    except OSError:
+        return 0
+
+
+def newest_file_in_dir(directory: Path) -> Path | None:
+    if not directory.exists():
+        return None
+
+    try:
+        files = [path for path in directory.iterdir() if path.is_file()]
+    except OSError:
+        return None
+
+    if not files:
+        return None
+
+    return max(files, key=lambda path: path.stat().st_mtime)
+
+
+def collect_health(sessions_dir: Path, validation_result: str) -> dict:
+    values = {
+        "newest_session": "-",
+        "active": "unknown",
+        "tick_id": "-",
+        "tick_age": "-",
+        "game_state": "-",
+        "position": "-",
+        "resources": "-",
+        "tick_files": "0",
+        "event_files": "0",
+        "frame_files": "0",
+        "frames_size": "-",
+        "session_size": "-",
+        "capture_errors": "-",
+        "validation": validation_result,
+    }
+    paths = {
+        "session": None,
+        "latest_frame": None,
+        "latest_status": None,
+        "manifest": None,
+        "newest_tick_segment": None,
+        "newest_event_segment": None,
+    }
+
+    if not sessions_dir.exists():
+        return health_result("stale", f"Sessions dir missing: {sessions_dir}", values, paths)
+
+    session = find_newest_session(sessions_dir)
+
+    if session is None:
+        return health_result("stale", f"No sessions found in {sessions_dir}", values, paths)
+
+    manifest = safe_read_json(session / "manifest.json")
+    manifest = manifest if isinstance(manifest, dict) else None
+    active = manifest.get("active") if manifest else None
+    tick_files = list_tick_files(session)
+    event_files = list_event_files(session)
+    latest_tick = read_latest_jsonl_record(tick_files)
+    latest_frame = None
+
+    if latest_tick:
+        latest_frame = resolve_frame_path(session, latest_tick.get("framePath"))
+
+        if latest_frame is not None and not latest_frame.exists():
+            latest_frame = None
+
+    if latest_frame is None:
+        latest_frame = newest_file_in_dir(session / "frames")
+
+    values["newest_session"] = str(session)
+    values["active"] = format_bool(active)
+    values["tick_files"] = str(len(tick_files))
+    values["event_files"] = str(len(event_files))
+    values["frame_files"] = str(count_frame_files(session))
+    values["frames_size"] = format_mb(directory_size(session / "frames") / (1024 * 1024))
+    values["session_size"] = format_mb(session_size_mb(session))
+    paths["session"] = str(session)
+    paths["latest_frame"] = str(latest_frame) if latest_frame else None
+    paths["latest_status"] = str(session / "latest" / "latest_status.json")
+    paths["manifest"] = str(session / "manifest.json")
+    paths["newest_tick_segment"] = str(tick_files[-1]) if tick_files else None
+    paths["newest_event_segment"] = str(event_files[-1]) if event_files else None
+
+    if latest_tick is None:
+        return health_result("stale", "No ticks found", values, paths)
+
+    local_player = latest_tick.get("localPlayer") or {}
+    status = latest_tick.get("status") or {}
+    tick_age = tick_age_seconds(latest_tick)
+    capture_errors = latest_tick.get("captureErrors") or []
+    hp = value_pair(status.get("hitpointsBoosted"), status.get("hitpointsReal"))
+    prayer = value_pair(status.get("prayerBoosted"), status.get("prayerReal"))
+    run = status.get("runEnergyPercent")
+
+    values["tick_id"] = str(latest_tick.get("tickId", "-"))
+    values["tick_age"] = format_age(tick_age)
+    values["game_state"] = str(latest_tick.get("gameState", "-"))
+    values["position"] = ",".join(
+        str(value if value is not None else "?")
+        for value in (
+            local_player.get("worldX"),
+            local_player.get("worldY"),
+            local_player.get("plane"),
+        )
+    )
+    values["resources"] = f"hp={hp} prayer={prayer} run={run if run is not None else '?'}"
+    values["capture_errors"] = str(len(capture_errors))
+
+    if tick_age is None:
+        return health_result("warning", "Latest tick timestamp unavailable", values, paths)
+
+    if tick_age < 10 and active is True:
+        return health_result("ok", "Active session is fresh", values, paths)
+
+    if tick_age <= 60:
+        return health_result("warning", "Latest tick is not fresh", values, paths)
+
+    return health_result("stale", "Latest tick is stale", values, paths)
+
+
+def value_pair(current, maximum) -> str:
+    return f"{current if current is not None else '?'}/{maximum if maximum is not None else '?'}"
+
+
+def health_result(status: str, message: str, values: dict, paths: dict) -> dict:
+    colors = {
+        "ok": ("#e8f5e9", "#1b5e20"),
+        "warning": ("#fff8e1", "#5d4300"),
+        "stale": ("#ffebee", "#7f1d1d"),
+    }
+    background, foreground = colors.get(status, ("#eeeeee", "#202124"))
+
+    return {
+        "status": status,
+        "message": message,
+        "values": values,
+        "paths": paths,
+        "background": background,
+        "foreground": foreground,
+    }
 
 
 class ManagedProcess:
@@ -141,21 +373,30 @@ class LauncherApp(Tk):
         configured_sessions_dir = os.environ.get(SESSIONS_DIR_ENV)
         self.sessions_dir_var = StringVar(value=configured_sessions_dir or str(DEFAULT_SESSIONS_DIR))
         self.auto_scroll_var = BooleanVar(value=True)
+        self.health_log_var = BooleanVar(value=False)
         self.output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self.health_queue: queue.Queue[dict] = queue.Queue()
         self.managed = {key: ManagedProcess(spec) for key, spec in PROCESS_SPECS.items()}
         self.start_buttons: dict[str, ttk.Button] = {}
+        self.health_values: dict[str, StringVar] = {}
+        self.health_paths: dict[str, str | None] = {}
+        self.health_refresh_running = False
+        self.last_validation_result = "unknown"
         self.log_line_count = 0
 
         self._build_ui()
         self._refresh_status_table()
         self.after(100, self._drain_output_queue)
+        self.after(250, self._drain_health_queue)
         self.after(500, self._poll_processes)
+        self.after(500, self.refresh_health)
+        self.after(HEALTH_REFRESH_MS, self._auto_refresh_health)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self):
         self.columnconfigure(0, weight=0)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(2, weight=1)
+        self.rowconfigure(3, weight=1)
 
         config_frame = ttk.LabelFrame(self, text="Configuration")
         config_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 6))
@@ -165,7 +406,7 @@ class LauncherApp(Tk):
         ttk.Entry(config_frame, textvariable=self.sessions_dir_var).grid(row=0, column=1, sticky="ew", padx=8, pady=8)
 
         button_frame = ttk.Frame(self)
-        button_frame.grid(row=1, column=0, rowspan=2, sticky="ns", padx=(10, 6), pady=6)
+        button_frame.grid(row=1, column=0, rowspan=3, sticky="ns", padx=(10, 6), pady=6)
 
         self._add_button_group(
             button_frame,
@@ -212,8 +453,13 @@ class LauncherApp(Tk):
             ],
         )
 
+        self._build_health_panel()
+        self._build_status_panel()
+        self._build_log_panel()
+
+    def _build_status_panel(self):
         status_frame = ttk.LabelFrame(self, text="Managed Processes")
-        status_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 10), pady=6)
+        status_frame.grid(row=2, column=1, sticky="nsew", padx=(6, 10), pady=6)
         status_frame.columnconfigure(0, weight=1)
 
         self.status_table = ttk.Treeview(
@@ -239,21 +485,9 @@ class LauncherApp(Tk):
         self.status_table.tag_configure("stopped", foreground="#6b7280")
         self.status_table.tag_configure("exited_error", background="#ffebee")
 
-    def _add_button_group(self, parent, title: str, controls: list[tuple[str, object, str | None]]):
-        row = len(parent.grid_slaves())
-        group = ttk.LabelFrame(parent, text=title)
-        group.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-        group.columnconfigure(0, weight=1)
-
-        for index, (label, command, process_key) in enumerate(controls):
-            button = ttk.Button(group, text=label, command=command)
-            button.grid(row=index, column=0, sticky="ew", padx=8, pady=3)
-
-            if process_key:
-                self.start_buttons[process_key] = button
-
+    def _build_log_panel(self):
         log_frame = ttk.LabelFrame(self, text="Log")
-        log_frame.grid(row=2, column=1, sticky="nsew", padx=(6, 10), pady=(6, 10))
+        log_frame.grid(row=3, column=1, sticky="nsew", padx=(6, 10), pady=(6, 10))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
 
@@ -266,8 +500,110 @@ class LauncherApp(Tk):
             column=0,
             sticky="w",
             padx=8,
+            pady=(0, 2),
+        )
+        ttk.Checkbutton(
+            log_frame,
+            text="Show health refresh logs",
+            variable=self.health_log_var,
+        ).grid(
+            row=2,
+            column=0,
+            sticky="w",
+            padx=8,
             pady=(0, 8),
         )
+
+    def _build_health_panel(self):
+        health_frame = ttk.LabelFrame(self, text="Telemetry Health")
+        health_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 10), pady=6)
+        health_frame.columnconfigure(1, weight=1)
+        health_frame.columnconfigure(3, weight=1)
+
+        self.health_status_label = Label(
+            health_frame,
+            text="unknown",
+            anchor="w",
+            background="#eeeeee",
+            foreground="#202124",
+            padx=8,
+            pady=4,
+        )
+        self.health_status_label.grid(row=0, column=0, columnspan=4, sticky="ew", padx=8, pady=(8, 4))
+
+        fields = [
+            ("newest_session", "Newest session path"),
+            ("active", "Session active"),
+            ("tick_id", "Latest tickId"),
+            ("tick_age", "Latest tick age"),
+            ("game_state", "Latest gameState"),
+            ("position", "Latest position"),
+            ("resources", "HP / prayer / run"),
+            ("tick_files", "Tick files"),
+            ("event_files", "Event files"),
+            ("frame_files", "Frame files"),
+            ("frames_size", "Frames folder size MB"),
+            ("session_size", "Session size MB"),
+            ("capture_errors", "Capture errors"),
+            ("validation", "Last validation result"),
+        ]
+
+        for index, (key, label) in enumerate(fields, start=1):
+            column_offset = 0 if index <= 7 else 2
+            row = index if index <= 7 else index - 7
+            self.health_values[key] = StringVar(value="-")
+            ttk.Label(health_frame, text=label).grid(
+                row=row,
+                column=column_offset,
+                sticky="w",
+                padx=(8, 4),
+                pady=2,
+            )
+            ttk.Label(health_frame, textvariable=self.health_values[key]).grid(
+                row=row,
+                column=column_offset + 1,
+                sticky="ew",
+                padx=(4, 8),
+                pady=2,
+            )
+
+        ttk.Button(health_frame, text="Refresh Health", command=self.refresh_health).grid(
+            row=8,
+            column=0,
+            sticky="w",
+            padx=8,
+            pady=(6, 8),
+        )
+        quick_actions = ttk.Frame(health_frame)
+        quick_actions.grid(row=8, column=1, columnspan=3, sticky="ew", padx=8, pady=(6, 8))
+
+        for index, (label, key) in enumerate((
+            ("Open latest frame file", "latest_frame"),
+            ("Open latest_status.json", "latest_status"),
+            ("Open manifest.json", "manifest"),
+            ("Open newest tick segment", "newest_tick_segment"),
+            ("Open newest event segment", "newest_event_segment"),
+            ("Open newest session folder", "session"),
+        )):
+            ttk.Button(
+                quick_actions,
+                text=label,
+                command=lambda target_key=key: self.open_health_target(target_key),
+            ).grid(row=index // 3, column=index % 3, sticky="ew", padx=3, pady=2)
+            quick_actions.columnconfigure(index % 3, weight=1)
+
+    def _add_button_group(self, parent, title: str, controls: list[tuple[str, object, str | None]]):
+        row = len(parent.grid_slaves())
+        group = ttk.LabelFrame(parent, text=title)
+        group.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        group.columnconfigure(0, weight=1)
+
+        for index, (label, command, process_key) in enumerate(controls):
+            button = ttk.Button(group, text=label, command=command)
+            button.grid(row=index, column=0, sticky="ew", padx=8, pady=3)
+
+            if process_key:
+                self.start_buttons[process_key] = button
 
     def _env_for_subprocess(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -351,6 +687,10 @@ class LauncherApp(Tk):
             managed.starting = False
             self.output_queue.put((managed.spec.name, f"Exited with code {return_code}."))
 
+            if managed.spec.key == "validate":
+                result = "pass" if return_code == 0 else "fail"
+                self.last_validation_result = f"{result} at {datetime.now().strftime('%H:%M:%S')}"
+
             if managed.spec.key == "runelite":
                 self.output_queue.put((
                     managed.spec.name,
@@ -370,6 +710,65 @@ class LauncherApp(Tk):
             drained += 1
 
         self.after(100, self._drain_output_queue)
+
+    def refresh_health(self):
+        if self.health_refresh_running:
+            return
+
+        self.health_refresh_running = True
+        sessions_dir = self.sessions_dir()
+        threading.Thread(
+            target=self._collect_health,
+            args=(sessions_dir,),
+            daemon=True,
+        ).start()
+
+    def _auto_refresh_health(self):
+        self.refresh_health()
+        self.after(HEALTH_REFRESH_MS, self._auto_refresh_health)
+
+    def _collect_health(self, sessions_dir: Path):
+        try:
+            health = collect_health(sessions_dir, self.last_validation_result)
+            self.health_queue.put({"ok": True, "health": health})
+        except Exception as error:
+            self.health_queue.put({"ok": False, "error": str(error)})
+
+    def _drain_health_queue(self):
+        try:
+            while True:
+                payload = self.health_queue.get_nowait()
+                self.health_refresh_running = False
+
+                if payload.get("ok"):
+                    self._apply_health(payload["health"])
+                else:
+                    self.log("Health", f"Refresh failed: {payload.get('error')}")
+        except queue.Empty:
+            pass
+
+        self.after(250, self._drain_health_queue)
+
+    def _apply_health(self, health: dict):
+        values = health.get("values", {})
+        self.health_paths = health.get("paths", {})
+
+        for key, variable in self.health_values.items():
+            variable.set(values.get(key, "-"))
+
+        status = health.get("status", "unknown")
+        message = health.get("message", "Health unknown")
+        self.health_status_label.configure(
+            text=f"{status.upper()}: {message}",
+            background=health.get("background", "#eeeeee"),
+            foreground=health.get("foreground", "#202124"),
+        )
+
+        if self.health_log_var.get():
+            self.log(
+                "Health",
+                f"{status}: tick={values.get('tick_id', '-')} age={values.get('tick_age', '-')} active={values.get('active', '-')}",
+            )
 
     def _poll_processes(self):
         self._refresh_status_table()
@@ -546,11 +945,36 @@ class LauncherApp(Tk):
 
         self.open_folder(newest, "Newest Session Folder")
 
+    def open_health_target(self, key: str):
+        labels = {
+            "latest_frame": "latest frame file",
+            "latest_status": "latest_status.json",
+            "manifest": "manifest.json",
+            "newest_tick_segment": "newest tick segment",
+            "newest_event_segment": "newest event segment",
+            "session": "newest session folder",
+        }
+        label = labels.get(key, key)
+        raw_path = self.health_paths.get(key)
+
+        if not raw_path:
+            message = f"No {label} is available from the current health snapshot."
+            self.log("Launcher", message)
+            messagebox.showinfo("Missing target", message)
+            return
+
+        self.open_path(Path(raw_path), label)
+
     def open_folder(self, path: Path, label: str):
+        self.open_path(path, label)
+
+    def open_path(self, path: Path, label: str):
         path = path.expanduser()
 
         if not path.exists():
-            self.log("Launcher", f"{label} does not exist: {path}")
+            message = f"{label} does not exist: {path}"
+            self.log("Launcher", message)
+            messagebox.showinfo("Missing target", message)
             return
 
         try:
