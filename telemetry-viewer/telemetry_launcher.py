@@ -92,7 +92,7 @@ PROCESS_SPECS = {
     "tests": ProcessSpec(
         "tests",
         "Path Regression Tests",
-        ["python", "telemetry-viewer\\test_telemetry_paths.py"],
+        ["python", "telemetry-viewer\\tests\\test_telemetry_paths.py"],
         False,
     ),
 }

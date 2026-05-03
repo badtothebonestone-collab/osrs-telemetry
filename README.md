@@ -27,6 +27,11 @@ python telemetry-viewer\viewer.py
 
 ## Telemetry Control Center
 
+`telemetry-viewer` is currently the Python telemetry toolchain, not only a
+viewer. User-facing scripts remain at the `telemetry-viewer` root for command
+compatibility. A future cleanup may rename or split this folder as
+`telemetry-tools`.
+
 Launch the local Tkinter control center from the project root:
 
 ```powershell
@@ -56,7 +61,7 @@ Buttons:
 - Run Export Session: writes generated summaries with `telemetry-viewer\export_session.py`.
 - Build Perception Dataset: writes derived per-tick perception bundles with
   `telemetry-viewer\build_perception_dataset.py`.
-- Run Path Regression Tests: runs `telemetry-viewer\test_telemetry_paths.py`.
+- Run Path Regression Tests: runs `telemetry-viewer\tests\test_telemetry_paths.py`.
 - Open Sessions Folder: opens the configured sessions directory.
 - Open Newest Session Folder: opens the newest discovered session.
 - Stop Selected Process: stops a process started by this launcher.
