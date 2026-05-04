@@ -3,7 +3,7 @@
   "$id": "https://osrs-telemetry.local/schemas/visual_tick_record.schema.json",
   "title": "OSRS Telemetry Visual Tick Record",
   "type": "object",
-  "description": "Derived per-tick visual preparation record built from existing perception bundles and screen region metadata.",
+  "description": "Derived per-tick visual preparation record built from existing perception bundles and typed screen-region metadata.",
   "required": [
     "schemaVersion",
     "sessionId",
@@ -58,14 +58,8 @@
           },
           "additionalProperties": true
         },
-        "hp": {
-          "type": "object",
-          "additionalProperties": true
-        },
-        "prayer": {
-          "type": "object",
-          "additionalProperties": true
-        },
+        "hp": { "type": "object", "additionalProperties": true },
+        "prayer": { "type": "object", "additionalProperties": true },
         "runEnergyPercent": { "type": ["number", "null"] },
         "interacting": { "type": ["string", "null"] },
         "inventoryCount": { "type": "integer", "minimum": 0 },
@@ -89,30 +83,7 @@
     },
     "regions": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["name", "normalizedBox", "pixelBox", "cropPath", "exists"],
-        "properties": {
-          "name": { "type": "string" },
-          "normalizedBox": {
-            "type": ["object", "null"],
-            "additionalProperties": true
-          },
-          "pixelBox": {
-            "type": ["object", "null"],
-            "properties": {
-              "x": { "type": "integer", "minimum": 0 },
-              "y": { "type": "integer", "minimum": 0 },
-              "w": { "type": "integer", "minimum": 0 },
-              "h": { "type": "integer", "minimum": 0 }
-            },
-            "additionalProperties": true
-          },
-          "cropPath": { "type": ["string", "null"] },
-          "exists": { "type": "boolean" }
-        },
-        "additionalProperties": true
-      }
+      "items": { "$ref": "#/$defs/visualRegion" }
     },
     "promptContext": {
       "type": "string"
@@ -128,6 +99,137 @@
           "type": "array",
           "items": { "type": "string" }
         }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "normalizedBox": {
+      "type": ["object", "null"],
+      "properties": {
+        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+        "w": { "type": "number", "minimum": 0, "maximum": 1 },
+        "h": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "pixelBox": {
+      "type": ["object", "null"],
+      "properties": {
+        "x": { "type": "integer", "minimum": 0 },
+        "y": { "type": "integer", "minimum": 0 },
+        "w": { "type": "integer", "minimum": 0 },
+        "h": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "shapeMask": {
+      "type": ["object", "null"],
+      "properties": {
+        "shape": { "type": "string", "enum": ["circle", "ellipse"] },
+        "maskGenerated": { "type": "boolean" },
+        "cropMode": { "type": "string" },
+        "outside": { "type": "string" },
+        "rotation": { "type": "number" },
+        "rotationApplied": { "type": "boolean" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "gridSlot": {
+      "type": "object",
+      "properties": {
+        "slot": { "type": ["integer", "null"], "minimum": 0 },
+        "row": { "type": ["integer", "null"], "minimum": 0 },
+        "col": { "type": ["integer", "null"], "minimum": 0 },
+        "normalizedBox": { "$ref": "#/$defs/normalizedBox" },
+        "pixelBox": { "$ref": "#/$defs/pixelBox" },
+        "cropPath": { "type": ["string", "null"] },
+        "exists": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "pixelGeometry": {
+      "type": ["object", "null"],
+      "properties": {
+        "type": { "type": "string", "enum": ["rect", "circle", "ellipse", "grid"] },
+        "boundingBox": { "$ref": "#/$defs/pixelBox" },
+        "pixelBox": { "$ref": "#/$defs/pixelBox" },
+        "center": {
+          "type": "object",
+          "properties": {
+            "x": { "type": "integer", "minimum": 0 },
+            "y": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": true
+        },
+        "radius": { "type": "integer", "minimum": 0 },
+        "radiusX": { "type": "integer", "minimum": 0 },
+        "radiusY": { "type": "integer", "minimum": 0 },
+        "rotation": { "type": "number" },
+        "rows": { "type": "integer", "minimum": 1 },
+        "cols": { "type": "integer", "minimum": 1 },
+        "slotCount": { "type": "integer", "minimum": 0 },
+        "slotBoxes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "typedGeometry": {
+      "type": ["object", "null"],
+      "description": "Normalized typed region geometry copied from screen_regions.json after compatibility normalization.",
+      "properties": {
+        "type": { "type": "string", "enum": ["rect", "circle", "ellipse", "grid"] },
+        "box": { "$ref": "#/$defs/normalizedBox" },
+        "center": {
+          "type": "object",
+          "properties": {
+            "x": { "type": "number", "minimum": 0, "maximum": 1 },
+            "y": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "additionalProperties": true
+        },
+        "radius": { "type": "number", "minimum": 0, "maximum": 1 },
+        "radiusX": { "type": "number", "minimum": 0, "maximum": 1 },
+        "radiusY": { "type": "number", "minimum": 0, "maximum": 1 },
+        "rotation": { "type": "number" },
+        "rows": { "type": "integer", "minimum": 1 },
+        "cols": { "type": "integer", "minimum": 1 },
+        "slotCount": { "type": "integer", "minimum": 0 },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "visualRegion": {
+      "type": "object",
+      "required": ["name", "cropPath", "exists"],
+      "properties": {
+        "name": { "type": "string" },
+        "type": { "type": ["string", "null"], "enum": ["rect", "circle", "ellipse", "grid", null] },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "geometry": { "$ref": "#/$defs/typedGeometry" },
+        "normalizedBox": { "$ref": "#/$defs/normalizedBox" },
+        "pixelBox": { "$ref": "#/$defs/pixelBox" },
+        "pixelGeometry": { "$ref": "#/$defs/pixelGeometry" },
+        "shapeMask": { "$ref": "#/$defs/shapeMask" },
+        "gridSlots": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/gridSlot" }
+        },
+        "cropPath": { "type": ["string", "null"] },
+        "exists": { "type": "boolean" }
       },
       "additionalProperties": true
     }

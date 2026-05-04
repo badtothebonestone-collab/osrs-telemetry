@@ -1,0 +1,122 @@
+{
+  "schemaVersion": "perception.screen_regions.v1",
+  "coordinateSpace": "normalized",
+  "note": "Reusable screen-region calibration profile. Copy or load this into future sessions.",
+  "regions": {
+    "fullFrame": {
+      "type": "rect",
+      "box": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0,
+        "h": 1.0
+      },
+      "tags": []
+    },
+    "gameViewport": {
+      "type": "rect",
+      "box": {
+        "x": 0.004479,
+        "y": 0.005963,
+        "w": 0.668533,
+        "h": 0.666951
+      },
+      "tags": []
+    },
+    "minimap": {
+      "type": "ellipse",
+      "center": {
+        "x": 0.840986,
+        "y": 0.151619
+      },
+      "radiusX": 0.094625,
+      "radiusY": 0.129472,
+      "rotation": 0.0,
+      "tags": []
+    },
+    "inventory": {
+      "type": "grid",
+      "box": {
+        "x": 0.732923,
+        "y": 0.420784,
+        "w": 0.215566,
+        "h": 0.5
+      },
+      "rows": 7,
+      "cols": 4,
+      "slotCount": 28,
+      "tags": []
+    },
+    "chatbox": {
+      "type": "rect",
+      "box": {
+        "x": 0.010638,
+        "y": 0.680579,
+        "w": 0.657335,
+        "h": 0.261499
+      },
+      "tags": []
+    },
+    "sidePanel": {
+      "type": "rect",
+      "box": {
+        "x": 0.675252,
+        "y": 0.001704,
+        "w": 0.324748,
+        "h": 0.998296
+      },
+      "tags": []
+    },
+    "compassOrbArea": {
+      "type": "ellipse",
+      "center": {
+        "x": 0.732643,
+        "y": 0.040886
+      },
+      "radiusX": 0.022677,
+      "radiusY": 0.035775,
+      "rotation": 0.0,
+      "tags": []
+    },
+    "Bottom_tabs": {
+      "type": "grid",
+      "box": {
+        "x": 0.684211,
+        "y": 0.92845,
+        "w": 0.31075,
+        "h": 0.068143
+      },
+      "rows": 1,
+      "cols": 7,
+      "slotCount": 7,
+      "tags": []
+    },
+    "Top_tabs": {
+      "type": "grid",
+      "box": {
+        "x": 0.68813,
+        "y": 0.335605,
+        "w": 0.305711,
+        "h": 0.070698
+      },
+      "rows": 1,
+      "cols": 7,
+      "slotCount": 7,
+      "tags": []
+    },
+    "Special_attack": {
+      "type": "ellipse",
+      "center": {
+        "x": 0.769597,
+        "y": 0.298126
+      },
+      "radiusX": 0.017078,
+      "radiusY": 0.028109,
+      "rotation": 0.0,
+      "tags": []
+    }
+  },
+  "approximate": false,
+  "profileName": "default_screen_regions",
+  "updatedAtUtc": "2026-05-04T01:12:08.255627+00:00"
+}

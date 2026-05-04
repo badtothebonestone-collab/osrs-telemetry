@@ -26,14 +26,27 @@ To build a derived perception dataset for the newest session:
 python telemetry-viewer\build_perception_dataset.py
 ```
 
+To initialize a new session from a reusable calibration profile:
+
+```text
+python telemetry-viewer\build_perception_dataset.py --calibration-profile "C:\path\to\screen_regions_profile.json"
+```
+
 `perception\tick_bundles.jsonl` contains one derived record per tick. Each
 bundle joins the authoritative tick JSON with nearby event context, the
 session-relative frame path, frame existence at build time, and frame-index
-timing when available. `perception\screen_regions.json` is an approximate
+timing when available. `perception\screen_regions.json` is the session-local
 normalized region map for review tooling; it does not crop or edit frame
-images. The perception dataset is read-only derived data from existing
-telemetry and performs no automation, clicking, input hooks, overlays, or
-client-state mutation.
+images. When it must be created, profile loading uses this order:
+
+1. Existing session `perception\screen_regions.json`
+2. `--calibration-profile "C:\path\to\profile.json"`
+3. `telemetry-viewer\calibration_profiles\default_screen_regions.json`
+4. Built-in approximate fallback regions
+
+The perception dataset is read-only derived data from existing telemetry and
+performs no automation, clicking, input hooks, overlays, or client-state
+mutation.
 
 To prepare tick-aligned visual review records from the derived perception
 dataset:
@@ -52,6 +65,22 @@ To attempt derived crop files for a small sample:
 python telemetry-viewer\prepare_visual_perception.py --generate-crops --limit 25
 ```
 
+For sessions where old frame images may have been deleted by retention, select
+newer or existing-frame records:
+
+```text
+python telemetry-viewer\prepare_visual_perception.py --latest 25 --only-existing-frames
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --latest 25 --only-existing-frames
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --generate-grid-slots --latest 25 --only-existing-frames
+```
+
+`--latest` selects the newest matching ticks. `--only-existing-frames` is useful
+when older tick bundles still exist but their source frame images were already
+removed by retention. Crop mode now prefers existing-frame ticks by default
+when possible so `--generate-crops --limit N` is less likely to spend the whole
+sample on missing retained frames. `--generate-grid-slots` derives slot crops
+for grid regions, such as inventory, only when explicitly requested.
+
 Crop mode requires Pillow to already be available. The script does not install
 dependencies. If Pillow is unavailable, it prints a warning and continues in
 metadata-only mode. Generated crops, when possible, are derived outputs under
@@ -59,6 +88,104 @@ metadata-only mode. Generated crops, when possible, are derived outputs under
 modified. The visual prep tool is read-only derived analysis data and performs
 no automation, clicking, input hooks, overlays, menu actions, or client-state
 mutation.
+
+Screen regions may use typed records:
+
+- `rect`: normalized rectangle box.
+- `circle`: normalized center plus radius.
+- `ellipse`: normalized center plus X/Y radii and optional rotation metadata.
+- `grid`: normalized outer box plus rows, columns, and slot count.
+
+Old-style `{ "x": ..., "y": ..., "w": ..., "h": ... }` regions are still read
+as rectangles. Inventory grids should use `rows=7`, `cols=4`, and
+`slotCount=28`; visual prep derives the 28 slot boxes from the calibrated grid
+geometry.
+
+If crop boxes look off, render region-calibration previews:
+
+```text
+python telemetry-viewer\calibrate_screen_regions.py --latest-existing-frame
+```
+
+Open the generated overlay and contact sheet under:
+
+```text
+perception\region_calibration\
+```
+
+Adjust a region with a pixel nudge:
+
+```text
+python telemetry-viewer\calibrate_screen_regions.py --latest-existing-frame --nudge inventory 20 -10 0 15 --output-calibrated
+```
+
+Or set normalized values directly:
+
+```text
+python telemetry-viewer\calibrate_screen_regions.py --latest-existing-frame --set-region inventory 0.700 0.300 0.250 0.400 --output-calibrated
+```
+
+Calibration is a read-only preview unless `--write-screen-regions` is used. It
+writes proposed values to
+`perception\region_calibration\calibrated_screen_regions.json`, and only
+overwrites the derived `perception\screen_regions.json` when explicitly asked:
+
+```text
+python telemetry-viewer\calibrate_screen_regions.py --latest-existing-frame --nudge inventory 20 -10 0 15 --write-screen-regions
+```
+
+After accepting calibrated regions, rerun visual perception crops:
+
+```text
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --latest 25 --only-existing-frames
+```
+
+For a local browser calibration UI:
+
+```text
+python telemetry-viewer\calibrate_screen_regions.py --interactive --latest-existing-frame
+```
+
+Open:
+
+```text
+http://127.0.0.1:8770/
+```
+
+The UI lets you drag boxes on the captured frame, edit pixel `x/y/w/h`
+values, switch region type between `rect`, `circle`, `ellipse`, and `grid`, add
+new region categories, rename or duplicate regions, delete regions, and edit
+tags. Use **Save as default profile** to write
+`telemetry-viewer\calibration_profiles\default_screen_regions.json`. Use
+**Load default profile** to load that profile into the UI without overwriting
+the session file. Use **Save calibrated copy** for
+`perception\region_calibration\calibrated_screen_regions.json`, and only click
+**Write screen_regions.json** when you are ready to update the derived session
+`perception\screen_regions.json`.
+
+For inventory calibration, add or select a grid region and set:
+
+```text
+rows=7
+cols=4
+slotCount=28
+```
+
+Then rerun visual perception crops:
+
+```text
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --latest 25 --only-existing-frames
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --generate-grid-slots --latest 25 --only-existing-frames
+```
+
+Mouse clicks in the calibration UI are local to the browser page. The UI does
+not interact with RuneLite or the game client. It does not modify raw telemetry
+or source frame images, and it only edits the derived
+`perception\screen_regions.json` after the explicit write button is clicked.
+
+The calibration tool uses existing frame images only. It does not modify raw
+telemetry or source frame images, and Pillow must already be available because
+the tool does not install dependencies.
 
 The replay viewer includes a read-only **Analysis** panel derived from the
 existing tick, event, frame, and frame-index telemetry. It does not collect new

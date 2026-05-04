@@ -109,6 +109,46 @@ Telemetry Health, and `export_session.py` writes
 `validate_session.py` reports dropped, failed, and deleted frame counts clearly;
 normal expired/deleted frames are not validation failures by themselves.
 
+## Derived Visual Calibration
+
+The perception and visual-prep tools use derived screen-region calibration
+files. Session-local calibration lives at `perception\screen_regions.json`.
+Reusable defaults live at
+`telemetry-viewer\calibration_profiles\default_screen_regions.json`.
+
+When `build_perception_dataset.py` needs to create a session calibration file,
+it loads regions in this order:
+
+1. Existing session `perception\screen_regions.json`
+2. `--calibration-profile "C:\path\to\profile.json"`
+3. `telemetry-viewer\calibration_profiles\default_screen_regions.json`
+4. Built-in approximate fallback regions
+
+Launch the local calibration UI with:
+
+```powershell
+python telemetry-viewer\calibrate_screen_regions.py --interactive --latest-existing-frame
+```
+
+Open `http://127.0.0.1:8770/`. The UI can add, rename, duplicate, and delete
+region categories, set tags, and edit `rect`, `circle`, `ellipse`, and `grid`
+regions. Inventory grids should use `rows=7`, `cols=4`, and `slotCount=28`.
+Use **Save as default profile** to update the reusable default profile. Use
+**Write screen_regions.json** only when you explicitly want to update the
+derived session calibration.
+
+After calibration, regenerate visual perception records or crops:
+
+```powershell
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --latest 25 --only-existing-frames
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --generate-grid-slots --latest 25 --only-existing-frames
+```
+
+These are derived tooling steps only. They do not interact with RuneLite or the
+game client, do not add automation, and do not modify raw telemetry or source
+frame images. Mouse clicks in the calibration UI affect only the local browser
+page.
+
 On Windows, Stop Selected Process and Stop All Started Processes stop the
 launcher-started process tree by PID with `taskkill /T /F`. The launcher does
 not kill unrelated Java, Gradle, RuneLite, or Python processes by image name.

@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://osrs-telemetry.local/schemas/screen_regions.schema.json",
+  "title": "OSRS Telemetry Screen Regions",
+  "type": "object",
+  "description": "Derived screen-region calibration/profile document used by local visual review tools. It is not raw telemetry and is safe to extend.",
+  "required": [
+    "regions"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string"
+    },
+    "coordinateSpace": {
+      "type": "string",
+      "description": "Usually normalized, where x/y/w/h values are in 0.0-1.0 frame coordinates."
+    },
+    "profileName": {
+      "type": ["string", "null"]
+    },
+    "createdAtUtc": {
+      "type": ["string", "null"]
+    },
+    "updatedAtUtc": {
+      "type": ["string", "null"]
+    },
+    "approximate": {
+      "type": ["boolean", "null"]
+    },
+    "note": {
+      "type": ["string", "null"]
+    },
+    "regions": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/region"
+      }
+    }
+  },
+  "$defs": {
+    "normalizedNumber": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "box": {
+      "type": "object",
+      "required": ["x", "y", "w", "h"],
+      "properties": {
+        "x": { "$ref": "#/$defs/normalizedNumber" },
+        "y": { "$ref": "#/$defs/normalizedNumber" },
+        "w": { "$ref": "#/$defs/normalizedNumber" },
+        "h": { "$ref": "#/$defs/normalizedNumber" }
+      },
+      "additionalProperties": true
+    },
+    "point": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "$ref": "#/$defs/normalizedNumber" },
+        "y": { "$ref": "#/$defs/normalizedNumber" }
+      },
+      "additionalProperties": true
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "oldStyleRect": {
+      "type": "object",
+      "description": "Backward-compatible legacy rectangle region.",
+      "required": ["x", "y", "w", "h"],
+      "properties": {
+        "x": { "$ref": "#/$defs/normalizedNumber" },
+        "y": { "$ref": "#/$defs/normalizedNumber" },
+        "w": { "$ref": "#/$defs/normalizedNumber" },
+        "h": { "$ref": "#/$defs/normalizedNumber" },
+        "tags": { "$ref": "#/$defs/tags" }
+      },
+      "additionalProperties": true
+    },
+    "rectRegion": {
+      "type": "object",
+      "required": ["type", "box"],
+      "properties": {
+        "type": { "const": "rect" },
+        "box": { "$ref": "#/$defs/box" },
+        "tags": { "$ref": "#/$defs/tags" }
+      },
+      "additionalProperties": true
+    },
+    "circleRegion": {
+      "type": "object",
+      "required": ["type", "center", "radius"],
+      "properties": {
+        "type": { "const": "circle" },
+        "center": { "$ref": "#/$defs/point" },
+        "radius": { "$ref": "#/$defs/normalizedNumber" },
+        "tags": { "$ref": "#/$defs/tags" }
+      },
+      "additionalProperties": true
+    },
+    "ellipseRegion": {
+      "type": "object",
+      "required": ["type", "center", "radiusX", "radiusY"],
+      "properties": {
+        "type": { "const": "ellipse" },
+        "center": { "$ref": "#/$defs/point" },
+        "radiusX": { "$ref": "#/$defs/normalizedNumber" },
+        "radiusY": { "$ref": "#/$defs/normalizedNumber" },
+        "rotation": { "type": "number" },
+        "tags": { "$ref": "#/$defs/tags" }
+      },
+      "additionalProperties": true
+    },
+    "gridRegion": {
+      "type": "object",
+      "required": ["type", "box"],
+      "properties": {
+        "type": { "const": "grid" },
+        "box": { "$ref": "#/$defs/box" },
+        "rows": { "type": "integer", "minimum": 1 },
+        "cols": { "type": "integer", "minimum": 1 },
+        "slotCount": { "type": "integer", "minimum": 0 },
+        "tags": { "$ref": "#/$defs/tags" }
+      },
+      "additionalProperties": true
+    },
+    "region": {
+      "oneOf": [
+        { "$ref": "#/$defs/oldStyleRect" },
+        { "$ref": "#/$defs/rectRegion" },
+        { "$ref": "#/$defs/circleRegion" },
+        { "$ref": "#/$defs/ellipseRegion" },
+        { "$ref": "#/$defs/gridRegion" }
+      ]
+    }
+  },
+  "additionalProperties": true
+}

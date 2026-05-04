@@ -31,6 +31,8 @@ DEFAULT_EVENT_WINDOW_TICKS = 2
 HIGH_FRAME_LATENCY_MS = 1000
 MANY_MISSING_FRAMES_MIN = 10
 MANY_MISSING_FRAMES_RATIO = 0.25
+CALIBRATION_PROFILES_DIR = Path(__file__).resolve().parent / "calibration_profiles"
+DEFAULT_SCREEN_REGIONS_PROFILE = CALIBRATION_PROFILES_DIR / "default_screen_regions.json"
 
 CATEGORY_BY_EVENT_TYPE = {
     "HitsplatApplied": "combat",
@@ -623,21 +625,105 @@ def build_event_window(
 
 
 def screen_regions() -> dict:
+    def rect(x: float, y: float, w: float, h: float, tags: list[str] | None = None) -> dict:
+        return {
+            "type": "rect",
+            "box": {"x": x, "y": y, "w": w, "h": h},
+            "tags": tags or [],
+        }
+
+    def grid(
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        *,
+        rows: int,
+        cols: int,
+        slot_count: int,
+        tags: list[str] | None = None,
+    ) -> dict:
+        return {
+            "type": "grid",
+            "box": {"x": x, "y": y, "w": w, "h": h},
+            "rows": rows,
+            "cols": cols,
+            "slotCount": slot_count,
+            "tags": tags or [],
+        }
+
     return {
         "schemaVersion": SCHEMA_VERSION_SCREEN_REGIONS,
         "coordinateSpace": "normalized",
+        "approximate": True,
         "note": "Approximate review regions based on the current captured frame layout. Images are not cropped or modified.",
         "regions": {
-            "fullFrame": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
-            "gameViewport": {"x": 0.0, "y": 0.0, "w": 0.735, "h": 0.74},
-            "minimap": {"x": 0.735, "y": 0.0, "w": 0.265, "h": 0.25},
-            "inventory": {"x": 0.735, "y": 0.34, "w": 0.265, "h": 0.42},
-            "chatbox": {"x": 0.0, "y": 0.74, "w": 0.735, "h": 0.26},
-            "sidePanel": {"x": 0.735, "y": 0.25, "w": 0.265, "h": 0.75},
-            "tabs": {"x": 0.735, "y": 0.25, "w": 0.265, "h": 0.09},
-            "compassOrbArea": {"x": 0.735, "y": 0.0, "w": 0.265, "h": 0.18},
+            "fullFrame": rect(0.0, 0.0, 1.0, 1.0, ["frame"]),
+            "gameViewport": rect(0.0, 0.0, 0.735, 0.74, ["world"]),
+            "minimap": rect(0.735, 0.0, 0.265, 0.25, ["navigation"]),
+            "inventory": grid(0.735, 0.34, 0.265, 0.42, rows=7, cols=4, slot_count=28, tags=["inventory"]),
+            "chatbox": rect(0.0, 0.74, 0.735, 0.26, ["chat"]),
+            "sidePanel": rect(0.735, 0.25, 0.265, 0.75, ["sidePanel"]),
+            "tabs": rect(0.735, 0.25, 0.265, 0.09, ["tabs"]),
+            "compassOrbArea": rect(0.735, 0.0, 0.265, 0.18, ["orbs"]),
         },
     }
+
+
+def validate_screen_regions(data, source: Path | str) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError(f"screen regions profile is not a JSON object: {source}")
+
+    regions = data.get("regions")
+
+    if not isinstance(regions, dict):
+        raise ValueError(f"screen regions profile does not contain a regions object: {source}")
+
+    return data
+
+
+def load_screen_regions_file(path: Path) -> dict:
+    data = safe_read_json(path)
+    return validate_screen_regions(data, path)
+
+
+def copy_json_object(data: dict) -> dict:
+    return json.loads(json.dumps(data))
+
+
+def initialized_screen_regions(data: dict, source_name: str, source_path: Path | None = None) -> dict:
+    output = copy_json_object(data)
+    output.setdefault("schemaVersion", SCHEMA_VERSION_SCREEN_REGIONS)
+    output.setdefault("coordinateSpace", "normalized")
+    output["initializedAtUtc"] = utc_now()
+    output["initializedFromProfile"] = source_name
+
+    if source_path is not None:
+        output["initializedFromProfilePath"] = str(source_path)
+
+    return output
+
+
+def select_screen_regions_for_session(session: Path, calibration_profile: str | Path | None) -> tuple[dict, str, bool]:
+    screen_regions_path = session / "perception" / "screen_regions.json"
+
+    if screen_regions_path.exists():
+        return load_screen_regions_file(screen_regions_path), "session-local screen_regions.json", True
+
+    if calibration_profile:
+        profile_path = Path(calibration_profile).expanduser().resolve()
+        data = load_screen_regions_file(profile_path)
+        return initialized_screen_regions(data, "calibration profile", profile_path), str(profile_path), False
+
+    if DEFAULT_SCREEN_REGIONS_PROFILE.exists():
+        data = load_screen_regions_file(DEFAULT_SCREEN_REGIONS_PROFILE)
+        return (
+            initialized_screen_regions(data, "default_screen_regions profile", DEFAULT_SCREEN_REGIONS_PROFILE),
+            str(DEFAULT_SCREEN_REGIONS_PROFILE),
+            False,
+        )
+
+    return initialized_screen_regions(screen_regions(), "built-in approximate regions"), "built-in approximate regions", False
 
 
 def write_json(path: Path, data) -> None:
@@ -660,7 +746,12 @@ def atomic_publish(perception_dir: Path, temp_dir: Path, filenames: tuple[str, .
         os.replace(temp_dir / filename, perception_dir / filename)
 
 
-def build_perception_dataset(session: Path, *, window_ticks: int = DEFAULT_EVENT_WINDOW_TICKS) -> dict:
+def build_perception_dataset(
+    session: Path,
+    *,
+    window_ticks: int = DEFAULT_EVENT_WINDOW_TICKS,
+    calibration_profile: str | Path | None = None,
+) -> dict:
     session = session.expanduser().resolve()
     perception_dir = session / "perception"
     temp_dir = perception_dir / f".tmp-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}-{os.getpid()}"
@@ -682,6 +773,10 @@ def build_perception_dataset(session: Path, *, window_ticks: int = DEFAULT_EVENT
     if not ticks:
         raise ValueError(f"No ticks found in session: {session}")
 
+    screen_regions_data, screen_regions_source, screen_regions_preserved = select_screen_regions_for_session(
+        session,
+        calibration_profile,
+    )
     ticks_without_frame_path = sum(1 for _, tick in ticks if not tick.get("framePath"))
 
     if ticks_without_frame_path:
@@ -803,17 +898,21 @@ def build_perception_dataset(session: Path, *, window_ticks: int = DEFAULT_EVENT
         "healthStateCounts": dict(health_state_counts.most_common()),
         "frameIndexSummary": frame_index_summary,
         "dictionaryStats": dictionary_stats,
+        "screenRegionsSource": screen_regions_source,
+        "screenRegionsPreserved": screen_regions_preserved,
         "paths": generated_files,
         "warnings": warnings[:100],
         "warningCount": len(warnings),
     }
 
-    filenames = (
+    filenames = [
         "perception_index.json",
         "tick_bundles.jsonl",
         "event_windows.jsonl",
-        "screen_regions.json",
-    )
+    ]
+
+    if not screen_regions_preserved:
+        filenames.append("screen_regions.json")
 
     if temp_dir.exists():
         shutil.rmtree(temp_dir)
@@ -824,8 +923,9 @@ def build_perception_dataset(session: Path, *, window_ticks: int = DEFAULT_EVENT
         write_json(temp_dir / "perception_index.json", index)
         write_jsonl(temp_dir / "tick_bundles.jsonl", tick_bundles)
         write_jsonl(temp_dir / "event_windows.jsonl", event_windows)
-        write_json(temp_dir / "screen_regions.json", screen_regions())
-        atomic_publish(perception_dir, temp_dir, filenames)
+        if not screen_regions_preserved:
+            write_json(temp_dir / "screen_regions.json", screen_regions_data)
+        atomic_publish(perception_dir, temp_dir, tuple(filenames))
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
@@ -838,6 +938,7 @@ def parse_args():
     parser.add_argument("--session", help="Telemetry session directory to process.")
     parser.add_argument("--sessions-dir", help="Override the telemetry sessions directory when --session is omitted.")
     parser.add_argument("--window", type=int, default=DEFAULT_EVENT_WINDOW_TICKS, help="Nearby event window in ticks. Default: 2.")
+    parser.add_argument("--calibration-profile", help="Initialize perception\\screen_regions.json from this profile when the session does not already have one.")
     return parser.parse_args()
 
 
@@ -858,7 +959,11 @@ def main() -> int:
         return 1
 
     try:
-        index = build_perception_dataset(session, window_ticks=max(0, args.window))
+        index = build_perception_dataset(
+            session,
+            window_ticks=max(0, args.window),
+            calibration_profile=args.calibration_profile,
+        )
     except (OSError, ValueError) as error:
         print(f"Unable to build perception dataset: {error}")
         return 1
@@ -868,6 +973,8 @@ def main() -> int:
     print(f"  perception/tick_bundles.jsonl ({index['tickBundleCount']} rows)")
     print(f"  perception/event_windows.jsonl ({index['tickBundleCount']} rows)")
     print(f"  perception/screen_regions.json")
+    print(f"  screenRegionsSource: {index['screenRegionsSource']}")
+    print(f"  screenRegionsPreserved: {index['screenRegionsPreserved']}")
     print(f"  healthStateCounts: {index['healthStateCounts']}")
     print(f"  warningCount: {index['warningCount']}")
 
