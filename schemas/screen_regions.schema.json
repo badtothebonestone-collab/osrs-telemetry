@@ -4,8 +4,10 @@
   "title": "OSRS Telemetry Screen Regions",
   "type": "object",
   "description": "Derived screen-region calibration/profile document used by local visual review tools. It is not raw telemetry and is safe to extend.",
-  "required": [
-    "regions"
+  "anyOf": [
+    { "required": ["regions"] },
+    { "required": ["baseRegions"] },
+    { "required": ["tabProfiles"] }
   ],
   "properties": {
     "schemaVersion": {
@@ -30,10 +32,44 @@
     "note": {
       "type": ["string", "null"]
     },
+    "defaultTabProfile": {
+      "type": ["string", "null"]
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Optional profile or calibration metadata. Tools may also write selected metadata fields at the document root for readability.",
+      "additionalProperties": true
+    },
+    "calibratedAtUtc": {
+      "type": ["string", "null"]
+    },
+    "calibratedFromTickId": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "calibratedFramePath": {
+      "type": ["string", "null"]
+    },
+    "frameWidth": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "frameHeight": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
     "regions": {
+      "$ref": "#/$defs/regionMap",
+      "description": "Legacy flat region map. New saves prefer baseRegions and tabProfiles."
+    },
+    "baseRegions": {
+      "$ref": "#/$defs/regionMap",
+      "description": "Regions that are valid regardless of which RuneLite side tab is open."
+    },
+    "tabProfiles": {
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/region"
+        "$ref": "#/$defs/tabProfile"
       }
     }
   },
@@ -66,6 +102,26 @@
     "tags": {
       "type": "array",
       "items": { "type": "string" }
+    },
+    "regionMap": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/region"
+      }
+    },
+    "tabProfile": {
+      "anyOf": [
+        { "$ref": "#/$defs/regionMap" },
+        {
+          "type": "object",
+          "properties": {
+            "regions": { "$ref": "#/$defs/regionMap" },
+            "label": { "type": ["string", "null"] },
+            "note": { "type": ["string", "null"] }
+          },
+          "additionalProperties": true
+        }
+      ]
     },
     "oldStyleRect": {
       "type": "object",

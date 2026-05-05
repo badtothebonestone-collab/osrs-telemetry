@@ -37,7 +37,16 @@ bundle joins the authoritative tick JSON with nearby event context, the
 session-relative frame path, frame existence at build time, and frame-index
 timing when available. `perception\screen_regions.json` is the session-local
 normalized region map for review tooling; it does not crop or edit frame
-images. When it must be created, profile loading uses this order:
+images.
+
+Screen-region profiles are tab-aware. `baseRegions` are always-valid areas such
+as the full frame, game viewport, minimap, chatbox, side panel, tabs, compass,
+and orb area. `tabProfiles` are side-tab-specific areas. Inventory, equipment,
+prayer, magic, and other side-panel tabs need separate crop profiles because the
+same side-panel pixels represent different widgets depending on which tab is
+open.
+
+When `screen_regions.json` must be created, profile loading uses this order:
 
 1. Existing session `perception\screen_regions.json`
 2. `--calibration-profile "C:\path\to\profile.json"`
@@ -65,6 +74,36 @@ To attempt derived crop files for a small sample:
 python telemetry-viewer\prepare_visual_perception.py --generate-crops --limit 25
 ```
 
+By default, visual prep includes `baseRegions` only unless you provide an active
+tab or ask for all tab profiles. Use an explicit tab when you know which side
+tab is visible in the selected frames:
+
+```text
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --latest 25 --only-existing-frames --active-tab auto
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --latest 25 --only-existing-frames --active-tab inventory
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --latest 25 --only-existing-frames --active-tab prayer
+```
+
+`--active-tab auto` uses the active side-tab inference generated into
+`perception\tick_bundles.jsonl`. Detection priority is manual override, widget
+inference, event inference, visual fallback if implemented, then `unknown`.
+Review inference output with:
+
+```text
+python telemetry-viewer\inspect_tab_detection.py --limit 25
+```
+
+Manual overrides such as `--active-tab prayer` apply that profile to every
+selected tick and mark the active-tab source as `manual`. When auto inference
+returns `unknown`, visual prep includes `baseRegions` only and records skipped
+tab profiles unless `--include-all-tab-profiles` is set.
+
+To include every tab profile in one derived pass:
+
+```text
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --latest 25 --only-existing-frames --include-all-tab-profiles
+```
+
 For sessions where old frame images may have been deleted by retention, select
 newer or existing-frame records:
 
@@ -80,6 +119,14 @@ removed by retention. Crop mode now prefers existing-frame ticks by default
 when possible so `--generate-crops --limit N` is less likely to spend the whole
 sample on missing retained frames. `--generate-grid-slots` derives slot crops
 for grid regions, such as inventory, only when explicitly requested.
+
+Profile-aware crops are grouped by profile name:
+
+```text
+perception\crops\tick-XXXXXXXX\base\chatbox.jpg
+perception\crops\tick-XXXXXXXX\inventory\inventoryGrid.jpg
+perception\crops\tick-XXXXXXXX\prayer\prayerGrid.jpg
+```
 
 Crop mode requires Pillow to already be available. The script does not install
 dependencies. If Pillow is unavailable, it prints a warning and continues in
@@ -98,8 +145,9 @@ Screen regions may use typed records:
 
 Old-style `{ "x": ..., "y": ..., "w": ..., "h": ... }` regions are still read
 as rectangles. Inventory grids should use `rows=7`, `cols=4`, and
-`slotCount=28`; visual prep derives the 28 slot boxes from the calibrated grid
-geometry.
+`slotCount=28` under `tabProfiles.inventory`; visual prep derives the 28 slot
+boxes from the calibrated grid geometry. Equipment and prayer can use their own
+grid or slot regions under `tabProfiles.equipment` and `tabProfiles.prayer`.
 
 If crop boxes look off, render region-calibration previews:
 
@@ -152,13 +200,46 @@ Open:
 http://127.0.0.1:8770/
 ```
 
-The UI lets you drag boxes on the captured frame, edit pixel `x/y/w/h`
-values, switch region type between `rect`, `circle`, `ellipse`, and `grid`, add
-new region categories, rename or duplicate regions, delete regions, and edit
-tags. Use **Save as default profile** to write
-`telemetry-viewer\calibration_profiles\default_screen_regions.json`. Use
-**Load default profile** to load that profile into the UI without overwriting
-the session file. Use **Save calibrated copy** for
+The simplest workflow is to start from the launcher:
+
+1. Run `python telemetry-viewer\telemetry_launcher.py`.
+2. Click **Start Core Stack**.
+3. Log into RuneLite.
+4. Click **Start Calibration Mode**.
+5. If needed, click **Refresh to newest frame**.
+6. Calibrate base regions and the active tab profile, such as inventory,
+   prayer, or equipment.
+7. Use **Save session calibration** for this session only, or **Save as default
+   profile** for future sessions.
+8. Click **Prepare test crops**.
+9. Inspect the crops from the current session perception folder.
+
+The launcher Calibration section includes **Start Calibration Mode**, **Open
+Calibration UI**, **Build Perception Dataset**, **Prepare Test Crops**, **Open
+Calibration Profile Folder**, and **Open Current Session Perception Folder**.
+
+The UI lets you refresh to the newest frame, use the latest existing frame,
+drag boxes on the captured frame, edit pixel `x/y/w/h` values, switch region
+type between `rect`, `circle`, `ellipse`, and `grid`, select **Base regions**
+or a tab profile, show base and active-tab regions with distinct styling, add
+custom tab profiles, add new region categories, rename or duplicate regions,
+delete regions, and edit tags. Adding a region while the Inventory profile is
+selected adds it under `tabProfiles.inventory`.
+
+Persistence behavior:
+
+- **Save session calibration** writes only the selected session's
+  `sessions\<session_id>\perception\screen_regions.json`.
+- **Save as default profile** writes
+  `telemetry-viewer\calibration_profiles\default_screen_regions.json`.
+- Future sessions initialize from the default profile when
+  `build_perception_dataset.py` creates their first `screen_regions.json`.
+- Existing sessions keep their own session-local calibration unless explicitly
+  overwritten.
+- **Load default profile** loads that profile into the UI without overwriting
+  the session file.
+
+Use **Save calibrated copy** for
 `perception\region_calibration\calibrated_screen_regions.json`, and only click
 **Write screen_regions.json** when you are ready to update the derived session
 `perception\screen_regions.json`.
@@ -174,8 +255,9 @@ slotCount=28
 Then rerun visual perception crops:
 
 ```text
-python telemetry-viewer\prepare_visual_perception.py --generate-crops --latest 25 --only-existing-frames
-python telemetry-viewer\prepare_visual_perception.py --generate-crops --generate-grid-slots --latest 25 --only-existing-frames
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --latest 25 --only-existing-frames --active-tab inventory
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --generate-grid-slots --latest 25 --only-existing-frames --active-tab inventory
+python telemetry-viewer\prepare_visual_perception.py --generate-crops --latest 25 --only-existing-frames --include-all-tab-profiles
 ```
 
 Mouse clicks in the calibration UI are local to the browser page. The UI does

@@ -21,6 +21,8 @@ from telemetry_paths import (
     load_frame_index_summaries,
     safe_read_json,
 )
+from label_ranges import load_label_ranges
+from tab_detection import infer_active_tab, load_rules
 
 
 SCHEMA_VERSION_INDEX = "perception.index.v1"
@@ -33,6 +35,35 @@ MANY_MISSING_FRAMES_MIN = 10
 MANY_MISSING_FRAMES_RATIO = 0.25
 CALIBRATION_PROFILES_DIR = Path(__file__).resolve().parent / "calibration_profiles"
 DEFAULT_SCREEN_REGIONS_PROFILE = CALIBRATION_PROFILES_DIR / "default_screen_regions.json"
+DEFAULT_TAB_PROFILE = "inventory"
+DEFAULT_TAB_PROFILES = (
+    "inventory",
+    "equipment",
+    "prayer",
+    "magic",
+    "combat",
+    "stats",
+    "quests",
+    "friends",
+    "clan",
+    "settings",
+    "emotes",
+    "music",
+    "logout",
+)
+BASE_REGION_NAMES = {
+    "fullframe",
+    "gameviewport",
+    "minimap",
+    "chatbox",
+    "sidepanel",
+    "tabs",
+    "toptabs",
+    "bottomtabs",
+    "orbs",
+    "compass",
+    "compassorbare",
+}
 
 CATEGORY_BY_EVENT_TYPE = {
     "HitsplatApplied": "combat",
@@ -533,6 +564,27 @@ def derived_summary(tick: dict, frame: dict, events: list[dict], derived: dict) 
     return f"tick {tick_id}: {derived['healthState']} - {frame_label}; {event_label}"
 
 
+def active_tab_fields(tick: dict, nearby_events: list[dict], rules: dict, labels: dict) -> dict:
+    inference = infer_active_tab(tick, nearby_events=nearby_events, rules=rules, labels=labels)
+    evidence = inference.get("evidence")
+    fields = {
+        "activeTab": inference.get("activeTab") or "unknown",
+        "activeTabSource": inference.get("source") or "unknown",
+        "activeTabConfidence": (
+            inference.get("confidence")
+            if isinstance(inference.get("confidence"), (int, float))
+            else 0.0
+        ),
+        "activeTabEvidence": evidence if isinstance(evidence, list) else [],
+    }
+
+    for key in ("uiState", "activityState", "labelSource"):
+        if inference.get(key) is not None:
+            fields[key] = inference.get(key)
+
+    return fields
+
+
 def build_tick_bundle(
     session: Path,
     session_id: str | None,
@@ -544,6 +596,8 @@ def build_tick_bundle(
     frame_index_available: bool,
     current_events: list[dict],
     nearby_events: list[dict],
+    tab_detection_rules: dict,
+    tab_labels: dict,
 ) -> dict:
     local_player = tick.get("localPlayer") or {}
     status = tick.get("status") or {}
@@ -556,6 +610,7 @@ def build_tick_bundle(
         active_session,
     )
     derived = derived_flags(tick, frame, nearby_events)
+    derived.update(active_tab_fields(tick, nearby_events, tab_detection_rules, tab_labels))
     derived["warnings"].extend(frame_warnings)
     source_files = {
         "tick": session_relative(session, tick_source),
@@ -655,31 +710,179 @@ def screen_regions() -> dict:
     return {
         "schemaVersion": SCHEMA_VERSION_SCREEN_REGIONS,
         "coordinateSpace": "normalized",
+        "defaultTabProfile": DEFAULT_TAB_PROFILE,
         "approximate": True,
         "note": "Approximate review regions based on the current captured frame layout. Images are not cropped or modified.",
-        "regions": {
+        "baseRegions": {
             "fullFrame": rect(0.0, 0.0, 1.0, 1.0, ["frame"]),
             "gameViewport": rect(0.0, 0.0, 0.735, 0.74, ["world"]),
             "minimap": rect(0.735, 0.0, 0.265, 0.25, ["navigation"]),
-            "inventory": grid(0.735, 0.34, 0.265, 0.42, rows=7, cols=4, slot_count=28, tags=["inventory"]),
             "chatbox": rect(0.0, 0.74, 0.735, 0.26, ["chat"]),
             "sidePanel": rect(0.735, 0.25, 0.265, 0.75, ["sidePanel"]),
             "tabs": rect(0.735, 0.25, 0.265, 0.09, ["tabs"]),
-            "compassOrbArea": rect(0.735, 0.0, 0.265, 0.18, ["orbs"]),
+            "orbs": rect(0.735, 0.0, 0.265, 0.18, ["orbs"]),
+            "compass": rect(0.735, 0.0, 0.08, 0.08, ["compass"]),
+        },
+        "tabProfiles": {
+            "inventory": {
+                "inventoryGrid": grid(0.735, 0.34, 0.265, 0.42, rows=7, cols=4, slot_count=28, tags=["inventory"]),
+            },
+            "equipment": {},
+            "prayer": {},
+            "magic": {},
+            "combat": {},
+            "stats": {},
+            "quests": {},
+            "friends": {},
+            "clan": {},
+            "settings": {},
+            "emotes": {},
+            "music": {},
+            "logout": {},
         },
     }
 
 
+def clean_region_key(name: str) -> str:
+    return "".join(character for character in name.lower() if character.isalnum())
+
+
+def unique_region_name(regions: dict, requested: str) -> str:
+    root = str(requested or "region").strip() or "region"
+
+    if root not in regions:
+        return root
+
+    index = 2
+
+    while f"{root}_{index}" in regions:
+        index += 1
+
+    return f"{root}_{index}"
+
+
+def flat_region_target(name: str, region: dict) -> tuple[str, str]:
+    lowered = clean_region_key(name)
+    region_type = region.get("type") if isinstance(region, dict) else None
+
+    if "inventory" in lowered:
+        return "inventory", "inventoryGrid" if region_type == "grid" else name
+
+    if "equipment" in lowered or lowered.startswith("equip"):
+        return "equipment", "equipmentSlots" if region_type == "grid" else name
+
+    if "prayer" in lowered:
+        return "prayer", "prayerGrid" if region_type == "grid" else name
+
+    if "magic" in lowered or "spell" in lowered:
+        return "magic", name
+
+    if "combat" in lowered or "specialattack" in lowered:
+        return "combat", name
+
+    if lowered in BASE_REGION_NAMES:
+        return "base", name
+
+    for profile_name in DEFAULT_TAB_PROFILES:
+        if profile_name != DEFAULT_TAB_PROFILE and profile_name in lowered:
+            return profile_name, name
+
+    return "base", name
+
+
+def migrate_flat_regions_to_base_regions(raw: dict) -> dict:
+    flat_regions = raw.get("regions")
+
+    if not isinstance(flat_regions, dict):
+        raise ValueError("screen regions profile does not contain regions, baseRegions, or tabProfiles")
+
+    output = {
+        key: copy_json_object(value) if isinstance(value, dict) else value
+        for key, value in raw.items()
+        if key not in ("regions", "baseRegions", "tabProfiles")
+    }
+    output["baseRegions"] = {}
+    output["tabProfiles"] = {name: {} for name in DEFAULT_TAB_PROFILES}
+
+    for name, region in flat_regions.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("screen regions profile contains an invalid region name")
+
+        if not isinstance(region, dict):
+            raise ValueError(f"screen regions profile region is not an object: {name}")
+
+        profile_name, region_name = flat_region_target(name, region)
+        target = output["baseRegions"] if profile_name == "base" else output["tabProfiles"].setdefault(profile_name, {})
+        target[unique_region_name(target, region_name)] = copy_json_object(region)
+
+    output.setdefault("defaultTabProfile", DEFAULT_TAB_PROFILE)
+    return output
+
+
+def normalize_tab_profiles(value) -> dict:
+    if value is None:
+        value = {}
+
+    if not isinstance(value, dict):
+        raise ValueError("tabProfiles must be an object")
+
+    output = {name: {} for name in DEFAULT_TAB_PROFILES}
+
+    for profile_name, profile_regions in value.items():
+        if not isinstance(profile_name, str) or not profile_name:
+            raise ValueError("tab profile names must be non-empty strings")
+
+        if profile_regions is None:
+            output[profile_name] = {}
+            continue
+
+        if not isinstance(profile_regions, dict):
+            raise ValueError(f"tab profile is not an object: {profile_name}")
+
+        source = profile_regions.get("regions") if isinstance(profile_regions.get("regions"), dict) else profile_regions
+        output[profile_name] = {
+            name: copy_json_object(region)
+            for name, region in source.items()
+            if isinstance(name, str) and name and isinstance(region, dict)
+        }
+
+    return output
+
+
+def normalize_screen_regions_document(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("screen regions profile is not a JSON object")
+
+    if "baseRegions" not in raw and "tabProfiles" not in raw:
+        raw = migrate_flat_regions_to_base_regions(raw)
+
+    output = {
+        key: copy_json_object(value) if isinstance(value, dict) else value
+        for key, value in raw.items()
+        if key not in ("regions", "baseRegions", "tabProfiles")
+    }
+    base_regions = raw.get("baseRegions", {})
+
+    if not isinstance(base_regions, dict):
+        raise ValueError("baseRegions must be an object")
+
+    output["schemaVersion"] = output.get("schemaVersion") or SCHEMA_VERSION_SCREEN_REGIONS
+    output["coordinateSpace"] = output.get("coordinateSpace") or "normalized"
+    output.setdefault("defaultTabProfile", DEFAULT_TAB_PROFILE)
+    output["baseRegions"] = {
+        name: copy_json_object(region)
+        for name, region in base_regions.items()
+        if isinstance(name, str) and name and isinstance(region, dict)
+    }
+    output["tabProfiles"] = normalize_tab_profiles(raw.get("tabProfiles", {}))
+    return output
+
+
 def validate_screen_regions(data, source: Path | str) -> dict:
-    if not isinstance(data, dict):
-        raise ValueError(f"screen regions profile is not a JSON object: {source}")
-
-    regions = data.get("regions")
-
-    if not isinstance(regions, dict):
-        raise ValueError(f"screen regions profile does not contain a regions object: {source}")
-
-    return data
+    try:
+        return normalize_screen_regions_document(data)
+    except ValueError as error:
+        raise ValueError(f"{error}: {source}") from error
 
 
 def load_screen_regions_file(path: Path) -> dict:
@@ -692,7 +895,7 @@ def copy_json_object(data: dict) -> dict:
 
 
 def initialized_screen_regions(data: dict, source_name: str, source_path: Path | None = None) -> dict:
-    output = copy_json_object(data)
+    output = normalize_screen_regions_document(data)
     output.setdefault("schemaVersion", SCHEMA_VERSION_SCREEN_REGIONS)
     output.setdefault("coordinateSpace", "normalized")
     output["initializedAtUtc"] = utc_now()
@@ -704,26 +907,44 @@ def initialized_screen_regions(data: dict, source_name: str, source_path: Path |
     return output
 
 
-def select_screen_regions_for_session(session: Path, calibration_profile: str | Path | None) -> tuple[dict, str, bool]:
+def screen_regions_model(data: dict) -> str:
+    normalized = normalize_screen_regions_document(data)
+
+    if "baseRegions" in normalized and "tabProfiles" in normalized:
+        return "baseRegions/tabProfiles"
+
+    return "unknown"
+
+
+def screen_regions_counts(data: dict) -> tuple[int, int]:
+    normalized = normalize_screen_regions_document(data)
+    return len(normalized.get("baseRegions", {})), len(normalized.get("tabProfiles", {}))
+
+
+def select_screen_regions_for_session(
+    session: Path,
+    calibration_profile: str | Path | None,
+) -> tuple[dict, str, bool, str | None]:
     screen_regions_path = session / "perception" / "screen_regions.json"
 
     if screen_regions_path.exists():
-        return load_screen_regions_file(screen_regions_path), "session-local screen_regions.json", True
+        return load_screen_regions_file(screen_regions_path), "session", True, str(screen_regions_path)
 
     if calibration_profile:
         profile_path = Path(calibration_profile).expanduser().resolve()
         data = load_screen_regions_file(profile_path)
-        return initialized_screen_regions(data, "calibration profile", profile_path), str(profile_path), False
+        return initialized_screen_regions(data, "calibration-profile", profile_path), "calibration-profile", False, str(profile_path)
 
     if DEFAULT_SCREEN_REGIONS_PROFILE.exists():
         data = load_screen_regions_file(DEFAULT_SCREEN_REGIONS_PROFILE)
         return (
-            initialized_screen_regions(data, "default_screen_regions profile", DEFAULT_SCREEN_REGIONS_PROFILE),
-            str(DEFAULT_SCREEN_REGIONS_PROFILE),
+            initialized_screen_regions(data, "default-profile", DEFAULT_SCREEN_REGIONS_PROFILE),
+            "default-profile",
             False,
+            str(DEFAULT_SCREEN_REGIONS_PROFILE),
         )
 
-    return initialized_screen_regions(screen_regions(), "built-in approximate regions"), "built-in approximate regions", False
+    return initialized_screen_regions(screen_regions(), "approximate-fallback"), "approximate-fallback", False, None
 
 
 def write_json(path: Path, data) -> None:
@@ -751,6 +972,7 @@ def build_perception_dataset(
     *,
     window_ticks: int = DEFAULT_EVENT_WINDOW_TICKS,
     calibration_profile: str | Path | None = None,
+    labels_path: str | Path | None = None,
 ) -> dict:
     session = session.expanduser().resolve()
     perception_dir = session / "perception"
@@ -773,10 +995,11 @@ def build_perception_dataset(
     if not ticks:
         raise ValueError(f"No ticks found in session: {session}")
 
-    screen_regions_data, screen_regions_source, screen_regions_preserved = select_screen_regions_for_session(
+    screen_regions_data, screen_regions_source, screen_regions_preserved, screen_regions_source_path = select_screen_regions_for_session(
         session,
         calibration_profile,
     )
+    base_region_count, tab_profile_count = screen_regions_counts(screen_regions_data)
     ticks_without_frame_path = sum(1 for _, tick in ticks if not tick.get("framePath"))
 
     if ticks_without_frame_path:
@@ -788,11 +1011,18 @@ def build_perception_dataset(
     frame_index_lookup = frame_index_by_tick(frame_index_summaries)
     frame_index_summary = frame_index_stats(frame_index_summaries)
     frame_index_available = bool(frame_index_summaries)
+    tab_detection_rules = load_rules()
+    tab_labels = load_label_ranges(labels_path)
 
     if not frame_index_files:
         warnings.append("frame_index.jsonl missing; frame timing fields may be unavailable")
     elif not frame_index_available:
         warnings.append("frame_index.jsonl present but no frame-index records were parsed")
+
+    if tab_detection_rules.get("_loadError"):
+        warnings.append(tab_detection_rules["_loadError"])
+
+    warnings.extend(tab_labels.get("warnings", []))
 
     latest_tick = ticks[-1][1] if ticks else None
     events_by_tick = defaultdict(list)
@@ -845,6 +1075,8 @@ def build_perception_dataset(
             frame_index_available,
             current_events,
             nearby_events,
+            tab_detection_rules,
+            tab_labels,
         )
         tick_bundles.append(bundle)
         health_state_counts[bundle["derived"]["healthState"]] += 1
@@ -860,6 +1092,7 @@ def build_perception_dataset(
     inventory_signal_count = sum(1 for bundle in tick_bundles if bundle["derived"]["hasInventorySignal"])
     ui_signal_count = sum(1 for bundle in tick_bundles if bundle["derived"]["hasUiSignal"])
     capture_error_count = sum(bundle["state"]["captureErrorCount"] for bundle in tick_bundles)
+    active_tab_counts = Counter(bundle["derived"].get("activeTab", "unknown") for bundle in tick_bundles)
 
     if frame_missing_count:
         warnings.append(f"frame files missing or expired: {frame_missing_count}/{len(tick_bundles)}")
@@ -896,10 +1129,16 @@ def build_perception_dataset(
         "topEventTypes": dict(event_type_counts.most_common(20)),
         "topEventCategories": dict(event_category_counts.most_common()),
         "healthStateCounts": dict(health_state_counts.most_common()),
+        "activeTabCounts": dict(active_tab_counts.most_common()),
+        "activeTabUnknownCount": active_tab_counts.get("unknown", 0),
         "frameIndexSummary": frame_index_summary,
         "dictionaryStats": dictionary_stats,
         "screenRegionsSource": screen_regions_source,
+        "screenRegionsSourcePath": screen_regions_source_path,
         "screenRegionsPreserved": screen_regions_preserved,
+        "screenRegionsModel": screen_regions_model(screen_regions_data),
+        "tabProfileCount": tab_profile_count,
+        "baseRegionCount": base_region_count,
         "paths": generated_files,
         "warnings": warnings[:100],
         "warningCount": len(warnings),
@@ -939,6 +1178,7 @@ def parse_args():
     parser.add_argument("--sessions-dir", help="Override the telemetry sessions directory when --session is omitted.")
     parser.add_argument("--window", type=int, default=DEFAULT_EVENT_WINDOW_TICKS, help="Nearby event window in ticks. Default: 2.")
     parser.add_argument("--calibration-profile", help="Initialize perception\\screen_regions.json from this profile when the session does not already have one.")
+    parser.add_argument("--labels", help="Path to manual tab label ranges JSON. Defaults to telemetry-viewer\\tab_labels.json when present.")
     return parser.parse_args()
 
 
@@ -963,6 +1203,7 @@ def main() -> int:
             session,
             window_ticks=max(0, args.window),
             calibration_profile=args.calibration_profile,
+            labels_path=args.labels,
         )
     except (OSError, ValueError) as error:
         print(f"Unable to build perception dataset: {error}")
@@ -974,6 +1215,9 @@ def main() -> int:
     print(f"  perception/event_windows.jsonl ({index['tickBundleCount']} rows)")
     print(f"  perception/screen_regions.json")
     print(f"  screenRegionsSource: {index['screenRegionsSource']}")
+    print(f"  screenRegionsModel: {index['screenRegionsModel']}")
+    print(f"  baseRegionCount: {index['baseRegionCount']}")
+    print(f"  tabProfileCount: {index['tabProfileCount']}")
     print(f"  screenRegionsPreserved: {index['screenRegionsPreserved']}")
     print(f"  healthStateCounts: {index['healthStateCounts']}")
     print(f"  warningCount: {index['warningCount']}")

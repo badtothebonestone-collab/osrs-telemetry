@@ -33,6 +33,8 @@ from telemetry_paths import (  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPLAY_URL = "http://127.0.0.1:8765/"
+CALIBRATION_URL = "http://127.0.0.1:8770/"
+CALIBRATION_PROFILE_DIR = Path(__file__).resolve().parent / "calibration_profiles"
 STOP_GRACE_MS = 2500
 MAX_LOG_LINES = 5000
 HEALTH_REFRESH_MS = 5000
@@ -71,6 +73,19 @@ PROCESS_SPECS = {
         ["python", "telemetry-viewer\\replay_viewer.py"],
         True,
     ),
+    "calibration": ProcessSpec(
+        "calibration",
+        "Screen Calibration UI",
+        [
+            "python",
+            "telemetry-viewer\\calibrate_screen_regions.py",
+            "--interactive",
+            "--latest-existing-frame",
+            "--port",
+            "8770",
+        ],
+        True,
+    ),
     "validate": ProcessSpec(
         "validate",
         "Validate Session",
@@ -93,6 +108,22 @@ PROCESS_SPECS = {
         "visual_perception",
         "Prepare Visual Perception",
         ["python", "telemetry-viewer\\prepare_visual_perception.py"],
+        False,
+    ),
+    "test_crops": ProcessSpec(
+        "test_crops",
+        "Prepare Test Crops",
+        [
+            "python",
+            "telemetry-viewer\\prepare_visual_perception.py",
+            "--generate-crops",
+            "--generate-grid-slots",
+            "--latest",
+            "25",
+            "--only-existing-frames",
+            "--active-tab",
+            "inventory",
+        ],
         False,
     ),
     "tests": ProcessSpec(
@@ -220,6 +251,41 @@ def newest_file_in_dir(directory: Path) -> Path | None:
     return max(files, key=lambda path: path.stat().st_mtime)
 
 
+def latest_existing_frame_file(session: Path) -> Path | None:
+    frames_dir = session / "frames"
+
+    if not frames_dir.exists():
+        return None
+
+    try:
+        frame_files = [path for path in frames_dir.glob("frame-tick-*.jpg") if path.is_file()]
+    except OSError:
+        return None
+
+    if not frame_files:
+        return None
+
+    try:
+        return max(frame_files, key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return None
+
+
+def tick_id_from_frame_file(path: Path | None) -> int | None:
+    if path is None:
+        return None
+
+    prefix = "frame-tick-"
+
+    if not path.stem.startswith(prefix):
+        return None
+
+    try:
+        return int(path.stem[len(prefix):])
+    except ValueError:
+        return None
+
+
 def collect_health(sessions_dir: Path, validation_result: str) -> dict:
     values = {
         "newest_session": "-",
@@ -241,6 +307,10 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
         "frame_deleted_count": "0",
         "perception_bundle_count": "not built",
         "visual_perception_record_count": "not built",
+        "calibration_profile_exists": "no",
+        "session_screen_regions": "unknown",
+        "latest_existing_frame_tick": "unavailable",
+        "visual_crop_count": "not built",
         "session_size": "-",
         "capture_errors": "-",
         "validation": validation_result,
@@ -252,7 +322,13 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
         "manifest": None,
         "newest_tick_segment": None,
         "newest_event_segment": None,
+        "perception": None,
+        "calibration_profiles": str(CALIBRATION_PROFILE_DIR),
     }
+
+    values["calibration_profile_exists"] = "yes" if (
+        CALIBRATION_PROFILE_DIR / "default_screen_regions.json"
+    ).exists() else "no"
 
     if not sessions_dir.exists():
         return health_result("stale", f"Sessions dir missing: {sessions_dir}", values, paths)
@@ -270,6 +346,11 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
     frame_index_summaries = load_frame_index_summaries(session)
     latest_tick = read_latest_jsonl_record(tick_files)
     latest_frame = None
+    latest_existing_frame = latest_existing_frame_file(session)
+    latest_existing_frame_tick = tick_id_from_frame_file(latest_existing_frame)
+
+    if latest_existing_frame_tick is not None:
+        values["latest_existing_frame_tick"] = str(latest_existing_frame_tick)
 
     if frame_index_summaries:
         frame_stats = frame_index_stats(frame_index_summaries)
@@ -293,7 +374,7 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
             latest_frame = None
 
     if latest_frame is None:
-        latest_frame = newest_file_in_dir(session / "frames")
+        latest_frame = latest_existing_frame or newest_file_in_dir(session / "frames")
 
     values["newest_session"] = str(session)
     values["active"] = format_bool(active)
@@ -302,6 +383,9 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
     values["frame_files"] = str(count_frame_files(session))
     values["frames_size"] = format_mb(directory_size(session / "frames") / (1024 * 1024))
     values["session_size"] = format_mb(session_size_mb(session))
+    values["session_screen_regions"] = "yes" if (
+        session / "perception" / "screen_regions.json"
+    ).exists() else "no"
 
     perception_index = safe_read_json(session / "perception" / "perception_index.json")
 
@@ -321,6 +405,8 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
         values["visual_perception_record_count"] = (
             str(record_count) if record_count is not None else "unknown"
         )
+        crop_count = visual_perception_index.get("cropCount")
+        values["visual_crop_count"] = str(crop_count) if crop_count is not None else "unknown"
 
     paths["session"] = str(session)
     paths["latest_frame"] = str(latest_frame) if latest_frame else None
@@ -328,6 +414,7 @@ def collect_health(sessions_dir: Path, validation_result: str) -> dict:
     paths["manifest"] = str(session / "manifest.json")
     paths["newest_tick_segment"] = str(tick_files[-1]) if tick_files else None
     paths["newest_event_segment"] = str(event_files[-1]) if event_files else None
+    paths["perception"] = str(session / "perception")
 
     if latest_tick is None:
         return health_result("stale", "No ticks found", values, paths)
@@ -512,9 +599,20 @@ class LauncherApp(Tk):
                 ("Open Replay Viewer in Browser", self.open_replay_viewer, None),
                 ("Run Validate Session", lambda: self.start_process("validate"), None),
                 ("Run Export Session", lambda: self.start_process("export"), None),
-                ("Build Perception Dataset", lambda: self.start_process("perception"), None),
                 ("Prepare Visual Perception", lambda: self.start_process("visual_perception"), None),
                 ("Run Path Regression Tests", lambda: self.start_process("tests"), None),
+            ],
+        )
+        self._add_button_group(
+            button_frame,
+            "Calibration",
+            [
+                ("Start Calibration Mode", self.start_calibration_mode, None),
+                ("Open Calibration UI", self.open_calibration_ui, None),
+                ("Build Perception Dataset", lambda: self.start_process("perception"), None),
+                ("Prepare Test Crops", lambda: self.start_process("test_crops"), None),
+                ("Open Calibration Profile Folder", self.open_calibration_profile_folder, None),
+                ("Open Current Session Perception Folder", self.open_current_session_perception_folder, None),
             ],
         )
         self._add_button_group(
@@ -631,6 +729,10 @@ class LauncherApp(Tk):
             ("frame_deleted_count", "FrameDeleted count"),
             ("perception_bundle_count", "Perception bundle count"),
             ("visual_perception_record_count", "Visual perception records"),
+            ("calibration_profile_exists", "Calibration profile exists"),
+            ("session_screen_regions", "Session screen_regions.json"),
+            ("latest_existing_frame_tick", "Latest existing frame tick"),
+            ("visual_crop_count", "Visual crop count"),
             ("frames_size", "Frames folder size MB"),
             ("session_size", "Session size MB"),
             ("capture_errors", "Capture errors"),
@@ -763,6 +865,51 @@ class LauncherApp(Tk):
                 self.start_process(key)
 
         self.open_replay_viewer()
+
+    def start_calibration_mode(self):
+        for key in ("runelite", "latest"):
+            if not self.managed[key].is_running():
+                self.start_process(key)
+
+        calibration = self.managed["calibration"]
+
+        if calibration.is_running():
+            self.log("Calibration", "Calibration server is already running; reusing it.")
+            self.open_calibration_ui()
+            return
+
+        session = find_newest_session(self.sessions_dir())
+
+        if session is None:
+            self.log(
+                "Calibration",
+                "No retained frame found yet. Log in and wait a few ticks, then refresh calibration.",
+            )
+            return
+
+        latest_frame = latest_existing_frame_file(session)
+
+        if latest_frame is None:
+            self.log(
+                "Calibration",
+                "No retained frame found yet. Log in and wait a few ticks, then refresh calibration.",
+            )
+            return
+
+        perception_dir = session / "perception"
+
+        if not (perception_dir / "tick_bundles.jsonl").exists() or not (
+            perception_dir / "screen_regions.json"
+        ).exists():
+            self.log(
+                "Calibration",
+                "Perception files are not built yet. Run Build Perception Dataset, then start calibration again.",
+            )
+            return
+
+        self.log("Calibration", f"Using retained frame: {latest_frame}")
+        self.start_process("calibration")
+        self.after(1000, self.open_calibration_ui)
 
     def _read_process_output(self, managed: ManagedProcess):
         process = managed.process
@@ -1030,6 +1177,10 @@ class LauncherApp(Tk):
         webbrowser.open(REPLAY_URL)
         self.log("Launcher", f"Opened {REPLAY_URL}")
 
+    def open_calibration_ui(self):
+        webbrowser.open(CALIBRATION_URL)
+        self.log("Launcher", f"Opened {CALIBRATION_URL}")
+
     def open_sessions_folder(self):
         self.open_folder(self.sessions_dir(), "Sessions Folder")
 
@@ -1041,6 +1192,18 @@ class LauncherApp(Tk):
             return
 
         self.open_folder(newest, "Newest Session Folder")
+
+    def open_calibration_profile_folder(self):
+        self.open_folder(CALIBRATION_PROFILE_DIR, "Calibration Profile Folder")
+
+    def open_current_session_perception_folder(self):
+        newest = find_newest_session(self.sessions_dir())
+
+        if newest is None:
+            self.log("Launcher", f"No sessions found in {self.sessions_dir()}")
+            return
+
+        self.open_folder(newest / "perception", "Current Session Perception Folder")
 
     def open_health_target(self, key: str):
         labels = {

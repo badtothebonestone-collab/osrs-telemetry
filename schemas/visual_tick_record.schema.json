@@ -31,6 +31,61 @@
     "timestampUtc": {
       "type": ["string", "null"]
     },
+    "activeTab": {
+      "type": ["string", "null"],
+      "description": "Active side-tab used for this visual record. May be manually supplied, inferred from telemetry, or unknown."
+    },
+    "activeTabSource": {
+      "type": ["string", "null"],
+      "description": "Source of active-tab selection, such as manual, widget, event, visual, or unknown."
+    },
+    "activeTabConfidence": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Confidence score for the active-tab inference, where 0 means unknown and 1 means explicit/manual."
+    },
+    "activeTabEvidence": {
+      "type": "array",
+      "description": "Evidence objects or strings explaining how the active tab was selected or why it is unknown.",
+      "items": {
+        "oneOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "additionalProperties": true
+          }
+        ]
+      }
+    },
+    "regionProfile": {
+      "type": ["string", "null"],
+      "description": "Overall region profile mode for this record, such as base, inventory, or all."
+    },
+    "tabProfile": {
+      "type": ["string", "null"],
+      "description": "Backward-compatible alias for activeTab."
+    },
+    "baseRegions": {
+      "type": "array",
+      "description": "Base region names included for this tick.",
+      "items": { "type": "string" }
+    },
+    "activeTabRegions": {
+      "type": "array",
+      "description": "Active tab-profile region names included for this tick.",
+      "items": { "type": "string" }
+    },
+    "skippedTabProfiles": {
+      "type": "array",
+      "description": "Tab profile names not included in this record.",
+      "items": { "type": "string" }
+    },
+    "appliedRegionProfiles": {
+      "type": "array",
+      "description": "Region profiles applied to this record, usually base plus an inferred/manual tab profile, or every profile when requested.",
+      "items": { "type": "string" }
+    },
     "frame": {
       "type": "object",
       "properties": {
@@ -214,6 +269,14 @@
       "required": ["name", "cropPath", "exists"],
       "properties": {
         "name": { "type": "string" },
+        "regionProfile": {
+          "type": ["string", "null"],
+          "description": "Profile folder/name this region came from, such as base, inventory, prayer, or a custom tab profile."
+        },
+        "regionRole": {
+          "type": ["string", "null"],
+          "description": "Role of the region source, usually base, activeTab, or tabProfile."
+        },
         "type": { "type": ["string", "null"], "enum": ["rect", "circle", "ellipse", "grid", null] },
         "tags": {
           "type": "array",
@@ -228,7 +291,10 @@
           "type": "array",
           "items": { "$ref": "#/$defs/gridSlot" }
         },
-        "cropPath": { "type": ["string", "null"] },
+        "cropPath": {
+          "type": ["string", "null"],
+          "description": "Session-relative derived crop path. Profile-aware crops are grouped under perception/crops/tick-XXXXXXXX/<profileName>/."
+        },
         "exists": { "type": "boolean" }
       },
       "additionalProperties": true

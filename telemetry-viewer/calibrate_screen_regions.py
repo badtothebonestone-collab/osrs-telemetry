@@ -5,6 +5,9 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -37,6 +40,38 @@ DEFAULT_INTERACTIVE_PORT = 8770
 SCHEMA_VERSION_SCREEN_REGIONS = "perception.screen_regions.v1"
 CALIBRATION_PROFILES_DIR = Path(__file__).resolve().parent / "calibration_profiles"
 DEFAULT_SCREEN_REGIONS_PROFILE = CALIBRATION_PROFILES_DIR / "default_screen_regions.json"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_TAB_PROFILE = "inventory"
+DEFAULT_TAB_PROFILES = (
+    "inventory",
+    "equipment",
+    "prayer",
+    "magic",
+    "combat",
+    "stats",
+    "quests",
+    "friends",
+    "clan",
+    "settings",
+    "emotes",
+    "music",
+    "logout",
+)
+INTERACTIVE_BASE_PROFILE = "__base__"
+INTERACTIVE_BASE_PROFILE_LABEL = "Base regions"
+BASE_REGION_NAMES = {
+    "fullframe",
+    "gameviewport",
+    "minimap",
+    "chatbox",
+    "sidepanel",
+    "tabs",
+    "toptabs",
+    "bottomtabs",
+    "orbs",
+    "compass",
+    "compassorbare",
+}
 SESSION_CALIBRATION_METADATA_KEYS = {
     "calibrationGeneratedAtUtc",
     "calibratedAtUtc",
@@ -392,6 +427,250 @@ def serialize_region_for_save(region: dict) -> dict:
     return output
 
 
+def unique_region_name(regions: dict, requested: str) -> str:
+    root = str(requested or "region").strip() or "region"
+
+    if root not in regions:
+        return root
+
+    index = 2
+
+    while f"{root}_{index}" in regions:
+        index += 1
+
+    return f"{root}_{index}"
+
+
+def normalize_region_map(value, source_name: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{source_name} must be an object")
+
+    regions = {}
+
+    for name, raw_region in value.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"{source_name} region names must be non-empty strings")
+
+        if not isinstance(raw_region, dict):
+            raise ValueError(f"{source_name} region {name} must be an object")
+
+        regions[name] = serialize_region_for_save(normalize_region_record(name, raw_region))
+
+    return regions
+
+
+def flat_region_target(name: str, region: dict) -> tuple[str, str]:
+    lowered = re.sub(r"[^a-z0-9]+", "", name.lower())
+    region_type = region.get("type")
+
+    if "inventory" in lowered:
+        return "inventory", "inventoryGrid" if region_type == "grid" else name
+
+    if "equipment" in lowered or lowered.startswith("equip"):
+        return "equipment", "equipmentSlots" if region_type == "grid" else name
+
+    if "prayer" in lowered:
+        return "prayer", "prayerGrid" if region_type == "grid" else name
+
+    if "magic" in lowered or "spell" in lowered:
+        return "magic", name
+
+    if "combat" in lowered or "specialattack" in lowered:
+        return "combat", name
+
+    if lowered in BASE_REGION_NAMES:
+        return "base", name
+
+    for profile_name in DEFAULT_TAB_PROFILES:
+        if profile_name != DEFAULT_TAB_PROFILE and profile_name in lowered:
+            return profile_name, name
+
+    return "base", name
+
+
+def migrate_flat_regions_to_base_regions(raw: dict) -> dict:
+    flat_regions = normalize_region_map(raw.get("regions"), "regions")
+    output = {
+        key: deepcopy(value)
+        for key, value in raw.items()
+        if key not in ("regions", "baseRegions", "tabProfiles")
+    }
+    output["baseRegions"] = {}
+    output["tabProfiles"] = {name: {} for name in DEFAULT_TAB_PROFILES}
+
+    for name, region in flat_regions.items():
+        profile_name, region_name = flat_region_target(name, region)
+
+        if profile_name == "base":
+            target = output["baseRegions"]
+        else:
+            target = output["tabProfiles"].setdefault(profile_name, {})
+
+        target[unique_region_name(target, region_name)] = region
+
+    output.setdefault("defaultTabProfile", DEFAULT_TAB_PROFILE)
+    return output
+
+
+def normalize_tab_profile(profile_name: str, raw_profile) -> dict:
+    if raw_profile is None:
+        return {}
+
+    if not isinstance(raw_profile, dict):
+        raise ValueError(f"tab profile {profile_name} must be an object")
+
+    if isinstance(raw_profile.get("regions"), dict):
+        source = raw_profile["regions"]
+    else:
+        source = {
+            name: region
+            for name, region in raw_profile.items()
+            if isinstance(region, dict)
+        }
+
+    return normalize_region_map(source, f"tabProfiles.{profile_name}")
+
+
+def normalize_screen_regions_document(raw) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("screen regions profile is not a JSON object")
+
+    if "baseRegions" not in raw and "tabProfiles" not in raw:
+        if not isinstance(raw.get("regions"), dict):
+            raise ValueError("screen regions profile does not contain regions, baseRegions, or tabProfiles")
+
+        raw = migrate_flat_regions_to_base_regions(raw)
+
+    output = {
+        key: deepcopy(value)
+        for key, value in raw.items()
+        if key not in ("regions", "baseRegions", "tabProfiles")
+    }
+    output["schemaVersion"] = output.get("schemaVersion") or SCHEMA_VERSION_SCREEN_REGIONS
+    output["coordinateSpace"] = output.get("coordinateSpace") or "normalized"
+    output.setdefault("defaultTabProfile", DEFAULT_TAB_PROFILE)
+    output["baseRegions"] = normalize_region_map(raw.get("baseRegions", {}), "baseRegions")
+    output["tabProfiles"] = {}
+
+    raw_tab_profiles = raw.get("tabProfiles", {})
+
+    if raw_tab_profiles is not None and not isinstance(raw_tab_profiles, dict):
+        raise ValueError("tabProfiles must be an object")
+
+    for profile_name in DEFAULT_TAB_PROFILES:
+        output["tabProfiles"][profile_name] = {}
+
+    for profile_name, raw_profile in (raw_tab_profiles or {}).items():
+        if not isinstance(profile_name, str) or not profile_name:
+            raise ValueError("tab profile names must be non-empty strings")
+
+        output["tabProfiles"][profile_name] = normalize_tab_profile(profile_name, raw_profile)
+
+    return output
+
+
+def serialize_screen_regions_document(doc: dict) -> dict:
+    output = normalize_screen_regions_document(doc)
+    output.pop("regions", None)
+    return output
+
+
+def get_base_regions(doc: dict) -> dict:
+    return deepcopy(normalize_screen_regions_document(doc)["baseRegions"])
+
+
+def get_tab_profile(doc: dict, profile_name: str) -> dict:
+    normalized = normalize_screen_regions_document(doc)
+    return deepcopy(normalized["tabProfiles"].get(profile_name, {}))
+
+
+def set_tab_profile_region(doc: dict, profile_name: str, region_name: str, region: dict) -> dict:
+    output = normalize_screen_regions_document(doc)
+    output["tabProfiles"].setdefault(profile_name, {})
+    output["tabProfiles"][profile_name][region_name] = serialize_region_for_save(normalize_region_record(region_name, region))
+    return output
+
+
+def list_tab_profiles(doc: dict) -> list[str]:
+    return list(normalize_screen_regions_document(doc)["tabProfiles"].keys())
+
+
+def profile_region_map(doc: dict, profile_name: str) -> dict:
+    normalized = normalize_screen_regions_document(doc)
+
+    if profile_name in (INTERACTIVE_BASE_PROFILE, "base", ""):
+        return deepcopy(normalized["baseRegions"])
+
+    return deepcopy(normalized["tabProfiles"].get(profile_name, {}))
+
+
+def set_profile_regions(doc: dict, profile_name: str, regions: dict) -> dict:
+    normalized = normalize_screen_regions_document(doc)
+
+    if profile_name in (INTERACTIVE_BASE_PROFILE, "base", ""):
+        normalized["baseRegions"] = validated_regions_payload(regions)
+    else:
+        normalized["tabProfiles"][profile_name] = validated_regions_payload(regions)
+
+    return serialize_screen_regions_document(normalized)
+
+
+def ensure_tab_profile(doc: dict, profile_name: str) -> dict:
+    normalized = normalize_screen_regions_document(doc)
+
+    if profile_name and profile_name not in normalized["tabProfiles"]:
+        normalized["tabProfiles"][profile_name] = {}
+
+    return serialize_screen_regions_document(normalized)
+
+
+def screen_regions_document_counts(doc: dict) -> dict:
+    normalized = normalize_screen_regions_document(doc)
+    tab_profiles = normalized["tabProfiles"]
+    return {
+        "baseRegionCount": len(normalized["baseRegions"]),
+        "tabProfileCount": len(tab_profiles),
+        "tabRegionCount": sum(len(regions) for regions in tab_profiles.values()),
+    }
+
+
+def labeled_regions_for_document(doc: dict) -> list[tuple[str, dict]]:
+    normalized = normalize_screen_regions_document(doc)
+    items = [(f"base.{name}", region) for name, region in normalized["baseRegions"].items()]
+
+    for profile_name, regions in normalized["tabProfiles"].items():
+        for region_name, region in regions.items():
+            items.append((f"{profile_name}.{region_name}", region))
+
+    return items
+
+
+def pixel_boxes_for_region_items(region_items: list[tuple[str, dict]], width: int | None, height: int | None) -> dict[str, dict]:
+    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        return {}
+
+    boxes = {}
+
+    for name, region in region_items:
+        calculated_box = pixel_box(region, width, height)
+
+        if calculated_box is not None:
+            boxes[name] = calculated_box
+
+    return boxes
+
+
+def pixel_boxes_for_screen_regions_document(doc: dict, width: int | None, height: int | None) -> dict:
+    normalized = normalize_screen_regions_document(doc)
+    return {
+        "baseRegions": pixel_boxes_for_regions(normalized["baseRegions"], width, height),
+        "tabProfiles": {
+            profile_name: pixel_boxes_for_regions(regions, width, height)
+            for profile_name, regions in normalized["tabProfiles"].items()
+        },
+    }
+
+
 def clamp_region(region: dict) -> dict:
     return serialize_region_for_save(region)
 
@@ -653,14 +932,8 @@ def adjustment_args(args) -> list[tuple]:
 
 
 def apply_adjustments(screen_regions: dict, width: int, height: int, args) -> tuple[dict, list[dict]]:
-    calibrated = deepcopy(screen_regions)
-    regions = calibrated.get("regions")
-
-    if not isinstance(regions, dict):
-        raise ValueError("screen_regions.json does not contain a regions object")
-
-    for name, raw_region in list(regions.items()):
-        regions[name] = serialize_region_for_save(normalize_region_record(name, raw_region))
+    calibrated = normalize_screen_regions_document(screen_regions)
+    regions = get_base_regions(calibrated)
 
     applied = []
 
@@ -709,7 +982,8 @@ def apply_adjustments(screen_regions: dict, width: int, height: int, args) -> tu
 
         applied.append(serialize_adjustment(adjustment))
 
-    return calibrated, applied
+    calibrated["baseRegions"] = regions
+    return serialize_screen_regions_document(calibrated), applied
 
 
 def pixel_boxes_for_regions(regions: dict, width: int | None, height: int | None) -> dict[str, dict]:
@@ -886,15 +1160,10 @@ def write_screen_regions_atomic(path: Path, data: dict) -> None:
 
 
 def validate_screen_regions_document(data, source: Path | str) -> dict:
-    if not isinstance(data, dict):
-        raise ValueError(f"screen regions profile is not a JSON object: {source}")
-
-    regions = data.get("regions")
-
-    if not isinstance(regions, dict):
-        raise ValueError(f"screen regions profile does not contain a regions object: {source}")
-
-    return data
+    try:
+        return normalize_screen_regions_document(data)
+    except ValueError as error:
+        raise ValueError(f"{error}: {source}") from error
 
 
 def load_screen_regions_document(path: Path) -> dict:
@@ -902,8 +1171,8 @@ def load_screen_regions_document(path: Path) -> dict:
     return validate_screen_regions_document(data, path)
 
 
-def reusable_profile_document(screen_regions: dict, regions: dict, profile_name: str) -> dict:
-    profile = deepcopy(screen_regions) if isinstance(screen_regions, dict) else {}
+def reusable_profile_document(screen_regions: dict, profile_name: str, regions: dict | None = None) -> dict:
+    profile = normalize_screen_regions_document(screen_regions)
 
     for key in SESSION_CALIBRATION_METADATA_KEYS:
         profile.pop(key, None)
@@ -913,12 +1182,10 @@ def reusable_profile_document(screen_regions: dict, regions: dict, profile_name:
     profile["profileName"] = profile_name
     profile["updatedAtUtc"] = utc_now()
     profile["approximate"] = False
-    profile["regions"] = {
-        name: serialize_region_for_save(normalize_region_record(name, region))
-        for name, region in regions.items()
-    }
+    if regions is not None:
+        profile["baseRegions"] = validated_regions_payload(regions)
     profile["note"] = "Reusable screen-region calibration profile. Copy or load this into future sessions."
-    return profile
+    return serialize_screen_regions_document(profile)
 
 
 def add_calibration_metadata(
@@ -976,22 +1243,8 @@ def load_calibration_source(session: Path, args) -> tuple[dict, list[str]]:
     if not tick_bundles_path.exists() or not screen_regions_path.exists():
         raise FileNotFoundError(MISSING_PERCEPTION_MESSAGE)
 
-    screen_regions = safe_read_json(screen_regions_path)
-
-    if not isinstance(screen_regions, dict):
-        raise ValueError(f"Unable to read screen regions: {screen_regions_path}")
-
-    regions = screen_regions.get("regions")
-
-    if not isinstance(regions, dict):
-        raise ValueError(f"screen_regions.json does not contain a regions object: {screen_regions_path}")
-
-    normalized_regions = {
-        name: serialize_region_for_save(normalize_region_record(name, region))
-        for name, region in regions.items()
-    }
-    screen_regions = deepcopy(screen_regions)
-    screen_regions["regions"] = normalized_regions
+    screen_regions = load_screen_regions_document(screen_regions_path)
+    normalized_regions = get_base_regions(screen_regions)
 
     bundle, lookup_warnings = find_selected_bundle(session, tick_bundles_path, args.tick)
     warnings.extend(lookup_warnings)
@@ -1048,21 +1301,7 @@ def clamped_normalized_box(box: dict) -> dict:
 
 
 def validated_regions_payload(value) -> dict:
-    if not isinstance(value, dict):
-        raise ValueError("request JSON must include a regions object")
-
-    regions = {}
-
-    for name, box in value.items():
-        if not isinstance(name, str) or not name:
-            raise ValueError("region names must be non-empty strings")
-
-        if not isinstance(box, dict):
-            raise ValueError(f"region {name} must be an object")
-
-        regions[name] = serialize_region_for_save(normalize_region_record(name, box))
-
-    return regions
+    return normalize_region_map(value, "regions")
 
 
 class InteractiveCalibrationState:
@@ -1073,9 +1312,11 @@ class InteractiveCalibrationState:
         self.calibration_dir = self.paths["calibrationDir"]
         self.tick_id = source["tickId"]
         self.frame_path = source["framePath"]
-        self.screen_regions = source["screenRegions"]
-        self.original_regions = deepcopy(source["regions"])
-        self.current_regions = deepcopy(source["regions"])
+        self.screen_regions = normalize_screen_regions_document(source["screenRegions"])
+        self.original_screen_regions = deepcopy(self.screen_regions)
+        self.current_screen_regions = deepcopy(self.screen_regions)
+        self.original_regions = get_base_regions(self.original_screen_regions)
+        self.current_regions = get_base_regions(self.current_screen_regions)
         self.warnings = list(warnings)
         bundle_frame = source["bundle"].get("frame") if isinstance(source["bundle"].get("frame"), dict) else {}
         detected_width, detected_height = image_dimensions(self.frame_path)
@@ -1084,10 +1325,12 @@ class InteractiveCalibrationState:
 
     def output_paths(self) -> dict:
         return {
+            "perceptionDir": str(self.paths["perceptionDir"]),
             "calibrationDir": str(self.calibration_dir),
             "calibratedScreenRegions": str(self.calibration_dir / "calibrated_screen_regions.json"),
             "screenRegions": str(self.screen_regions_path),
             "defaultScreenRegionsProfile": str(DEFAULT_SCREEN_REGIONS_PROFILE),
+            "calibrationProfilesDir": str(CALIBRATION_PROFILES_DIR),
         }
 
     def state_payload(self) -> dict:
@@ -1097,14 +1340,94 @@ class InteractiveCalibrationState:
             "frameUrl": "/frame",
             "frameWidth": self.frame_width,
             "frameHeight": self.frame_height,
+            "baseProfileId": INTERACTIVE_BASE_PROFILE,
+            "baseProfileLabel": INTERACTIVE_BASE_PROFILE_LABEL,
+            "defaultTabProfiles": list(DEFAULT_TAB_PROFILES),
+            "defaultTabProfile": self.current_screen_regions.get("defaultTabProfile") or DEFAULT_TAB_PROFILE,
+            "profileNames": list_tab_profiles(self.current_screen_regions),
+            "screenRegions": self.current_screen_regions,
+            "originalScreenRegions": self.original_screen_regions,
             "currentRegions": self.current_regions,
             "originalRegions": self.original_regions,
             "currentPixelBoxes": pixel_boxes_for_regions(self.current_regions, self.frame_width, self.frame_height),
             "originalPixelBoxes": pixel_boxes_for_regions(self.original_regions, self.frame_width, self.frame_height),
+            "currentPixelGeometries": pixel_boxes_for_screen_regions_document(
+                self.current_screen_regions,
+                self.frame_width,
+                self.frame_height,
+            ),
+            "documentCounts": screen_regions_document_counts(self.current_screen_regions),
             "sessionPath": str(self.session),
             "outputPaths": self.output_paths(),
+            "persistence": {
+                "sessionCalibrationPath": str(self.screen_regions_path),
+                "defaultProfilePath": str(DEFAULT_SCREEN_REGIONS_PROFILE),
+                "sessionCalibrationNote": "Session calibration affects this session only.",
+                "defaultProfileNote": "Default profile initializes future sessions.",
+                "existingSessionsNote": "Existing sessions keep their own screen_regions.json unless explicitly overwritten.",
+            },
             "warnings": self.warnings,
         }
+
+    def latest_frame_info(self) -> dict:
+        tick_bundles_path = self.paths["tickBundles"]
+
+        if not tick_bundles_path.exists():
+            return {
+                "ok": False,
+                "error": MISSING_PERCEPTION_MESSAGE,
+            }
+
+        bundle, lookup_warnings = find_selected_bundle(self.session, tick_bundles_path, None)
+
+        if bundle is None:
+            return {
+                "ok": False,
+                "error": "No retained frame found yet. Log in and wait a few ticks, then refresh calibration.",
+            }
+
+        tick_id = bundle.get("tickId")
+        frame_path = frame_path_for_bundle(self.session, bundle)
+
+        if frame_path is None or not frame_path.exists():
+            return {
+                "ok": False,
+                "error": "No retained frame found yet. Log in and wait a few ticks, then refresh calibration.",
+                "tickId": tick_id,
+                "framePath": str(frame_path) if frame_path else None,
+            }
+
+        width, height = image_dimensions(frame_path)
+
+        return {
+            "ok": True,
+            "tickId": tick_id,
+            "framePath": str(frame_path),
+            "frameWidth": width,
+            "frameHeight": height,
+            "warnings": lookup_warnings,
+        }
+
+    def refresh_latest_frame(self) -> dict:
+        latest = self.latest_frame_info()
+
+        if not latest.get("ok"):
+            return latest
+
+        self.tick_id = latest["tickId"]
+        self.frame_path = Path(latest["framePath"])
+        self.frame_width = latest.get("frameWidth")
+        self.frame_height = latest.get("frameHeight")
+
+        for warning in latest.get("warnings") or []:
+            if warning not in self.warnings:
+                self.warnings.append(warning)
+
+        payload = self.state_payload()
+        payload["ok"] = True
+        payload["refreshed"] = True
+        payload["message"] = f"Using latest retained frame for tick {self.tick_id}"
+        return payload
 
     def update_dimensions(self, width, height) -> None:
         if isinstance(width, int) and width > 0:
@@ -1113,22 +1436,52 @@ class InteractiveCalibrationState:
         if isinstance(height, int) and height > 0:
             self.frame_height = height
 
-    def update_regions(self, regions: dict, *, frame_width=None, frame_height=None) -> dict:
+    def update_regions(self, regions: dict | None = None, *, screen_regions: dict | None = None, frame_width=None, frame_height=None) -> dict:
         self.update_dimensions(frame_width, frame_height)
-        self.current_regions = validated_regions_payload(regions)
+        if screen_regions is not None:
+            self.current_screen_regions = normalize_screen_regions_document(screen_regions)
+        elif regions is not None:
+            self.current_screen_regions = set_profile_regions(
+                self.current_screen_regions,
+                INTERACTIVE_BASE_PROFILE,
+                regions,
+            )
+        else:
+            raise ValueError("region update request must include screenRegions or regions")
+
+        self.current_regions = get_base_regions(self.current_screen_regions)
         return self.state_payload()
 
     def calibrated_output(self) -> dict:
-        calibrated = deepcopy(self.screen_regions)
-        calibrated["regions"] = deepcopy(self.current_regions)
-        pixel_boxes = pixel_boxes_for_regions(self.current_regions, self.frame_width, self.frame_height)
+        calibrated = serialize_screen_regions_document(self.current_screen_regions)
+        pixel_boxes = {
+            name: {
+                "x": box["x"],
+                "y": box["y"],
+                "w": box["w"],
+                "h": box["h"],
+            }
+            for name, box in pixel_boxes_for_region_items(
+                labeled_regions_for_document(calibrated),
+                self.frame_width,
+                self.frame_height,
+            ).items()
+        }
+        counts = screen_regions_document_counts(calibrated)
         return add_calibration_metadata(
             calibrated,
             tick_id=self.tick_id,
             frame_path=self.frame_path,
             width=self.frame_width,
             height=self.frame_height,
-            adjustments=[{"type": "interactive-update", "regionCount": len(self.current_regions)}],
+            adjustments=[
+                {
+                    "type": "interactive-update",
+                    "baseRegionCount": counts["baseRegionCount"],
+                    "tabProfileCount": counts["tabProfileCount"],
+                    "tabRegionCount": counts["tabRegionCount"],
+                }
+            ],
             pixel_boxes=pixel_boxes,
         )
 
@@ -1147,33 +1500,45 @@ class InteractiveCalibrationState:
     def write_screen_regions(self) -> dict:
         output = self.calibrated_output()
         write_screen_regions_atomic(self.screen_regions_path, output)
-        self.screen_regions = deepcopy(output)
-        self.original_regions = deepcopy(self.current_regions)
+        self.screen_regions = normalize_screen_regions_document(output)
+        self.current_screen_regions = deepcopy(self.screen_regions)
+        self.original_screen_regions = deepcopy(self.screen_regions)
+        self.current_regions = get_base_regions(self.current_screen_regions)
+        self.original_regions = get_base_regions(self.original_screen_regions)
         return {
             "ok": True,
             "path": str(self.screen_regions_path),
             "screenRegionsUpdated": True,
+            "message": "Session calibration affects this session only. Existing sessions keep their own screen_regions.json.",
         }
 
     def save_default_profile(self) -> dict:
-        profile = reusable_profile_document(self.screen_regions, self.current_regions, "default_screen_regions")
+        profile = reusable_profile_document(self.current_screen_regions, "default_screen_regions")
         write_json_atomic(DEFAULT_SCREEN_REGIONS_PROFILE, profile)
+        counts = screen_regions_document_counts(profile)
         return {
             "ok": True,
             "path": str(DEFAULT_SCREEN_REGIONS_PROFILE),
             "profileName": profile["profileName"],
-            "regionCount": len(profile["regions"]),
+            "regionCount": counts["baseRegionCount"] + counts["tabRegionCount"],
+            "baseRegionCount": counts["baseRegionCount"],
+            "tabProfileCount": counts["tabProfileCount"],
+            "message": "Default profile initializes future sessions. Existing sessions keep their own screen_regions.json.",
         }
 
     def load_default_profile(self) -> dict:
         profile = load_screen_regions_document(DEFAULT_SCREEN_REGIONS_PROFILE)
-        regions = validated_regions_payload(profile["regions"])
         self.screen_regions = deepcopy(profile)
-        self.current_regions = regions
+        self.current_screen_regions = deepcopy(profile)
+        self.current_regions = get_base_regions(self.current_screen_regions)
         payload = self.state_payload()
         payload["ok"] = True
         payload["path"] = str(DEFAULT_SCREEN_REGIONS_PROFILE)
         payload["profileName"] = profile.get("profileName") or DEFAULT_SCREEN_REGIONS_PROFILE.stem
+        payload["message"] = (
+            "Loaded default profile into the UI only. Save session calibration or Write screen_regions.json "
+            "to update this session."
+        )
         return payload
 
     def export_profile(self, path_value) -> dict:
@@ -1191,13 +1556,16 @@ class InteractiveCalibrationState:
             raise ValueError(f"export profile path must stay under {self.calibration_dir}") from error
 
         profile_name = output_path.stem or "screen_regions_profile"
-        profile = reusable_profile_document(self.screen_regions, self.current_regions, profile_name)
+        profile = reusable_profile_document(self.current_screen_regions, profile_name)
         write_json_atomic(output_path, profile)
+        counts = screen_regions_document_counts(profile)
         return {
             "ok": True,
             "path": str(output_path),
             "profileName": profile["profileName"],
-            "regionCount": len(profile["regions"]),
+            "regionCount": counts["baseRegionCount"] + counts["tabRegionCount"],
+            "baseRegionCount": counts["baseRegionCount"],
+            "tabProfileCount": counts["tabProfileCount"],
         }
 
     def export_preview(self) -> dict:
@@ -1222,14 +1590,8 @@ class InteractiveCalibrationState:
             width, height = frame.size
             self.frame_width = width
             self.frame_height = height
-            region_items = [(name, box) for name, box in self.current_regions.items()]
-            pixel_boxes = {}
-
-            for name, box in region_items:
-                calculated_box = pixel_box(box, width, height)
-
-                if calculated_box is not None:
-                    pixel_boxes[name] = calculated_box
+            region_items = labeled_regions_for_document(self.current_screen_regions)
+            pixel_boxes = pixel_boxes_for_region_items(region_items, width, height)
 
             if not pixel_boxes:
                 raise ValueError("no valid region boxes were available after clamping")
@@ -1242,6 +1604,88 @@ class InteractiveCalibrationState:
             "overlayPath": str(overlay_path),
             "contactSheetPath": str(sheet_path),
             "regionCount": len(pixel_boxes),
+        }
+
+    def prepare_test_crops(self) -> dict:
+        display_command = (
+            "python telemetry-viewer\\prepare_visual_perception.py "
+            f"--session \"{self.session}\" "
+            "--generate-crops --generate-grid-slots --latest 25 --only-existing-frames --active-tab inventory"
+        )
+        command = [
+            sys.executable,
+            "telemetry-viewer\\prepare_visual_perception.py",
+            "--session",
+            str(self.session),
+            "--generate-crops",
+            "--generate-grid-slots",
+            "--latest",
+            "25",
+            "--only-existing-frames",
+            "--active-tab",
+            "inventory",
+        ]
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+
+        try:
+            result = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                shell=False,
+                timeout=300,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return {
+                "ok": False,
+                "command": display_command,
+                "error": str(error),
+            }
+
+        output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
+
+        if len(output) > 12000:
+            output = output[-12000:]
+
+        return {
+            "ok": result.returncode == 0,
+            "command": display_command,
+            "returnCode": result.returncode,
+            "output": output,
+            "visualPerceptionIndex": str(self.paths["perceptionDir"] / "visual_perception_index.json"),
+            "cropsDir": str(self.paths["perceptionDir"] / "crops"),
+            "message": "Prepared derived visual crops only. Raw telemetry and source frame images were not modified.",
+        }
+
+    def open_folder(self, folder: Path, label: str) -> dict:
+        folder = folder.expanduser()
+
+        if not folder.exists():
+            return {
+                "ok": False,
+                "path": str(folder),
+                "error": f"{label} does not exist: {folder}",
+            }
+
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(str(folder))
+            else:
+                webbrowser.open(folder.resolve().as_uri())
+        except OSError as error:
+            return {
+                "ok": False,
+                "path": str(folder),
+                "error": f"Unable to open {label}: {error}",
+            }
+
+        return {
+            "ok": True,
+            "path": str(folder),
+            "opened": True,
         }
 
 
@@ -1273,6 +1717,10 @@ HOME_HTML = """<!doctype html>
     button:hover { background: #33415a; }
     button.danger { border-color: #8b3a46; background: #44232c; }
     button[disabled] { color: #8b94a5; cursor: not-allowed; background: #1a1d24; }
+    .checkRow { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 8px; }
+    .checkRow label { display: flex; align-items: center; gap: 8px; margin: 0; }
+    .checkRow input { width: auto; }
+    .smallNote { font-size: 12px; color: #9da8ba; margin: 6px 0 0; }
     pre { background: #151821; border: 1px solid #303747; padding: 8px; color: #d5e4ff; white-space: pre-wrap; word-break: break-word; max-height: 170px; overflow: auto; }
     .muted { color: #aab2c0; }
     .status { min-height: 1.4em; color: #b9f6ca; }
@@ -1291,6 +1739,27 @@ HOME_HTML = """<!doctype html>
   <aside class="panel">
     <h1>Screen Region Calibration</h1>
     <p class="muted">Click and drag on the frame to redraw the selected region. Arrow keys move it; Shift moves 10 px; Ctrl resizes.</p>
+    <div class="buttons">
+      <button id="refreshLatestFrame">Refresh to newest frame</button>
+      <button id="useLatestFrame">Use latest existing frame</button>
+      <button id="prepareTestCrops">Prepare test crops</button>
+      <button id="openPerceptionFolder">Open perception folder</button>
+      <button id="openProfileFolder">Open profile folder</button>
+    </div>
+    <label for="profileSelect">Profile</label>
+    <select id="profileSelect"></select>
+    <p class="smallNote">Base regions are always visible regions; tab profiles are side-panel-specific.</p>
+    <div class="buttons">
+      <button id="addProfile">Add tab profile</button>
+      <button id="renameProfile">Rename tab profile</button>
+      <button id="duplicateProfile">Duplicate tab profile</button>
+      <button id="deleteProfile" class="danger">Delete tab profile</button>
+    </div>
+    <div class="checkRow">
+      <label><input id="showBaseRegions" type="checkbox" checked> Show base regions</label>
+      <label><input id="showActiveProfileRegions" type="checkbox" checked> Show active tab profile regions</label>
+      <label><input id="showAllProfiles" type="checkbox"> Show all profiles</label>
+    </div>
     <label for="regionSelect">Region</label>
     <select id="regionSelect"></select>
     <div class="buttons">
@@ -1338,8 +1807,9 @@ HOME_HTML = """<!doctype html>
       <button id="resetSelected">Reset selected region</button>
       <button id="reloadOriginal">Reload original</button>
       <button id="exportPreview">Export overlay/contact sheet</button>
-      <button id="write" title="Overwrites derived perception/screen_regions.json with the current calibrated boxes">Write screen_regions.json</button>
+      <button id="write" title="Overwrites derived perception/screen_regions.json with the current calibrated model">Write screen_regions.json</button>
     </div>
+    <p class="smallNote">Session calibration affects this session only. Default profile initializes future sessions. Existing sessions keep their own screen_regions.json unless explicitly overwritten.</p>
     <p id="status" class="status"></p>
     <h2>State</h2>
     <pre id="state">Loading...</pre>
@@ -1348,10 +1818,16 @@ HOME_HTML = """<!doctype html>
 <script>
 const image = document.getElementById('frameImage');
 const overlay = document.getElementById('overlay');
+const profileSelect = document.getElementById('profileSelect');
 const regionSelect = document.getElementById('regionSelect');
 const regionTypeSelect = document.getElementById('regionType');
 const regionTagsInput = document.getElementById('regionTags');
 const statusEl = document.getElementById('status');
+const showBaseToggle = document.getElementById('showBaseRegions');
+const showActiveToggle = document.getElementById('showActiveProfileRegions');
+const showAllToggle = document.getElementById('showAllProfiles');
+const BASE_PROFILE = '__base__';
+const DEFAULT_TAB_PROFILES = ['inventory', 'equipment', 'prayer', 'magic', 'combat', 'stats', 'quests', 'friends', 'clan', 'settings', 'emotes', 'music', 'logout'];
 const inputs = {
   x: document.getElementById('pxX'),
   y: document.getElementById('pxY'),
@@ -1364,10 +1840,15 @@ const gridInputs = {
   slotCount: document.getElementById('gridSlotCount')
 };
 let appState = null;
-let regions = {};
-let originalRegions = {};
+let screenRegions = {baseRegions: {}, tabProfiles: {}};
+let originalScreenRegions = {baseRegions: {}, tabProfiles: {}};
+let selectedProfile = BASE_PROFILE;
 let selectedRegion = null;
 let dragStart = null;
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value || {}));
+}
 
 function setStatus(text, warning=false) {
   statusEl.textContent = text || '';
@@ -1385,13 +1866,89 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function round6(value) {
+  return Math.round(value * 1000000) / 1000000;
+}
+
+function cleanName(value, fallback='region') {
+  return String(value || fallback).trim().replace(/\\s+/g, '_') || fallback;
+}
+
+function cleanProfileName(value) {
+  return cleanName(value, 'custom').replace(/[^A-Za-z0-9_-]/g, '_');
+}
+
+function titleCase(value) {
+  return String(value || '').replace(/[_-]+/g, ' ').replace(/\\b\\w/g, letter => letter.toUpperCase());
+}
+
+function normalizeModel(raw) {
+  const doc = clone(raw);
+  if (!doc.baseRegions && !doc.tabProfiles && doc.regions) {
+    doc.baseRegions = clone(doc.regions);
+  }
+  doc.baseRegions = doc.baseRegions || {};
+  doc.tabProfiles = doc.tabProfiles || {};
+  const defaults = appState?.defaultTabProfiles || DEFAULT_TAB_PROFILES;
+  defaults.forEach(name => {
+    if (!doc.tabProfiles[name]) doc.tabProfiles[name] = {};
+  });
+  doc.schemaVersion = doc.schemaVersion || 'perception.screen_regions.v1';
+  doc.coordinateSpace = doc.coordinateSpace || 'normalized';
+  doc.defaultTabProfile = doc.defaultTabProfile || 'inventory';
+  delete doc.regions;
+  return doc;
+}
+
+function profileNames() {
+  const names = [];
+  const seen = new Set();
+  (appState?.defaultTabProfiles || DEFAULT_TAB_PROFILES).forEach(name => {
+    if (!seen.has(name)) {
+      seen.add(name);
+      names.push(name);
+    }
+  });
+  Object.keys(screenRegions.tabProfiles || {}).forEach(name => {
+    if (!seen.has(name)) {
+      seen.add(name);
+      names.push(name);
+    }
+  });
+  return names;
+}
+
+function profileLabel(profile) {
+  if (profile === BASE_PROFILE) return appState?.baseProfileLabel || 'Base regions';
+  return titleCase(profile);
+}
+
+function activeRegionMap() {
+  if (selectedProfile === BASE_PROFILE) {
+    screenRegions.baseRegions = screenRegions.baseRegions || {};
+    return screenRegions.baseRegions;
+  }
+  screenRegions.tabProfiles = screenRegions.tabProfiles || {};
+  if (!screenRegions.tabProfiles[selectedProfile]) screenRegions.tabProfiles[selectedProfile] = {};
+  return screenRegions.tabProfiles[selectedProfile];
+}
+
+function originalProfileRegionMap() {
+  if (selectedProfile === BASE_PROFILE) return originalScreenRegions.baseRegions || {};
+  return (originalScreenRegions.tabProfiles || {})[selectedProfile] || {};
+}
+
+function selectedProfileIsBase() {
+  return selectedProfile === BASE_PROFILE;
+}
+
 function normalizeBox(pixel) {
   const size = frameSize();
   return {
-    x: round6(pixel.x / size.width),
-    y: round6(pixel.y / size.height),
-    w: round6(pixel.w / size.width),
-    h: round6(pixel.h / size.height)
+    x: round6(pixel.x / Math.max(1, size.width)),
+    y: round6(pixel.y / Math.max(1, size.height)),
+    w: round6(pixel.w / Math.max(1, size.width)),
+    h: round6(pixel.h / Math.max(1, size.height))
   };
 }
 
@@ -1444,9 +2001,12 @@ function regionBox(region) {
 }
 
 function defaultGridValues(name, existing={}) {
-  const isInventory = String(name || '').toLowerCase().includes('inventory');
-  const rows = Number(existing.rows) || (isInventory ? 7 : 2);
-  const cols = Number(existing.cols) || (isInventory ? 4 : 2);
+  const lowered = String(name || selectedProfile || '').toLowerCase();
+  const isInventory = lowered.includes('inventory');
+  const isPrayer = lowered.includes('prayer');
+  const isEquipment = lowered.includes('equipment') || lowered.includes('equip');
+  const rows = Number(existing.rows) || (isInventory ? 7 : (isPrayer ? 5 : (isEquipment ? 4 : 2)));
+  const cols = Number(existing.cols) || (isInventory ? 4 : (isPrayer ? 6 : (isEquipment ? 4 : 2)));
   const slotCount = Number(existing.slotCount) || (isInventory ? 28 : rows * cols);
   return {rows, cols, slotCount};
 }
@@ -1508,10 +2068,6 @@ function cleanPixel(pixel) {
   return {x, y, w, h};
 }
 
-function round6(value) {
-  return Math.round(value * 1000000) / 1000000;
-}
-
 function screenToPixel(event) {
   const rect = image.getBoundingClientRect();
   const size = frameSize();
@@ -1523,18 +2079,66 @@ function screenToPixel(event) {
 function overlayScale() {
   const rect = image.getBoundingClientRect();
   const size = frameSize();
-  return {x: rect.width / size.width, y: rect.height / size.height, width: rect.width, height: rect.height};
+  return {x: rect.width / Math.max(1, size.width), y: rect.height / Math.max(1, size.height), width: rect.width, height: rect.height};
 }
 
 function setSelectedRegion(name) {
   selectedRegion = name;
-  regionSelect.value = name;
+  regionSelect.value = name || '';
   updateInputs();
   drawRegions();
 }
 
+function setSelectedProfile(profile) {
+  selectedProfile = profile || BASE_PROFILE;
+  if (selectedProfile !== BASE_PROFILE && !screenRegions.tabProfiles[selectedProfile]) {
+    screenRegions.tabProfiles[selectedProfile] = {};
+  }
+  selectedRegion = null;
+  loadProfilesIntoSelect();
+  loadRegionsIntoSelect();
+  refreshStatePanel();
+  drawRegions();
+}
+
+function displayEntries() {
+  const entries = [];
+  const seen = new Set();
+  function add(scope, profile, name, region, active, tone) {
+    const key = `${scope}:${profile}:${name}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push({scope, profile, name, region, active, tone, key});
+  }
+  if (showBaseToggle.checked) {
+    Object.entries(screenRegions.baseRegions || {}).forEach(([name, region]) => {
+      add('base', BASE_PROFILE, name, region, selectedProfile === BASE_PROFILE && name === selectedRegion, 'base');
+    });
+  }
+  if (selectedProfile !== BASE_PROFILE && showActiveToggle.checked) {
+    Object.entries(activeRegionMap()).forEach(([name, region]) => {
+      add('profile', selectedProfile, name, region, name === selectedRegion, 'active');
+    });
+  }
+  if (showAllToggle.checked) {
+    Object.entries(screenRegions.tabProfiles || {}).forEach(([profile, regions]) => {
+      Object.entries(regions || {}).forEach(([name, region]) => {
+        add('profile', profile, name, region, profile === selectedProfile && name === selectedRegion, profile === selectedProfile ? 'active' : 'other');
+      });
+    });
+  }
+  return entries;
+}
+
 function updateInputs() {
-  if (!selectedRegion || !regions[selectedRegion]) return;
+  const regions = activeRegionMap();
+  if (!selectedRegion || !regions[selectedRegion]) {
+    Object.values(inputs).forEach(input => input.value = '');
+    regionTagsInput.value = '';
+    document.getElementById('normalizedValues').textContent = '{}';
+    document.getElementById('typeValues').textContent = '{}';
+    return;
+  }
   regions[selectedRegion] = normalizeRegion(regions[selectedRegion], selectedRegion);
   const region = regions[selectedRegion];
   const pixel = pixelBox(region);
@@ -1558,25 +2162,17 @@ function updateInputs() {
 function typeValues(region, pixel) {
   const type = regionType(region);
   const values = {
+    profile: profileLabel(selectedProfile),
     type,
     pixelBox: pixel,
     normalizedBox: regionBox(region)
   };
   if (type === 'circle') {
-    values.center = {
-      normalized: region.center,
-      pixel: centerPixel(region)
-    };
-    values.radius = {
-      normalized: region.radius,
-      pixelApprox: Math.round((Number(region.radius) || 0) * Math.min(frameSize().width, frameSize().height))
-    };
+    values.center = {normalized: region.center, pixel: centerPixel(region)};
+    values.radius = {normalized: region.radius, pixelApprox: Math.round((Number(region.radius) || 0) * Math.min(frameSize().width, frameSize().height))};
   }
   if (type === 'ellipse') {
-    values.center = {
-      normalized: region.center,
-      pixel: centerPixel(region)
-    };
+    values.center = {normalized: region.center, pixel: centerPixel(region)};
     values.radiusX = {normalized: region.radiusX, pixel: Math.round((Number(region.radiusX) || 0) * frameSize().width)};
     values.radiusY = {normalized: region.radiusY, pixel: Math.round((Number(region.radiusY) || 0) * frameSize().height)};
     values.rotation = region.rotation || 0;
@@ -1622,7 +2218,7 @@ function svgNode(name, attributes) {
   return node;
 }
 
-function drawGridLines(region, scale, selected) {
+function drawGridLines(region, scale, selected, tone) {
   const slots = gridSlotBoxes(region);
   slots.forEach(slot => {
     const px = pixelBox({type: 'rect', box: slot.box});
@@ -1632,7 +2228,7 @@ function drawGridLines(region, scale, selected) {
       width: px.w * scale.x,
       height: px.h * scale.y,
       fill: 'transparent',
-      stroke: selected ? 'rgba(255,204,64,0.42)' : 'rgba(80,180,255,0.32)',
+      stroke: selected ? 'rgba(255,204,64,0.46)' : (tone === 'base' ? 'rgba(110,231,183,0.34)' : 'rgba(80,180,255,0.30)'),
       'stroke-width': 1
     });
     overlay.appendChild(rect);
@@ -1650,18 +2246,23 @@ function drawGridLines(region, scale, selected) {
   });
 }
 
+function styleForEntry(entry) {
+  if (entry.active) return {stroke: '#ffcc40', fill: 'rgba(255,204,64,0.18)', width: 3, dash: ''};
+  if (entry.tone === 'base') return {stroke: '#6ee7b7', fill: 'rgba(110,231,183,0.08)', width: 2, dash: '7 5'};
+  if (entry.tone === 'other') return {stroke: '#a78bfa', fill: 'rgba(167,139,250,0.06)', width: 1.5, dash: '4 5'};
+  return {stroke: '#50b4ff', fill: 'rgba(80,180,255,0.10)', width: 2, dash: ''};
+}
+
 function drawRegions() {
   const scale = overlayScale();
   overlay.setAttribute('viewBox', `0 0 ${scale.width} ${scale.height}`);
   overlay.style.width = `${scale.width}px`;
   overlay.style.height = `${scale.height}px`;
   overlay.innerHTML = '';
-  Object.entries(regions).forEach(([name, region], index) => {
-    const clean = normalizeRegion(region, name);
+  displayEntries().forEach(entry => {
+    const clean = normalizeRegion(entry.region, entry.name);
     const px = pixelBox(clean);
-    const selected = name === selectedRegion;
-    const stroke = selected ? '#ffcc40' : '#50b4ff';
-    const fill = selected ? 'rgba(255,204,64,0.18)' : 'rgba(80,180,255,0.10)';
+    const style = styleForEntry(entry);
     let shape;
     if (clean.type === 'circle' || clean.type === 'ellipse') {
       shape = svgNode('ellipse', {
@@ -1669,9 +2270,10 @@ function drawRegions() {
         cy: (px.y + px.h / 2) * scale.y,
         rx: Math.max(1, (px.w / 2) * scale.x),
         ry: Math.max(1, (px.h / 2) * scale.y),
-        fill,
-        stroke,
-        'stroke-width': selected ? 3 : 2
+        fill: style.fill,
+        stroke: style.stroke,
+        'stroke-width': style.width,
+        'stroke-dasharray': style.dash
       });
       if (clean.type === 'ellipse' && clean.rotation) {
         shape.setAttribute('transform', `rotate(${clean.rotation} ${(px.x + px.w / 2) * scale.x} ${(px.y + px.h / 2) * scale.y})`);
@@ -1682,27 +2284,28 @@ function drawRegions() {
         y: px.y * scale.y,
         width: px.w * scale.x,
         height: px.h * scale.y,
-        fill,
-        stroke,
-        'stroke-width': selected ? 3 : 2
+        fill: style.fill,
+        stroke: style.stroke,
+        'stroke-width': style.width,
+        'stroke-dasharray': style.dash
       });
     }
-    shape.dataset.region = name;
     overlay.appendChild(shape);
-    if (clean.type === 'grid') drawGridLines(clean, scale, selected);
+    if (clean.type === 'grid') drawGridLines(clean, scale, entry.active, entry.tone);
     const label = svgNode('text', {
       x: px.x * scale.x + 5,
       y: px.y * scale.y + 16,
-      fill: stroke,
+      fill: style.stroke,
       'font-size': 13
     });
-    label.textContent = `${name} (${clean.type})`;
+    label.textContent = `${entry.tone === 'base' ? 'base' : entry.profile}.${entry.name} (${clean.type})`;
     overlay.appendChild(label);
   });
 }
 
 function setRegionFromPixel(name, pixel) {
   if (!name) return;
+  const regions = activeRegionMap();
   regions[name] = regionFromPixel(regions[name], pixel, name);
   updateInputs();
   drawRegions();
@@ -1713,12 +2316,15 @@ async function pushRegions() {
   const response = await fetch('/api/regions', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({regions, frameWidth: size.width, frameHeight: size.height})
+    body: JSON.stringify({screenRegions, frameWidth: size.width, frameHeight: size.height})
   });
   const result = await response.json();
   if (!response.ok) {
     setStatus(result.error || 'Unable to update regions', true);
+    return null;
   }
+  appState = {...appState, documentCounts: result.documentCounts, profileNames: result.profileNames};
+  return result;
 }
 
 function updateFrameInfo() {
@@ -1733,15 +2339,40 @@ function updateFrameInfo() {
 
 function refreshStatePanel() {
   document.getElementById('state').textContent = JSON.stringify({
-    sessionPath: appState.sessionPath,
-    outputPaths: appState.outputPaths,
-    regionCount: Object.keys(regions).length,
-    warnings: appState.warnings
+    sessionPath: appState?.sessionPath,
+    outputPaths: appState?.outputPaths,
+    persistence: appState?.persistence,
+    selectedProfile: profileLabel(selectedProfile),
+    editableRegionCount: Object.keys(activeRegionMap()).length,
+    documentCounts: appState?.documentCounts || {
+      baseRegionCount: Object.keys(screenRegions.baseRegions || {}).length,
+      tabProfileCount: Object.keys(screenRegions.tabProfiles || {}).length,
+      tabRegionCount: Object.values(screenRegions.tabProfiles || {}).reduce((total, regions) => total + Object.keys(regions || {}).length, 0)
+    },
+    warnings: appState?.warnings
   }, null, 2);
+}
+
+function loadProfilesIntoSelect() {
+  const prior = selectedProfile;
+  profileSelect.innerHTML = '';
+  const baseOption = document.createElement('option');
+  baseOption.value = BASE_PROFILE;
+  baseOption.textContent = profileLabel(BASE_PROFILE);
+  profileSelect.appendChild(baseOption);
+  profileNames().forEach(name => {
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = profileLabel(name);
+    profileSelect.appendChild(option);
+  });
+  selectedProfile = prior && (prior === BASE_PROFILE || profileNames().includes(prior)) ? prior : BASE_PROFILE;
+  profileSelect.value = selectedProfile;
 }
 
 function loadRegionsIntoSelect() {
   const prior = selectedRegion;
+  const regions = activeRegionMap();
   regionSelect.innerHTML = '';
   Object.keys(regions).forEach(name => {
     regions[name] = normalizeRegion(regions[name], name);
@@ -1753,6 +2384,7 @@ function loadRegionsIntoSelect() {
   const names = Object.keys(regions);
   if (names.length === 0) {
     selectedRegion = null;
+    updateInputs();
     updateFrameInfo();
     drawRegions();
     return;
@@ -1760,32 +2392,67 @@ function loadRegionsIntoSelect() {
   setSelectedRegion(names.includes(prior) ? prior : names[0]);
 }
 
-async function loadState() {
-  const response = await fetch('/api/state');
-  appState = await response.json();
-  regions = structuredClone(appState.currentRegions || {});
-  originalRegions = structuredClone(appState.originalRegions || {});
+function updateFrameImage() {
+  const frameUrl = appState?.frameUrl || '/frame';
+  image.src = `${frameUrl}?tick=${appState?.selectedTickId || 'latest'}&v=${Date.now()}`;
+}
+
+function applyServerState(payload, options={}) {
+  const priorProfile = selectedProfile;
+  const priorRegion = selectedRegion;
+  appState = payload;
+  screenRegions = normalizeModel(appState.screenRegions || {baseRegions: appState.currentRegions || {}, tabProfiles: {}});
+  originalScreenRegions = normalizeModel(appState.originalScreenRegions || {baseRegions: appState.originalRegions || {}, tabProfiles: {}});
+
+  if (options.preserveSelection && priorProfile && (priorProfile === BASE_PROFILE || Object.prototype.hasOwnProperty.call(screenRegions.tabProfiles || {}, priorProfile))) {
+    selectedProfile = priorProfile;
+  } else {
+    selectedProfile = screenRegions.defaultTabProfile || appState.defaultTabProfile || BASE_PROFILE;
+    if (!screenRegions.tabProfiles[selectedProfile]) selectedProfile = BASE_PROFILE;
+  }
+
+  selectedRegion = options.preserveSelection ? priorRegion : selectedRegion;
+  loadProfilesIntoSelect();
   loadRegionsIntoSelect();
+  if (options.refreshImage) updateFrameImage();
   updateFrameInfo();
   refreshStatePanel();
 }
 
+async function loadState() {
+  const response = await fetch('/api/state');
+  const payload = await response.json();
+  applyServerState(payload, {refreshImage: true});
+}
+
 function uniqueRegionName(base) {
-  const root = String(base || 'region').trim().replace(/\\s+/g, '_') || 'region';
+  const regions = activeRegionMap();
+  const root = cleanName(base, 'region');
   if (!regions[root]) return root;
   let index = 2;
   while (regions[`${root}_${index}`]) index += 1;
   return `${root}_${index}`;
 }
 
+function uniqueProfileName(base) {
+  const root = cleanProfileName(base);
+  const names = new Set(profileNames());
+  if (!names.has(root)) return root;
+  let index = 2;
+  while (names.has(`${root}_${index}`)) index += 1;
+  return `${root}_${index}`;
+}
+
 function applySelectedMetadata() {
+  const regions = activeRegionMap();
   if (!selectedRegion || !regions[selectedRegion]) return;
   const current = normalizeRegion(regions[selectedRegion], selectedRegion);
   current.tags = tagsFromText(regionTagsInput.value);
   if (current.type === 'grid') {
-    const rows = Math.max(1, Math.round(Number(gridInputs.rows.value) || 7));
-    const cols = Math.max(1, Math.round(Number(gridInputs.cols.value) || 4));
-    const slotCount = clamp(Math.round(Number(gridInputs.slotCount.value) || rows * cols), 0, rows * cols);
+    const defaults = defaultGridValues(selectedRegion, current);
+    const rows = Math.max(1, Math.round(Number(gridInputs.rows.value) || defaults.rows));
+    const cols = Math.max(1, Math.round(Number(gridInputs.cols.value) || defaults.cols));
+    const slotCount = clamp(Math.round(Number(gridInputs.slotCount.value) || defaults.slotCount), 0, rows * cols);
     current.rows = rows;
     current.cols = cols;
     current.slotCount = slotCount;
@@ -1801,30 +2468,139 @@ async function pushAndReport(message) {
   refreshStatePanel();
 }
 
+function applyVisibleInputs() {
+  if (!selectedRegion) return;
+  if (inputs.x.value !== '' && inputs.y.value !== '' && inputs.w.value !== '' && inputs.h.value !== '') {
+    setRegionFromPixel(selectedRegion, {x: inputs.x.value, y: inputs.y.value, w: inputs.w.value, h: inputs.h.value});
+  }
+  applySelectedMetadata();
+}
+
+async function refreshLatestFrame(buttonLabel) {
+  applyVisibleInputs();
+  await pushRegions();
+  const response = await fetch('/api/refresh-latest-frame', {method: 'POST'});
+  const result = await response.json();
+
+  if (!result.ok) {
+    setStatus(result.error || 'No retained frame found yet. Log in and wait a few ticks, then refresh calibration.', true);
+    return;
+  }
+
+  applyServerState(result, {preserveSelection: true, refreshImage: true});
+  setStatus(`${buttonLabel}: ${result.message || `using tick ${result.selectedTickId}`}`);
+}
+
+async function openFolderEndpoint(endpoint, label) {
+  const response = await fetch(endpoint);
+  const result = await response.json();
+  if (result.ok) {
+    setStatus(`${label}: ${result.path}`);
+  } else {
+    setStatus(result.error || `${label}: ${result.path || 'unavailable'}`, true);
+  }
+}
+
+async function prepareTestCrops() {
+  applyVisibleInputs();
+  await pushRegions();
+  setStatus('Preparing test crops...');
+  const response = await fetch('/api/prepare-test-crops', {method: 'POST'});
+  const result = await response.json();
+  document.getElementById('state').textContent = JSON.stringify(result, null, 2);
+  setStatus(
+    result.ok
+      ? `${result.message || 'Prepared test crops.'} ${result.cropsDir || ''}`
+      : `Unable to prepare test crops. ${result.command || ''} ${result.error || ''}`,
+    !result.ok
+  );
+}
+
+profileSelect.addEventListener('change', () => setSelectedProfile(profileSelect.value));
 regionSelect.addEventListener('change', () => setSelectedRegion(regionSelect.value));
+[showBaseToggle, showActiveToggle, showAllToggle].forEach(toggle => toggle.addEventListener('change', drawRegions));
+
+document.getElementById('refreshLatestFrame').addEventListener('click', () => refreshLatestFrame('Refreshed to newest frame'));
+document.getElementById('useLatestFrame').addEventListener('click', () => refreshLatestFrame('Using latest existing frame'));
+document.getElementById('prepareTestCrops').addEventListener('click', prepareTestCrops);
+document.getElementById('openPerceptionFolder').addEventListener('click', () => openFolderEndpoint('/api/open-perception-folder', 'Perception folder'));
+document.getElementById('openProfileFolder').addEventListener('click', () => openFolderEndpoint('/api/open-profile-folder', 'Profile folder'));
+
+document.getElementById('addProfile').addEventListener('click', async () => {
+  const requestedName = prompt('New tab profile name:', 'custom');
+  if (!requestedName) return;
+  const name = uniqueProfileName(requestedName);
+  screenRegions.tabProfiles[name] = {};
+  setSelectedProfile(name);
+  await pushAndReport(`Added tab profile ${name}`);
+});
+
+document.getElementById('renameProfile').addEventListener('click', async () => {
+  if (selectedProfileIsBase()) {
+    setStatus('Base regions cannot be renamed.', true);
+    return;
+  }
+  const requestedName = prompt('Rename tab profile:', selectedProfile);
+  if (!requestedName || requestedName === selectedProfile) return;
+  const name = uniqueProfileName(requestedName);
+  screenRegions.tabProfiles[name] = activeRegionMap();
+  delete screenRegions.tabProfiles[selectedProfile];
+  selectedProfile = name;
+  loadProfilesIntoSelect();
+  loadRegionsIntoSelect();
+  await pushAndReport(`Renamed tab profile to ${name}`);
+});
+
+document.getElementById('duplicateProfile').addEventListener('click', async () => {
+  const requestedName = prompt('Duplicate tab profile as:', selectedProfileIsBase() ? 'custom_copy' : `${selectedProfile}_copy`);
+  if (!requestedName) return;
+  const name = uniqueProfileName(requestedName);
+  screenRegions.tabProfiles[name] = clone(activeRegionMap());
+  setSelectedProfile(name);
+  await pushAndReport(`Duplicated profile as ${name}`);
+});
+
+document.getElementById('deleteProfile').addEventListener('click', async () => {
+  if (selectedProfileIsBase()) {
+    setStatus('Base regions cannot be deleted.', true);
+    return;
+  }
+  if (!confirm(`Delete tab profile "${selectedProfile}" from the in-memory calibration set? Built-in empty profiles may still appear as available choices.`)) return;
+  delete screenRegions.tabProfiles[selectedProfile];
+  selectedProfile = BASE_PROFILE;
+  loadProfilesIntoSelect();
+  loadRegionsIntoSelect();
+  await pushAndReport('Deleted tab profile');
+});
 
 document.getElementById('addRegion').addEventListener('click', async () => {
-  const requestedName = prompt('New region name:', 'newRegion');
+  const requestedName = prompt('New region name:', selectedProfile === 'inventory' ? 'inventoryGrid' : 'newRegion');
   if (!requestedName) return;
+  const regions = activeRegionMap();
   const name = uniqueRegionName(requestedName);
-  const type = regionTypeSelect.value || 'rect';
+  const loweredName = name.toLowerCase();
+  const selectedType = regionTypeSelect.value || 'rect';
+  const shouldDefaultGrid = loweredName.includes('grid') || selectedProfile === 'inventory' || selectedProfile === 'prayer';
+  const type = selectedType === 'rect' && shouldDefaultGrid ? 'grid' : selectedType;
   const box = {x: 0.1, y: 0.1, w: 0.2, h: 0.2};
   regions[name] = regionFromBoxForType(type, box, {tags: tagsFromText(regionTagsInput.value)}, name);
   loadRegionsIntoSelect();
   setSelectedRegion(name);
-  await pushAndReport(`Added ${name}`);
+  await pushAndReport(`Added ${name} to ${profileLabel(selectedProfile)}`);
 });
 
 document.getElementById('renameRegion').addEventListener('click', async () => {
+  const regions = activeRegionMap();
+  const originals = originalProfileRegionMap();
   if (!selectedRegion) return;
   const requestedName = prompt('Rename region:', selectedRegion);
   if (!requestedName || requestedName === selectedRegion) return;
   const name = uniqueRegionName(requestedName);
   regions[name] = regions[selectedRegion];
   delete regions[selectedRegion];
-  if (originalRegions[selectedRegion] && !originalRegions[name]) {
-    originalRegions[name] = originalRegions[selectedRegion];
-    delete originalRegions[selectedRegion];
+  if (originals[selectedRegion] && !originals[name]) {
+    originals[name] = originals[selectedRegion];
+    delete originals[selectedRegion];
   }
   selectedRegion = name;
   loadRegionsIntoSelect();
@@ -1832,17 +2608,19 @@ document.getElementById('renameRegion').addEventListener('click', async () => {
 });
 
 document.getElementById('duplicateRegion').addEventListener('click', async () => {
+  const regions = activeRegionMap();
   if (!selectedRegion || !regions[selectedRegion]) return;
   const name = uniqueRegionName(`${selectedRegion}_copy`);
-  regions[name] = structuredClone(regions[selectedRegion]);
+  regions[name] = clone(regions[selectedRegion]);
   loadRegionsIntoSelect();
   setSelectedRegion(name);
   await pushAndReport(`Duplicated ${selectedRegion} as ${name}`);
 });
 
 document.getElementById('deleteRegion').addEventListener('click', async () => {
+  const regions = activeRegionMap();
   if (!selectedRegion) return;
-  if (!confirm(`Delete region "${selectedRegion}" from the in-memory calibration set?`)) return;
+  if (!confirm(`Delete region "${selectedRegion}" from ${profileLabel(selectedProfile)}?`)) return;
   delete regions[selectedRegion];
   selectedRegion = null;
   loadRegionsIntoSelect();
@@ -1850,6 +2628,7 @@ document.getElementById('deleteRegion').addEventListener('click', async () => {
 });
 
 regionTypeSelect.addEventListener('change', async () => {
+  const regions = activeRegionMap();
   if (!selectedRegion || !regions[selectedRegion]) return;
   regions[selectedRegion] = regionFromBoxForType(regionTypeSelect.value, regionBox(regions[selectedRegion]), regions[selectedRegion], selectedRegion);
   loadRegionsIntoSelect();
@@ -1871,12 +2650,7 @@ Object.values(gridInputs).forEach(input => {
 
 Object.values(inputs).forEach(input => {
   input.addEventListener('change', async () => {
-    setRegionFromPixel(selectedRegion, {
-      x: inputs.x.value,
-      y: inputs.y.value,
-      w: inputs.w.value,
-      h: inputs.h.value
-    });
+    setRegionFromPixel(selectedRegion, {x: inputs.x.value, y: inputs.y.value, w: inputs.w.value, h: inputs.h.value});
     await pushRegions();
   });
 });
@@ -1905,7 +2679,8 @@ overlay.addEventListener('pointerup', async event => {
 
 document.addEventListener('keydown', async event => {
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
-  if (!selectedRegion || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  const regions = activeRegionMap();
+  if (!selectedRegion || !regions[selectedRegion] || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
   event.preventDefault();
   const amount = event.shiftKey ? 10 : 1;
   const pixel = pixelBox(regions[selectedRegion]);
@@ -1932,21 +2707,22 @@ document.getElementById('save').addEventListener('click', async () => {
 });
 
 document.getElementById('saveSession').addEventListener('click', async () => {
-  const confirmed = confirm('Write the current calibrated regions to derived perception/screen_regions.json? Raw telemetry and source frames are not modified.');
+  const confirmed = confirm('Write the current calibrated model to this session\\'s derived perception/screen_regions.json? Session calibration affects this session only. Raw telemetry and source frames are not modified.');
   if (!confirmed) return;
   await pushRegions();
   const response = await fetch('/api/save-session-calibration', {method: 'POST'});
   const result = await response.json();
-  setStatus(result.ok ? `Saved session calibration ${result.path}` : result.error, !result.ok);
+  setStatus(result.ok ? `${result.message} Saved ${result.path}` : result.error, !result.ok);
+  if (result.ok) await loadState();
 });
 
 document.getElementById('saveDefaultProfile').addEventListener('click', async () => {
-  const confirmed = confirm('Save the current regions as telemetry-viewer/calibration_profiles/default_screen_regions.json?');
+  const confirmed = confirm('Save the full baseRegions/tabProfiles model as telemetry-viewer/calibration_profiles/default_screen_regions.json? Default profile initializes future sessions; existing sessions keep their own screen_regions.json.');
   if (!confirmed) return;
   await pushRegions();
   const response = await fetch('/api/save-default-profile', {method: 'POST'});
   const result = await response.json();
-  setStatus(result.ok ? `Saved default profile ${result.path}` : result.error, !result.ok);
+  setStatus(result.ok ? `${result.message} Saved ${result.path}` : result.error, !result.ok);
 });
 
 document.getElementById('loadDefaultProfile').addEventListener('click', async () => {
@@ -1956,15 +2732,18 @@ document.getElementById('loadDefaultProfile').addEventListener('click', async ()
   const result = await response.json();
   if (result.ok) {
     appState = result;
-    regions = structuredClone(result.currentRegions || {});
+    screenRegions = normalizeModel(result.screenRegions || {baseRegions: result.currentRegions || {}, tabProfiles: {}});
+    selectedProfile = screenRegions.defaultTabProfile || 'inventory';
+    loadProfilesIntoSelect();
     loadRegionsIntoSelect();
     refreshStatePanel();
+    drawRegions();
   }
-  setStatus(result.ok ? `Loaded default profile ${result.path}` : result.error, !result.ok);
+  setStatus(result.ok ? `${result.message} ${result.path}` : result.error, !result.ok);
 });
 
 document.getElementById('exportProfile').addEventListener('click', async () => {
-  const defaultPath = `${appState?.outputPaths?.calibrationDir || ''}\\exported_screen_regions.json`;
+  const defaultPath = `${appState?.outputPaths?.calibrationDir || ''}/exported_screen_regions.json`;
   const path = prompt('Export profile path:', defaultPath);
   if (!path) return;
   await pushRegions();
@@ -1978,8 +2757,10 @@ document.getElementById('exportProfile').addEventListener('click', async () => {
 });
 
 document.getElementById('resetSelected').addEventListener('click', async () => {
-  if (selectedRegion && originalRegions[selectedRegion]) {
-    regions[selectedRegion] = structuredClone(originalRegions[selectedRegion]);
+  const regions = activeRegionMap();
+  const originals = originalProfileRegionMap();
+  if (selectedRegion && originals[selectedRegion]) {
+    regions[selectedRegion] = clone(originals[selectedRegion]);
     updateInputs();
     drawRegions();
     await pushRegions();
@@ -1988,10 +2769,11 @@ document.getElementById('resetSelected').addEventListener('click', async () => {
 });
 
 document.getElementById('reloadOriginal').addEventListener('click', async () => {
-  regions = structuredClone(originalRegions);
+  screenRegions = normalizeModel(originalScreenRegions);
+  loadProfilesIntoSelect();
   loadRegionsIntoSelect();
   await pushRegions();
-  setStatus('Reloaded original regions');
+  setStatus('Reloaded original screen region model');
 });
 
 document.getElementById('exportPreview').addEventListener('click', async () => {
@@ -2002,12 +2784,13 @@ document.getElementById('exportPreview').addEventListener('click', async () => {
 });
 
 document.getElementById('write').addEventListener('click', async () => {
-  const confirmed = confirm('Overwrite derived perception/screen_regions.json with the current calibrated boxes? Raw telemetry and source frames are not modified.');
+  const confirmed = confirm('Overwrite this session\\'s derived perception/screen_regions.json with the current calibrated model? Existing sessions keep their own screen_regions.json. Raw telemetry and source frames are not modified.');
   if (!confirmed) return;
   await pushRegions();
   const response = await fetch('/api/write-screen-regions', {method: 'POST'});
   const result = await response.json();
-  setStatus(result.ok ? `Wrote ${result.path}` : result.error, !result.ok);
+  setStatus(result.ok ? `${result.message} Wrote ${result.path}` : result.error, !result.ok);
+  if (result.ok) await loadState();
 });
 
 image.addEventListener('load', async () => {
@@ -2071,6 +2854,18 @@ def calibration_handler(state: InteractiveCalibrationState):
                 send_json_response(self, state.state_payload())
                 return
 
+            if parsed.path == "/api/latest-frame":
+                send_json_response(self, state.latest_frame_info())
+                return
+
+            if parsed.path == "/api/open-perception-folder":
+                send_json_response(self, state.open_folder(state.paths["perceptionDir"], "perception folder"))
+                return
+
+            if parsed.path == "/api/open-profile-folder":
+                send_json_response(self, state.open_folder(CALIBRATION_PROFILES_DIR, "calibration profile folder"))
+                return
+
             if parsed.path == "/frame":
                 self.serve_frame()
                 return
@@ -2084,9 +2879,22 @@ def calibration_handler(state: InteractiveCalibrationState):
                 if parsed.path == "/api/regions":
                     payload = read_json_request(self)
                     regions = payload.get("regions") if isinstance(payload, dict) else None
+                    screen_regions = payload.get("screenRegions") if isinstance(payload, dict) else None
                     frame_width = payload.get("frameWidth") if isinstance(payload, dict) else None
                     frame_height = payload.get("frameHeight") if isinstance(payload, dict) else None
-                    send_json_response(self, state.update_regions(regions, frame_width=frame_width, frame_height=frame_height))
+                    send_json_response(
+                        self,
+                        state.update_regions(
+                            regions,
+                            screen_regions=screen_regions,
+                            frame_width=frame_width,
+                            frame_height=frame_height,
+                        ),
+                    )
+                    return
+
+                if parsed.path == "/api/refresh-latest-frame":
+                    send_json_response(self, state.refresh_latest_frame())
                     return
 
                 if parsed.path == "/api/save-calibrated":
@@ -2114,6 +2922,11 @@ def calibration_handler(state: InteractiveCalibrationState):
                 if parsed.path == "/api/overlay":
                     result = state.export_preview()
                     send_json_response(self, result, status=200 if result.get("ok") else 501)
+                    return
+
+                if parsed.path == "/api/prepare-test-crops":
+                    result = state.prepare_test_crops()
+                    send_json_response(self, result, status=200 if result.get("ok") else 500)
                     return
 
                 if parsed.path == "/api/write-screen-regions":
@@ -2189,22 +3002,7 @@ def build_calibration_preview(session: Path, args) -> tuple[dict, list[str]]:
     if not tick_bundles_path.exists() or not screen_regions_path.exists():
         raise FileNotFoundError(MISSING_PERCEPTION_MESSAGE)
 
-    screen_regions = safe_read_json(screen_regions_path)
-
-    if not isinstance(screen_regions, dict):
-        raise ValueError(f"Unable to read screen regions: {screen_regions_path}")
-
-    regions = screen_regions.get("regions")
-
-    if not isinstance(regions, dict):
-        raise ValueError(f"screen_regions.json does not contain a regions object: {screen_regions_path}")
-
-    normalized_regions = {
-        name: serialize_region_for_save(normalize_region_record(name, region))
-        for name, region in regions.items()
-    }
-    screen_regions = deepcopy(screen_regions)
-    screen_regions["regions"] = normalized_regions
+    screen_regions = load_screen_regions_document(screen_regions_path)
 
     bundle, lookup_warnings = find_selected_bundle(session, tick_bundles_path, args.tick)
     warnings.extend(lookup_warnings)
@@ -2239,10 +3037,10 @@ def build_calibration_preview(session: Path, args) -> tuple[dict, list[str]]:
             frame = frame_image.convert("RGB")
             width, height = frame.size
             calibrated_regions, adjustments_applied = apply_adjustments(screen_regions, width, height, args)
-            adjusted_regions = calibrated_regions.get("regions")
+            adjusted_regions = get_base_regions(calibrated_regions)
 
             if not isinstance(adjusted_regions, dict):
-                raise ValueError("calibrated screen regions did not contain a regions object")
+                raise ValueError("calibrated screen regions did not contain baseRegions")
 
             requested_regions = parse_region_filter(args.regions)
             region_items, region_warnings = selected_regions(adjusted_regions, requested_regions)

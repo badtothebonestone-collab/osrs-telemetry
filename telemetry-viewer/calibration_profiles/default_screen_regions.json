@@ -1,8 +1,12 @@
 {
   "schemaVersion": "perception.screen_regions.v1",
   "coordinateSpace": "normalized",
+  "profileName": "default_screen_regions",
+  "defaultTabProfile": "inventory",
+  "approximate": false,
   "note": "Reusable screen-region calibration profile. Copy or load this into future sessions.",
-  "regions": {
+  "updatedAtUtc": "2026-05-05T00:57:23.485014+00:00",
+  "baseRegions": {
     "fullFrame": {
       "type": "rect",
       "box": {
@@ -34,19 +38,6 @@
       "rotation": 0.0,
       "tags": []
     },
-    "inventory": {
-      "type": "grid",
-      "box": {
-        "x": 0.732923,
-        "y": 0.420784,
-        "w": 0.215566,
-        "h": 0.5
-      },
-      "rows": 7,
-      "cols": 4,
-      "slotCount": 28,
-      "tags": []
-    },
     "chatbox": {
       "type": "rect",
       "box": {
@@ -67,31 +58,17 @@
       },
       "tags": []
     },
-    "compassOrbArea": {
-      "type": "ellipse",
-      "center": {
-        "x": 0.732643,
-        "y": 0.040886
-      },
-      "radiusX": 0.022677,
-      "radiusY": 0.035775,
-      "rotation": 0.0,
-      "tags": []
-    },
-    "Bottom_tabs": {
-      "type": "grid",
+    "tabs": {
+      "type": "rect",
       "box": {
         "x": 0.684211,
-        "y": 0.92845,
+        "y": 0.335605,
         "w": 0.31075,
-        "h": 0.068143
+        "h": 0.660988
       },
-      "rows": 1,
-      "cols": 7,
-      "slotCount": 7,
       "tags": []
     },
-    "Top_tabs": {
+    "topTabs": {
       "type": "grid",
       "box": {
         "x": 0.68813,
@@ -104,19 +81,302 @@
       "slotCount": 7,
       "tags": []
     },
+    "bottomTabs": {
+      "type": "grid",
+      "box": {
+        "x": 0.684211,
+        "y": 0.92845,
+        "w": 0.31075,
+        "h": 0.068143
+      },
+      "rows": 1,
+      "cols": 7,
+      "slotCount": 7,
+      "tags": []
+    },
+    "orbs": {
+      "type": "ellipse",
+      "center": {
+        "x": 0.732643,
+        "y": 0.040886
+      },
+      "radiusX": 0.022677,
+      "radiusY": 0.035775,
+      "rotation": 0.0,
+      "tags": []
+    },
+    "compass": {
+      "type": "ellipse",
+      "center": {
+        "x": 0.732643,
+        "y": 0.040886
+      },
+      "radiusX": 0.022677,
+      "radiusY": 0.035775,
+      "rotation": 0.0,
+      "tags": []
+    },
+    "Run": {
+      "type": "ellipse",
+      "center": {
+        "x": 0.740481,
+        "y": 0.247019
+      },
+      "radiusX": 0.017637,
+      "radiusY": 0.028961,
+      "rotation": 0.0,
+      "tags": []
+    },
     "Special_attack": {
       "type": "ellipse",
       "center": {
-        "x": 0.769597,
-        "y": 0.298126
+        "x": 0.768757,
+        "y": 0.294719
       },
-      "radiusX": 0.017078,
-      "radiusY": 0.028109,
+      "radiusX": 0.017357,
+      "radiusY": 0.027257,
+      "rotation": 0.0,
+      "tags": []
+    },
+    "World_Map": {
+      "type": "ellipse",
+      "center": {
+        "x": 0.951568,
+        "y": 0.267461
+      },
+      "radiusX": 0.018757,
+      "radiusY": 0.027257,
       "rotation": 0.0,
       "tags": []
     }
   },
-  "approximate": false,
-  "profileName": "default_screen_regions",
-  "updatedAtUtc": "2026-05-04T01:12:08.255627+00:00"
+  "tabProfiles": {
+    "inventory": {
+      "inventoryGrid": {
+        "type": "grid",
+        "box": {
+          "x": 0.732923,
+          "y": 0.420784,
+          "w": 0.215566,
+          "h": 0.5
+        },
+        "rows": 7,
+        "cols": 4,
+        "slotCount": 28,
+        "tags": []
+      }
+    },
+    "equipment": {
+      "Helmet": {
+        "type": "rect",
+        "box": {
+          "x": 0.818029,
+          "y": 0.417376,
+          "w": 0.043113,
+          "h": 0.068995
+        },
+        "tags": []
+      },
+      "Necklace": {
+        "type": "rect",
+        "box": {
+          "x": 0.816349,
+          "y": 0.495741,
+          "w": 0.045913,
+          "h": 0.069847
+        },
+        "tags": []
+      },
+      "Ammo": {
+        "type": "rect",
+        "box": {
+          "x": 0.868421,
+          "y": 0.497445,
+          "w": 0.047032,
+          "h": 0.068143
+        },
+        "tags": []
+      },
+      "Offhand": {
+        "type": "rect",
+        "box": {
+          "x": 0.889698,
+          "y": 0.570698,
+          "w": 0.045913,
+          "h": 0.070698
+        },
+        "tags": []
+      },
+      "Body": {
+        "type": "rect",
+        "box": {
+          "x": 0.815789,
+          "y": 0.574106,
+          "w": 0.048152,
+          "h": 0.068143
+        },
+        "tags": []
+      },
+      "Legs": {
+        "type": "rect",
+        "box": {
+          "x": 0.818029,
+          "y": 0.654174,
+          "w": 0.044233,
+          "h": 0.065588
+        },
+        "tags": []
+      },
+      "Main_hand": {
+        "type": "rect",
+        "box": {
+          "x": 0.742441,
+          "y": 0.57155,
+          "w": 0.045913,
+          "h": 0.068995
+        },
+        "tags": []
+      },
+      "Ring": {
+        "type": "rect",
+        "box": {
+          "x": 0.888018,
+          "y": 0.729983,
+          "w": 0.049272,
+          "h": 0.07155
+        },
+        "tags": []
+      },
+      "Cape": {
+        "type": "rect",
+        "box": {
+          "x": 0.763158,
+          "y": 0.492334,
+          "w": 0.047592,
+          "h": 0.074106
+        },
+        "tags": []
+      },
+      "Boots": {
+        "type": "rect",
+        "box": {
+          "x": 0.816909,
+          "y": 0.730835,
+          "w": 0.044793,
+          "h": 0.068995
+        },
+        "tags": []
+      },
+      "Gloves": {
+        "type": "rect",
+        "box": {
+          "x": 0.744121,
+          "y": 0.732538,
+          "w": 0.043673,
+          "h": 0.06644
+        },
+        "tags": []
+      }
+    },
+    "prayer": {
+      "Prayer": {
+        "type": "grid",
+        "box": {
+          "x": 0.723404,
+          "y": 0.41908,
+          "w": 0.235722,
+          "h": 0.436116
+        },
+        "rows": 6,
+        "cols": 5,
+        "slotCount": 30,
+        "tags": [
+          "prayer",
+          "combat",
+          "protection"
+        ]
+      }
+    },
+    "magic": {
+      "Normal_spell_book": {
+        "type": "grid",
+        "box": {
+          "x": 0.722844,
+          "y": 0.410562,
+          "w": 0.232923,
+          "h": 0.470187
+        },
+        "rows": 10,
+        "cols": 7,
+        "slotCount": 69,
+        "tags": []
+      }
+    },
+    "combat": {
+      "Attack_style": {
+        "type": "grid",
+        "box": {
+          "x": 0.740202,
+          "y": 0.497445,
+          "w": 0.197088,
+          "h": 0.201874
+        },
+        "rows": 2,
+        "cols": 2,
+        "slotCount": 4,
+        "tags": []
+      },
+      "Autto_Retaliate": {
+        "type": "rect",
+        "box": {
+          "x": 0.740202,
+          "y": 0.712095,
+          "w": 0.198208,
+          "h": 0.09029
+        },
+        "tags": []
+      }
+    },
+    "stats": {},
+    "quests": {},
+    "friends": {},
+    "clan": {},
+    "settings": {},
+    "emotes": {},
+    "music": {},
+    "logout": {
+      "Click_here_to_logout": {
+        "type": "rect",
+        "box": {
+          "x": 0.74692,
+          "y": 0.82879,
+          "w": 0.18645,
+          "h": 0.063884
+        },
+        "tags": []
+      },
+      "World_Switcher": {
+        "type": "rect",
+        "box": {
+          "x": 0.74748,
+          "y": 0.731687,
+          "w": 0.183651,
+          "h": 0.065588
+        },
+        "tags": []
+      }
+    },
+    "World_Switcher": {
+      "Worlds": {
+        "type": "rect",
+        "box": {
+          "x": 0.713326,
+          "y": 0.453152,
+          "w": 0.25252,
+          "h": 0.40971
+        },
+        "tags": []
+      }
+    }
+  }
 }

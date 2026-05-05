@@ -144,6 +144,33 @@
         "hasVarSignal": { "type": "boolean" },
         "hasFrameIssue": { "type": "boolean" },
         "hasCaptureError": { "type": "boolean" },
+        "activeTab": {
+          "type": ["string", "null"],
+          "description": "Active side-tab inferred from existing telemetry, or unknown when there is insufficient evidence."
+        },
+        "activeTabSource": {
+          "type": ["string", "null"],
+          "description": "Inference source, such as manual, widget, event, visual, or unknown."
+        },
+        "activeTabConfidence": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Confidence score for active-tab inference."
+        },
+        "activeTabEvidence": {
+          "type": "array",
+          "description": "Evidence explaining the inferred active tab or why it is unknown.",
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "additionalProperties": true
+              }
+            ]
+          }
+        },
         "healthState": {
           "type": "string",
           "enum": ["OK", "WARNING", "ISSUE"]
