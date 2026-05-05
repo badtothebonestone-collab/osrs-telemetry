@@ -57,6 +57,69 @@ The perception dataset is read-only derived data from existing telemetry and
 performs no automation, clicking, input hooks, overlays, or client-state
 mutation.
 
+## Simplified Calibration And Dataset Flow
+
+1. Calibrate from the launcher:
+
+   ```text
+   python telemetry-viewer\telemetry_launcher.py
+   ```
+
+   Click **Start Calibration Mode**, edit regions, then click **Save Default
+   Profile** for future sessions or **Save Session Profile** for this session
+   only.
+
+2. Label active tab ranges with `telemetry-viewer\tab_labels.json`, or use the
+   replay labeling UI if present.
+
+3. Build perception:
+
+   ```text
+   python telemetry-viewer\build_perception_dataset.py
+   ```
+
+4. Generate disposable test crops from the launcher with **Generate Test
+   Crops**. Test crops are preview/verification data, not the final training
+   dataset. They are written under:
+
+   ```text
+   perception\test_crops\<run_id>\
+   ```
+
+   Prior test crop runs are preserved unless explicitly cleared.
+
+5. Build persistent training data:
+
+   ```text
+   python telemetry-viewer\build_training_dataset.py --latest 500 --sample-every 5 --keep-event-ticks --only-existing-frames --generate-grid-slots
+   ```
+
+   Training crops are durable derived data under:
+
+   ```text
+   training_data\crops\
+   ```
+
+   The builder is non-destructive by default. It appends new examples or skips
+   duplicate keys. Only `--rebuild` clears `training_data` before rebuilding.
+
+6. Inspect status:
+
+   ```text
+   python telemetry-viewer\dataset_status.py
+   ```
+
+Save behavior:
+
+- **Save Default Profile** writes
+  `telemetry-viewer\calibration_profiles\default_screen_regions.json` and
+  initializes future sessions.
+- **Save Session Profile** writes
+  `sessions\<session_id>\perception\screen_regions.json` and affects only that
+  session.
+- Existing sessions keep their own session-local profile unless explicitly
+  overwritten.
+
 To prepare tick-aligned visual review records from the derived perception
 dataset:
 
@@ -120,21 +183,21 @@ when possible so `--generate-crops --limit N` is less likely to spend the whole
 sample on missing retained frames. `--generate-grid-slots` derives slot crops
 for grid regions, such as inventory, only when explicitly requested.
 
-Profile-aware crops are grouped by profile name:
+Profile-aware test crops are grouped by run id and profile name:
 
 ```text
-perception\crops\tick-XXXXXXXX\base\chatbox.jpg
-perception\crops\tick-XXXXXXXX\inventory\inventoryGrid.jpg
-perception\crops\tick-XXXXXXXX\prayer\prayerGrid.jpg
+perception\test_crops\<run_id>\tick-XXXXXXXX\base\chatbox.jpg
+perception\test_crops\<run_id>\tick-XXXXXXXX\inventory\inventoryGrid.jpg
+perception\test_crops\<run_id>\tick-XXXXXXXX\prayer\prayerGrid.jpg
 ```
 
 Crop mode requires Pillow to already be available. The script does not install
 dependencies. If Pillow is unavailable, it prints a warning and continues in
-metadata-only mode. Generated crops, when possible, are derived outputs under
-`perception\crops\`; source frame images and raw telemetry files are not
-modified. The visual prep tool is read-only derived analysis data and performs
-no automation, clicking, input hooks, overlays, menu actions, or client-state
-mutation.
+metadata-only mode. Generated visual-prep crops are disposable test crops under
+`perception\test_crops\<run_id>\`; source frame images and raw telemetry files
+are not modified. The visual prep tool is read-only derived analysis data and
+performs no automation, clicking, input hooks, overlays, menu actions, or
+client-state mutation.
 
 Screen regions may use typed records:
 
@@ -209,14 +272,17 @@ The simplest workflow is to start from the launcher:
 5. If needed, click **Refresh to newest frame**.
 6. Calibrate base regions and the active tab profile, such as inventory,
    prayer, or equipment.
-7. Use **Save session calibration** for this session only, or **Save as default
-   profile** for future sessions.
-8. Click **Prepare test crops**.
-9. Inspect the crops from the current session perception folder.
+7. Use **Save Session Profile** for this session only, or **Save Default
+   Profile** for future sessions.
+8. Click **Generate Test Crops**.
+9. Inspect the latest test crop run under the current session perception
+   folder.
 
 The launcher Calibration section includes **Start Calibration Mode**, **Open
-Calibration UI**, **Build Perception Dataset**, **Prepare Test Crops**, **Open
-Calibration Profile Folder**, and **Open Current Session Perception Folder**.
+Calibration UI**, **Generate Test Crops**, **Open Latest Test Crops**, and
+**Open Calibration Profile Folder**. The Dataset section includes **Build
+Training Dataset**, **Build Training Dataset Rebuild**, and **Open Training
+Data Folder**.
 
 The UI lets you refresh to the newest frame, use the latest existing frame,
 drag boxes on the captured frame, edit pixel `x/y/w/h` values, switch region
@@ -228,9 +294,9 @@ selected adds it under `tabProfiles.inventory`.
 
 Persistence behavior:
 
-- **Save session calibration** writes only the selected session's
+- **Save Session Profile** writes only the selected session's
   `sessions\<session_id>\perception\screen_regions.json`.
-- **Save as default profile** writes
+- **Save Default Profile** writes
   `telemetry-viewer\calibration_profiles\default_screen_regions.json`.
 - Future sessions initialize from the default profile when
   `build_perception_dataset.py` creates their first `screen_regions.json`.
@@ -238,6 +304,14 @@ Persistence behavior:
   overwritten.
 - **Load default profile** loads that profile into the UI without overwriting
   the session file.
+
+Test crops are disposable previews under
+`sessions\<session_id>\perception\test_crops\<run_id>\`. They are not the final
+dataset. Persistent training data lives under
+`sessions\<session_id>\training_data\`, and training crops live under
+`sessions\<session_id>\training_data\crops\`. Normal training builds skip
+duplicates and do not wipe previous training data; only `--rebuild` clears and
+rebuilds `training_data`.
 
 Use **Save calibrated copy** for
 `perception\region_calibration\calibrated_screen_regions.json`, and only click

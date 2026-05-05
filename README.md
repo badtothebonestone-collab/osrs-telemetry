@@ -59,19 +59,25 @@ Buttons:
 - Open Replay Viewer in Browser: opens `http://127.0.0.1:8765/`.
 - Run Validate Session: runs `telemetry-viewer\validate_session.py`.
 - Run Export Session: writes generated summaries with `telemetry-viewer\export_session.py`.
+- Build Perception Dataset: writes derived per-tick perception bundles with
+  `telemetry-viewer\build_perception_dataset.py`.
 - Prepare Visual Perception: writes derived visual review metadata with
   `telemetry-viewer\prepare_visual_perception.py`.
 - Start Calibration Mode: starts or reuses the RuneLite dev client, latest-state
   watcher, and local calibration UI, then opens `http://127.0.0.1:8770/`.
 - Open Calibration UI: opens `http://127.0.0.1:8770/` without starting tools.
-- Build Perception Dataset: writes derived per-tick perception bundles with
-  `telemetry-viewer\build_perception_dataset.py`.
-- Prepare Test Crops: runs visual crop prep with crop generation, grid slots,
+- Generate Test Crops: runs visual crop prep with crop generation, grid slots,
   latest retained frames, existing-frame filtering, and the inventory profile.
+- Open Latest Test Crops: opens the newest disposable crop preview run under
+  the newest session's `perception\test_crops`.
 - Open Calibration Profile Folder: opens
   `telemetry-viewer\calibration_profiles`.
-- Open Current Session Perception Folder: opens the newest session's
-  `perception` folder, or shows a friendly message if no session exists.
+- Build Training Dataset: appends or skips durable training examples with
+  `telemetry-viewer\build_training_dataset.py`.
+- Build Training Dataset Rebuild: explicitly clears and rebuilds the newest
+  session's `training_data` folder by passing `--rebuild`.
+- Open Training Data Folder: opens the newest session's `training_data`
+  folder, or shows a friendly message if it has not been built yet.
 - Run Path Regression Tests: runs `telemetry-viewer\tests\test_telemetry_paths.py`.
 - Open Sessions Folder: opens the configured sessions directory.
 - Open Newest Session Folder: opens the newest discovered session.
@@ -140,28 +146,51 @@ Streamlined calibration workflow:
    **Use latest existing frame** in the calibration UI.
 6. Calibrate **Base regions** and the active tab profile, such as
    **Inventory**, **Prayer**, or **Equipment**.
-7. Use **Save session calibration** for this session only, or **Save as
-   default profile** to initialize future sessions.
-8. Click **Prepare test crops**.
-9. Inspect crops under the current session `perception` folder.
+7. Click **Save Default Profile** to initialize future sessions, or **Save
+   Session Profile** to update only the current session.
+8. Label active side-tab ranges with `telemetry-viewer\tab_labels.json`, or use
+   the replay labeling UI if present.
+9. Build perception data:
+
+   ```powershell
+   python telemetry-viewer\build_perception_dataset.py
+   ```
+
+10. Click **Generate Test Crops** for disposable preview crops.
+11. Build persistent training data:
+
+    ```powershell
+    python telemetry-viewer\build_training_dataset.py --latest 500 --sample-every 5 --keep-event-ticks --only-existing-frames --generate-grid-slots
+    ```
+
+12. Inspect the dataset health:
+
+    ```powershell
+    python telemetry-viewer\dataset_status.py
+    ```
 
 The launcher Calibration section contains:
 
 - Start Calibration Mode
 - Open Calibration UI
-- Build Perception Dataset
-- Prepare Test Crops
+- Generate Test Crops
+- Open Latest Test Crops
 - Open Calibration Profile Folder
-- Open Current Session Perception Folder
+
+The launcher Dataset section contains:
+
+- Build Training Dataset
+- Build Training Dataset Rebuild
+- Open Training Data Folder
 
 The calibration UI includes:
 
 - Refresh to newest frame
 - Use latest existing frame
-- Save session calibration
-- Save as default profile
+- Save Session Profile
+- Save Default Profile
 - Load default profile
-- Prepare test crops
+- Generate Test Crops
 - Open perception folder
 - Open profile folder
 
@@ -191,20 +220,34 @@ regions. Use the profile selector to edit **Base regions** or a side-tab
 profile such as **Inventory**, **Equipment**, **Prayer**, or **Magic**. Custom
 tab profiles can be added from the same panel. Inventory grids should live
 under `tabProfiles.inventory` and use `rows=7`, `cols=4`, and `slotCount=28`.
-Use **Save as default profile** to update the reusable full
+Use **Save Default Profile** to update the reusable full
 `baseRegions`/`tabProfiles` profile. Use **Write screen_regions.json** only
 when you explicitly want to update the derived session calibration.
 
 Persistence rules:
 
-- Saving session calibration writes
+- Save Session Profile writes
   `sessions\<session_id>\perception\screen_regions.json`.
-- Saving as default profile writes
+- Save Default Profile writes
   `telemetry-viewer\calibration_profiles\default_screen_regions.json`.
 - Future sessions initialize from the default profile when
   `build_perception_dataset.py` creates their first `screen_regions.json`.
 - Existing sessions keep their own session-local calibration unless explicitly
   overwritten.
+
+Test crops and training data are intentionally separate:
+
+- Test crops are disposable preview/verification crops, not the final dataset.
+- Test crops are written under
+  `sessions\<session_id>\perception\test_crops\<run_id>\`.
+- Test crop generation does not wipe previous test crop runs by default.
+- Persistent training data is written under
+  `sessions\<session_id>\training_data\`.
+- Training crops are written under
+  `sessions\<session_id>\training_data\crops\`.
+- Training data is non-destructive by default: existing examples are detected
+  and skipped by key.
+- Only `--rebuild` wipes `training_data` before rebuilding.
 
 After calibration, regenerate visual perception records or crops:
 
@@ -229,10 +272,11 @@ selected tick and record the source as `manual`. When the inferred active tab
 is `unknown`, visual prep uses `baseRegions` only and records the skipped tab
 profiles unless `--include-all-tab-profiles` is used.
 
-Visual crops are grouped by profile name, for example
-`perception\crops\tick-XXXXXXXX\base\chatbox.jpg` and
-`perception\crops\tick-XXXXXXXX\inventory\inventoryGrid.jpg`. Grid slot crops
-are only written when `--generate-grid-slots` is explicitly added.
+Test crops are grouped by run id and profile name, for example
+`perception\test_crops\<run_id>\tick-XXXXXXXX\base\chatbox.jpg` and
+`perception\test_crops\<run_id>\tick-XXXXXXXX\inventory\inventoryGrid.jpg`.
+Grid slot test crops are only written when `--generate-grid-slots` is
+explicitly added.
 
 These are derived tooling steps only. They do not interact with RuneLite or the
 game client, do not add automation, and do not modify raw telemetry or source

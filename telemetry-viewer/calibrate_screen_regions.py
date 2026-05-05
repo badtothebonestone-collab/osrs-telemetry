@@ -1331,6 +1331,7 @@ class InteractiveCalibrationState:
             "screenRegions": str(self.screen_regions_path),
             "defaultScreenRegionsProfile": str(DEFAULT_SCREEN_REGIONS_PROFILE),
             "calibrationProfilesDir": str(CALIBRATION_PROFILES_DIR),
+            "testCrops": str(self.paths["perceptionDir"] / "test_crops"),
         }
 
     def state_payload(self) -> dict:
@@ -1509,7 +1510,7 @@ class InteractiveCalibrationState:
             "ok": True,
             "path": str(self.screen_regions_path),
             "screenRegionsUpdated": True,
-            "message": "Session calibration affects this session only. Existing sessions keep their own screen_regions.json.",
+            "message": "Saved session profile for this session only.",
         }
 
     def save_default_profile(self) -> dict:
@@ -1523,7 +1524,7 @@ class InteractiveCalibrationState:
             "regionCount": counts["baseRegionCount"] + counts["tabRegionCount"],
             "baseRegionCount": counts["baseRegionCount"],
             "tabProfileCount": counts["tabProfileCount"],
-            "message": "Default profile initializes future sessions. Existing sessions keep their own screen_regions.json.",
+            "message": "Saved default profile for future sessions.",
         }
 
     def load_default_profile(self) -> dict:
@@ -1536,7 +1537,7 @@ class InteractiveCalibrationState:
         payload["path"] = str(DEFAULT_SCREEN_REGIONS_PROFILE)
         payload["profileName"] = profile.get("profileName") or DEFAULT_SCREEN_REGIONS_PROFILE.stem
         payload["message"] = (
-            "Loaded default profile into the UI only. Save session calibration or Write screen_regions.json "
+            "Loaded default profile into the UI only. Save Session Profile or Raw write screen_regions.json "
             "to update this session."
         )
         return payload
@@ -1610,7 +1611,7 @@ class InteractiveCalibrationState:
         display_command = (
             "python telemetry-viewer\\prepare_visual_perception.py "
             f"--session \"{self.session}\" "
-            "--generate-crops --generate-grid-slots --latest 25 --only-existing-frames --active-tab inventory"
+            "--generate-crops --generate-grid-slots --latest 25 --only-existing-frames --active-tab auto"
         )
         command = [
             sys.executable,
@@ -1623,7 +1624,7 @@ class InteractiveCalibrationState:
             "25",
             "--only-existing-frames",
             "--active-tab",
-            "inventory",
+            "auto",
         ]
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -1650,14 +1651,66 @@ class InteractiveCalibrationState:
         if len(output) > 12000:
             output = output[-12000:]
 
+        visual_index_path = self.paths["perceptionDir"] / "visual_perception_index.json"
+        visual_index = safe_read_json(visual_index_path)
+        visual_index = visual_index if isinstance(visual_index, dict) else {}
+        test_crop_run_path = visual_index.get("testCropRunPath")
+        crops_dir = (
+            self.session / test_crop_run_path
+            if isinstance(test_crop_run_path, str)
+            else self.paths["perceptionDir"] / "test_crops"
+        )
+
         return {
             "ok": result.returncode == 0,
             "command": display_command,
             "returnCode": result.returncode,
             "output": output,
-            "visualPerceptionIndex": str(self.paths["perceptionDir"] / "visual_perception_index.json"),
-            "cropsDir": str(self.paths["perceptionDir"] / "crops"),
-            "message": "Prepared derived visual crops only. Raw telemetry and source frame images were not modified.",
+            "visualPerceptionIndex": str(visual_index_path),
+            "testCropRunId": visual_index.get("testCropRunId"),
+            "testCropRunPath": str(crops_dir),
+            "cropsDir": str(crops_dir),
+            "message": "Generated disposable test crops. Training data, raw telemetry, and source frame images were not modified.",
+        }
+
+    def latest_test_crops_dir(self) -> Path | None:
+        test_crops_dir = self.paths["perceptionDir"] / "test_crops"
+
+        if not test_crops_dir.exists():
+            return None
+
+        try:
+            run_dirs = [path for path in test_crops_dir.iterdir() if path.is_dir()]
+        except OSError:
+            return None
+
+        if not run_dirs:
+            return None
+
+        return max(run_dirs, key=lambda path: path.stat().st_mtime)
+
+    def open_latest_test_crops(self) -> dict:
+        latest = self.latest_test_crops_dir()
+
+        if latest is None:
+            return {
+                "ok": False,
+                "path": str(self.paths["perceptionDir"] / "test_crops"),
+                "error": "No test crop runs found yet. Use Generate Test Crops first.",
+            }
+
+        return self.open_folder(latest, "latest test crops")
+
+    def clear_test_crops(self) -> dict:
+        test_crops_dir = self.paths["perceptionDir"] / "test_crops"
+
+        if test_crops_dir.exists():
+            shutil.rmtree(test_crops_dir)
+
+        return {
+            "ok": True,
+            "path": str(test_crops_dir),
+            "message": "Cleared disposable test crop runs. Training data, raw telemetry, and source frame images were not modified.",
         }
 
     def open_folder(self, folder: Path, label: str) -> dict:
@@ -1721,6 +1774,10 @@ HOME_HTML = """<!doctype html>
     .checkRow label { display: flex; align-items: center; gap: 8px; margin: 0; }
     .checkRow input { width: auto; }
     .smallNote { font-size: 12px; color: #9da8ba; margin: 6px 0 0; }
+    .helpBox { background: #151821; border: 1px solid #3a4050; border-radius: 4px; padding: 10px; color: #d8e2f2; margin: 10px 0 12px; }
+    .helpBox p { margin: 4px 0; }
+    details { border: 1px solid #303747; border-radius: 4px; padding: 8px; margin: 12px 0; background: #12151c; }
+    summary { cursor: pointer; color: #d8e2f2; font-weight: 600; }
     pre { background: #151821; border: 1px solid #303747; padding: 8px; color: #d5e4ff; white-space: pre-wrap; word-break: break-word; max-height: 170px; overflow: auto; }
     .muted { color: #aab2c0; }
     .status { min-height: 1.4em; color: #b9f6ca; }
@@ -1739,12 +1796,24 @@ HOME_HTML = """<!doctype html>
   <aside class="panel">
     <h1>Screen Region Calibration</h1>
     <p class="muted">Click and drag on the frame to redraw the selected region. Arrow keys move it; Shift moves 10 px; Ctrl resizes.</p>
+    <div class="helpBox">
+      <p><strong>Save Default Profile</strong> = future sessions.</p>
+      <p><strong>Save Session Profile</strong> = this session only.</p>
+      <p><strong>Generate Test Crops</strong> = preview/verification only.</p>
+      <p><strong>Build Training Dataset</strong> = persistent data for model training.</p>
+    </div>
+    <div class="buttons">
+      <button id="saveDefaultProfile">Save Default Profile</button>
+      <button id="saveSession">Save Session Profile</button>
+      <button id="prepareTestCrops">Generate Test Crops</button>
+      <button id="openLatestTestCrops">Open Latest Test Crops</button>
+      <button id="openProfileFolder">Open Default Profile Folder</button>
+      <button id="openPerceptionFolder">Open Session Perception Folder</button>
+    </div>
+    <h2>Frame</h2>
     <div class="buttons">
       <button id="refreshLatestFrame">Refresh to newest frame</button>
       <button id="useLatestFrame">Use latest existing frame</button>
-      <button id="prepareTestCrops">Prepare test crops</button>
-      <button id="openPerceptionFolder">Open perception folder</button>
-      <button id="openProfileFolder">Open profile folder</button>
     </div>
     <label for="profileSelect">Profile</label>
     <select id="profileSelect"></select>
@@ -1798,18 +1867,20 @@ HOME_HTML = """<!doctype html>
     <pre id="normalizedValues"></pre>
     <h2>Frame</h2>
     <pre id="frameInfo"></pre>
-    <div class="buttons">
-      <button id="save">Save calibrated copy</button>
-      <button id="saveSession">Save session calibration</button>
-      <button id="saveDefaultProfile">Save as default profile</button>
-      <button id="loadDefaultProfile">Load default profile</button>
-      <button id="exportProfile">Export profile as...</button>
-      <button id="resetSelected">Reset selected region</button>
-      <button id="reloadOriginal">Reload original</button>
-      <button id="exportPreview">Export overlay/contact sheet</button>
-      <button id="write" title="Overwrites derived perception/screen_regions.json with the current calibrated model">Write screen_regions.json</button>
-    </div>
-    <p class="smallNote">Session calibration affects this session only. Default profile initializes future sessions. Existing sessions keep their own screen_regions.json unless explicitly overwritten.</p>
+    <details>
+      <summary>Advanced</summary>
+      <div class="buttons">
+        <button id="save">Save calibrated copy</button>
+        <button id="exportProfile">Export profile as...</button>
+        <button id="loadDefaultProfile">Load default profile</button>
+        <button id="resetSelected">Reset selected region</button>
+        <button id="reloadOriginal">Reload original</button>
+        <button id="exportPreview">Export overlay/contact sheet</button>
+        <button id="clearTestCrops" class="danger">Clear old test crops</button>
+        <button id="write" class="danger" title="Overwrites derived perception/screen_regions.json with the current calibrated model">Raw write screen_regions.json</button>
+      </div>
+      <p class="smallNote">Advanced actions are for preview copies, export/backup, restore, and explicit derived screen_regions.json writes.</p>
+    </details>
     <p id="status" class="status"></p>
     <h2>State</h2>
     <pre id="state">Loading...</pre>
@@ -2504,14 +2575,14 @@ async function openFolderEndpoint(endpoint, label) {
 async function prepareTestCrops() {
   applyVisibleInputs();
   await pushRegions();
-  setStatus('Preparing test crops...');
+  setStatus('Generating disposable test crops...');
   const response = await fetch('/api/prepare-test-crops', {method: 'POST'});
   const result = await response.json();
   document.getElementById('state').textContent = JSON.stringify(result, null, 2);
   setStatus(
     result.ok
-      ? `${result.message || 'Prepared test crops.'} ${result.cropsDir || ''}`
-      : `Unable to prepare test crops. ${result.command || ''} ${result.error || ''}`,
+      ? `${result.message || 'Generated test crops.'} ${result.testCropRunPath || result.cropsDir || ''}`
+      : `Unable to generate test crops. ${result.command || ''} ${result.error || ''}`,
     !result.ok
   );
 }
@@ -2523,6 +2594,7 @@ regionSelect.addEventListener('change', () => setSelectedRegion(regionSelect.val
 document.getElementById('refreshLatestFrame').addEventListener('click', () => refreshLatestFrame('Refreshed to newest frame'));
 document.getElementById('useLatestFrame').addEventListener('click', () => refreshLatestFrame('Using latest existing frame'));
 document.getElementById('prepareTestCrops').addEventListener('click', prepareTestCrops);
+document.getElementById('openLatestTestCrops').addEventListener('click', () => openFolderEndpoint('/api/open-latest-test-crops', 'Latest test crops'));
 document.getElementById('openPerceptionFolder').addEventListener('click', () => openFolderEndpoint('/api/open-perception-folder', 'Perception folder'));
 document.getElementById('openProfileFolder').addEventListener('click', () => openFolderEndpoint('/api/open-profile-folder', 'Profile folder'));
 
@@ -2712,7 +2784,7 @@ document.getElementById('saveSession').addEventListener('click', async () => {
   await pushRegions();
   const response = await fetch('/api/save-session-calibration', {method: 'POST'});
   const result = await response.json();
-  setStatus(result.ok ? `${result.message} Saved ${result.path}` : result.error, !result.ok);
+  setStatus(result.ok ? `${result.message} ${result.path}` : result.error, !result.ok);
   if (result.ok) await loadState();
 });
 
@@ -2722,7 +2794,15 @@ document.getElementById('saveDefaultProfile').addEventListener('click', async ()
   await pushRegions();
   const response = await fetch('/api/save-default-profile', {method: 'POST'});
   const result = await response.json();
-  setStatus(result.ok ? `${result.message} Saved ${result.path}` : result.error, !result.ok);
+  setStatus(result.ok ? `${result.message} ${result.path}` : result.error, !result.ok);
+});
+
+document.getElementById('clearTestCrops').addEventListener('click', async () => {
+  const confirmed = confirm('Delete old disposable test crop runs for this session? Training data, raw telemetry, and source frame images are not modified.');
+  if (!confirmed) return;
+  const response = await fetch('/api/clear-test-crops', {method: 'POST'});
+  const result = await response.json();
+  setStatus(result.ok ? `${result.message} ${result.path}` : result.error, !result.ok);
 });
 
 document.getElementById('loadDefaultProfile').addEventListener('click', async () => {
@@ -2866,6 +2946,10 @@ def calibration_handler(state: InteractiveCalibrationState):
                 send_json_response(self, state.open_folder(CALIBRATION_PROFILES_DIR, "calibration profile folder"))
                 return
 
+            if parsed.path == "/api/open-latest-test-crops":
+                send_json_response(self, state.open_latest_test_crops())
+                return
+
             if parsed.path == "/frame":
                 self.serve_frame()
                 return
@@ -2927,6 +3011,10 @@ def calibration_handler(state: InteractiveCalibrationState):
                 if parsed.path == "/api/prepare-test-crops":
                     result = state.prepare_test_crops()
                     send_json_response(self, result, status=200 if result.get("ok") else 500)
+                    return
+
+                if parsed.path == "/api/clear-test-crops":
+                    send_json_response(self, state.clear_test_crops())
                     return
 
                 if parsed.path == "/api/write-screen-regions":

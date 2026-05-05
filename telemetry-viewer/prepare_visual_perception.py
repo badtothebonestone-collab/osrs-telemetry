@@ -24,6 +24,7 @@ APPROXIMATE_REGIONS_WARNING = (
     "screen_regions.json appears approximate; if crops look off, run "
     "python telemetry-viewer\\calibrate_screen_regions.py --latest-existing-frame"
 )
+TEST_CROPS_DIR_NAME = "test_crops"
 DEFAULT_TAB_PROFILE = "inventory"
 DEFAULT_TAB_PROFILES = (
     "inventory",
@@ -91,6 +92,20 @@ def session_relative(session: Path, path: Path) -> str:
 def safe_name(value: str) -> str:
     cleaned = "".join(character if character.isalnum() or character in ("-", "_") else "_" for character in value)
     return cleaned.strip("_") or "region"
+
+
+def crop_run_id(args) -> str:
+    mode, manual_profile = active_tab_mode(args)
+
+    if args.include_all_tab_profiles:
+        label = "all_profiles"
+    elif mode == "manual":
+        label = manual_profile or "manual"
+    else:
+        label = "auto"
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    return f"run-{timestamp}_{safe_name(label)}"
 
 
 def parse_tick_id(value: str) -> int:
@@ -1103,6 +1118,7 @@ def generate_region_crops(
     visual_regions: list[dict],
     tick_id,
     temp_crops_dir: Path,
+    published_crops_dir: Path,
     image_module,
     *,
     generate_grid_slots: bool = False,
@@ -1130,7 +1146,7 @@ def generate_region_crops(
         return 0, [f"tick {tick_id} frame path escapes session; crops skipped"], 0
 
     crop_dir = temp_crops_dir / f"tick-{tick_id:08d}"
-    published_crop_dir = Path("perception") / "crops" / f"tick-{tick_id:08d}"
+    published_crop_dir = published_crops_dir / f"tick-{tick_id:08d}"
     crop_count = 0
     slot_crop_count = 0
 
@@ -1286,6 +1302,7 @@ def build_visual_record(
     crop_enabled: bool = False,
     generate_grid_slots: bool = False,
     temp_crops_dir: Path | None = None,
+    published_crops_dir: Path | None = None,
     image_module=None,
 ) -> tuple[dict, list[str], int, int]:
     frame = bundle.get("frame") if isinstance(bundle.get("frame"), dict) else {}
@@ -1337,13 +1354,19 @@ def build_visual_record(
     crop_count = 0
     slot_crop_count = 0
 
-    if crop_enabled and temp_crops_dir is not None and image_module is not None:
+    if (
+        crop_enabled
+        and temp_crops_dir is not None
+        and published_crops_dir is not None
+        and image_module is not None
+    ):
         crop_count, crop_warnings, slot_crop_count = generate_region_crops(
             session,
             crop_frame,
             regions_payload,
             bundle.get("tickId"),
             temp_crops_dir,
+            published_crops_dir,
             image_module,
             generate_grid_slots=generate_grid_slots,
         )
@@ -1407,20 +1430,36 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
             file.write("\n")
 
 
-def atomic_publish(perception_dir: Path, temp_dir: Path, filenames: tuple[str, ...], *, publish_crops: bool = False) -> None:
+def atomic_publish(
+    perception_dir: Path,
+    temp_dir: Path,
+    filenames: tuple[str, ...],
+    *,
+    publish_crops: bool = False,
+    crop_run_id: str | None = None,
+    clear_test_crops: bool = False,
+) -> None:
     perception_dir.mkdir(parents=True, exist_ok=True)
 
     for filename in filenames:
         os.replace(temp_dir / filename, perception_dir / filename)
 
-    crop_root = perception_dir / "crops"
-    temp_crop_root = temp_dir / "crops"
+    test_crop_root = perception_dir / TEST_CROPS_DIR_NAME
+    temp_test_crop_root = temp_dir / TEST_CROPS_DIR_NAME
 
-    if crop_root.exists():
-        shutil.rmtree(crop_root)
+    if clear_test_crops and test_crop_root.exists():
+        shutil.rmtree(test_crop_root)
 
-    if publish_crops and temp_crop_root.exists():
-        shutil.move(str(temp_crop_root), str(crop_root))
+    if publish_crops and crop_run_id:
+        temp_run_dir = temp_test_crop_root / crop_run_id
+        target_run_dir = test_crop_root / crop_run_id
+
+        if target_run_dir.exists():
+            shutil.rmtree(target_run_dir)
+
+        if temp_run_dir.exists():
+            test_crop_root.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(temp_run_dir), str(target_run_dir))
 
 
 def load_pillow_image():
@@ -1480,6 +1519,8 @@ def build_visual_perception(session: Path, args) -> dict:
     crop_skipped_missing_frame_count = 0
     image_module = None
     crop_generation_reason = CROP_GENERATION_REASON
+    test_crop_run_id = crop_run_id(args)
+    test_crop_run_path = Path("perception") / TEST_CROPS_DIR_NAME / test_crop_run_id
 
     if args.generate_crops:
         image_module = load_pillow_image()
@@ -1489,7 +1530,7 @@ def build_visual_perception(session: Path, args) -> dict:
             warnings.append(PILLOW_UNAVAILABLE_REASON)
 
     temp_dir = perception_dir / f".tmp-visual-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}-{os.getpid()}"
-    temp_crops_dir = temp_dir / "crops"
+    temp_crops_dir = temp_dir / TEST_CROPS_DIR_NAME / test_crop_run_id
 
     if temp_dir.exists():
         shutil.rmtree(temp_dir)
@@ -1521,6 +1562,7 @@ def build_visual_perception(session: Path, args) -> dict:
             crop_enabled=bool(args.generate_crops and image_module is not None),
             generate_grid_slots=bool(args.generate_grid_slots),
             temp_crops_dir=temp_crops_dir,
+            published_crops_dir=test_crop_run_path,
             image_module=image_module,
         )
         records.append(visual_record)
@@ -1606,7 +1648,9 @@ def build_visual_perception(session: Path, args) -> dict:
     output_paths = {
         "visualPerceptionIndex": "perception/visual_perception_index.json",
         "visualTickRecords": "perception/visual_tick_records.jsonl",
-        "crops": "perception/crops",
+        "crops": str(test_crop_run_path),
+        "testCrops": str(Path("perception") / TEST_CROPS_DIR_NAME),
+        "testCropRun": str(test_crop_run_path),
     }
     requested_active_tab = manual_profile if mode == "manual" else "auto"
     included_profiles = list(applied_profile_counts.keys())
@@ -1647,6 +1691,11 @@ def build_visual_perception(session: Path, args) -> dict:
         "cropsGenerated": bool(crop_count),
         "cropGenerationReason": crop_generation_reason,
         "cropCount": crop_count,
+        "cropOutputKind": "test",
+        "testCropRunId": test_crop_run_id,
+        "testCropRunPath": str(test_crop_run_path),
+        "testCropsPreserved": not bool(args.clear_test_crops),
+        "clearedTestCrops": bool(args.clear_test_crops),
         "activeTab": requested_active_tab,
         "activeTabMode": mode,
         "manualActiveTab": manual_profile,
@@ -1697,7 +1746,14 @@ def build_visual_perception(session: Path, args) -> dict:
     try:
         write_json(temp_dir / "visual_perception_index.json", index)
         write_jsonl(temp_dir / "visual_tick_records.jsonl", records)
-        atomic_publish(perception_dir, temp_dir, filenames, publish_crops=bool(crop_count))
+        atomic_publish(
+            perception_dir,
+            temp_dir,
+            filenames,
+            publish_crops=bool(crop_count),
+            crop_run_id=test_crop_run_id,
+            clear_test_crops=bool(args.clear_test_crops),
+        )
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
@@ -1715,7 +1771,8 @@ def parse_args():
             "Crop mode prefers existing-frame ticks by default unless --tick selects one exact tick. "
             "--active-tab auto uses tick bundle activeTab inference; manual --active-tab values override every selected tick. "
             "--include-all-tab-profiles includes every tab profile. "
-            "--generate-grid-slots only writes slot crop files when --generate-crops is also used."
+            "--generate-grid-slots only writes slot crop files when --generate-crops is also used. "
+            "Generated crops are disposable test crops under perception\\test_crops\\run-*; old runs are preserved unless --clear-test-crops is used."
         ),
     )
     parser.add_argument("--session", help="Telemetry session directory to process.")
@@ -1734,6 +1791,7 @@ def parse_args():
     parser.add_argument("--include-all-tab-profiles", action="store_true", help="Include baseRegions and every tabProfiles entry, with crops separated by profile name.")
     parser.add_argument("--generate-crops", action="store_true", help="Attempt to generate region crops if Pillow is already available.")
     parser.add_argument("--generate-grid-slots", action="store_true", help="With --generate-crops, also write derived grid slot crop files such as inventorySlot00.jpg.")
+    parser.add_argument("--clear-test-crops", action="store_true", help="Delete old perception\\test_crops runs before writing this run. Not used by default.")
     return parser.parse_args()
 
 
@@ -1766,6 +1824,9 @@ def main() -> int:
     print(f"  perception/visual_tick_records.jsonl ({index['selectedTickCount']} rows)")
     print(f"  cropsGenerated: {index['cropsGenerated']}")
     print(f"  cropGenerationReason: {index['cropGenerationReason']}")
+    print(f"  cropOutputKind: {index['cropOutputKind']}")
+    print(f"  testCropRunPath: {index['testCropRunPath']}")
+    print(f"  testCropsPreserved: {index['testCropsPreserved']}")
     print(f"  activeTab: {index['activeTab']}")
     print(f"  activeTabMode: {index['activeTabMode']}")
     print(f"  activeTabCounts: {index['activeTabCounts']}")

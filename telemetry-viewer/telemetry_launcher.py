@@ -112,7 +112,7 @@ PROCESS_SPECS = {
     ),
     "test_crops": ProcessSpec(
         "test_crops",
-        "Prepare Test Crops",
+        "Generate Test Crops",
         [
             "python",
             "telemetry-viewer\\prepare_visual_perception.py",
@@ -123,6 +123,39 @@ PROCESS_SPECS = {
             "--only-existing-frames",
             "--active-tab",
             "inventory",
+        ],
+        False,
+    ),
+    "training": ProcessSpec(
+        "training",
+        "Build Training Dataset",
+        [
+            "python",
+            "telemetry-viewer\\build_training_dataset.py",
+            "--latest",
+            "500",
+            "--sample-every",
+            "5",
+            "--keep-event-ticks",
+            "--only-existing-frames",
+            "--generate-grid-slots",
+        ],
+        False,
+    ),
+    "training_rebuild": ProcessSpec(
+        "training_rebuild",
+        "Build Training Dataset Rebuild",
+        [
+            "python",
+            "telemetry-viewer\\build_training_dataset.py",
+            "--latest",
+            "500",
+            "--sample-every",
+            "5",
+            "--keep-event-ticks",
+            "--only-existing-frames",
+            "--generate-grid-slots",
+            "--rebuild",
         ],
         False,
     ),
@@ -249,6 +282,24 @@ def newest_file_in_dir(directory: Path) -> Path | None:
         return None
 
     return max(files, key=lambda path: path.stat().st_mtime)
+
+
+def newest_directory_in_dir(directory: Path) -> Path | None:
+    if not directory.exists():
+        return None
+
+    try:
+        directories = [path for path in directory.iterdir() if path.is_dir()]
+    except OSError:
+        return None
+
+    if not directories:
+        return None
+
+    try:
+        return max(directories, key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return None
 
 
 def latest_existing_frame_file(session: Path) -> Path | None:
@@ -599,6 +650,7 @@ class LauncherApp(Tk):
                 ("Open Replay Viewer in Browser", self.open_replay_viewer, None),
                 ("Run Validate Session", lambda: self.start_process("validate"), None),
                 ("Run Export Session", lambda: self.start_process("export"), None),
+                ("Build Perception Dataset", lambda: self.start_process("perception"), "perception"),
                 ("Prepare Visual Perception", lambda: self.start_process("visual_perception"), None),
                 ("Run Path Regression Tests", lambda: self.start_process("tests"), None),
             ],
@@ -609,10 +661,22 @@ class LauncherApp(Tk):
             [
                 ("Start Calibration Mode", self.start_calibration_mode, None),
                 ("Open Calibration UI", self.open_calibration_ui, None),
-                ("Build Perception Dataset", lambda: self.start_process("perception"), None),
-                ("Prepare Test Crops", lambda: self.start_process("test_crops"), None),
+                ("Generate Test Crops", lambda: self.start_process("test_crops"), "test_crops"),
+                ("Open Latest Test Crops", self.open_latest_test_crops, None),
                 ("Open Calibration Profile Folder", self.open_calibration_profile_folder, None),
-                ("Open Current Session Perception Folder", self.open_current_session_perception_folder, None),
+            ],
+        )
+        self._add_button_group(
+            button_frame,
+            "Dataset",
+            [
+                ("Build Training Dataset", lambda: self.start_process("training"), "training"),
+                (
+                    "Build Training Dataset Rebuild",
+                    lambda: self.start_process("training_rebuild"),
+                    "training_rebuild",
+                ),
+                ("Open Training Data Folder", self.open_training_data_folder, None),
             ],
         )
         self._add_button_group(
@@ -1204,6 +1268,43 @@ class LauncherApp(Tk):
             return
 
         self.open_folder(newest / "perception", "Current Session Perception Folder")
+
+    def open_latest_test_crops(self):
+        newest = find_newest_session(self.sessions_dir())
+
+        if newest is None:
+            self.log("Launcher", f"No sessions found in {self.sessions_dir()}")
+            return
+
+        test_crops_root = newest / "perception" / "test_crops"
+        latest_test_crops = newest_directory_in_dir(test_crops_root)
+
+        if latest_test_crops is None:
+            self.log(
+                "Launcher",
+                f"No test crop runs found yet in {test_crops_root}. Generate Test Crops first.",
+            )
+            return
+
+        self.open_folder(latest_test_crops, "Latest Test Crops")
+
+    def open_training_data_folder(self):
+        newest = find_newest_session(self.sessions_dir())
+
+        if newest is None:
+            self.log("Launcher", f"No sessions found in {self.sessions_dir()}")
+            return
+
+        training_data = newest / "training_data"
+
+        if not training_data.exists():
+            self.log(
+                "Launcher",
+                f"No training data folder found yet at {training_data}. Build Training Dataset first.",
+            )
+            return
+
+        self.open_folder(training_data, "Training Data Folder")
 
     def open_health_target(self, key: str):
         labels = {
