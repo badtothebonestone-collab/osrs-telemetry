@@ -143,6 +143,31 @@ mutation.
    `training_data`. `--include-missing-crops` is for diagnostics only, not
    normal training data.
 
+8. Export a curated manifest for later model/training experiments:
+
+   ```text
+   python telemetry-viewer\export_curated_training_dataset.py
+   python telemetry-viewer\export_curated_training_dataset.py --reviewed-only
+   python telemetry-viewer\export_curated_training_dataset.py --split train,val,test --seed 123
+   ```
+
+   You do not need to review every crop. By default, review labels act as
+   vetoes: unreviewed examples with existing crops are included, `good`
+   examples are included, and latest `bad_crop`, `wrong_label`, or `unsure`
+   reviews are excluded. `--reviewed-only` is the strict mode that includes
+   only latest `good` reviews.
+
+   Curated output is written to:
+
+   ```text
+   training_data\curated\curated_manifest.jsonl
+   training_data\curated\curated_index.json
+   ```
+
+   `curated_manifest.jsonl` is the clean selected list for later experiments.
+   Exporting it does not copy crops, delete crops, modify
+   `training_manifest.jsonl`, or modify `review_labels.jsonl`.
+
 Save behavior:
 
 - **Save Default Profile** writes

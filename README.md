@@ -295,6 +295,29 @@ python telemetry-viewer\build_training_dataset.py --preset focused-ui --latest 5
 examples whose crop file cannot be generated, and `--rebuild` is still required
 before the builder clears existing persistent training data.
 
+Export a clean curated manifest after QA review:
+
+```powershell
+python telemetry-viewer\export_curated_training_dataset.py
+python telemetry-viewer\export_curated_training_dataset.py --reviewed-only
+python telemetry-viewer\export_curated_training_dataset.py --split train,val,test --seed 123
+```
+
+The training dataset inspector is for QA, and you do not need to review every
+crop. By default, review labels act as vetoes: unreviewed crop examples are
+included, `good` examples are included, and latest `bad_crop`, `wrong_label`,
+or `unsure` reviews are excluded. Use `--reviewed-only` for a strict export
+that includes only latest `good` reviews. Curated outputs are written under:
+
+```text
+training_data\curated\curated_manifest.jsonl
+training_data\curated\curated_index.json
+```
+
+`curated_manifest.jsonl` is the clean selected manifest for later
+model/training experiments. The export does not copy crops, delete crops,
+modify `training_manifest.jsonl`, or modify `review_labels.jsonl`.
+
 After calibration, regenerate visual perception records or crops:
 
 ```powershell

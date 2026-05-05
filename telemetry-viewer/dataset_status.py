@@ -112,6 +112,10 @@ def status_for_session(session: Path | None) -> dict:
         "latestTestCropRun": None,
         "trainingManifestExampleCount": 0,
         "trainingCropCount": 0,
+        "curatedManifestExists": False,
+        "curatedManifestExampleCount": 0,
+        "curatedGeneratedAtUtc": None,
+        "curatedSplitCounts": {},
         "defaultTabProfileCount": len(default_tab_profiles),
         "sessionTabProfileCount": 0,
         "warnings": [],
@@ -130,6 +134,10 @@ def status_for_session(session: Path | None) -> dict:
     latest_test_crop_run = latest_directory(perception_dir / "test_crops")
     training_manifest_path = training_dir / "training_manifest.jsonl"
     training_crops_path = training_dir / "crops"
+    curated_manifest_path = training_dir / "curated" / "curated_manifest.jsonl"
+    curated_index_path = training_dir / "curated" / "curated_index.json"
+    curated_index = safe_read_json(curated_index_path)
+    curated_index = curated_index if isinstance(curated_index, dict) else {}
 
     status.update(
         {
@@ -139,6 +147,10 @@ def status_for_session(session: Path | None) -> dict:
             "latestTestCropRun": str(latest_test_crop_run) if latest_test_crop_run else None,
             "trainingManifestExampleCount": count_jsonl(training_manifest_path),
             "trainingCropCount": count_files(training_crops_path),
+            "curatedManifestExists": curated_manifest_path.exists(),
+            "curatedManifestExampleCount": count_jsonl(curated_manifest_path),
+            "curatedGeneratedAtUtc": curated_index.get("generatedAtUtc"),
+            "curatedSplitCounts": curated_index.get("splitCounts") if isinstance(curated_index.get("splitCounts"), dict) else {},
             "sessionTabProfileCount": len(session_tab_profiles),
         }
     )
@@ -163,6 +175,9 @@ def status_for_session(session: Path | None) -> dict:
 
     if status["trainingManifestExampleCount"] == 0:
         status["warnings"].append("no training data yet")
+
+    if status["trainingManifestExampleCount"] and not status["curatedManifestExists"]:
+        status["warnings"].append("no curated training manifest yet")
 
     for profile_name in missing_profiles:
         status["warnings"].append(f"label activeTab has no matching tab profile: {profile_name}")
@@ -190,6 +205,16 @@ def print_human(status: dict) -> None:
     print(f"  latest test crop run: {status['latestTestCropRun'] or 'none'}")
     print(f"  training manifest examples: {status['trainingManifestExampleCount']}")
     print(f"  training crop files: {status['trainingCropCount']}")
+    print(f"  curated manifest exists: {'yes' if status['curatedManifestExists'] else 'no'}")
+    print(f"  curated examples: {status['curatedManifestExampleCount']}")
+    print(f"  curated generatedAtUtc: {status['curatedGeneratedAtUtc'] or 'none'}")
+    print("  curated split counts:")
+
+    if status["curatedSplitCounts"]:
+        for split_name, count in status["curatedSplitCounts"].items():
+            print(f"    {split_name}: {count}")
+    else:
+        print("    unavailable")
 
     if status["warnings"] or status["labelWarnings"]:
         print("  warnings:")
