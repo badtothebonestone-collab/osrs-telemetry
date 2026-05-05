@@ -7,6 +7,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tab_profile_names import canonical_tab_profile_key, resolve_tab_profile_key
 from telemetry_paths import find_newest_session, get_sessions_dir, safe_read_json
 
 
@@ -40,6 +41,7 @@ DEFAULT_TAB_PROFILES = (
     "emotes",
     "music",
     "logout",
+    "world_switcher",
 )
 BASE_REGION_NAMES = {
     "fullframe",
@@ -92,6 +94,10 @@ def session_relative(session: Path, path: Path) -> str:
 def safe_name(value: str) -> str:
     cleaned = "".join(character if character.isalnum() or character in ("-", "_") else "_" for character in value)
     return cleaned.strip("_") or "region"
+
+
+def compact_profile_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
 def crop_run_id(args) -> str:
@@ -535,7 +541,7 @@ def flat_region_target(name: str, region: dict) -> tuple[str, str]:
         return "base", name
 
     for profile_name in DEFAULT_TAB_PROFILES:
-        if profile_name != DEFAULT_TAB_PROFILE and profile_name in lowered:
+        if profile_name != DEFAULT_TAB_PROFILE and compact_profile_key(profile_name) in lowered:
             return profile_name, name
 
     return "base", name
@@ -595,7 +601,10 @@ def normalize_screen_regions_document(raw) -> dict:
         if key not in ("regions", "baseRegions", "tabProfiles")
     }
     output.setdefault("coordinateSpace", "normalized")
-    output.setdefault("defaultTabProfile", DEFAULT_TAB_PROFILE)
+    output["defaultTabProfile"] = canonical_tab_profile_key(
+        output.get("defaultTabProfile") or DEFAULT_TAB_PROFILE,
+        default=DEFAULT_TAB_PROFILE,
+    )
     output["baseRegions"] = normalize_region_map(raw.get("baseRegions", {}), "baseRegions")
     output["tabProfiles"] = {name: {} for name in DEFAULT_TAB_PROFILES}
 
@@ -606,7 +615,13 @@ def normalize_screen_regions_document(raw) -> dict:
 
     for profile_name, raw_profile in (raw_tab_profiles or {}).items():
         if isinstance(profile_name, str) and profile_name:
-            output["tabProfiles"][profile_name] = normalize_tab_profile(profile_name, raw_profile)
+            canonical_profile_name = canonical_tab_profile_key(profile_name, default="")
+
+            if not canonical_profile_name:
+                continue
+
+            target = output["tabProfiles"].setdefault(canonical_profile_name, {})
+            target.update(normalize_tab_profile(canonical_profile_name, raw_profile))
 
     return output
 
@@ -617,7 +632,8 @@ def get_base_regions(doc: dict) -> dict:
 
 def get_tab_profile(doc: dict, profile_name: str) -> dict:
     normalized = normalize_screen_regions_document(doc)
-    return dict(normalized["tabProfiles"].get(profile_name, {}))
+    resolved_profile_name = resolve_tab_profile_key(normalized["tabProfiles"], profile_name)
+    return dict(normalized["tabProfiles"].get(resolved_profile_name, {})) if resolved_profile_name else {}
 
 
 def list_tab_profiles(doc: dict) -> list[str]:
@@ -626,9 +642,12 @@ def list_tab_profiles(doc: dict) -> list[str]:
 
 def default_tab_profile(doc: dict) -> str:
     normalized = normalize_screen_regions_document(doc)
-    profile_name = normalized.get("defaultTabProfile")
+    profile_name = resolve_tab_profile_key(
+        normalized["tabProfiles"],
+        normalized.get("defaultTabProfile"),
+    )
 
-    if isinstance(profile_name, str) and profile_name in normalized["tabProfiles"]:
+    if profile_name:
         return profile_name
 
     if DEFAULT_TAB_PROFILE in normalized["tabProfiles"]:
@@ -640,7 +659,12 @@ def default_tab_profile(doc: dict) -> str:
 
 def combined_regions_for_profile(doc: dict, profile_name: str | None = None) -> tuple[dict, str]:
     normalized = normalize_screen_regions_document(doc)
-    selected_profile = profile_name or default_tab_profile(normalized)
+    selected_profile = (
+        resolve_tab_profile_key(normalized["tabProfiles"], profile_name)
+        if profile_name
+        else default_tab_profile(normalized)
+    )
+    selected_profile = selected_profile or default_tab_profile(normalized)
     combined = dict(normalized["baseRegions"])
     combined.update(normalized["tabProfiles"].get(selected_profile, {}))
     return combined, selected_profile
@@ -648,7 +672,7 @@ def combined_regions_for_profile(doc: dict, profile_name: str | None = None) -> 
 
 def tab_inference_from_bundle(bundle: dict) -> dict:
     derived = bundle.get("derived") if isinstance(bundle.get("derived"), dict) else {}
-    active_tab = derived.get("activeTab") or "unknown"
+    active_tab = canonical_tab_profile_key(derived.get("activeTab"))
     active_tab_source = derived.get("activeTabSource") or "unknown"
     active_tab_confidence = derived.get("activeTabConfidence")
     active_tab_evidence = derived.get("activeTabEvidence")
@@ -672,6 +696,7 @@ def tab_inference_from_bundle(bundle: dict) -> dict:
 
 
 def manual_tab_inference(profile_name: str) -> dict:
+    profile_name = canonical_tab_profile_key(profile_name)
     return {
         "activeTab": profile_name,
         "activeTabSource": "manual",
@@ -691,7 +716,7 @@ def active_tab_mode(args) -> tuple[str, str | None]:
     if requested is None:
         return "auto", None
 
-    normalized = str(requested).strip().lower()
+    normalized = canonical_tab_profile_key(requested, default="")
 
     if not normalized or normalized == "auto":
         return "auto", None
@@ -714,7 +739,13 @@ def region_groups_for_bundle(screen_regions: dict, args, bundle: dict) -> tuple[
     warnings = []
     mode, manual_profile = active_tab_mode(args)
     inference = manual_tab_inference(manual_profile) if mode == "manual" else tab_inference_from_bundle(bundle)
-    active_tab = inference["activeTab"]
+    active_tab = canonical_tab_profile_key(inference["activeTab"])
+    resolved_active_profile = resolve_tab_profile_key(tab_profiles, active_tab)
+
+    if resolved_active_profile:
+        active_tab = resolved_active_profile
+        inference = dict(inference)
+        inference["activeTab"] = resolved_active_profile
 
     if args.include_all_tab_profiles:
         if active_tab != "unknown" and active_tab not in tab_profiles:

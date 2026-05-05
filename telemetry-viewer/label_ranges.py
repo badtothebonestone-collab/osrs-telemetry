@@ -3,6 +3,8 @@ import json
 from collections import Counter
 from pathlib import Path
 
+from tab_profile_names import canonical_tab_profile_key
+
 
 DEFAULT_LABELS_PATH = Path(__file__).resolve().with_name("tab_labels.json")
 
@@ -15,7 +17,7 @@ def int_or_none(value) -> int | None:
 
 
 def normalize_label_name(value) -> str:
-    return str(value or "unknown").strip().lower().replace(" ", "_").replace("-", "_") or "unknown"
+    return canonical_tab_profile_key(value)
 
 
 def load_label_ranges(path: str | Path | None = None) -> dict:

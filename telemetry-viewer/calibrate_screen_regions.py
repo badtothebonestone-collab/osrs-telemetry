@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+from tab_profile_names import canonical_tab_profile_key, resolve_tab_profile_key
 from telemetry_paths import find_newest_session, get_sessions_dir, safe_read_json
 
 
@@ -56,6 +57,7 @@ DEFAULT_TAB_PROFILES = (
     "emotes",
     "music",
     "logout",
+    "world_switcher",
 )
 INTERACTIVE_BASE_PROFILE = "__base__"
 INTERACTIVE_BASE_PROFILE_LABEL = "Base regions"
@@ -482,7 +484,9 @@ def flat_region_target(name: str, region: dict) -> tuple[str, str]:
         return "base", name
 
     for profile_name in DEFAULT_TAB_PROFILES:
-        if profile_name != DEFAULT_TAB_PROFILE and profile_name in lowered:
+        profile_token = re.sub(r"[^a-z0-9]+", "", profile_name.lower())
+
+        if profile_name != DEFAULT_TAB_PROFILE and profile_token in lowered:
             return profile_name, name
 
     return "base", name
@@ -548,7 +552,10 @@ def normalize_screen_regions_document(raw) -> dict:
     }
     output["schemaVersion"] = output.get("schemaVersion") or SCHEMA_VERSION_SCREEN_REGIONS
     output["coordinateSpace"] = output.get("coordinateSpace") or "normalized"
-    output.setdefault("defaultTabProfile", DEFAULT_TAB_PROFILE)
+    output["defaultTabProfile"] = canonical_tab_profile_key(
+        output.get("defaultTabProfile") or DEFAULT_TAB_PROFILE,
+        default=DEFAULT_TAB_PROFILE,
+    )
     output["baseRegions"] = normalize_region_map(raw.get("baseRegions", {}), "baseRegions")
     output["tabProfiles"] = {}
 
@@ -564,7 +571,13 @@ def normalize_screen_regions_document(raw) -> dict:
         if not isinstance(profile_name, str) or not profile_name:
             raise ValueError("tab profile names must be non-empty strings")
 
-        output["tabProfiles"][profile_name] = normalize_tab_profile(profile_name, raw_profile)
+        canonical_profile_name = canonical_tab_profile_key(profile_name, default="")
+
+        if not canonical_profile_name:
+            continue
+
+        target = output["tabProfiles"].setdefault(canonical_profile_name, {})
+        target.update(normalize_tab_profile(canonical_profile_name, raw_profile))
 
     return output
 
@@ -581,11 +594,13 @@ def get_base_regions(doc: dict) -> dict:
 
 def get_tab_profile(doc: dict, profile_name: str) -> dict:
     normalized = normalize_screen_regions_document(doc)
-    return deepcopy(normalized["tabProfiles"].get(profile_name, {}))
+    resolved_profile_name = resolve_tab_profile_key(normalized["tabProfiles"], profile_name)
+    return deepcopy(normalized["tabProfiles"].get(resolved_profile_name, {})) if resolved_profile_name else {}
 
 
 def set_tab_profile_region(doc: dict, profile_name: str, region_name: str, region: dict) -> dict:
     output = normalize_screen_regions_document(doc)
+    profile_name = canonical_tab_profile_key(profile_name, default=DEFAULT_TAB_PROFILE)
     output["tabProfiles"].setdefault(profile_name, {})
     output["tabProfiles"][profile_name][region_name] = serialize_region_for_save(normalize_region_record(region_name, region))
     return output
@@ -601,7 +616,8 @@ def profile_region_map(doc: dict, profile_name: str) -> dict:
     if profile_name in (INTERACTIVE_BASE_PROFILE, "base", ""):
         return deepcopy(normalized["baseRegions"])
 
-    return deepcopy(normalized["tabProfiles"].get(profile_name, {}))
+    resolved_profile_name = resolve_tab_profile_key(normalized["tabProfiles"], profile_name)
+    return deepcopy(normalized["tabProfiles"].get(resolved_profile_name, {})) if resolved_profile_name else {}
 
 
 def set_profile_regions(doc: dict, profile_name: str, regions: dict) -> dict:
@@ -610,6 +626,7 @@ def set_profile_regions(doc: dict, profile_name: str, regions: dict) -> dict:
     if profile_name in (INTERACTIVE_BASE_PROFILE, "base", ""):
         normalized["baseRegions"] = validated_regions_payload(regions)
     else:
+        profile_name = canonical_tab_profile_key(profile_name, default=DEFAULT_TAB_PROFILE)
         normalized["tabProfiles"][profile_name] = validated_regions_payload(regions)
 
     return serialize_screen_regions_document(normalized)
@@ -617,6 +634,7 @@ def set_profile_regions(doc: dict, profile_name: str, regions: dict) -> dict:
 
 def ensure_tab_profile(doc: dict, profile_name: str) -> dict:
     normalized = normalize_screen_regions_document(doc)
+    profile_name = canonical_tab_profile_key(profile_name, default="")
 
     if profile_name and profile_name not in normalized["tabProfiles"]:
         normalized["tabProfiles"][profile_name] = {}
@@ -1898,7 +1916,7 @@ const showBaseToggle = document.getElementById('showBaseRegions');
 const showActiveToggle = document.getElementById('showActiveProfileRegions');
 const showAllToggle = document.getElementById('showAllProfiles');
 const BASE_PROFILE = '__base__';
-const DEFAULT_TAB_PROFILES = ['inventory', 'equipment', 'prayer', 'magic', 'combat', 'stats', 'quests', 'friends', 'clan', 'settings', 'emotes', 'music', 'logout'];
+const DEFAULT_TAB_PROFILES = ['inventory', 'equipment', 'prayer', 'magic', 'combat', 'stats', 'quests', 'friends', 'clan', 'settings', 'emotes', 'music', 'logout', 'world_switcher'];
 const inputs = {
   x: document.getElementById('pxX'),
   y: document.getElementById('pxY'),
@@ -1946,7 +1964,12 @@ function cleanName(value, fallback='region') {
 }
 
 function cleanProfileName(value) {
-  return cleanName(value, 'custom').replace(/[^A-Za-z0-9_-]/g, '_');
+  return cleanName(value, 'custom')
+    .toLowerCase()
+    .replace(/[\\s-]+/g, '_')
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'custom';
 }
 
 function titleCase(value) {
@@ -1959,14 +1982,19 @@ function normalizeModel(raw) {
     doc.baseRegions = clone(doc.regions);
   }
   doc.baseRegions = doc.baseRegions || {};
-  doc.tabProfiles = doc.tabProfiles || {};
+  const rawTabProfiles = doc.tabProfiles || {};
+  doc.tabProfiles = {};
+  Object.entries(rawTabProfiles).forEach(([name, regions]) => {
+    const key = cleanProfileName(name);
+    doc.tabProfiles[key] = {...(doc.tabProfiles[key] || {}), ...(regions || {})};
+  });
   const defaults = appState?.defaultTabProfiles || DEFAULT_TAB_PROFILES;
   defaults.forEach(name => {
     if (!doc.tabProfiles[name]) doc.tabProfiles[name] = {};
   });
   doc.schemaVersion = doc.schemaVersion || 'perception.screen_regions.v1';
   doc.coordinateSpace = doc.coordinateSpace || 'normalized';
-  doc.defaultTabProfile = doc.defaultTabProfile || 'inventory';
+  doc.defaultTabProfile = cleanProfileName(doc.defaultTabProfile || 'inventory');
   delete doc.regions;
   return doc;
 }

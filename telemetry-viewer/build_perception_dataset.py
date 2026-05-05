@@ -22,6 +22,7 @@ from telemetry_paths import (
     safe_read_json,
 )
 from label_ranges import load_label_ranges
+from tab_profile_names import canonical_tab_profile_key
 from tab_detection import infer_active_tab, load_rules
 
 
@@ -50,6 +51,7 @@ DEFAULT_TAB_PROFILES = (
     "emotes",
     "music",
     "logout",
+    "world_switcher",
 )
 BASE_REGION_NAMES = {
     "fullframe",
@@ -568,7 +570,7 @@ def active_tab_fields(tick: dict, nearby_events: list[dict], rules: dict, labels
     inference = infer_active_tab(tick, nearby_events=nearby_events, rules=rules, labels=labels)
     evidence = inference.get("evidence")
     fields = {
-        "activeTab": inference.get("activeTab") or "unknown",
+        "activeTab": canonical_tab_profile_key(inference.get("activeTab")),
         "activeTabSource": inference.get("source") or "unknown",
         "activeTabConfidence": (
             inference.get("confidence")
@@ -739,6 +741,7 @@ def screen_regions() -> dict:
             "emotes": {},
             "music": {},
             "logout": {},
+            "world_switcher": {},
         },
     }
 
@@ -784,7 +787,7 @@ def flat_region_target(name: str, region: dict) -> tuple[str, str]:
         return "base", name
 
     for profile_name in DEFAULT_TAB_PROFILES:
-        if profile_name != DEFAULT_TAB_PROFILE and profile_name in lowered:
+        if profile_name != DEFAULT_TAB_PROFILE and clean_region_key(profile_name) in lowered:
             return profile_name, name
 
     return "base", name
@@ -833,14 +836,22 @@ def normalize_tab_profiles(value) -> dict:
             raise ValueError("tab profile names must be non-empty strings")
 
         if profile_regions is None:
-            output[profile_name] = {}
+            canonical_profile_name = canonical_tab_profile_key(profile_name, default="")
+
+            if canonical_profile_name:
+                output[canonical_profile_name] = {}
             continue
 
         if not isinstance(profile_regions, dict):
             raise ValueError(f"tab profile is not an object: {profile_name}")
 
         source = profile_regions.get("regions") if isinstance(profile_regions.get("regions"), dict) else profile_regions
-        output[profile_name] = {
+        canonical_profile_name = canonical_tab_profile_key(profile_name, default="")
+
+        if not canonical_profile_name:
+            continue
+
+        output[canonical_profile_name] = {
             name: copy_json_object(region)
             for name, region in source.items()
             if isinstance(name, str) and name and isinstance(region, dict)
@@ -868,7 +879,10 @@ def normalize_screen_regions_document(raw: dict) -> dict:
 
     output["schemaVersion"] = output.get("schemaVersion") or SCHEMA_VERSION_SCREEN_REGIONS
     output["coordinateSpace"] = output.get("coordinateSpace") or "normalized"
-    output.setdefault("defaultTabProfile", DEFAULT_TAB_PROFILE)
+    output["defaultTabProfile"] = canonical_tab_profile_key(
+        output.get("defaultTabProfile") or DEFAULT_TAB_PROFILE,
+        default=DEFAULT_TAB_PROFILE,
+    )
     output["baseRegions"] = {
         name: copy_json_object(region)
         for name, region in base_regions.items()

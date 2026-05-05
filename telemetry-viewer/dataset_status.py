@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from label_ranges import load_label_ranges
+from tab_profile_names import canonical_tab_profile_key
 from telemetry_paths import find_newest_session, get_sessions_dir, safe_read_json
 
 
@@ -83,14 +84,14 @@ def active_tab_counts(perception_index: dict | None) -> dict:
 def label_active_tabs(labels_doc: dict) -> set[str]:
     labels = labels_doc.get("labels") if isinstance(labels_doc, dict) else []
     return {
-        str(label.get("activeTab"))
+        canonical_tab_profile_key(label.get("activeTab"))
         for label in labels
         if isinstance(label, dict) and label.get("activeTab")
     }
 
 
 def profile_names(tab_profiles: dict) -> set[str]:
-    return {str(name) for name in tab_profiles.keys()}
+    return {canonical_tab_profile_key(name) for name in tab_profiles.keys()}
 
 
 def status_for_session(session: Path | None) -> dict:
@@ -157,7 +158,7 @@ def status_for_session(session: Path | None) -> dict:
 
     counts = status["activeTabCounts"]
 
-    if counts and all(tab == "unknown" for tab in counts.keys()):
+    if counts and all(canonical_tab_profile_key(tab) == "unknown" for tab in counts.keys()):
         status["warnings"].append("all activeTab counts are unknown")
 
     if status["trainingManifestExampleCount"] == 0:

@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from label_ranges import label_for_tick, load_label_ranges
+from tab_profile_names import canonical_tab_profile_key
 from prepare_visual_perception import (
     build_visual_record,
     crop_box,
@@ -208,7 +209,7 @@ def bundle_with_label_fallback(bundle: dict, labels_doc: dict) -> dict:
 
 
 def normalize_active_tab(value) -> str:
-    return str(value or "unknown").strip().lower().replace(" ", "_").replace("-", "_") or "unknown"
+    return canonical_tab_profile_key(value)
 
 
 def bundle_with_active_tab_priority(bundle: dict, manual_active_tab: str | None, labels_doc: dict) -> dict:
@@ -242,7 +243,7 @@ def bundle_with_active_tab_priority(bundle: dict, manual_active_tab: str | None,
     if label is not None:
         updated_derived.update(
             {
-                "activeTab": label.get("activeTab") or "unknown",
+                "activeTab": normalize_active_tab(label.get("activeTab")),
                 "activeTabSource": "label",
                 "activeTabConfidence": 1.0,
                 "activeTabEvidence": [
@@ -467,7 +468,7 @@ def label_record(bundle: dict, labels_doc: dict) -> dict:
         record["matchingLabelRange"] = {
             "startTick": label.get("startTick"),
             "endTick": label.get("endTick"),
-            "activeTab": label.get("activeTab"),
+            "activeTab": normalize_active_tab(label.get("activeTab")),
             "uiState": label.get("uiState"),
             "activityState": label.get("activityState"),
             "notes": label.get("notes"),

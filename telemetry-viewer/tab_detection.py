@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 from label_ranges import infer_label_for_tick, load_label_ranges
+from tab_profile_names import canonical_tab_profile_key
 
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().with_name("tab_detection_rules.json")
@@ -251,13 +252,15 @@ def normalize_tab_name(value, rules: dict | None = None) -> str:
     if not raw:
         return "unknown"
 
-    lowered = raw.lower()
+    lowered = canonical_tab_profile_key(raw)
     aliases = (rules or {}).get("aliases") if isinstance(rules, dict) else {}
 
-    if isinstance(aliases, dict) and lowered in aliases:
-        return str(aliases[lowered])
+    if isinstance(aliases, dict):
+        for alias, target in aliases.items():
+            if canonical_tab_profile_key(alias) == lowered:
+                return canonical_tab_profile_key(target)
 
-    return lowered.replace(" ", "_").replace("-", "_")
+    return lowered
 
 
 def tab_rules(rules: dict) -> dict:
