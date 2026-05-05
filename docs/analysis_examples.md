@@ -234,6 +234,25 @@ mutation.
    `target_geometry_inspector.py` can load these candidate files and draw ranked
    aim points/preferred geometry alongside the raw UI/world overlays.
 
+11. Export a read-only target handoff:
+
+   ```text
+   python telemetry-viewer\export_target_handoff.py --category bank --limit 10
+   ```
+
+   This writes:
+
+   ```text
+   interaction_geometry\handoff\latest_candidates.json
+   interaction_geometry\handoff\latest_candidates.jsonl
+   interaction_geometry\handoff\handoff_index.json
+   ```
+
+   The handoff files contain ranked candidate geometry for external analysis or
+   private-server experiments. They preserve aim points, preferred geometry, and
+   scoring reasons, but they do not contain mouse movement, click commands,
+   keyboard input, menu actions, or automation instructions.
+
 Save behavior:
 
 - **Save Default Profile** writes

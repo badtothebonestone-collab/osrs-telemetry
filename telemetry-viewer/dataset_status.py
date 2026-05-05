@@ -243,6 +243,9 @@ def status_for_session(session: Path | None) -> dict:
         "targetCandidatesExist": False,
         "targetCandidateCount": 0,
         "targetCandidatesGeneratedAtUtc": None,
+        "targetHandoffExists": False,
+        "targetHandoffCandidateCount": 0,
+        "targetHandoffGeneratedAtUtc": None,
         "curatedManifestExists": False,
         "curatedManifestExampleCount": 0,
         "curatedGeneratedAtUtc": None,
@@ -282,6 +285,11 @@ def status_for_session(session: Path | None) -> dict:
     target_candidates_index_path = ui_geometry_dir / "target_candidates_index.json"
     target_candidates_index = safe_read_json(target_candidates_index_path)
     target_candidates_index = target_candidates_index if isinstance(target_candidates_index, dict) else {}
+    target_handoff_dir = ui_geometry_dir / "handoff"
+    target_handoff_jsonl_path = target_handoff_dir / "latest_candidates.jsonl"
+    target_handoff_index_path = target_handoff_dir / "handoff_index.json"
+    target_handoff_index = safe_read_json(target_handoff_index_path)
+    target_handoff_index = target_handoff_index if isinstance(target_handoff_index, dict) else {}
     ui_first_tick, ui_last_tick = tick_range_from_index_or_jsonl(ui_geometry_index, ui_targets_path)
     world_first_tick, world_last_tick = tick_range_from_index_or_jsonl(world_geometry_index, world_targets_path)
     curated_manifest_path = training_dir / "curated" / "curated_manifest.jsonl"
@@ -370,6 +378,13 @@ def status_for_session(session: Path | None) -> dict:
                 else count_jsonl(target_candidates_path)
             ),
             "targetCandidatesGeneratedAtUtc": target_candidates_index.get("generatedAtUtc"),
+            "targetHandoffExists": target_handoff_jsonl_path.exists() and target_handoff_index_path.exists(),
+            "targetHandoffCandidateCount": (
+                target_handoff_index.get("selectedCandidateCount")
+                if isinstance(target_handoff_index.get("selectedCandidateCount"), int)
+                else count_jsonl(target_handoff_jsonl_path)
+            ),
+            "targetHandoffGeneratedAtUtc": target_handoff_index.get("generatedAtUtc"),
             "curatedManifestExists": curated_manifest_path.exists(),
             "curatedManifestExampleCount": count_jsonl(curated_manifest_path),
             "curatedGeneratedAtUtc": curated_index.get("generatedAtUtc"),
@@ -487,6 +502,9 @@ def print_human(status: dict) -> None:
     print(f"  target candidates exist: {'yes' if status['targetCandidatesExist'] else 'no'}")
     print(f"  target candidate count: {status['targetCandidateCount']}")
     print(f"  target candidates generatedAtUtc: {status['targetCandidatesGeneratedAtUtc'] or 'none'}")
+    print(f"  target handoff exists: {'yes' if status['targetHandoffExists'] else 'no'}")
+    print(f"  target handoff candidate count: {status['targetHandoffCandidateCount']}")
+    print(f"  target handoff generatedAtUtc: {status['targetHandoffGeneratedAtUtc'] or 'none'}")
     print(f"  curated manifest exists: {'yes' if status['curatedManifestExists'] else 'no'}")
     print(f"  curated examples: {status['curatedManifestExampleCount']}")
     print(f"  curated generatedAtUtc: {status['curatedGeneratedAtUtc'] or 'none'}")
