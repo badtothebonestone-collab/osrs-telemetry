@@ -160,7 +160,8 @@ Streamlined calibration workflow:
 11. Build persistent training data:
 
     ```powershell
-    python telemetry-viewer\build_training_dataset.py --latest 500 --sample-every 5 --keep-event-ticks --only-existing-frames --generate-grid-slots
+    python telemetry-viewer\build_training_dataset.py --preset review --latest 500 --generate-grid-slots
+    python telemetry-viewer\build_training_dataset.py --preset focused-ui --latest 500 --generate-grid-slots
     ```
 
 12. Inspect the dataset health:
@@ -168,6 +169,26 @@ Streamlined calibration workflow:
     ```powershell
     python telemetry-viewer\dataset_status.py
     ```
+
+13. Review generated training examples in the local browser inspector:
+
+    ```powershell
+    python telemetry-viewer\training_dataset_inspector.py
+    ```
+
+    Optional forms:
+
+    ```powershell
+    python telemetry-viewer\training_dataset_inspector.py --port 8790
+    python telemetry-viewer\training_dataset_inspector.py --session "C:\path\to\session"
+    ```
+
+    Open `http://127.0.0.1:8790/`. You are not expected to manually review
+    every crop. Start with **Review Queue** set to **Balanced by
+    regionProfile**, size `100`, and `cropExists=true`; then mark examples
+    **Good**, **Bad Crop**, **Wrong Label**, or **Unsure**. If training data
+    has not been built, the page shows:
+    `Run python telemetry-viewer\build_training_dataset.py first.`
 
 The launcher Calibration section contains:
 
@@ -248,6 +269,31 @@ Test crops and training data are intentionally separate:
 - Training data is non-destructive by default: existing examples are detected
   and skipped by key.
 - Only `--rebuild` wipes `training_data` before rebuilding.
+
+The training dataset inspector is for local QA/review of generated training
+data. It shows summary cards, filters, crop thumbnails, labels, telemetry
+summary, source frame images when available, and a detail panel for the
+selected example. Use its review queues and quick filters to inspect a
+manageable sample instead of working through every manifest row. Missing crop
+diagnostics separate manifest examples, examples with crop files, and stale or
+missing crop paths; if many crops are missing, filter to `cropExists=true` or
+rebuild only when you intentionally want to replace `training_data`.
+Review buttons append QA metadata to
+`sessions\<session_id>\training_data\review_labels.jsonl`. That sidecar is
+append-only: it does not modify raw telemetry, does not overwrite
+`training_manifest.jsonl`, does not alter `training_index.json`, and does not
+modify crops.
+
+For smaller focused training builds, prefer the presets:
+
+```powershell
+python telemetry-viewer\build_training_dataset.py --preset review --latest 500 --generate-grid-slots
+python telemetry-viewer\build_training_dataset.py --preset focused-ui --latest 500 --generate-grid-slots
+```
+
+`--include-missing-crops` is for diagnostics only. Normal training builds skip
+examples whose crop file cannot be generated, and `--rebuild` is still required
+before the builder clears existing persistent training data.
 
 After calibration, regenerate visual perception records or crops:
 

@@ -1,8 +1,10 @@
 import argparse
 import json
 import os
+import random
+import re
 import shutil
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +32,12 @@ MISSING_PERCEPTION_MESSAGE = (
     "Required perception files not found. "
     "Run python telemetry-viewer\\build_perception_dataset.py first."
 )
+FOCUSED_UI_BASE_REGION_NAMES = {"chatbox", "minimap"}
+FOCUSED_UI_PROFILES = {"base", "inventory", "equipment", "prayer", "magic", "combat", "stats"}
+
+
+def folded_name(value) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
 
 def utc_now() -> str:
@@ -202,6 +210,149 @@ def sampled_bundles(candidates: list[dict], args) -> list[dict]:
             selected.append(bundle)
 
     return selected
+
+
+def active_tab_for_record(record: dict) -> str:
+    labels = record.get("labels") if isinstance(record.get("labels"), dict) else {}
+    return normalize_active_tab(labels.get("activeTab") or "unknown")
+
+
+def region_profile_for_record(record: dict) -> str:
+    return canonical_tab_profile_key(record.get("regionProfile") or "base")
+
+
+def region_name_for_record(record: dict) -> str:
+    return str(record.get("regionName") or "unknown")
+
+
+def tags_for_record(record: dict) -> set[str]:
+    return {str(tag).strip().lower() for tag in (record.get("tags") or []) if str(tag).strip()}
+
+
+def explicit_region_name_keys(args) -> set[str]:
+    return {folded_name(name) for name in (args.region_name or [])}
+
+
+def region_filter_reason(record: dict, args) -> str | None:
+    profile = region_profile_for_record(record)
+    region_name = region_name_for_record(record)
+    region_name_key = folded_name(region_name)
+    include_profiles = {canonical_tab_profile_key(value) for value in (args.region_profile or [])}
+    include_region_names = explicit_region_name_keys(args)
+    include_tags = {str(value).strip().lower() for value in (args.tag or []) if str(value).strip()}
+    exclude_region_names = {folded_name(value) for value in (args.exclude_region_name or [])}
+
+    if include_profiles and profile not in include_profiles:
+        return "regionProfile"
+
+    if include_region_names and region_name_key not in include_region_names:
+        return "regionName"
+
+    if include_tags and not tags_for_record(record).intersection(include_tags):
+        return "tag"
+
+    if args.exclude_base_regions and profile == "base":
+        return "excludeBaseRegions"
+
+    if region_name_key in exclude_region_names:
+        return "excludeRegionName"
+
+    if getattr(args, "_focused_ui_preset", False) and profile == "base":
+        if region_name_key not in FOCUSED_UI_BASE_REGION_NAMES and region_name_key not in include_region_names:
+            return "focusedUiBaseRegion"
+
+    return None
+
+
+def apply_region_filters(records: list[dict], args) -> tuple[list[dict], int]:
+    kept = []
+    skipped = 0
+
+    for record in records:
+        if region_filter_reason(record, args) is None:
+            kept.append(record)
+        else:
+            skipped += 1
+
+    return kept, skipped
+
+
+def balanced_order(entries: list[dict], key_func, rng: random.Random) -> list[dict]:
+    groups = defaultdict(list)
+
+    for entry in entries:
+        groups[key_func(entry["record"])].append(entry)
+
+    for group in groups.values():
+        rng.shuffle(group)
+
+    ordered = []
+    keys = sorted(groups.keys(), key=str)
+    index = 0
+
+    while keys:
+        key = keys[index % len(keys)]
+        group = groups[key]
+
+        if group:
+            ordered.append(group.pop())
+
+        if not group:
+            keys.remove(key)
+
+            if not keys:
+                break
+
+            index %= len(keys)
+        else:
+            index = (index + 1) % len(keys)
+
+    return ordered
+
+
+def sample_record_entries(entries: list[dict], args) -> tuple[list[dict], int]:
+    rng = random.Random(args.seed) if args.seed is not None else random.Random()
+    ordered = list(entries)
+
+    if args.random_sample:
+        rng.shuffle(ordered)
+    elif args.balanced_sample:
+        ordered = balanced_order(ordered, region_profile_for_record, rng)
+
+    active_tab_counts = Counter()
+    region_profile_counts = Counter()
+    region_name_counts = Counter()
+    kept = []
+    skipped = 0
+
+    for index, entry in enumerate(ordered):
+        record = entry["record"]
+        active_tab = active_tab_for_record(record)
+        region_profile = region_profile_for_record(record)
+        region_name = region_name_for_record(record)
+
+        if args.max_per_active_tab is not None and active_tab_counts[active_tab] >= args.max_per_active_tab:
+            skipped += 1
+            continue
+
+        if args.max_per_region_profile is not None and region_profile_counts[region_profile] >= args.max_per_region_profile:
+            skipped += 1
+            continue
+
+        if args.max_per_region_name is not None and region_name_counts[region_name] >= args.max_per_region_name:
+            skipped += 1
+            continue
+
+        kept.append(entry)
+        active_tab_counts[active_tab] += 1
+        region_profile_counts[region_profile] += 1
+        region_name_counts[region_name] += 1
+
+        if args.max_examples is not None and len(kept) >= args.max_examples:
+            skipped += len(ordered) - index - 1
+            break
+
+    return kept, max(0, skipped)
 
 
 def bundle_with_label_fallback(bundle: dict, labels_doc: dict) -> dict:
@@ -624,15 +775,44 @@ def records_for_bundle(session: Path, screen_regions: dict, bundle: dict, args) 
     return records, visual_record, warnings
 
 
+def apply_preset(args) -> None:
+    args._focused_ui_preset = False
+
+    if args.preset == "review":
+        included_region_names = explicit_region_name_keys(args)
+
+        for region_name in ("fullFrame", "gameViewport", "sidePanel", "tabs"):
+            if folded_name(region_name) not in included_region_names and region_name not in args.exclude_region_name:
+                args.exclude_region_name.append(region_name)
+
+        if args.max_per_region_name is None:
+            args.max_per_region_name = 100
+
+    elif args.preset == "focused-ui":
+        args._focused_ui_preset = True
+
+        if not args.region_profile:
+            args.region_profile.extend(sorted(FOCUSED_UI_PROFILES))
+
+
 def counters_for_records(records: list[dict]) -> dict:
     active_tabs = Counter()
     region_profiles = Counter()
+    region_names = Counter()
     tags = Counter()
+    crop_exists_count = 0
+    crop_missing_count = 0
 
     for record in records:
         labels = record.get("labels") if isinstance(record.get("labels"), dict) else {}
         active_tabs[labels.get("activeTab") or "unknown"] += 1
         region_profiles[record.get("regionProfile") or "unknown"] += 1
+        region_names[record.get("regionName") or "unknown"] += 1
+
+        if record.get("cropExists") is True:
+            crop_exists_count += 1
+        else:
+            crop_missing_count += 1
 
         for tag in record.get("tags") or []:
             tags[str(tag)] += 1
@@ -640,7 +820,10 @@ def counters_for_records(records: list[dict]) -> dict:
     return {
         "activeTabCounts": dict(active_tabs.most_common()),
         "regionProfileCounts": dict(region_profiles.most_common()),
+        "regionNameCounts": dict(region_names.most_common()),
         "tagCounts": dict(tags.most_common()),
+        "cropExistsExampleCount": crop_exists_count,
+        "cropMissingExampleCount": crop_missing_count,
     }
 
 
@@ -672,15 +855,21 @@ def build_training_dataset(session: Path, args) -> dict:
     selected_bundles = sampled_bundles(candidates, args)
     selected_tick_count = len(selected_bundles)
     image_module, image_draw_module = load_pillow_modules()
+    planned_entries = []
     new_records = []
     new_label_records = []
     skipped_duplicate_count = 0
+    skipped_by_region_filter_count = 0
+    skipped_by_sampling_count = 0
+    skipped_missing_crop_count = 0
     unknown_active_tab_count = 0
     crop_count = 0
-    max_examples = args.max_examples if args.max_examples is not None else None
 
     if image_module is None:
-        warnings.append("Pillow not available; training crops were not generated, but manifest metadata was written")
+        warnings.append(
+            "Pillow not available; training crops were not generated"
+            + ("; manifest metadata will be written because --include-missing-crops was provided" if args.include_missing_crops else "; examples without crops will be skipped")
+        )
 
     for raw_bundle in selected_bundles:
         bundle = bundle_with_active_tab_priority(raw_bundle, args.active_tab, labels_doc)
@@ -697,40 +886,58 @@ def build_training_dataset(session: Path, args) -> dict:
 
         records, _visual_record, record_warnings = records_for_bundle(session, screen_regions, bundle, args)
         warnings.extend(record_warnings)
-        bundle_new_records = []
+        filtered_records, skipped_count = apply_region_filters(records, args)
+        skipped_by_region_filter_count += skipped_count
 
-        for record in records:
-            key = example_key(record)
+        for record in filtered_records:
+            planned_entries.append(
+                {
+                    "bundle": bundle,
+                    "visual_record": _visual_record,
+                    "record": record,
+                }
+            )
 
-            if key is None:
-                warnings.append(f"skipped record without duplicate key on tick {record.get('tickId')}")
-                continue
+    planned_entries, skipped_by_sampling_count = sample_record_entries(planned_entries, args)
+    records_by_visual_id = {}
+    visual_records_by_id = {}
+    planned_keys = set()
 
-            if key in existing_keys:
-                skipped_duplicate_count += 1
-                continue
+    for entry in planned_entries:
+        record = entry["record"]
+        key = example_key(record)
 
-            bundle_new_records.append(record)
-            existing_keys.add(key)
+        if key is None:
+            warnings.append(f"skipped record without duplicate key on tick {record.get('tickId')}")
+            skipped_by_sampling_count += 1
+            continue
 
-            if max_examples is not None and len(new_records) + len(bundle_new_records) >= max_examples:
-                break
+        if key in existing_keys or key in planned_keys:
+            skipped_duplicate_count += 1
+            continue
 
+        planned_keys.add(key)
+        visual_id = id(entry["visual_record"])
+        visual_records_by_id[visual_id] = entry["visual_record"]
+        records_by_visual_id.setdefault(visual_id, []).append(record)
+
+    for visual_id, records in records_by_visual_id.items():
         if image_module is not None:
             added_crops, crop_warnings = generate_crops_for_records(
                 session,
-                _visual_record,
-                bundle_new_records,
+                visual_records_by_id[visual_id],
+                records,
                 image_module,
                 image_draw_module,
             )
             crop_count += added_crops
             warnings.extend(crop_warnings)
 
-        new_records.extend(bundle_new_records)
-
-        if max_examples is not None and len(new_records) >= max_examples:
-            break
+        for record in records:
+            if record.get("cropExists") is True or args.include_missing_crops:
+                new_records.append(record)
+            else:
+                skipped_missing_crop_count += 1
 
     append_jsonl(output_paths["manifest"], new_records)
     append_jsonl(output_paths["labelsApplied"], new_label_records)
@@ -742,13 +949,20 @@ def build_training_dataset(session: Path, args) -> dict:
         "sessionPath": str(session),
         "selectedTickCount": selected_tick_count,
         "exampleCount": len(all_records),
+        "manifestExampleCount": len(all_records),
+        "cropExistsExampleCount": counts["cropExistsExampleCount"],
+        "cropMissingExampleCount": counts["cropMissingExampleCount"],
         "addedExampleCount": len(new_records),
         "existingExampleCount": len(existing_records),
         "skippedDuplicateCount": skipped_duplicate_count,
         "skippedMissingFrameCount": skipped_missing_frame,
+        "skippedByRegionFilterCount": skipped_by_region_filter_count,
+        "skippedBySamplingCount": skipped_by_sampling_count,
+        "skippedMissingCropCount": skipped_missing_crop_count,
         "unknownActiveTabCount": unknown_active_tab_count,
         "countsByActiveTab": counts["activeTabCounts"],
         "countsByRegionProfile": counts["regionProfileCounts"],
+        "countsByRegionName": counts["regionNameCounts"],
         "countsByTag": counts["tagCounts"],
         "labelsLoaded": labels_doc.get("loaded"),
         "labelsPath": labels_doc.get("path"),
@@ -775,6 +989,19 @@ def build_training_dataset(session: Path, args) -> dict:
             "generateGridSlots": bool(args.generate_grid_slots),
             "includeAllTabProfiles": bool(args.include_all_tab_profiles),
             "maxExamples": args.max_examples,
+            "regionProfiles": args.region_profile,
+            "regionNames": args.region_name,
+            "tags": args.tag,
+            "excludeBaseRegions": bool(args.exclude_base_regions),
+            "excludeRegionNames": args.exclude_region_name,
+            "maxPerActiveTab": args.max_per_active_tab,
+            "maxPerRegionProfile": args.max_per_region_profile,
+            "maxPerRegionName": args.max_per_region_name,
+            "balancedSample": bool(args.balanced_sample),
+            "randomSample": bool(args.random_sample),
+            "seed": args.seed,
+            "preset": args.preset,
+            "includeMissingCrops": bool(args.include_missing_crops),
             "rebuild": bool(args.rebuild),
         },
         "paths": {
@@ -802,6 +1029,7 @@ def parse_args():
     parser.add_argument("--session", help="Telemetry session directory to process.")
     parser.add_argument("--sessions-dir", help="Override the telemetry sessions directory when --session is omitted.")
     parser.add_argument("--labels", help="Path to tab label ranges JSON. Defaults to session perception\\labels.json when present, otherwise telemetry-viewer\\tab_labels.json.")
+    parser.add_argument("--preset", choices=("review", "focused-ui"), help="Apply conservative selection defaults for review queues or focused UI crop datasets.")
     parser.add_argument("--latest", type=positive_int, metavar="N", help="Select the newest N matching tick bundles before sampling.")
     parser.add_argument("--range", nargs=2, type=parse_tick_id, dest="tick_range", metavar=("START", "END"), help="Select an inclusive tick range.")
     parser.add_argument("--tick", type=parse_tick_id, help="Select one tick.")
@@ -809,11 +1037,26 @@ def parse_args():
     parser.add_argument("--sample-every", type=positive_int, default=5, metavar="N", help="Keep every Nth selected tick. Default: 5.")
     parser.add_argument("--keep-event-ticks", action="store_true", default=True, help="Keep ticks with on-tick events even if skipped by sampling. Default: true.")
     parser.add_argument("--only-existing-frames", action="store_true", default=True, help="Use only ticks whose frame file currently exists. Default: true.")
+    parser.add_argument("--region-profile", action="append", default=[], metavar="NAME", help="Only include examples from this region profile. Can be repeated.")
+    parser.add_argument("--region-name", action="append", default=[], metavar="NAME", help="Only include examples for this region name. Can be repeated.")
+    parser.add_argument("--tag", action="append", default=[], metavar="TAG", help="Only include examples with this region tag. Can be repeated.")
+    parser.add_argument("--exclude-base-regions", action="store_true", help="Skip all base profile regions.")
+    parser.add_argument("--exclude-region-name", action="append", default=[], metavar="NAME", help="Skip examples for this region name. Can be repeated.")
+    parser.add_argument("--max-per-active-tab", type=positive_int, metavar="N", help="Cap new examples per active tab after filters.")
+    parser.add_argument("--max-per-region-profile", type=positive_int, metavar="N", help="Cap new examples per region profile after filters.")
+    parser.add_argument("--max-per-region-name", type=positive_int, metavar="N", help="Cap new examples per region name after filters.")
+    sample_group = parser.add_mutually_exclusive_group()
+    sample_group.add_argument("--balanced-sample", action="store_true", help="Balance selected examples by region profile before caps/max examples.")
+    sample_group.add_argument("--random-sample", action="store_true", help="Randomize selected examples before caps/max examples.")
+    parser.add_argument("--seed", type=int, help="Seed for reproducible random or balanced sampling.")
     parser.add_argument("--generate-grid-slots", action="store_true", help="Also add manifest examples for derived grid slots. Crop bytes are still deferred in this pass.")
     parser.add_argument("--include-all-tab-profiles", action="store_true", help="Include every tab profile region set for each selected tick.")
+    parser.add_argument("--include-missing-crops", action="store_true", help="Write metadata-only manifest rows when crop files cannot be generated. By default, missing-crop examples are skipped.")
     parser.add_argument("--max-examples", type=positive_int, metavar="N", help="Stop after adding at most N new manifest examples.")
     parser.add_argument("--rebuild", action="store_true", help="Explicitly delete and rebuild training_data for the selected session.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    apply_preset(args)
+    return args
 
 
 def main() -> int:
@@ -847,11 +1090,18 @@ def main() -> int:
     print(f"  training_data/labels_applied.jsonl")
     print(f"  selectedTickCount: {index['selectedTickCount']}")
     print(f"  exampleCount: {index['exampleCount']}")
+    print(f"  manifestExampleCount: {index['manifestExampleCount']}")
+    print(f"  cropExistsExampleCount: {index['cropExistsExampleCount']}")
+    print(f"  cropMissingExampleCount: {index['cropMissingExampleCount']}")
     print(f"  addedExampleCount: {index['addedExampleCount']}")
     print(f"  skippedDuplicateCount: {index['skippedDuplicateCount']}")
     print(f"  skippedMissingFrameCount: {index['skippedMissingFrameCount']}")
+    print(f"  skippedByRegionFilterCount: {index['skippedByRegionFilterCount']}")
+    print(f"  skippedBySamplingCount: {index['skippedBySamplingCount']}")
+    print(f"  skippedMissingCropCount: {index['skippedMissingCropCount']}")
     print(f"  unknownActiveTabCount: {index['unknownActiveTabCount']}")
     print(f"  countsByActiveTab: {index['countsByActiveTab']}")
+    print(f"  countsByRegionProfile: {index['countsByRegionProfile']}")
     print(f"  rebuilt: {index['rebuilt']}")
     print(f"  cropsGenerated: {index['cropsGenerated']}")
     print(f"  cropCount: {index['cropCount']}")

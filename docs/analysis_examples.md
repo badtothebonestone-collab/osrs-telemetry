@@ -91,7 +91,8 @@ mutation.
 5. Build persistent training data:
 
    ```text
-   python telemetry-viewer\build_training_dataset.py --latest 500 --sample-every 5 --keep-event-ticks --only-existing-frames --generate-grid-slots
+   python telemetry-viewer\build_training_dataset.py --preset review --latest 500 --generate-grid-slots
+   python telemetry-viewer\build_training_dataset.py --preset focused-ui --latest 500 --generate-grid-slots
    ```
 
    Training crops are durable derived data under:
@@ -108,6 +109,39 @@ mutation.
    ```text
    python telemetry-viewer\dataset_status.py
    ```
+
+7. Review generated training examples in a local browser:
+
+   ```text
+   python telemetry-viewer\training_dataset_inspector.py
+   python telemetry-viewer\training_dataset_inspector.py --port 8790
+   python telemetry-viewer\training_dataset_inspector.py --session "C:\path\to\session"
+   ```
+
+   Open `http://127.0.0.1:8790/`. The inspector shows summary cards,
+   filters, crop thumbnails, labels, telemetry summaries, source frames when
+   available, and a detail panel for the selected example. You are not
+   expected to manually review every crop. Use **Review Queue**, start with
+   **Balanced by regionProfile**, size `100`, and `cropExists=true`, then mark
+   examples **Good**, **Bad Crop**, **Wrong Label**, or **Unsure**. If training
+   data is missing, it shows: `Run python
+   telemetry-viewer\build_training_dataset.py first.`
+
+   QA review buttons append local metadata to:
+
+   ```text
+   training_data\review_labels.jsonl
+   ```
+
+   `review_labels.jsonl` is append-only QA metadata. It does not modify raw
+   telemetry, does not overwrite `training_manifest.jsonl`, does not alter
+   `training_index.json`, and does not modify crops.
+
+   Missing crop diagnostics separate manifest examples from actual crop files.
+   If many crops are missing, filter to `cropExists=true`. Only use
+   `--rebuild` when you intentionally want to replace persistent
+   `training_data`. `--include-missing-crops` is for diagnostics only, not
+   normal training data.
 
 Save behavior:
 
@@ -312,6 +346,17 @@ dataset. Persistent training data lives under
 `sessions\<session_id>\training_data\crops\`. Normal training builds skip
 duplicates and do not wipe previous training data; only `--rebuild` clears and
 rebuilds `training_data`.
+
+For smaller reviewable datasets, prefer:
+
+```text
+python telemetry-viewer\build_training_dataset.py --preset review --latest 500 --generate-grid-slots
+python telemetry-viewer\build_training_dataset.py --preset focused-ui --latest 500 --generate-grid-slots
+```
+
+The `review` preset drops broad low-value base crops such as full frame,
+viewport, side panel, and tabs. The `focused-ui` preset concentrates on side-tab
+profiles plus useful base context such as chatbox and minimap.
 
 Use **Save calibrated copy** for
 `perception\region_calibration\calibrated_screen_regions.json`, and only click
