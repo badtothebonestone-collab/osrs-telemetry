@@ -1553,7 +1553,15 @@ def html_page() -> str:
           <div class="section-label">Candidate overlay</div>
           <label><input id="showCandidateAim" type="checkbox" checked> aim point</label>
           <label><input id="showCandidateGeometry" type="checkbox" checked> preferred geometry</label>
-          <label><input id="showCandidateRankLabels" type="checkbox" checked> rank labels</label>
+          <label>Candidate label
+            <select id="candidateLabelMode">
+              <option value="nameRank" selected>name + rank</option>
+              <option value="rankScore">rank + score</option>
+              <option value="name">name</option>
+              <option value="nameScore">name + score</option>
+              <option value="none">none</option>
+            </select>
+          </label>
         </div>
         <button id="applyFilters">Apply Filters</button>
         <button id="clearFilters">Clear</button>
@@ -1625,7 +1633,7 @@ def html_page() -> str:
       maxTargets: document.getElementById("maxTargets"),
       showCandidateAim: document.getElementById("showCandidateAim"),
       showCandidateGeometry: document.getElementById("showCandidateGeometry"),
-      showCandidateRankLabels: document.getElementById("showCandidateRankLabels"),
+      candidateLabelMode: document.getElementById("candidateLabelMode"),
       applyFilters: document.getElementById("applyFilters"),
       clearFilters: document.getElementById("clearFilters"),
       diagnostics: document.getElementById("diagnostics"),
@@ -1642,6 +1650,48 @@ def html_page() -> str:
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;");
+    }
+
+    function nonEmptyText(value) {
+      const text = String(value ?? "").trim();
+      return text ? text : "";
+    }
+
+    function bestDisplayName(record) {
+      const target = record.target || {};
+      const info = record._inspector || {};
+      const values = [
+        target.name,
+        target.targetName,
+        target.objectName,
+        target.itemName,
+        target.npcName,
+        target.fallbackName,
+        target.targetId,
+        info.name,
+      ];
+
+      for (const value of values) {
+        const text = nonEmptyText(value);
+        if (text) return text;
+      }
+
+      const targetType = target.targetType || info.targetType || "Target";
+      const id = target.rawId ?? target.id ?? info.rawId ?? info.id;
+      return id !== undefined && id !== null ? `${targetType}[${id}]` : targetType;
+    }
+
+    function candidateLabel(candidate) {
+      const mode = el.candidateLabelMode.value || "nameRank";
+      const name = bestDisplayName(candidate);
+      const rank = candidate.rank !== undefined && candidate.rank !== null ? `#${candidate.rank}` : "";
+      const score = candidate.score !== undefined && candidate.score !== null ? String(candidate.score) : "";
+
+      if (mode === "none") return "";
+      if (mode === "rankScore") return [rank, score].filter(Boolean).join(" ");
+      if (mode === "name") return name;
+      if (mode === "nameScore") return [name, score].filter(Boolean).join(" ");
+      return [rank, name].filter(Boolean).join(" ");
     }
 
     function jsonUrl(path, params = {}) {
@@ -2035,7 +2085,7 @@ def html_page() -> str:
           y: Math.max(12, anchor.y - 5),
           class: "label",
         });
-        label.textContent = info.name || target.name || target.targetName || target.kind || info.targetType || "";
+        label.textContent = bestDisplayName(record);
         if (!selected) label.style.opacity = String(Number(el.overlayOpacity.value) || 0.7);
         el.overlay.appendChild(label);
       }
@@ -2103,14 +2153,15 @@ def html_page() -> str:
 
       const point = scalePoint(geometry.aimPoint, sourceSpace) || firstGeometryAnchor(candidate);
       const rank = Number(candidate.rank);
-      const showRank = el.showCandidateRankLabels.checked && point && (selected || (Number.isFinite(rank) && rank <= 20));
-      if (showRank) {
+      const labelText = candidateLabel(candidate);
+      const showLabel = labelText && point && (selected || (Number.isFinite(rank) && rank <= 20) || el.candidateLabelMode.value !== "rankScore");
+      if (showLabel) {
         const label = svgElement("text", {
           x: point.x + 7,
           y: Math.max(12, point.y - 7),
           class: "label",
         });
-        label.textContent = `#${candidate.rank} ${candidate.score ?? ""}`;
+        label.textContent = labelText;
         if (!selected) label.style.opacity = String(Number(el.overlayOpacity.value) || 0.8);
         el.overlay.appendChild(label);
       }
@@ -2253,6 +2304,7 @@ def html_page() -> str:
       const scoring = selected.scoring || {};
       el.targetDetails.textContent = JSON.stringify({
         kind: info.sourceKind,
+        displayName: bestDisplayName(selected),
         rank: selected.rank,
         score: selected.score,
         targetType: info.targetType,
@@ -2263,6 +2315,8 @@ def html_page() -> str:
         id: info.id,
         rawId: info.rawId,
         targetId: info.targetId,
+        targetName: target.targetName,
+        targetNameField: target.name,
         nameSource: target.nameSource,
         npcNameSource: target.npcNameSource,
         objectNameSource: target.objectNameSource,
@@ -2454,7 +2508,7 @@ def html_page() -> str:
     el.tagFilter.addEventListener("keydown", (event) => {
       if (event.key === "Enter") loadTargets();
     });
-    for (const input of [el.showLabels, el.showPolygons, el.showBounds, el.overlayOpacity, el.maxTargets, el.showCandidateAim, el.showCandidateGeometry, el.showCandidateRankLabels]) {
+    for (const input of [el.showLabels, el.showPolygons, el.showBounds, el.overlayOpacity, el.maxTargets, el.showCandidateAim, el.showCandidateGeometry, el.candidateLabelMode]) {
       input.addEventListener("change", () => {
         renderFrame();
         renderDiagnostics();
