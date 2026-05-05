@@ -15,6 +15,7 @@ HOST = "127.0.0.1"
 DEFAULT_PORT = 8800
 MISSING_WORLD_MESSAGE = "Run python telemetry-viewer\\build_world_target_geometry.py first."
 MISSING_UI_MESSAGE = "Run python telemetry-viewer\\build_ui_target_geometry.py first."
+MISSING_CANDIDATES_MESSAGE = "Run python telemetry-viewer\\select_target_candidates.py first."
 FRAME_TICK_RE = re.compile(r"frame-tick-(\d+)\.[^.]+$", re.IGNORECASE)
 FRAME_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 
@@ -244,6 +245,9 @@ def target_tags_for(record: dict) -> list[str]:
 
 
 def geometry_available_for(record: dict) -> bool:
+    if record.get("_inspector", {}).get("sourceKind") == "candidate":
+        return candidate_geometry_available(record)
+
     geometry = geometry_for(record)
     value = geometry.get("geometryAvailable")
 
@@ -268,6 +272,19 @@ def geometry_available_for(record: dict) -> bool:
 
 
 def on_screen_for(record: dict) -> bool | None:
+    inspector = record.get("_inspector", {})
+
+    if inspector.get("sourceKind") == "candidate":
+        scoring = record.get("scoring") if isinstance(record.get("scoring"), dict) else {}
+        reasons = scoring.get("reasons") if isinstance(scoring.get("reasons"), list) else []
+        penalties = scoring.get("penalties") if isinstance(scoring.get("penalties"), list) else []
+
+        if "onScreen" in reasons:
+            return True
+
+        if "offScreen" in penalties:
+            return False
+
     geometry = geometry_for(record)
     value = geometry.get("onScreen")
 
@@ -277,10 +294,22 @@ def on_screen_for(record: dict) -> bool | None:
     return None
 
 
+def candidate_geometry_available(record: dict) -> bool:
+    geom = geometry_for(record)
+
+    if geom.get("preferredAimGeometryType"):
+        return True
+
+    if isinstance(geom.get("availableGeometryTypes"), list) and geom.get("availableGeometryTypes"):
+        return True
+
+    return geom.get("aimPoint") is not None or geom.get("preferredAimGeometry") is not None
+
+
 def point_summary(record: dict) -> str:
     geometry = geometry_for(record)
 
-    for key in ("canvasPoint", "canvasLocation", "canvasCenter", "center"):
+    for key in ("aimPoint", "canvasPoint", "canvasLocation", "canvasCenter", "center"):
         point = geometry.get(key)
 
         if isinstance(point, dict):
@@ -296,7 +325,7 @@ def point_summary(record: dict) -> str:
 def bounds_summary(record: dict) -> str:
     geometry = geometry_for(record)
 
-    for key in ("clickboxBounds", "convexHullBounds", "pixelBox"):
+    for key in ("aimBounds", "clickboxBounds", "convexHullBounds", "pixelBox"):
         bounds = geometry.get(key)
 
         if isinstance(bounds, dict):
@@ -335,12 +364,17 @@ class GeometryDataset:
         self.world_index_path = self.geometry_dir / "world_geometry_index.json" if self.geometry_dir else None
         self.ui_targets_path = self.geometry_dir / "ui_targets.jsonl" if self.geometry_dir else None
         self.ui_index_path = self.geometry_dir / "ui_geometry_index.json" if self.geometry_dir else None
+        self.candidates_path = self.geometry_dir / "target_candidates.jsonl" if self.geometry_dir else None
+        self.candidates_index_path = self.geometry_dir / "target_candidates_index.json" if self.geometry_dir else None
         self.world_index = {}
         self.ui_index = {}
+        self.candidates_index = {}
         self.world_records = []
         self.ui_records = []
+        self.candidate_records = []
         self.records = []
         self.records_by_tick = defaultdict(list)
+        self.candidates_by_tick = defaultdict(list)
         self.tick_summaries = {}
         self.warnings = []
         self.messages = []
@@ -352,16 +386,24 @@ class GeometryDataset:
 
         self.world_index = self._read_index(self.world_index_path)
         self.ui_index = self._read_index(self.ui_index_path)
+        self.candidates_index = self._read_index(self.candidates_index_path)
         self.world_records, world_warnings = read_jsonl(self.world_targets_path) if self.world_targets_path else ([], [])
         self.ui_records, ui_warnings = read_jsonl(self.ui_targets_path) if self.ui_targets_path else ([], [])
+        self.candidate_records, candidate_warnings = (
+            read_jsonl(self.candidates_path) if self.candidates_path else ([], [])
+        )
         self.warnings.extend(world_warnings)
         self.warnings.extend(ui_warnings)
+        self.warnings.extend(candidate_warnings)
 
         if not (self.world_targets_path and self.world_targets_path.exists()):
             self.messages.append(MISSING_WORLD_MESSAGE)
 
         if not (self.ui_targets_path and self.ui_targets_path.exists()):
             self.messages.append(MISSING_UI_MESSAGE)
+
+        if not (self.candidates_path and self.candidates_path.exists()):
+            self.messages.append(MISSING_CANDIDATES_MESSAGE)
 
         for source_kind, source_records in (("world", self.world_records), ("ui", self.ui_records)):
             for source_index, record in enumerate(source_records):
@@ -379,6 +421,21 @@ class GeometryDataset:
                 self.records.append(decorated)
                 self.records_by_tick[tick_id].append(decorated)
 
+        for source_index, record in enumerate(self.candidate_records):
+            tick_id = record.get("tickId")
+
+            if not isinstance(tick_id, int):
+                continue
+
+            decorated = dict(record)
+            decorated["_inspector"] = {
+                "sourceKind": "candidate",
+                "sourceIndex": source_index,
+                "globalIndex": len(self.records) + source_index,
+            }
+            self.candidate_records[source_index] = decorated
+            self.candidates_by_tick[tick_id].append(decorated)
+
         self._build_tick_summaries()
 
     def _read_index(self, path: Path | None) -> dict:
@@ -389,7 +446,11 @@ class GeometryDataset:
         return value if isinstance(value, dict) else {}
 
     def _build_tick_summaries(self) -> None:
-        for tick_id, records in self.records_by_tick.items():
+        tick_ids = sorted(set(self.records_by_tick) | set(self.candidates_by_tick))
+
+        for tick_id in tick_ids:
+            records = self.records_by_tick.get(tick_id, [])
+            candidates = self.candidates_by_tick.get(tick_id, [])
             world_count = 0
             ui_count = 0
             frame_record = None
@@ -412,6 +473,12 @@ class GeometryDataset:
                 if canvas_record is None and canvas_for(record):
                     canvas_record = record
 
+            for candidate in candidates:
+                target_counts[target_type_for(candidate)] += 1
+
+                if frame_record is None and frame_path_text(candidate):
+                    frame_record = candidate
+
             frame = frame_for(frame_record) if frame_record else {}
             canvas = canvas_for(canvas_record) if canvas_record else {}
             frame_path = frame.get("path")
@@ -423,6 +490,7 @@ class GeometryDataset:
                 "targetCount": len(records),
                 "worldTargetCount": world_count,
                 "uiTargetCount": ui_count,
+                "candidateCount": len(candidates),
                 "countsByTargetType": compact_counts(target_counts),
                 "framePath": str(frame_path) if frame_path else None,
                 "frameExists": frame_exists,
@@ -515,6 +583,9 @@ class GeometryDataset:
         target_tag_counts = Counter()
         name_counts = Counter()
         on_screen_counts = Counter()
+        candidate_type_counts = Counter()
+        candidate_category_counts = Counter()
+        candidate_geometry_counts = Counter()
         recorded_frame_exists_true = 0
         recorded_frame_exists_false = 0
 
@@ -540,6 +611,12 @@ class GeometryDataset:
                 recorded_frame_exists_true += 1
             elif frame_exists is False:
                 recorded_frame_exists_false += 1
+
+        for candidate in self.candidate_records:
+            candidate_type_counts[target_type_for(candidate)] += 1
+            candidate_category_counts[target_category_for(candidate)] += 1
+            preferred = geometry_for(candidate).get("preferredAimGeometryType") or "none"
+            candidate_geometry_counts[preferred] += 1
 
         ticks = sorted(self.tick_summaries)
         frame_files = self.frame_file_summary()
@@ -572,11 +649,30 @@ class GeometryDataset:
             "geometryDir": str(self.geometry_dir) if self.geometry_dir else None,
             "worldTargetsPath": str(self.world_targets_path) if self.world_targets_path else None,
             "uiTargetsPath": str(self.ui_targets_path) if self.ui_targets_path else None,
+            "targetCandidatesPath": str(self.candidates_path) if self.candidates_path else None,
             "worldGeometryExists": bool(self.world_targets_path and self.world_targets_path.exists()),
             "uiGeometryExists": bool(self.ui_targets_path and self.ui_targets_path.exists()),
+            "targetCandidatesExist": bool(self.candidates_path and self.candidates_path.exists()),
             "worldTargetCount": len(self.world_records),
             "uiTargetCount": len(self.ui_records),
             "totalTargetCount": len(self.records),
+            "targetCandidateCount": len(self.candidate_records),
+            "targetCandidatesGeneratedAtUtc": self.candidates_index.get("generatedAtUtc"),
+            "countsByCandidatePreferredAimGeometryType": (
+                self.candidates_index.get("countsByPreferredAimGeometryType")
+                if isinstance(self.candidates_index.get("countsByPreferredAimGeometryType"), dict)
+                else compact_counts(candidate_geometry_counts)
+            ),
+            "topCandidateTargetTypes": (
+                self.candidates_index.get("countsByTargetType")
+                if isinstance(self.candidates_index.get("countsByTargetType"), dict)
+                else compact_counts(candidate_type_counts, 25)
+            ),
+            "topCandidateTargetCategories": (
+                self.candidates_index.get("countsByCategory")
+                if isinstance(self.candidates_index.get("countsByCategory"), dict)
+                else compact_counts(candidate_category_counts, 25)
+            ),
             "countsByTargetType": compact_counts(target_type_counts),
             "countsByTargetRole": compact_counts(target_role_counts),
             "countsByTargetCategory": compact_counts(target_category_counts),
@@ -599,6 +695,7 @@ class GeometryDataset:
             "indexes": {
                 "world": self.world_index,
                 "ui": self.ui_index,
+                "candidates": self.candidates_index,
             },
         }
 
@@ -708,6 +805,95 @@ class GeometryDataset:
 
         return matches
 
+    def candidates_for_tick(self, tick_id: int, filters: dict) -> list[dict]:
+        records = self.candidates_by_tick.get(tick_id, [])
+        matches = []
+        limit = filters.get("limit")
+
+        for record in records:
+            target_type = filters.get("targetType")
+            target_types = filters.get("targetTypes") or set()
+
+            if target_types and target_type_for(record) not in target_types:
+                continue
+
+            if target_type and target_type != "all" and target_type_for(record) != target_type:
+                continue
+
+            target_roles = filters.get("targetRoles") or set()
+
+            if target_roles and target_role_for(record) not in target_roles:
+                continue
+
+            target_categories = filters.get("targetCategories") or set()
+
+            if target_categories and target_category_for(record) not in target_categories:
+                continue
+
+            on_screen = filters.get("onScreen")
+
+            if on_screen is True and on_screen_for(record) is not True:
+                continue
+
+            if filters.get("geometryAvailable") is True and not geometry_available_for(record):
+                continue
+
+            if filters.get("frameExists") is True and not self.frame_exists_for_record(record):
+                continue
+
+            name = filters.get("name")
+
+            if name:
+                target = target_for(record)
+                scoring = record.get("scoring") if isinstance(record.get("scoring"), dict) else {}
+                haystack = " ".join(
+                    str(value or "")
+                    for value in (
+                        target_name_for(record),
+                        target.get("name"),
+                        target.get("targetName"),
+                        target.get("targetType"),
+                        target_role_for(record),
+                        target_category_for(record),
+                        " ".join(target_tags_for(record)),
+                        target.get("id"),
+                        target.get("rawId"),
+                        target.get("targetId"),
+                        " ".join(scoring.get("reasons") or []),
+                        " ".join(scoring.get("penalties") or []),
+                    )
+                ).lower()
+
+                if name.lower() not in haystack:
+                    continue
+
+            tag_filter = filters.get("tag")
+
+            if tag_filter:
+                tags = " ".join(target_tags_for(record)).lower()
+
+                if tag_filter.lower() not in tags:
+                    continue
+
+            id_filter = filters.get("id")
+
+            if id_filter:
+                needle = str(id_filter).lower()
+                ids = [value.lower() for value in target_id_values(record)]
+
+                if filters.get("idExact") is True:
+                    if needle not in ids:
+                        continue
+                elif not any(needle in value for value in ids):
+                    continue
+
+            matches.append(self.decorate_candidate(record))
+
+            if isinstance(limit, int) and len(matches) >= limit:
+                break
+
+        return matches
+
     def decorate_target(self, record: dict) -> dict:
         target = target_for(record)
         geometry = geometry_for(record)
@@ -734,6 +920,38 @@ class GeometryDataset:
             },
         }
 
+    def decorate_candidate(self, record: dict) -> dict:
+        target = target_for(record)
+        geom = geometry_for(record)
+        scoring = record.get("scoring") if isinstance(record.get("scoring"), dict) else {}
+        inspector = record.get("_inspector", {})
+        return {
+            **record,
+            "_inspector": {
+                **inspector,
+                "targetType": target_type_for(record),
+                "name": target_name_for(record),
+                "targetId": target.get("targetId"),
+                "id": target_id_for(record),
+                "rawId": target.get("rawId"),
+                "nameSource": target.get("nameSource"),
+                "targetRole": target_role_for(record),
+                "targetCategory": target_category_for(record),
+                "targetTags": target_tags_for(record),
+                "onScreen": on_screen_for(record),
+                "geometryAvailable": geometry_available_for(record),
+                "pointSummary": point_summary(record),
+                "boundsSummary": bounds_summary(record),
+                "frameExists": self.frame_exists_for_record(record),
+                "coordinateSpace": geom.get("coordinateSpace"),
+                "rank": record.get("rank"),
+                "score": record.get("score"),
+                "preferredAimGeometryType": geom.get("preferredAimGeometryType"),
+                "reasons": scoring.get("reasons") if isinstance(scoring.get("reasons"), list) else [],
+                "penalties": scoring.get("penalties") if isinstance(scoring.get("penalties"), list) else [],
+            },
+        }
+
 
 def html_page() -> str:
     return r"""<!doctype html>
@@ -752,6 +970,7 @@ def html_page() -> str:
       --muted: #64748b;
       --world: #e11d48;
       --ui: #0f766e;
+      --candidate: #7c3aed;
       --selected: #f59e0b;
     }
 
@@ -872,7 +1091,7 @@ def html_page() -> str:
 
     .left-panel {
       display: grid;
-      grid-template-rows: minmax(260px, 1fr) 250px;
+      grid-template-rows: minmax(260px, 1fr) 230px 190px;
       gap: 10px;
       border: 0;
       background: transparent;
@@ -950,6 +1169,11 @@ def html_page() -> str:
     .ui {
       stroke: var(--ui);
       fill: rgba(15, 118, 110, 0.08);
+    }
+
+    .candidate {
+      stroke: var(--candidate);
+      fill: rgba(124, 58, 237, 0.12);
     }
 
     .selected {
@@ -1219,6 +1443,33 @@ def html_page() -> str:
           </table>
         </div>
       </section>
+
+      <section class="panel table-shell">
+        <div class="toolbar">
+          <strong>Ranked Candidates</strong>
+          <span id="candidateCount" class="muted"></span>
+        </div>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:54px">Rank</th>
+                <th style="width:58px">Score</th>
+                <th style="width:68px">Tick</th>
+                <th style="width:102px">Type</th>
+                <th>Name</th>
+                <th style="width:78px">ID</th>
+                <th style="width:90px">Role</th>
+                <th style="width:100px">Category</th>
+                <th style="width:132px">Geometry</th>
+                <th style="width:96px">Aim</th>
+                <th style="width:220px">Reasons</th>
+              </tr>
+            </thead>
+            <tbody id="candidateRows"></tbody>
+          </table>
+        </div>
+      </section>
     </section>
 
     <aside class="panel right-panel">
@@ -1252,6 +1503,8 @@ def html_page() -> str:
           <input id="tagFilter" type="search" placeholder="bank, wall, navigation_geometry">
         </label>
         <div class="check-row">
+          <label><input id="showRawTargets" type="checkbox" checked> show raw targets</label>
+          <label><input id="showCandidates" type="checkbox"> show ranked candidates</label>
           <label><input id="onScreenOnly" type="checkbox"> onScreen only</label>
           <label><input id="geometryOnly" type="checkbox"> geometry available only</label>
           <label><input id="frameExistsOnly" type="checkbox"> only ticks with frames</label>
@@ -1296,6 +1549,12 @@ def html_page() -> str:
           <label>Opacity <input id="overlayOpacity" type="range" min="0.15" max="1" step="0.05" value="0.7"></label>
           <label>Max draw <input id="maxTargets" type="number" min="1" max="5000" value="200"></label>
         </div>
+        <div class="full visual-controls">
+          <div class="section-label">Candidate overlay</div>
+          <label><input id="showCandidateAim" type="checkbox" checked> aim point</label>
+          <label><input id="showCandidateGeometry" type="checkbox" checked> preferred geometry</label>
+          <label><input id="showCandidateRankLabels" type="checkbox" checked> rank labels</label>
+        </div>
         <button id="applyFilters">Apply Filters</button>
         <button id="clearFilters">Clear</button>
         <div class="full warning" id="diagnostics" style="display:none"></div>
@@ -1322,6 +1581,7 @@ def html_page() -> str:
       ticks: [],
       selectedTickId: null,
       targets: [],
+      candidates: [],
       selectedGlobalIndex: null,
       frameNatural: null,
       scaleCanvas: true,
@@ -1339,7 +1599,9 @@ def html_page() -> str:
       blankFrame: document.getElementById("blankFrame"),
       overlay: document.getElementById("overlay"),
       targetRows: document.getElementById("targetRows"),
+      candidateRows: document.getElementById("candidateRows"),
       targetCount: document.getElementById("targetCount"),
+      candidateCount: document.getElementById("candidateCount"),
       tickRows: document.getElementById("tickRows"),
       tickCount: document.getElementById("tickCount"),
       targetDetails: document.getElementById("targetDetails"),
@@ -1350,6 +1612,8 @@ def html_page() -> str:
       idFilter: document.getElementById("idFilter"),
       tagFilter: document.getElementById("tagFilter"),
       idExact: document.getElementById("idExact"),
+      showRawTargets: document.getElementById("showRawTargets"),
+      showCandidates: document.getElementById("showCandidates"),
       onScreenOnly: document.getElementById("onScreenOnly"),
       geometryOnly: document.getElementById("geometryOnly"),
       showUI: document.getElementById("showUI"),
@@ -1359,6 +1623,9 @@ def html_page() -> str:
       showBounds: document.getElementById("showBounds"),
       overlayOpacity: document.getElementById("overlayOpacity"),
       maxTargets: document.getElementById("maxTargets"),
+      showCandidateAim: document.getElementById("showCandidateAim"),
+      showCandidateGeometry: document.getElementById("showCandidateGeometry"),
+      showCandidateRankLabels: document.getElementById("showCandidateRankLabels"),
       applyFilters: document.getElementById("applyFilters"),
       clearFilters: document.getElementById("clearFilters"),
       diagnostics: document.getElementById("diagnostics"),
@@ -1402,6 +1669,7 @@ def html_page() -> str:
         const cards = [
           ["World targets", summary.worldTargetCount],
           ["UI targets", summary.uiTargetCount],
+          ["Candidates", summary.targetCandidateCount],
           ["Ticks", summary.tickCount],
           ["Target ticks with frames", summary.availableFrameTickCount],
           ["JPG/PNG files on disk", summary.frameFileCount],
@@ -1422,6 +1690,10 @@ def html_page() -> str:
 
       populateSelect(el.targetRole, summary.countsByTargetRole || {}, "all roles");
       populateSelect(el.targetCategory, summary.countsByTargetCategory || {}, "all categories");
+
+      if (summary.targetCandidatesExist && Number(summary.targetCandidateCount || 0) > 0) {
+        el.showCandidates.checked = true;
+      }
     }
 
     function populateSelect(select, counts, allLabel) {
@@ -1442,7 +1714,7 @@ def html_page() -> str:
           <div class="tick-row${active}" data-tick="${tick.tickId}">
             <strong>${tick.tickId}</strong>
             <span title="${escapeHtml(tick.framePath || "")}">
-              ${tick.worldTargetCount} world / ${tick.uiTargetCount} ui
+              ${tick.worldTargetCount} world / ${tick.uiTargetCount} ui / ${tick.candidateCount || 0} cand
             </span>
             <span class="badge">${frame}</span>
           </div>
@@ -1503,16 +1775,33 @@ def html_page() -> str:
     async function loadTargets() {
       if (state.selectedTickId === null) {
         state.targets = [];
+        state.candidates = [];
         renderTargets();
+        renderCandidates();
         renderFrame();
         return;
       }
 
-      const data = await fetchJson("/api/targets", filterParams());
-      state.targets = data.targets || [];
-      state.selectedGlobalIndex = state.targets[0]?._inspector?.globalIndex ?? null;
+      const params = filterParams();
+      if (el.showRawTargets.checked) {
+        const data = await fetchJson("/api/targets", params);
+        state.targets = data.targets || [];
+      } else {
+        state.targets = [];
+      }
+      if (el.showCandidates.checked) {
+        const candidateData = await fetchJson("/api/candidates", { ...params, limit: 250 });
+        state.candidates = candidateData.candidates || [];
+      } else {
+        state.candidates = [];
+      }
+      const selectedExists = [...state.targets, ...state.candidates].some((record) => (record._inspector || {}).globalIndex === state.selectedGlobalIndex);
+      if (!selectedExists) {
+        state.selectedGlobalIndex = state.candidates[0]?._inspector?.globalIndex ?? state.targets[0]?._inspector?.globalIndex ?? null;
+      }
       renderTicks();
       renderTargets();
+      renderCandidates();
       renderFrame();
       renderDiagnostics();
       renderDetails();
@@ -1538,6 +1827,41 @@ def html_page() -> str:
             <td title="${escapeHtml(info.pointSummary || "")}">${escapeHtml(info.pointSummary || "")}</td>
             <td title="${escapeHtml(info.boundsSummary || "")}">${escapeHtml(info.boundsSummary || "")}</td>
             <td>${info.frameExists ? "ok" : "missing"}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    function candidateAimText(candidate) {
+      const point = (candidate.geometry || {}).aimPoint;
+      if (point && Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y))) {
+        return `${Math.round(Number(point.x))},${Math.round(Number(point.y))}`;
+      }
+      return "";
+    }
+
+    function renderCandidates() {
+      el.candidateCount.textContent = `${state.candidates.length} matching candidates`;
+      el.candidateRows.innerHTML = state.candidates.map((record) => {
+        const info = record._inspector || {};
+        const target = record.target || {};
+        const geom = record.geometry || {};
+        const scoring = record.scoring || {};
+        const active = info.globalIndex === state.selectedGlobalIndex ? " active" : "";
+        const reasons = Array.isArray(scoring.reasons) ? scoring.reasons.join(",") : "";
+        return `
+          <tr class="${active}" data-index="${info.globalIndex}">
+            <td>${escapeHtml(record.rank ?? "")}</td>
+            <td>${escapeHtml(record.score ?? "")}</td>
+            <td>${escapeHtml(record.tickId ?? "")}</td>
+            <td>${escapeHtml(info.targetType || target.targetType || "")}</td>
+            <td title="${escapeHtml(info.name || target.name || "")}">${escapeHtml(info.name || target.name || "")}</td>
+            <td title="${escapeHtml(info.id ?? target.id ?? target.rawId ?? "")}">${escapeHtml(info.id ?? target.id ?? target.rawId ?? "")}</td>
+            <td title="${escapeHtml(info.targetRole || target.targetRole || "")}">${escapeHtml(info.targetRole || target.targetRole || "")}</td>
+            <td title="${escapeHtml(info.targetCategory || target.targetCategory || "")}">${escapeHtml(info.targetCategory || target.targetCategory || "")}</td>
+            <td title="${escapeHtml(geom.preferredAimGeometryType || "")}">${escapeHtml(geom.preferredAimGeometryType || "")}</td>
+            <td>${escapeHtml(candidateAimText(record))}</td>
+            <td title="${escapeHtml(reasons)}">${escapeHtml(reasons)}</td>
           </tr>
         `;
       }).join("");
@@ -1630,9 +1954,19 @@ def html_page() -> str:
     function addShape(node, record) {
       const info = record._inspector || {};
       const selected = info.globalIndex === state.selectedGlobalIndex;
-      node.classList.add("target-shape", info.sourceKind === "ui" ? "ui" : "world");
+      node.classList.add("target-shape", info.sourceKind === "candidate" ? "candidate" : info.sourceKind === "ui" ? "ui" : "world");
       if (selected) node.classList.add("selected");
       if (!selected) node.style.opacity = String(Number(el.overlayOpacity.value) || 0.7);
+      node.dataset.index = info.globalIndex;
+      el.overlay.appendChild(node);
+    }
+
+    function addCandidateShape(node, record) {
+      const info = record._inspector || {};
+      const selected = info.globalIndex === state.selectedGlobalIndex;
+      node.classList.add("target-shape", "candidate");
+      if (selected) node.classList.add("selected");
+      if (!selected) node.style.opacity = String(Number(el.overlayOpacity.value) || 0.8);
       node.dataset.index = info.globalIndex;
       el.overlay.appendChild(node);
     }
@@ -1709,14 +2043,89 @@ def html_page() -> str:
       return drawn.length > 0;
     }
 
+    function drawCandidate(candidate) {
+      const geometry = candidate.geometry || {};
+      const info = candidate._inspector || {};
+      const sourceSpace = geometry.coordinateSpace || "framePixels";
+      const selected = info.globalIndex === state.selectedGlobalIndex;
+      const drawn = [];
+
+      if (el.showCandidateGeometry.checked) {
+        const preferred = geometry.preferredAimGeometry;
+        const kind = geometry.preferredAimGeometryType || "";
+
+        if (Array.isArray(preferred)) {
+          const points = scalePolygon(preferred, sourceSpace);
+          if (points) {
+            const polygon = svgElement("polygon", { points, fill: "none", "stroke-width": selected ? 4 : 2.5 });
+            addCandidateShape(polygon, candidate);
+            drawn.push(polygon);
+          }
+        } else if (preferred && typeof preferred === "object" && ["clickboxBounds", "convexHullBounds", "pixelBox", "aimBounds", "boundingBox", "bounds"].includes(kind)) {
+          const bounds = scaleBounds(preferred, sourceSpace);
+          if (bounds && bounds.w > 0 && bounds.h > 0) {
+            const rect = svgElement("rect", {
+              x: bounds.x,
+              y: bounds.y,
+              width: bounds.w,
+              height: bounds.h,
+              fill: "none",
+              "stroke-width": selected ? 4 : 2.5,
+            });
+            addCandidateShape(rect, candidate);
+            drawn.push(rect);
+          }
+        } else if (preferred && typeof preferred === "object") {
+          const point = scalePoint(preferred, sourceSpace);
+          if (point) {
+            const circle = svgElement("circle", { cx: point.x, cy: point.y, r: selected ? 7 : 5, class: "dot" });
+            addCandidateShape(circle, candidate);
+            drawn.push(circle);
+          }
+        }
+      }
+
+      if (el.showCandidateAim.checked) {
+        const point = scalePoint(geometry.aimPoint, sourceSpace);
+        if (point) {
+          const group = svgElement("g", {});
+          const radius = selected ? 7 : 5;
+          const circle = svgElement("circle", { cx: point.x, cy: point.y, r: radius, class: "dot" });
+          const lineH = svgElement("line", { x1: point.x - 11, y1: point.y, x2: point.x + 11, y2: point.y, "stroke-width": selected ? 2.5 : 2 });
+          const lineV = svgElement("line", { x1: point.x, y1: point.y - 11, x2: point.x, y2: point.y + 11, "stroke-width": selected ? 2.5 : 2 });
+          group.appendChild(lineH);
+          group.appendChild(lineV);
+          group.appendChild(circle);
+          addCandidateShape(group, candidate);
+          drawn.push(group);
+        }
+      }
+
+      const point = scalePoint(geometry.aimPoint, sourceSpace) || firstGeometryAnchor(candidate);
+      const rank = Number(candidate.rank);
+      const showRank = el.showCandidateRankLabels.checked && point && (selected || (Number.isFinite(rank) && rank <= 20));
+      if (showRank) {
+        const label = svgElement("text", {
+          x: point.x + 7,
+          y: Math.max(12, point.y - 7),
+          class: "label",
+        });
+        label.textContent = `#${candidate.rank} ${candidate.score ?? ""}`;
+        if (!selected) label.style.opacity = String(Number(el.overlayOpacity.value) || 0.8);
+        el.overlay.appendChild(label);
+      }
+
+      return drawn.length > 0;
+    }
+
     function firstGeometryAnchor(record) {
       const geometry = record.geometry || {};
       const sourceSpace = geometry.coordinateSpace || "framePixels";
-      for (const key of ["canvasPoint", "canvasLocation", "canvasCenter", "center"]) {
+      for (const key of ["aimPoint", "canvasPoint", "canvasLocation", "canvasCenter", "center"]) {
         const point = scalePoint(geometry[key], sourceSpace);
         if (point) return point;
       }
-      for (const key of ["clickboxBounds", "convexHullBounds", "pixelBox"]) {
+      for (const key of ["aimBounds", "clickboxBounds", "convexHullBounds", "pixelBox"]) {
         const bounds = scaleBounds(geometry[key], sourceSpace);
         if (bounds) return { x: bounds.x, y: bounds.y };
       }
@@ -1736,6 +2145,12 @@ def html_page() -> str:
       }
 
       return limited;
+    }
+
+    function candidatesForDrawing() {
+      const selected = state.candidates.find((record) => (record._inspector || {}).globalIndex === state.selectedGlobalIndex);
+      const unselected = state.candidates.filter((record) => (record._inspector || {}).globalIndex !== state.selectedGlobalIndex);
+      return selected ? [...unselected, selected] : unselected;
     }
 
     function renderFrame() {
@@ -1774,8 +2189,12 @@ def html_page() -> str:
       for (const record of limitedTargetsForDrawing()) {
         if (drawTarget(record)) drawnCount += 1;
       }
+      let drawnCandidateCount = 0;
+      for (const candidate of candidatesForDrawing()) {
+        if (drawCandidate(candidate)) drawnCandidateCount += 1;
+      }
 
-      el.status.textContent = `tick ${tick.tickId} - ${drawnCount} drawable overlays - view ${dims.coordinateSpace} ${Math.round(dims.width)}x${Math.round(dims.height)}`;
+      el.status.textContent = `tick ${tick.tickId} - ${drawnCount} raw overlays / ${drawnCandidateCount} candidate overlays - view ${dims.coordinateSpace} ${Math.round(dims.width)}x${Math.round(dims.height)}`;
     }
 
     function renderDiagnostics() {
@@ -1789,7 +2208,8 @@ def html_page() -> str:
         notes.push("Frame file missing or expired by retention. Geometry data is still available.");
       }
 
-      if (state.targets.length === 0) notes.push("No targets match filters.");
+      if (state.targets.length === 0 && el.showRawTargets.checked) notes.push("No targets match filters.");
+      if (state.candidates.length === 0 && el.showCandidates.checked) notes.push("No target candidates match. Try running select_target_candidates.py with matching filters.");
 
       if (state.hiddenByDrawLimit > 0) {
         notes.push(`Showing ${Math.min(state.drawLimit, state.targets.length)} of ${state.targets.length} targets. Use filters or increase max targets.`);
@@ -1799,7 +2219,7 @@ def html_page() -> str:
         notes.push("Some targets have missing geometry.");
       }
 
-      const hasCanvasTargets = state.targets.some((record) => (record.geometry || {}).coordinateSpace === "canvasPixels");
+      const hasCanvasTargets = [...state.targets, ...state.candidates].some((record) => (record.geometry || {}).coordinateSpace === "canvasPixels");
       if (hasCanvasTargets && (!dims.canvasWidth || !dims.canvasHeight || !dims.frameWidth || !dims.frameHeight)) {
         notes.push("Cannot confidently scale canvas geometry to frame; showing raw coordinates where dimensions are missing.");
       }
@@ -1821,7 +2241,7 @@ def html_page() -> str:
     }
 
     function renderDetails() {
-      const selected = state.targets.find((record) => (record._inspector || {}).globalIndex === state.selectedGlobalIndex);
+      const selected = [...state.targets, ...state.candidates].find((record) => (record._inspector || {}).globalIndex === state.selectedGlobalIndex);
       if (!selected) {
         el.targetDetails.textContent = "Select a target row or overlay shape.";
         return;
@@ -1830,7 +2250,11 @@ def html_page() -> str:
       const info = selected._inspector || {};
       const target = selected.target || {};
       const geometry = selected.geometry || {};
+      const scoring = selected.scoring || {};
       el.targetDetails.textContent = JSON.stringify({
+        kind: info.sourceKind,
+        rank: selected.rank,
+        score: selected.score,
         targetType: info.targetType,
         targetRole: info.targetRole,
         targetCategory: info.targetCategory,
@@ -1851,6 +2275,12 @@ def html_page() -> str:
         canvasLocation: geometry.canvasLocation,
         canvasCenter: geometry.canvasCenter,
         center: geometry.center,
+        preferredAimGeometryType: geometry.preferredAimGeometryType,
+        preferredAimGeometry: geometry.preferredAimGeometry,
+        aimPoint: geometry.aimPoint,
+        aimBounds: geometry.aimBounds,
+        availableGeometryTypes: geometry.availableGeometryTypes,
+        geometryQuality: geometry.geometryQuality,
         clickboxBounds: geometry.clickboxBounds,
         convexHullBounds: geometry.convexHullBounds,
         pixelBox: geometry.pixelBox,
@@ -1860,6 +2290,10 @@ def html_page() -> str:
         onScreen: info.onScreen,
         geometryAvailable: info.geometryAvailable,
         geometryWarning: geometry.geometryWarning,
+        scoreParts: scoring.scoreParts,
+        reasons: scoring.reasons,
+        penalties: scoring.penalties,
+        sourceTarget: selected.sourceTarget,
         record: selected,
       }, null, 2);
     }
@@ -1867,6 +2301,7 @@ def html_page() -> str:
     function selectTarget(globalIndex) {
       state.selectedGlobalIndex = Number(globalIndex);
       renderTargets();
+      renderCandidates();
       renderFrame();
       renderDiagnostics();
       renderDetails();
@@ -1959,6 +2394,8 @@ def html_page() -> str:
       el.onScreenOnly.checked = false;
       el.geometryOnly.checked = false;
       el.showUI.checked = true;
+      el.showRawTargets.checked = true;
+      el.showCandidates.checked = Boolean(state.summary?.targetCandidatesExist && Number(state.summary?.targetCandidateCount || 0) > 0);
       el.frameExistsOnly.checked = false;
       loadTicks({ keepSelection: true });
     }
@@ -1974,6 +2411,10 @@ def html_page() -> str:
       if (row) selectTick(row.dataset.tick);
     });
     el.targetRows.addEventListener("click", (event) => {
+      const row = event.target.closest("[data-index]");
+      if (row) selectTarget(row.dataset.index);
+    });
+    el.candidateRows.addEventListener("click", (event) => {
       const row = event.target.closest("[data-index]");
       if (row) selectTarget(row.dataset.index);
     });
@@ -2001,7 +2442,7 @@ def html_page() -> str:
     el.jumpTick.addEventListener("keydown", (event) => {
       if (event.key === "Enter") el.jumpTickButton.click();
     });
-    for (const input of [...el.targetTypeBoxes, el.targetRole, el.targetCategory, el.onScreenOnly, el.geometryOnly, el.showUI, el.idExact]) {
+    for (const input of [...el.targetTypeBoxes, el.targetRole, el.targetCategory, el.onScreenOnly, el.geometryOnly, el.showUI, el.showRawTargets, el.showCandidates, el.idExact]) {
       input.addEventListener("change", () => loadTargets());
     }
     el.nameFilter.addEventListener("keydown", (event) => {
@@ -2013,7 +2454,7 @@ def html_page() -> str:
     el.tagFilter.addEventListener("keydown", (event) => {
       if (event.key === "Enter") loadTargets();
     });
-    for (const input of [el.showLabels, el.showPolygons, el.showBounds, el.overlayOpacity, el.maxTargets]) {
+    for (const input of [el.showLabels, el.showPolygons, el.showBounds, el.overlayOpacity, el.maxTargets, el.showCandidateAim, el.showCandidateGeometry, el.showCandidateRankLabels]) {
       input.addEventListener("change", () => {
         renderFrame();
         renderDiagnostics();
@@ -2057,6 +2498,10 @@ class TargetGeometryHandler(BaseHTTPRequestHandler):
 
         if path == "/api/targets":
             self.handle_targets(parsed)
+            return
+
+        if path == "/api/candidates":
+            self.handle_candidates(parsed)
             return
 
         if path.startswith("/api/frame/"):
@@ -2107,6 +2552,45 @@ class TargetGeometryHandler(BaseHTTPRequestHandler):
         }
         targets = self.dataset.targets_for_tick(tick_id, filters)
         self.send_json({"tickId": tick_id, "targets": targets, "targetCount": len(targets)})
+
+    def handle_candidates(self, parsed) -> None:
+        params = parse_qs(parsed.query)
+        tick_id = parse_tick(first_param(params, "tick"))
+
+        if tick_id is None:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "tick query parameter is required")
+            return
+
+        limit = parse_tick(first_param(params, "limit"))
+
+        filters = {
+            "targetType": first_param(params, "targetType") or "all",
+            "targetTypes": {
+                value
+                for value in (first_param(params, "targetTypes") or "").split(",")
+                if value
+            },
+            "targetRoles": {
+                value
+                for value in (first_param(params, "targetRoles") or "").split(",")
+                if value
+            },
+            "targetCategories": {
+                value
+                for value in (first_param(params, "targetCategories") or "").split(",")
+                if value
+            },
+            "name": first_param(params, "name") or "",
+            "tag": first_param(params, "tag") or "",
+            "id": first_param(params, "id") or "",
+            "idExact": parse_bool(first_param(params, "idExact")),
+            "onScreen": parse_bool(first_param(params, "onScreen")),
+            "geometryAvailable": parse_bool(first_param(params, "geometryAvailable")),
+            "frameExists": parse_bool(first_param(params, "frameExists")),
+            "limit": limit if isinstance(limit, int) and limit > 0 else 250,
+        }
+        candidates = self.dataset.candidates_for_tick(tick_id, filters)
+        self.send_json({"tickId": tick_id, "candidates": candidates, "candidateCount": len(candidates)})
 
     def handle_frame(self, path: str) -> None:
         tick_text = path.rsplit("/", 1)[-1]

@@ -231,6 +231,8 @@ mutation.
    UI boxes, and points. The output is a read-only handoff/analysis layer: it
    does not send mouse input, create click commands, invoke menus, interact with
    RuneLite, or modify raw telemetry or frame images.
+   `target_geometry_inspector.py` can load these candidate files and draw ranked
+   aim points/preferred geometry alongside the raw UI/world overlays.
 
 Save behavior:
 
