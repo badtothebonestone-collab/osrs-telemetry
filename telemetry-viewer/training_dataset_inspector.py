@@ -190,17 +190,30 @@ class TrainingDataset:
     def available(self) -> bool:
         return self.missing_reason is None
 
+    def missing_training_details(self) -> str:
+        session_text = str(self.session) if self.session else "none"
+        training_dir_exists = bool(self.training_dir and self.training_dir.exists())
+        manifest_exists = bool(self.manifest_path and self.manifest_path.exists())
+        training_dir_text = str(self.training_dir) if self.training_dir else "none"
+        manifest_text = str(self.manifest_path) if self.manifest_path else "none"
+        return (
+            f"{MISSING_TRAINING_MESSAGE} "
+            f"Session: {session_text}. "
+            f"training_data folder exists: {'yes' if training_dir_exists else 'no'} ({training_dir_text}). "
+            f"training_manifest.jsonl exists: {'yes' if manifest_exists else 'no'} ({manifest_text})."
+        )
+
     def load(self) -> None:
         if self.session is None:
             self.missing_reason = "No telemetry session found."
             return
 
         if self.training_dir is None or not self.training_dir.exists():
-            self.missing_reason = MISSING_TRAINING_MESSAGE
+            self.missing_reason = self.missing_training_details()
             return
 
         if self.manifest_path is None or not self.manifest_path.exists():
-            self.missing_reason = MISSING_TRAINING_MESSAGE
+            self.missing_reason = self.missing_training_details()
             return
 
         index = safe_read_json(self.index_path) if self.index_path else None
@@ -362,6 +375,8 @@ class TrainingDataset:
             "available": self.available,
             "message": None if self.available else self.missing_reason,
             "sessionPath": str(self.session) if self.session else None,
+            "trainingDirExists": bool(self.training_dir and self.training_dir.exists()),
+            "trainingManifestExists": bool(self.manifest_path and self.manifest_path.exists()),
             "manifestExamples": int(self.index.get("exampleCount") or len(self.manifest_rows)),
             "totalExamples": int(self.index.get("exampleCount") or len(self.manifest_rows)),
             "loadedExamples": len(self.manifest_rows),
@@ -1557,7 +1572,9 @@ def html_page(dataset: TrainingDataset) -> str:
         ["reviewed examples", summary.reviewedExamples],
         ["unreviewed examples", summary.unreviewedExamples],
         ["unknown activeTab", summary.unknownActiveTabCount],
-        ["skipped missing frames", summary.skippedMissingFrames]
+        ["skipped missing frames", summary.skippedMissingFrames],
+        ["training_data folder", summary.trainingDirExists ? "yes" : "no"],
+        ["training_manifest.jsonl", summary.trainingManifestExists ? "yes" : "no"]
       ];
       el.summaryCards.innerHTML = cards.map(([label, value]) => `
         <div class="card">

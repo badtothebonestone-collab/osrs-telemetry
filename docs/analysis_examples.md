@@ -168,6 +168,70 @@ mutation.
    Exporting it does not copy crops, delete crops, modify
    `training_manifest.jsonl`, or modify `review_labels.jsonl`.
 
+9. Inspect derived UI/world target geometry alignment:
+
+   ```text
+   python telemetry-viewer\target_geometry_inspector.py
+   ```
+
+   Open `http://127.0.0.1:8800/`. The inspector overlays existing
+   `interaction_geometry\ui_targets.jsonl` and
+   `interaction_geometry\world_targets.jsonl` records on retained frame images.
+   It is a local QA viewer only. It does not send input, perform mouse actions,
+   interact with RuneLite, or modify telemetry, geometry, crops, or frame
+   images. Missing retained frames are shown as a placeholder with the geometry
+   still available for inspection.
+
+   If target records exist but no frame image appears, run:
+
+   ```text
+   python telemetry-viewer\dataset_status.py
+   ```
+
+   Compare the geometry target tick range in the inspector with the retained
+   frame tick range in status output. Geometry files may reference older frame
+   paths after retention has kept only newer JPGs. Rebuild the derived UI/world
+   geometry for currently retained frames:
+
+   ```text
+   python telemetry-viewer\build_world_target_geometry.py --target-type npc --only-on-screen --latest-with-frames 100
+   python telemetry-viewer\build_ui_target_geometry.py --include-base-regions --latest-with-frames 100
+   python telemetry-viewer\target_geometry_inspector.py
+   ```
+
+   `--latest-with-frames` checks actual frame files under `frames\` instead of
+   trusting stale derived `frame.exists` metadata. If no retained frame files
+   remain, collect a fresh session or raise the RuneLite config storage caps
+   before collecting a longer QA run.
+
+   World target records include conservative derived labels such as
+   `targetRole`, `targetCategory`, and `targetTags`. Examples include
+   interactable targets such as banks, doors, trees, ladders, furnaces, ranges,
+   and altars; entity targets such as NPCs and players; item targets for ground
+   items; and obstacle/navigation geometry such as walls, fences, counters,
+   building pieces, and tiles. Obstacle and wall geometry is kept because it can
+   be useful for navigation/pathing analysis, but the inspector can hide it with
+   role/category/tag filters without deleting any records.
+
+10. Select ranked target candidates from existing geometry:
+
+   ```text
+   python telemetry-viewer\select_target_candidates.py --category bank --only-on-screen --geometry-available
+   ```
+
+   This writes:
+
+   ```text
+   interaction_geometry\target_candidates.jsonl
+   interaction_geometry\target_candidates_index.json
+   ```
+
+   Candidate selection ranks existing UI/world geometry records and preserves the
+   best available aim geometry, preferring clickboxes, then hulls, tile polygons,
+   UI boxes, and points. The output is a read-only handoff/analysis layer: it
+   does not send mouse input, create click commands, invoke menus, interact with
+   RuneLite, or modify raw telemetry or frame images.
+
 Save behavior:
 
 - **Save Default Profile** writes

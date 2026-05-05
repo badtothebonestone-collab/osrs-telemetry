@@ -38,6 +38,20 @@ Launch the local Tkinter control center from the project root:
 python telemetry-viewer\telemetry_launcher.py
 ```
 
+Most users should use the launcher. Individual scripts still exist for
+debugging and advanced use.
+
+Happy Path:
+
+1. Start Collection
+2. Wait for the launcher to lock a fresh active session
+3. Calibrate if needed, then Save Default Profile
+4. Replay / label tick ranges
+5. Build Dataset
+6. Inspect Dataset
+7. Export Curated
+8. Run Doctor / Status
+
 The launcher starts and stops local dev tools and read-only telemetry scripts.
 It defaults to:
 
@@ -48,49 +62,45 @@ C:\Users\stone\.osrs-telemetry\sessions
 You can override the sessions directory in the GUI. The launcher passes that
 value to child tools through `OSRS_TELEMETRY_SESSIONS_DIR`.
 
-Buttons:
+Simple Mode shows the main workflow buttons:
 
-- Start Core Stack: starts the RuneLite dev client, latest-state watcher, and
-  replay viewer if they are not already running, then opens the replay URL.
-- Start RuneLite Dev Client: runs the local Gradle dev client command.
-- Start Text Viewer: starts `telemetry-viewer\viewer.py`.
-- Start Latest State Watcher: starts `telemetry-viewer\latest_state.py`.
-- Start Replay Viewer: starts `telemetry-viewer\replay_viewer.py`.
-- Open Replay Viewer in Browser: opens `http://127.0.0.1:8765/`.
-- Run Validate Session: runs `telemetry-viewer\validate_session.py`.
-- Run Export Session: writes generated summaries with `telemetry-viewer\export_session.py`.
-- Build Perception Dataset: writes derived per-tick perception bundles with
-  `telemetry-viewer\build_perception_dataset.py`.
-- Prepare Visual Perception: writes derived visual review metadata with
-  `telemetry-viewer\prepare_visual_perception.py`.
-- Start Calibration Mode: starts or reuses the RuneLite dev client, latest-state
-  watcher, and local calibration UI, then opens `http://127.0.0.1:8770/`.
-- Open Calibration UI: opens `http://127.0.0.1:8770/` without starting tools.
-- Generate Test Crops: runs visual crop prep with crop generation, grid slots,
-  latest retained frames, existing-frame filtering, and the inventory profile.
-- Open Latest Test Crops: opens the newest disposable crop preview run under
-  the newest session's `perception\test_crops`.
-- Open Calibration Profile Folder: opens
-  `telemetry-viewer\calibration_profiles`.
-- Build Training Dataset: appends or skips durable training examples with
-  `telemetry-viewer\build_training_dataset.py`.
-- Build Training Dataset Rebuild: explicitly clears and rebuilds the newest
-  session's `training_data` folder by passing `--rebuild`.
-- Open Training Data Folder: opens the newest session's `training_data`
-  folder, or shows a friendly message if it has not been built yet.
-- Run Path Regression Tests: runs `telemetry-viewer\tests\test_telemetry_paths.py`.
-- Open Sessions Folder: opens the configured sessions directory.
-- Open Newest Session Folder: opens the newest discovered session.
-- Stop Selected Process: stops a process started by this launcher.
-- Stop All Started Processes: stops all processes started by this launcher.
-- Clear Log: clears the launcher log panel.
+- Start Collection: launches RuneLite and waits for a fresh active session.
+- Stop Collection: stops launcher-started collection processes.
+- Open Replay / Label: reviews ticks, frames, events, and tab labels.
+- Open Calibration: edits screen regions and tab profiles.
+- Build Dataset: runs perception, training review preset, then status.
+- Inspect Dataset: opens the training data inspector.
+- Export Curated: exports curated train/val/test manifest data.
+- Run Doctor / Status: checks profiles, labels, sessions, training data, and
+  curated output.
 
-The Telemetry Health panel shows the newest session path, active status, latest
-tick id and age, game state, position, HP/prayer/run, tick/event/frame file
-counts, latest frame write delay, latest total frame latency, latest frame index
-status, FrameWritten/FrameDropped/FrameDeleted counts, perception bundle count
-and visual perception record count when built, frame and session sizes, capture
-errors, and the last validation result.
+Start Collection intentionally does not open replay, calibration, or other data
+consumers right away. It records the launch time, ignores old stale sessions,
+and waits until a session has fresh ticks before locking that active session.
+Tools that support `--session` then receive the locked active session path, so
+they do not silently inspect yesterday's newest folder.
+
+Advanced mode is for debugging and lower-level commands only. It contains
+manual RuneLite/latest-state/viewer starts, individual build/export commands,
+folder shortcuts, raw session export, validation, path tests, and process
+controls.
+
+Key dataset/export commands behind the launcher buttons:
+
+```powershell
+python telemetry-viewer\build_perception_dataset.py
+python telemetry-viewer\build_training_dataset.py --preset review --latest 500 --generate-grid-slots
+python telemetry-viewer\build_training_dataset.py --preset focused-ui --latest 500 --generate-grid-slots
+python telemetry-viewer\build_training_dataset.py --preset review --latest 500 --generate-grid-slots --rebuild
+python telemetry-viewer\export_curated_training_dataset.py
+python telemetry-viewer\export_curated_training_dataset.py --split train,val,test --seed 123
+python telemetry-viewer\dataset_status.py
+```
+
+The Telemetry Health panel focuses on active-session lock state, active session
+path, latest tick age, label/default-profile presence, perception bundles,
+training examples, curated examples, missing crops, warning count, and the
+latest validation/status result.
 
 Health status colors:
 
@@ -106,7 +116,7 @@ them:
 - Open `manifest.json`
 - Open newest tick segment
 - Open newest event segment
-- Open newest session folder
+- Open active/newest session folder
 
 Safety: the launcher only manages processes it started. It does not perform
 game automation, clicking, input hooks, overlays, menu actions, or client-state
@@ -139,9 +149,10 @@ Streamlined calibration workflow:
    python telemetry-viewer\telemetry_launcher.py
    ```
 
-2. Click **Start Core Stack**.
-3. Log into the RuneLite development client.
-4. Click **Start Calibration Mode**.
+2. Click **Start Collection**.
+3. Log into the RuneLite development client and wait for the launcher to lock
+   a fresh active session.
+4. Click **Open Calibration**.
 5. If the displayed frame is stale, click **Refresh to newest frame** or
    **Use latest existing frame** in the calibration UI.
 6. Calibrate **Base regions** and the active tab profile, such as
@@ -150,59 +161,52 @@ Streamlined calibration workflow:
    Session Profile** to update only the current session.
 8. Label active side-tab ranges with `telemetry-viewer\tab_labels.json`, or use
    the replay labeling UI if present.
-9. Build perception data:
-
-   ```powershell
-   python telemetry-viewer\build_perception_dataset.py
-   ```
-
-10. Click **Generate Test Crops** for disposable preview crops.
-11. Build persistent training data:
-
-    ```powershell
-    python telemetry-viewer\build_training_dataset.py --preset review --latest 500 --generate-grid-slots
-    python telemetry-viewer\build_training_dataset.py --preset focused-ui --latest 500 --generate-grid-slots
-    ```
-
-12. Inspect the dataset health:
+9. Click **Build Dataset** to build perception and persistent training data.
+10. Use **Inspect Dataset** to review generated training examples.
+11. Use **Export Curated** when you are ready to create the clean split
+    manifest.
+12. Use **Run Doctor / Status** to inspect health:
 
     ```powershell
     python telemetry-viewer\dataset_status.py
     ```
 
-13. Review generated training examples in the local browser inspector:
+Disposable test crops are still available from Advanced > Generate Test Crops
+or from the calibration UI when you need quick visual previews.
 
-    ```powershell
-    python telemetry-viewer\training_dataset_inspector.py
-    ```
+You can also launch the local browser inspector directly:
 
-    Optional forms:
+```powershell
+python telemetry-viewer\training_dataset_inspector.py
+```
 
-    ```powershell
-    python telemetry-viewer\training_dataset_inspector.py --port 8790
-    python telemetry-viewer\training_dataset_inspector.py --session "C:\path\to\session"
-    ```
+Optional forms:
 
-    Open `http://127.0.0.1:8790/`. You are not expected to manually review
-    every crop. Start with **Review Queue** set to **Balanced by
-    regionProfile**, size `100`, and `cropExists=true`; then mark examples
-    **Good**, **Bad Crop**, **Wrong Label**, or **Unsure**. If training data
-    has not been built, the page shows:
-    `Run python telemetry-viewer\build_training_dataset.py first.`
+```powershell
+python telemetry-viewer\training_dataset_inspector.py --port 8790
+python telemetry-viewer\training_dataset_inspector.py --session "C:\path\to\session"
+```
 
-The launcher Calibration section contains:
+Open `http://127.0.0.1:8790/`. You are not expected to manually review every
+crop. Start with **Review Queue** set to **Balanced by regionProfile**, size
+`100`, and `cropExists=true`; then mark examples **Good**, **Bad Crop**,
+**Wrong Label**, or **Unsure**. If training data has not been built, the page
+shows: `Run python telemetry-viewer\build_training_dataset.py first.`
 
-- Start Calibration Mode
-- Open Calibration UI
-- Generate Test Crops
-- Open Latest Test Crops
-- Open Calibration Profile Folder
+The launcher Simple Workflow contains:
 
-The launcher Dataset section contains:
+- Start Collection
+- Stop Collection
+- Open Replay / Label
+- Open Calibration
+- Build Dataset
+- Inspect Dataset
+- Export Curated
+- Run Doctor / Status
 
-- Build Training Dataset
-- Build Training Dataset Rebuild
-- Open Training Data Folder
+Show Advanced only when you need lower-level controls such as individual
+perception/training/export commands, test crop generation, folder shortcuts,
+validation, path tests, or process controls.
 
 The calibration UI includes:
 
@@ -340,6 +344,69 @@ Manual overrides such as `--active-tab prayer` apply one tab profile to every
 selected tick and record the source as `manual`. When the inferred active tab
 is `unknown`, visual prep uses `baseRegions` only and records the skipped tab
 profiles unless `--include-all-tab-profiles` is used.
+
+Build deterministic UI target geometry from structured JSON plus calibration:
+
+```powershell
+python telemetry-viewer\build_ui_target_geometry.py
+python telemetry-viewer\build_ui_target_geometry.py --include-base-regions --latest-with-frames 100
+```
+
+This writes screen-relative records under
+`sessions\<session_id>\interaction_geometry\`. Inventory and equipment item IDs
+come from raw tick JSON; pixel boxes and centers come from calibrated
+`screen_regions.json`. The tool emits geometry records only. It does not use
+vision, does not perform mouse actions, does not send input, and does not
+modify raw telemetry or frame images.
+
+Build read-only world target geometry from existing projected tick telemetry:
+
+```powershell
+python telemetry-viewer\build_world_target_geometry.py
+python telemetry-viewer\build_world_target_geometry.py --only-on-screen --target-type sceneObject
+python telemetry-viewer\build_world_target_geometry.py --target-type npc --only-on-screen --latest-with-frames 100
+```
+
+This writes `interaction_geometry\world_targets.jsonl` and
+`interaction_geometry\world_geometry_index.json` for NPCs, players, scene
+objects, ground items, and derived tiles when projection fields are present in
+raw ticks. It exports canvas points, tile polygons, clickbox bounds/polygons,
+visibility flags, and camera/viewport/canvas context. It does not use vision,
+does not invent screen positions, does not generate mouse actions, and does not
+modify raw telemetry or frame images.
+
+Inspect UI and world target geometry in a local browser:
+
+```powershell
+python telemetry-viewer\target_geometry_inspector.py
+```
+
+Open `http://127.0.0.1:8800/`. The inspector overlays existing
+`interaction_geometry` target records on retained frame images so you can check
+alignment. It serves only from `127.0.0.1`, reads existing geometry/frame files,
+and is QA-only: it does not interact with RuneLite, send input, generate mouse
+actions, or modify telemetry, geometry, or frame files. If old retained frames
+were deleted by retention, it shows a missing-frame placeholder while keeping
+the geometry available for inspection.
+
+If the inspector reports target records but `Frames available` is zero, compare
+the target tick range with the retained frame tick range from
+`dataset_status.py`. Geometry can outlive the JPGs it references. This usually
+means the derived geometry was built for older ticks and frame retention now
+only has newer images. Rebuild UI/world geometry for ticks whose frames are
+still retained:
+
+```powershell
+python telemetry-viewer\build_world_target_geometry.py --target-type npc --only-on-screen --latest-with-frames 100
+python telemetry-viewer\build_ui_target_geometry.py --include-base-regions --latest-with-frames 100
+python telemetry-viewer\target_geometry_inspector.py
+```
+
+The `--latest-with-frames` option checks actual files under `frames\` instead
+of trusting stale derived `frame.exists` flags. If there are no retained frame
+files, collect a fresh session or increase the RuneLite config storage caps
+(`Max telemetry GB` and `Max frame storage MB`) before collecting a longer QA
+run. Retention should stay enabled unless you explicitly choose otherwise.
 
 Test crops are grouped by run id and profile name, for example
 `perception\test_crops\<run_id>\tick-XXXXXXXX\base\chatbox.jpg` and

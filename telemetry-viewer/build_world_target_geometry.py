@@ -48,6 +48,24 @@ GEOMETRY_FIELDS = (
     "geometryAvailable",
     "onScreen",
 )
+CLASSIFICATION_RULES = (
+    ("bank_booth", ("bank booth", "bank chest", "deposit box"), "interactable", "bank", ("bank", "bank_booth", "clickable_candidate")),
+    ("banker", ("banker",), "entity", "npc", ("bank", "banker", "clickable_candidate")),
+    ("bank", ("bank",), "interactable", "bank", ("bank", "clickable_candidate")),
+    ("oak", ("oak",), "interactable", "tree", ("tree", "oak", "clickable_candidate")),
+    ("willow", ("willow",), "interactable", "tree", ("tree", "willow", "clickable_candidate")),
+    ("maple", ("maple",), "interactable", "tree", ("tree", "maple", "clickable_candidate")),
+    ("yew", ("yew",), "interactable", "tree", ("tree", "yew", "clickable_candidate")),
+    ("tree", ("tree",), "interactable", "tree", ("tree", "clickable_candidate")),
+    ("door", ("door", "gate"), "interactable", "door", ("door", "clickable_candidate", "navigation_geometry")),
+    ("ladder", ("ladder", "stair", "staircase", "stairs"), "interactable", "door", ("ladder", "clickable_candidate", "navigation_geometry")),
+    ("furnace", ("furnace",), "interactable", "sceneObject", ("furnace", "clickable_candidate")),
+    ("range", ("range", "cooking range"), "interactable", "sceneObject", ("range", "clickable_candidate")),
+    ("altar", ("altar",), "interactable", "sceneObject", ("altar", "clickable_candidate")),
+    ("water", ("water", "fountain", "well"), "decoration", "sceneObject", ("water", "decoration")),
+    ("wall", ("wall", "fence", "counter", "barrier", "railing", "building"), "obstacle", "wall", ("wall", "obstacle", "navigation_geometry")),
+)
+FALLBACK_NAME_PREFIXES = ("Npc[", "SceneObject[", "GroundItem[", "Tile[")
 
 
 def utc_now() -> str:
@@ -356,6 +374,98 @@ def fallback_label(prefix: str, value) -> str:
     return f"{prefix}[{value}]" if value is not None else f"{prefix}[unknown]"
 
 
+def source_name(value, fallback: str) -> str:
+    text = useful_name(value)
+    return text or fallback
+
+
+def normalize_text(value) -> str:
+    return str(value or "").strip().lower().replace("_", " ")
+
+
+def add_tags(tags: list[str], values) -> None:
+    for value in values:
+        if value not in tags:
+            tags.append(value)
+
+
+def is_fallback_target_name(name: str | None) -> bool:
+    return isinstance(name, str) and any(name.startswith(prefix) for prefix in FALLBACK_NAME_PREFIXES)
+
+
+def classify_target(target: dict) -> dict:
+    target_type = str(target.get("targetType") or "unknown")
+    name = str(target.get("name") or target.get("targetName") or target.get("fallbackName") or "")
+    haystack = " ".join(
+        normalize_text(value)
+        for value in (
+            name,
+            target.get("targetName"),
+            target.get("fallbackName"),
+            target.get("kind"),
+            target.get("nameSource"),
+            target.get("id"),
+            target.get("rawId"),
+        )
+    )
+    tags: list[str] = []
+
+    if target_type == "npc":
+        role = "entity"
+        category = "npc"
+        add_tags(tags, ("npc", "clickable_candidate"))
+    elif target_type == "player":
+        role = "entity"
+        category = "player"
+        add_tags(tags, ("player",))
+    elif target_type == "groundItem":
+        role = "item"
+        category = "groundItem"
+        add_tags(tags, ("groundItem", "item", "clickable_candidate"))
+    elif target_type == "tile":
+        role = "navigation"
+        category = "tile"
+        add_tags(tags, ("tile", "navigation_geometry"))
+    elif target_type == "sceneObject":
+        role = "unknown" if is_fallback_target_name(name) else "decoration"
+        category = "unknown" if is_fallback_target_name(name) else "sceneObject"
+        add_tags(tags, ("sceneObject",))
+    else:
+        role = "unknown"
+        category = "unknown"
+
+    if target_type == "sceneObject":
+        for _rule_name, patterns, rule_role, rule_category, rule_tags in CLASSIFICATION_RULES:
+            if any(pattern in haystack for pattern in patterns):
+                role = rule_role
+                category = rule_category
+                add_tags(tags, rule_tags)
+                break
+    elif target_type == "npc":
+        for _rule_name, patterns, _rule_role, rule_category, rule_tags in CLASSIFICATION_RULES:
+            if any(pattern in haystack for pattern in patterns):
+                category = "npc" if rule_category == "bank" else category
+                add_tags(tags, rule_tags)
+                break
+    elif target_type == "groundItem":
+        for _rule_name, patterns, _rule_role, _rule_category, rule_tags in CLASSIFICATION_RULES:
+            if any(pattern in haystack for pattern in patterns):
+                add_tags(tags, rule_tags)
+                break
+
+    if role in {"obstacle", "navigation"}:
+        add_tags(tags, ("navigation_geometry",))
+
+    if role == "obstacle":
+        add_tags(tags, ("obstacle",))
+
+    return {
+        "targetRole": role,
+        "targetCategory": category,
+        "targetTags": tags,
+    }
+
+
 def geometry_available(record: dict) -> bool:
     value = record.get("geometryAvailable")
 
@@ -467,6 +577,9 @@ def should_include_record(record: dict, args) -> bool:
                 target.get("targetName"),
                 target.get("kind"),
                 target.get("targetType"),
+                target.get("targetRole"),
+                target.get("targetCategory"),
+                " ".join(target.get("targetTags") or []),
                 target.get("rawId"),
                 target.get("nameSource"),
                 target.get("id"),
@@ -510,8 +623,17 @@ def npc_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
 
         index = npc.get("index")
         npc_id = npc.get("id")
-        name = useful_name(npc.get("name")) or useful_name(npc.get("npcName")) or fallback_label("NPC", npc_id)
-        name_source = "npcName" if useful_name(npc.get("name")) or useful_name(npc.get("npcName")) else "fallback"
+        npc_name = useful_name(npc.get("npcName"))
+        legacy_name = useful_name(npc.get("name"))
+        fallback_name = fallback_label("Npc", npc_id)
+        name = npc_name or legacy_name or fallback_name
+        name_source = (
+            source_name(npc.get("npcNameSource"), "npcName")
+            if npc_name
+            else "name"
+            if legacy_name
+            else "fallback"
+        )
         target = {
             "targetType": "npc",
             "targetId": f"{tick.get('tickId')}:npc:{index if index is not None else npc_id}",
@@ -521,10 +643,13 @@ def npc_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
             "name": name,
             "targetName": name,
             "nameSource": name_source,
+            "npcNameSource": npc.get("npcNameSource"),
+            "fallbackName": fallback_name,
             "world": world_payload(npc),
             "scene": scene_payload(npc),
             "local": local_payload(npc),
         }
+        target.update(classify_target(target))
         records.append(base_target_record(session_id, tick, frame, target, geometry_payload(npc), state_payload(npc), record_warnings(npc)))
 
     return records
@@ -548,6 +673,7 @@ def player_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
             "scene": scene_payload(player),
             "local": local_payload(player),
         }
+        target.update(classify_target(target))
         records.append(base_target_record(session_id, tick, frame, target, geometry_payload(player), state_payload(player), record_warnings(player)))
 
     return records
@@ -564,13 +690,15 @@ def scene_object_records(session_id: str, tick: dict, frame: dict) -> list[dict]
         kind = scene_object.get("kind")
         scene = scene_payload(scene_object)
         scene_suffix = f"{scene.get('x')}:{scene.get('y')}" if scene else "unknown"
-        object_name = useful_name(scene_object.get("objectName")) or useful_name(scene_object.get("name"))
-        target_name = object_name or fallback_label("SceneObject", object_id)
+        object_name = useful_name(scene_object.get("objectName"))
+        legacy_name = useful_name(scene_object.get("name"))
+        fallback_name = fallback_label("SceneObject", object_id)
+        target_name = object_name or legacy_name or fallback_name
         name_source = (
-            "objectDefinition"
-            if useful_name(scene_object.get("objectName"))
+            source_name(scene_object.get("objectNameSource"), "objectDefinition")
+            if object_name
             else "legacy"
-            if useful_name(scene_object.get("name"))
+            if legacy_name
             else "fallback"
         )
         target = {
@@ -582,10 +710,13 @@ def scene_object_records(session_id: str, tick: dict, frame: dict) -> list[dict]
             "name": target_name,
             "targetName": target_name,
             "nameSource": name_source,
+            "objectNameSource": scene_object.get("objectNameSource"),
+            "fallbackName": fallback_name,
             "world": world_payload(scene_object),
             "scene": scene,
             "local": local_payload(scene_object),
         }
+        target.update(classify_target(target))
         records.append(
             base_target_record(
                 session_id,
@@ -611,13 +742,15 @@ def ground_item_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
         item_id = item.get("id")
         scene = scene_payload(item)
         scene_suffix = f"{scene.get('x')}:{scene.get('y')}" if scene else "unknown"
-        item_name = useful_name(item.get("itemName")) or useful_name(item.get("name"))
-        target_name = item_name or fallback_label("GroundItem", item_id)
+        item_name = useful_name(item.get("itemName"))
+        legacy_name = useful_name(item.get("name"))
+        fallback_name = fallback_label("GroundItem", item_id)
+        target_name = item_name or legacy_name or fallback_name
         name_source = (
-            "itemDefinition"
-            if useful_name(item.get("itemName"))
+            source_name(item.get("itemNameSource"), "itemDefinition")
+            if item_name
             else "legacy"
-            if useful_name(item.get("name"))
+            if legacy_name
             else "fallback"
         )
         target = {
@@ -629,10 +762,13 @@ def ground_item_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
             "name": target_name,
             "targetName": target_name,
             "nameSource": name_source,
+            "itemNameSource": item.get("itemNameSource"),
+            "fallbackName": fallback_name,
             "world": world_payload(item),
             "scene": scene,
             "local": local_payload(item),
         }
+        target.update(classify_target(target))
         records.append(base_target_record(session_id, tick, frame, target, geometry_payload(item), state_payload(item), record_warnings(item)))
 
     return records
@@ -694,6 +830,7 @@ def tile_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
                 "scene": scene,
                 "local": local,
             }
+            target.update(classify_target(target))
             warnings = []
             warning = source.get("geometryWarning")
 
@@ -762,6 +899,11 @@ def build_world_target_geometry(session: Path, args) -> dict:
     counts_by_geometry_available = Counter()
     counts_by_name = Counter()
     counts_by_id = Counter()
+    counts_by_target_role = Counter()
+    counts_by_target_category = Counter()
+    counts_by_target_tag = Counter()
+    name_diagnostics = Counter()
+    unclassified_scene_object_count = 0
     missing_projection_count = 0
     missing_frame_target_count = 0
 
@@ -781,8 +923,16 @@ def build_world_target_geometry(session: Path, args) -> dict:
             target_id = target.get("id")
 
             counts_by_target_type[target_type] += 1
+            counts_by_target_role[target.get("targetRole") or "unknown"] += 1
+            counts_by_target_category[target.get("targetCategory") or "unknown"] += 1
             counts_by_on_screen[str(bool(geometry.get("onScreen"))).lower()] += 1
             counts_by_geometry_available[str(bool(geometry.get("geometryAvailable"))).lower()] += 1
+
+            for tag in target.get("targetTags") or []:
+                counts_by_target_tag[str(tag)] += 1
+
+            if target_type == "sceneObject" and target.get("targetCategory") in {None, "unknown"}:
+                unclassified_scene_object_count += 1
 
             if not geometry.get("geometryAvailable"):
                 missing_projection_count += 1
@@ -798,7 +948,31 @@ def build_world_target_geometry(session: Path, args) -> dict:
             if target_id is not None:
                 counts_by_id[str(target_id)] += 1
 
+            name_source = str(target.get("nameSource") or "")
+
+            if target_type == "npc":
+                name_diagnostics["fallbackNpcCount" if name_source == "fallback" else "namedNpcCount"] += 1
+            elif target_type == "sceneObject":
+                name_diagnostics["fallbackSceneObjectCount" if name_source == "fallback" else "namedSceneObjectCount"] += 1
+            elif target_type == "groundItem":
+                name_diagnostics["fallbackGroundItemCount" if name_source == "fallback" else "namedGroundItemCount"] += 1
+
     paths = output_paths(session)
+    fallback_scene_objects = name_diagnostics["fallbackSceneObjectCount"]
+    named_scene_objects = name_diagnostics["namedSceneObjectCount"]
+
+    if fallback_scene_objects and fallback_scene_objects >= max(25, named_scene_objects):
+        warnings.append(
+            f"{fallback_scene_objects} scene object records used fallback labels; "
+            "fresh sessions may still contain hidden or unavailable object definitions"
+        )
+
+    if unclassified_scene_object_count >= 100:
+        warnings.append(
+            f"{unclassified_scene_object_count} scene object records are unclassified; "
+            "use inspector role/category/tag filters to hide clutter without deleting obstacle data"
+        )
+
     index = {
         "schemaVersion": SCHEMA_VERSION_INDEX,
         "generatedAtUtc": utc_now(),
@@ -812,10 +986,22 @@ def build_world_target_geometry(session: Path, args) -> dict:
         "selectedTickCount": len(ticks),
         "targetRecordCount": len(records),
         "countsByTargetType": dict(counts_by_target_type.most_common()),
+        "countsByTargetRole": dict(counts_by_target_role.most_common()),
+        "countsByTargetCategory": dict(counts_by_target_category.most_common()),
+        "topTargetTags": dict(counts_by_target_tag.most_common(25)),
         "countsByOnScreen": dict(counts_by_on_screen.most_common()),
         "countsByGeometryAvailable": dict(counts_by_geometry_available.most_common()),
         "topTargetNames": dict(counts_by_name.most_common(25)),
         "topTargetIds": dict(counts_by_id.most_common(25)),
+        "nameDiagnostics": {
+            "namedNpcCount": name_diagnostics["namedNpcCount"],
+            "fallbackNpcCount": name_diagnostics["fallbackNpcCount"],
+            "namedSceneObjectCount": name_diagnostics["namedSceneObjectCount"],
+            "fallbackSceneObjectCount": name_diagnostics["fallbackSceneObjectCount"],
+            "namedGroundItemCount": name_diagnostics["namedGroundItemCount"],
+            "fallbackGroundItemCount": name_diagnostics["fallbackGroundItemCount"],
+            "unclassifiedSceneObjectCount": unclassified_scene_object_count,
+        },
         "missingProjectionCount": missing_projection_count,
         "missingFrameTargetCount": missing_frame_target_count,
         "filters": {
@@ -891,6 +1077,22 @@ def print_summary(index: dict) -> None:
     else:
         print("  none")
 
+    print("counts by targetRole:")
+
+    if index["countsByTargetRole"]:
+        for role, count in index["countsByTargetRole"].items():
+            print(f"  {role}: {count}")
+    else:
+        print("  none")
+
+    print("counts by targetCategory:")
+
+    if index["countsByTargetCategory"]:
+        for category, count in index["countsByTargetCategory"].items():
+            print(f"  {category}: {count}")
+    else:
+        print("  none")
+
     print("counts by onScreen:")
 
     if index["countsByOnScreen"]:
@@ -898,6 +1100,16 @@ def print_summary(index: dict) -> None:
             print(f"  {value}: {count}")
     else:
         print("  none")
+
+    diagnostics = index.get("nameDiagnostics") or {}
+    print("name diagnostics:")
+    print(f"  named NPCs: {diagnostics.get('namedNpcCount', 0)}")
+    print(f"  fallback NPCs: {diagnostics.get('fallbackNpcCount', 0)}")
+    print(f"  named scene objects: {diagnostics.get('namedSceneObjectCount', 0)}")
+    print(f"  fallback scene objects: {diagnostics.get('fallbackSceneObjectCount', 0)}")
+    print(f"  unclassified scene objects: {diagnostics.get('unclassifiedSceneObjectCount', 0)}")
+    print(f"  named ground items: {diagnostics.get('namedGroundItemCount', 0)}")
+    print(f"  fallback ground items: {diagnostics.get('fallbackGroundItemCount', 0)}")
 
     if index["warnings"]:
         print("warnings:")

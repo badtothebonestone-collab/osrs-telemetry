@@ -21,15 +21,38 @@
       "description": "UTC timestamp when the tick snapshot was captured."
     },
     "gameState": { "type": ["string", "null"] },
+    "cameraX": { "type": ["integer", "null"], "description": "Read-only RuneLite camera X coordinate." },
+    "cameraY": { "type": ["integer", "null"], "description": "Read-only RuneLite camera Y coordinate." },
+    "cameraZ": { "type": ["integer", "null"], "description": "Read-only RuneLite camera Z coordinate." },
+    "cameraYaw": { "type": ["integer", "null"], "description": "Read-only RuneLite camera yaw." },
+    "cameraPitch": { "type": ["integer", "null"], "description": "Read-only RuneLite camera pitch." },
+    "viewportWidth": { "type": ["integer", "null"], "minimum": 0, "description": "Read-only game viewport width in canvas pixels." },
+    "viewportHeight": { "type": ["integer", "null"], "minimum": 0, "description": "Read-only game viewport height in canvas pixels." },
+    "viewportXOffset": { "type": ["integer", "null"], "description": "Read-only game viewport X offset in canvas pixels." },
+    "viewportYOffset": { "type": ["integer", "null"], "description": "Read-only game viewport Y offset in canvas pixels." },
+    "canvasWidth": { "type": ["integer", "null"], "minimum": 0, "description": "Read-only RuneLite canvas width in pixels." },
+    "canvasHeight": { "type": ["integer", "null"], "minimum": 0, "description": "Read-only RuneLite canvas height in pixels." },
     "localPlayer": { "type": ["object", "null"] },
     "inventory": { "type": ["array", "null"] },
     "equipment": { "type": ["array", "null"] },
     "skills": { "type": ["array", "null"] },
-    "npcs": { "type": ["array", "null"] },
-    "players": { "type": ["array", "null"] },
+    "npcs": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/projectedActorRecord" }
+    },
+    "players": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/projectedActorRecord" }
+    },
     "widgets": { "type": ["array", "null"] },
-    "sceneObjects": { "type": ["array", "null"] },
-    "groundItems": { "type": ["array", "null"] },
+    "sceneObjects": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/projectedSceneObjectRecord" }
+    },
+    "groundItems": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/projectedGroundItemRecord" }
+    },
     "status": { "type": ["object", "null"] },
     "activePrayers": { "type": ["array", "null"] },
     "framePath": {
@@ -72,6 +95,88 @@
       "type": ["integer", "null"],
       "minimum": 0,
       "description": "Total telemetry records dropped because the writer queue was full."
+    }
+  },
+  "$defs": {
+    "canvasPoint": {
+      "type": "object",
+      "properties": {
+        "x": { "type": "integer" },
+        "y": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+    "bounds": {
+      "type": "object",
+      "properties": {
+        "x": { "type": "integer" },
+        "y": { "type": "integer" },
+        "w": { "type": "integer", "minimum": 0 },
+        "h": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "polygon": {
+      "type": "array",
+      "description": "Compact canvas polygon as [x, y] points.",
+      "items": {
+        "type": "array",
+        "minItems": 2,
+        "items": { "type": "integer" }
+      }
+    },
+    "projectedActorRecord": {
+      "type": "object",
+      "description": "NPC/player record. Projection-v1 fields are optional and defensive.",
+      "properties": {
+        "localX": { "type": ["integer", "null"] },
+        "localY": { "type": ["integer", "null"] },
+        "npcName": { "type": ["string", "null"] },
+        "npcNameSource": { "type": ["string", "null"] },
+        "canvasPoint": { "anyOf": [{ "$ref": "#/$defs/canvasPoint" }, { "type": "null" }] },
+        "clickboxBounds": { "anyOf": [{ "$ref": "#/$defs/bounds" }, { "type": "null" }] },
+        "convexHullBounds": { "anyOf": [{ "$ref": "#/$defs/bounds" }, { "type": "null" }] },
+        "onScreen": { "type": ["boolean", "null"] },
+        "geometryAvailable": { "type": ["boolean", "null"] },
+        "geometryWarning": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "projectedSceneObjectRecord": {
+      "type": "object",
+      "description": "Scene object record. Projection fields are optional and defensive.",
+      "properties": {
+        "localX": { "type": ["integer", "null"] },
+        "localY": { "type": ["integer", "null"] },
+        "objectName": { "type": ["string", "null"] },
+        "objectNameSource": { "type": ["string", "null"] },
+        "canvasLocation": { "anyOf": [{ "$ref": "#/$defs/canvasPoint" }, { "type": "null" }] },
+        "canvasTilePolygon": { "anyOf": [{ "$ref": "#/$defs/polygon" }, { "type": "null" }] },
+        "clickboxBounds": { "anyOf": [{ "$ref": "#/$defs/bounds" }, { "type": "null" }] },
+        "clickboxPolygon": { "anyOf": [{ "$ref": "#/$defs/polygon" }, { "type": "null" }] },
+        "convexHullBounds": { "anyOf": [{ "$ref": "#/$defs/bounds" }, { "type": "null" }] },
+        "convexHullPolygon": { "anyOf": [{ "$ref": "#/$defs/polygon" }, { "type": "null" }] },
+        "onScreen": { "type": ["boolean", "null"] },
+        "geometryAvailable": { "type": ["boolean", "null"] },
+        "geometryWarning": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "projectedGroundItemRecord": {
+      "type": "object",
+      "description": "Ground item record. Projection fields describe the item's tile and are optional.",
+      "properties": {
+        "localX": { "type": ["integer", "null"] },
+        "localY": { "type": ["integer", "null"] },
+        "itemName": { "type": ["string", "null"] },
+        "itemNameSource": { "type": ["string", "null"] },
+        "canvasTilePolygon": { "anyOf": [{ "$ref": "#/$defs/polygon" }, { "type": "null" }] },
+        "canvasCenter": { "anyOf": [{ "$ref": "#/$defs/canvasPoint" }, { "type": "null" }] },
+        "onScreen": { "type": ["boolean", "null"] },
+        "geometryAvailable": { "type": ["boolean", "null"] },
+        "geometryWarning": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
     }
   },
   "additionalProperties": true

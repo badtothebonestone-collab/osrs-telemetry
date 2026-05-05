@@ -21,6 +21,10 @@ Required top-level fields:
 Common optional top-level fields:
 
 - `gameState`
+- `cameraX`, `cameraY`, `cameraZ`
+- `cameraYaw`, `cameraPitch`
+- `viewportWidth`, `viewportHeight`, `viewportXOffset`, `viewportYOffset`
+- `canvasWidth`, `canvasHeight`
 - `localPlayer`
 - `inventory`
 - `equipment`
@@ -44,6 +48,29 @@ Common optional top-level fields:
 prayer, health ratio, and current interacting target.
 
 `activePrayers` contains all known prayers with their varbit and active state.
+
+Projection-v1 tick fields are read-only camera, viewport, and canvas values
+captured from RuneLite getters. NPC and non-local player records may also include
+nullable `localX`, `localY`, `canvasPoint`, `clickboxBounds`,
+`convexHullBounds`, `onScreen`, `geometryAvailable`, and `geometryWarning`
+fields, plus `npcName` and `npcNameSource` when a read-only lookup fills a
+missing or transformed name. Scene object records may include nullable
+`objectName`, `objectNameSource`, `localX`, `localY`, `canvasLocation`,
+`canvasTilePolygon`, `clickboxBounds`, `clickboxPolygon`, `convexHullBounds`,
+`convexHullPolygon`, `onScreen`, `geometryAvailable`, and `geometryWarning`.
+Ground item records may include nullable `itemName`, `itemNameSource`, and tile
+geometry such as `localX`, `localY`, `canvasTilePolygon`, `canvasCenter`,
+`onScreen`, `geometryAvailable`, and `geometryWarning`.
+Projection failures are non-fatal: missing/null geometry means the target could
+not be projected for that tick, while the rest of the tick remains valid. This
+telemetry does not add overlays, input hooks, menu actions, clicks, or
+client-state mutation.
+
+NPC, object, and ground item names are best-effort read-only definition
+lookups. Scene objects prefer valid impostor names when an object definition can
+transform. If a definition is hidden or unavailable, derived tooling falls back
+to stable ID labels such as `SceneObject[12345]`, `GroundItem[995]`, or
+`Tile[3200,3200,0]`.
 
 `captureErrors` is normally empty. If a capture layer fails, the tick still gets
 written and the failed layer name is listed here.

@@ -5,8 +5,11 @@ import com.google.inject.Provides;
 import java.awt.Canvas;
 import java.awt.Dimension;
 import java.awt.Image;
+import java.awt.Polygon;
 import java.awt.Rectangle;
 import java.awt.Robot;
+import java.awt.Shape;
+import java.awt.geom.PathIterator;
 import java.awt.image.BufferedImage;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -22,9 +25,11 @@ import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
 import net.runelite.api.Client;
+import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameState;
 import net.runelite.api.GameObject;
 import net.runelite.api.GraphicsObject;
+import net.runelite.api.GroundObject;
 import net.runelite.api.Hitsplat;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
@@ -34,6 +39,7 @@ import net.runelite.api.MenuEntry;
 import net.runelite.api.NPC;
 import net.runelite.api.NPCComposition;
 import net.runelite.api.ObjectComposition;
+import net.runelite.api.Perspective;
 import net.runelite.api.Player;
 import net.runelite.api.Point;
 import net.runelite.api.Prayer;
@@ -115,6 +121,9 @@ public class TelemetryPlugin extends Plugin
 	private final Set<Integer> knownItemIds = new HashSet<>();
 	private final Set<Integer> knownNpcIds = new HashSet<>();
 	private final Set<Integer> knownObjectIds = new HashSet<>();
+	private final Map<Integer, DefinitionName> itemNameCache = new LinkedHashMap<>();
+	private final Map<Integer, DefinitionName> npcNameCache = new LinkedHashMap<>();
+	private final Map<Integer, DefinitionName> objectNameCache = new LinkedHashMap<>();
 
 	@Provides
 	TelemetryConfig provideConfig(ConfigManager configManager)
@@ -125,6 +134,13 @@ public class TelemetryPlugin extends Plugin
 	@Override
 	protected void startUp() throws Exception
 	{
+		knownItemIds.clear();
+		knownNpcIds.clear();
+		knownObjectIds.clear();
+		itemNameCache.clear();
+		npcNameCache.clear();
+		objectNameCache.clear();
+
 		writer = new TelemetryWriter(
 				config.outputDirectory(),
 				gson,
@@ -193,6 +209,7 @@ public class TelemetryPlugin extends Plugin
 		{
 			if (gameState == GameState.LOGGED_IN)
 			{
+				safeCapture(captureErrors, "cameraViewport", () -> captureCameraViewport(snapshot));
 				safeCapture(captureErrors, "localPlayer", () -> captureLocalPlayer(snapshot));
 				safeCapture(captureErrors, "inventory", () -> captureInventory(snapshot));
 				safeCapture(captureErrors, "equipment", () -> captureEquipment(snapshot));
@@ -775,6 +792,35 @@ public class TelemetryPlugin extends Plugin
 		snapshot.activePrayers = prayers.toArray(new TickSnapshot.ActivePrayerSnapshot[0]);
 	}
 
+	private void captureCameraViewport(TickSnapshot snapshot)
+	{
+		snapshot.cameraX = client.getCameraX();
+		snapshot.cameraY = client.getCameraY();
+		snapshot.cameraZ = client.getCameraZ();
+		snapshot.cameraYaw = client.getCameraYaw();
+		snapshot.cameraPitch = client.getCameraPitch();
+		snapshot.viewportWidth = client.getViewportWidth();
+		snapshot.viewportHeight = client.getViewportHeight();
+		snapshot.viewportXOffset = client.getViewportXOffset();
+		snapshot.viewportYOffset = client.getViewportYOffset();
+		snapshot.canvasWidth = client.getCanvasWidth();
+		snapshot.canvasHeight = client.getCanvasHeight();
+
+		Canvas canvas = client.getCanvas();
+
+		if (canvas != null && (snapshot.canvasWidth == null || snapshot.canvasHeight == null
+				|| snapshot.canvasWidth <= 0 || snapshot.canvasHeight <= 0))
+		{
+			Dimension size = canvas.getSize();
+
+			if (size != null)
+			{
+				snapshot.canvasWidth = size.width;
+				snapshot.canvasHeight = size.height;
+			}
+		}
+	}
+
 	private void captureWidgets(TickSnapshot snapshot)
 	{
 		Widget[] roots = client.getWidgetRoots();
@@ -954,6 +1000,9 @@ public class TelemetryPlugin extends Plugin
 			npcSnapshot.index = npc.getIndex();
 			npcSnapshot.id = npc.getId();
 			npcSnapshot.name = npc.getName();
+			DefinitionName npcName = npcNameLookup(npc);
+			npcSnapshot.npcName = npcName.name;
+			npcSnapshot.npcNameSource = npcName.source;
 			npcSnapshot.combatLevel = npc.getCombatLevel();
 
 			WorldPoint worldLocation = npc.getWorldLocation();
@@ -971,6 +1020,7 @@ public class TelemetryPlugin extends Plugin
 			npcSnapshot.healthRatio = npc.getHealthRatio();
 			npcSnapshot.healthScale = npc.getHealthScale();
 			npcSnapshot.dead = npc.isDead();
+			applyActorProjection(npcSnapshot, npc);
 
 			snapshot.npcs[i] = npcSnapshot;
 		}
@@ -1114,6 +1164,9 @@ public class TelemetryPlugin extends Plugin
 		TickSnapshot.SceneObjectSnapshot snapshot = new TickSnapshot.SceneObjectSnapshot();
 		snapshot.kind = kind;
 		snapshot.id = object.getId();
+		DefinitionName objectName = objectNameLookup(snapshot.id);
+		snapshot.objectName = objectName.name;
+		snapshot.objectNameSource = objectName.source;
 		rememberObject(snapshot.id);
 		snapshot.orientation = orientation;
 		snapshot.sceneX = sceneLocation == null ? -1 : sceneLocation.getX();
@@ -1130,6 +1183,7 @@ public class TelemetryPlugin extends Plugin
 			snapshot.plane = object.getPlane();
 		}
 
+		applySceneObjectProjection(snapshot, object);
 		sceneObjects.add(snapshot);
 	}
 
@@ -1144,6 +1198,142 @@ public class TelemetryPlugin extends Plugin
 		}
 
 		return new Point(worldLocation.getX() - worldView.getBaseX(), worldLocation.getY() - worldView.getBaseY());
+	}
+
+	private void applySceneObjectProjection(TickSnapshot.SceneObjectSnapshot snapshot, TileObject object)
+	{
+		SceneObjectProjection projection = captureSceneObjectProjection(object);
+		snapshot.localX = projection.localX;
+		snapshot.localY = projection.localY;
+		snapshot.canvasLocation = projection.canvasLocation;
+		snapshot.canvasTilePolygon = projection.canvasTilePolygon;
+		snapshot.clickboxBounds = projection.clickboxBounds;
+		snapshot.clickboxPolygon = projection.clickboxPolygon;
+		snapshot.convexHullBounds = projection.convexHullBounds;
+		snapshot.convexHullPolygon = projection.convexHullPolygon;
+		snapshot.onScreen = projection.onScreen;
+		snapshot.geometryAvailable = projection.geometryAvailable;
+		snapshot.geometryWarning = projection.geometryWarning;
+	}
+
+	private SceneObjectProjection captureSceneObjectProjection(TileObject object)
+	{
+		SceneObjectProjection projection = new SceneObjectProjection();
+		List<String> warnings = new ArrayList<>();
+
+		if (object == null)
+		{
+			projection.geometryWarning = "object missing";
+			return projection;
+		}
+
+		try
+		{
+			LocalPoint localLocation = object.getLocalLocation();
+
+			if (localLocation != null)
+			{
+				projection.localX = localLocation.getX();
+				projection.localY = localLocation.getY();
+			}
+			else
+			{
+				warnings.add("local location unavailable");
+			}
+		}
+		catch (Exception e)
+		{
+			warnings.add("local location failed: " + exceptionSummary(e));
+		}
+
+		try
+		{
+			projection.canvasLocation = canvasPointSnapshot(object.getCanvasLocation());
+		}
+		catch (Exception e)
+		{
+			warnings.add("canvas location failed: " + exceptionSummary(e));
+		}
+
+		try
+		{
+			projection.canvasTilePolygon = polygonSnapshot(object.getCanvasTilePoly());
+		}
+		catch (Exception e)
+		{
+			warnings.add("canvas tile polygon failed: " + exceptionSummary(e));
+		}
+
+		try
+		{
+			Shape clickbox = object.getClickbox();
+			projection.clickboxBounds = boundsSnapshot(clickbox);
+			projection.clickboxPolygon = polygonSnapshot(clickbox);
+		}
+		catch (Exception e)
+		{
+			warnings.add("clickbox failed: " + exceptionSummary(e));
+		}
+
+		try
+		{
+			Shape convexHull = tileObjectConvexHull(object);
+			projection.convexHullBounds = boundsSnapshot(convexHull);
+			projection.convexHullPolygon = polygonSnapshot(convexHull);
+		}
+		catch (Exception e)
+		{
+			warnings.add("convex hull failed: " + exceptionSummary(e));
+		}
+
+		projection.geometryAvailable = projection.canvasLocation != null
+				|| projection.canvasTilePolygon != null
+				|| projection.clickboxBounds != null
+				|| projection.clickboxPolygon != null
+				|| projection.convexHullBounds != null
+				|| projection.convexHullPolygon != null;
+		projection.onScreen = projection.geometryAvailable && geometryIntersectsVisibleArea(
+				projection.canvasLocation,
+				combinePolygons(projection.canvasTilePolygon, projection.clickboxPolygon, projection.convexHullPolygon),
+				projection.clickboxBounds,
+				projection.convexHullBounds);
+
+		if (!projection.geometryAvailable && warnings.isEmpty())
+		{
+			warnings.add("projection returned no canvas geometry");
+		}
+
+		if (!warnings.isEmpty())
+		{
+			projection.geometryWarning = String.join("; ", warnings);
+		}
+
+		return projection;
+	}
+
+	private Shape tileObjectConvexHull(TileObject object)
+	{
+		if (object instanceof GameObject)
+		{
+			return ((GameObject) object).getConvexHull();
+		}
+
+		if (object instanceof WallObject)
+		{
+			return ((WallObject) object).getConvexHull();
+		}
+
+		if (object instanceof DecorativeObject)
+		{
+			return ((DecorativeObject) object).getConvexHull();
+		}
+
+		if (object instanceof GroundObject)
+		{
+			return ((GroundObject) object).getConvexHull();
+		}
+
+		return null;
 	}
 
 	private void captureTileGroundItems(Tile tile, List<TickSnapshot.GroundItemSnapshot> groundItems)
@@ -1172,6 +1362,9 @@ public class TelemetryPlugin extends Plugin
 
 			TickSnapshot.GroundItemSnapshot snapshot = new TickSnapshot.GroundItemSnapshot();
 			snapshot.id = item.getId();
+			DefinitionName itemName = itemNameLookup(snapshot.id);
+			snapshot.itemName = itemName.name;
+			snapshot.itemNameSource = itemName.source;
 			snapshot.quantity = item.getQuantity();
 			rememberItem(snapshot.id);
 			snapshot.sceneX = sceneLocation == null ? -1 : sceneLocation.getX();
@@ -1188,6 +1381,7 @@ public class TelemetryPlugin extends Plugin
 				snapshot.plane = tile.getPlane();
 			}
 
+			applyGroundItemProjection(snapshot, tile);
 			groundItems.add(snapshot);
 
 			if (groundItems.size() >= MAX_GROUND_ITEMS)
@@ -1195,6 +1389,80 @@ public class TelemetryPlugin extends Plugin
 				return;
 			}
 		}
+	}
+
+	private void applyGroundItemProjection(TickSnapshot.GroundItemSnapshot snapshot, Tile tile)
+	{
+		GroundItemProjection projection = captureGroundItemProjection(tile);
+		snapshot.localX = projection.localX;
+		snapshot.localY = projection.localY;
+		snapshot.canvasTilePolygon = projection.canvasTilePolygon;
+		snapshot.canvasCenter = projection.canvasCenter;
+		snapshot.onScreen = projection.onScreen;
+		snapshot.geometryAvailable = projection.geometryAvailable;
+		snapshot.geometryWarning = projection.geometryWarning;
+	}
+
+	private GroundItemProjection captureGroundItemProjection(Tile tile)
+	{
+		GroundItemProjection projection = new GroundItemProjection();
+		List<String> warnings = new ArrayList<>();
+		LocalPoint localLocation = null;
+
+		if (tile == null)
+		{
+			projection.geometryWarning = "tile missing";
+			return projection;
+		}
+
+		try
+		{
+			localLocation = tile.getLocalLocation();
+
+			if (localLocation != null)
+			{
+				projection.localX = localLocation.getX();
+				projection.localY = localLocation.getY();
+			}
+			else
+			{
+				warnings.add("local location unavailable");
+			}
+		}
+		catch (Exception e)
+		{
+			warnings.add("local location failed: " + exceptionSummary(e));
+		}
+
+		if (localLocation != null)
+		{
+			try
+			{
+				projection.canvasTilePolygon = polygonSnapshot(Perspective.getCanvasTilePoly(client, localLocation));
+				projection.canvasCenter = polygonCenter(projection.canvasTilePolygon);
+			}
+			catch (Exception e)
+			{
+				warnings.add("canvas tile polygon failed: " + exceptionSummary(e));
+			}
+		}
+
+		projection.geometryAvailable = projection.canvasTilePolygon != null || projection.canvasCenter != null;
+		projection.onScreen = projection.geometryAvailable && geometryIntersectsVisibleArea(
+				projection.canvasCenter,
+				projection.canvasTilePolygon);
+
+		if (!projection.geometryAvailable && warnings.isEmpty())
+		{
+			warnings.add("projection returned no canvas geometry");
+		}
+
+		if (!warnings.isEmpty())
+		{
+			projection.geometryWarning = String.join("; ", warnings);
+		}
+
+		return projection;
 	}
 
 	private TickSnapshot.PlayerSnapshot toPlayerSnapshot(Player player)
@@ -1219,9 +1487,416 @@ public class TelemetryPlugin extends Plugin
 		playerSnapshot.orientation = player.getOrientation();
 		playerSnapshot.healthRatio = player.getHealthRatio();
 		playerSnapshot.healthScale = player.getHealthScale();
+		applyActorProjection(playerSnapshot, player);
 
 		return playerSnapshot;
 	}
+
+	private void applyActorProjection(TickSnapshot.NpcSnapshot snapshot, Actor actor)
+	{
+		ActorProjection projection = captureActorProjection(actor);
+		snapshot.localX = projection.localX;
+		snapshot.localY = projection.localY;
+		snapshot.canvasPoint = projection.canvasPoint;
+		snapshot.clickboxBounds = projection.clickboxBounds;
+		snapshot.convexHullBounds = projection.convexHullBounds;
+		snapshot.onScreen = projection.onScreen;
+		snapshot.geometryAvailable = projection.geometryAvailable;
+		snapshot.geometryWarning = projection.geometryWarning;
+	}
+
+	private void applyActorProjection(TickSnapshot.PlayerSnapshot snapshot, Actor actor)
+	{
+		ActorProjection projection = captureActorProjection(actor);
+		snapshot.localX = projection.localX;
+		snapshot.localY = projection.localY;
+		snapshot.canvasPoint = projection.canvasPoint;
+		snapshot.clickboxBounds = projection.clickboxBounds;
+		snapshot.convexHullBounds = projection.convexHullBounds;
+		snapshot.onScreen = projection.onScreen;
+		snapshot.geometryAvailable = projection.geometryAvailable;
+		snapshot.geometryWarning = projection.geometryWarning;
+	}
+
+	private ActorProjection captureActorProjection(Actor actor)
+	{
+		ActorProjection projection = new ActorProjection();
+		List<String> warnings = new ArrayList<>();
+
+		if (actor == null)
+		{
+			projection.geometryWarning = "actor missing";
+			return projection;
+		}
+
+		LocalPoint localLocation = null;
+
+		try
+		{
+			localLocation = actor.getLocalLocation();
+
+			if (localLocation != null)
+			{
+				projection.localX = localLocation.getX();
+				projection.localY = localLocation.getY();
+			}
+			else
+			{
+				warnings.add("local location unavailable");
+			}
+		}
+		catch (Exception e)
+		{
+			warnings.add("local location failed: " + exceptionSummary(e));
+		}
+
+		if (localLocation != null)
+		{
+			try
+			{
+				Point canvasPoint = Perspective.localToCanvas(client, localLocation, actorPlane(actor));
+				projection.canvasPoint = canvasPointSnapshot(canvasPoint);
+			}
+			catch (Exception e)
+			{
+				warnings.add("canvas projection failed: " + exceptionSummary(e));
+			}
+		}
+
+		try
+		{
+			projection.convexHullBounds = boundsSnapshot(actor.getConvexHull());
+		}
+		catch (Exception e)
+		{
+			warnings.add("convex hull failed: " + exceptionSummary(e));
+		}
+
+		projection.geometryAvailable = projection.canvasPoint != null
+				|| projection.clickboxBounds != null
+				|| projection.convexHullBounds != null;
+		projection.onScreen = projection.geometryAvailable && geometryIntersectsVisibleArea(
+				projection.canvasPoint,
+				projection.clickboxBounds,
+				projection.convexHullBounds);
+
+		if (!projection.geometryAvailable && warnings.isEmpty())
+		{
+			warnings.add("projection returned no canvas geometry");
+		}
+
+		if (!warnings.isEmpty())
+		{
+			projection.geometryWarning = String.join("; ", warnings);
+		}
+
+		return projection;
+	}
+
+	private int actorPlane(Actor actor)
+	{
+		WorldPoint worldLocation = actor.getWorldLocation();
+
+		if (worldLocation != null)
+		{
+			return worldLocation.getPlane();
+		}
+
+		return client.getPlane();
+	}
+
+	private TickSnapshot.CanvasPoint canvasPointSnapshot(Point point)
+	{
+		if (point == null)
+		{
+			return null;
+		}
+
+		TickSnapshot.CanvasPoint snapshot = new TickSnapshot.CanvasPoint();
+		snapshot.x = point.getX();
+		snapshot.y = point.getY();
+		return snapshot;
+	}
+
+	private TickSnapshot.Bounds boundsSnapshot(Shape shape)
+	{
+		if (shape == null)
+		{
+			return null;
+		}
+
+		Rectangle bounds = shape.getBounds();
+
+		if (bounds == null || bounds.width <= 0 || bounds.height <= 0)
+		{
+			return null;
+		}
+
+		TickSnapshot.Bounds snapshot = new TickSnapshot.Bounds();
+		snapshot.x = bounds.x;
+		snapshot.y = bounds.y;
+		snapshot.w = bounds.width;
+		snapshot.h = bounds.height;
+		return snapshot;
+	}
+
+	private int[][] polygonSnapshot(Shape shape)
+	{
+		if (shape == null)
+		{
+			return null;
+		}
+
+		if (shape instanceof Polygon)
+		{
+			return polygonSnapshot((Polygon) shape);
+		}
+
+		List<int[]> points = new ArrayList<>();
+		PathIterator iterator = shape.getPathIterator(null, 1.0);
+		double[] coords = new double[6];
+
+		while (!iterator.isDone() && points.size() < 64)
+		{
+			int segmentType = iterator.currentSegment(coords);
+
+			if (segmentType == PathIterator.SEG_MOVETO || segmentType == PathIterator.SEG_LINETO)
+			{
+				points.add(new int[] {(int) Math.round(coords[0]), (int) Math.round(coords[1])});
+			}
+
+			iterator.next();
+		}
+
+		if (points.isEmpty())
+		{
+			return null;
+		}
+
+		return points.toArray(new int[0][]);
+	}
+
+	private int[][] polygonSnapshot(Polygon polygon)
+	{
+		if (polygon == null || polygon.npoints <= 0)
+		{
+			return null;
+		}
+
+		int[][] points = new int[polygon.npoints][2];
+
+		for (int i = 0; i < polygon.npoints; i++)
+		{
+			points[i][0] = polygon.xpoints[i];
+			points[i][1] = polygon.ypoints[i];
+		}
+
+		return points;
+	}
+
+	private int[][] combinePolygons(int[][]... polygons)
+	{
+		List<int[]> points = new ArrayList<>();
+
+		for (int[][] polygon : polygons)
+		{
+			if (polygon == null)
+			{
+				continue;
+			}
+
+			for (int[] point : polygon)
+			{
+				if (point != null && point.length >= 2)
+				{
+					points.add(new int[] {point[0], point[1]});
+				}
+			}
+		}
+
+		return points.isEmpty() ? null : points.toArray(new int[0][]);
+	}
+
+	private TickSnapshot.CanvasPoint polygonCenter(int[][] polygon)
+	{
+		TickSnapshot.Bounds bounds = boundsSnapshot(polygon);
+
+		if (bounds == null)
+		{
+			return null;
+		}
+
+		TickSnapshot.CanvasPoint point = new TickSnapshot.CanvasPoint();
+		point.x = bounds.x + bounds.w / 2;
+		point.y = bounds.y + bounds.h / 2;
+		return point;
+	}
+
+	private TickSnapshot.Bounds boundsSnapshot(int[][] polygon)
+	{
+		if (polygon == null || polygon.length == 0)
+		{
+			return null;
+		}
+
+		int minX = Integer.MAX_VALUE;
+		int minY = Integer.MAX_VALUE;
+		int maxX = Integer.MIN_VALUE;
+		int maxY = Integer.MIN_VALUE;
+		boolean sawPoint = false;
+
+		for (int[] point : polygon)
+		{
+			if (point == null || point.length < 2)
+			{
+				continue;
+			}
+
+			sawPoint = true;
+			minX = Math.min(minX, point[0]);
+			minY = Math.min(minY, point[1]);
+			maxX = Math.max(maxX, point[0]);
+			maxY = Math.max(maxY, point[1]);
+		}
+
+		if (!sawPoint)
+		{
+			return null;
+		}
+
+		TickSnapshot.Bounds bounds = new TickSnapshot.Bounds();
+		bounds.x = minX;
+		bounds.y = minY;
+		bounds.w = Math.max(1, maxX - minX);
+		bounds.h = Math.max(1, maxY - minY);
+		return bounds;
+	}
+
+	private boolean geometryIntersectsVisibleArea(TickSnapshot.CanvasPoint point, TickSnapshot.Bounds... bounds)
+	{
+		return geometryIntersectsVisibleArea(point, null, bounds);
+	}
+
+	private boolean geometryIntersectsVisibleArea(TickSnapshot.CanvasPoint point, int[][] polygon, TickSnapshot.Bounds... bounds)
+	{
+		Rectangle visibleArea = currentVisibleArea();
+
+		if (visibleArea == null || visibleArea.width <= 0 || visibleArea.height <= 0)
+		{
+			return false;
+		}
+
+		if (point != null && visibleArea.contains(point.x, point.y))
+		{
+			return true;
+		}
+
+		TickSnapshot.Bounds polygonBounds = boundsSnapshot(polygon);
+
+		if (polygonBounds != null && visibleArea.intersects(new Rectangle(
+				polygonBounds.x,
+				polygonBounds.y,
+				polygonBounds.w,
+				polygonBounds.h)))
+		{
+			return true;
+		}
+
+		for (TickSnapshot.Bounds bound : bounds)
+		{
+			if (bound != null && visibleArea.intersects(new Rectangle(bound.x, bound.y, bound.w, bound.h)))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private Rectangle currentVisibleArea()
+	{
+		int viewportWidth = client.getViewportWidth();
+		int viewportHeight = client.getViewportHeight();
+
+		if (viewportWidth > 0 && viewportHeight > 0)
+		{
+			return new Rectangle(
+					client.getViewportXOffset(),
+					client.getViewportYOffset(),
+					viewportWidth,
+					viewportHeight);
+		}
+
+		int canvasWidth = client.getCanvasWidth();
+		int canvasHeight = client.getCanvasHeight();
+
+		if (canvasWidth <= 0 || canvasHeight <= 0)
+		{
+			Canvas canvas = client.getCanvas();
+
+			if (canvas != null)
+			{
+				Dimension size = canvas.getSize();
+
+				if (size != null)
+				{
+					canvasWidth = size.width;
+					canvasHeight = size.height;
+				}
+			}
+		}
+
+		if (canvasWidth <= 0 || canvasHeight <= 0)
+		{
+			return null;
+		}
+
+		return new Rectangle(0, 0, canvasWidth, canvasHeight);
+	}
+
+	private String exceptionSummary(Exception e)
+	{
+		return e == null ? "unknown" : e.getClass().getSimpleName();
+	}
+
+	private static class ActorProjection
+	{
+		private Integer localX;
+		private Integer localY;
+		private TickSnapshot.CanvasPoint canvasPoint;
+		private TickSnapshot.Bounds clickboxBounds;
+		private TickSnapshot.Bounds convexHullBounds;
+		private boolean onScreen;
+		private boolean geometryAvailable;
+		private String geometryWarning;
+	}
+
+	private static class SceneObjectProjection
+	{
+		private Integer localX;
+		private Integer localY;
+		private TickSnapshot.CanvasPoint canvasLocation;
+		private int[][] canvasTilePolygon;
+		private TickSnapshot.Bounds clickboxBounds;
+		private int[][] clickboxPolygon;
+		private TickSnapshot.Bounds convexHullBounds;
+		private int[][] convexHullPolygon;
+		private boolean onScreen;
+		private boolean geometryAvailable;
+		private String geometryWarning;
+	}
+
+	private static class GroundItemProjection
+	{
+		private Integer localX;
+		private Integer localY;
+		private int[][] canvasTilePolygon;
+		private TickSnapshot.CanvasPoint canvasCenter;
+		private boolean onScreen;
+		private boolean geometryAvailable;
+		private String geometryWarning;
+	}
+
 	private String hashName(String name)
 	{
 		if (name == null || name.isBlank())
@@ -1505,8 +2180,7 @@ public class TelemetryPlugin extends Plugin
 
 		try
 		{
-			ItemComposition itemComposition = client.getItemDefinition(itemId);
-			currentWriter.rememberItem(itemId, itemComposition == null ? null : itemComposition.getName());
+			currentWriter.rememberItem(itemId, itemName(itemId));
 		}
 		catch (Exception e)
 		{
@@ -1530,15 +2204,7 @@ public class TelemetryPlugin extends Plugin
 
 		try
 		{
-			String name = npc.getName();
-			NPCComposition composition = npc.getComposition();
-
-			if ((name == null || name.isBlank()) && composition != null)
-			{
-				name = composition.getName();
-			}
-
-			currentWriter.rememberNpc(npc.getId(), name);
+			currentWriter.rememberNpc(npc.getId(), npcDisplayName(npc));
 		}
 		catch (Exception e)
 		{
@@ -1557,12 +2223,213 @@ public class TelemetryPlugin extends Plugin
 
 		try
 		{
-			ObjectComposition objectComposition = client.getObjectDefinition(objectId);
-			currentWriter.rememberObject(objectId, objectComposition == null ? null : objectComposition.getName());
+			currentWriter.rememberObject(objectId, objectName(objectId));
 		}
 		catch (Exception e)
 		{
 			log.debug("Failed to remember object definition {}", objectId, e);
+		}
+	}
+
+	private String itemName(int itemId)
+	{
+		return itemNameLookup(itemId).name;
+	}
+
+	private DefinitionName itemNameLookup(int itemId)
+	{
+		if (itemId < 0)
+		{
+			return DefinitionName.unavailable();
+		}
+
+		if (itemNameCache.containsKey(itemId))
+		{
+			return itemNameCache.get(itemId);
+		}
+
+		DefinitionName lookup = DefinitionName.unavailable();
+
+		try
+		{
+			ItemComposition itemComposition = client.getItemDefinition(itemId);
+
+			if (itemComposition != null)
+			{
+				String name = usableDefinitionName(itemComposition.getName());
+				lookup = name == null ? DefinitionName.fallback() : new DefinitionName(name, "itemDefinition");
+			}
+		}
+		catch (Exception e)
+		{
+			log.debug("Failed to read item definition {}", itemId, e);
+		}
+
+		itemNameCache.put(itemId, lookup);
+		return lookup;
+	}
+
+	private String objectName(int objectId)
+	{
+		return objectNameLookup(objectId).name;
+	}
+
+	private DefinitionName objectNameLookup(int objectId)
+	{
+		if (objectId < 0)
+		{
+			return DefinitionName.unavailable();
+		}
+
+		if (objectNameCache.containsKey(objectId))
+		{
+			return objectNameCache.get(objectId);
+		}
+
+		DefinitionName lookup = DefinitionName.unavailable();
+
+		try
+		{
+			ObjectComposition objectComposition = client.getObjectDefinition(objectId);
+
+			if (objectComposition != null)
+			{
+				String impostorName = null;
+
+				if (objectComposition.getImpostorIds() != null)
+				{
+					try
+					{
+						ObjectComposition impostor = objectComposition.getImpostor();
+						impostorName = impostor == null ? null : usableDefinitionName(impostor.getName());
+					}
+					catch (Exception e)
+					{
+						log.debug("Failed to read object impostor definition {}", objectId, e);
+					}
+				}
+
+				if (impostorName != null)
+				{
+					lookup = new DefinitionName(impostorName, "objectImpostor");
+				}
+				else
+				{
+					String name = usableDefinitionName(objectComposition.getName());
+					lookup = name == null ? DefinitionName.fallback() : new DefinitionName(name, "objectDefinition");
+				}
+			}
+		}
+		catch (Exception e)
+		{
+			log.debug("Failed to read object definition {}", objectId, e);
+		}
+
+		objectNameCache.put(objectId, lookup);
+		return lookup;
+	}
+
+	private String npcDisplayName(NPC npc)
+	{
+		return npcNameLookup(npc).name;
+	}
+
+	private DefinitionName npcNameLookup(NPC npc)
+	{
+		if (npc == null)
+		{
+			return DefinitionName.unavailable();
+		}
+
+		String name = usableDefinitionName(npc.getName());
+
+		if (name != null)
+		{
+			DefinitionName lookup = new DefinitionName(name, "npcName");
+			npcNameCache.put(npc.getId(), lookup);
+			return lookup;
+		}
+
+		return npcDefinitionName(npc);
+	}
+
+	private DefinitionName npcDefinitionName(NPC npc)
+	{
+		int npcId = npc.getId();
+
+		if (npcId < 0)
+		{
+			return DefinitionName.unavailable();
+		}
+
+		if (npcNameCache.containsKey(npcId))
+		{
+			return npcNameCache.get(npcId);
+		}
+
+		DefinitionName lookup = DefinitionName.unavailable();
+
+		try
+		{
+			NPCComposition transformed = npc.getTransformedComposition();
+			String transformedName = transformed == null ? null : usableDefinitionName(transformed.getName());
+
+			if (transformedName != null)
+			{
+				lookup = new DefinitionName(transformedName, "transformedComposition");
+			}
+			else
+			{
+				NPCComposition composition = npc.getComposition();
+				String compositionName = composition == null ? null : usableDefinitionName(composition.getName());
+				lookup = compositionName == null ? DefinitionName.fallback() : new DefinitionName(compositionName, "npcComposition");
+			}
+		}
+		catch (Exception e)
+		{
+			log.debug("Failed to read npc definition {}", npcId, e);
+		}
+
+		npcNameCache.put(npcId, lookup);
+		return lookup;
+	}
+
+	private String usableDefinitionName(String value)
+	{
+		if (value == null)
+		{
+			return null;
+		}
+
+		String trimmed = value.trim();
+
+		if (trimmed.isEmpty() || "null".equalsIgnoreCase(trimmed) || "hidden".equalsIgnoreCase(trimmed))
+		{
+			return null;
+		}
+
+		return trimmed;
+	}
+
+	private static class DefinitionName
+	{
+		private final String name;
+		private final String source;
+
+		private DefinitionName(String name, String source)
+		{
+			this.name = name;
+			this.source = source;
+		}
+
+		private static DefinitionName fallback()
+		{
+			return new DefinitionName(null, "fallback");
+		}
+
+		private static DefinitionName unavailable()
+		{
+			return new DefinitionName(null, "unavailable");
 		}
 	}
 

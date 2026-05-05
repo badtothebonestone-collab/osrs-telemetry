@@ -6,6 +6,17 @@ public class TickSnapshot
     public long tickId;
     public String timestampUtc;
     public String gameState;
+    public Integer cameraX;
+    public Integer cameraY;
+    public Integer cameraZ;
+    public Integer cameraYaw;
+    public Integer cameraPitch;
+    public Integer viewportWidth;
+    public Integer viewportHeight;
+    public Integer viewportXOffset;
+    public Integer viewportYOffset;
+    public Integer canvasWidth;
+    public Integer canvasHeight;
 
     public LocalPlayer localPlayer;
     public InventorySlot[] inventory;
@@ -50,6 +61,20 @@ public class TickSnapshot
         public int combatLevel;
     }
 
+    public static class CanvasPoint
+    {
+        public int x;
+        public int y;
+    }
+
+    public static class Bounds
+    {
+        public int x;
+        public int y;
+        public int w;
+        public int h;
+    }
+
     public static class InventorySlot
     {
         public int slot;
@@ -68,6 +93,8 @@ public class TickSnapshot
         public int index;
         public int id;
         public String name;
+        public String npcName;
+        public String npcNameSource;
         public int combatLevel;
         public int worldX;
         public int worldY;
@@ -78,6 +105,14 @@ public class TickSnapshot
         public int healthRatio;
         public int healthScale;
         public boolean dead;
+        public Integer localX;
+        public Integer localY;
+        public CanvasPoint canvasPoint;
+        public Bounds clickboxBounds;
+        public Bounds convexHullBounds;
+        public boolean onScreen;
+        public boolean geometryAvailable;
+        public String geometryWarning;
     }
 
     public static class PlayerSnapshot
@@ -93,29 +128,59 @@ public class TickSnapshot
         public int orientation;
         public int healthRatio;
         public int healthScale;
+        public Integer localX;
+        public Integer localY;
+        public CanvasPoint canvasPoint;
+        public Bounds clickboxBounds;
+        public Bounds convexHullBounds;
+        public boolean onScreen;
+        public boolean geometryAvailable;
+        public String geometryWarning;
     }
 
     public static class SceneObjectSnapshot
     {
         public String kind;
         public int id;
+        public String objectName;
+        public String objectNameSource;
         public int worldX;
         public int worldY;
         public int plane;
         public int orientation;
         public int sceneX;
         public int sceneY;
+        public Integer localX;
+        public Integer localY;
+        public CanvasPoint canvasLocation;
+        public int[][] canvasTilePolygon;
+        public Bounds clickboxBounds;
+        public int[][] clickboxPolygon;
+        public Bounds convexHullBounds;
+        public int[][] convexHullPolygon;
+        public boolean onScreen;
+        public boolean geometryAvailable;
+        public String geometryWarning;
     }
 
     public static class GroundItemSnapshot
     {
         public int id;
+        public String itemName;
+        public String itemNameSource;
         public int quantity;
         public int worldX;
         public int worldY;
         public int plane;
         public int sceneX;
         public int sceneY;
+        public Integer localX;
+        public Integer localY;
+        public int[][] canvasTilePolygon;
+        public CanvasPoint canvasCenter;
+        public boolean onScreen;
+        public boolean geometryAvailable;
+        public String geometryWarning;
     }
 
     public static class StatusSnapshot

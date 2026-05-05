@@ -182,6 +182,67 @@ def target_id_values(record: dict) -> list[str]:
     return values
 
 
+def target_role_for(record: dict) -> str:
+    target = target_for(record)
+    value = target.get("targetRole")
+
+    if value:
+        return str(value)
+
+    source_kind = record.get("_inspector", {}).get("sourceKind")
+
+    if source_kind == "ui":
+        return "ui"
+
+    target_type = target_type_for(record)
+
+    if target_type in {"npc", "player"}:
+        return "entity"
+
+    if target_type == "groundItem":
+        return "item"
+
+    if target_type == "tile":
+        return "navigation"
+
+    return "unknown"
+
+
+def target_category_for(record: dict) -> str:
+    target = target_for(record)
+    value = target.get("targetCategory")
+
+    if value:
+        return str(value)
+
+    source_kind = record.get("_inspector", {}).get("sourceKind")
+
+    if source_kind == "ui":
+        return "ui"
+
+    target_type = target_type_for(record)
+
+    if target_type in {"npc", "player", "groundItem", "tile", "sceneObject"}:
+        return target_type
+
+    return "unknown"
+
+
+def target_tags_for(record: dict) -> list[str]:
+    target = target_for(record)
+    value = target.get("targetTags")
+
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+
+    source_kind = record.get("_inspector", {}).get("sourceKind")
+
+    if source_kind == "ui":
+        return ["ui"]
+
+    return []
+
+
 def geometry_available_for(record: dict) -> bool:
     geometry = geometry_for(record)
     value = geometry.get("geometryAvailable")
@@ -449,6 +510,9 @@ class GeometryDataset:
 
     def summary(self) -> dict:
         target_type_counts = Counter()
+        target_role_counts = Counter()
+        target_category_counts = Counter()
+        target_tag_counts = Counter()
         name_counts = Counter()
         on_screen_counts = Counter()
         recorded_frame_exists_true = 0
@@ -456,6 +520,12 @@ class GeometryDataset:
 
         for record in self.records:
             target_type_counts[target_type_for(record)] += 1
+            target_role_counts[target_role_for(record)] += 1
+            target_category_counts[target_category_for(record)] += 1
+
+            for tag in target_tags_for(record):
+                target_tag_counts[tag] += 1
+
             name = target_name_for(record)
 
             if name:
@@ -508,6 +578,9 @@ class GeometryDataset:
             "uiTargetCount": len(self.ui_records),
             "totalTargetCount": len(self.records),
             "countsByTargetType": compact_counts(target_type_counts),
+            "countsByTargetRole": compact_counts(target_role_counts),
+            "countsByTargetCategory": compact_counts(target_category_counts),
+            "topTargetTags": compact_counts(target_tag_counts, 50),
             "topTargetNames": compact_counts(name_counts, 50),
             "countsByOnScreen": compact_counts(on_screen_counts),
             "firstTickId": ticks[0] if ticks else None,
@@ -560,6 +633,16 @@ class GeometryDataset:
             if target_type and target_type != "all" and target_type_for(record) != target_type:
                 continue
 
+            target_roles = filters.get("targetRoles") or set()
+
+            if target_roles and target_role_for(record) not in target_roles:
+                continue
+
+            target_categories = filters.get("targetCategories") or set()
+
+            if target_categories and target_category_for(record) not in target_categories:
+                continue
+
             on_screen = filters.get("onScreen")
 
             if on_screen is True and on_screen_for(record) is not True:
@@ -584,14 +667,29 @@ class GeometryDataset:
                         target.get("kind"),
                         target.get("regionName"),
                         target.get("targetType"),
+                        target_role_for(record),
+                        target_category_for(record),
+                        " ".join(target_tags_for(record)),
                         target.get("id"),
                         target.get("rawId"),
                         target.get("targetId"),
                         target.get("nameSource"),
+                        target.get("npcNameSource"),
+                        target.get("objectNameSource"),
+                        target.get("itemNameSource"),
+                        target.get("fallbackName"),
                     )
                 ).lower()
 
                 if name.lower() not in haystack:
+                    continue
+
+            tag_filter = filters.get("tag")
+
+            if tag_filter:
+                tags = " ".join(target_tags_for(record)).lower()
+
+                if tag_filter.lower() not in tags:
                     continue
 
             id_filter = filters.get("id")
@@ -622,6 +720,11 @@ class GeometryDataset:
                 "name": target_name_for(record),
                 "targetId": target.get("targetId"),
                 "id": target_id_for(record),
+                "rawId": target.get("rawId"),
+                "nameSource": target.get("nameSource"),
+                "targetRole": target_role_for(record),
+                "targetCategory": target_category_for(record),
+                "targetTags": target_tags_for(record),
                 "onScreen": on_screen_for(record),
                 "geometryAvailable": geometry_available_for(record),
                 "pointSummary": point_summary(record),
@@ -1100,8 +1203,11 @@ def html_page() -> str:
                 <th style="width:68px">Tick</th>
                 <th style="width:58px">Kind</th>
                 <th style="width:105px">Type</th>
+                <th style="width:92px">Role</th>
+                <th style="width:112px">Category</th>
                 <th>Name</th>
                 <th style="width:80px">ID</th>
+                <th style="width:112px">Name source</th>
                 <th style="width:76px">On</th>
                 <th style="width:78px">Geom</th>
                 <th style="width:135px">Point</th>
@@ -1126,11 +1232,24 @@ def html_page() -> str:
           <label><input class="target-type-box" type="checkbox" value="tile" checked> Tile</label>
           <label><input id="showUI" type="checkbox" checked> UI targets</label>
         </div>
+        <label>Target role
+          <select id="targetRole">
+            <option value="">all roles</option>
+          </select>
+        </label>
+        <label>Target category
+          <select id="targetCategory">
+            <option value="">all categories</option>
+          </select>
+        </label>
         <label>Name contains
           <input id="nameFilter" type="search" placeholder="Goblin, banker, inventory">
         </label>
         <label>ID contains
           <input id="idFilter" type="search" placeholder="12345">
+        </label>
+        <label class="full">Tag contains
+          <input id="tagFilter" type="search" placeholder="bank, wall, navigation_geometry">
         </label>
         <div class="check-row">
           <label><input id="onScreenOnly" type="checkbox"> onScreen only</label>
@@ -1143,6 +1262,9 @@ def html_page() -> str:
           <button type="button" data-quick-filter="npcs">NPCs only</button>
           <button type="button" data-quick-filter="sceneObjects">Scene objects only</button>
           <button type="button" data-quick-filter="groundItems">Ground items only</button>
+          <button type="button" data-quick-filter="interactables">Interactables</button>
+          <button type="button" data-quick-filter="obstacles">Obstacles/Walls</button>
+          <button type="button" data-quick-filter="navigation">Navigation geometry</button>
           <button type="button" data-quick-filter="bank">Bank-related</button>
           <button type="button" data-quick-filter="trees">Trees</button>
           <button type="button" data-quick-filter="doors">Doors</button>
@@ -1222,8 +1344,11 @@ def html_page() -> str:
       tickCount: document.getElementById("tickCount"),
       targetDetails: document.getElementById("targetDetails"),
       targetTypeBoxes: Array.from(document.querySelectorAll(".target-type-box")),
+      targetRole: document.getElementById("targetRole"),
+      targetCategory: document.getElementById("targetCategory"),
       nameFilter: document.getElementById("nameFilter"),
       idFilter: document.getElementById("idFilter"),
+      tagFilter: document.getElementById("tagFilter"),
       idExact: document.getElementById("idExact"),
       onScreenOnly: document.getElementById("onScreenOnly"),
       geometryOnly: document.getElementById("geometryOnly"),
@@ -1274,15 +1399,15 @@ def html_page() -> str:
 
     function renderSummary(summary) {
       el.sessionPath.textContent = summary.sessionPath || "No session selected";
-      const cards = [
-        ["World targets", summary.worldTargetCount],
-        ["UI targets", summary.uiTargetCount],
-        ["Ticks", summary.tickCount],
-        ["Target ticks with frames", summary.availableFrameTickCount],
-        ["JPG/PNG files on disk", summary.frameFileCount],
-        ["Missing-frame targets", summary.referencedFrameMissingTargetCount],
-        ["On-screen true", summary.countsByOnScreen?.["true"] || 0],
-      ];
+        const cards = [
+          ["World targets", summary.worldTargetCount],
+          ["UI targets", summary.uiTargetCount],
+          ["Ticks", summary.tickCount],
+          ["Target ticks with frames", summary.availableFrameTickCount],
+          ["JPG/PNG files on disk", summary.frameFileCount],
+          ["Missing-frame targets", summary.referencedFrameMissingTargetCount],
+          ["On-screen true", summary.countsByOnScreen?.["true"] || 0],
+        ];
       el.summaryCards.innerHTML = cards.map(([label, value]) => (
         `<div class="card"><b>${escapeHtml(value)}</b><span>${escapeHtml(label)}</span></div>`
       )).join("");
@@ -1294,6 +1419,18 @@ def html_page() -> str:
         notes.push(`Target tick range ${summary.firstTickId}-${summary.lastTickId}; retained frame tick range ${summary.firstFrameFileTick}-${summary.lastFrameFileTick}.`);
       }
       el.messages.innerHTML = notes.map((message) => `<div class="warning">${escapeHtml(message)}</div>`).join("");
+
+      populateSelect(el.targetRole, summary.countsByTargetRole || {}, "all roles");
+      populateSelect(el.targetCategory, summary.countsByTargetCategory || {}, "all categories");
+    }
+
+    function populateSelect(select, counts, allLabel) {
+      const current = select.value;
+      const values = Object.keys(counts || {}).sort((a, b) => a.localeCompare(b));
+      select.innerHTML = `<option value="">${escapeHtml(allLabel)}</option>` + values.map((value) => (
+        `<option value="${escapeHtml(value)}">${escapeHtml(value)} (${escapeHtml(counts[value])})</option>`
+      )).join("");
+      if (values.includes(current)) select.value = current;
     }
 
     function renderTicks() {
@@ -1336,7 +1473,10 @@ def html_page() -> str:
       return {
         tick: state.selectedTickId,
         targetTypes: targetTypes.join(","),
+        targetRoles: el.targetRole.value,
+        targetCategories: el.targetCategory.value,
         name: el.nameFilter.value.trim(),
+        tag: el.tagFilter.value.trim(),
         id: el.idFilter.value.trim(),
         idExact: el.idExact.checked ? "true" : "",
         onScreen: el.onScreenOnly.checked ? "true" : "",
@@ -1388,8 +1528,11 @@ def html_page() -> str:
             <td>${escapeHtml(record.tickId)}</td>
             <td>${escapeHtml(info.sourceKind || "")}</td>
             <td>${escapeHtml(info.targetType || "")}</td>
+            <td title="${escapeHtml(info.targetRole || "")}">${escapeHtml(info.targetRole || "")}</td>
+            <td title="${escapeHtml(info.targetCategory || "")}">${escapeHtml(info.targetCategory || "")}</td>
             <td title="${escapeHtml(info.name || "")}">${escapeHtml(info.name || "")}</td>
             <td title="${escapeHtml(info.id ?? "")}">${escapeHtml(info.id ?? "")}</td>
+            <td title="${escapeHtml(info.nameSource ?? "")}">${escapeHtml(info.nameSource ?? "")}</td>
             <td>${info.onScreen === true ? "true" : info.onScreen === false ? "false" : "?"}</td>
             <td>${info.geometryAvailable ? "yes" : "no"}</td>
             <td title="${escapeHtml(info.pointSummary || "")}">${escapeHtml(info.pointSummary || "")}</td>
@@ -1689,10 +1832,18 @@ def html_page() -> str:
       const geometry = selected.geometry || {};
       el.targetDetails.textContent = JSON.stringify({
         targetType: info.targetType,
+        targetRole: info.targetRole,
+        targetCategory: info.targetCategory,
+        targetTags: info.targetTags,
         name: info.name,
         id: info.id,
+        rawId: info.rawId,
         targetId: info.targetId,
         nameSource: target.nameSource,
+        npcNameSource: target.npcNameSource,
+        objectNameSource: target.objectNameSource,
+        itemNameSource: target.itemNameSource,
+        fallbackName: target.fallbackName,
         world: target.world,
         scene: target.scene,
         local: target.local,
@@ -1738,9 +1889,12 @@ def html_page() -> str:
 
     function applyQuickFilter(kind) {
       el.idFilter.value = "";
+      el.tagFilter.value = "";
       el.idExact.checked = false;
       el.onScreenOnly.checked = false;
       el.geometryOnly.checked = false;
+      el.targetRole.value = "";
+      el.targetCategory.value = "";
 
       if (kind === "clear") {
         clearFilters();
@@ -1759,18 +1913,36 @@ def html_page() -> str:
         setTargetTypes(["groundItem"]);
         el.showUI.checked = false;
         el.nameFilter.value = "";
+      } else if (kind === "interactables") {
+        setTargetTypes(["npc", "sceneObject", "groundItem"]);
+        el.showUI.checked = false;
+        el.targetRole.value = "interactable";
+        el.nameFilter.value = "";
+      } else if (kind === "obstacles") {
+        setTargetTypes(["sceneObject", "tile"]);
+        el.showUI.checked = false;
+        el.targetRole.value = "obstacle";
+        el.nameFilter.value = "";
+      } else if (kind === "navigation") {
+        setTargetTypes(["sceneObject", "tile"]);
+        el.showUI.checked = false;
+        el.tagFilter.value = "navigation_geometry";
+        el.nameFilter.value = "";
       } else if (kind === "bank") {
         setTargetTypes(["npc", "sceneObject", "groundItem", "tile"]);
         el.showUI.checked = false;
-        el.nameFilter.value = "bank";
+        el.tagFilter.value = "bank";
+        el.nameFilter.value = "";
       } else if (kind === "trees") {
         setTargetTypes(["sceneObject"]);
         el.showUI.checked = false;
-        el.nameFilter.value = "tree";
+        el.tagFilter.value = "tree";
+        el.nameFilter.value = "";
       } else if (kind === "doors") {
         setTargetTypes(["sceneObject"]);
         el.showUI.checked = false;
-        el.nameFilter.value = "door";
+        el.tagFilter.value = "door";
+        el.nameFilter.value = "";
       }
 
       loadTargets();
@@ -1778,8 +1950,11 @@ def html_page() -> str:
 
     function clearFilters() {
       setTargetTypes(["npc", "player", "sceneObject", "groundItem", "tile"]);
+      el.targetRole.value = "";
+      el.targetCategory.value = "";
       el.nameFilter.value = "";
       el.idFilter.value = "";
+      el.tagFilter.value = "";
       el.idExact.checked = false;
       el.onScreenOnly.checked = false;
       el.geometryOnly.checked = false;
@@ -1826,13 +2001,16 @@ def html_page() -> str:
     el.jumpTick.addEventListener("keydown", (event) => {
       if (event.key === "Enter") el.jumpTickButton.click();
     });
-    for (const input of [...el.targetTypeBoxes, el.onScreenOnly, el.geometryOnly, el.showUI, el.idExact]) {
+    for (const input of [...el.targetTypeBoxes, el.targetRole, el.targetCategory, el.onScreenOnly, el.geometryOnly, el.showUI, el.idExact]) {
       input.addEventListener("change", () => loadTargets());
     }
     el.nameFilter.addEventListener("keydown", (event) => {
       if (event.key === "Enter") loadTargets();
     });
     el.idFilter.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadTargets();
+    });
+    el.tagFilter.addEventListener("keydown", (event) => {
       if (event.key === "Enter") loadTargets();
     });
     for (const input of [el.showLabels, el.showPolygons, el.showBounds, el.overlayOpacity, el.maxTargets]) {
@@ -1907,7 +2085,18 @@ class TargetGeometryHandler(BaseHTTPRequestHandler):
                 for value in (first_param(params, "targetTypes") or "").split(",")
                 if value
             },
+            "targetRoles": {
+                value
+                for value in (first_param(params, "targetRoles") or "").split(",")
+                if value
+            },
+            "targetCategories": {
+                value
+                for value in (first_param(params, "targetCategories") or "").split(",")
+                if value
+            },
             "name": first_param(params, "name") or "",
+            "tag": first_param(params, "tag") or "",
             "id": first_param(params, "id") or "",
             "idExact": parse_bool(first_param(params, "idExact")),
             "onScreen": parse_bool(first_param(params, "onScreen")),
