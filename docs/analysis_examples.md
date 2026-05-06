@@ -1145,6 +1145,52 @@ python telemetry-viewer\live_context_query.py --session "<session>" --baseline -
 The query helper only reads live files. It does not click, send input, invoke
 menus, perform routing, or generate actions.
 
+## Live Context QA
+
+`telemetry-viewer\live_context_query.py` is a read-only mock context oracle for
+the rolling live files. It validates whether the current telemetry can answer
+brain-facing context questions such as where the player is, which useful target
+candidates are nearby, whether a candidate is on screen, whether it has an aim
+point telemetry field, whether that point is UI-blocked, whether the live feed
+is fresh, and whether source scene knowledge appears complete.
+
+It does not execute actions, choose clicks, send mouse or keyboard input,
+manipulate menus, interact with RuneLite, or mutate telemetry. Screen
+coordinates and aim points are reported only as read-only telemetry fields for
+QA and future consumers.
+
+Response schemas are versioned:
+
+- `live_context_summary.v1` for `--summary`
+- `live_context_answer.v1` for `--nearest` and `--best`
+- `live_task_context.v1` for `--task woodcutting`
+- `live_context_self_test.v1` for `--self-test`
+
+Use `--summary` to inspect baseline state, freshness, player location,
+candidate counts, source cap status, processor budget status, and live file
+warnings. Use `--nearest tree` or `--best tree` to inspect candidate quality.
+Use `--task woodcutting` to check whether the live files can answer the core
+woodcutting context questions without implying any action. Use `--self-test`
+before longer experiments to confirm the baseline/status/context/candidate
+files are readable, fresh, and source capture is not capped.
+
+Example commands:
+
+```text
+python telemetry-viewer\live_context_query.py --latest-session --summary
+python telemetry-viewer\live_context_query.py --latest-session --nearest tree --json
+python telemetry-viewer\live_context_query.py --latest-session --best tree --json
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --json
+python telemetry-viewer\live_context_query.py --latest-session --self-test
+python telemetry-viewer\live_context_query.py --latest-session --watch --nearest tree --interval 1
+```
+
+Navigation readiness is intentionally a placeholder unless a future read-only
+collision summary is available. When collision data is missing, the task report
+returns navigation readiness as `unknown` and warns that reachability questions
+cannot be answered yet.
+
 ## Realtime live mode versus complete live mode
 
 `live_target_processor.py` now has two latency modes:
