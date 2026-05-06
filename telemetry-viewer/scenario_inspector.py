@@ -540,7 +540,7 @@ def html_page() -> str:
         <div class="table-box">
           <table>
             <thead>
-              <tr><th style="width:50px">Rank</th><th style="width:64px">Score</th><th>Name</th><th style="width:86px">Type</th><th>Role / Category</th><th style="width:120px">Aim</th><th>Reasons</th></tr>
+              <tr><th style="width:50px">Rank</th><th style="width:64px">Score</th><th>Name</th><th style="width:86px">Type</th><th>Role / Category</th><th style="width:74px">Dist</th><th style="width:120px">Aim</th><th>Reasons</th></tr>
             </thead>
             <tbody id="candidateRows"></tbody>
           </table>
@@ -696,6 +696,7 @@ def html_page() -> str:
           <td title="${escapeHtml(targetName(target))}">${escapeHtml(targetName(target))}</td>
           <td>${escapeHtml(target.targetType || "-")}</td>
           <td>${escapeHtml(target.targetRole || "-")} / ${escapeHtml(target.targetCategory || "-")}</td>
+          <td>${escapeHtml(candidate.targetDistanceChebyshev ?? "-")}</td>
           <td>${escapeHtml(pointText(candidate.aimPoint))}</td>
           <td title="${escapeHtml(reasons)}">${escapeHtml(reasons || "-")}</td>
         </tr>`;

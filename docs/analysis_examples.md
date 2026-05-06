@@ -231,6 +231,9 @@ mutation.
    UI boxes, and points. The output is a read-only handoff/analysis layer: it
    does not send mouse input, create click commands, invoke menus, interact with
    RuneLite, or modify raw telemetry or frame images.
+   When player and target world positions are available, the ranker also records
+   Chebyshev/Manhattan tile distances and prefers closer entity/NPC candidates;
+   distance is a moderate tie-breaker for interactable world objects.
    `target_geometry_inspector.py` can load these candidate files and draw ranked
    aim points/preferred geometry alongside the raw UI/world overlays.
 
@@ -263,6 +266,14 @@ mutation.
    template, `bank_area`, selects visible bank-related candidates such as bank
    booths, deposit boxes, bankers, and deposit targets, then preserves nearby
    obstacle/navigation context when available.
+
+   A second template, `goblin_area`, selects visible Goblin NPC candidates and
+   preserves nearby obstacle/navigation context:
+
+   ```text
+   python telemetry-viewer\build_scenario_dataset.py --scenario goblin_area
+   python telemetry-viewer\scenario_inspector.py --scenario goblin_area --port 8810
+   ```
 
    Scenario output is written to:
 

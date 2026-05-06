@@ -243,7 +243,12 @@ def score_sort_key(candidate: dict) -> tuple:
     if not isinstance(rank, int):
         rank = 999999
 
-    return (-candidate_score(candidate), rank, candidate.get("tickId") if candidate.get("tickId") is not None else -1)
+    distance = candidate.get("targetDistanceChebyshev")
+
+    if not isinstance(distance, int):
+        distance = 999999
+
+    return (-candidate_score(candidate), distance, rank, candidate.get("tickId") if candidate.get("tickId") is not None else -1)
 
 
 def tick_id_for(record: dict) -> int | None:
@@ -328,6 +333,13 @@ def compact_candidate(candidate: dict, rank_within_scenario: int) -> dict:
         "aimPoint": candidate_geometry.get("aimPoint"),
         "preferredAimGeometryType": candidate_geometry.get("preferredAimGeometryType"),
         "preferredAimGeometry": candidate_geometry.get("preferredAimGeometry"),
+        "targetDistanceTiles": candidate.get("targetDistanceTiles"),
+        "targetDistanceChebyshev": candidate.get("targetDistanceChebyshev"),
+        "targetDistanceManhattan": candidate.get("targetDistanceManhattan"),
+        "targetDistanceEuclidean": candidate.get("targetDistanceEuclidean"),
+        "playerWorld": candidate.get("playerWorld"),
+        "targetWorld": candidate.get("targetWorld"),
+        "scoreParts": candidate_scoring.get("scoreParts") if isinstance(candidate_scoring.get("scoreParts"), list) else [],
         "reasons": candidate_scoring.get("reasons") if isinstance(candidate_scoring.get("reasons"), list) else [],
         "penalties": candidate_scoring.get("penalties") if isinstance(candidate_scoring.get("penalties"), list) else [],
     }

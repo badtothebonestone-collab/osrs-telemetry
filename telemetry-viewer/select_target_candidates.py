@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import inspect_target_geometry as geometry
-from telemetry_paths import find_newest_session, get_sessions_dir
+from telemetry_paths import find_newest_session, get_sessions_dir, iter_jsonl, list_tick_files
 
 
 SCHEMA_VERSION_INDEX = "interaction_geometry.target_candidates_index.v1"
@@ -45,6 +45,8 @@ GEOMETRY_QUALITY = {
     "boundingBox": 0.65,
     "bounds": 0.65,
 }
+WORLD_DISTANCE_ROLES = {"entity", "interactable", "item"}
+WORLD_DISTANCE_TYPES = {"npc", "player", "sceneObject", "groundItem", "tile"}
 
 
 def utc_now() -> str:
@@ -354,7 +356,217 @@ def fallback_name(record: dict) -> bool:
     return source == "fallback" or name.startswith(("Npc[", "SceneObject[", "GroundItem[", "Tile["))
 
 
-def score_record(record: dict, aim: dict, args, frame_exists) -> dict:
+def int_value(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        return value
+
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+
+    return None
+
+
+def world_payload_from(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+
+    x = int_value(value.get("x"))
+    y = int_value(value.get("y"))
+
+    if x is None:
+        x = int_value(value.get("worldX"))
+
+    if y is None:
+        y = int_value(value.get("worldY"))
+
+    plane = int_value(value.get("plane"))
+
+    if x is None or y is None:
+        return None
+
+    payload = {"x": x, "y": y}
+
+    if plane is not None:
+        payload["plane"] = plane
+
+    return payload
+
+
+def tick_player_world(tick: dict) -> dict | None:
+    local_player = tick.get("localPlayer")
+    world = world_payload_from(local_player)
+
+    if world:
+        return world
+
+    for key in ("player", "self", "local"):
+        world = world_payload_from(tick.get(key))
+
+        if world:
+            return world
+
+    status = tick.get("status") if isinstance(tick.get("status"), dict) else {}
+    world = {
+        "x": int_value(status.get("worldX")),
+        "y": int_value(status.get("worldY")),
+        "plane": int_value(status.get("plane")),
+    }
+
+    if world["x"] is not None and world["y"] is not None:
+        return {key: value for key, value in world.items() if value is not None}
+
+    return None
+
+
+def load_player_world_by_tick(session: Path, tick_ids: set[int]) -> tuple[dict[int, dict], list[str]]:
+    positions = {}
+    warnings = []
+
+    if not tick_ids:
+        return positions, warnings
+
+    tick_files = list_tick_files(session)
+
+    if not tick_files:
+        return positions, ["raw tick files unavailable; target distance scoring disabled"]
+
+    remaining = set(tick_ids)
+
+    for _source, tick in iter_jsonl(tick_files):
+        if not remaining:
+            break
+
+        if not isinstance(tick, dict):
+            continue
+
+        tick_id = tick.get("tickId")
+
+        if tick_id not in remaining:
+            continue
+
+        player_world = tick_player_world(tick)
+
+        if player_world:
+            positions[tick_id] = player_world
+
+        remaining.discard(tick_id)
+
+    if remaining:
+        warnings.append(f"player position unavailable for {len(remaining)} selected ticks")
+
+    return positions, warnings
+
+
+def target_world_for_record(record: dict) -> dict | None:
+    target = geometry.target_for(record)
+    world = world_payload_from(target.get("world"))
+
+    if world:
+        return world
+
+    x = int_value(target.get("worldX"))
+    y = int_value(target.get("worldY"))
+    plane = int_value(target.get("plane"))
+
+    if x is None or y is None:
+        return None
+
+    payload = {"x": x, "y": y}
+
+    if plane is not None:
+        payload["plane"] = plane
+
+    return payload
+
+
+def target_distance_for_record(record: dict, player_world: dict | None) -> dict:
+    target_world = target_world_for_record(record)
+
+    if not player_world or not target_world:
+        return {
+            "targetDistanceTiles": None,
+            "targetDistanceChebyshev": None,
+            "targetDistanceManhattan": None,
+            "targetDistanceEuclidean": None,
+            "playerWorld": player_world,
+            "targetWorld": target_world,
+        }
+
+    dx = int(target_world["x"]) - int(player_world["x"])
+    dy = int(target_world["y"]) - int(player_world["y"])
+    chebyshev = max(abs(dx), abs(dy))
+    manhattan = abs(dx) + abs(dy)
+    return {
+        "targetDistanceTiles": chebyshev,
+        "targetDistanceChebyshev": chebyshev,
+        "targetDistanceManhattan": manhattan,
+        "targetDistanceEuclidean": round((dx * dx + dy * dy) ** 0.5, 3),
+        "playerWorld": player_world,
+        "targetWorld": target_world,
+    }
+
+
+def distance_available(distance: dict) -> bool:
+    return isinstance(distance.get("targetDistanceChebyshev"), int)
+
+
+def screen_center_distance(record: dict, aim: dict) -> float | None:
+    aim_point = aim.get("aimPoint")
+
+    if not is_point_dict(aim_point):
+        return None
+
+    width, height = source_dimensions(record)
+
+    if not isinstance(width, (int, float)) or not isinstance(height, (int, float)):
+        return None
+
+    if width <= 0 or height <= 0:
+        return None
+
+    dx = float(aim_point["x"]) - float(width) / 2.0
+    dy = float(aim_point["y"]) - float(height) / 2.0
+    return round((dx * dx + dy * dy) ** 0.5, 3)
+
+
+def distance_bonus_for(record: dict, distance: dict) -> tuple[int, str | None, str | None]:
+    if not distance_available(distance):
+        return 0, None, None
+
+    target_type = geometry.target_type_for(record)
+    role = geometry.target_role_for(record)
+    chebyshev = distance["targetDistanceChebyshev"]
+
+    if target_type in {"npc", "player"} or role == "entity":
+        if chebyshev <= 2:
+            return 30, "closeTarget", None
+        if chebyshev <= 5:
+            return 20, "closeTarget", None
+        if chebyshev <= 8:
+            return 10, "nearTarget", None
+        return -5, None, "farTarget"
+
+    if role in {"interactable", "item"} or target_type in {"sceneObject", "groundItem"}:
+        if chebyshev <= 2:
+            return 12, "nearInteractable", None
+        if chebyshev <= 5:
+            return 8, "nearInteractable", None
+        if chebyshev <= 8:
+            return 4, "nearInteractable", None
+        if chebyshev > 12:
+            return -3, None, "farInteractable"
+
+    return 0, None, None
+
+
+def distance_relevant(record: dict) -> bool:
+    return geometry.target_role_for(record) in WORLD_DISTANCE_ROLES or geometry.target_type_for(record) in WORLD_DISTANCE_TYPES
+
+
+def score_record(record: dict, aim: dict, args, frame_exists, distance: dict) -> dict:
     score = 0
     score_parts = []
     reasons = []
@@ -429,6 +641,16 @@ def score_record(record: dict, aim: dict, args, frame_exists) -> dict:
     if semantic_filter_requested(args) and fallback_name(record):
         add("fallbackName", -10, penalty="fallbackName")
 
+    if distance_available(distance):
+        chebyshev = distance["targetDistanceChebyshev"]
+        reasons.append(f"distanceTiles={chebyshev}")
+        bonus, reason, penalty = distance_bonus_for(record, distance)
+
+        if bonus:
+            add("distance", bonus, reason=reason, penalty=penalty)
+    elif distance_relevant(record):
+        add("distanceUnavailable", 0, reason="playerDistanceUnavailable")
+
     if category in {"bank", "tree", "door", "npc", "player", "groundItem"}:
         reasons.append(f"category:{category}")
 
@@ -468,10 +690,12 @@ def frame_payload(record: dict, frame_exists) -> dict:
     }
 
 
-def candidate_record(dataset: geometry.TargetGeometryDataset, record: dict, rank: int, args) -> dict:
+def candidate_record(dataset: geometry.TargetGeometryDataset, record: dict, rank: int, args, player_world_by_tick: dict[int, dict]) -> dict:
     aim = preferred_aim_geometry(record)
     frame_exists = dataset.frame_exists_for_record(record)
-    scoring = score_record(record, aim, args, frame_exists)
+    distance = target_distance_for_record(record, player_world_by_tick.get(record.get("tickId")))
+    scoring = score_record(record, aim, args, frame_exists, distance)
+    center_distance = screen_center_distance(record, aim)
     return {
         "schemaVersion": SCHEMA_VERSION_RECORD,
         "sessionId": record.get("sessionId"),
@@ -489,6 +713,13 @@ def candidate_record(dataset: geometry.TargetGeometryDataset, record: dict, rank
             **aim,
         },
         "scoring": scoring,
+        "targetDistanceTiles": distance["targetDistanceTiles"],
+        "targetDistanceChebyshev": distance["targetDistanceChebyshev"],
+        "targetDistanceManhattan": distance["targetDistanceManhattan"],
+        "targetDistanceEuclidean": distance["targetDistanceEuclidean"],
+        "playerWorld": distance["playerWorld"],
+        "targetWorld": distance["targetWorld"],
+        "screenCenterDistance": center_distance,
         "frame": frame_payload(record, frame_exists),
         "safety": {
             "readOnly": True,
@@ -497,18 +728,40 @@ def candidate_record(dataset: geometry.TargetGeometryDataset, record: dict, rank
     }
 
 
-def rank_candidates(dataset: geometry.TargetGeometryDataset, records: list[dict], args) -> list[dict]:
+def geometry_priority_rank(candidate: dict) -> int:
+    kind = candidate.get("geometry", {}).get("preferredAimGeometryType")
+
+    try:
+        return GEOMETRY_PRIORITY.index(kind)
+    except ValueError:
+        return len(GEOMETRY_PRIORITY)
+
+
+def sort_distance(candidate: dict) -> int:
+    value = candidate.get("targetDistanceChebyshev")
+    return value if isinstance(value, int) else 999999
+
+
+def sort_screen_center(candidate: dict) -> float:
+    value = candidate.get("screenCenterDistance")
+    return float(value) if isinstance(value, (int, float)) else 999999.0
+
+
+def rank_candidates(dataset: geometry.TargetGeometryDataset, records: list[dict], args, player_world_by_tick: dict[int, dict]) -> list[dict]:
     candidates = []
 
     for record in records:
-        candidate = candidate_record(dataset, record, 0, args)
+        candidate = candidate_record(dataset, record, 0, args, player_world_by_tick)
         candidates.append(candidate)
 
     candidates.sort(
         key=lambda candidate: (
             -candidate["score"],
-            -candidate["geometry"].get("geometryQuality", 0.0),
+            sort_distance(candidate),
+            geometry_priority_rank(candidate),
+            sort_screen_center(candidate),
             candidate.get("tickId") if candidate.get("tickId") is not None else -1,
+            str(candidate.get("target", {}).get("name") or ""),
             str(candidate.get("target", {}).get("targetId") or ""),
         )
     )
@@ -595,8 +848,12 @@ def select_target_candidates(session: Path, args) -> tuple[list[dict], dict]:
         raise RuntimeError("No target geometry records found. Build world/UI target geometry first.")
 
     records, ticks = candidate_input_records(dataset, args)
-    candidates = rank_candidates(dataset, records, args)
-    warnings = list(dataset.messages) + list(dataset.warnings)
+    player_world_by_tick, distance_warnings = load_player_world_by_tick(
+        session,
+        {tick for tick in (record.get("tickId") for record in records) if isinstance(tick, int)},
+    )
+    candidates = rank_candidates(dataset, records, args, player_world_by_tick)
+    warnings = list(dataset.messages) + list(dataset.warnings) + distance_warnings
     index = index_for(session, ticks, len(records), candidates, warnings)
     paths = output_paths(session)
     atomic_write_outputs(paths, candidates, index)
@@ -617,11 +874,14 @@ def compact_candidate_line(candidate: dict) -> str:
     if target_id is None:
         target_id = target.get("rawId")
 
+    distance = candidate.get("targetDistanceChebyshev")
+    distance_text = distance if isinstance(distance, int) else "-"
     return (
         f"{candidate.get('rank')} score={candidate.get('score')} tick={candidate.get('tickId')} "
         f"type={target.get('targetType')} name=\"{target.get('name') or '-'}\" "
         f"id={target_id if target_id is not None else '-'} "
         f"role={target.get('targetRole')} category={target.get('targetCategory')} "
+        f"dist={distance_text} "
         f"aim={aim_text} geometry={candidate.get('geometry', {}).get('preferredAimGeometryType') or 'none'} "
         f"reasons={reasons or '-'}"
     )
