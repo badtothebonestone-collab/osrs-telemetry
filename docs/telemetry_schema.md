@@ -32,6 +32,11 @@ Common optional top-level fields:
 - `npcs`
 - `players`
 - `widgets`
+- `sceneCaptureSummary`
+- `sceneIndexSummary`
+- `sceneProjectionSummary`
+- `sceneObjectDeltas`
+- `visibleSceneObjectRefs`
 - `sceneObjects`
 - `groundItems`
 - `status`
@@ -43,11 +48,42 @@ Common optional top-level fields:
 - `captureErrors`
 - `writerQueueSize`
 - `writerDroppedRecords`
+- `sceneCaptureDurationMillis`
+- `snapshotBuildDurationMillis`
 
 `status` summarizes read-only local status such as run energy, weight, HP,
 prayer, health ratio, and current interacting target.
 
 `activePrayers` contains all known prayers with their varbit and active state.
+
+`sceneCaptureSummary` is a read-only diagnostic object for the bounded scene
+scan. It records `sceneCaptureMode`, whether the scan covered the full current
+plane, configured radius/max scene object cap, scanned plane, scanned tile
+bounds and dimensions, objects seen/captured/skipped by cap, capture ratio, and
+per-layer counts for game, wall, decorative, and ground objects. It does not add
+extra object payload or any interaction behavior; it only explains whether
+`sceneObjects` was capped or radius-limited for that tick.
+
+`STATIC_SCENE_INDEX_DIAGNOSTIC` is an opt-in static scene memory mode. In that
+mode, `sceneObjects` is intentionally kept empty or light while the tick may
+include `sceneIndexSummary`, `sceneProjectionSummary`, `sceneObjectDeltas`, and
+`visibleSceneObjectRefs`. `sceneObjectDeltas` contains compact new/updated/
+despawned records keyed by `objectKey`; `visibleSceneObjectRefs` contains
+projected refs that should be used for per-tick visual QA. `objectKey` is a
+best-effort stable identity made from plane, world/scene tile, object layer,
+object id, hash when available, and orientation, so same-id objects at different
+locations stay distinct.
+
+`sceneIndexSummary` reports static index size, present object count, delta
+counts, whether a full resync happened, resync reason, index cap status, and
+index build/update timings. `sceneProjectionSummary` reports projection state
+hash, whether camera/viewport/player projection state changed, refresh mode,
+objects considered/updated/reused, visible refs, geometry counts, and projection
+duration. These fields are diagnostic-only and read-only.
+
+`sceneCaptureDurationMillis` and `snapshotBuildDurationMillis` are lightweight
+timing diagnostics for short dev sessions. `writerQueueSize` and
+`writerDroppedRecords` remain the primary writer pressure indicators.
 
 Projection-v1 tick fields are read-only camera, viewport, and canvas values
 captured from RuneLite getters. NPC and non-local player records may also include

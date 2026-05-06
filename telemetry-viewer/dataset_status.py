@@ -10,6 +10,7 @@ from telemetry_paths import find_newest_session, get_sessions_dir, list_frame_in
 
 DEFAULT_PROFILE_PATH = Path(__file__).resolve().parent / "calibration_profiles" / "default_screen_regions.json"
 DEFAULT_LABELS_PATH = Path(__file__).resolve().with_name("tab_labels.json")
+TARGET_OVERRIDES_PATH = Path(__file__).resolve().with_name("target_name_overrides.json")
 FRAME_TICK_RE = re.compile(r"frame-tick-(\d+)\.[^.]+$", re.IGNORECASE)
 FRAME_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 
@@ -46,6 +47,21 @@ def count_files(path: Path) -> int:
         return sum(1 for child in path.rglob("*") if child.is_file())
     except OSError:
         return 0
+
+
+def target_override_counts() -> dict:
+    document = safe_read_json(TARGET_OVERRIDES_PATH)
+
+    if not isinstance(document, dict):
+        return {"sceneObjects": 0, "groundItems": 0, "npcs": 0}
+
+    counts = {}
+
+    for group in ("sceneObjects", "groundItems", "npcs"):
+        value = document.get(group)
+        counts[group] = len(value) if isinstance(value, dict) else 0
+
+    return counts
 
 
 def tick_range_from_jsonl(path: Path) -> tuple[int | None, int | None]:
@@ -197,6 +213,7 @@ def status_for_session(session: Path | None) -> dict:
     labels_doc = load_label_ranges()
     default_profile = safe_read_json(DEFAULT_PROFILE_PATH)
     default_base_regions, default_tab_profiles = region_doc_model(default_profile)
+    override_counts = target_override_counts()
     status = {
         "sessionPath": str(session) if session else None,
         "defaultProfilePath": str(DEFAULT_PROFILE_PATH),
@@ -207,6 +224,11 @@ def status_for_session(session: Path | None) -> dict:
         "labelsFileExists": DEFAULT_LABELS_PATH.exists(),
         "labelCount": len(labels_doc.get("labels", [])),
         "labelWarnings": labels_doc.get("warnings", []),
+        "targetOverridesPath": str(TARGET_OVERRIDES_PATH),
+        "targetOverridesExist": TARGET_OVERRIDES_PATH.exists(),
+        "targetOverrideSceneObjectCount": override_counts["sceneObjects"],
+        "targetOverrideGroundItemCount": override_counts["groundItems"],
+        "targetOverrideNpcCount": override_counts["npcs"],
         "activeTabCounts": {},
         "frameFileCount": 0,
         "firstFrameFileTick": None,
@@ -234,12 +256,18 @@ def status_for_session(session: Path | None) -> dict:
         "worldGeometryFirstTick": None,
         "worldGeometryLastTick": None,
         "worldGeometryFrameOverlap": None,
+        "worldGeometrySourceSchema": None,
+        "worldObjectKeySupport": False,
+        "worldStaticIndexRecordCount": 0,
+        "sceneStaticIndexExists": False,
+        "sceneStaticIndexRecordCount": 0,
         "worldTargetRoleCounts": {},
         "worldTargetCategoryCounts": {},
         "worldTopTargetTags": {},
         "worldUnclassifiedSceneObjectCount": 0,
         "worldFallbackSceneObjectCount": 0,
         "targetGeometryInspectorCommand": "python telemetry-viewer\\target_geometry_inspector.py",
+        "targetOverrideSuggestionCommand": "python telemetry-viewer\\suggest_target_overrides.py --limit 25",
         "targetCandidatesExist": False,
         "targetCandidateCount": 0,
         "targetCandidatesGeneratedAtUtc": None,
@@ -288,6 +316,7 @@ def status_for_session(session: Path | None) -> dict:
     world_geometry_index_path = ui_geometry_dir / "world_geometry_index.json"
     world_geometry_index = safe_read_json(world_geometry_index_path)
     world_geometry_index = world_geometry_index if isinstance(world_geometry_index, dict) else {}
+    scene_static_index_path = ui_geometry_dir / "scene_static_index.jsonl"
     target_candidates_path = ui_geometry_dir / "target_candidates.jsonl"
     target_candidates_index_path = ui_geometry_dir / "target_candidates_index.json"
     target_candidates_index = safe_read_json(target_candidates_index_path)
@@ -359,6 +388,15 @@ def status_for_session(session: Path | None) -> dict:
                 frame_summary["firstFrameTick"],
                 frame_summary["lastFrameTick"],
             ),
+            "worldGeometrySourceSchema": world_geometry_index.get("sourceSchema"),
+            "worldObjectKeySupport": bool(world_geometry_index.get("objectKeySupport")),
+            "worldStaticIndexRecordCount": (
+                world_geometry_index.get("staticIndexRecordCount")
+                if isinstance(world_geometry_index.get("staticIndexRecordCount"), int)
+                else count_jsonl(scene_static_index_path)
+            ),
+            "sceneStaticIndexExists": scene_static_index_path.exists(),
+            "sceneStaticIndexRecordCount": count_jsonl(scene_static_index_path),
             "worldTargetRoleCounts": (
                 world_geometry_index.get("countsByTargetRole")
                 if isinstance(world_geometry_index.get("countsByTargetRole"), dict)
@@ -498,6 +536,10 @@ def print_human(status: dict) -> None:
     print(f"  session profile exists: {'yes' if status['sessionProfileExists'] else 'no'}")
     print(f"  labels file exists: {'yes' if status['labelsFileExists'] else 'no'}")
     print(f"  label count: {status['labelCount']}")
+    print(f"  target overrides exist: {'yes' if status['targetOverridesExist'] else 'no'}")
+    print(f"  target override scene objects: {status['targetOverrideSceneObjectCount']}")
+    print(f"  target override ground items: {status['targetOverrideGroundItemCount']}")
+    print(f"  target override NPCs: {status['targetOverrideNpcCount']}")
     print(f"  default tab profiles: {status['defaultTabProfileCount']}")
     print(f"  session tab profiles: {status['sessionTabProfileCount']}")
     print("  activeTab counts:")
@@ -531,12 +573,17 @@ def print_human(status: dict) -> None:
     print(f"  world geometry tick range: {status['worldGeometryFirstTick'] or 'none'}-{status['worldGeometryLastTick'] or 'none'}")
     print(f"  world/retained frame overlap: {status['worldGeometryFrameOverlap'] if status['worldGeometryFrameOverlap'] is not None else 'unknown'}")
     print(f"  world geometry generatedAtUtc: {status['worldGeometryGeneratedAtUtc'] or 'none'}")
+    print(f"  world geometry source schema: {status['worldGeometrySourceSchema'] or 'unknown'}")
+    print(f"  world objectKey support: {'yes' if status['worldObjectKeySupport'] else 'no'}")
+    print(f"  scene static index exists: {'yes' if status['sceneStaticIndexExists'] else 'no'}")
+    print(f"  scene static index records: {status['sceneStaticIndexRecordCount']}")
     print(f"  world target roles: {json.dumps(status['worldTargetRoleCounts'], sort_keys=True)}")
     print(f"  world target categories: {json.dumps(status['worldTargetCategoryCounts'], sort_keys=True)}")
     print(f"  world top target tags: {json.dumps(status['worldTopTargetTags'], sort_keys=True)}")
     print(f"  world unclassified scene objects: {status['worldUnclassifiedSceneObjectCount']}")
     print(f"  world fallback scene objects: {status['worldFallbackSceneObjectCount']}")
     print(f"  target geometry inspector: {status['targetGeometryInspectorCommand']}")
+    print(f"  target override suggestions: {status['targetOverrideSuggestionCommand']}")
     print(f"  target candidates exist: {'yes' if status['targetCandidatesExist'] else 'no'}")
     print(f"  target candidate count: {status['targetCandidateCount']}")
     print(f"  target candidates generatedAtUtc: {status['targetCandidatesGeneratedAtUtc'] or 'none'}")

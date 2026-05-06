@@ -48,6 +48,9 @@ GEOMETRY_FIELDS = (
     "geometryAvailable",
     "onScreen",
 )
+SCENE_OBJECT_COLLECTIONS = ("sceneObjects", "visibleSceneObjectRefs", "projectedSceneObjects")
+TARGET_NAME_OVERRIDES_PATH = Path(__file__).resolve().with_name("target_name_overrides.json")
+TARGET_OVERRIDE_GROUPS = ("sceneObjects", "groundItems", "npcs")
 CLASSIFICATION_RULES = (
     ("bank_booth", ("bank booth", "bank chest", "deposit box"), "interactable", "bank", ("bank", "bank_booth", "clickable_candidate")),
     ("banker", ("banker",), "entity", "npc", ("bank", "banker", "clickable_candidate")),
@@ -105,6 +108,7 @@ def output_paths(session: Path) -> dict[str, Path]:
         "outputDir": output_dir,
         "targets": output_dir / "world_targets.jsonl",
         "index": output_dir / "world_geometry_index.json",
+        "staticIndex": output_dir / "scene_static_index.jsonl",
     }
 
 
@@ -183,7 +187,17 @@ def selection_mode(args) -> str:
     if args.tick_range is not None:
         return "range"
 
-    return "default"
+    if args.all_ticks:
+        return "all-ticks"
+
+    return "default-all-raw-ticks"
+
+
+def selection_source(args) -> str:
+    if args.latest_with_frames is not None:
+        return "retained frame tick ids joined to raw ticks"
+
+    return "raw tick records"
 
 
 def read_selected_ticks(session: Path, args) -> tuple[list[dict], dict]:
@@ -224,6 +238,7 @@ def read_selected_ticks(session: Path, args) -> tuple[list[dict], dict]:
     selected_frame_ticks = sorted(selected_tick_ids & retained_ticks)
     selection_info = {
         "selectedBy": selection_mode(args),
+        "selectionSource": selection_source(args),
         "retainedFrameTickCount": len(retained_ticks),
         "retainedFrameTickRange": [min(retained_ticks), max(retained_ticks)] if retained_ticks else None,
         "selectedFrameTickCount": len(selected_frame_ticks),
@@ -268,7 +283,7 @@ def has_projection_fields(tick: dict) -> bool:
     if any(key in tick for key in PROJECTION_TOP_LEVEL_FIELDS):
         return True
 
-    for collection_name in ("npcs", "players", "sceneObjects", "groundItems"):
+    for collection_name in ("npcs", "players", *SCENE_OBJECT_COLLECTIONS, "groundItems"):
         values = tick.get(collection_name)
 
         if not isinstance(values, list):
@@ -279,6 +294,74 @@ def has_projection_fields(tick: dict) -> bool:
                 return True
 
     return False
+
+
+def scene_object_identity_key(tick: dict, scene_object: dict) -> tuple:
+    object_key = scene_object.get("objectKey")
+
+    if object_key not in (None, ""):
+        return ("objectKey", str(object_key))
+
+    return (
+        "fallback",
+        tick.get("tickId"),
+        scene_object.get("kind"),
+        scene_object.get("id"),
+        scene_object.get("hash"),
+        scene_object.get("worldX"),
+        scene_object.get("worldY"),
+        scene_object.get("plane"),
+        scene_object.get("sceneX"),
+        scene_object.get("sceneY"),
+    )
+
+
+def scene_object_sources_for_tick(tick: dict) -> list[dict]:
+    sources = []
+    seen = set()
+
+    for collection_name in SCENE_OBJECT_COLLECTIONS:
+        values = tick.get(collection_name)
+
+        if not isinstance(values, list):
+            continue
+
+        for value in values:
+            if not isinstance(value, dict):
+                continue
+
+            key = scene_object_identity_key(tick, value)
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            sources.append(value)
+
+    return sources
+
+
+def scene_object_delta_sources_for_tick(tick: dict) -> list[dict]:
+    deltas = tick.get("sceneObjectDeltas")
+
+    if not isinstance(deltas, dict):
+        return []
+
+    sources = []
+
+    for field in ("newObjects", "updatedObjects", "despawnedObjects"):
+        values = deltas.get(field)
+
+        if not isinstance(values, list):
+            continue
+
+        for value in values:
+            if isinstance(value, dict):
+                copied = dict(value)
+                copied["_deltaKind"] = field
+                sources.append(copied)
+
+    return sources
 
 
 def frame_payload(session: Path, tick: dict, bundle: dict | None) -> dict:
@@ -391,6 +474,121 @@ def add_tags(tags: list[str], values) -> None:
 
 def is_fallback_target_name(name: str | None) -> bool:
     return isinstance(name, str) and any(name.startswith(prefix) for prefix in FALLBACK_NAME_PREFIXES)
+
+
+def empty_target_overrides() -> dict:
+    return {group: {} for group in TARGET_OVERRIDE_GROUPS}
+
+
+def load_target_overrides(path: Path = TARGET_NAME_OVERRIDES_PATH) -> tuple[dict, list[str]]:
+    warnings = []
+    overrides = empty_target_overrides()
+
+    if not path.exists():
+        return overrides, warnings
+
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            document = json.load(file)
+    except (OSError, json.JSONDecodeError) as error:
+        warnings.append(f"target override file could not be loaded: {error}")
+        return overrides, warnings
+
+    if not isinstance(document, dict):
+        warnings.append("target override file root must be a JSON object")
+        return overrides, warnings
+
+    for group in TARGET_OVERRIDE_GROUPS:
+        group_value = document.get(group, {})
+
+        if not isinstance(group_value, dict):
+            warnings.append(f"target override group {group} must be a JSON object")
+            continue
+
+        overrides[group] = {
+            str(target_id): value
+            for target_id, value in group_value.items()
+            if isinstance(value, dict)
+        }
+
+    return overrides, warnings
+
+
+def target_override_counts(overrides: dict) -> dict:
+    return {
+        group: len(overrides.get(group) or {})
+        for group in TARGET_OVERRIDE_GROUPS
+    }
+
+
+def override_for_target(overrides: dict, group: str, target_id) -> dict | None:
+    if target_id is None:
+        return None
+
+    group_overrides = overrides.get(group)
+
+    if not isinstance(group_overrides, dict):
+        return None
+
+    value = group_overrides.get(str(target_id))
+    return value if isinstance(value, dict) else None
+
+
+def override_tags(override: dict | None) -> list[str]:
+    if not isinstance(override, dict):
+        return []
+
+    value = override.get("tags")
+
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if item is not None and str(item).strip()]
+
+    return []
+
+
+def apply_override_name(target: dict, override: dict | None) -> None:
+    if not isinstance(override, dict):
+        return
+
+    target["overrideApplied"] = True
+    target["overrideSource"] = "target_name_overrides.json"
+    notes = useful_name(override.get("notes"))
+
+    if notes:
+        target["overrideNotes"] = notes
+
+    name = useful_name(override.get("name"))
+
+    if not name:
+        return
+
+    target["name"] = name
+    target["targetName"] = name
+    target["nameSource"] = "override"
+    target["overrideNameApplied"] = True
+
+
+def apply_override_classification(target: dict, override: dict | None) -> None:
+    if not isinstance(override, dict):
+        return
+
+    role = useful_name(override.get("role"))
+    category = useful_name(override.get("category"))
+    tags = [str(tag) for tag in target.get("targetTags") or [] if tag is not None]
+    extra_tags = override_tags(override)
+
+    if role:
+        target["targetRole"] = role
+        target["overrideRoleApplied"] = True
+
+    if category:
+        target["targetCategory"] = category
+        target["overrideCategoryApplied"] = True
+
+    if extra_tags:
+        add_tags(tags, extra_tags)
+        target["targetTags"] = tags
+        target["overrideTagsApplied"] = True
 
 
 def classify_target(target: dict) -> dict:
@@ -614,7 +812,55 @@ def base_target_record(session_id: str, tick: dict, frame: dict, target: dict, g
     }
 
 
-def npc_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
+def scene_object_target_payload(tick: dict, scene_object: dict, overrides: dict) -> dict:
+    object_id = scene_object.get("id")
+    kind = scene_object.get("kind")
+    scene = scene_payload(scene_object)
+    scene_suffix = f"{scene.get('x')}:{scene.get('y')}" if scene else "unknown"
+    object_name = useful_name(scene_object.get("objectName"))
+    legacy_name = useful_name(scene_object.get("name"))
+    fallback_name = fallback_label("SceneObject", object_id)
+    target_name = object_name or legacy_name or fallback_name
+    name_source = (
+        source_name(scene_object.get("objectNameSource"), "objectDefinition")
+        if object_name
+        else "legacy"
+        if legacy_name
+        else "fallback"
+    )
+    target = {
+        "targetType": "sceneObject",
+        "targetId": f"{tick.get('tickId')}:sceneObject:{kind}:{object_id}:{scene_suffix}",
+        "id": object_id,
+        "rawId": object_id,
+        "hash": scene_object.get("hash"),
+        "objectKey": scene_object.get("objectKey"),
+        "kind": kind,
+        "name": target_name,
+        "targetName": target_name,
+        "nameSource": name_source,
+        "objectNameSource": scene_object.get("objectNameSource"),
+        "fallbackName": fallback_name,
+        "actions": scene_object.get("actions"),
+        "world": world_payload(scene_object),
+        "scene": scene,
+        "local": local_payload(scene_object),
+        "source": scene_object.get("source"),
+        "firstSeenTick": scene_object.get("firstSeenTick"),
+        "lastSeenTick": scene_object.get("lastSeenTick"),
+        "lastUpdatedTick": scene_object.get("lastUpdatedTick"),
+        "present": scene_object.get("present"),
+        "despawnedTick": scene_object.get("despawnedTick"),
+        "projectionVersion": scene_object.get("projectionVersion"),
+    }
+    override = override_for_target(overrides, "sceneObjects", object_id)
+    apply_override_name(target, override)
+    target.update(classify_target(target))
+    apply_override_classification(target, override)
+    return target
+
+
+def npc_records(session_id: str, tick: dict, frame: dict, overrides: dict) -> list[dict]:
     records = []
 
     for npc in tick.get("npcs") or []:
@@ -649,7 +895,10 @@ def npc_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
             "scene": scene_payload(npc),
             "local": local_payload(npc),
         }
+        override = override_for_target(overrides, "npcs", npc_id)
+        apply_override_name(target, override)
         target.update(classify_target(target))
+        apply_override_classification(target, override)
         records.append(base_target_record(session_id, tick, frame, target, geometry_payload(npc), state_payload(npc), record_warnings(npc)))
 
     return records
@@ -679,44 +928,14 @@ def player_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
     return records
 
 
-def scene_object_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
+def scene_object_records(session_id: str, tick: dict, frame: dict, overrides: dict) -> list[dict]:
     records = []
 
-    for scene_object in tick.get("sceneObjects") or []:
+    for scene_object in scene_object_sources_for_tick(tick):
         if not isinstance(scene_object, dict):
             continue
 
-        object_id = scene_object.get("id")
-        kind = scene_object.get("kind")
-        scene = scene_payload(scene_object)
-        scene_suffix = f"{scene.get('x')}:{scene.get('y')}" if scene else "unknown"
-        object_name = useful_name(scene_object.get("objectName"))
-        legacy_name = useful_name(scene_object.get("name"))
-        fallback_name = fallback_label("SceneObject", object_id)
-        target_name = object_name or legacy_name or fallback_name
-        name_source = (
-            source_name(scene_object.get("objectNameSource"), "objectDefinition")
-            if object_name
-            else "legacy"
-            if legacy_name
-            else "fallback"
-        )
-        target = {
-            "targetType": "sceneObject",
-            "targetId": f"{tick.get('tickId')}:sceneObject:{kind}:{object_id}:{scene_suffix}",
-            "id": object_id,
-            "rawId": object_id,
-            "kind": kind,
-            "name": target_name,
-            "targetName": target_name,
-            "nameSource": name_source,
-            "objectNameSource": scene_object.get("objectNameSource"),
-            "fallbackName": fallback_name,
-            "world": world_payload(scene_object),
-            "scene": scene,
-            "local": local_payload(scene_object),
-        }
-        target.update(classify_target(target))
+        target = scene_object_target_payload(tick, scene_object, overrides)
         records.append(
             base_target_record(
                 session_id,
@@ -732,7 +951,7 @@ def scene_object_records(session_id: str, tick: dict, frame: dict) -> list[dict]
     return records
 
 
-def ground_item_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
+def ground_item_records(session_id: str, tick: dict, frame: dict, overrides: dict) -> list[dict]:
     records = []
 
     for item in tick.get("groundItems") or []:
@@ -768,7 +987,10 @@ def ground_item_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
             "scene": scene,
             "local": local_payload(item),
         }
+        override = override_for_target(overrides, "groundItems", item_id)
+        apply_override_name(target, override)
         target.update(classify_target(target))
+        apply_override_classification(target, override)
         records.append(base_target_record(session_id, tick, frame, target, geometry_payload(item), state_payload(item), record_warnings(item)))
 
     return records
@@ -778,8 +1000,13 @@ def tile_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
     records = []
     seen = set()
 
-    for source_type, collection_name in (("sceneObject", "sceneObjects"), ("groundItem", "groundItems")):
-        for source in tick.get(collection_name) or []:
+    source_groups = (
+        ("sceneObject", scene_object_sources_for_tick(tick)),
+        ("groundItem", tick.get("groundItems") or []),
+    )
+
+    for source_type, values in source_groups:
+        for source in values:
             if not isinstance(source, dict):
                 continue
 
@@ -842,18 +1069,168 @@ def tile_records(session_id: str, tick: dict, frame: dict) -> list[dict]:
     return records
 
 
-def records_for_tick(session_id: str, session: Path, tick: dict, bundle: dict | None) -> list[dict]:
+def records_for_tick(session_id: str, session: Path, tick: dict, bundle: dict | None, overrides: dict) -> list[dict]:
     frame = frame_payload(session, tick, bundle)
     records = []
-    records.extend(npc_records(session_id, tick, frame))
+    records.extend(npc_records(session_id, tick, frame, overrides))
     records.extend(player_records(session_id, tick, frame))
-    records.extend(scene_object_records(session_id, tick, frame))
-    records.extend(ground_item_records(session_id, tick, frame))
+    records.extend(scene_object_records(session_id, tick, frame, overrides))
+    records.extend(ground_item_records(session_id, tick, frame, overrides))
     records.extend(tile_records(session_id, tick, frame))
     return records
 
 
-def atomic_write_outputs(paths: dict[str, Path], records: list[dict], index: dict) -> None:
+def projection_sample(source: dict) -> dict | None:
+    sample = {
+        "onScreen": source.get("onScreen"),
+        "geometryAvailable": geometry_available(source),
+        "canvasLocation": source.get("canvasLocation"),
+        "canvasPoint": source.get("canvasPoint"),
+        "canvasCenter": source.get("canvasCenter"),
+        "clickboxBounds": source.get("clickboxBounds"),
+        "convexHullBounds": source.get("convexHullBounds"),
+        "tilePolygonBounds": polygon_bounds(source.get("canvasTilePolygon")),
+        "projectionVersion": source.get("projectionVersion"),
+    }
+    return {key: value for key, value in sample.items() if value is not None}
+
+
+def update_scene_static_index(static_objects: dict, session_id: str, tick: dict, overrides: dict) -> None:
+    sources = scene_object_sources_for_tick(tick) + scene_object_delta_sources_for_tick(tick)
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+
+        target = scene_object_target_payload(tick, source, overrides)
+        key = target.get("objectKey")
+
+        if not key:
+            key = ":".join(
+                str(value)
+                for value in (
+                    target.get("targetType"),
+                    target.get("rawId"),
+                    source.get("hash"),
+                    source.get("worldX"),
+                    source.get("worldY"),
+                    source.get("plane"),
+                    source.get("sceneX"),
+                    source.get("sceneY"),
+                )
+            )
+
+        tick_id = tick.get("tickId")
+        existing = static_objects.get(key)
+        sample = projection_sample(source)
+
+        if existing is None:
+            existing = {
+                "schemaVersion": "interaction_geometry.scene_static_index.v1",
+                "sessionId": session_id,
+                "objectKey": key,
+                "id": target.get("id"),
+                "rawId": target.get("rawId"),
+                "hash": target.get("hash"),
+                "kind": target.get("kind"),
+                "name": target.get("name"),
+                "targetName": target.get("targetName"),
+                "nameSource": target.get("nameSource"),
+                "fallbackName": target.get("fallbackName"),
+                "actions": target.get("actions"),
+                "targetRole": target.get("targetRole"),
+                "targetCategory": target.get("targetCategory"),
+                "targetTags": target.get("targetTags"),
+                "world": target.get("world"),
+                "scene": target.get("scene"),
+                "local": target.get("local"),
+                "firstSeenTick": source.get("firstSeenTick", tick_id),
+                "lastSeenTick": source.get("lastSeenTick", tick_id),
+                "lastUpdatedTick": source.get("lastUpdatedTick"),
+                "present": source.get("present"),
+                "despawnedTick": source.get("despawnedTick"),
+                "sources": [],
+                "sampleProjection": sample,
+                "_ticks": set(),
+            }
+            static_objects[key] = existing
+        else:
+            existing["lastSeenTick"] = source.get("lastSeenTick", tick_id)
+            existing["lastUpdatedTick"] = source.get("lastUpdatedTick", existing.get("lastUpdatedTick"))
+            existing["present"] = source.get("present", existing.get("present"))
+            existing["despawnedTick"] = source.get("despawnedTick", existing.get("despawnedTick"))
+
+            if sample:
+                existing["sampleProjection"] = sample
+
+        source_name = source.get("source") or source.get("_deltaKind") or "rawTick"
+
+        if source_name and source_name not in existing["sources"]:
+            existing["sources"].append(source_name)
+
+        if isinstance(tick_id, int):
+            existing["_ticks"].add(tick_id)
+
+
+def finalized_static_index_records(static_objects: dict) -> list[dict]:
+    records = []
+
+    for record in static_objects.values():
+        copied = dict(record)
+        ticks = copied.pop("_ticks", set())
+        copied["ticksSeen"] = len(ticks)
+        records.append(copied)
+
+    records.sort(key=lambda item: (str(item.get("kind") or ""), str(item.get("id") or ""), str(item.get("objectKey") or "")))
+    return records
+
+
+def source_schema_for_ticks(ticks: list[dict]) -> str:
+    if any(isinstance(tick.get("sceneIndexSummary"), dict) or isinstance(tick.get("visibleSceneObjectRefs"), list) for tick in ticks):
+        return "staticIndexDelta"
+
+    if any(isinstance(tick.get("sceneObjects"), list) for tick in ticks):
+        return "fullSnapshot"
+
+    return "unknown"
+
+
+def scene_index_summary_for_ticks(ticks: list[dict]) -> dict:
+    total_static_indexed = 0
+    per_tick_projected = {}
+    full_resync_ticks = []
+    projection_modes = Counter()
+
+    for tick in ticks:
+        tick_id = tick.get("tickId")
+        index_summary = tick.get("sceneIndexSummary") if isinstance(tick.get("sceneIndexSummary"), dict) else {}
+        projection_summary = tick.get("sceneProjectionSummary") if isinstance(tick.get("sceneProjectionSummary"), dict) else {}
+        total_static_indexed = max(total_static_indexed, int(index_summary.get("indexObjectCount") or 0))
+
+        if isinstance(tick_id, int):
+            projected_count = projection_summary.get("visibleObjectCount")
+
+            if projected_count is None and isinstance(tick.get("visibleSceneObjectRefs"), list):
+                projected_count = len(tick.get("visibleSceneObjectRefs") or [])
+
+            if projected_count is not None:
+                per_tick_projected[str(tick_id)] = projected_count
+
+            if index_summary.get("fullResyncThisTick"):
+                full_resync_ticks.append(tick_id)
+
+        if projection_summary.get("projectionRefreshMode"):
+            projection_modes[str(projection_summary.get("projectionRefreshMode"))] += 1
+
+    return {
+        "totalStaticIndexedObjects": total_static_indexed,
+        "perTickProjectedObjectCounts": per_tick_projected,
+        "fullResyncTicks": full_resync_ticks,
+        "projectionRefreshModeCounts": dict(projection_modes),
+    }
+
+
+def atomic_write_outputs(paths: dict[str, Path], records: list[dict], index: dict, static_index_records: list[dict]) -> None:
     output_dir = paths["outputDir"]
     temp_dir = output_dir / f".tmp-world-targets-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}-{os.getpid()}"
 
@@ -872,9 +1249,15 @@ def atomic_write_outputs(paths: dict[str, Path], records: list[dict], index: dic
             json.dump(index, file, indent=2)
             file.write("\n")
 
+        with (temp_dir / "scene_static_index.jsonl").open("w", encoding="utf-8") as file:
+            for record in static_index_records:
+                file.write(json_dump_compact(record))
+                file.write("\n")
+
         output_dir.mkdir(parents=True, exist_ok=True)
         os.replace(temp_dir / "world_targets.jsonl", paths["targets"])
         os.replace(temp_dir / "world_geometry_index.json", paths["index"])
+        os.replace(temp_dir / "scene_static_index.jsonl", paths["staticIndex"])
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
@@ -886,6 +1269,9 @@ def build_world_target_geometry(session: Path, args) -> dict:
     ticks, selection_info = read_selected_ticks(session, args)
     tick_bundles = read_tick_bundles_by_tick(session)
     warnings = list(selection_info.get("warnings") or [])
+    target_overrides, override_warnings = load_target_overrides()
+    warnings.extend(override_warnings)
+    override_counts = target_override_counts(target_overrides)
 
     if ticks and not any(has_projection_fields(tick) for tick in ticks):
         raise RuntimeError(PROJECTION_MISSING_MESSAGE)
@@ -903,15 +1289,23 @@ def build_world_target_geometry(session: Path, args) -> dict:
     counts_by_target_category = Counter()
     counts_by_target_tag = Counter()
     name_diagnostics = Counter()
+    fallback_scene_object_ids = Counter()
+    override_record_count = 0
+    override_name_count = 0
+    override_role_count = 0
+    override_category_count = 0
+    override_tag_count = 0
     unclassified_scene_object_count = 0
     missing_projection_count = 0
     missing_frame_target_count = 0
+    static_objects = {}
 
     for tick in ticks:
         tick_id = tick.get("tickId")
         bundle = tick_bundles.get(tick_id)
+        update_scene_static_index(static_objects, session_id, tick, target_overrides)
 
-        for record in records_for_tick(session_id, session, tick, bundle):
+        for record in records_for_tick(session_id, session, tick, bundle, target_overrides):
             if not should_include_record(record, args):
                 continue
 
@@ -934,6 +1328,21 @@ def build_world_target_geometry(session: Path, args) -> dict:
             if target_type == "sceneObject" and target.get("targetCategory") in {None, "unknown"}:
                 unclassified_scene_object_count += 1
 
+            if target.get("overrideApplied"):
+                override_record_count += 1
+
+            if target.get("overrideNameApplied"):
+                override_name_count += 1
+
+            if target.get("overrideRoleApplied"):
+                override_role_count += 1
+
+            if target.get("overrideCategoryApplied"):
+                override_category_count += 1
+
+            if target.get("overrideTagsApplied"):
+                override_tag_count += 1
+
             if not geometry.get("geometryAvailable"):
                 missing_projection_count += 1
 
@@ -954,10 +1363,14 @@ def build_world_target_geometry(session: Path, args) -> dict:
                 name_diagnostics["fallbackNpcCount" if name_source == "fallback" else "namedNpcCount"] += 1
             elif target_type == "sceneObject":
                 name_diagnostics["fallbackSceneObjectCount" if name_source == "fallback" else "namedSceneObjectCount"] += 1
+                if name_source == "fallback" and target_id is not None:
+                    fallback_scene_object_ids[str(target_id)] += 1
             elif target_type == "groundItem":
                 name_diagnostics["fallbackGroundItemCount" if name_source == "fallback" else "namedGroundItemCount"] += 1
 
     paths = output_paths(session)
+    static_index_records = finalized_static_index_records(static_objects)
+    scene_index_summary = scene_index_summary_for_ticks(ticks)
     fallback_scene_objects = name_diagnostics["fallbackSceneObjectCount"]
     named_scene_objects = name_diagnostics["namedSceneObjectCount"]
 
@@ -978,6 +1391,7 @@ def build_world_target_geometry(session: Path, args) -> dict:
         "generatedAtUtc": utc_now(),
         "sessionPath": str(session),
         "selectedBy": selection_info["selectedBy"],
+        "selectionSource": selection_info["selectionSource"],
         "selectedTickRange": selection_info["selectedTickRange"],
         "retainedFrameTickCount": selection_info["retainedFrameTickCount"],
         "retainedFrameTickRange": selection_info["retainedFrameTickRange"],
@@ -985,6 +1399,13 @@ def build_world_target_geometry(session: Path, args) -> dict:
         "selectedFrameTickRange": selection_info["selectedFrameTickRange"],
         "selectedTickCount": len(ticks),
         "targetRecordCount": len(records),
+        "sourceSchema": source_schema_for_ticks(ticks),
+        "objectKeySupport": any(record.get("target", {}).get("objectKey") for record in records),
+        "staticIndexRecordCount": len(static_index_records),
+        "totalStaticIndexedObjects": scene_index_summary["totalStaticIndexedObjects"],
+        "perTickProjectedObjectCounts": scene_index_summary["perTickProjectedObjectCounts"],
+        "sceneIndexFullResyncTicks": scene_index_summary["fullResyncTicks"],
+        "projectionRefreshModeCounts": scene_index_summary["projectionRefreshModeCounts"],
         "countsByTargetType": dict(counts_by_target_type.most_common()),
         "countsByTargetRole": dict(counts_by_target_role.most_common()),
         "countsByTargetCategory": dict(counts_by_target_category.most_common()),
@@ -993,11 +1414,21 @@ def build_world_target_geometry(session: Path, args) -> dict:
         "countsByGeometryAvailable": dict(counts_by_geometry_available.most_common()),
         "topTargetNames": dict(counts_by_name.most_common(25)),
         "topTargetIds": dict(counts_by_id.most_common(25)),
+        "targetOverridePath": str(TARGET_NAME_OVERRIDES_PATH),
+        "targetOverrideFileExists": TARGET_NAME_OVERRIDES_PATH.exists(),
+        "targetOverrideCounts": override_counts,
+        "overrideRecordCount": override_record_count,
+        "overrideNameCount": override_name_count,
+        "overrideRoleCount": override_role_count,
+        "overrideCategoryCount": override_category_count,
+        "overrideTagCount": override_tag_count,
+        "fallbackSceneObjectIds": dict(fallback_scene_object_ids.most_common(25)),
         "nameDiagnostics": {
             "namedNpcCount": name_diagnostics["namedNpcCount"],
             "fallbackNpcCount": name_diagnostics["fallbackNpcCount"],
             "namedSceneObjectCount": name_diagnostics["namedSceneObjectCount"],
             "fallbackSceneObjectCount": name_diagnostics["fallbackSceneObjectCount"],
+            "fallbackSceneObjectIds": dict(fallback_scene_object_ids.most_common(25)),
             "namedGroundItemCount": name_diagnostics["namedGroundItemCount"],
             "fallbackGroundItemCount": name_diagnostics["fallbackGroundItemCount"],
             "unclassifiedSceneObjectCount": unclassified_scene_object_count,
@@ -1017,11 +1448,12 @@ def build_world_target_geometry(session: Path, args) -> dict:
         "paths": {
             "worldTargets": "interaction_geometry/world_targets.jsonl",
             "worldGeometryIndex": "interaction_geometry/world_geometry_index.json",
+            "sceneStaticIndex": "interaction_geometry/scene_static_index.jsonl",
         },
         "warnings": warnings[:100],
         "warningCount": len(warnings),
     }
-    atomic_write_outputs(paths, records, index)
+    atomic_write_outputs(paths, records, index, static_index_records)
     return index
 
 
@@ -1034,6 +1466,11 @@ def parse_args():
     )
     parser.add_argument("--session", help="Telemetry session directory to process.")
     parser.add_argument("--sessions-dir", help="Override telemetry sessions directory when --session is omitted.")
+    parser.add_argument(
+        "--all-ticks",
+        action="store_true",
+        help="Explicitly process all matching raw ticks. This is also the default when no tick selector is supplied.",
+    )
     parser.add_argument("--latest", type=positive_int, metavar="N", help="Select the newest N matching raw ticks.")
     parser.add_argument(
         "--latest-with-frames",
@@ -1052,6 +1489,15 @@ def parse_args():
     if args.latest is not None and args.latest_with_frames is not None:
         parser.error("--latest-with-frames cannot be combined with --latest")
 
+    if args.all_ticks and args.latest is not None:
+        parser.error("--all-ticks cannot be combined with --latest")
+
+    if args.all_ticks and args.latest_with_frames is not None:
+        parser.error("--all-ticks cannot be combined with --latest-with-frames")
+
+    if args.all_ticks and args.tick_range is not None:
+        parser.error("--all-ticks cannot be combined with --range")
+
     if args.tick_range is not None:
         start, end = args.tick_range
 
@@ -1064,10 +1510,15 @@ def parse_args():
 def print_summary(index: dict) -> None:
     print(f"session: {index['sessionPath']}")
     print(f"selected by: {index.get('selectedBy')}")
+    print(f"selection source: {index.get('selectionSource') or 'raw tick records'}")
     print(f"selected ticks: {index['selectedTickCount']}")
     print(f"selected tick range: {index.get('selectedTickRange') or 'none'}")
     print(f"retained frame tick range: {index.get('retainedFrameTickRange') or 'none'}")
     print(f"selected frame ticks: {index.get('selectedFrameTickCount', 0)}")
+    print(f"source schema: {index.get('sourceSchema', 'unknown')}")
+    print(f"objectKey support: {'yes' if index.get('objectKeySupport') else 'no'}")
+    print(f"static scene index records: {index.get('staticIndexRecordCount', 0)}")
+    print(f"total static indexed objects: {index.get('totalStaticIndexedObjects', 0)}")
     print(f"target records: {index['targetRecordCount']}")
     print("counts by targetType:")
 
@@ -1110,6 +1561,20 @@ def print_summary(index: dict) -> None:
     print(f"  unclassified scene objects: {diagnostics.get('unclassifiedSceneObjectCount', 0)}")
     print(f"  named ground items: {diagnostics.get('namedGroundItemCount', 0)}")
     print(f"  fallback ground items: {diagnostics.get('fallbackGroundItemCount', 0)}")
+    print("target overrides:")
+    print(f"  file exists: {'yes' if index.get('targetOverrideFileExists') else 'no'}")
+    print(f"  entries: {json.dumps(index.get('targetOverrideCounts') or {}, sort_keys=True)}")
+    print(f"  records with overrides: {index.get('overrideRecordCount', 0)}")
+    print(f"  override names applied: {index.get('overrideNameCount', 0)}")
+    print(f"  override categories applied: {index.get('overrideCategoryCount', 0)}")
+
+    fallback_ids = index.get("fallbackSceneObjectIds") or diagnostics.get("fallbackSceneObjectIds") or {}
+
+    if fallback_ids:
+        print("top fallback scene object IDs:")
+
+        for object_id, count in list(fallback_ids.items())[:10]:
+            print(f"  {object_id}: {count}")
 
     if index["warnings"]:
         print("warnings:")

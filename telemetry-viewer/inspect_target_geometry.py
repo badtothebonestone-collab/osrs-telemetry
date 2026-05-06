@@ -33,6 +33,7 @@ TARGET_ROLES = {
     "ui",
     "unknown",
 }
+FALLBACK_NAME_PREFIXES = ("Npc[", "SceneObject[", "GroundItem[", "Tile[")
 
 
 def resolve_session(args) -> Path | None:
@@ -151,6 +152,22 @@ def target_id_values(record: dict) -> list[str]:
     return values
 
 
+def fallback_name_for(record: dict) -> bool:
+    target = target_for(record)
+    name_source = str(target.get("nameSource") or "").lower()
+
+    if name_source == "fallback":
+        return True
+
+    name = target_name_for(record)
+    fallback_name = target.get("fallbackName")
+
+    if fallback_name is not None and name == str(fallback_name):
+        return True
+
+    return any(name.startswith(prefix) for prefix in FALLBACK_NAME_PREFIXES)
+
+
 def target_role_for(record: dict) -> str:
     target = target_for(record)
     value = target.get("targetRole")
@@ -208,6 +225,10 @@ def target_tags_for(record: dict) -> list[str]:
         return ["ui"]
 
     return []
+
+
+def unclassified_for(record: dict) -> bool:
+    return target_role_for(record).lower() == "unknown" or target_category_for(record).lower() == "unknown"
 
 
 def geometry_available_for(record: dict) -> bool:
@@ -282,6 +303,99 @@ def bounds_summary(record: dict) -> str:
             return f"{key}={len(polygon)}pts"
 
     return ""
+
+
+def bounds_area_from_bounds(bounds) -> float:
+    if not isinstance(bounds, dict):
+        return 0.0
+
+    w = bounds.get("w")
+    h = bounds.get("h")
+
+    if isinstance(w, (int, float)) and isinstance(h, (int, float)):
+        return max(0.0, float(w)) * max(0.0, float(h))
+
+    return 0.0
+
+
+def bounds_area_from_polygon(polygon) -> float:
+    if not isinstance(polygon, list) or not polygon:
+        return 0.0
+
+    xs = []
+    ys = []
+
+    for point in polygon:
+        if isinstance(point, dict):
+            x = point.get("x")
+            y = point.get("y")
+        elif isinstance(point, list) and len(point) >= 2:
+            x = point[0]
+            y = point[1]
+        else:
+            continue
+
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+            xs.append(float(x))
+            ys.append(float(y))
+
+    if not xs or not ys:
+        return 0.0
+
+    return max(0.0, max(xs) - min(xs)) * max(0.0, max(ys) - min(ys))
+
+
+def bounds_area_detail(record: dict) -> tuple[float, str]:
+    geometry = geometry_for(record)
+    best_area = 0.0
+    best_key = ""
+
+    for key in ("clickboxBounds", "convexHullBounds", "pixelBox", "aimBounds"):
+        area = bounds_area_from_bounds(geometry.get(key))
+
+        if area > best_area:
+            best_area = area
+            best_key = key
+
+    for key in ("tilePolygon", "clickboxPolygon", "convexHullPolygon"):
+        area = bounds_area_from_polygon(geometry.get(key))
+
+        if area > best_area:
+            best_area = area
+            best_key = key
+
+    return best_area, best_key
+
+
+def unclassified_scene_object_for_review(record: dict) -> bool:
+    if target_type_for(record) != "sceneObject":
+        return False
+
+    role = target_role_for(record).lower()
+    category = target_category_for(record).lower()
+
+    if role not in {"unknown", "decoration"} and category not in {"unknown", "sceneobject", "decoration"}:
+        return False
+
+    return fallback_name_for(record) and on_screen_for(record) is True and geometry_available_for(record)
+
+
+def override_snippet_for_id(target_id) -> str:
+    text = json.dumps(
+        {
+            str(target_id): {
+                "name": "Tree",
+                "role": "interactable",
+                "category": "tree",
+                "tags": ["tree", "clickable_candidate"],
+            }
+        },
+        indent=2,
+    )
+    return "\n".join(
+        line[2:] if line.startswith("  ") else line
+        for line in text.splitlines()[1:-1]
+    )
 
 
 def position_summary(record: dict) -> str:
@@ -438,6 +552,9 @@ class TargetGeometryDataset:
             if selected_ticks is not None and tick_id not in selected_ticks:
                 continue
 
+            if args.unclassified_scene_objects and not unclassified_scene_object_for_review(record):
+                continue
+
             if args.target_type != "all" and target_type_for(record) != args.target_type:
                 continue
 
@@ -476,6 +593,8 @@ class TargetGeometryDataset:
                         target.get("objectNameSource"),
                         target.get("itemNameSource"),
                         target.get("fallbackName"),
+                        target.get("overrideSource"),
+                        target.get("overrideNotes"),
                     )
                 ).lower()
 
@@ -489,6 +608,15 @@ class TargetGeometryDataset:
                 if not any(needle in value for value in ids):
                     continue
 
+            if args.fallback_only and not fallback_name_for(record):
+                continue
+
+            if args.unclassified and not unclassified_for(record):
+                continue
+
+            if args.large_only and bounds_area_detail(record)[0] < args.min_area:
+                continue
+
             if args.only_on_screen and on_screen_for(record) is not True:
                 continue
 
@@ -497,7 +625,7 @@ class TargetGeometryDataset:
 
             matches.append(record)
 
-        return matches[: args.limit]
+        return matches if args.top_ids else matches[: args.limit]
 
     def summary(self) -> dict:
         target_type_counts = Counter()
@@ -648,6 +776,12 @@ def compact_record_line(record: dict) -> str:
     if bounds:
         pieces.append(bounds)
 
+    area, area_source = bounds_area_detail(record)
+
+    if area:
+        pieces.append(f"boundsArea={area:.0f}")
+        pieces.append(f"areaSource={area_source}")
+
     if position:
         pieces.append(position)
 
@@ -661,6 +795,107 @@ def compact_record_line(record: dict) -> str:
         pieces.append(f"source={source_kind}")
 
     return " ".join(pieces)
+
+
+def world_position_text(record: dict) -> str:
+    world = target_for(record).get("world")
+
+    if not isinstance(world, dict):
+        return ""
+
+    x = world.get("x")
+    y = world.get("y")
+    plane = world.get("plane")
+
+    if x is None and y is None and plane is None:
+        return ""
+
+    return f"{x},{y},{plane}"
+
+
+def group_records_by_target_id(records: list[dict]) -> list[dict]:
+    groups = {}
+
+    for record in records:
+        target_id = target_id_for(record)
+
+        if target_id is None:
+            continue
+
+        key = str(target_id)
+        area, area_source = bounds_area_detail(record)
+        group = groups.setdefault(
+            key,
+            {
+                "id": key,
+                "count": 0,
+                "ticks": set(),
+                "areas": [],
+                "areaSources": Counter(),
+                "worldPositions": Counter(),
+                "name": target_name_for(record),
+                "category": target_category_for(record),
+                "role": target_role_for(record),
+                "tags": target_tags_for(record),
+            },
+        )
+        group["count"] += 1
+
+        if isinstance(record.get("tickId"), int):
+            group["ticks"].add(record["tickId"])
+
+        if area > 0:
+            group["areas"].append(area)
+            group["areaSources"][area_source or "unknown"] += 1
+
+        world_text = world_position_text(record)
+
+        if world_text:
+            group["worldPositions"][world_text] += 1
+
+    output = []
+
+    for group in groups.values():
+        areas = group.pop("areas")
+        area_sources = group.pop("areaSources")
+        world_positions = group.pop("worldPositions")
+        ticks = sorted(group.pop("ticks"))
+        group["exampleTicks"] = ticks[:8]
+        group["bestArea"] = max(areas) if areas else 0.0
+        group["averageArea"] = (sum(areas) / len(areas)) if areas else 0.0
+        group["bestAreaSource"] = area_sources.most_common(1)[0][0] if area_sources else ""
+        group["exampleWorldPositions"] = [position for position, _count in world_positions.most_common(5)]
+        group["suggestedOverride"] = {
+            group["id"]: {
+                "name": "Tree",
+                "role": "interactable",
+                "category": "tree",
+                "tags": ["tree", "clickable_candidate"],
+            }
+        }
+        output.append(group)
+
+    output.sort(key=lambda item: (item["bestArea"], item["count"], item["id"]), reverse=True)
+    return output
+
+
+def print_top_id_groups(groups: list[dict], limit: int) -> None:
+    if not groups:
+        print("No target IDs matched.")
+        return
+
+    for group in groups[:limit]:
+        tags = ",".join(group.get("tags") or []) or "-"
+        ticks = ",".join(str(tick) for tick in group.get("exampleTicks") or []) or "-"
+        positions = ";".join(group.get("exampleWorldPositions") or []) or "-"
+        print(
+            f"id={group['id']} count={group['count']} name={group.get('name') or '-'} "
+            f"category={group.get('category') or '-'} role={group.get('role') or '-'} "
+            f"tags={tags} bestArea={group['bestArea']:.0f} avgArea={group['averageArea']:.0f} "
+            f"areaSource={group.get('bestAreaSource') or '-'} ticks={ticks} world={positions}"
+        )
+        print("suggested override:")
+        print(override_snippet_for_id(group["id"]))
 
 
 def parse_args():
@@ -682,6 +917,16 @@ def parse_args():
     parser.add_argument("--tag", help="Exact target tag filter.")
     parser.add_argument("--name", help="Case-insensitive text filter against name/type/role/category/tags/id fields.")
     parser.add_argument("--id", help="Text filter against id/rawId/targetId.")
+    parser.add_argument("--fallback-only", action="store_true", help="Only show targets using fallback labels such as SceneObject[12345].")
+    parser.add_argument("--unclassified", action="store_true", help="Only show targets whose role or category is unknown.")
+    parser.add_argument(
+        "--unclassified-scene-objects",
+        action="store_true",
+        help="Show on-screen fallback scene objects with unknown/decorative classification and usable geometry.",
+    )
+    parser.add_argument("--large-only", action="store_true", help="Only show/group targets with bounds area at least --min-area.")
+    parser.add_argument("--min-area", type=float, default=500.0, help="Minimum bounds area for --large-only. Default: 500.")
+    parser.add_argument("--top-ids", action="store_true", help="Group matching targets by id/rawId and print the largest repeated IDs.")
     parser.add_argument("--only-on-screen", action="store_true", help="Only show targets with onScreen=true.")
     parser.add_argument("--geometry-available", action="store_true", help="Only show targets with usable geometry.")
     parser.add_argument("--limit", type=int, default=50, help="Maximum compact rows or JSON lines to print. Default: 50.")
@@ -708,6 +953,12 @@ def parse_args():
 
     if args.limit < 1:
         parser.error("--limit must be positive")
+
+    if args.min_area < 0:
+        parser.error("--min-area must be zero or greater")
+
+    if args.unclassified_scene_objects:
+        args.target_type = "sceneObject"
 
     return args
 
@@ -739,12 +990,21 @@ def main() -> int:
     matches = dataset.matching_records(args)
 
     if args.json:
+        if args.top_ids:
+            for group in group_records_by_target_id(matches)[: args.limit]:
+                print(json.dumps(group, separators=(",", ":")))
+            return 0
+
         for record in matches:
             cleaned = dict(record)
             cleaned.pop("_sourceKind", None)
             cleaned.pop("_sourceIndex", None)
             print(json.dumps(cleaned, separators=(",", ":")))
     else:
+        if args.top_ids:
+            print_top_id_groups(group_records_by_target_id(matches), args.limit)
+            return 0
+
         if not matches:
             print("No targets matched.")
 

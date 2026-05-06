@@ -36,6 +36,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPLAY_URL = "http://127.0.0.1:8765/"
 CALIBRATION_URL = "http://127.0.0.1:8770/"
 TRAINING_INSPECTOR_URL = "http://127.0.0.1:8790/"
+TARGET_GEOMETRY_INSPECTOR_URL = "http://127.0.0.1:8800/"
 CALIBRATION_PROFILE_DIR = Path(__file__).resolve().parent / "calibration_profiles"
 TAB_LABELS_PATH = Path(__file__).resolve().parent / "tab_labels.json"
 REPLAY_LABELING_HELP_PATH = PROJECT_ROOT / "docs" / "analysis_examples.md"
@@ -57,6 +58,11 @@ SESSION_AWARE_PROCESS_KEYS = {
     "training_inspector",
     "curated_export",
     "curated_export_splits",
+    "world_geometry",
+    "target_candidates",
+    "target_coverage",
+    "target_override_suggestions",
+    "target_geometry_inspector",
 }
 
 
@@ -225,6 +231,43 @@ PROCESS_SPECS = {
         "Path Regression Tests",
         ["python", "telemetry-viewer\\tests\\test_telemetry_paths.py"],
         False,
+    ),
+    "world_geometry": ProcessSpec(
+        "world_geometry",
+        "Build World Target Geometry",
+        ["python", "telemetry-viewer\\build_world_target_geometry.py", "--target-type", "all"],
+        False,
+    ),
+    "target_candidates": ProcessSpec(
+        "target_candidates",
+        "Select Target Candidates",
+        ["python", "telemetry-viewer\\select_target_candidates.py", "--target-type", "all", "--limit", "500", "--summary"],
+        False,
+    ),
+    "target_coverage": ProcessSpec(
+        "target_coverage",
+        "Target Coverage Diagnostic",
+        [
+            "python",
+            "telemetry-viewer\\diagnose_target_coverage.py",
+            "--latest",
+            "25",
+            "--project-root",
+            str(PROJECT_ROOT),
+        ],
+        False,
+    ),
+    "target_override_suggestions": ProcessSpec(
+        "target_override_suggestions",
+        "Suggest Target Overrides",
+        ["python", "telemetry-viewer\\suggest_target_overrides.py", "--limit", "25"],
+        False,
+    ),
+    "target_geometry_inspector": ProcessSpec(
+        "target_geometry_inspector",
+        "Target Geometry Inspector",
+        ["python", "telemetry-viewer\\target_geometry_inspector.py", "--port", "8800"],
+        True,
     ),
 }
 
@@ -914,7 +957,9 @@ class LauncherApp(Tk):
             text=(
                 "Current Happy Path: 1. Start Collection  2. Calibrate if needed, then Save Default Profile  "
                 "3. Replay / label tick ranges  4. Build Dataset  5. Inspect Dataset  "
-                "6. Export Curated  7. Run Doctor / Status"
+                "6. Export Curated  7. Run Doctor / Status\n"
+                "Target Geometry QA: collect raw session, then build world target geometry, select target candidates, "
+                "run target coverage diagnostic, and open the target geometry inspector."
             ),
             justify="left",
             wraplength=980,
@@ -1064,6 +1109,18 @@ class LauncherApp(Tk):
                 ),
                 ("Run Validate Session", lambda: self.start_process("validate"), "validate"),
                 ("Run Path Tests", lambda: self.start_process("tests"), "tests"),
+            ],
+        )
+        self._add_button_group(
+            self.advanced_frame,
+            "Target Geometry QA",
+            [
+                ("Build World Target Geometry", self.build_world_target_geometry, "world_geometry"),
+                ("Select Target Candidates", self.select_target_candidates, "target_candidates"),
+                ("Run Target Coverage Diagnostic", self.run_target_coverage_diagnostic, "target_coverage"),
+                ("Suggest Target Overrides", self.suggest_target_overrides, "target_override_suggestions"),
+                ("Start Target Geometry Inspector", self.open_target_geometry_inspector_workflow, "target_geometry_inspector"),
+                ("Open Target Geometry Inspector", self.open_target_geometry_inspector, None),
             ],
         )
         self._add_button_group(
@@ -1651,6 +1708,57 @@ class LauncherApp(Tk):
         )
         self.start_process("dataset_status", session_override=session)
 
+    def build_world_target_geometry(self):
+        session = self.session_for_tool("Build World Target Geometry")
+
+        if session is None:
+            return
+
+        self.log("Build World Target Geometry", "Builds broad world_targets.jsonl from raw read-only scene/NPC/player/object geometry.")
+        self.log("Build World Target Geometry", f"Resolved session: {session}")
+        self.start_process("world_geometry", session_override=session)
+
+    def select_target_candidates(self):
+        session = self.session_for_tool("Select Target Candidates")
+
+        if session is None:
+            return
+
+        self.log("Select Target Candidates", "Ranks/filter-selects existing world/UI targets; sparse candidates do not mean sparse raw/world capture.")
+        self.log("Select Target Candidates", f"Resolved session: {session}")
+        self.start_process("target_candidates", session_override=session)
+
+    def run_target_coverage_diagnostic(self):
+        session = self.session_for_tool("Run Target Coverage Diagnostic")
+
+        if session is None:
+            return
+
+        self.log("Target Coverage Diagnostic", "Reports raw -> world_targets -> target_candidates coverage and scene capture cap pressure.")
+        self.log("Target Coverage Diagnostic", f"Resolved session: {session}")
+        self.start_process("target_coverage", session_override=session)
+
+    def suggest_target_overrides(self):
+        session = self.session_for_tool("Suggest Target Overrides")
+
+        if session is None:
+            return
+
+        self.log("Suggest Target Overrides", "Prints read-only skeletons for fallback/unclassified scene object labels; it does not edit override files.")
+        self.log("Suggest Target Overrides", f"Resolved session: {session}")
+        self.start_process("target_override_suggestions", session_override=session)
+
+    def open_target_geometry_inspector_workflow(self):
+        session = self.session_for_tool("Open Target Geometry Inspector")
+
+        if session is None:
+            return
+
+        self.log("Target Geometry Inspector", "Inspect world_targets first for broad QA; use candidates for task-specific QA.")
+        self.log("Target Geometry Inspector", f"Opening local URL: {TARGET_GEOMETRY_INSPECTOR_URL}")
+        self.start_process("target_geometry_inspector", session_override=session, restart_if_command_changed=True)
+        self.after(800, self.open_target_geometry_inspector)
+
     def inspect_dataset_workflow(self):
         session = self.session_for_tool("Inspect Dataset", prefer_training_data=True)
 
@@ -2043,6 +2151,10 @@ class LauncherApp(Tk):
     def open_training_dataset_inspector(self):
         webbrowser.open(TRAINING_INSPECTOR_URL)
         self.log("Launcher", f"Opened {TRAINING_INSPECTOR_URL}")
+
+    def open_target_geometry_inspector(self):
+        webbrowser.open(TARGET_GEOMETRY_INSPECTOR_URL)
+        self.log("Launcher", f"Opened {TARGET_GEOMETRY_INSPECTOR_URL}")
 
     def open_labels_file(self):
         if not TAB_LABELS_PATH.exists():

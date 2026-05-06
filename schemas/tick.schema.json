@@ -45,6 +45,27 @@
       "items": { "$ref": "#/$defs/projectedActorRecord" }
     },
     "widgets": { "type": ["array", "null"] },
+    "sceneCaptureSummary": {
+      "anyOf": [{ "$ref": "#/$defs/sceneCaptureSummary" }, { "type": "null" }],
+      "description": "Read-only diagnostic counters describing the bounded scene object scan for this tick."
+    },
+    "sceneIndexSummary": {
+      "anyOf": [{ "$ref": "#/$defs/sceneIndexSummary" }, { "type": "null" }],
+      "description": "Optional diagnostic counters for static scene index mode."
+    },
+    "sceneProjectionSummary": {
+      "anyOf": [{ "$ref": "#/$defs/sceneProjectionSummary" }, { "type": "null" }],
+      "description": "Optional diagnostic counters for static scene projection refresh/reuse."
+    },
+    "sceneObjectDeltas": {
+      "anyOf": [{ "$ref": "#/$defs/sceneObjectDeltas" }, { "type": "null" }],
+      "description": "Optional compact scene object changes emitted by static scene index mode."
+    },
+    "visibleSceneObjectRefs": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/projectedSceneObjectRecord" },
+      "description": "Optional projected scene object refs emitted by static scene index mode."
+    },
     "sceneObjects": {
       "type": ["array", "null"],
       "items": { "$ref": "#/$defs/projectedSceneObjectRecord" }
@@ -95,6 +116,16 @@
       "type": ["integer", "null"],
       "minimum": 0,
       "description": "Total telemetry records dropped because the writer queue was full."
+    },
+    "sceneCaptureDurationMillis": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Approximate elapsed time spent in read-only scene capture for this tick."
+    },
+    "snapshotBuildDurationMillis": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Approximate elapsed time spent building the tick snapshot before enqueue."
     }
   },
   "$defs": {
@@ -142,10 +173,115 @@
       },
       "additionalProperties": true
     },
+    "sceneCaptureSummary": {
+      "type": "object",
+      "description": "Diagnostic-only counters for the bounded, read-only scene scan. Counters explain capture caps without adding object payload.",
+      "properties": {
+        "sceneCaptureMode": { "type": ["string", "null"] },
+        "fullCurrentPlaneScan": { "type": ["boolean", "null"] },
+        "configuredRadius": { "type": ["integer", "null"], "minimum": 0 },
+        "configuredMaxSceneObjects": { "type": ["integer", "null"], "minimum": 0 },
+        "scanRadius": { "type": ["integer", "null"], "minimum": 0 },
+        "maxSceneObjects": { "type": ["integer", "null"], "minimum": 0 },
+        "maxGroundItems": { "type": ["integer", "null"], "minimum": 0 },
+        "scannedPlane": { "type": ["integer", "null"] },
+        "scannedTiles": { "type": ["integer", "null"], "minimum": 0 },
+        "tilesWithObjects": { "type": ["integer", "null"], "minimum": 0 },
+        "scanMinSceneX": { "type": ["integer", "null"] },
+        "scanMaxSceneX": { "type": ["integer", "null"] },
+        "scanMinSceneY": { "type": ["integer", "null"] },
+        "scanMaxSceneY": { "type": ["integer", "null"] },
+        "scanWidth": { "type": ["integer", "null"], "minimum": 0 },
+        "scanHeight": { "type": ["integer", "null"], "minimum": 0 },
+        "sceneObjectsSeen": { "type": ["integer", "null"], "minimum": 0 },
+        "sceneObjectsCaptured": { "type": ["integer", "null"], "minimum": 0 },
+        "sceneObjectsSkippedByCap": { "type": ["integer", "null"], "minimum": 0 },
+        "sceneObjectCapHit": { "type": ["boolean", "null"] },
+        "captureRatio": { "type": ["number", "null"], "minimum": 0 },
+        "gameObjectsSeen": { "type": ["integer", "null"], "minimum": 0 },
+        "wallObjectsSeen": { "type": ["integer", "null"], "minimum": 0 },
+        "decorativeObjectsSeen": { "type": ["integer", "null"], "minimum": 0 },
+        "groundObjectsSeen": { "type": ["integer", "null"], "minimum": 0 },
+        "gameObjectsCaptured": { "type": ["integer", "null"], "minimum": 0 },
+        "wallObjectsCaptured": { "type": ["integer", "null"], "minimum": 0 },
+        "decorativeObjectsCaptured": { "type": ["integer", "null"], "minimum": 0 },
+        "groundObjectsCaptured": { "type": ["integer", "null"], "minimum": 0 },
+        "gameObjectsSkippedByCap": { "type": ["integer", "null"], "minimum": 0 },
+        "wallObjectsSkippedByCap": { "type": ["integer", "null"], "minimum": 0 },
+        "decorativeObjectsSkippedByCap": { "type": ["integer", "null"], "minimum": 0 },
+        "groundObjectsSkippedByCap": { "type": ["integer", "null"], "minimum": 0 },
+        "nullObjectsSkipped": { "type": ["integer", "null"], "minimum": 0 },
+        "groundItemsSeen": { "type": ["integer", "null"], "minimum": 0 },
+        "groundItemsCaptured": { "type": ["integer", "null"], "minimum": 0 },
+        "groundItemsSkippedByCap": { "type": ["integer", "null"], "minimum": 0 },
+        "groundItemCapHit": { "type": ["boolean", "null"] },
+        "nullGroundItemsSkipped": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "sceneIndexSummary": {
+      "type": "object",
+      "description": "Diagnostic-only counters for the optional static scene object index.",
+      "properties": {
+        "sceneCaptureMode": { "type": ["string", "null"] },
+        "indexEnabled": { "type": ["boolean", "null"] },
+        "indexObjectCount": { "type": ["integer", "null"], "minimum": 0 },
+        "presentObjectCount": { "type": ["integer", "null"], "minimum": 0 },
+        "newlyIndexedCount": { "type": ["integer", "null"], "minimum": 0 },
+        "updatedCount": { "type": ["integer", "null"], "minimum": 0 },
+        "despawnedCount": { "type": ["integer", "null"], "minimum": 0 },
+        "fullResyncThisTick": { "type": ["boolean", "null"] },
+        "resyncReason": { "type": ["string", "null"] },
+        "indexCapHit": { "type": ["boolean", "null"] },
+        "maxSceneIndexObjects": { "type": ["integer", "null"], "minimum": 0 },
+        "sceneIndexBuildDurationMillis": { "type": ["integer", "null"], "minimum": 0 },
+        "sceneIndexUpdateDurationMillis": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "sceneProjectionSummary": {
+      "type": "object",
+      "description": "Diagnostic-only counters for projection refresh/reuse in static scene index mode.",
+      "properties": {
+        "projectionStateHash": { "type": ["string", "null"] },
+        "projectionStateChanged": { "type": ["boolean", "null"] },
+        "projectionRefreshMode": { "type": ["string", "null"] },
+        "projectionCandidatesConsidered": { "type": ["integer", "null"], "minimum": 0 },
+        "projectionObjectsUpdated": { "type": ["integer", "null"], "minimum": 0 },
+        "projectionObjectsReused": { "type": ["integer", "null"], "minimum": 0 },
+        "projectionDurationMillis": { "type": ["integer", "null"], "minimum": 0 },
+        "visibleObjectCount": { "type": ["integer", "null"], "minimum": 0 },
+        "onScreenObjectCount": { "type": ["integer", "null"], "minimum": 0 },
+        "geometryAvailableCount": { "type": ["integer", "null"], "minimum": 0 },
+        "missingGeometryCount": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "sceneObjectDeltas": {
+      "type": "object",
+      "description": "Compact scene object changes from static scene index mode.",
+      "properties": {
+        "newObjects": { "type": ["array", "null"], "items": { "$ref": "#/$defs/projectedSceneObjectRecord" } },
+        "updatedObjects": { "type": ["array", "null"], "items": { "$ref": "#/$defs/projectedSceneObjectRecord" } },
+        "despawnedObjects": { "type": ["array", "null"], "items": { "$ref": "#/$defs/projectedSceneObjectRecord" } }
+      },
+      "additionalProperties": true
+    },
     "projectedSceneObjectRecord": {
       "type": "object",
       "description": "Scene object record. Projection fields are optional and defensive.",
       "properties": {
+        "objectKey": { "type": ["string", "null"] },
+        "hash": { "type": ["integer", "number", "string", "null"] },
+        "kind": { "type": ["string", "null"] },
+        "actions": { "type": ["array", "null"], "items": { "type": ["string", "null"] } },
+        "firstSeenTick": { "type": ["integer", "null"], "minimum": 0 },
+        "lastSeenTick": { "type": ["integer", "null"], "minimum": 0 },
+        "lastUpdatedTick": { "type": ["integer", "null"], "minimum": 0 },
+        "present": { "type": ["boolean", "null"] },
+        "despawnedTick": { "type": ["integer", "null"], "minimum": 0 },
+        "source": { "type": ["string", "null"] },
+        "projectionVersion": { "type": ["integer", "null"], "minimum": 0 },
         "localX": { "type": ["integer", "null"] },
         "localY": { "type": ["integer", "null"] },
         "objectName": { "type": ["string", "null"] },

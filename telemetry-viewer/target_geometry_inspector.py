@@ -2,6 +2,7 @@ import argparse
 import json
 import mimetypes
 import re
+import time
 from collections import Counter, defaultdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,11 @@ MISSING_UI_MESSAGE = "Run python telemetry-viewer\\build_ui_target_geometry.py f
 MISSING_CANDIDATES_MESSAGE = "Run python telemetry-viewer\\select_target_candidates.py first."
 FRAME_TICK_RE = re.compile(r"frame-tick-(\d+)\.[^.]+$", re.IGNORECASE)
 FRAME_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+TARGET_OVERRIDES_PATH = Path(__file__).resolve().with_name("target_name_overrides.json")
+TARGET_OVERRIDE_GROUPS = {"sceneObjects", "groundItems", "npcs"}
+TARGET_OVERRIDE_ROLES = {"interactable", "obstacle", "navigation", "decoration", "entity", "item", "ui", "unknown"}
+LIVE_READ_RETRY_ATTEMPTS = 3
+LIVE_READ_RETRY_DELAY_SECONDS = 0.025
 
 
 def resolve_session(args) -> Path | None:
@@ -27,35 +33,75 @@ def resolve_session(args) -> Path | None:
     return find_newest_session(get_sessions_dir(args.sessions_dir))
 
 
-def read_jsonl(path: Path) -> tuple[list[dict], list[str]]:
+def read_jsonl(path: Path, *, retry_attempts: int = 1, retry_delay: float = 0.0, strict_jsonl: bool = False) -> tuple[list[dict], list[str]]:
     records = []
     warnings = []
 
     if not path.exists():
         return records, warnings
 
-    try:
-        with path.open("r", encoding="utf-8") as file:
-            for line_number, line in enumerate(file, start=1):
-                text = line.strip()
+    attempts = max(1, retry_attempts)
+    last_warning = None
 
-                if not text:
-                    continue
+    for attempt in range(attempts):
+        records = []
 
-                try:
-                    record = json.loads(text)
-                except json.JSONDecodeError as error:
-                    warnings.append(f"{path.name}:{line_number}: invalid JSON: {error.msg}")
-                    continue
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                for line_number, line in enumerate(file, start=1):
+                    text = line.strip()
 
-                if isinstance(record, dict):
-                    records.append(record)
-                else:
-                    warnings.append(f"{path.name}:{line_number}: expected JSON object")
-    except OSError as error:
-        warnings.append(f"could not read {path}: {error}")
+                    if not text:
+                        continue
+
+                    try:
+                        record = json.loads(text)
+                    except json.JSONDecodeError as error:
+                        message = f"{path.name}:{line_number}: invalid JSON: {error.msg}"
+                        if strict_jsonl:
+                            raise ValueError(message) from error
+                        warnings.append(message)
+                        continue
+
+                    if isinstance(record, dict):
+                        records.append(record)
+                    else:
+                        message = f"{path.name}:{line_number}: expected JSON object"
+                        if strict_jsonl:
+                            raise ValueError(message)
+                        warnings.append(message)
+            return records, warnings
+        except (OSError, ValueError) as error:
+            last_warning = f"could not read {path}: {error}"
+            if attempt < attempts - 1:
+                time.sleep(retry_delay)
+                continue
+
+    if last_warning:
+        warnings.append(last_warning)
 
     return records, warnings
+
+
+def read_json_with_retries(path: Path | None, *, retry_attempts: int = LIVE_READ_RETRY_ATTEMPTS, retry_delay: float = LIVE_READ_RETRY_DELAY_SECONDS) -> tuple[dict, list[str]]:
+    if path is None:
+        return {}, []
+    if not path.exists():
+        return {}, []
+
+    last_warning = None
+    for attempt in range(max(1, retry_attempts)):
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                value = json.load(file)
+            return (value if isinstance(value, dict) else {}), []
+        except (OSError, json.JSONDecodeError) as error:
+            last_warning = f"could not read {path}: {error}"
+            if attempt < retry_attempts - 1:
+                time.sleep(retry_delay)
+                continue
+
+    return {}, [last_warning] if last_warning else []
 
 
 def first_param(params: dict[str, list[str]], name: str) -> str | None:
@@ -86,6 +132,115 @@ def parse_tick(value: str | None) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def default_target_overrides() -> dict:
+    return {"sceneObjects": {}, "groundItems": {}, "npcs": {}}
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.tmp")
+
+    with temp_path.open("w", encoding="utf-8") as file:
+        json.dump(data, file, indent=2, sort_keys=True)
+        file.write("\n")
+
+    temp_path.replace(path)
+
+
+def load_target_overrides() -> dict:
+    if not TARGET_OVERRIDES_PATH.exists():
+        data = default_target_overrides()
+        atomic_write_json(TARGET_OVERRIDES_PATH, data)
+        return data
+
+    data = safe_read_json(TARGET_OVERRIDES_PATH)
+
+    if not isinstance(data, dict):
+        data = default_target_overrides()
+
+    for group in TARGET_OVERRIDE_GROUPS:
+        if not isinstance(data.get(group), dict):
+            data[group] = {}
+
+    return data
+
+
+def clean_override_payload(payload: dict) -> tuple[str, str, dict]:
+    if not isinstance(payload, dict):
+        raise ValueError("request body must be a JSON object")
+
+    target_kind = str(payload.get("targetKind") or "").strip()
+
+    if target_kind not in TARGET_OVERRIDE_GROUPS:
+        raise ValueError("targetKind must be sceneObjects, groundItems, or npcs")
+
+    target_id = str(payload.get("id") or "").strip()
+
+    if not target_id:
+        raise ValueError("id is required")
+
+    entry = {}
+
+    for key in ("name", "category", "notes"):
+        value = str(payload.get(key) or "").strip()
+
+        if value:
+            entry[key] = value
+
+    role = str(payload.get("role") or "").strip()
+
+    if role:
+        if role not in TARGET_OVERRIDE_ROLES:
+            raise ValueError("role is not one of the supported target roles")
+
+        entry["role"] = role
+
+    tags = payload.get("tags")
+
+    if isinstance(tags, str):
+        tag_values = tags.split(",")
+    elif isinstance(tags, list):
+        tag_values = tags
+    elif tags is None:
+        tag_values = []
+    else:
+        raise ValueError("tags must be a list or comma-separated string")
+
+    cleaned_tags = []
+
+    for tag in tag_values:
+        text = str(tag or "").strip()
+
+        if text and text not in cleaned_tags:
+            cleaned_tags.append(text)
+
+    if cleaned_tags:
+        entry["tags"] = cleaned_tags
+
+    return target_kind, target_id, entry
+
+
+def save_target_override(payload: dict, session: Path | None) -> dict:
+    target_kind, target_id, entry = clean_override_payload(payload)
+    data = load_target_overrides()
+    data[target_kind][target_id] = entry
+    atomic_write_json(TARGET_OVERRIDES_PATH, data)
+    session_text = str(session) if session else "<session>"
+
+    return {
+        "ok": True,
+        "message": "Override saved. Rebuild world geometry and scenario/candidate datasets to apply it.",
+        "path": str(TARGET_OVERRIDES_PATH),
+        "targetKind": target_kind,
+        "id": target_id,
+        "entry": entry,
+        "rebuildCommands": [
+            f'python telemetry-viewer\\build_world_target_geometry.py --session "{session_text}" --target-type all --only-on-screen --latest-with-frames 50',
+            f'python telemetry-viewer\\select_target_candidates.py --session "{session_text}" --target-type all --only-on-screen --geometry-available --limit 100',
+        ],
+    }
 
 
 def count_files(path: Path) -> int:
@@ -244,6 +399,16 @@ def target_tags_for(record: dict) -> list[str]:
     return []
 
 
+def class_id_for(record: dict) -> str:
+    target = target_for(record)
+    return str(record.get("classId") or target.get("classId") or "")
+
+
+def ui_blocked_for(record: dict) -> bool | None:
+    value = record.get("uiBlocked")
+    return value if isinstance(value, bool) else None
+
+
 def geometry_available_for(record: dict) -> bool:
     if record.get("_inspector", {}).get("sourceKind") == "candidate":
         return candidate_geometry_available(record)
@@ -357,18 +522,28 @@ def frame_path_text(record: dict) -> str | None:
 
 
 class GeometryDataset:
-    def __init__(self, session: Path | None):
+    def __init__(self, session: Path | None, live: bool = False, live_poll_interval: float = 2.0):
         self.session = session
-        self.geometry_dir = session / "interaction_geometry" if session else None
-        self.world_targets_path = self.geometry_dir / "world_targets.jsonl" if self.geometry_dir else None
-        self.world_index_path = self.geometry_dir / "world_geometry_index.json" if self.geometry_dir else None
-        self.ui_targets_path = self.geometry_dir / "ui_targets.jsonl" if self.geometry_dir else None
-        self.ui_index_path = self.geometry_dir / "ui_geometry_index.json" if self.geometry_dir else None
-        self.candidates_path = self.geometry_dir / "target_candidates.jsonl" if self.geometry_dir else None
-        self.candidates_index_path = self.geometry_dir / "target_candidates_index.json" if self.geometry_dir else None
+        self.live_mode = live
+        self.live_poll_interval_ms = max(250, int(live_poll_interval * 1000))
+        base_geometry_dir = session / "interaction_geometry" if session else None
+        self.geometry_dir = base_geometry_dir / "live" if live and base_geometry_dir else base_geometry_dir
+        self.world_targets_path = self.geometry_dir / ("live_world_targets.jsonl" if live else "world_targets.jsonl") if self.geometry_dir else None
+        self.world_index_path = self.geometry_dir / ("live_index.json" if live else "world_geometry_index.json") if self.geometry_dir else None
+        self.ui_targets_path = self.geometry_dir / ("live_ui_targets.jsonl" if live else "ui_targets.jsonl") if self.geometry_dir else None
+        self.ui_index_path = self.geometry_dir / ("live_index.json" if live else "ui_geometry_index.json") if self.geometry_dir else None
+        self.candidates_path = self.geometry_dir / ("live_candidates.jsonl" if live else "target_candidates.jsonl") if self.geometry_dir else None
+        self.candidates_index_path = self.geometry_dir / ("live_index.json" if live else "target_candidates_index.json") if self.geometry_dir else None
+        self.live_status_path = self.geometry_dir / "live_status.json" if live and self.geometry_dir else None
+        self.live_context_index_path = self.geometry_dir / "live_context_index.json" if live and self.geometry_dir else None
+        self.reset_records()
+
+    def reset_records(self) -> None:
         self.world_index = {}
         self.ui_index = {}
         self.candidates_index = {}
+        self.live_status = {}
+        self.live_context_index = {}
         self.world_records = []
         self.ui_records = []
         self.candidate_records = []
@@ -379,7 +554,32 @@ class GeometryDataset:
         self.warnings = []
         self.messages = []
 
+    def snapshot_records(self) -> dict:
+        return {
+            "world_index": self.world_index,
+            "ui_index": self.ui_index,
+            "candidates_index": self.candidates_index,
+            "live_status": self.live_status,
+            "live_context_index": self.live_context_index,
+            "world_records": self.world_records,
+            "ui_records": self.ui_records,
+            "candidate_records": self.candidate_records,
+            "records": self.records,
+            "records_by_tick": self.records_by_tick,
+            "candidates_by_tick": self.candidates_by_tick,
+            "tick_summaries": self.tick_summaries,
+            "warnings": self.warnings,
+            "messages": self.messages,
+        }
+
+    def restore_records(self, snapshot: dict) -> None:
+        for key, value in snapshot.items():
+            setattr(self, key, value)
+
     def load(self) -> None:
+        previous = self.snapshot_records() if self.live_mode else None
+        self.reset_records()
+
         if self.session is None:
             self.messages.append("No telemetry session found.")
             return
@@ -387,23 +587,55 @@ class GeometryDataset:
         self.world_index = self._read_index(self.world_index_path)
         self.ui_index = self._read_index(self.ui_index_path)
         self.candidates_index = self._read_index(self.candidates_index_path)
-        self.world_records, world_warnings = read_jsonl(self.world_targets_path) if self.world_targets_path else ([], [])
-        self.ui_records, ui_warnings = read_jsonl(self.ui_targets_path) if self.ui_targets_path else ([], [])
+        self.live_status = self._read_index(self.live_status_path)
+        self.live_context_index = self._read_index(self.live_context_index_path)
+        live_read_kwargs = {
+            "retry_attempts": LIVE_READ_RETRY_ATTEMPTS if self.live_mode else 1,
+            "retry_delay": LIVE_READ_RETRY_DELAY_SECONDS if self.live_mode else 0.0,
+            "strict_jsonl": self.live_mode,
+        }
+        self.world_records, world_warnings = read_jsonl(self.world_targets_path, **live_read_kwargs) if self.world_targets_path else ([], [])
+        self.ui_records, ui_warnings = read_jsonl(self.ui_targets_path, **live_read_kwargs) if self.ui_targets_path else ([], [])
         self.candidate_records, candidate_warnings = (
-            read_jsonl(self.candidates_path) if self.candidates_path else ([], [])
+            read_jsonl(self.candidates_path, **live_read_kwargs) if self.candidates_path else ([], [])
         )
         self.warnings.extend(world_warnings)
         self.warnings.extend(ui_warnings)
         self.warnings.extend(candidate_warnings)
 
-        if not (self.world_targets_path and self.world_targets_path.exists()):
-            self.messages.append(MISSING_WORLD_MESSAGE)
+        live_read_failed = self.live_mode and any("could not read" in warning for warning in self.warnings)
+        previous_has_data = bool(
+            previous
+            and (
+                previous.get("records")
+                or previous.get("candidate_records")
+                or previous.get("live_status")
+                or previous.get("tick_summaries")
+            )
+        )
 
-        if not (self.ui_targets_path and self.ui_targets_path.exists()):
+        if live_read_failed and previous_has_data:
+            current_warnings = list(self.warnings)
+            self.restore_records(previous)
+            self.warnings = list(self.warnings) + current_warnings + [
+                "Transient live file read failed; kept previous live inspector data for this poll."
+            ]
+            return
+
+        if not self.live_mode and not (self.world_targets_path and self.world_targets_path.exists()):
+            self.messages.append(
+                MISSING_WORLD_MESSAGE
+            )
+
+        if not self.live_mode and not (self.ui_targets_path and self.ui_targets_path.exists()):
             self.messages.append(MISSING_UI_MESSAGE)
 
         if not (self.candidates_path and self.candidates_path.exists()):
-            self.messages.append(MISSING_CANDIDATES_MESSAGE)
+            self.messages.append(
+                "Run python telemetry-viewer\\live_target_processor.py first."
+                if self.live_mode
+                else MISSING_CANDIDATES_MESSAGE
+            )
 
         for source_kind, source_records in (("world", self.world_records), ("ui", self.ui_records)):
             for source_index, record in enumerate(source_records):
@@ -441,6 +673,11 @@ class GeometryDataset:
     def _read_index(self, path: Path | None) -> dict:
         if path is None:
             return {}
+
+        if self.live_mode:
+            value, warnings = read_json_with_retries(path)
+            self.warnings.extend(warnings)
+            return value if isinstance(value, dict) else {}
 
         value = safe_read_json(path)
         return value if isinstance(value, dict) else {}
@@ -482,6 +719,19 @@ class GeometryDataset:
             frame = frame_for(frame_record) if frame_record else {}
             canvas = canvas_for(canvas_record) if canvas_record else {}
             frame_path = frame.get("path")
+            if (
+                self.live_mode
+                and not frame_path
+                and tick_id == self.live_status.get("latestFrameTick")
+                and self.live_status.get("latestFramePath")
+            ):
+                frame_path = self.live_status.get("latestFramePath")
+                frame = {
+                    "path": frame_path,
+                    "exists": self.live_status.get("selectedTickHasFrame"),
+                    "width": frame.get("width"),
+                    "height": frame.get("height"),
+                }
             resolved = self.resolve_session_path(str(frame_path)) if frame_path else None
             frame_exists = bool(resolved and resolved.exists() and resolved.is_file())
 
@@ -586,6 +836,9 @@ class GeometryDataset:
         candidate_type_counts = Counter()
         candidate_category_counts = Counter()
         candidate_geometry_counts = Counter()
+        candidate_class_counts = Counter()
+        candidate_quality_counts = Counter()
+        candidate_ui_blocked_counts = Counter()
         recorded_frame_exists_true = 0
         recorded_frame_exists_false = 0
 
@@ -617,6 +870,9 @@ class GeometryDataset:
             candidate_category_counts[target_category_for(candidate)] += 1
             preferred = geometry_for(candidate).get("preferredAimGeometryType") or "none"
             candidate_geometry_counts[preferred] += 1
+            candidate_class_counts[class_id_for(candidate) or "unclassified"] += 1
+            candidate_quality_counts[str(candidate.get("qualityTier") or "unknown")] += 1
+            candidate_ui_blocked_counts[str(bool(candidate.get("uiBlocked"))).lower()] += 1
 
         ticks = sorted(self.tick_summaries)
         frame_files = self.frame_file_summary()
@@ -647,6 +903,17 @@ class GeometryDataset:
         return {
             "sessionPath": str(self.session) if self.session else None,
             "geometryDir": str(self.geometry_dir) if self.geometry_dir else None,
+            "liveMode": self.live_mode,
+            "liveStatus": self.live_status,
+            "liveContextIndex": self.live_context_index,
+            "livePollIntervalMillis": self.live_poll_interval_ms,
+            "liveLastProcessedTick": self.live_status.get("lastProcessedTick"),
+            "liveTickRangeInWindow": self.live_status.get("tickRangeInWindow"),
+            "liveLatestFrameTick": self.live_status.get("latestFrameTick"),
+            "liveLatestFramePath": self.live_status.get("latestFramePath"),
+            "liveSelectedTickHasFrame": self.live_status.get("selectedTickHasFrame"),
+            "liveEmitWorldTargetsMode": self.live_status.get("emitWorldTargetsMode"),
+            "liveWorldTargetsWritten": self.live_status.get("worldTargetsWritten"),
             "worldTargetsPath": str(self.world_targets_path) if self.world_targets_path else None,
             "uiTargetsPath": str(self.ui_targets_path) if self.ui_targets_path else None,
             "targetCandidatesPath": str(self.candidates_path) if self.candidates_path else None,
@@ -658,6 +925,25 @@ class GeometryDataset:
             "totalTargetCount": len(self.records),
             "targetCandidateCount": len(self.candidate_records),
             "targetCandidatesGeneratedAtUtc": self.candidates_index.get("generatedAtUtc"),
+            "worldSourceSchema": self.world_index.get("sourceSchema"),
+            "worldStaticIndexRecordCount": self.world_index.get("staticIndexRecordCount"),
+            "candidateLimit": self.candidates_index.get("limit"),
+            "candidateDiscardedByLimit": self.candidates_index.get("discardedByLimit"),
+            "candidateDedupeEnabled": self.candidates_index.get("dedupeEnabled"),
+            "candidateProfileId": self.candidates_index.get("profileId"),
+            "candidateUiBlockedCount": self.candidates_index.get("uiBlockedCount"),
+            "candidateExcludedUiBlockedCount": self.candidates_index.get("excludedUiBlockedCount"),
+            "countsByCandidateClassId": (
+                self.candidates_index.get("countsByClassId")
+                if isinstance(self.candidates_index.get("countsByClassId"), dict)
+                else compact_counts(candidate_class_counts, 25)
+            ),
+            "countsByCandidateQualityTier": (
+                self.candidates_index.get("countsByQualityTier")
+                if isinstance(self.candidates_index.get("countsByQualityTier"), dict)
+                else compact_counts(candidate_quality_counts, 25)
+            ),
+            "countsByCandidateUiBlocked": compact_counts(candidate_ui_blocked_counts),
             "countsByCandidatePreferredAimGeometryType": (
                 self.candidates_index.get("countsByPreferredAimGeometryType")
                 if isinstance(self.candidates_index.get("countsByPreferredAimGeometryType"), dict)
@@ -740,6 +1026,11 @@ class GeometryDataset:
             if target_categories and target_category_for(record) not in target_categories:
                 continue
 
+            target_class = filters.get("targetClass")
+
+            if target_class and target_class.lower() not in class_id_for(record).lower():
+                continue
+
             on_screen = filters.get("onScreen")
 
             if on_screen is True and on_screen_for(record) is not True:
@@ -749,6 +1040,14 @@ class GeometryDataset:
                 continue
 
             if filters.get("frameExists") is True and not self.frame_exists_for_record(record):
+                continue
+
+            ui_blocked = filters.get("uiBlocked")
+
+            if ui_blocked is True and ui_blocked_for(record) is not True:
+                continue
+
+            if ui_blocked is False and ui_blocked_for(record) is True:
                 continue
 
             name = filters.get("name")
@@ -830,6 +1129,11 @@ class GeometryDataset:
             if target_categories and target_category_for(record) not in target_categories:
                 continue
 
+            target_class = filters.get("targetClass")
+
+            if target_class and target_class.lower() not in class_id_for(record).lower():
+                continue
+
             on_screen = filters.get("onScreen")
 
             if on_screen is True and on_screen_for(record) is not True:
@@ -839,6 +1143,14 @@ class GeometryDataset:
                 continue
 
             if filters.get("frameExists") is True and not self.frame_exists_for_record(record):
+                continue
+
+            ui_blocked = filters.get("uiBlocked")
+
+            if ui_blocked is True and ui_blocked_for(record) is not True:
+                continue
+
+            if ui_blocked is False and ui_blocked_for(record) is True:
                 continue
 
             name = filters.get("name")
@@ -911,6 +1223,8 @@ class GeometryDataset:
                 "targetRole": target_role_for(record),
                 "targetCategory": target_category_for(record),
                 "targetTags": target_tags_for(record),
+                "classId": class_id_for(record),
+                "uiBlocked": ui_blocked_for(record),
                 "onScreen": on_screen_for(record),
                 "geometryAvailable": geometry_available_for(record),
                 "pointSummary": point_summary(record),
@@ -938,6 +1252,11 @@ class GeometryDataset:
                 "targetRole": target_role_for(record),
                 "targetCategory": target_category_for(record),
                 "targetTags": target_tags_for(record),
+                "classId": class_id_for(record),
+                "qualityTier": record.get("qualityTier"),
+                "qualityScore": record.get("qualityScore"),
+                "uiBlocked": ui_blocked_for(record),
+                "blockingUiRegions": record.get("blockingUiRegions") if isinstance(record.get("blockingUiRegions"), list) else [],
                 "onScreen": on_screen_for(record),
                 "geometryAvailable": geometry_available_for(record),
                 "pointSummary": point_summary(record),
@@ -1367,6 +1686,49 @@ def html_page() -> str:
       overflow: auto;
     }
 
+    .override-panel {
+      display: grid;
+      gap: 7px;
+      font-size: 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    .override-panel label {
+      display: grid;
+      gap: 3px;
+      color: #475569;
+    }
+
+    .override-panel input,
+    .override-panel select,
+    .override-panel textarea {
+      width: 100%;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      padding: 5px 6px;
+      font: inherit;
+      background: #fff;
+      color: #0f172a;
+    }
+
+    .override-panel textarea {
+      min-height: 58px;
+      resize: vertical;
+      font-family: Consolas, "SFMono-Regular", monospace;
+      font-size: 11px;
+    }
+
+    .override-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .override-status {
+      color: #334155;
+      font-size: 12px;
+    }
+
     @media (max-width: 1180px) {
       .layout {
         grid-template-columns: 1fr;
@@ -1493,6 +1855,9 @@ def html_page() -> str:
             <option value="">all categories</option>
           </select>
         </label>
+        <label>Target class
+          <input id="targetClassFilter" type="search" placeholder="tree, door, npc">
+        </label>
         <label>Name contains
           <input id="nameFilter" type="search" placeholder="Goblin, banker, inventory">
         </label>
@@ -1507,8 +1872,16 @@ def html_page() -> str:
           <label><input id="showCandidates" type="checkbox"> show ranked candidates</label>
           <label><input id="onScreenOnly" type="checkbox"> onScreen only</label>
           <label><input id="geometryOnly" type="checkbox"> geometry available only</label>
+          <label><input id="uiBlockedOnly" type="checkbox"> UI-blocked only</label>
           <label><input id="frameExistsOnly" type="checkbox"> only ticks with frames</label>
           <label><input id="idExact" type="checkbox"> exact ID</label>
+        </div>
+        <div class="full quick-row">
+          <div class="section-label">QA presets</div>
+          <button type="button" data-preset="broadWorld">Broad world QA</button>
+          <button type="button" data-preset="candidateQa">Candidate QA</button>
+          <button type="button" data-preset="woodcuttingQa">Woodcutting QA</button>
+          <button type="button" data-preset="uiBlockedQa">UI-blocked QA</button>
         </div>
         <div class="full quick-row">
           <div class="section-label">Quick filters</div>
@@ -1580,6 +1953,57 @@ def html_page() -> str:
         <h2 style="font-size:14px;margin:0 0 8px">Selected Target</h2>
         <pre id="targetDetails">Select a target row or overlay shape.</pre>
       </section>
+      <section class="details override-panel">
+        <h2 style="font-size:14px;margin:0">Add/Edit Override</h2>
+        <div class="muted">Saved overrides update derived labels only. Rebuild geometry to apply them.</div>
+        <label>Target kind
+          <select id="overrideKind">
+            <option value="sceneObjects">sceneObjects</option>
+            <option value="groundItems">groundItems</option>
+            <option value="npcs">npcs</option>
+          </select>
+        </label>
+        <label>ID/rawId <input id="overrideId" type="text" placeholder="select a target"></label>
+        <label>Name <input id="overrideName" type="text" placeholder="Tree, Bank booth, Door"></label>
+        <label>Role
+          <select id="overrideRole">
+            <option value="interactable">interactable</option>
+            <option value="obstacle">obstacle</option>
+            <option value="navigation">navigation</option>
+            <option value="decoration">decoration</option>
+            <option value="entity">entity</option>
+            <option value="item">item</option>
+            <option value="ui">ui</option>
+            <option value="unknown">unknown</option>
+          </select>
+        </label>
+        <label>Category <input id="overrideCategory" type="text" list="overrideCategories" placeholder="tree, bank, door"></label>
+        <datalist id="overrideCategories">
+          <option value="tree"></option>
+          <option value="bank"></option>
+          <option value="door"></option>
+          <option value="wall"></option>
+          <option value="npc"></option>
+          <option value="groundItem"></option>
+          <option value="obstacle"></option>
+          <option value="unknown"></option>
+        </datalist>
+        <label>Tags <input id="overrideTags" type="text" placeholder="tree,clickable_candidate"></label>
+        <label>Notes <input id="overrideNotes" type="text" placeholder="added from target geometry inspector"></label>
+        <div class="override-actions">
+          <button id="saveOverride" type="button">Save Override</button>
+          <button id="copyOverrideSnippet" type="button">Copy Override Snippet</button>
+          <button id="reloadOverrides" type="button">Reload Overrides</button>
+          <button id="copyRebuildCommands" type="button">Copy Rebuild Commands</button>
+        </div>
+        <div id="overrideStatus" class="override-status">Select a target to prefill this form.</div>
+        <label>Override snippet
+          <textarea id="overrideSnippet" readonly></textarea>
+        </label>
+        <label>Rebuild commands
+          <textarea id="rebuildCommands" readonly></textarea>
+        </label>
+      </section>
     </aside>
   </main>
 
@@ -1595,6 +2019,7 @@ def html_page() -> str:
       scaleCanvas: true,
       hiddenByDrawLimit: 0,
       drawLimit: 200,
+      overrides: null,
     };
 
     const el = {
@@ -1613,9 +2038,24 @@ def html_page() -> str:
       tickRows: document.getElementById("tickRows"),
       tickCount: document.getElementById("tickCount"),
       targetDetails: document.getElementById("targetDetails"),
+      overrideKind: document.getElementById("overrideKind"),
+      overrideId: document.getElementById("overrideId"),
+      overrideName: document.getElementById("overrideName"),
+      overrideRole: document.getElementById("overrideRole"),
+      overrideCategory: document.getElementById("overrideCategory"),
+      overrideTags: document.getElementById("overrideTags"),
+      overrideNotes: document.getElementById("overrideNotes"),
+      saveOverride: document.getElementById("saveOverride"),
+      copyOverrideSnippet: document.getElementById("copyOverrideSnippet"),
+      reloadOverrides: document.getElementById("reloadOverrides"),
+      copyRebuildCommands: document.getElementById("copyRebuildCommands"),
+      overrideStatus: document.getElementById("overrideStatus"),
+      overrideSnippet: document.getElementById("overrideSnippet"),
+      rebuildCommands: document.getElementById("rebuildCommands"),
       targetTypeBoxes: Array.from(document.querySelectorAll(".target-type-box")),
       targetRole: document.getElementById("targetRole"),
       targetCategory: document.getElementById("targetCategory"),
+      targetClassFilter: document.getElementById("targetClassFilter"),
       nameFilter: document.getElementById("nameFilter"),
       idFilter: document.getElementById("idFilter"),
       tagFilter: document.getElementById("tagFilter"),
@@ -1624,6 +2064,7 @@ def html_page() -> str:
       showCandidates: document.getElementById("showCandidates"),
       onScreenOnly: document.getElementById("onScreenOnly"),
       geometryOnly: document.getElementById("geometryOnly"),
+      uiBlockedOnly: document.getElementById("uiBlockedOnly"),
       showUI: document.getElementById("showUI"),
       frameExistsOnly: document.getElementById("frameExistsOnly"),
       showLabels: document.getElementById("showLabels"),
@@ -1694,6 +2135,49 @@ def html_page() -> str:
       return [rank, name].filter(Boolean).join(" ");
     }
 
+    function boundsAreaFromBounds(bounds) {
+      if (!bounds || typeof bounds !== "object") return 0;
+      const w = Number(bounds.w);
+      const h = Number(bounds.h);
+      return Number.isFinite(w) && Number.isFinite(h) ? Math.max(0, w) * Math.max(0, h) : 0;
+    }
+
+    function boundsAreaFromPolygon(polygon) {
+      if (!Array.isArray(polygon) || !polygon.length) return 0;
+      const xs = [];
+      const ys = [];
+      for (const point of polygon) {
+        const x = Array.isArray(point) ? Number(point[0]) : Number(point?.x);
+        const y = Array.isArray(point) ? Number(point[1]) : Number(point?.y);
+        if (Number.isFinite(x) && Number.isFinite(y)) {
+          xs.push(x);
+          ys.push(y);
+        }
+      }
+      if (!xs.length || !ys.length) return 0;
+      return Math.max(0, Math.max(...xs) - Math.min(...xs)) * Math.max(0, Math.max(...ys) - Math.min(...ys));
+    }
+
+    function boundsAreaDetail(geometry) {
+      let bestArea = 0;
+      let bestKey = "";
+      for (const key of ["aimBounds", "clickboxBounds", "convexHullBounds", "pixelBox"]) {
+        const area = boundsAreaFromBounds(geometry?.[key]);
+        if (area > bestArea) {
+          bestArea = area;
+          bestKey = key;
+        }
+      }
+      for (const key of ["tilePolygon", "clickboxPolygon", "convexHullPolygon"]) {
+        const area = boundsAreaFromPolygon(geometry?.[key]);
+        if (area > bestArea) {
+          bestArea = area;
+          bestKey = key;
+        }
+      }
+      return {area: bestArea, source: bestKey};
+    }
+
     function jsonUrl(path, params = {}) {
       const query = new URLSearchParams();
       for (const [key, value] of Object.entries(params)) {
@@ -1710,6 +2194,17 @@ def html_page() -> str:
       return data;
     }
 
+    async function postJson(path, payload) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || response.statusText);
+      return data;
+    }
+
     function selectedTick() {
       return state.ticks.find((tick) => tick.tickId === state.selectedTickId) || null;
     }
@@ -1717,9 +2212,11 @@ def html_page() -> str:
     function renderSummary(summary) {
       el.sessionPath.textContent = summary.sessionPath || "No session selected";
         const cards = [
+          ...(summary.liveMode ? [["Live latest tick", summary.liveLastProcessedTick ?? "waiting"]] : []),
           ["World targets", summary.worldTargetCount],
           ["UI targets", summary.uiTargetCount],
           ["Candidates", summary.targetCandidateCount],
+          ["Candidate profile", summary.candidateProfileId || "none"],
           ["Ticks", summary.tickCount],
           ["Target ticks with frames", summary.availableFrameTickCount],
           ["JPG/PNG files on disk", summary.frameFileCount],
@@ -1731,6 +2228,11 @@ def html_page() -> str:
       )).join("");
 
       const notes = [];
+      if (summary.liveMode) {
+        notes.push(`LIVE MODE: rolling output ${summary.liveTickRangeInWindow ? summary.liveTickRangeInWindow.join("-") : "has no tick window yet"}.`);
+        notes.push(`Live world output mode: ${summary.liveEmitWorldTargetsMode || "unknown"}; world records written: ${summary.liveWorldTargetsWritten ?? 0}.`);
+        notes.push(`Latest live frame: ${summary.liveLatestFramePath || "none"}; selected tick has frame: ${summary.liveSelectedTickHasFrame === true ? "yes" : "no"}.`);
+      }
       for (const message of summary.messages || []) notes.push(message);
       for (const warning of summary.warnings || []) notes.push(warning);
       if (summary.firstTickId !== null && summary.firstFrameFileTick !== null) {
@@ -1797,10 +2299,12 @@ def html_page() -> str:
         targetTypes: targetTypes.join(","),
         targetRoles: el.targetRole.value,
         targetCategories: el.targetCategory.value,
+        targetClass: el.targetClassFilter.value.trim(),
         name: el.nameFilter.value.trim(),
         tag: el.tagFilter.value.trim(),
         id: el.idFilter.value.trim(),
         idExact: el.idExact.checked ? "true" : "",
+        uiBlocked: el.uiBlockedOnly.checked ? "true" : "",
         onScreen: el.onScreenOnly.checked ? "true" : "",
         geometryAvailable: el.geometryOnly.checked ? "true" : "",
         showUI: el.showUI.checked ? "true" : "false",
@@ -1814,8 +2318,13 @@ def html_page() -> str:
       state.ticks = ticks.ticks || [];
 
       if (!keepSelection || !state.ticks.some((tick) => tick.tickId === state.selectedTickId)) {
+        const liveFrameTick = state.summary?.liveSelectedTickHasFrame ? state.summary?.liveLatestFrameTick : null;
+        const liveFrameMatch = liveFrameTick === null || liveFrameTick === undefined
+          ? null
+          : state.ticks.find((tick) => tick.tickId === liveFrameTick && tick.frameExists);
+        const firstCandidateWithFrame = state.ticks.find((tick) => tick.frameExists && Number(tick.candidateCount || 0) > 0);
         const firstWithFrame = state.ticks.find((tick) => tick.frameExists);
-        state.selectedTickId = (firstWithFrame || state.ticks[0] || {}).tickId ?? null;
+        state.selectedTickId = (liveFrameMatch || firstCandidateWithFrame || firstWithFrame || state.ticks[0] || {}).tickId ?? null;
       }
 
       renderTicks();
@@ -2266,6 +2775,8 @@ def html_page() -> str:
         notes.push(`Showing ${Math.min(state.drawLimit, state.targets.length)} of ${state.targets.length} targets. Use filters or increase max targets.`);
       }
 
+      notes.push("If matching target count is unexpectedly low, run diagnose_target_coverage.py for coverage analysis.");
+
       if (state.targets.some((record) => !(record._inspector || {}).geometryAvailable)) {
         notes.push("Some targets have missing geometry.");
       }
@@ -2295,6 +2806,7 @@ def html_page() -> str:
       const selected = [...state.targets, ...state.candidates].find((record) => (record._inspector || {}).globalIndex === state.selectedGlobalIndex);
       if (!selected) {
         el.targetDetails.textContent = "Select a target row or overlay shape.";
+        renderOverridePanel();
         return;
       }
 
@@ -2302,11 +2814,15 @@ def html_page() -> str:
       const target = selected.target || {};
       const geometry = selected.geometry || {};
       const scoring = selected.scoring || {};
+      const area = boundsAreaDetail(geometry);
       el.targetDetails.textContent = JSON.stringify({
         kind: info.sourceKind,
         displayName: bestDisplayName(selected),
         rank: selected.rank,
         score: selected.score,
+        qualityScore: selected.qualityScore,
+        qualityTier: selected.qualityTier,
+        classId: selected.classId || target.classId || info.classId,
         targetType: info.targetType,
         targetRole: info.targetRole,
         targetCategory: info.targetCategory,
@@ -2335,6 +2851,14 @@ def html_page() -> str:
         aimBounds: geometry.aimBounds,
         availableGeometryTypes: geometry.availableGeometryTypes,
         geometryQuality: geometry.geometryQuality,
+        uiBlocked: selected.uiBlocked,
+        blockingUiRegions: selected.blockingUiRegions,
+        blockedReason: selected.blockedReason,
+        positiveSignals: selected.positiveSignals,
+        negativeSignals: selected.negativeSignals,
+        rejectReasons: selected.rejectReasons,
+        profileId: selected.profileId,
+        selectedByProfile: selected.selectedByProfile,
         clickboxBounds: geometry.clickboxBounds,
         convexHullBounds: geometry.convexHullBounds,
         pixelBox: geometry.pixelBox,
@@ -2344,12 +2868,15 @@ def html_page() -> str:
         onScreen: info.onScreen,
         geometryAvailable: info.geometryAvailable,
         geometryWarning: geometry.geometryWarning,
+        boundsArea: Math.round(area.area),
+        boundsAreaSource: area.source,
         scoreParts: scoring.scoreParts,
         reasons: scoring.reasons,
         penalties: scoring.penalties,
         sourceTarget: selected.sourceTarget,
         record: selected,
       }, null, 2);
+      renderOverridePanel();
     }
 
     function selectTarget(globalIndex) {
@@ -2359,6 +2886,167 @@ def html_page() -> str:
       renderFrame();
       renderDiagnostics();
       renderDetails();
+    }
+
+    function selectedRecord() {
+      return [...state.targets, ...state.candidates].find((record) => (record._inspector || {}).globalIndex === state.selectedGlobalIndex) || null;
+    }
+
+    function overrideKindForTargetType(targetType) {
+      if (targetType === "sceneObject") return "sceneObjects";
+      if (targetType === "groundItem") return "groundItems";
+      if (targetType === "npc") return "npcs";
+      return "";
+    }
+
+    function selectedOverrideInfo() {
+      const selected = selectedRecord();
+      if (!selected) return null;
+      const target = selected.target || {};
+      const info = selected._inspector || {};
+      const targetType = target.targetType || info.targetType || "";
+      const id = target.rawId ?? target.id ?? info.rawId ?? info.id;
+      const kind = overrideKindForTargetType(targetType);
+      if (!kind || id === undefined || id === null || id === "") return null;
+      return {selected, target, info, targetType, id: String(id), kind};
+    }
+
+    function existingOverride(kind, id) {
+      const group = state.overrides?.overrides?.[kind] || state.overrides?.[kind] || {};
+      return group[String(id)] || null;
+    }
+
+    function suggestedOverride(info) {
+      const target = info.target || {};
+      const nameText = [
+        bestDisplayName(info.selected),
+        target.name,
+        target.targetName,
+        target.targetCategory,
+        (target.targetTags || []).join(" "),
+      ].join(" ").toLowerCase();
+      const suggestion = {
+        name: "",
+        role: target.targetRole || "interactable",
+        category: target.targetCategory && target.targetCategory !== "unknown" ? target.targetCategory : "",
+        tags: Array.isArray(target.targetTags) ? target.targetTags.join(",") : "",
+      };
+
+      if (nameText.includes("bank") || nameText.includes("deposit")) {
+        suggestion.name = nameText.includes("deposit") ? "Bank Deposit Box" : "Bank";
+        suggestion.role = "interactable";
+        suggestion.category = "bank";
+        suggestion.tags = "bank,clickable_candidate";
+      } else if (nameText.includes("door") || nameText.includes("gate")) {
+        suggestion.name = nameText.includes("gate") ? "Gate" : "Door";
+        suggestion.role = "interactable";
+        suggestion.category = "door";
+        suggestion.tags = "door,navigation_geometry,clickable_candidate";
+      } else if (nameText.includes("tree") || target.targetCategory === "tree") {
+        suggestion.name = "Tree";
+        suggestion.role = "interactable";
+        suggestion.category = "tree";
+        suggestion.tags = "tree,clickable_candidate";
+      }
+
+      return suggestion;
+    }
+
+    function rebuildCommandText() {
+      const session = state.summary?.sessionPath || "<session>";
+      const targetType = selectedOverrideInfo()?.targetType || "all";
+      const category = el.overrideCategory.value.trim();
+      const name = el.overrideName.value.trim();
+      const quote = (value) => `"${String(value).replaceAll('"', '\\"')}"`;
+      const selector = category ? `--category ${quote(category)}` : name ? `--name ${quote(name)}` : "--target-type all";
+      const targetTypeFilter = targetType && targetType !== "all" ? `--target-type ${targetType}` : "";
+      return [
+        `python telemetry-viewer\\build_world_target_geometry.py --session "${session}" --target-type all --only-on-screen --latest-with-frames 50`,
+        `python telemetry-viewer\\select_target_candidates.py --session "${session}" ${selector} ${targetTypeFilter} --only-on-screen --geometry-available --limit 100`.replace(/\s+/g, " ").trim(),
+        `python telemetry-viewer\\build_scenario_dataset.py --session "${session}" --scenario <scenario_name>`,
+      ].join("\n");
+    }
+
+    function overrideSnippetText() {
+      const id = el.overrideId.value.trim() || "<id>";
+      const entry = {};
+      if (el.overrideName.value.trim()) entry.name = el.overrideName.value.trim();
+      if (el.overrideRole.value) entry.role = el.overrideRole.value;
+      if (el.overrideCategory.value.trim()) entry.category = el.overrideCategory.value.trim();
+      const tags = el.overrideTags.value.split(",").map((tag) => tag.trim()).filter(Boolean);
+      if (tags.length) entry.tags = tags;
+      return JSON.stringify({[id]: entry}, null, 2).slice(1, -1).trim();
+    }
+
+    function renderOverridePanel() {
+      const info = selectedOverrideInfo();
+
+      if (!info) {
+        el.overrideId.value = "";
+        el.overrideStatus.textContent = "Select an NPC, scene object, or ground item to prefill this form.";
+        el.overrideSnippet.value = overrideSnippetText();
+        el.rebuildCommands.value = rebuildCommandText();
+        return;
+      }
+
+      const override = existingOverride(info.kind, info.id);
+      const suggestion = override || suggestedOverride(info);
+      el.overrideKind.value = info.kind;
+      el.overrideId.value = info.id;
+      el.overrideName.value = suggestion.name || "";
+      el.overrideRole.value = suggestion.role || "interactable";
+      el.overrideCategory.value = suggestion.category || "";
+      el.overrideTags.value = Array.isArray(suggestion.tags) ? suggestion.tags.join(",") : (suggestion.tags || "");
+      el.overrideNotes.value = suggestion.notes || "added from target geometry inspector";
+      el.overrideStatus.textContent = override ? "Existing override loaded for this target ID." : "Override form prefilled from the selected target.";
+      el.overrideSnippet.value = overrideSnippetText();
+      el.rebuildCommands.value = rebuildCommandText();
+    }
+
+    async function loadOverrides() {
+      state.overrides = await fetchJson("/api/overrides");
+      renderOverridePanel();
+    }
+
+    async function saveOverride() {
+      const payload = {
+        targetKind: el.overrideKind.value,
+        id: el.overrideId.value.trim(),
+        name: el.overrideName.value.trim(),
+        role: el.overrideRole.value,
+        category: el.overrideCategory.value.trim(),
+        tags: el.overrideTags.value.split(",").map((tag) => tag.trim()).filter(Boolean),
+        notes: el.overrideNotes.value.trim(),
+      };
+      const result = await postJson("/api/overrides", payload);
+      el.overrideStatus.textContent = result.message || "Override saved.";
+      el.rebuildCommands.value = (result.rebuildCommands || rebuildCommandText().split("\n")).join("\n");
+      el.overrideSnippet.value = overrideSnippetText();
+      await loadOverrides();
+    }
+
+    async function copyOverrideSnippet() {
+      const text = el.overrideSnippet.value || overrideSnippetText();
+      try {
+        await navigator.clipboard.writeText(text);
+        el.overrideStatus.textContent = "Override snippet copied.";
+      } catch (_error) {
+        el.overrideSnippet.focus();
+        el.overrideSnippet.select();
+        el.overrideStatus.textContent = "Select and copy the override snippet from the box.";
+      }
+    }
+
+    async function copyRebuildCommands() {
+      const text = el.rebuildCommands.value || rebuildCommandText();
+      try {
+        await navigator.clipboard.writeText(text);
+        el.overrideStatus.textContent = "Rebuild commands copied.";
+      } catch (_error) {
+        el.rebuildCommands.focus();
+        el.rebuildCommands.select();
+        el.overrideStatus.textContent = "Select and copy the rebuild commands from the box.";
+      }
     }
 
     function selectTick(tickId) {
@@ -2379,9 +3067,11 @@ def html_page() -> str:
     function applyQuickFilter(kind) {
       el.idFilter.value = "";
       el.tagFilter.value = "";
+      el.targetClassFilter.value = "";
       el.idExact.checked = false;
       el.onScreenOnly.checked = false;
       el.geometryOnly.checked = false;
+      el.uiBlockedOnly.checked = false;
       el.targetRole.value = "";
       el.targetCategory.value = "";
 
@@ -2437,16 +3127,88 @@ def html_page() -> str:
       loadTargets();
     }
 
+    function applyPreset(kind) {
+      el.idFilter.value = "";
+      el.nameFilter.value = "";
+      el.tagFilter.value = "";
+      el.targetClassFilter.value = "";
+      el.idExact.checked = false;
+      el.frameExistsOnly.checked = false;
+      el.scaleCanvas.checked = true;
+
+      if (kind === "broadWorld") {
+        setTargetTypes(["npc", "player", "sceneObject", "groundItem", "tile"]);
+        el.showUI.checked = true;
+        el.showRawTargets.checked = true;
+        el.showCandidates.checked = false;
+        el.onScreenOnly.checked = true;
+        el.geometryOnly.checked = false;
+        el.uiBlockedOnly.checked = false;
+        el.showLabels.value = "selected";
+        el.showPolygons.value = "selected";
+        el.showBounds.value = "all";
+        el.maxTargets.value = 2000;
+        el.targetRole.value = "";
+        el.targetCategory.value = "";
+      } else if (kind === "candidateQa") {
+        setTargetTypes(["npc", "player", "sceneObject", "groundItem", "tile"]);
+        el.showUI.checked = true;
+        el.showRawTargets.checked = false;
+        el.showCandidates.checked = true;
+        el.onScreenOnly.checked = false;
+        el.geometryOnly.checked = false;
+        el.uiBlockedOnly.checked = false;
+        el.candidateLabelMode.value = "nameRank";
+        el.showCandidateAim.checked = true;
+        el.showCandidateGeometry.checked = true;
+        el.showLabels.value = "selected";
+        el.showPolygons.value = "selected";
+        el.showBounds.value = "selected";
+        el.maxTargets.value = 1000;
+        el.targetRole.value = "";
+        el.targetCategory.value = "";
+      } else if (kind === "woodcuttingQa") {
+        setTargetTypes(["sceneObject"]);
+        el.showUI.checked = false;
+        el.showRawTargets.checked = false;
+        el.showCandidates.checked = true;
+        el.onScreenOnly.checked = true;
+        el.geometryOnly.checked = true;
+        el.uiBlockedOnly.checked = false;
+        el.targetClassFilter.value = "tree";
+        el.tagFilter.value = "tree";
+        el.candidateLabelMode.value = "nameRank";
+        el.maxTargets.value = 1000;
+      } else if (kind === "uiBlockedQa") {
+        setTargetTypes(["npc", "player", "sceneObject", "groundItem", "tile"]);
+        el.showUI.checked = true;
+        el.showRawTargets.checked = false;
+        el.showCandidates.checked = true;
+        el.uiBlockedOnly.checked = true;
+        el.onScreenOnly.checked = false;
+        el.geometryOnly.checked = false;
+        el.showLabels.value = "selected";
+        el.showPolygons.value = "selected";
+        el.showBounds.value = "selected";
+        el.maxTargets.value = 1000;
+      }
+
+      state.scaleCanvas = el.scaleCanvas.checked;
+      loadTicks({ keepSelection: true });
+    }
+
     function clearFilters() {
       setTargetTypes(["npc", "player", "sceneObject", "groundItem", "tile"]);
       el.targetRole.value = "";
       el.targetCategory.value = "";
+      el.targetClassFilter.value = "";
       el.nameFilter.value = "";
       el.idFilter.value = "";
       el.tagFilter.value = "";
       el.idExact.checked = false;
       el.onScreenOnly.checked = false;
       el.geometryOnly.checked = false;
+      el.uiBlockedOnly.checked = false;
       el.showUI.checked = true;
       el.showRawTargets.checked = true;
       el.showCandidates.checked = Boolean(state.summary?.targetCandidatesExist && Number(state.summary?.targetCandidateCount || 0) > 0);
@@ -2457,7 +3219,20 @@ def html_page() -> str:
     async function init() {
       state.summary = await fetchJson("/api/summary");
       renderSummary(state.summary);
+      await loadOverrides();
       await loadTicks();
+      if (state.summary?.liveMode) {
+        const pollInterval = Math.max(500, Number(state.summary.livePollIntervalMillis || 2000));
+        setInterval(async () => {
+          try {
+            state.summary = await fetchJson("/api/summary");
+            renderSummary(state.summary);
+            await loadTicks({keepSelection: true});
+          } catch (error) {
+            el.messages.innerHTML = `<div class="warning">${escapeHtml(error.message || error)}</div>`;
+          }
+        }, pollInterval);
+      }
     }
 
     el.tickRows.addEventListener("click", (event) => {
@@ -2487,6 +3262,9 @@ def html_page() -> str:
     for (const button of document.querySelectorAll("[data-quick-filter]")) {
       button.addEventListener("click", () => applyQuickFilter(button.dataset.quickFilter));
     }
+    for (const button of document.querySelectorAll("[data-preset]")) {
+      button.addEventListener("click", () => applyPreset(button.dataset.preset));
+    }
     el.prevTick.addEventListener("click", () => moveTick(-1));
     el.nextTick.addEventListener("click", () => moveTick(1));
     el.jumpTickButton.addEventListener("click", () => {
@@ -2496,9 +3274,12 @@ def html_page() -> str:
     el.jumpTick.addEventListener("keydown", (event) => {
       if (event.key === "Enter") el.jumpTickButton.click();
     });
-    for (const input of [...el.targetTypeBoxes, el.targetRole, el.targetCategory, el.onScreenOnly, el.geometryOnly, el.showUI, el.showRawTargets, el.showCandidates, el.idExact]) {
+    for (const input of [...el.targetTypeBoxes, el.targetRole, el.targetCategory, el.onScreenOnly, el.geometryOnly, el.uiBlockedOnly, el.showUI, el.showRawTargets, el.showCandidates, el.idExact]) {
       input.addEventListener("change", () => loadTargets());
     }
+    el.targetClassFilter.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadTargets();
+    });
     el.nameFilter.addEventListener("keydown", (event) => {
       if (event.key === "Enter") loadTargets();
     });
@@ -2514,6 +3295,34 @@ def html_page() -> str:
         renderDiagnostics();
       });
     }
+    for (const input of [el.overrideKind, el.overrideId, el.overrideName, el.overrideRole, el.overrideCategory, el.overrideTags]) {
+      input.addEventListener("input", () => {
+        el.overrideSnippet.value = overrideSnippetText();
+        el.rebuildCommands.value = rebuildCommandText();
+      });
+      input.addEventListener("change", () => {
+        el.overrideSnippet.value = overrideSnippetText();
+        el.rebuildCommands.value = rebuildCommandText();
+      });
+    }
+    el.saveOverride.addEventListener("click", () => {
+      saveOverride().catch((error) => {
+        el.overrideStatus.textContent = error.message || String(error);
+      });
+    });
+    el.copyOverrideSnippet.addEventListener("click", () => {
+      copyOverrideSnippet();
+    });
+    el.reloadOverrides.addEventListener("click", () => {
+      loadOverrides().then(() => {
+        el.overrideStatus.textContent = "Overrides reloaded.";
+      }).catch((error) => {
+        el.overrideStatus.textContent = error.message || String(error);
+      });
+    });
+    el.copyRebuildCommands.addEventListener("click", () => {
+      copyRebuildCommands();
+    });
     el.overlayOpacity.addEventListener("input", () => {
       renderFrame();
       renderDiagnostics();
@@ -2534,6 +3343,10 @@ class TargetGeometryHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
+    def refresh_live_dataset(self) -> None:
+        if getattr(self.dataset, "live_mode", False):
+            self.dataset.load()
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -2543,26 +3356,83 @@ class TargetGeometryHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/summary":
+            self.refresh_live_dataset()
             self.send_json(self.dataset.summary())
             return
 
         if path == "/api/ticks":
+            self.refresh_live_dataset()
             self.handle_ticks(parsed)
             return
 
         if path == "/api/targets":
+            self.refresh_live_dataset()
             self.handle_targets(parsed)
             return
 
         if path == "/api/candidates":
+            self.refresh_live_dataset()
             self.handle_candidates(parsed)
             return
 
+        if path == "/api/overrides":
+            self.send_json({
+                "path": str(TARGET_OVERRIDES_PATH),
+                "exists": TARGET_OVERRIDES_PATH.exists(),
+                "overrides": load_target_overrides(),
+            })
+            return
+
         if path.startswith("/api/frame/"):
+            self.refresh_live_dataset()
             self.handle_frame(path)
             return
 
         self.send_error_json(HTTPStatus.NOT_FOUND, "not found")
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/api/overrides":
+            self.handle_save_override()
+            return
+
+        self.send_error_json(HTTPStatus.NOT_FOUND, "not found")
+
+    def read_json_body(self) -> dict | None:
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
+            return None
+
+        if length <= 0:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "request body is required")
+            return None
+
+        if length > 65536:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "request body is too large")
+            return None
+
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, f"invalid JSON body: {error}")
+            return None
+
+    def handle_save_override(self) -> None:
+        payload = self.read_json_body()
+
+        if payload is None:
+            return
+
+        try:
+            result = save_target_override(payload, self.dataset.session)
+        except (OSError, ValueError) as error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, str(error))
+            return
+
+        self.send_json(result)
 
     def handle_ticks(self, parsed) -> None:
         params = parse_qs(parsed.query)
@@ -2594,10 +3464,12 @@ class TargetGeometryHandler(BaseHTTPRequestHandler):
                 for value in (first_param(params, "targetCategories") or "").split(",")
                 if value
             },
+            "targetClass": first_param(params, "targetClass") or "",
             "name": first_param(params, "name") or "",
             "tag": first_param(params, "tag") or "",
             "id": first_param(params, "id") or "",
             "idExact": parse_bool(first_param(params, "idExact")),
+            "uiBlocked": parse_bool(first_param(params, "uiBlocked")),
             "onScreen": parse_bool(first_param(params, "onScreen")),
             "geometryAvailable": parse_bool(first_param(params, "geometryAvailable")),
             "showUI": parse_bool(first_param(params, "showUI")),
@@ -2634,10 +3506,12 @@ class TargetGeometryHandler(BaseHTTPRequestHandler):
                 for value in (first_param(params, "targetCategories") or "").split(",")
                 if value
             },
+            "targetClass": first_param(params, "targetClass") or "",
             "name": first_param(params, "name") or "",
             "tag": first_param(params, "tag") or "",
             "id": first_param(params, "id") or "",
             "idExact": parse_bool(first_param(params, "idExact")),
+            "uiBlocked": parse_bool(first_param(params, "uiBlocked")),
             "onScreen": parse_bool(first_param(params, "onScreen")),
             "geometryAvailable": parse_bool(first_param(params, "geometryAvailable")),
             "frameExists": parse_bool(first_param(params, "frameExists")),
@@ -2708,13 +3582,15 @@ def parse_args():
     parser.add_argument("--session", help="Telemetry session directory to inspect.")
     parser.add_argument("--sessions-dir", help="Override telemetry sessions directory when --session is omitted.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Local HTTP port, default {DEFAULT_PORT}.")
+    parser.add_argument("--live", action="store_true", help="Read rolling live outputs from interaction_geometry\\live and refresh browser data periodically.")
+    parser.add_argument("--live-poll-interval", type=float, default=2.0, help="Browser live refresh interval in seconds. Default: 2.0.")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     session = resolve_session(args)
-    dataset = GeometryDataset(session)
+    dataset = GeometryDataset(session, live=args.live, live_poll_interval=args.live_poll_interval)
     dataset.load()
     TargetGeometryHandler.dataset = dataset
     server = ThreadingHTTPServer((HOST, args.port), TargetGeometryHandler)
@@ -2722,6 +3598,8 @@ def main() -> int:
 
     print(f"Target geometry inspector: {url}")
     print(f"Session: {session if session else 'none'}")
+    if args.live:
+        print("Mode: LIVE")
 
     for message in dataset.messages:
         print(message)

@@ -1,4 +1,5 @@
 import argparse
+import copy
 import json
 import os
 import shutil
@@ -251,6 +252,158 @@ def score_sort_key(candidate: dict) -> tuple:
     return (-candidate_score(candidate), distance, rank, candidate.get("tickId") if candidate.get("tickId") is not None else -1)
 
 
+def normalized_coordinate_payload(value) -> tuple | None:
+    if not isinstance(value, dict):
+        return None
+
+    fields = []
+
+    for key in ("x", "y", "plane"):
+        item = value.get(key)
+
+        if isinstance(item, bool):
+            item = None
+
+        if isinstance(item, float) and item.is_integer():
+            item = int(item)
+
+        fields.append(item if isinstance(item, int) else None)
+
+    if fields[0] is None or fields[1] is None:
+        return None
+
+    return tuple(fields)
+
+
+def normalized_point_payload(value) -> tuple | None:
+    if not isinstance(value, dict):
+        return None
+
+    x = value.get("x")
+    y = value.get("y")
+
+    if isinstance(x, bool) or isinstance(y, bool):
+        return None
+
+    if isinstance(x, float) and x.is_integer():
+        x = int(x)
+
+    if isinstance(y, float) and y.is_integer():
+        y = int(y)
+
+    if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+        return (round(float(x), 2), round(float(y), 2))
+
+    return None
+
+
+def bounds_payload(value) -> tuple | None:
+    if not isinstance(value, dict):
+        return None
+
+    values = []
+
+    for key in ("x", "y", "w", "h"):
+        item = value.get(key)
+
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+
+        values.append(round(float(item), 2))
+
+    return tuple(values)
+
+
+def candidate_dedupe_key(candidate: dict) -> tuple:
+    target = target_for(candidate)
+    geometry = geometry_for(candidate)
+    target_type = str(target.get("targetType") or "target")
+    raw_id = target.get("rawId")
+
+    if raw_id is None:
+        raw_id = target.get("id")
+
+    target_world = normalized_coordinate_payload(candidate.get("targetWorld") or target.get("world"))
+    target_scene = normalized_coordinate_payload(target.get("scene"))
+    target_local = normalized_coordinate_payload(target.get("local"))
+    aim_point = normalized_point_payload(geometry.get("aimPoint") or candidate.get("aimPoint"))
+    geometry_type = geometry.get("preferredAimGeometryType") or candidate.get("preferredAimGeometryType")
+    preferred_geometry = geometry.get("preferredAimGeometry") or candidate.get("preferredAimGeometry")
+    bounds = bounds_payload(preferred_geometry)
+
+    if target_type in {"sceneObject", "groundItem", "tile"} and (target_world or target_scene or target_local):
+        return ("position", target_type, raw_id, target_world, target_scene, target_local)
+
+    if target_type in {"sceneObject", "groundItem", "tile"} and aim_point:
+        return ("aim", target_type, raw_id, display_name(candidate), aim_point, geometry_type, bounds)
+
+    target_id = target.get("targetId")
+
+    if target_id is not None and str(target_id).strip():
+        return ("targetId", target_type, str(target_id))
+
+    if raw_id is not None and target_world:
+        return ("world", target_type, raw_id, target_world)
+
+    if aim_point:
+        return ("aim", target_type, raw_id, display_name(candidate), aim_point, geometry_type, bounds)
+
+    source = candidate.get("sourceTarget") if isinstance(candidate.get("sourceTarget"), dict) else {}
+    source_index = source.get("originalTargetRecordIndex")
+
+    if source_index is not None:
+        return ("source", source.get("sourceFileType"), source_index)
+
+    return ("rank", target_type, raw_id, candidate.get("rank"), tick_id_for(candidate))
+
+
+def merged_unique_values(first, second) -> list:
+    result = []
+
+    for value in list(first or []) + list(second or []):
+        if value is None:
+            continue
+
+        if value not in result:
+            result.append(value)
+
+    return result
+
+
+def merge_duplicate_candidate(best: dict, duplicate: dict) -> None:
+    best["scenarioDuplicateCount"] = int(best.get("scenarioDuplicateCount") or 0) + 1
+    target = target_for(best)
+    duplicate_target = target_for(duplicate)
+    target["targetTags"] = merged_unique_values(target.get("targetTags"), duplicate_target.get("targetTags"))
+
+    best_scoring = scoring_for(best)
+    duplicate_scoring = scoring_for(duplicate)
+
+    if best_scoring:
+        best_scoring["reasons"] = merged_unique_values(best_scoring.get("reasons"), duplicate_scoring.get("reasons"))
+        best_scoring["penalties"] = merged_unique_values(best_scoring.get("penalties"), duplicate_scoring.get("penalties"))
+
+
+def dedupe_candidates_for_tick(candidates: list[dict]) -> tuple[list[dict], int]:
+    unique = {}
+    duplicate_count = 0
+
+    for candidate in sorted(candidates, key=score_sort_key):
+        key = candidate_dedupe_key(candidate)
+
+        if key not in unique:
+            unique[key] = copy.deepcopy(candidate)
+            unique[key]["scenarioDuplicateCount"] = int(unique[key].get("scenarioDuplicateCount") or 0)
+            continue
+
+        duplicate_count += 1
+        merge_duplicate_candidate(unique[key], candidate)
+
+    deduped = list(unique.values())
+    deduped.sort(key=score_sort_key)
+    return deduped, duplicate_count
+
+
 def tick_id_for(record: dict) -> int | None:
     value = record.get("tickId")
     return value if isinstance(value, int) else None
@@ -339,6 +492,7 @@ def compact_candidate(candidate: dict, rank_within_scenario: int) -> dict:
         "targetDistanceEuclidean": candidate.get("targetDistanceEuclidean"),
         "playerWorld": candidate.get("playerWorld"),
         "targetWorld": candidate.get("targetWorld"),
+        "scenarioDuplicateCount": candidate.get("scenarioDuplicateCount"),
         "scoreParts": candidate_scoring.get("scoreParts") if isinstance(candidate_scoring.get("scoreParts"), list) else [],
         "reasons": candidate_scoring.get("reasons") if isinstance(candidate_scoring.get("reasons"), list) else [],
         "penalties": candidate_scoring.get("penalties") if isinstance(candidate_scoring.get("penalties"), list) else [],
@@ -371,6 +525,8 @@ def context_records_for_tick(
     world_by_tick: dict[int, list[dict]],
     tick_id: int,
     context_roles: set[str],
+    context_target_types: set[str],
+    excluded_context_target_types: set[str],
     limit: int,
 ) -> tuple[list[dict], dict[str, dict]]:
     matching = []
@@ -379,10 +535,17 @@ def context_records_for_tick(
 
     for record in world_by_tick.get(tick_id, []):
         target = target_for(record)
+        target_type = str(target.get("targetType") or "unknown")
         role = str(target.get("targetRole") or "unknown")
         category = str(target.get("targetCategory") or "unknown")
 
         if role.lower() not in context_roles:
+            continue
+
+        if context_target_types and target_type.lower() not in context_target_types:
+            continue
+
+        if target_type.lower() in excluded_context_target_types:
             continue
 
         role_counts[role] += 1
@@ -404,6 +567,7 @@ def scenario_record(
     candidates: list[dict],
     context_targets: list[dict],
     context_counts: dict,
+    duplicate_candidate_count: int,
 ) -> dict:
     first = candidates[0]
     frame = frame_for(first)
@@ -428,7 +592,8 @@ def scenario_record(
             "countsByRole": context_counts.get("countsByRole", {}),
             "countsByCategory": context_counts.get("countsByCategory", {}),
         },
-        "warnings": [],
+        "duplicateCandidateCount": duplicate_candidate_count,
+        "warnings": ([f"removed {duplicate_candidate_count} duplicate selected candidates"] if duplicate_candidate_count else []),
         "safety": {
             "readOnly": True,
             "actionGenerated": False,
@@ -452,12 +617,14 @@ def index_for(
     geometry_counts = Counter()
     context_count = 0
     selected_candidate_count = 0
+    duplicate_candidate_count = 0
 
     for record in records:
         context_targets = record.get("context", {}).get("targets", [])
         context_count += len(context_targets) if isinstance(context_targets, list) else 0
         selected = record.get("selectedCandidates", [])
         selected_candidate_count += len(selected) if isinstance(selected, list) else 0
+        duplicate_candidate_count += int(record.get("duplicateCandidateCount") or 0)
 
         for candidate in selected:
             target = candidate.get("target") if isinstance(candidate.get("target"), dict) else {}
@@ -474,6 +641,8 @@ def index_for(
         "selectedTickCount": len(selected_ticks),
         "scenarioRecordCount": len(records),
         "selectedCandidateCount": selected_candidate_count,
+        "duplicateCandidateCount": duplicate_candidate_count,
+        "duplicateCandidateCountByScenarioType": ({scenario_type: duplicate_candidate_count} if duplicate_candidate_count else {}),
         "contextTargetCount": context_count,
         "countsByTargetName": dict(name_counts.most_common(25)),
         "countsByTargetCategory": dict(category_counts.most_common()),
@@ -527,6 +696,8 @@ def build_scenario_dataset(session: Path, args) -> tuple[list[dict], dict]:
     include_context = bool(args.include_context or template.get("includeContext"))
     context_limit = int(template.get("contextLimitPerTick", 20))
     context_roles = {str(role).lower() for role in template.get("contextRoles", []) if str(role).strip()}
+    context_target_types = {str(target_type).lower() for target_type in template.get("contextTargetTypes", []) if str(target_type).strip()}
+    excluded_context_target_types = {str(target_type).lower() for target_type in template.get("excludedContextTargetTypes", []) if str(target_type).strip()}
 
     geometry_dir = session / "interaction_geometry"
     candidate_path = geometry_dir / "target_candidates.jsonl"
@@ -549,9 +720,12 @@ def build_scenario_dataset(session: Path, args) -> tuple[list[dict], dict]:
         world_by_tick = group_by_tick(world_records)
 
     records = []
+    duplicate_candidate_count = 0
 
     for tick_id in sorted(selected_by_tick):
-        tick_candidates = sorted(selected_by_tick[tick_id], key=score_sort_key)[:limit_per_tick]
+        deduped_candidates, tick_duplicate_count = dedupe_candidates_for_tick(selected_by_tick[tick_id])
+        duplicate_candidate_count += tick_duplicate_count
+        tick_candidates = deduped_candidates[:limit_per_tick]
         context_targets = []
         context_counts = {"countsByRole": {}, "countsByCategory": {}}
 
@@ -560,6 +734,8 @@ def build_scenario_dataset(session: Path, args) -> tuple[list[dict], dict]:
                 world_by_tick,
                 tick_id,
                 context_roles,
+                context_target_types,
+                excluded_context_target_types,
                 context_limit,
             )
 
@@ -571,8 +747,15 @@ def build_scenario_dataset(session: Path, args) -> tuple[list[dict], dict]:
                 tick_candidates,
                 context_targets,
                 context_counts,
+                tick_duplicate_count,
             )
         )
+
+    if duplicate_candidate_count:
+        warnings.append(f"removed {duplicate_candidate_count} duplicate scenario candidates before applying limitPerTick")
+
+        if duplicate_candidate_count >= 20:
+            warnings.append(f"many duplicate scenario candidates removed: {duplicate_candidate_count}")
 
     paths = output_paths(session, scenario_type)
     index = index_for(
@@ -595,6 +778,7 @@ def print_summary(index: dict) -> None:
     print(f"selected ticks: {index['selectedTickCount']}")
     print(f"scenario records: {index['scenarioRecordCount']}")
     print(f"selected candidates: {index['selectedCandidateCount']}")
+    print(f"duplicates removed: {index.get('duplicateCandidateCount', 0)}")
     print(f"context targets: {index['contextTargetCount']}")
     print(f"min score: {index['minScoreUsed']}")
     print(f"limit per tick: {index['limitPerTickUsed']}")

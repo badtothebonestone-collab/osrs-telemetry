@@ -206,4 +206,54 @@ public interface TelemetryConfig extends Config
 	{
 		return false;
 	}
+
+	@ConfigItem(
+			keyName = "sceneCaptureMode",
+			name = "Scene capture mode",
+			description = "Diagnostic scene object coverage. LOCAL_DEFAULT preserves radius 12/max 250; wide/full are raw-force modes; static index mode reduces repeated unchanged scenery."
+	)
+	default SceneCaptureMode sceneCaptureMode()
+	{
+		return SceneCaptureMode.LOCAL_DEFAULT;
+	}
+
+	@ConfigItem(
+			keyName = "sceneIndexRescanIntervalTicks",
+			name = "Scene index rescan interval",
+			description = "Diagnostic static scene index full-resync interval in ticks. 0 disables periodic resync."
+	)
+	default int sceneIndexRescanIntervalTicks()
+	{
+		return 0;
+	}
+
+	@ConfigItem(
+			keyName = "keepDespawnedSceneObjectsInIndex",
+			name = "Keep despawned scene objects",
+			description = "Keep despawned scene object records in the diagnostic static scene index."
+	)
+	default boolean keepDespawnedSceneObjectsInIndex()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "maxSceneIndexObjects",
+			name = "Max scene index objects",
+			description = "Safety cap for diagnostic static scene index object count."
+	)
+	default int maxSceneIndexObjects()
+	{
+		return 50000;
+	}
+
+	@ConfigItem(
+			keyName = "sceneProjectionRefreshMode",
+			name = "Scene projection refresh mode",
+			description = "Projection subset for static scene index diagnostic mode."
+	)
+	default SceneProjectionRefreshMode sceneProjectionRefreshMode()
+	{
+		return SceneProjectionRefreshMode.VISIBLE_AND_NEARBY;
+	}
 }

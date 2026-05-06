@@ -16,6 +16,9 @@ DEFAULT_SCENARIO = "bank_area"
 MISSING_SCENARIO_MESSAGE = (
     "Run python telemetry-viewer\\build_scenario_dataset.py --scenario bank_area first."
 )
+TARGET_OVERRIDES_PATH = Path(__file__).resolve().with_name("target_name_overrides.json")
+TARGET_OVERRIDE_GROUPS = {"sceneObjects", "groundItems", "npcs"}
+TARGET_OVERRIDE_ROLES = {"interactable", "obstacle", "navigation", "decoration", "entity", "item", "ui", "unknown"}
 
 
 def resolve_session(args) -> Path | None:
@@ -23,6 +26,116 @@ def resolve_session(args) -> Path | None:
         return Path(args.session).expanduser()
 
     return find_newest_session(get_sessions_dir(args.sessions_dir))
+
+
+def default_target_overrides() -> dict:
+    return {"sceneObjects": {}, "groundItems": {}, "npcs": {}}
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.tmp")
+
+    with temp_path.open("w", encoding="utf-8") as file:
+        json.dump(data, file, indent=2, sort_keys=True)
+        file.write("\n")
+
+    temp_path.replace(path)
+
+
+def load_target_overrides() -> dict:
+    if not TARGET_OVERRIDES_PATH.exists():
+        data = default_target_overrides()
+        atomic_write_json(TARGET_OVERRIDES_PATH, data)
+        return data
+
+    data = safe_read_json(TARGET_OVERRIDES_PATH)
+
+    if not isinstance(data, dict):
+        data = default_target_overrides()
+
+    for group in TARGET_OVERRIDE_GROUPS:
+        if not isinstance(data.get(group), dict):
+            data[group] = {}
+
+    return data
+
+
+def clean_override_payload(payload: dict) -> tuple[str, str, dict]:
+    if not isinstance(payload, dict):
+        raise ValueError("request body must be a JSON object")
+
+    target_kind = str(payload.get("targetKind") or "").strip()
+
+    if target_kind not in TARGET_OVERRIDE_GROUPS:
+        raise ValueError("targetKind must be sceneObjects, groundItems, or npcs")
+
+    target_id = str(payload.get("id") or "").strip()
+
+    if not target_id:
+        raise ValueError("id is required")
+
+    entry = {}
+
+    for key in ("name", "category", "notes"):
+        value = str(payload.get(key) or "").strip()
+
+        if value:
+            entry[key] = value
+
+    role = str(payload.get("role") or "").strip()
+
+    if role:
+        if role not in TARGET_OVERRIDE_ROLES:
+            raise ValueError("role is not one of the supported target roles")
+
+        entry["role"] = role
+
+    tags = payload.get("tags")
+
+    if isinstance(tags, str):
+        tag_values = tags.split(",")
+    elif isinstance(tags, list):
+        tag_values = tags
+    elif tags is None:
+        tag_values = []
+    else:
+        raise ValueError("tags must be a list or comma-separated string")
+
+    cleaned_tags = []
+
+    for tag in tag_values:
+        text = str(tag or "").strip()
+
+        if text and text not in cleaned_tags:
+            cleaned_tags.append(text)
+
+    if cleaned_tags:
+        entry["tags"] = cleaned_tags
+
+    return target_kind, target_id, entry
+
+
+def save_target_override(payload: dict, session: Path | None, scenario: str) -> dict:
+    target_kind, target_id, entry = clean_override_payload(payload)
+    data = load_target_overrides()
+    data[target_kind][target_id] = entry
+    atomic_write_json(TARGET_OVERRIDES_PATH, data)
+    session_text = str(session) if session else "<session>"
+
+    return {
+        "ok": True,
+        "message": "Override saved. Rebuild world geometry and scenario dataset to apply it.",
+        "path": str(TARGET_OVERRIDES_PATH),
+        "targetKind": target_kind,
+        "id": target_id,
+        "entry": entry,
+        "rebuildCommands": [
+            f'python telemetry-viewer\\build_world_target_geometry.py --session "{session_text}" --target-type all --only-on-screen --latest-with-frames 50',
+            f'python telemetry-viewer\\select_target_candidates.py --session "{session_text}" --target-type all --only-on-screen --geometry-available --limit 100',
+            f'python telemetry-viewer\\build_scenario_dataset.py --session "{session_text}" --scenario {scenario}',
+        ],
+    }
 
 
 def read_jsonl(path: Path) -> tuple[list[dict], list[str]]:
@@ -326,7 +439,7 @@ def html_page() -> str:
       overflow: hidden;
       background: #111417;
     }
-    button, input {
+    button, input, select, textarea {
       color: inherit;
       background: #1e252c;
       border: 1px solid #33414d;
@@ -505,6 +618,30 @@ def html_page() -> str:
     input[type="range"] {
       width: 110px;
     }
+    .override-panel {
+      display: grid;
+      gap: 7px;
+    }
+    .override-panel label {
+      display: grid;
+      align-items: stretch;
+      gap: 3px;
+    }
+    .override-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .override-status {
+      color: #c3d4e4;
+      font-size: 12px;
+    }
+    .override-panel textarea {
+      min-height: 76px;
+      resize: vertical;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+    }
   </style>
 </head>
 <body>
@@ -518,14 +655,23 @@ def html_page() -> str:
         <label><input id="scaleCanvas" type="checkbox" checked> Scale canvas geometry to frame</label>
         <label><input id="showDebug" type="checkbox"> Show coordinate debug</label>
         <label><input id="showCandidates" type="checkbox" checked> selected candidates</label>
-        <label><input id="showContext" type="checkbox" checked> context</label>
+        <label><input id="showContext" type="checkbox"> context</label>
         <label><input id="showObstacleContext" type="checkbox" checked> obstacle/navigation</label>
-        <label><input id="showLabels" type="checkbox" checked> labels</label>
+        <label><input id="contextLabels" type="checkbox"> context labels</label>
+        <label><input id="hideTileContext" type="checkbox"> hide tile context</label>
+        <span class="muted">context type:</span>
+        <label><input id="contextTiles" type="checkbox" checked> tiles</label>
+        <label><input id="contextSceneObjects" type="checkbox" checked> scene</label>
+        <label><input id="contextGroundItems" type="checkbox" checked> items</label>
+        <label><input id="contextNpcPlayers" type="checkbox" checked> npc/player</label>
+        <label><input id="contextUi" type="checkbox" checked> ui</label>
+        <label><input id="showLabels" type="checkbox" checked> selected labels</label>
         <label><input id="showRankScore" type="checkbox" checked> rank/score</label>
         <label>opacity <input id="opacity" type="range" min="0.1" max="1" step="0.05" value="0.75"></label>
         <label>max context <input id="maxContext" type="number" min="0" value="50"></label>
       </div>
       <div id="messages"></div>
+      <div id="overlayStatus"></div>
       <pre class="debug" id="coordinateDebug"></pre>
       <div class="viewer">
         <div class="frame-wrap" id="frameWrap">
@@ -570,8 +716,55 @@ def html_page() -> str:
           <pre id="recordDetails">{}</pre>
         </div>
         <div class="panel">
-          <h3 style="margin:0 0 8px">Selected Candidate</h3>
+          <h3 style="margin:0 0 8px">Selected Candidate / Context</h3>
           <pre id="candidateDetails">{}</pre>
+        </div>
+        <div class="panel override-panel">
+          <h3 style="margin:0">Add/Edit Override</h3>
+          <div class="muted">Overrides change derived labels/categories only. Rebuild geometry and the scenario to apply them.</div>
+          <label>Target kind
+            <select id="overrideKind">
+              <option value="sceneObjects">sceneObjects</option>
+              <option value="groundItems">groundItems</option>
+              <option value="npcs">npcs</option>
+            </select>
+          </label>
+          <label>ID/rawId <input id="overrideId" type="text" placeholder="select a target"></label>
+          <label>Name <input id="overrideName" type="text" placeholder="Tree, Bank booth, Door"></label>
+          <label>Role
+            <select id="overrideRole">
+              <option value="interactable">interactable</option>
+              <option value="obstacle">obstacle</option>
+              <option value="navigation">navigation</option>
+              <option value="decoration">decoration</option>
+              <option value="entity">entity</option>
+              <option value="item">item</option>
+              <option value="ui">ui</option>
+              <option value="unknown">unknown</option>
+            </select>
+          </label>
+          <label>Category <input id="overrideCategory" type="text" list="overrideCategories" placeholder="tree, bank, door"></label>
+          <datalist id="overrideCategories">
+            <option value="tree"></option>
+            <option value="bank"></option>
+            <option value="door"></option>
+            <option value="wall"></option>
+            <option value="npc"></option>
+            <option value="groundItem"></option>
+            <option value="obstacle"></option>
+            <option value="unknown"></option>
+          </datalist>
+          <label>Tags <input id="overrideTags" type="text" placeholder="tree,clickable_candidate"></label>
+          <label>Notes <input id="overrideNotes" type="text" placeholder="added from scenario inspector"></label>
+          <div class="override-actions">
+            <button id="saveOverride" type="button">Save Override</button>
+            <button id="reloadOverrides" type="button">Reload Overrides</button>
+            <button id="copyRebuildCommands" type="button">Copy Rebuild Commands</button>
+          </div>
+          <div id="overrideStatus" class="override-status">Select a candidate or context target to prefill this form.</div>
+          <label>Rebuild commands
+            <textarea id="rebuildCommands" readonly></textarea>
+          </label>
         </div>
       </div>
     </aside>
@@ -584,13 +777,16 @@ def html_page() -> str:
       currentRecord: null,
       currentDimensions: {},
       selectedCandidateIndex: 0,
+      selectedContextIndex: null,
       frameLoaded: false,
       frameNatural: null,
+      overrides: null,
     };
 
     const el = {
       summary: document.getElementById("summary"),
       messages: document.getElementById("messages"),
+      overlayStatus: document.getElementById("overlayStatus"),
       recordSelect: document.getElementById("recordSelect"),
       frameImage: document.getElementById("frameImage"),
       overlay: document.getElementById("overlay"),
@@ -600,6 +796,18 @@ def html_page() -> str:
       contextRows: document.getElementById("contextRows"),
       recordDetails: document.getElementById("recordDetails"),
       candidateDetails: document.getElementById("candidateDetails"),
+      overrideKind: document.getElementById("overrideKind"),
+      overrideId: document.getElementById("overrideId"),
+      overrideName: document.getElementById("overrideName"),
+      overrideRole: document.getElementById("overrideRole"),
+      overrideCategory: document.getElementById("overrideCategory"),
+      overrideTags: document.getElementById("overrideTags"),
+      overrideNotes: document.getElementById("overrideNotes"),
+      saveOverride: document.getElementById("saveOverride"),
+      reloadOverrides: document.getElementById("reloadOverrides"),
+      copyRebuildCommands: document.getElementById("copyRebuildCommands"),
+      overrideStatus: document.getElementById("overrideStatus"),
+      rebuildCommands: document.getElementById("rebuildCommands"),
       prev: document.getElementById("prev"),
       next: document.getElementById("next"),
       jumpTick: document.getElementById("jumpTick"),
@@ -610,6 +818,13 @@ def html_page() -> str:
       showCandidates: document.getElementById("showCandidates"),
       showContext: document.getElementById("showContext"),
       showObstacleContext: document.getElementById("showObstacleContext"),
+      contextLabels: document.getElementById("contextLabels"),
+      hideTileContext: document.getElementById("hideTileContext"),
+      contextTiles: document.getElementById("contextTiles"),
+      contextSceneObjects: document.getElementById("contextSceneObjects"),
+      contextGroundItems: document.getElementById("contextGroundItems"),
+      contextNpcPlayers: document.getElementById("contextNpcPlayers"),
+      contextUi: document.getElementById("contextUi"),
       showLabels: document.getElementById("showLabels"),
       showRankScore: document.getElementById("showRankScore"),
       opacity: document.getElementById("opacity"),
@@ -622,10 +837,18 @@ def html_page() -> str:
       }[c]));
     }
 
-    async function api(path) {
-      const response = await fetch(path);
+    async function api(path, options = {}) {
+      const response = await fetch(path, options);
       if (!response.ok) throw new Error(await response.text());
       return await response.json();
+    }
+
+    async function postJson(path, payload) {
+      return await api(path, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload),
+      });
     }
 
     function card(label, value) {
@@ -645,6 +868,21 @@ def html_page() -> str:
       el.messages.innerHTML = warnings.length
         ? warnings.map(w => `<div class="warning">${escapeHtml(w)}</div>`).join("")
         : "";
+    }
+
+    function scenarioType() {
+      return String((state.summary || {}).scenarioType || "").toLowerCase();
+    }
+
+    function applyScenarioDefaults() {
+      el.showContext.checked = false;
+      el.contextLabels.checked = false;
+
+      if (scenarioType() === "tree_cutting") {
+        el.showObstacleContext.checked = false;
+        el.hideTileContext.checked = true;
+        el.maxContext.value = "25";
+      }
     }
 
     function recordLabel(row) {
@@ -669,6 +907,161 @@ def html_page() -> str:
       return target.name || target.targetName || target.fallbackName || target.targetId || `${target.targetType || "target"}[${target.rawId ?? target.id ?? "unknown"}]`;
     }
 
+    function overrideKindForTargetType(targetType) {
+      if (targetType === "sceneObject") return "sceneObjects";
+      if (targetType === "groundItem") return "groundItems";
+      if (targetType === "npc") return "npcs";
+      return "";
+    }
+
+    function selectedOverrideTarget() {
+      const record = state.currentRecord || {};
+
+      if (state.selectedContextIndex !== null) {
+        const contextTargets = contextFilterResult(record.context?.targets || []).filtered;
+        const target = contextTargets[state.selectedContextIndex] || null;
+        if (!target) return null;
+        const kind = overrideKindForTargetType(target.targetType);
+        const id = target.rawId ?? target.id;
+        if (!kind || id === undefined || id === null || id === "") return null;
+        return {kind, id: String(id), target, source: "context"};
+      }
+
+      const candidate = (record.selectedCandidates || [])[state.selectedCandidateIndex] || null;
+      const target = candidate?.target || null;
+      if (!target) return null;
+      const kind = overrideKindForTargetType(target.targetType);
+      const id = target.rawId ?? target.id;
+      if (!kind || id === undefined || id === null || id === "") return null;
+      return {kind, id: String(id), target, candidate, source: "candidate"};
+    }
+
+    function existingOverride(kind, id) {
+      const group = state.overrides?.overrides?.[kind] || state.overrides?.[kind] || {};
+      return group[String(id)] || null;
+    }
+
+    function suggestedOverride(info) {
+      const target = info.target || {};
+      const scenario = scenarioType();
+      const haystack = [
+        targetName(target),
+        target.name,
+        target.targetName,
+        target.targetCategory,
+        (target.targetTags || []).join(" "),
+      ].join(" ").toLowerCase();
+      const suggestion = {
+        name: "",
+        role: target.targetRole || "interactable",
+        category: target.targetCategory && target.targetCategory !== "unknown" ? target.targetCategory : "",
+        tags: Array.isArray(target.targetTags) ? target.targetTags.join(",") : "",
+      };
+
+      if (scenario === "tree_cutting" && target.targetType === "sceneObject") {
+        suggestion.name = "Tree";
+        suggestion.role = "interactable";
+        suggestion.category = "tree";
+        suggestion.tags = "tree,clickable_candidate";
+      } else if (haystack.includes("bank") || haystack.includes("deposit")) {
+        suggestion.name = haystack.includes("deposit") ? "Bank Deposit Box" : "Bank";
+        suggestion.role = "interactable";
+        suggestion.category = "bank";
+        suggestion.tags = "bank,clickable_candidate";
+      } else if (haystack.includes("door") || haystack.includes("gate")) {
+        suggestion.name = haystack.includes("gate") ? "Gate" : "Door";
+        suggestion.role = "interactable";
+        suggestion.category = "door";
+        suggestion.tags = "door,navigation_geometry,clickable_candidate";
+      } else if (haystack.includes("tree") || target.targetCategory === "tree") {
+        suggestion.name = "Tree";
+        suggestion.role = "interactable";
+        suggestion.category = "tree";
+        suggestion.tags = "tree,clickable_candidate";
+      }
+
+      return suggestion;
+    }
+
+    function rebuildCommandText() {
+      const session = state.summary?.sessionPath || "<session>";
+      const scenario = state.summary?.scenarioType || "bank_area";
+      const category = el.overrideCategory.value.trim();
+      const name = el.overrideName.value.trim();
+      const selected = selectedOverrideTarget();
+      const targetType = selected?.target?.targetType || "all";
+      const quote = (value) => `"${String(value).replaceAll('"', '\\"')}"`;
+      const selector = scenario === "tree_cutting"
+        ? "--name tree --target-type sceneObject"
+        : category
+          ? `--category ${quote(category)}`
+          : name
+            ? `--name ${quote(name)}`
+            : "--target-type all";
+      const targetTypeFilter = selector.includes("--target-type") || targetType === "all" ? "" : `--target-type ${targetType}`;
+      return [
+        `python telemetry-viewer\\build_world_target_geometry.py --session "${session}" --target-type all --only-on-screen --latest-with-frames 50`,
+        `python telemetry-viewer\\select_target_candidates.py --session "${session}" ${selector} ${targetTypeFilter} --only-on-screen --geometry-available --limit 100`.replace(/\s+/g, " ").trim(),
+        `python telemetry-viewer\\build_scenario_dataset.py --session "${session}" --scenario ${scenario}`,
+      ].join("\n");
+    }
+
+    function renderOverridePanel() {
+      const info = selectedOverrideTarget();
+
+      if (!info) {
+        el.overrideId.value = "";
+        el.overrideStatus.textContent = "Select an NPC, scene object, or ground item candidate/context row to prefill this form.";
+        el.rebuildCommands.value = rebuildCommandText();
+        return;
+      }
+
+      const override = existingOverride(info.kind, info.id);
+      const suggestion = override || suggestedOverride(info);
+      el.overrideKind.value = info.kind;
+      el.overrideId.value = info.id;
+      el.overrideName.value = suggestion.name || "";
+      el.overrideRole.value = suggestion.role || "interactable";
+      el.overrideCategory.value = suggestion.category || "";
+      el.overrideTags.value = Array.isArray(suggestion.tags) ? suggestion.tags.join(",") : (suggestion.tags || "");
+      el.overrideNotes.value = suggestion.notes || `added from scenario inspector ${scenarioType() || ""}`.trim();
+      el.overrideStatus.textContent = override ? "Existing override loaded for this target ID." : `Override form prefilled from selected ${info.source}.`;
+      el.rebuildCommands.value = rebuildCommandText();
+    }
+
+    async function loadOverrides() {
+      state.overrides = await api("/api/overrides");
+      renderOverridePanel();
+    }
+
+    async function saveOverride() {
+      const payload = {
+        targetKind: el.overrideKind.value,
+        id: el.overrideId.value.trim(),
+        name: el.overrideName.value.trim(),
+        role: el.overrideRole.value,
+        category: el.overrideCategory.value.trim(),
+        tags: el.overrideTags.value.split(",").map(tag => tag.trim()).filter(Boolean),
+        notes: el.overrideNotes.value.trim(),
+      };
+      const result = await postJson("/api/overrides", payload);
+      el.overrideStatus.textContent = result.message || "Override saved.";
+      el.rebuildCommands.value = (result.rebuildCommands || rebuildCommandText().split("\n")).join("\n");
+      await loadOverrides();
+    }
+
+    async function copyRebuildCommands() {
+      const text = el.rebuildCommands.value || rebuildCommandText();
+      try {
+        await navigator.clipboard.writeText(text);
+        el.overrideStatus.textContent = "Rebuild commands copied.";
+      } catch (_error) {
+        el.rebuildCommands.focus();
+        el.rebuildCommands.select();
+        el.overrideStatus.textContent = "Select and copy the rebuild commands from the box.";
+      }
+    }
+
     function geometrySummary(target) {
       for (const key of ["clickboxBounds", "convexHullBounds"]) {
         const b = target[key];
@@ -683,14 +1076,83 @@ def html_page() -> str:
       return "-";
     }
 
+    function contextTypeAllowed(target) {
+      const type = String(target.targetType || "").toLowerCase();
+
+      if (type === "tile") return el.contextTiles.checked && !el.hideTileContext.checked;
+      if (type === "sceneobject") return el.contextSceneObjects.checked;
+      if (type === "grounditem") return el.contextGroundItems.checked;
+      if (type === "npc" || type === "player") return el.contextNpcPlayers.checked;
+      if (["inventoryslot", "equipmentslot", "prayericon", "magicspell", "baseuiregion"].includes(type)) return el.contextUi.checked;
+
+      return true;
+    }
+
+    function contextRoleAllowed(target) {
+      const role = String(target.targetRole || "").toLowerCase();
+      return !el.showObstacleContext.checked || ["obstacle", "navigation"].includes(role);
+    }
+
+    function contextFilterResult(targets) {
+      const allTargets = Array.isArray(targets) ? targets : [];
+      const filtered = allTargets.filter(target => contextTypeAllowed(target) && contextRoleAllowed(target));
+      const maxContext = Math.max(0, Number(el.maxContext.value) || 50);
+      return {
+        total: allTargets.length,
+        filtered,
+        drawn: filtered.slice(0, maxContext),
+        hiddenByFilter: allTargets.length - filtered.length,
+        hiddenByMax: Math.max(0, filtered.length - maxContext),
+      };
+    }
+
+    function possibleDuplicateSelectedCandidates(candidates) {
+      const seen = new Map();
+
+      for (const candidate of candidates || []) {
+        const target = candidate.target || {};
+        const point = normalizePoint(candidate.aimPoint);
+        const key = [
+          target.targetType || "target",
+          target.rawId ?? target.id ?? target.targetId ?? "unknown",
+          targetName(target),
+          point ? Math.round(point.x / 3) : "-",
+          point ? Math.round(point.y / 3) : "-",
+          candidate.preferredAimGeometryType || "-",
+        ].join("|");
+
+        if (seen.has(key)) return true;
+        seen.set(key, true);
+      }
+
+      return false;
+    }
+
+    function renderOverlayStatus(contextResult) {
+      const record = state.currentRecord || {};
+      const messages = [];
+
+      if (contextResult && (contextResult.hiddenByFilter || contextResult.hiddenByMax)) {
+        messages.push("Context targets hidden/limited for readability.");
+      }
+
+      if (possibleDuplicateSelectedCandidates(record.selectedCandidates || [])) {
+        messages.push("Possible duplicate selected candidates.");
+      }
+
+      el.overlayStatus.innerHTML = messages.length
+        ? messages.map(message => `<div class="warning">${escapeHtml(message)}</div>`).join("")
+        : "";
+    }
+
     function renderTables() {
       const record = state.currentRecord || {};
       const candidates = record.selectedCandidates || [];
-      const context = record.context?.targets || [];
+      const context = contextFilterResult(record.context?.targets || []).filtered;
       el.candidateRows.innerHTML = candidates.map((candidate, index) => {
         const target = candidate.target || {};
         const reasons = (candidate.reasons || []).slice(0, 5).join(",");
-        return `<tr class="${index === state.selectedCandidateIndex ? "selected" : ""}" data-index="${index}">
+        return `<tr class="${state.selectedContextIndex === null && index === state.selectedCandidateIndex ? "selected" : ""}" data-index="${index}">
           <td>${escapeHtml(candidate.rankWithinScenario ?? "-")}</td>
           <td>${escapeHtml(candidate.score ?? "-")}</td>
           <td title="${escapeHtml(targetName(target))}">${escapeHtml(targetName(target))}</td>
@@ -701,8 +1163,8 @@ def html_page() -> str:
           <td title="${escapeHtml(reasons)}">${escapeHtml(reasons || "-")}</td>
         </tr>`;
       }).join("");
-      el.contextRows.innerHTML = context.map(target => {
-        return `<tr>
+      el.contextRows.innerHTML = context.map((target, index) => {
+        return `<tr class="${index === state.selectedContextIndex ? "selected" : ""}" data-index="${index}">
           <td title="${escapeHtml(targetName(target))}">${escapeHtml(targetName(target))}</td>
           <td>${escapeHtml(target.targetType || "-")}</td>
           <td>${escapeHtml(target.targetRole || "-")} / ${escapeHtml(target.targetCategory || "-")}</td>
@@ -713,6 +1175,14 @@ def html_page() -> str:
       for (const row of el.candidateRows.querySelectorAll("tr")) {
         row.addEventListener("click", () => {
           state.selectedCandidateIndex = Number(row.dataset.index);
+          state.selectedContextIndex = null;
+          renderAll();
+        });
+      }
+
+      for (const row of el.contextRows.querySelectorAll("tr")) {
+        row.addEventListener("click", () => {
+          state.selectedContextIndex = Number(row.dataset.index);
           renderAll();
         });
       }
@@ -836,8 +1306,8 @@ def html_page() -> str:
       return scaled;
     }
 
-    function labelAt(ctx, point, text, color) {
-      if (!point || !el.showLabels.checked) return;
+    function labelAt(ctx, point, text, color, enabled) {
+      if (!point || !enabled) return;
       ctx.font = "12px Segoe UI, Arial";
       ctx.textBaseline = "top";
       const width = ctx.measureText(text).width + 8;
@@ -863,19 +1333,19 @@ def html_page() -> str:
       labelPoint = drawPoint(ctx, candidate.aimPoint, candidate, color, selected ? 6 : 4) || labelPoint;
       const name = targetName(candidate.target || {});
       const prefix = el.showRankScore.checked ? `#${candidate.rankWithinScenario ?? "?"} ${candidate.score ?? ""} ` : "";
-      labelAt(ctx, labelPoint, `${prefix}${name}`, color);
+      labelAt(ctx, labelPoint, `${prefix}${name}`, color, el.showLabels.checked);
     }
 
     function drawContext(ctx, target) {
+      if (!contextTypeAllowed(target) || !contextRoleAllowed(target)) return;
       const role = String(target.targetRole || "").toLowerCase();
-      if (el.showObstacleContext.checked && !["obstacle", "navigation"].includes(role)) return;
       const color = role === "obstacle" ? "#7ec8ff" : "#73e1b4";
       const fill = role === "obstacle" ? "rgba(126, 200, 255, 0.06)" : "rgba(115, 225, 180, 0.06)";
       drawPolygon(ctx, target.tilePolygon || target.canvasTilePolygon, target, color, fill, 1);
       drawBounds(ctx, target.clickboxBounds || target.convexHullBounds, target, color, fill, 1);
       const point = target.canvasPoint || target.canvasLocation || target.canvasCenter;
       const labelPoint = drawPoint(ctx, point, target, color, 3);
-      labelAt(ctx, labelPoint, targetName(target), color);
+      labelAt(ctx, labelPoint, targetName(target), color, el.contextLabels.checked);
     }
 
     function renderOverlay() {
@@ -884,9 +1354,9 @@ def html_page() -> str:
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.globalAlpha = Number(el.opacity.value) || 0.75;
       const record = state.currentRecord || {};
+      const contextResult = contextFilterResult(record.context?.targets || []);
       if (el.showContext.checked) {
-        const maxContext = Math.max(0, Number(el.maxContext.value) || 50);
-        for (const target of (record.context?.targets || []).slice(0, maxContext)) drawContext(ctx, target);
+        for (const target of contextResult.drawn) drawContext(ctx, target);
       }
       if (el.showCandidates.checked) {
         (record.selectedCandidates || []).forEach((candidate, index) => {
@@ -896,6 +1366,7 @@ def html_page() -> str:
         if (selected) drawCandidate(ctx, selected, true);
       }
       ctx.globalAlpha = 1;
+      renderOverlayStatus(contextResult);
       renderCoordinateDebug();
     }
 
@@ -936,6 +1407,7 @@ def html_page() -> str:
     async function loadRecord(index) {
       state.currentIndex = Math.max(0, Math.min(index, state.records.length - 1));
       state.selectedCandidateIndex = 0;
+      state.selectedContextIndex = null;
       const payload = await api(`/api/record/${state.currentIndex}`);
       state.currentRecord = payload.record;
       state.currentDimensions = payload.dimensions || {};
@@ -962,7 +1434,9 @@ def html_page() -> str:
 
     function renderDetails() {
       const record = state.currentRecord || {};
-      const candidate = (record.selectedCandidates || [])[state.selectedCandidateIndex] || null;
+      const context = contextFilterResult(record.context?.targets || []).filtered;
+      const candidate = state.selectedContextIndex === null ? (record.selectedCandidates || [])[state.selectedCandidateIndex] || null : null;
+      const contextTarget = state.selectedContextIndex !== null ? context[state.selectedContextIndex] || null : null;
       const compactRecord = {
         tickId: record.tickId,
         frame: record.frame,
@@ -975,7 +1449,8 @@ def html_page() -> str:
         safety: record.safety || {},
       };
       el.recordDetails.textContent = JSON.stringify(compactRecord, null, 2);
-      el.candidateDetails.textContent = JSON.stringify(candidate || {}, null, 2);
+      el.candidateDetails.textContent = JSON.stringify(candidate || contextTarget || {}, null, 2);
+      renderOverridePanel();
     }
 
     function renderAll() {
@@ -987,9 +1462,11 @@ def html_page() -> str:
 
     async function init() {
       state.summary = await api("/api/summary");
+      await loadOverrides();
       const recordsPayload = await api("/api/records");
       state.records = recordsPayload.records || [];
       renderSummary();
+      applyScenarioDefaults();
       renderRecordSelect();
       if (state.records.length) await loadRecord(0);
     }
@@ -1021,10 +1498,37 @@ def html_page() -> str:
       const index = state.records.findIndex(row => row.tickId === tick);
       if (index >= 0) loadRecord(index);
     });
-    for (const control of [el.scaleCanvas, el.showDebug, el.showCandidates, el.showContext, el.showObstacleContext, el.showLabels, el.showRankScore, el.opacity, el.maxContext]) {
+    for (const control of [el.scaleCanvas, el.showDebug, el.showCandidates, el.contextLabels, el.showLabels, el.showRankScore, el.opacity]) {
       control.addEventListener("change", renderOverlay);
       control.addEventListener("input", renderOverlay);
     }
+    for (const control of [el.showContext, el.showObstacleContext, el.hideTileContext, el.contextTiles, el.contextSceneObjects, el.contextGroundItems, el.contextNpcPlayers, el.contextUi, el.maxContext]) {
+      control.addEventListener("change", renderAll);
+      control.addEventListener("input", renderAll);
+    }
+    for (const input of [el.overrideKind, el.overrideId, el.overrideName, el.overrideRole, el.overrideCategory, el.overrideTags]) {
+      input.addEventListener("input", () => {
+        el.rebuildCommands.value = rebuildCommandText();
+      });
+      input.addEventListener("change", () => {
+        el.rebuildCommands.value = rebuildCommandText();
+      });
+    }
+    el.saveOverride.addEventListener("click", () => {
+      saveOverride().catch(error => {
+        el.overrideStatus.textContent = error.message || String(error);
+      });
+    });
+    el.reloadOverrides.addEventListener("click", () => {
+      loadOverrides().then(() => {
+        el.overrideStatus.textContent = "Overrides reloaded.";
+      }).catch(error => {
+        el.overrideStatus.textContent = error.message || String(error);
+      });
+    });
+    el.copyRebuildCommands.addEventListener("click", () => {
+      copyRebuildCommands();
+    });
     init().catch(error => {
       el.messages.innerHTML = `<div class="warning">${escapeHtml(error.message || error)}</div>`;
     });
@@ -1064,7 +1568,59 @@ class ScenarioHandler(BaseHTTPRequestHandler):
             self.handle_frame(path)
             return
 
+        if path == "/api/overrides":
+            self.send_json({
+                "path": str(TARGET_OVERRIDES_PATH),
+                "exists": TARGET_OVERRIDES_PATH.exists(),
+                "overrides": load_target_overrides(),
+            })
+            return
+
         self.send_error_json(HTTPStatus.NOT_FOUND, "not found")
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/api/overrides":
+            self.handle_save_override()
+            return
+
+        self.send_error_json(HTTPStatus.NOT_FOUND, "not found")
+
+    def read_json_body(self) -> dict | None:
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
+            return None
+
+        if length <= 0:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "request body is required")
+            return None
+
+        if length > 65536:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "request body is too large")
+            return None
+
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, f"invalid JSON body: {error}")
+            return None
+
+    def handle_save_override(self) -> None:
+        payload = self.read_json_body()
+
+        if payload is None:
+            return
+
+        try:
+            result = save_target_override(payload, self.dataset.session, self.dataset.scenario)
+        except (OSError, ValueError) as error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, str(error))
+            return
+
+        self.send_json(result)
 
     def handle_record(self, path: str) -> None:
         index_text = path.rsplit("/", 1)[-1]

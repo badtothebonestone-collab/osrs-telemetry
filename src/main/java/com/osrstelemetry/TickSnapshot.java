@@ -25,6 +25,11 @@ public class TickSnapshot
     public NpcSnapshot[] npcs;
     public PlayerSnapshot[] players;
     public WidgetSnapshot[] widgets;
+    public SceneCaptureSummary sceneCaptureSummary;
+    public SceneIndexSummary sceneIndexSummary;
+    public SceneProjectionSummary sceneProjectionSummary;
+    public SceneObjectDeltas sceneObjectDeltas;
+    public SceneObjectSnapshot[] visibleSceneObjectRefs;
     public SceneObjectSnapshot[] sceneObjects;
     public GroundItemSnapshot[] groundItems;
     public StatusSnapshot status;
@@ -36,6 +41,8 @@ public class TickSnapshot
     public String[] captureErrors;
     public int writerQueueSize;
     public long writerDroppedRecords;
+    public Long sceneCaptureDurationMillis;
+    public Long snapshotBuildDurationMillis;
 
     public static class WidgetSnapshot
     {
@@ -138,12 +145,97 @@ public class TickSnapshot
         public String geometryWarning;
     }
 
+    public static class SceneCaptureSummary
+    {
+        public String sceneCaptureMode;
+        public boolean fullCurrentPlaneScan;
+        public int configuredRadius;
+        public int configuredMaxSceneObjects;
+        public int scanRadius;
+        public int maxSceneObjects;
+        public int maxGroundItems;
+        public int scannedPlane;
+        public int scannedTiles;
+        public int tilesWithObjects;
+        public int scanMinSceneX;
+        public int scanMaxSceneX;
+        public int scanMinSceneY;
+        public int scanMaxSceneY;
+        public int scanWidth;
+        public int scanHeight;
+        public int sceneObjectsSeen;
+        public int sceneObjectsCaptured;
+        public int sceneObjectsSkippedByCap;
+        public boolean sceneObjectCapHit;
+        public double captureRatio;
+        public int gameObjectsSeen;
+        public int wallObjectsSeen;
+        public int decorativeObjectsSeen;
+        public int groundObjectsSeen;
+        public int gameObjectsCaptured;
+        public int wallObjectsCaptured;
+        public int decorativeObjectsCaptured;
+        public int groundObjectsCaptured;
+        public int gameObjectsSkippedByCap;
+        public int wallObjectsSkippedByCap;
+        public int decorativeObjectsSkippedByCap;
+        public int groundObjectsSkippedByCap;
+        public int nullObjectsSkipped;
+        public int groundItemsSeen;
+        public int groundItemsCaptured;
+        public int groundItemsSkippedByCap;
+        public boolean groundItemCapHit;
+        public int nullGroundItemsSkipped;
+    }
+
+    public static class SceneIndexSummary
+    {
+        public String sceneCaptureMode;
+        public boolean indexEnabled;
+        public int indexObjectCount;
+        public int presentObjectCount;
+        public int newlyIndexedCount;
+        public int updatedCount;
+        public int despawnedCount;
+        public boolean fullResyncThisTick;
+        public String resyncReason;
+        public boolean indexCapHit;
+        public int maxSceneIndexObjects;
+        public Long sceneIndexBuildDurationMillis;
+        public Long sceneIndexUpdateDurationMillis;
+    }
+
+    public static class SceneProjectionSummary
+    {
+        public String projectionStateHash;
+        public boolean projectionStateChanged;
+        public String projectionRefreshMode;
+        public int projectionCandidatesConsidered;
+        public int projectionObjectsUpdated;
+        public int projectionObjectsReused;
+        public Long projectionDurationMillis;
+        public int visibleObjectCount;
+        public int onScreenObjectCount;
+        public int geometryAvailableCount;
+        public int missingGeometryCount;
+    }
+
+    public static class SceneObjectDeltas
+    {
+        public SceneObjectSnapshot[] newObjects;
+        public SceneObjectSnapshot[] updatedObjects;
+        public SceneObjectSnapshot[] despawnedObjects;
+    }
+
     public static class SceneObjectSnapshot
     {
+        public String objectKey;
         public String kind;
         public int id;
+        public Long hash;
         public String objectName;
         public String objectNameSource;
+        public String[] actions;
         public int worldX;
         public int worldY;
         public int plane;
@@ -161,6 +253,13 @@ public class TickSnapshot
         public boolean onScreen;
         public boolean geometryAvailable;
         public String geometryWarning;
+        public long firstSeenTick;
+        public long lastSeenTick;
+        public long lastUpdatedTick;
+        public boolean present;
+        public Long despawnedTick;
+        public String source;
+        public long projectionVersion;
     }
 
     public static class GroundItemSnapshot
