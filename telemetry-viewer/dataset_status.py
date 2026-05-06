@@ -252,6 +252,7 @@ def status_for_session(session: Path | None) -> dict:
         "scenarioSelectedCandidateCount": 0,
         "scenarioContextTargetCount": 0,
         "scenarioGeneratedAtUtc": None,
+        "scenarioInspectorCommand": "python telemetry-viewer\\scenario_inspector.py --scenario bank_area",
         "curatedManifestExists": False,
         "curatedManifestExampleCount": 0,
         "curatedGeneratedAtUtc": None,
@@ -548,6 +549,7 @@ def print_human(status: dict) -> None:
     print(f"  scenario selected candidates: {status['scenarioSelectedCandidateCount']}")
     print(f"  scenario context targets: {status['scenarioContextTargetCount']}")
     print(f"  scenario generatedAtUtc: {status['scenarioGeneratedAtUtc'] or 'none'}")
+    print(f"  scenario inspector: {status['scenarioInspectorCommand']}")
     print(f"  curated manifest exists: {'yes' if status['curatedManifestExists'] else 'no'}")
     print(f"  curated examples: {status['curatedManifestExampleCount']}")
     print(f"  curated generatedAtUtc: {status['curatedGeneratedAtUtc'] or 'none'}")

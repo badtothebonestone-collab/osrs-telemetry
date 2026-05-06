@@ -275,6 +275,18 @@ mutation.
    movement, clicks, keyboard input, menu actions, client-state mutation, or
    automation. Target candidates are ranked geometry records, not commands.
 
+   To visually QA a scenario dataset, run:
+
+   ```text
+   python telemetry-viewer\scenario_inspector.py --scenario bank_area
+   ```
+
+   Open `http://127.0.0.1:8810/`. The scenario inspector overlays selected
+   candidates and optional obstacle/navigation context on retained frame images.
+   It is read-only scenario QA: browser clicks only select rows or overlay
+   details inside the local page, and the tool does not interact with RuneLite,
+   modify telemetry, modify frame images, or generate input/actions.
+
 Save behavior:
 
 - **Save Default Profile** writes
