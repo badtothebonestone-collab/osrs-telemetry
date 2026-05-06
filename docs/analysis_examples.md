@@ -253,6 +253,28 @@ mutation.
    scoring reasons, but they do not contain mouse movement, click commands,
    keyboard input, menu actions, or automation instructions.
 
+12. Build a read-only scenario dataset:
+
+   ```text
+   python telemetry-viewer\build_scenario_dataset.py --scenario bank_area
+   ```
+
+   Scenarios group useful ranked target candidates by purpose. The first
+   template, `bank_area`, selects visible bank-related candidates such as bank
+   booths, deposit boxes, bankers, and deposit targets, then preserves nearby
+   obstacle/navigation context when available.
+
+   Scenario output is written to:
+
+   ```text
+   scenario_datasets\bank_area.jsonl
+   scenario_datasets\scenario_index.json
+   ```
+
+   Scenario records are geometry/context only. They do not generate mouse
+   movement, clicks, keyboard input, menu actions, client-state mutation, or
+   automation. Target candidates are ranked geometry records, not commands.
+
 Save behavior:
 
 - **Save Default Profile** writes

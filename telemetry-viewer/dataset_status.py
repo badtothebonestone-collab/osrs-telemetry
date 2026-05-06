@@ -246,6 +246,12 @@ def status_for_session(session: Path | None) -> dict:
         "targetHandoffExists": False,
         "targetHandoffCandidateCount": 0,
         "targetHandoffGeneratedAtUtc": None,
+        "scenarioDatasetExists": False,
+        "scenarioDatasetType": None,
+        "scenarioDatasetRecordCount": 0,
+        "scenarioSelectedCandidateCount": 0,
+        "scenarioContextTargetCount": 0,
+        "scenarioGeneratedAtUtc": None,
         "curatedManifestExists": False,
         "curatedManifestExampleCount": 0,
         "curatedGeneratedAtUtc": None,
@@ -290,6 +296,12 @@ def status_for_session(session: Path | None) -> dict:
     target_handoff_index_path = target_handoff_dir / "handoff_index.json"
     target_handoff_index = safe_read_json(target_handoff_index_path)
     target_handoff_index = target_handoff_index if isinstance(target_handoff_index, dict) else {}
+    scenario_dir = session / "scenario_datasets"
+    scenario_index_path = scenario_dir / "scenario_index.json"
+    scenario_index = safe_read_json(scenario_index_path)
+    scenario_index = scenario_index if isinstance(scenario_index, dict) else {}
+    scenario_type = scenario_index.get("scenarioType") if isinstance(scenario_index.get("scenarioType"), str) else None
+    scenario_dataset_path = scenario_dir / f"{scenario_type}.jsonl" if scenario_type else None
     ui_first_tick, ui_last_tick = tick_range_from_index_or_jsonl(ui_geometry_index, ui_targets_path)
     world_first_tick, world_last_tick = tick_range_from_index_or_jsonl(world_geometry_index, world_targets_path)
     curated_manifest_path = training_dir / "curated" / "curated_manifest.jsonl"
@@ -385,6 +397,28 @@ def status_for_session(session: Path | None) -> dict:
                 else count_jsonl(target_handoff_jsonl_path)
             ),
             "targetHandoffGeneratedAtUtc": target_handoff_index.get("generatedAtUtc"),
+            "scenarioDatasetExists": bool(
+                scenario_index_path.exists()
+                and scenario_dataset_path is not None
+                and scenario_dataset_path.exists()
+            ),
+            "scenarioDatasetType": scenario_type,
+            "scenarioDatasetRecordCount": (
+                scenario_index.get("scenarioRecordCount")
+                if isinstance(scenario_index.get("scenarioRecordCount"), int)
+                else count_jsonl(scenario_dataset_path) if scenario_dataset_path is not None else 0
+            ),
+            "scenarioSelectedCandidateCount": (
+                scenario_index.get("selectedCandidateCount")
+                if isinstance(scenario_index.get("selectedCandidateCount"), int)
+                else 0
+            ),
+            "scenarioContextTargetCount": (
+                scenario_index.get("contextTargetCount")
+                if isinstance(scenario_index.get("contextTargetCount"), int)
+                else 0
+            ),
+            "scenarioGeneratedAtUtc": scenario_index.get("generatedAtUtc"),
             "curatedManifestExists": curated_manifest_path.exists(),
             "curatedManifestExampleCount": count_jsonl(curated_manifest_path),
             "curatedGeneratedAtUtc": curated_index.get("generatedAtUtc"),
@@ -443,6 +477,9 @@ def status_for_session(session: Path | None) -> dict:
         status["warnings"].append(
             f"{status['worldUnclassifiedSceneObjectCount']} world scene object records are unclassified"
         )
+
+    if status["targetCandidateCount"] and not status["scenarioDatasetExists"]:
+        status["warnings"].append("no scenario dataset yet")
 
     if status["trainingManifestExampleCount"] and not status["curatedManifestExists"]:
         status["warnings"].append("no curated training manifest yet")
@@ -505,6 +542,12 @@ def print_human(status: dict) -> None:
     print(f"  target handoff exists: {'yes' if status['targetHandoffExists'] else 'no'}")
     print(f"  target handoff candidate count: {status['targetHandoffCandidateCount']}")
     print(f"  target handoff generatedAtUtc: {status['targetHandoffGeneratedAtUtc'] or 'none'}")
+    print(f"  scenario dataset exists: {'yes' if status['scenarioDatasetExists'] else 'no'}")
+    print(f"  scenario dataset type: {status['scenarioDatasetType'] or 'none'}")
+    print(f"  scenario records: {status['scenarioDatasetRecordCount']}")
+    print(f"  scenario selected candidates: {status['scenarioSelectedCandidateCount']}")
+    print(f"  scenario context targets: {status['scenarioContextTargetCount']}")
+    print(f"  scenario generatedAtUtc: {status['scenarioGeneratedAtUtc'] or 'none'}")
     print(f"  curated manifest exists: {'yes' if status['curatedManifestExists'] else 'no'}")
     print(f"  curated examples: {status['curatedManifestExampleCount']}")
     print(f"  curated generatedAtUtc: {status['curatedGeneratedAtUtc'] or 'none'}")

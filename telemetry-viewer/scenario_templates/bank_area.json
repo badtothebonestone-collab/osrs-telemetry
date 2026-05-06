@@ -1,0 +1,40 @@
+{
+  "scenarioType": "bank_area",
+  "description": "Read-only scenario template for visible bank targets and nearby navigation context.",
+  "targetRules": [
+    {
+      "category": "bank"
+    },
+    {
+      "tag": "bank"
+    },
+    {
+      "tag": "bank_booth"
+    },
+    {
+      "tag": "deposit_box"
+    },
+    {
+      "nameContains": "banker"
+    },
+    {
+      "nameContains": "bank"
+    },
+    {
+      "nameContains": "deposit"
+    }
+  ],
+  "preferredRoles": [
+    "interactable",
+    "entity"
+  ],
+  "contextRoles": [
+    "obstacle",
+    "navigation"
+  ],
+  "minScore": 70,
+  "limitPerTick": 5,
+  "includeContext": true,
+  "contextLimitPerTick": 20,
+  "notes": "Useful for identifying visible bank booths, deposit boxes, bankers, and nearby obstacle/navigation context."
+}
