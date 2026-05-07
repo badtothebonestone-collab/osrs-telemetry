@@ -20,6 +20,8 @@ LIVE_STATUS_SCHEMA = "live_status.v1"
 LIVE_INDEX_SCHEMA = "live_index.v1"
 LIVE_CONTEXT_INDEX_SCHEMA = "live_context_index.v1"
 LIVE_BASELINE_SCHEMA = "live_baseline_state.v1"
+LIVE_ACTIVITY_SCHEMA = "live_activity_state.v1"
+LIVE_PERFORMANCE_SCHEMA = "live_performance_summary.v1"
 LIVE_NAVIGATION_SCHEMA = "live_navigation_summary.v1"
 LIVE_TICK_SUMMARY_SCHEMA = "live_tick_summary.v1"
 LIVE_WORLD_TARGET_SCHEMA = "live_world_target_update.v1"
@@ -34,6 +36,7 @@ WORLD_TARGET_EMIT_MODES = {"none", "candidates", "profile", "visible", "full"}
 WORLD_TARGET_TYPES = {"npc", "player", "sceneObject", "groundItem", "tile"}
 LATENCY_MODES = {"realtime", "complete"}
 CANDIDATE_OUTPUT_WINDOWS = {"latest", "rolling"}
+LIVENESS_MODES = {"off", "basic", "delta", "full"}
 ALL_LIVE_TARGET_TYPES = WORLD_TARGET_TYPES | {
     "inventorySlot",
     "equipmentSlot",
@@ -47,6 +50,8 @@ LIVE_OUTPUT_FILES = (
     "live_candidates.jsonl",
     "live_tick_summary.jsonl",
     "live_baseline_state.json",
+    "live_activity_state.json",
+    "live_performance_summary.json",
     "live_context_index.json",
     "live_navigation_summary.json",
     "live_index.json",
@@ -136,6 +141,8 @@ def live_output_paths(session: Path) -> dict[str, Path]:
         "candidates": output_dir / "live_candidates.jsonl",
         "tickSummary": output_dir / "live_tick_summary.jsonl",
         "baseline": output_dir / "live_baseline_state.json",
+        "activity": output_dir / "live_activity_state.json",
+        "performance": output_dir / "live_performance_summary.json",
         "contextIndex": output_dir / "live_context_index.json",
         "navigation": output_dir / "live_navigation_summary.json",
         "index": output_dir / "live_index.json",
@@ -289,28 +296,85 @@ class TimingContext:
 
 
 TIMING_BUCKETS = [
+    "fileDiscoverMillis",
     "tailReadMillis",
+    "lineSplitMillis",
     "jsonParseMillis",
     "rawTickIngestMillis",
+    "tickCoalesceMillis",
     "baselineStateMillis",
+    "activityStateMillis",
+    "inventoryDeltaMillis",
+    "livenessUpdateMillis",
+    "livenessTotalMillis",
+    "livenessDeltaMillis",
+    "livenessCacheLookupMillis",
+    "livenessUnavailablePruneMillis",
+    "livenessVisibleRefFallbackMillis",
+    "livenessCandidateApplyMillis",
+    "livenessFullScanMillis",
+    "classificationCacheMillis",
+    "candidateCacheMillis",
     "worldTargetBuildMillis",
     "worldTargetFilterMillis",
     "candidateSelectMillis",
     "contextIndexMillis",
     "uiTargetLoadMillis",
     "outputWriteMillis",
+    "outputSerializeMillis",
+    "consolePrintMillis",
+    "sleepMillis",
+    "idleWaitMillis",
+    "pollLoopMillis",
+    "totalActiveMillis",
+    "totalExclusiveMillis",
+    "totalWallMillis",
     "totalDurationMillis",
 ]
 
-TIMING_MODE = "nested"
+TIMING_MODE = "exclusive"
 
 
-def timing_payload(timing: Timing, total_duration_ms: float, tailer=None) -> dict:
+def timing_payload(timing: Timing, total_duration_ms: float, tailer=None, *, raw_tick_ingest_millis: float = 0.0) -> dict:
     payload = {key: 0.0 for key in TIMING_BUCKETS}
     payload.update(timing.rounded())
     if tailer is not None:
+        payload["fileDiscoverMillis"] = round(tailer.last_file_discover_millis, 3)
         payload["tailReadMillis"] = round(tailer.last_tail_read_millis, 3)
+        payload["lineSplitMillis"] = round(tailer.last_line_split_millis, 3)
         payload["jsonParseMillis"] = round(tailer.last_json_parse_millis, 3)
+    payload["rawTickIngestMillis"] = round(raw_tick_ingest_millis, 3)
+    if not payload.get("livenessTotalMillis"):
+        payload["livenessTotalMillis"] = round(
+            float(payload.get("livenessDeltaMillis") or 0.0)
+            + float(payload.get("livenessFullScanMillis") or 0.0)
+            + float(payload.get("livenessUnavailablePruneMillis") or 0.0)
+            + float(payload.get("livenessCandidateApplyMillis") or 0.0)
+            + float(payload.get("livenessCacheLookupMillis") or 0.0)
+            + float(payload.get("livenessVisibleRefFallbackMillis") or 0.0),
+            3,
+        )
+    payload["livenessUpdateMillis"] = round(float(payload.get("livenessTotalMillis") or payload.get("livenessUpdateMillis") or 0.0), 3)
+    exclusive_keys = [
+        key
+        for key in TIMING_BUCKETS
+        if key
+        not in {
+            "totalExclusiveMillis",
+            "totalWallMillis",
+            "totalActiveMillis",
+            "totalDurationMillis",
+            "pollLoopMillis",
+            "idleWaitMillis",
+            "sleepMillis",
+            "livenessUpdateMillis",
+            "livenessTotalMillis",
+        }
+    ]
+    payload["totalExclusiveMillis"] = round(sum(float(payload.get(key) or 0.0) for key in exclusive_keys), 3)
+    payload["totalWallMillis"] = round(total_duration_ms, 3)
+    payload["totalActiveMillis"] = round(total_duration_ms, 3)
+    payload["pollLoopMillis"] = round(total_duration_ms, 3)
     payload["totalDurationMillis"] = round(total_duration_ms, 3)
     return payload
 
@@ -329,8 +393,30 @@ class TickJsonlTailer:
         self.malformed_counts: Counter[str] = Counter()
         self.malformed_total = 0
         self.read_errors: list[str] = []
+        self.last_file_discover_millis = 0.0
         self.last_tail_read_millis = 0.0
+        self.last_line_split_millis = 0.0
         self.last_json_parse_millis = 0.0
+        self.last_raw_records_seen = 0
+        self.last_raw_records_fully_parsed = 0
+        self.last_raw_records_skipped_before_parse = 0
+        self.last_raw_records_light_parsed = 0
+        self.last_coalesced_before_parse = 0
+        self.last_newest_tick_selected = None
+        self.last_file_offsets_advanced_past_skipped_records = False
+
+    def reset_poll_stats(self) -> None:
+        self.last_file_discover_millis = 0.0
+        self.last_tail_read_millis = 0.0
+        self.last_line_split_millis = 0.0
+        self.last_json_parse_millis = 0.0
+        self.last_raw_records_seen = 0
+        self.last_raw_records_fully_parsed = 0
+        self.last_raw_records_skipped_before_parse = 0
+        self.last_raw_records_light_parsed = 0
+        self.last_coalesced_before_parse = 0
+        self.last_newest_tick_selected = None
+        self.last_file_offsets_advanced_past_skipped_records = False
 
     def files(self) -> list[Path]:
         return list_tick_files(self.session)
@@ -346,12 +432,16 @@ class TickJsonlTailer:
                 continue
             self.states[path] = TailState(offset=size)
 
-    def read_new_records(self) -> list[tuple[Path, int, dict]]:
+    def read_new_records(self, *, realtime: bool = False, max_records: int | None = None) -> list[tuple[Path, int, dict]]:
         records: list[tuple[Path, int, dict]] = []
-        self.last_tail_read_millis = 0.0
-        self.last_json_parse_millis = 0.0
+        complete_lines: list[tuple[Path, int, str]] = []
+        self.reset_poll_stats()
 
-        for path in self.files():
+        started = time.perf_counter()
+        files = self.files()
+        self.last_file_discover_millis = (time.perf_counter() - started) * 1000.0
+
+        for path in files:
             state = self.states.setdefault(path, TailState())
 
             try:
@@ -379,11 +469,13 @@ class TickJsonlTailer:
             self.last_tail_read_millis += (time.perf_counter() - started) * 1000.0
 
             state.offset += len(data)
+            split_started = time.perf_counter()
             text = state.pending + data.decode("utf-8", errors="replace")
             last_newline = max(text.rfind("\n"), text.rfind("\r"))
 
             if last_newline < 0:
                 state.pending = text
+                self.last_line_split_millis += (time.perf_counter() - split_started) * 1000.0
                 continue
 
             complete = text[: last_newline + 1]
@@ -394,22 +486,39 @@ class TickJsonlTailer:
                 line = raw_line.strip()
                 if not line:
                     continue
-                parse_started = time.perf_counter()
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    self.last_json_parse_millis += (time.perf_counter() - parse_started) * 1000.0
-                    self.malformed_counts[str(path)] += 1
-                    self.malformed_total += 1
-                    continue
+                complete_lines.append((path, state.line_number, line))
+            self.last_line_split_millis += (time.perf_counter() - split_started) * 1000.0
+
+        self.last_raw_records_seen = len(complete_lines)
+        lines_to_parse = complete_lines
+        if realtime and max_records and max_records > 0 and len(complete_lines) > max_records:
+            skipped = len(complete_lines) - max_records
+            lines_to_parse = complete_lines[-max_records:]
+            self.last_raw_records_skipped_before_parse = skipped
+            self.last_coalesced_before_parse = skipped
+            self.last_file_offsets_advanced_past_skipped_records = True
+
+        for path, line_number, line in lines_to_parse:
+            parse_started = time.perf_counter()
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
                 self.last_json_parse_millis += (time.perf_counter() - parse_started) * 1000.0
+                self.malformed_counts[str(path)] += 1
+                self.malformed_total += 1
+                continue
+            self.last_json_parse_millis += (time.perf_counter() - parse_started) * 1000.0
 
-                if isinstance(record, dict):
-                    records.append((path, state.line_number, record))
-                else:
-                    self.malformed_counts[str(path)] += 1
-                    self.malformed_total += 1
+            if isinstance(record, dict):
+                records.append((path, line_number, record))
+            else:
+                self.malformed_counts[str(path)] += 1
+                self.malformed_total += 1
 
+        self.last_raw_records_fully_parsed = len(records)
+        tick_ids = [tick_id_for(record) for _path, _line_number, record in records]
+        tick_ids = [tick_id for tick_id in tick_ids if tick_id is not None]
+        self.last_newest_tick_selected = max(tick_ids) if tick_ids else None
         return records
 
 
@@ -955,10 +1064,203 @@ def profile_source_record(record: dict, library: dict, profile: dict | None) -> 
     )
 
 
+def target_classes_by_id(library: dict) -> dict[str, dict]:
+    classes = {}
+    for target_class in library.get("targetClasses") or []:
+        if isinstance(target_class, dict) and target_class.get("classId"):
+            classes[str(target_class.get("classId")).lower()] = target_class
+    return classes
+
+
+def candidate_class_ids(candidate: dict) -> set[str]:
+    ids = set()
+    for key in ("classId", "targetClass"):
+        value = candidate.get(key)
+        if value:
+            ids.add(str(value).lower())
+    for value in candidate.get("targetClassIds") or []:
+        if value:
+            ids.add(str(value).lower())
+    target = candidate.get("target") if isinstance(candidate.get("target"), dict) else {}
+    for value in target.get("targetClassIds") or []:
+        if value:
+            ids.add(str(value).lower())
+    return ids
+
+
+def class_config_values(library: dict, class_ids: set[str], field: str) -> list:
+    classes = target_classes_by_id(library)
+    values = []
+    for class_id in class_ids:
+        target_class = classes.get(class_id)
+        if not isinstance(target_class, dict):
+            continue
+        field_value = target_class.get(field)
+        if isinstance(field_value, list):
+            values.extend(field_value)
+        elif field_value not in (None, ""):
+            values.append(field_value)
+    return values
+
+
+def lower_strings(values) -> set[str]:
+    return {str(value).strip().lower() for value in values or [] if str(value).strip()}
+
+
+def candidate_name(candidate: dict) -> str:
+    target = candidate.get("target") if isinstance(candidate.get("target"), dict) else {}
+    return str(candidate.get("name") or target.get("name") or target.get("targetName") or "").strip()
+
+
+def source_name(source: dict) -> str:
+    return str(source.get("objectName") or source.get("name") or "").strip()
+
+
+def actions_for_payload(payload: dict) -> list[str]:
+    actions = payload.get("actions")
+    if not isinstance(actions, list):
+        target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+        actions = target.get("actions")
+    return [str(action).strip().lower() for action in actions or [] if str(action).strip()]
+
+
+def is_tree_class(class_ids: set[str]) -> bool:
+    return bool(class_ids & {"tree", "oak_tree", "willow_tree", "maple_tree", "yew_tree", "magic_tree"})
+
+
+def depleted_name_match(name: str, configured_names: list) -> bool:
+    lowered = name.lower()
+    configured = lower_strings(configured_names)
+    return "stump" in lowered or "depleted" in lowered or any(value in lowered for value in configured)
+
+
+def candidate_depleted_by_name_or_actions(candidate: dict, library: dict) -> tuple[bool, list[str]]:
+    evidence = []
+    class_ids = candidate_class_ids(candidate)
+    name = candidate_name(candidate)
+    if depleted_name_match(name, class_config_values(library, class_ids, "depletedNames")):
+        evidence.append(f"name suggests depleted/stump: {name}")
+
+    raw_id = candidate.get("rawId") if candidate.get("rawId") is not None else candidate.get("id")
+    depleted_ids = {str(value) for value in class_config_values(library, class_ids, "depletedObjectIds")}
+    if raw_id is not None and str(raw_id) in depleted_ids:
+        evidence.append(f"object id is configured as depleted: {raw_id}")
+
+    useful_actions = lower_strings(class_config_values(library, class_ids, "usefulActions"))
+    actions = actions_for_payload(candidate)
+    if useful_actions and actions and not any(any(useful in action for action in actions) for useful in useful_actions):
+        evidence.append(f"useful action missing from available actions: {actions}")
+
+    return bool(evidence), evidence
+
+
+def source_class_info(tick: dict, source: dict, overrides: dict, library: dict) -> dict:
+    preview = preview_scene_object_record(tick, source, overrides)
+    return candidate_builder.classify_record(preview, library)
+
+
+def source_depleted_by_name_or_actions(tick: dict, source: dict, overrides: dict, library: dict) -> tuple[bool, list[str], dict]:
+    preview = preview_scene_object_record(tick, source, overrides)
+    class_info = candidate_builder.classify_record(preview, library)
+    class_ids = {str(value).lower() for value in class_info.get("targetClassIds") or []}
+    if class_info.get("classId"):
+        class_ids.add(str(class_info.get("classId")).lower())
+    target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
+    name = str(target.get("name") or source_name(source) or "").strip()
+    evidence = []
+    if depleted_name_match(name, class_config_values(library, class_ids, "depletedNames")):
+        evidence.append(f"name suggests depleted/stump: {name}")
+
+    object_id = source.get("id")
+    depleted_ids = {str(value) for value in class_config_values(library, class_ids, "depletedObjectIds")}
+    if object_id is not None and str(object_id) in depleted_ids:
+        evidence.append(f"object id is configured as depleted: {object_id}")
+
+    useful_actions = lower_strings(class_config_values(library, class_ids, "usefulActions"))
+    actions = actions_for_payload(target)
+    if useful_actions and actions and not any(any(useful in action for action in actions) for useful in useful_actions):
+        evidence.append(f"useful action missing from available actions: {actions}")
+
+    return bool(evidence), evidence, class_info
+
+
+def object_identity_keys_from_values(
+    *,
+    target_type: str = "sceneObject",
+    object_key=None,
+    object_id=None,
+    object_hash=None,
+    world_x=None,
+    world_y=None,
+    plane=None,
+    scene_x=None,
+    scene_y=None,
+) -> list[str]:
+    keys = []
+    if object_key not in (None, ""):
+        keys.append(f"objectKey:{object_key}")
+    if world_x is not None and world_y is not None and plane is not None:
+        keys.append(f"location:{target_type}:{plane}:{world_x}:{world_y}")
+        if object_id is not None:
+            keys.append(f"idLocation:{target_type}:{object_id}:{plane}:{world_x}:{world_y}")
+        if object_hash is not None:
+            keys.append(f"hashLocation:{target_type}:{object_hash}:{plane}:{world_x}:{world_y}")
+    if scene_x is not None and scene_y is not None and plane is not None:
+        keys.append(f"scene:{target_type}:{plane}:{scene_x}:{scene_y}")
+    return keys
+
+
+def source_identity_keys(source: dict) -> list[str]:
+    return object_identity_keys_from_values(
+        object_key=source.get("objectKey"),
+        object_id=source.get("id"),
+        object_hash=source.get("hash"),
+        world_x=source.get("worldX"),
+        world_y=source.get("worldY"),
+        plane=source.get("plane"),
+        scene_x=source.get("sceneX"),
+        scene_y=source.get("sceneY"),
+    )
+
+
+def candidate_identity_keys(candidate: dict) -> list[str]:
+    target = candidate.get("target") if isinstance(candidate.get("target"), dict) else {}
+    return object_identity_keys_from_values(
+        target_type=str(candidate.get("targetType") or target.get("targetType") or "sceneObject"),
+        object_key=candidate.get("objectKey") or target.get("objectKey"),
+        object_id=candidate.get("rawId") if candidate.get("rawId") is not None else candidate.get("id") or target.get("rawId") or target.get("id"),
+        object_hash=candidate.get("hash") or target.get("hash"),
+        world_x=candidate.get("worldX"),
+        world_y=candidate.get("worldY"),
+        plane=candidate.get("plane"),
+        scene_x=candidate.get("sceneX"),
+        scene_y=candidate.get("sceneY"),
+    )
+
+
 def limit_records(records: list[dict], limit: int) -> list[dict]:
     if limit == 0:
         return records
     return records[:limit]
+
+
+def percentile(values: list[float], percent: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return round(ordered[0], 3)
+    position = (len(ordered) - 1) * (percent / 100.0)
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    if lower == upper:
+        return round(ordered[lower], 3)
+    weight = position - lower
+    return round(ordered[lower] * (1.0 - weight) + ordered[upper] * weight, 3)
+
+
+def average(values: list[float]) -> float | None:
+    return round(sum(values) / len(values), 3) if values else None
 
 
 def candidate_source_world_records(candidates: list[dict], source_records: list[dict]) -> list[dict]:
@@ -1157,15 +1459,173 @@ def inventory_summary(tick: dict) -> dict:
     for item in items:
         if not isinstance(item, dict):
             continue
-        item_id = item.get("id")
+        item_id = item.get("itemId") if item.get("itemId") is not None else item.get("id")
         quantity = item.get("quantity")
         if item_id not in (None, -1, 0):
             filled += 1
             signature_parts.append(f"{item_id}:{quantity}")
     return {
         "itemCount": filled,
+        "filledSlots": filled,
         "freeSlots": max(0, 28 - filled) if items else None,
         "signature": "|".join(signature_parts) if signature_parts else None,
+    }
+
+
+def normalized_inventory_items(tick: dict) -> list[dict]:
+    inventory = tick.get("inventory")
+    items = inventory if isinstance(inventory, list) else inventory.get("items") if isinstance(inventory, dict) else []
+    normalized = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("itemId") if item.get("itemId") is not None else item.get("id")
+        quantity = item.get("quantity")
+        slot = item.get("slot")
+        if item_id in (None, -1, 0):
+            continue
+        normalized.append({"slot": slot, "itemId": item_id, "quantity": quantity if quantity is not None else 1})
+    normalized.sort(key=lambda item: (item.get("slot") is None, item.get("slot"), item.get("itemId")))
+    return normalized
+
+
+def inventory_signature_for_tick(tick: dict) -> str | None:
+    items = normalized_inventory_items(tick)
+    if not items:
+        return None
+    return "|".join(f"{item.get('slot')}:{item.get('itemId')}:{item.get('quantity')}" for item in items)
+
+
+def item_quantity_counter(items: list[dict]) -> Counter:
+    counter = Counter()
+    for item in items:
+        counter[str(item.get("itemId"))] += int(item.get("quantity") or 0)
+    return counter
+
+
+def inventory_delta(previous_tick: dict | None, current_tick: dict | None) -> dict | None:
+    if not previous_tick or not current_tick:
+        return None
+    previous_items = normalized_inventory_items(previous_tick)
+    current_items = normalized_inventory_items(current_tick)
+    previous = item_quantity_counter(previous_items)
+    current = item_quantity_counter(current_items)
+    changes = []
+    for item_id in sorted(set(previous) | set(current)):
+        before = previous.get(item_id, 0)
+        after = current.get(item_id, 0)
+        if before == after:
+            continue
+        changes.append(
+            {
+                "itemId": int(item_id) if item_id.isdigit() else item_id,
+                "beforeQuantity": before,
+                "afterQuantity": after,
+                "delta": after - before,
+                "changeType": "itemAdded" if after > before else "itemRemoved",
+            }
+        )
+    if not changes and inventory_signature_for_tick(previous_tick) == inventory_signature_for_tick(current_tick):
+        return None
+    previous_summary = inventory_summary(previous_tick)
+    current_summary = inventory_summary(current_tick)
+    return {
+        "fromTick": tick_id_for(previous_tick),
+        "toTick": tick_id_for(current_tick),
+        "changes": changes,
+        "filledSlotsBefore": previous_summary.get("filledSlots"),
+        "filledSlotsAfter": current_summary.get("filledSlots"),
+        "freeSlotsBefore": previous_summary.get("freeSlots"),
+        "freeSlotsAfter": current_summary.get("freeSlots"),
+    }
+
+
+def inventory_state_for_ticks(ticks: list[dict], latest_tick: dict | None) -> dict:
+    latest_tick = latest_tick or {}
+    items = normalized_inventory_items(latest_tick)
+    summary = inventory_summary(latest_tick)
+    known = isinstance(latest_tick.get("inventory"), (list, dict))
+    deltas = []
+    ordered = [tick for tick in ticks if tick_id_for(tick) is not None]
+    ordered.sort(key=lambda tick: tick_id_for(tick) or -1)
+    for previous, current in zip(ordered, ordered[1:]):
+        delta = inventory_delta(previous, current)
+        if delta:
+            deltas.append(delta)
+    latest_delta = deltas[-1] if deltas else None
+    return {
+        "known": known,
+        "freeSlots": summary.get("freeSlots") if known else None,
+        "filledSlots": summary.get("filledSlots") if known else None,
+        "itemCount": summary.get("itemCount") if known else None,
+        "items": items if known else [],
+        "inventoryHash": summary.get("signature"),
+        "signature": summary.get("signature"),
+        "changedThisTick": bool(latest_delta and latest_delta.get("toTick") == tick_id_for(latest_tick)),
+        "changedRecently": bool(deltas),
+        "recentItemDeltas": deltas[-10:],
+        "inventoryFull": summary.get("freeSlots") == 0 if known and summary.get("freeSlots") is not None else None,
+    }
+
+
+def equipment_state_for_tick(tick: dict | None) -> dict:
+    tick = tick or {}
+    equipment = tick.get("equipment")
+    items = []
+    if isinstance(equipment, list):
+        for item in equipment:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("itemId") if item.get("itemId") is not None else item.get("id")
+            if item_id in (None, -1, 0):
+                continue
+            items.append({"slot": item.get("slot"), "itemId": item_id, "quantity": item.get("quantity")})
+    return {"known": isinstance(equipment, list), "items": items}
+
+
+def apparent_activity_for_tick(tick: dict | None, inventory_state: dict, liveness_summary: dict) -> dict:
+    tick = tick or {}
+    player = local_player_for(tick)
+    status = tick.get("status") if isinstance(tick.get("status"), dict) else {}
+    animation = player.get("animation")
+    interacting = status.get("interactingType") or status.get("interactingName") or player.get("interacting")
+    evidence = []
+    warnings = []
+    state = "unknown"
+    confidence = 0.2
+    if animation not in (None, -1, 0):
+        state = "animating"
+        confidence = 0.65
+        evidence.append(f"local player animation={animation}")
+    elif interacting not in (None, "", -1):
+        state = "interacting"
+        confidence = 0.55
+        evidence.append(f"interacting={interacting}")
+    elif player.get("isMoving") is True:
+        state = "moving"
+        confidence = 0.55
+        evidence.append("isMoving=true")
+    elif animation in (-1, 0):
+        state = "idle"
+        confidence = 0.5
+        evidence.append(f"local player animation={animation}")
+    else:
+        warnings.append("local player animation/movement fields are incomplete.")
+
+    apparent_task = "unknown"
+    if state == "animating":
+        apparent_task = "woodcutting_possible"
+        evidence.append("woodcutting_possible because a tree profile can pair animation with nearby tree candidates.")
+    if inventory_state.get("changedThisTick") or inventory_state.get("changedRecently"):
+        evidence.append("inventory changed recently")
+    if liveness_summary.get("recentlyDepletedCount"):
+        evidence.append("recent target depletion observed")
+    return {
+        "apparentState": state,
+        "apparentTask": apparent_task,
+        "confidence": round(confidence, 3),
+        "evidence": evidence,
+        "warnings": warnings,
     }
 
 
@@ -1260,6 +1720,132 @@ def navigation_summary_for(tick: dict | None, processed_at: str) -> dict:
     }
 
 
+def woodcutting_state_for(activity: dict, inventory_state: dict, candidates: list[dict], liveness_summary: dict) -> dict:
+    evidence = []
+    warnings = []
+    if inventory_state.get("inventoryFull") is True:
+        return {
+            "woodcuttingState": "inventory_full",
+            "confidence": 0.9,
+            "evidence": ["inventory freeSlots=0"],
+            "warnings": warnings,
+        }
+    if liveness_summary.get("candidatesSuppressedAsDepleted"):
+        state = "target_depleted"
+        confidence = 0.85
+        evidence.append("one or more tree-like candidates were suppressed as depleted/stump")
+        if candidates:
+            evidence.append("new live candidate is available after suppression")
+        return {"woodcuttingState": state, "confidence": confidence, "evidence": evidence, "warnings": warnings}
+    if inventory_state.get("changedThisTick") or inventory_state.get("changedRecently"):
+        return {
+            "woodcuttingState": "inventory_changed",
+            "confidence": 0.8,
+            "evidence": ["inventory signature changed recently"],
+            "warnings": warnings,
+        }
+    apparent = activity.get("apparentState")
+    if apparent == "animating" and candidates:
+        return {
+            "woodcuttingState": "likely_chopping",
+            "confidence": 0.65,
+            "evidence": ["local player is animating", "tree-like candidate is available"],
+            "warnings": warnings,
+        }
+    if apparent == "moving":
+        return {
+            "woodcuttingState": "likely_moving",
+            "confidence": 0.55,
+            "evidence": ["movement field indicates moving"],
+            "warnings": warnings,
+        }
+    if apparent == "idle" and candidates:
+        return {
+            "woodcuttingState": "likely_idle",
+            "confidence": 0.55,
+            "evidence": ["idle animation observed", "live tree-like candidate is available"],
+            "warnings": warnings,
+        }
+    if not candidates:
+        warnings.append("no live tree-like candidates available for woodcutting state heuristic.")
+    return {
+        "woodcuttingState": "unknown",
+        "confidence": 0.2,
+        "evidence": evidence,
+        "warnings": warnings,
+    }
+
+
+def activity_state_for(
+    latest_tick: dict | None,
+    ticks: list[dict],
+    candidates: list[dict],
+    liveness_summary: dict,
+    processed_at: str,
+    build_duration_ms: float,
+    *,
+    inventory_state: dict | None = None,
+) -> dict:
+    started = time.perf_counter()
+    latest_tick = latest_tick or {}
+    player = local_player_for(latest_tick)
+    status = latest_tick.get("status") if isinstance(latest_tick.get("status"), dict) else {}
+    inventory_state = inventory_state or inventory_state_for_ticks(ticks, latest_tick)
+    equipment_state = equipment_state_for_tick(latest_tick)
+    activity = apparent_activity_for_tick(latest_tick, inventory_state, liveness_summary)
+    woodcutting = woodcutting_state_for(activity, inventory_state, candidates, liveness_summary)
+    elapsed = build_duration_ms or (time.perf_counter() - started) * 1000.0
+    return {
+        "schema": LIVE_ACTIVITY_SCHEMA,
+        "generatedAtUtc": processed_at,
+        "latestTick": tick_id_for(latest_tick),
+        "player": {
+            "worldX": player.get("worldX"),
+            "worldY": player.get("worldY"),
+            "plane": player.get("plane"),
+            "sceneX": player.get("sceneX"),
+            "sceneY": player.get("sceneY"),
+            "localX": player.get("localX"),
+            "localY": player.get("localY"),
+            "animation": player.get("animation"),
+            "poseAnimation": player.get("poseAnimation"),
+            "animationFrame": player.get("animationFrame"),
+            "interacting": {
+                "type": status.get("interactingType"),
+                "index": status.get("interactingIndex"),
+                "id": status.get("interactingId"),
+                "name": status.get("interactingName"),
+                "worldX": status.get("interactingWorldX"),
+                "worldY": status.get("interactingWorldY"),
+                "plane": status.get("interactingPlane"),
+            },
+            "isMoving": player.get("isMoving"),
+            "runEnergy": status.get("runEnergyPercent") if status.get("runEnergyPercent") is not None else latest_tick.get("runEnergy"),
+            "healthRatio": status.get("localHealthRatio"),
+            "healthScale": status.get("localHealthScale"),
+            "hitpointsBoosted": status.get("hitpointsBoosted"),
+            "hitpointsReal": status.get("hitpointsReal"),
+        },
+        "inventory": inventory_state,
+        "equipment": equipment_state,
+        "targetLiveness": {
+            "activeCandidateLiveState": candidates[0].get("targetLiveState") if candidates else None,
+            "bestCandidateLiveState": candidates[0].get("targetLiveState") if candidates else None,
+            **liveness_summary,
+        },
+        "activity": activity,
+        "woodcuttingState": woodcutting,
+        "performance": {
+            "buildDurationMillis": round(elapsed, 3),
+        },
+        "safety": {
+            "readOnly": True,
+            "actionGenerated": False,
+            "inputGenerated": False,
+        },
+    }
+
+
 def tick_summaries_for(session: Path, ticks: list[dict], source_files: dict[int, str], world_counts: Counter, candidate_counts: Counter, durations: dict[int, float], processed_at: str) -> list[dict]:
     summaries = []
 
@@ -1324,6 +1910,15 @@ class LiveTargetProcessor:
         self.last_skipped_intermediate_tick_ids: list[int] = []
         self.last_coalesced_backlog_ticks = 0
         self.last_backlog_depth = 0
+        self.last_raw_tick_add_millis = 0.0
+        self.previous_update_overran = False
+        self.backlog_drain_count = 0
+        self.last_backlog_drain_tick = None
+        self.last_backlog_drain_reason = None
+        self.last_activity_used_rolling_scan = False
+        self.last_inventory_used_rolling_scan = False
+        self.last_liveness_cache_hits = 0
+        self.last_liveness_cache_misses = 0
         self.last_source_records_considered = 0
         self.last_source_records_prefiltered_out = 0
         self.last_classification_cache_hits = 0
@@ -1333,8 +1928,27 @@ class LiveTargetProcessor:
         self.last_candidate_tick_cache_misses = 0
         self.last_old_ticks_dropped_from_candidate_cache = 0
         self.classification_cache: dict[tuple, dict] = {}
+        self.recently_unavailable_targets: dict[str, dict] = {}
+        self.last_recently_unavailable_count = 0
+        self.last_recently_depleted_count = 0
+        self.last_recently_unavailable_pruned = 0
+        self.last_recently_unavailable_cache_over_limit = False
+        self.last_candidates_suppressed_by_liveness = 0
+        self.last_candidates_suppressed_as_depleted = 0
+        self.last_candidates_revived_after_respawn = 0
+        self.last_liveness_budget_exceeded = False
+        self.last_liveness_degraded = False
+        self.last_liveness_candidates_checked = 0
+        self.last_liveness_candidates_skipped_by_budget = 0
+        self.last_liveness_visible_ref_scan_count = 0
+        self.last_liveness_full_scan_count = 0
+        self.last_liveness_mode_warning = None
+        self.last_prune_tick = None
+        self.previous_best_candidate: dict | None = None
+        self.last_best_candidate_change: dict = {}
         self.total_write_retries = 0
         self.total_write_failures = 0
+        self.performance_history: deque[dict] = deque(maxlen=100)
 
     def current_profile_doc_signature(self) -> tuple:
         paths = [
@@ -1575,6 +2189,396 @@ class LiveTargetProcessor:
         self.last_processed_tick_ids = [tick_id_for(item.tick) for item in processed if tick_id_for(item.tick) is not None]
         return processed, new_count
 
+    def ticks_for_realtime_state_update(self, selected_ticks: list[dict], processing_ticks: list[dict], output_ticks: list[dict]) -> list[dict]:
+        if self.args.latency_mode != "realtime":
+            self.last_activity_used_rolling_scan = True
+            self.last_inventory_used_rolling_scan = True
+            return selected_ticks
+
+        self.last_activity_used_rolling_scan = False
+        self.last_inventory_used_rolling_scan = False
+        if output_ticks:
+            return output_ticks[-1:]
+        if processing_ticks:
+            return processing_ticks[-1:]
+        return selected_ticks[-1:]
+
+    def unavailable_suppress_until(self, tick_id: int | None) -> int | None:
+        if tick_id is None:
+            return None
+        return tick_id + max(1, int(self.args.depleted_suppress_ticks))
+
+    def mark_unavailable(self, keys: list[str], tick_id: int | None, reason: str, state: str, source: dict, class_info: dict | None, evidence: list[str]) -> None:
+        if not keys:
+            return
+        suppress_until = self.unavailable_suppress_until(tick_id)
+        class_id = class_info.get("classId") if isinstance(class_info, dict) else None
+        record = {
+            "unavailableSinceTick": tick_id,
+            "lastSeenLiveTick": source.get("lastSeenTick"),
+            "reason": reason,
+            "targetLiveState": state,
+            "targetLiveEvidence": evidence,
+            "replacementObjectId": source.get("id"),
+            "replacementObjectName": source_name(source),
+            "replacementObjectCategory": None,
+            "suppressUntilTick": suppress_until,
+            "profileId": self.args.profile,
+            "classId": class_id,
+            "objectKey": source.get("objectKey"),
+            "worldX": source.get("worldX"),
+            "worldY": source.get("worldY"),
+            "plane": source.get("plane"),
+            "sceneX": source.get("sceneX"),
+            "sceneY": source.get("sceneY"),
+        }
+        for key in keys:
+            self.recently_unavailable_targets[key] = dict(record)
+
+    def clear_unavailable(self, keys: list[str]) -> None:
+        cleared = 0
+        for key in keys:
+            if key in self.recently_unavailable_targets:
+                self.recently_unavailable_targets.pop(key, None)
+                cleared += 1
+        self.last_candidates_revived_after_respawn += cleared
+
+    def prune_unavailable(self, current_tick: int | None, *, force: bool = False) -> None:
+        self.last_recently_unavailable_pruned = 0
+        self.last_recently_unavailable_cache_over_limit = False
+        if current_tick is None and not force:
+            return
+        max_items = max(1, int(self.args.max_recently_unavailable))
+        should_prune = force or self.last_prune_tick is None or (isinstance(current_tick, int) and current_tick >= self.last_prune_tick + 10)
+        if not should_prune and len(self.recently_unavailable_targets) <= max_items:
+            return
+
+        expired = []
+        if current_tick is not None:
+            expired = [
+                key
+                for key, value in self.recently_unavailable_targets.items()
+                if isinstance(value.get("suppressUntilTick"), int) and value.get("suppressUntilTick") < current_tick
+            ]
+        for key in expired:
+            self.recently_unavailable_targets.pop(key, None)
+        self.last_recently_unavailable_pruned += len(expired)
+
+        if len(self.recently_unavailable_targets) > max_items:
+            self.last_recently_unavailable_cache_over_limit = True
+            ordered = sorted(
+                self.recently_unavailable_targets.items(),
+                key=lambda item: (
+                    item[1].get("suppressUntilTick") if isinstance(item[1].get("suppressUntilTick"), int) else 10**12,
+                    item[1].get("unavailableSinceTick") if isinstance(item[1].get("unavailableSinceTick"), int) else 10**12,
+                    item[0],
+                ),
+            )
+            remove_count = len(self.recently_unavailable_targets) - max_items
+            for key, _value in ordered[:remove_count]:
+                self.recently_unavailable_targets.pop(key, None)
+            self.last_recently_unavailable_pruned += remove_count
+
+        if isinstance(current_tick, int):
+            self.last_prune_tick = current_tick
+
+    def expire_unavailable(self, current_tick: int | None) -> None:
+        self.prune_unavailable(current_tick)
+
+    def update_liveness_from_tick_full(self, tick: dict) -> None:
+        tick_id = tick_id_for(tick)
+        self.prune_unavailable(tick_id)
+
+        for source in world_builder.scene_object_sources_for_tick(tick):
+            if not isinstance(source, dict):
+                continue
+            self.last_liveness_full_scan_count += 1
+            depleted, evidence, class_info = source_depleted_by_name_or_actions(tick, source, self.target_overrides, self.library)
+            keys = source_identity_keys(source)
+            if depleted:
+                self.mark_unavailable(keys, tick_id, "source looks depleted or lacks useful action", "depleted_or_stump", source, class_info, evidence)
+            else:
+                self.clear_unavailable(keys)
+
+        self.update_liveness_from_tick_delta(tick)
+
+    def update_liveness_from_tick_delta(self, tick: dict) -> None:
+        tick_id = tick_id_for(tick)
+        self.prune_unavailable(tick_id)
+        deltas = tick.get("sceneObjectDeltas") if isinstance(tick.get("sceneObjectDeltas"), dict) else {}
+        for source in deltas.get("despawnedObjects") or []:
+            if not isinstance(source, dict):
+                continue
+            class_info = source_class_info(tick, source, self.target_overrides, self.library)
+            self.mark_unavailable(
+                source_identity_keys(source),
+                tick_id,
+                "scene object despawned",
+                "recently_despawned",
+                source,
+                class_info,
+                ["sceneObjectDeltas.despawnedObjects"],
+            )
+
+        for field in ("newObjects", "updatedObjects"):
+            for source in deltas.get(field) or []:
+                if not isinstance(source, dict):
+                    continue
+                depleted, evidence, class_info = source_depleted_by_name_or_actions(tick, source, self.target_overrides, self.library)
+                if depleted or source.get("present") is False:
+                    state = "depleted_or_stump" if depleted else "recently_despawned"
+                    reason = "replacement object appears depleted/stump" if depleted else "scene object marked not present"
+                    self.mark_unavailable(source_identity_keys(source), tick_id, reason, state, source, class_info, evidence or [field])
+                else:
+                    self.clear_unavailable(source_identity_keys(source))
+
+        unique = {
+            (
+                value.get("objectKey"),
+                value.get("worldX"),
+                value.get("worldY"),
+                value.get("plane"),
+                value.get("targetLiveState"),
+            ): value
+            for value in self.recently_unavailable_targets.values()
+        }
+        self.last_recently_unavailable_count = len(unique)
+        self.last_recently_depleted_count = sum(1 for value in unique.values() if value.get("targetLiveState") == "depleted_or_stump")
+
+    def update_liveness_from_ticks(self, ticks: list[dict]) -> None:
+        self.last_candidates_revived_after_respawn = 0
+        self.last_liveness_full_scan_count = 0
+        self.last_liveness_visible_ref_scan_count = 0
+        mode = self.args.liveness_mode
+        if mode == "off":
+            return
+        if mode == "basic":
+            latest = ticks[-1] if ticks else None
+            self.prune_unavailable(tick_id_for(latest) if latest else None)
+            return
+        ordered = sorted(ticks, key=lambda item: tick_id_for(item) if tick_id_for(item) is not None else -1)
+        if mode == "delta":
+            if ordered:
+                self.update_liveness_from_tick_delta(ordered[-1])
+            return
+        for tick in ordered:
+            self.update_liveness_from_tick_full(tick)
+
+    def liveness_for_candidate(self, candidate: dict) -> dict:
+        tick_id = candidate.get("tickId") if isinstance(candidate.get("tickId"), int) else candidate.get("tick")
+        mode = self.args.liveness_mode
+        if mode == "off":
+            return {
+                "targetLiveState": "unknown",
+                "targetLiveStateConfidence": 0.0,
+                "targetLiveEvidence": ["liveness disabled"],
+                "suppressUntilTick": None,
+                "suppressReason": None,
+            }
+        self.expire_unavailable(tick_id if isinstance(tick_id, int) else None)
+        evidence = []
+        unavailable = None
+        unavailable_matches = []
+        for key in candidate_identity_keys(candidate):
+            value = self.recently_unavailable_targets.get(key)
+            if not value:
+                continue
+            suppress_until = value.get("suppressUntilTick")
+            if isinstance(tick_id, int) and isinstance(suppress_until, int) and suppress_until < tick_id:
+                continue
+            unavailable_matches.append(value)
+        if unavailable_matches:
+            unavailable = next((value for value in unavailable_matches if value.get("targetLiveState") == "depleted_or_stump"), unavailable_matches[0])
+
+        depleted, depleted_evidence = candidate_depleted_by_name_or_actions(candidate, self.library)
+        target = candidate.get("target") if isinstance(candidate.get("target"), dict) else {}
+        present = target.get("present")
+        if unavailable:
+            evidence.extend(unavailable.get("targetLiveEvidence") or [])
+            state = unavailable.get("targetLiveState") or "stale"
+            confidence = 0.9 if state in {"recently_despawned", "depleted_or_stump"} else 0.7
+            return {
+                "targetLiveState": state,
+                "targetLiveStateConfidence": confidence,
+                "targetLiveEvidence": evidence or [unavailable.get("reason")],
+                "lastSeenTick": target.get("lastSeenTick"),
+                "lastChangedTick": target.get("lastUpdatedTick"),
+                "lastDespawnedTick": target.get("despawnedTick") or unavailable.get("unavailableSinceTick"),
+                "replacementObjectId": unavailable.get("replacementObjectId"),
+                "replacementObjectName": unavailable.get("replacementObjectName"),
+                "replacementObjectCategory": unavailable.get("replacementObjectCategory"),
+                "suppressUntilTick": unavailable.get("suppressUntilTick"),
+                "suppressReason": unavailable.get("reason"),
+            }
+        if present is False:
+            return {
+                "targetLiveState": "recently_despawned",
+                "targetLiveStateConfidence": 0.85,
+                "targetLiveEvidence": ["target.present=false"],
+                "lastSeenTick": target.get("lastSeenTick"),
+                "lastChangedTick": target.get("lastUpdatedTick"),
+                "lastDespawnedTick": target.get("despawnedTick"),
+                "suppressUntilTick": self.unavailable_suppress_until(tick_id if isinstance(tick_id, int) else None),
+                "suppressReason": "target is marked not present",
+            }
+        if depleted:
+            return {
+                "targetLiveState": "depleted_or_stump",
+                "targetLiveStateConfidence": 0.8,
+                "targetLiveEvidence": depleted_evidence,
+                "lastSeenTick": target.get("lastSeenTick"),
+                "lastChangedTick": target.get("lastUpdatedTick"),
+                "lastDespawnedTick": target.get("despawnedTick"),
+                "suppressUntilTick": self.unavailable_suppress_until(tick_id if isinstance(tick_id, int) else None),
+                "suppressReason": "candidate appears depleted/stump or lacks useful action",
+            }
+        if mode in {"basic", "delta"}:
+            assumed_state = "live_assumed" if target.get("targetType") == "sceneObject" else "unknown"
+            return {
+                "targetLiveState": assumed_state,
+                "targetLiveStateConfidence": 0.55 if assumed_state == "live_assumed" else 0.25,
+                "targetLiveEvidence": ["no direct depletion delta seen"] if assumed_state == "live_assumed" else ["no direct liveness evidence"],
+                "lastSeenTick": target.get("lastSeenTick"),
+                "lastChangedTick": target.get("lastUpdatedTick"),
+                "lastDespawnedTick": target.get("despawnedTick"),
+                "suppressUntilTick": None,
+                "suppressReason": None,
+            }
+        return {
+            "targetLiveState": "live" if target.get("targetType") == "sceneObject" else "unknown",
+            "targetLiveStateConfidence": 0.8 if target.get("targetType") == "sceneObject" else 0.35,
+            "targetLiveEvidence": ["candidate present in current live candidate source"],
+            "lastSeenTick": target.get("lastSeenTick"),
+            "lastChangedTick": target.get("lastUpdatedTick"),
+            "lastDespawnedTick": target.get("despawnedTick"),
+            "suppressUntilTick": None,
+            "suppressReason": None,
+        }
+
+    def apply_liveness_to_candidates(self, candidates: list[dict]) -> tuple[list[dict], dict]:
+        kept = []
+        suppressed = 0
+        depleted = 0
+        live_state_counts = Counter()
+        started = time.perf_counter()
+        budget_ms = float(self.args.liveness_budget_ms)
+        budget_applies = self.args.latency_mode == "realtime" and self.args.liveness_mode != "full"
+        self.last_liveness_cache_hits = 0
+        self.last_liveness_cache_misses = 0
+        self.last_liveness_budget_exceeded = False
+        self.last_liveness_degraded = False
+        self.last_liveness_candidates_checked = 0
+        self.last_liveness_candidates_skipped_by_budget = 0
+        for index, candidate in enumerate(candidates):
+            if budget_applies and (time.perf_counter() - started) * 1000.0 > budget_ms:
+                self.last_liveness_budget_exceeded = True
+                self.last_liveness_degraded = True
+                self.last_liveness_candidates_skipped_by_budget = len(candidates) - index
+                for remaining in candidates[index:]:
+                    state = "live_assumed" if self.args.liveness_mode in {"basic", "delta"} else "unknown"
+                    remaining.update(
+                        {
+                            "targetLiveState": state,
+                            "targetLiveStateConfidence": 0.25 if state == "unknown" else 0.45,
+                            "targetLiveEvidence": ["liveness budget exceeded; state degraded"],
+                        }
+                    )
+                    if state == "unknown":
+                        remaining["negativeSignals"] = sorted(set((remaining.get("negativeSignals") or []) + ["livenessUnknown"]))
+                    kept.append(remaining)
+                    live_state_counts[state] += 1
+                break
+
+            keys = candidate_identity_keys(candidate)
+            if any(key in self.recently_unavailable_targets for key in keys):
+                self.last_liveness_cache_hits += 1
+            else:
+                self.last_liveness_cache_misses += 1
+            self.last_liveness_candidates_checked += 1
+            info = self.liveness_for_candidate(candidate)
+            candidate.update(info)
+            live_state = info.get("targetLiveState") or "unknown"
+            live_state_counts[live_state] += 1
+            if live_state in {"recently_despawned", "depleted_or_stump", "stale", "changed"}:
+                candidate["negativeSignals"] = sorted(set((candidate.get("negativeSignals") or []) + [live_state, "suppressedByLiveness"]))
+                candidate["rejectReasons"] = sorted(set((candidate.get("rejectReasons") or []) + [info.get("suppressReason") or live_state]))
+                suppressed += 1
+                if live_state == "depleted_or_stump":
+                    depleted += 1
+                continue
+            if live_state == "unknown":
+                candidate["negativeSignals"] = sorted(set((candidate.get("negativeSignals") or []) + ["livenessUnknown"]))
+            kept.append(candidate)
+        self.last_candidates_suppressed_by_liveness = suppressed
+        self.last_candidates_suppressed_as_depleted = depleted
+        return kept, {
+            "candidatesSuppressedByLiveness": suppressed,
+            "candidatesSuppressedAsDepleted": depleted,
+            "candidateLiveStateCounts": dict(live_state_counts.most_common()),
+            "livenessBudgetExceeded": self.last_liveness_budget_exceeded,
+            "livenessDegraded": self.last_liveness_degraded,
+            "livenessCandidatesChecked": self.last_liveness_candidates_checked,
+            "livenessCandidatesSkippedByBudget": self.last_liveness_candidates_skipped_by_budget,
+        }
+
+    def update_best_candidate_change(self, candidates: list[dict]) -> None:
+        current = best_candidate_summary(candidates[0] if candidates else None)
+        previous = self.previous_best_candidate
+        changed = previous != current
+        reason = None
+        if changed and previous and current:
+            reason = "best candidate identity or rank changed"
+        elif changed and previous and not current:
+            reason = "previous best candidate no longer available"
+        elif changed and current and not previous:
+            reason = "first best candidate observed"
+        self.last_best_candidate_change = {
+            "previousBestCandidate": previous,
+            "currentBestCandidate": current,
+            "bestCandidateChanged": changed,
+            "bestCandidateChangeReason": reason,
+            "previousBestSuppressedReason": None if current == previous else "liveness/profile filtering may have changed the best candidate",
+        }
+        self.previous_best_candidate = current
+
+    def liveness_summary(self) -> dict:
+        sample = []
+        seen = set()
+        for value in self.recently_unavailable_targets.values():
+            identity = (
+                value.get("objectKey"),
+                value.get("worldX"),
+                value.get("worldY"),
+                value.get("plane"),
+                value.get("targetLiveState"),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            sample.append(value)
+            if len(sample) >= 10:
+                break
+        return {
+            "livenessMode": self.args.liveness_mode,
+            "livenessBudgetMs": self.args.liveness_budget_ms,
+            "livenessBudgetExceeded": self.last_liveness_budget_exceeded,
+            "livenessDegraded": self.last_liveness_degraded,
+            "livenessCandidatesChecked": self.last_liveness_candidates_checked,
+            "livenessCandidatesSkippedByBudget": self.last_liveness_candidates_skipped_by_budget,
+            "livenessCacheSize": len(self.recently_unavailable_targets),
+            "recentlyUnavailableCount": self.last_recently_unavailable_count,
+            "recentlyDepletedCount": self.last_recently_depleted_count,
+            "recentlyUnavailablePruned": self.last_recently_unavailable_pruned,
+            "recentlyUnavailableCacheMax": self.args.max_recently_unavailable,
+            "recentlyUnavailableCacheOverLimit": self.last_recently_unavailable_cache_over_limit,
+            "suppressedCandidateCount": self.last_candidates_suppressed_by_liveness,
+            "candidatesSuppressedByLiveness": self.last_candidates_suppressed_by_liveness,
+            "candidatesSuppressedAsDepleted": self.last_candidates_suppressed_as_depleted,
+            "candidatesRevivedAfterRespawn": self.last_candidates_revived_after_respawn,
+            "recentlyUnavailableTargets": sample,
+            **self.last_best_candidate_change,
+        }
+
     def output_world_records(self, candidates: list[dict], source_records: list[dict], full_records: list[dict]) -> list[dict]:
         mode = self.args.emit_world_targets
         if mode == "none":
@@ -1588,6 +2592,67 @@ class LiveTargetProcessor:
             return limit_records(source_records, self.args.world_target_output_limit)
         return limit_records(candidate_source_world_records(candidates, source_records), self.args.world_target_output_limit)
 
+    def record_performance_sample(self, status: dict) -> None:
+        timing = status.get("timingBreakdownMillis") if isinstance(status.get("timingBreakdownMillis"), dict) else {}
+        self.performance_history.append(
+            {
+                "tick": status.get("lastProcessedTick"),
+                "totalMs": float(status.get("processingDurationMillis") or 0.0),
+                "candidateMs": float(timing.get("candidateSelectMillis") or 0.0),
+                "livenessMs": float(timing.get("livenessUpdateMillis") or timing.get("livenessTotalMillis") or 0.0),
+                "writeMs": float(timing.get("outputWriteMillis") or 0.0),
+                "worldBuilt": int(status.get("worldTargetsBuilt") or 0),
+                "candidates": int(status.get("candidateCount") or 0),
+                "budgetExceeded": bool(status.get("budgetExceeded")),
+                "writeRetryCount": int(status.get("writeRetryCount") or 0),
+                "writeFailureCount": int(status.get("writeFailureCount") or 0),
+                "rawSeen": int(status.get("rawRecordsSeenThisPoll") or 0),
+                "processed": int(status.get("rawRecordsFullyProcessed") or 0),
+                "coalesced": int(status.get("coalescedBacklogTicks") or 0),
+                "livenessBudgetExceeded": bool(status.get("livenessBudgetExceeded")),
+            }
+        )
+
+    def performance_summary_payload(self, status: dict, processed_at: str) -> dict:
+        samples = list(self.performance_history)
+        totals = [sample["totalMs"] for sample in samples]
+        recommendations = []
+        if self.args.latency_mode == "complete":
+            recommendations.append("Complete audit mode processes every selected tick; use realtime mode for live latency.")
+        elif percentile(totals, 95) is not None and percentile(totals, 95) > self.args.target_update_ms:
+            recommendations.append("Realtime p95 exceeds the target update budget; keep max-new-ticks-per-update=1 and emit-world-targets=candidates.")
+        if any(sample["writeFailureCount"] for sample in samples):
+            recommendations.append("Live output write failures were observed; close readers or increase write retry settings.")
+        if average([sample["coalesced"] for sample in samples]) and average([sample["coalesced"] for sample in samples]) > 0:
+            recommendations.append("Backlog is being coalesced for freshness; this is expected in realtime mode when raw ticks arrive faster than processing.")
+        return {
+            "schema": LIVE_PERFORMANCE_SCHEMA,
+            "generatedAtUtc": processed_at,
+            "sessionPath": str(self.session),
+            "mode": status.get("mode"),
+            "latencyMode": self.args.latency_mode,
+            "latestTick": status.get("lastProcessedTick"),
+            "sampleCount": len(samples),
+            "avgTotalMs": average(totals),
+            "p50TotalMs": percentile(totals, 50),
+            "p90TotalMs": percentile(totals, 90),
+            "p95TotalMs": percentile(totals, 95),
+            "maxTotalMs": round(max(totals), 3) if totals else None,
+            "avgCandidateMs": average([sample["candidateMs"] for sample in samples]),
+            "avgLivenessMs": average([sample.get("livenessMs", 0.0) for sample in samples]),
+            "avgWriteMs": average([sample["writeMs"] for sample in samples]),
+            "avgWorldBuilt": average([sample["worldBuilt"] for sample in samples]),
+            "avgCandidates": average([sample["candidates"] for sample in samples]),
+            "budgetExceededCount": sum(1 for sample in samples if sample["budgetExceeded"]),
+            "livenessBudgetExceededCount": sum(1 for sample in samples if sample.get("livenessBudgetExceeded")),
+            "writeRetryCount": sum(sample["writeRetryCount"] for sample in samples),
+            "writeFailureCount": sum(sample["writeFailureCount"] for sample in samples),
+            "avgRawSeen": average([sample["rawSeen"] for sample in samples]),
+            "avgProcessed": average([sample["processed"] for sample in samples]),
+            "avgCoalesced": average([sample["coalesced"] for sample in samples]),
+            "recommendations": recommendations,
+        }
+
     def process_window(self, force_rebuild: bool = False, rebuild_reason: str = "incremental") -> dict:
         total_started = time.perf_counter()
         processed_at = utc_now()
@@ -1597,12 +2662,16 @@ class LiveTargetProcessor:
         warnings = list(self.override_warnings) + list(self.profile_warnings)
         selected_ticks = self.selected_ticks()
         selected_tick_ids = [tick_id_for(tick) for tick in selected_ticks if tick_id_for(tick) is not None]
-        processing_ticks = self.processing_ticks_for(selected_ticks, force_rebuild)
+        with timing.measure("tickCoalesceMillis"):
+            processing_ticks = self.processing_ticks_for(selected_ticks, force_rebuild)
         self.last_full_window_rebuild = bool(force_rebuild)
         self.last_rebuild_reason = rebuild_reason if force_rebuild else "incremental"
 
-        with timing.measure("rawTickIngestMillis"):
-            processed_now, new_count = self.process_selected_ticks(processing_ticks, force_rebuild, timing)
+        loop_started = time.perf_counter()
+        build_before = timing.values.get("worldTargetBuildMillis", 0.0)
+        processed_now, new_count = self.process_selected_ticks(processing_ticks, force_rebuild, timing)
+        build_delta = timing.values.get("worldTargetBuildMillis", 0.0) - build_before
+        timing.set("candidateCacheMillis", max(0.0, (time.perf_counter() - loop_started) * 1000.0 - build_delta))
 
         output_ticks = self.output_ticks_for(selected_ticks, processed_now)
         output_tick_ids = {tick_id_for(tick) for tick in output_ticks if tick_id_for(tick) is not None}
@@ -1611,6 +2680,21 @@ class LiveTargetProcessor:
             for tick_id in sorted(output_tick_ids)
             if tick_id in self.processed_ticks
         ]
+        state_update_ticks = self.ticks_for_realtime_state_update(selected_ticks, processing_ticks, output_ticks)
+        candidate_context_ticks = state_update_ticks if self.args.latency_mode == "realtime" else selected_ticks
+        with timing.measure("livenessTotalMillis"):
+            with timing.measure("livenessUnavailablePruneMillis"):
+                latest_state_tick = state_update_ticks[-1] if state_update_ticks else None
+                self.prune_unavailable(tick_id_for(latest_state_tick) if latest_state_tick else None)
+            if self.args.liveness_mode == "full":
+                with timing.measure("livenessFullScanMillis"):
+                    self.update_liveness_from_ticks(state_update_ticks)
+            elif self.args.liveness_mode == "delta":
+                with timing.measure("livenessDeltaMillis"):
+                    self.update_liveness_from_ticks(state_update_ticks)
+            else:
+                with timing.measure("livenessCacheLookupMillis"):
+                    self.update_liveness_from_ticks(state_update_ticks)
         if self.args.latency_mode == "complete":
             self.last_skipped_intermediate_tick_ids = []
             self.last_coalesced_backlog_ticks = 0
@@ -1640,7 +2724,7 @@ class LiveTargetProcessor:
         with timing.measure("candidateSelectMillis"):
             candidates, candidate_stats, candidate_warnings = rank_live_candidates(
                 self.session,
-                selected_ticks,
+                candidate_context_ticks,
                 source_records,
                 ui_records,
                 self.args,
@@ -1649,6 +2733,12 @@ class LiveTargetProcessor:
             )
         warnings.extend(candidate_warnings)
         candidates = [enrich_live_candidate(candidate, processed_at) for candidate in candidates]
+        with timing.measure("livenessCandidateApplyMillis"):
+            candidates, liveness_stats = self.apply_liveness_to_candidates(candidates)
+        timing.set("livenessTotalMillis", timing.values.get("livenessCandidateApplyMillis", 0.0))
+        timing.set("livenessUpdateMillis", timing.values.get("livenessTotalMillis", 0.0))
+        candidate_stats.update(liveness_stats)
+        self.update_best_candidate_change(candidates)
 
         with timing.measure("worldTargetFilterMillis"):
             world_output_records = self.output_world_records(candidates, source_records, full_records)
@@ -1665,6 +2755,20 @@ class LiveTargetProcessor:
 
         with timing.measure("baselineStateMillis"):
             baseline = baseline_state_for(self.session, self.args, latest_tick_record, selected_ticks, candidates, processed_at, total_duration_ms, budget_exceeded)
+
+        with timing.measure("inventoryDeltaMillis"):
+            inventory_state = inventory_state_for_ticks(state_update_ticks, latest_tick_record)
+
+        with timing.measure("activityStateMillis"):
+            activity = activity_state_for(
+                latest_tick_record,
+                state_update_ticks,
+                candidates,
+                self.liveness_summary(),
+                processed_at,
+                0.0,
+                inventory_state=inventory_state,
+            )
 
         with timing.measure("contextIndexMillis"):
             context_index = context_index_for(self.session, self.args, selected_ticks, candidates, processed_at)
@@ -1701,27 +2805,56 @@ class LiveTargetProcessor:
 
         output_bytes = {}
         write_stats = WriteStats()
+        with timing.measure("outputSerializeMillis"):
+            serialized_outputs = {
+                "uiTargets": "".join(json_dump_compact(record) + "\n" for record in ui_records),
+                "candidates": "".join(json_dump_compact(record) + "\n" for record in candidates),
+                "tickSummary": "".join(json_dump_compact(record) + "\n" for record in tick_summaries),
+                "baseline": json.dumps(baseline, indent=2, sort_keys=False) + "\n",
+                "activity": json.dumps(activity, indent=2, sort_keys=False) + "\n",
+                "contextIndex": json.dumps(context_index, indent=2, sort_keys=False) + "\n",
+                "navigation": json.dumps(navigation, indent=2, sort_keys=False) + "\n",
+                "index": json.dumps(index, indent=2, sort_keys=False) + "\n",
+                "status": json.dumps(status, indent=2, sort_keys=False) + "\n",
+            }
+            if self.args.emit_world_targets != "none":
+                serialized_outputs["worldTargets"] = "".join(json_dump_compact(record) + "\n" for record in world_output_records)
         with timing.measure("outputWriteMillis"):
             if self.args.emit_world_targets == "none":
                 output_bytes["worldTargets"] = remove_file_if_exists(paths["worldTargets"])
             else:
-                output_bytes["worldTargets"] = atomic_write_jsonl(paths["worldTargets"], world_output_records, options=self.write_options, stats=write_stats)
-            output_bytes["uiTargets"] = atomic_write_jsonl(paths["uiTargets"], ui_records, options=self.write_options, stats=write_stats)
-            output_bytes["candidates"] = atomic_write_jsonl(paths["candidates"], candidates, options=self.write_options, stats=write_stats)
-            output_bytes["tickSummary"] = atomic_write_jsonl(paths["tickSummary"], tick_summaries, options=self.write_options, stats=write_stats)
-            output_bytes["baseline"] = atomic_write_json(paths["baseline"], baseline, options=self.write_options, stats=write_stats)
-            output_bytes["contextIndex"] = atomic_write_json(paths["contextIndex"], context_index, options=self.write_options, stats=write_stats)
-            output_bytes["navigation"] = atomic_write_json(paths["navigation"], navigation, options=self.write_options, stats=write_stats)
-            output_bytes["index"] = atomic_write_json(paths["index"], index, options=self.write_options, stats=write_stats)
-            output_bytes["status"] = atomic_write_json(paths["status"], status, options=self.write_options, stats=write_stats)
+                output_bytes["worldTargets"] = atomic_write_text(paths["worldTargets"], serialized_outputs["worldTargets"], options=self.write_options, stats=write_stats)
+            output_bytes["uiTargets"] = atomic_write_text(paths["uiTargets"], serialized_outputs["uiTargets"], options=self.write_options, stats=write_stats)
+            output_bytes["candidates"] = atomic_write_text(paths["candidates"], serialized_outputs["candidates"], options=self.write_options, stats=write_stats)
+            output_bytes["tickSummary"] = atomic_write_text(paths["tickSummary"], serialized_outputs["tickSummary"], options=self.write_options, stats=write_stats)
+            output_bytes["baseline"] = atomic_write_text(paths["baseline"], serialized_outputs["baseline"], options=self.write_options, stats=write_stats)
+            output_bytes["activity"] = atomic_write_text(paths["activity"], serialized_outputs["activity"], options=self.write_options, stats=write_stats)
+            output_bytes["contextIndex"] = atomic_write_text(paths["contextIndex"], serialized_outputs["contextIndex"], options=self.write_options, stats=write_stats)
+            output_bytes["navigation"] = atomic_write_text(paths["navigation"], serialized_outputs["navigation"], options=self.write_options, stats=write_stats)
+            output_bytes["index"] = atomic_write_text(paths["index"], serialized_outputs["index"], options=self.write_options, stats=write_stats)
+            output_bytes["status"] = atomic_write_text(paths["status"], serialized_outputs["status"], options=self.write_options, stats=write_stats)
 
+        process_window_ms = (time.perf_counter() - total_started) * 1000.0
+        pre_window_ms = (
+            self.tailer.last_file_discover_millis
+            + self.tailer.last_tail_read_millis
+            + self.tailer.last_json_parse_millis
+            + self.last_raw_tick_add_millis
+        )
+        final_duration_ms = process_window_ms + pre_window_ms
+        budget_exceeded = self.args.latency_mode == "realtime" and final_duration_ms > self.args.target_update_ms
+        warning_exceeded = self.args.latency_mode == "realtime" and final_duration_ms > self.args.warn_update_ms
         self.total_write_retries += write_stats.retry_count
         self.total_write_failures += write_stats.failure_count
-        status["timingBreakdownMillis"] = timing_payload(timing, total_duration_ms, self.tailer)
+        status["processingDurationMillis"] = round(final_duration_ms, 3)
+        status["auditDurationMillis"] = round(final_duration_ms, 3) if self.args.latency_mode == "complete" else None
+        status["realtimeDurationMillis"] = round(final_duration_ms, 3) if self.args.latency_mode == "realtime" else None
+        status["timingBreakdownMillis"] = timing_payload(timing, final_duration_ms, self.tailer, raw_tick_ingest_millis=self.last_raw_tick_add_millis)
         status["outputBytes"] = {
             "outputBytesWorldTargets": output_bytes.get("worldTargets", 0),
             "outputBytesCandidates": output_bytes.get("candidates", 0),
             "outputBytesBaseline": output_bytes.get("baseline", 0),
+            "outputBytesActivity": output_bytes.get("activity", 0),
             "outputBytesStatus": output_bytes.get("status", 0),
             "outputBytesIndex": output_bytes.get("contextIndex", 0),
             "outputBytesTotal": sum(output_bytes.values()),
@@ -1742,20 +2875,29 @@ class LiveTargetProcessor:
             )
             status["warningCount"] = len(status["warnings"])
         if budget_exceeded:
-            status.setdefault("warnings", []).append(f"target update budget exceeded: {total_duration_ms:.1f} ms > {self.args.target_update_ms} ms")
+            status.setdefault("warnings", []).append(f"target update budget exceeded: {final_duration_ms:.1f} ms > {self.args.target_update_ms} ms")
             status["warningCount"] = len(status["warnings"])
         if warning_exceeded and not budget_exceeded:
-            status.setdefault("warnings", []).append(f"update warning threshold exceeded: {total_duration_ms:.1f} ms > {self.args.warn_update_ms} ms")
+            status.setdefault("warnings", []).append(f"update warning threshold exceeded: {final_duration_ms:.1f} ms > {self.args.warn_update_ms} ms")
             status["warningCount"] = len(status["warnings"])
         before_status_failures = write_stats.failure_count
-        status_size = atomic_write_json(paths["status"], status, options=self.write_options, stats=write_stats)
+        self.record_performance_sample(status)
+        performance = self.performance_summary_payload(status, processed_at)
+        with timing.measure("outputSerializeMillis"):
+            final_status_text = json.dumps(status, indent=2, sort_keys=False) + "\n"
+            performance_text = json.dumps(performance, indent=2, sort_keys=False) + "\n"
+        with timing.measure("outputWriteMillis"):
+            status_size = atomic_write_text(paths["status"], final_status_text, options=self.write_options, stats=write_stats)
+            performance_size = atomic_write_text(paths["performance"], performance_text, options=self.write_options, stats=write_stats)
         if status_size:
             output_bytes["status"] = status_size
+        output_bytes["performance"] = performance_size
         if write_stats.retry_count or write_stats.failure_count:
             self.total_write_retries += write_stats.retry_count - status.get("writeRetryCount", 0)
             self.total_write_failures += write_stats.failure_count - status.get("writeFailureCount", 0)
         if write_stats.failure_count > before_status_failures:
             print(f"Warning: could not refresh live_status.json after retries: {write_stats.last_error}")
+        self.previous_update_overran = bool(status.get("budgetExceeded") or status.get("warningUpdateExceeded"))
 
         return {
             "worldRecords": world_output_records,
@@ -1763,6 +2905,8 @@ class LiveTargetProcessor:
             "candidates": candidates,
             "tickSummaries": tick_summaries,
             "baseline": baseline,
+            "activity": activity,
+            "performance": performance,
             "contextIndex": context_index,
             "navigation": navigation,
             "status": status,
@@ -1798,6 +2942,23 @@ class LiveTargetProcessor:
         suppressed = max(0, len(full_records) - len(world_output_records))
         frame_index = self.session / "frames" / "frame_index.jsonl"
         skipped_ids = list(self.last_skipped_intermediate_tick_ids)
+        coalesced_before = self.tailer.last_coalesced_before_parse
+        coalesced_after = self.last_coalesced_backlog_ticks
+        raw_records_fully_processed = len(self.last_processed_tick_ids)
+        if self.args.latency_mode == "realtime" and self.last_full_window_rebuild and not self.args.force_window_rebuild:
+            warnings.append("Realtime mode performed a full window rebuild without --force-window-rebuild.")
+        if (
+            self.args.latency_mode == "realtime"
+            and self.args.max_new_ticks_per_update
+            and raw_records_fully_processed > self.args.max_new_ticks_per_update
+        ):
+            warnings.append(
+                f"Realtime mode fully processed {raw_records_fully_processed} ticks, above --max-new-ticks-per-update={self.args.max_new_ticks_per_update}."
+            )
+        if self.args.latency_mode == "realtime" and self.args.liveness_mode == "full":
+            warnings.append("full liveness in realtime mode may exceed update budget; use delta/basic/off for realtime.")
+        if self.last_liveness_budget_exceeded:
+            warnings.append("liveness budget exceeded; candidate liveness degraded for this tick")
         return {
             "schema": LIVE_STATUS_SCHEMA,
             "generatedAtUtc": processed_at,
@@ -1807,6 +2968,13 @@ class LiveTargetProcessor:
             "targetType": self.args.target_type,
             "mode": "follow" if self.args.follow else "once",
             "latencyMode": self.args.latency_mode,
+            "modeLabel": (
+                "COMPLETE AUDIT MODE: processes every selected tick; not intended for live latency."
+                if self.args.latency_mode == "complete"
+                else "REALTIME MODE: latest context prioritized; intermediate ticks may be coalesced."
+            ),
+            "auditMode": self.args.latency_mode == "complete",
+            "realtimeMode": self.args.latency_mode == "realtime",
             "candidateOutputWindow": self.args.candidate_output_window,
             "maxNewTicksPerUpdate": self.args.max_new_ticks_per_update,
             "dropBacklogToMeetBudget": bool(self.args.drop_backlog_to_meet_budget),
@@ -1828,11 +2996,23 @@ class LiveTargetProcessor:
             "latestRawTickSeen": self.latest_raw_tick_seen,
             "latestTickProcessed": max(self.last_processed_tick_ids) if self.last_processed_tick_ids else None,
             "processedTickIds": self.last_processed_tick_ids,
-            "coalescedBacklogTicks": self.last_coalesced_backlog_ticks,
+            "rawRecordsSeenThisPoll": self.tailer.last_raw_records_seen,
+            "rawRecordsFullyParsedThisPoll": self.tailer.last_raw_records_fully_parsed,
+            "rawRecordsSkippedBeforeParse": self.tailer.last_raw_records_skipped_before_parse,
+            "rawRecordsLightParsed": self.tailer.last_raw_records_light_parsed,
+            "rawRecordsFullyProcessed": raw_records_fully_processed,
+            "coalescedBeforeParse": coalesced_before,
+            "coalescedAfterParse": coalesced_after,
+            "coalescedBacklogTicks": coalesced_before + coalesced_after,
+            "newestTickSelectedForProcessing": self.tailer.last_newest_tick_selected or (max(self.last_processed_tick_ids) if self.last_processed_tick_ids else None),
+            "fileOffsetsAdvancedPastSkippedRecords": bool(self.tailer.last_file_offsets_advanced_past_skipped_records),
             "skippedIntermediateTickIds": skipped_ids if len(skipped_ids) <= 25 else [],
             "skippedIntermediateTickCount": len(skipped_ids),
             "skippedIntermediateTickIdsTruncated": len(skipped_ids) > 25,
             "backlogDepth": self.last_backlog_depth,
+            "backlogDrainCount": self.backlog_drain_count,
+            "lastBacklogDrainTick": self.last_backlog_drain_tick,
+            "lastBacklogDrainReason": self.last_backlog_drain_reason,
             "liveFreshnessMillis": freshness_millis_for(selected_ticks),
             "latestTick": max(window_ids) if window_ids else None,
             "tickRangeInWindow": [min(window_ids), max(window_ids)] if window_ids else None,
@@ -1859,10 +3039,36 @@ class LiveTargetProcessor:
             "candidateCountsByCategory": counts["category"],
             "candidateCountsByTargetType": counts["targetType"],
             "candidateStats": candidate_stats,
+            "recentlyUnavailableCount": self.last_recently_unavailable_count,
+            "recentlyDepletedCount": self.last_recently_depleted_count,
+            "recentlyUnavailablePruned": self.last_recently_unavailable_pruned,
+            "recentlyUnavailableCacheMax": self.args.max_recently_unavailable,
+            "recentlyUnavailableCacheOverLimit": self.last_recently_unavailable_cache_over_limit,
+            "candidatesSuppressedByLiveness": self.last_candidates_suppressed_by_liveness,
+            "candidatesSuppressedAsDepleted": self.last_candidates_suppressed_as_depleted,
+            "candidatesRevivedAfterRespawn": self.last_candidates_revived_after_respawn,
+            "livenessMode": self.args.liveness_mode,
+            "livenessBudgetMs": self.args.liveness_budget_ms,
+            "livenessBudgetExceeded": self.last_liveness_budget_exceeded,
+            "livenessDegraded": self.last_liveness_degraded,
+            "livenessCandidatesChecked": self.last_liveness_candidates_checked,
+            "livenessCandidatesSkippedByBudget": self.last_liveness_candidates_skipped_by_budget,
+            "livenessVisibleRefScanLimit": self.args.liveness_visible_ref_scan_limit,
+            "livenessVisibleRefScanCount": self.last_liveness_visible_ref_scan_count,
+            "livenessFullScanCount": self.last_liveness_full_scan_count,
+            **self.last_best_candidate_change,
             "targetUpdateMillis": self.args.target_update_ms,
             "warnUpdateMillis": self.args.warn_update_ms,
-            "budgetExceeded": budget_exceeded,
-            "warningUpdateExceeded": warning_exceeded,
+            "budgetAppliesToRealtime": self.args.latency_mode == "realtime",
+            "budgetExceeded": budget_exceeded if self.args.latency_mode == "realtime" else False,
+            "warningUpdateExceeded": warning_exceeded if self.args.latency_mode == "realtime" else False,
+            "auditDurationMillis": round(duration_ms, 3) if self.args.latency_mode == "complete" else None,
+            "realtimeDurationMillis": round(duration_ms, 3) if self.args.latency_mode == "realtime" else None,
+            "auditPerformanceNote": (
+                "Complete audit mode is expected to be slower because it processes every selected tick."
+                if self.args.latency_mode == "complete"
+                else None
+            ),
             "processedNewTicks": processed_new_ticks,
             "reusedTicks": max(0, len(selected_ticks) - processed_new_ticks),
             "droppedOldTicks": self.last_dropped_old_ticks,
@@ -1874,6 +3080,11 @@ class LiveTargetProcessor:
             "candidateTickCacheHits": self.last_candidate_tick_cache_hits,
             "candidateTickCacheMisses": self.last_candidate_tick_cache_misses,
             "oldTicksDroppedFromCandidateCache": self.last_old_ticks_dropped_from_candidate_cache,
+            "livenessCacheSize": len(self.recently_unavailable_targets),
+            "livenessCacheHits": self.last_liveness_cache_hits,
+            "livenessCacheMisses": self.last_liveness_cache_misses,
+            "activityUsedRollingScan": self.last_activity_used_rolling_scan,
+            "inventoryUsedRollingScan": self.last_inventory_used_rolling_scan,
             "fullWindowRebuild": self.last_full_window_rebuild,
             "rebuildReason": self.last_rebuild_reason,
             "processingDurationMillis": round(duration_ms, 3),
@@ -1918,6 +3129,8 @@ class LiveTargetProcessor:
                 "liveCandidates": str(paths["candidates"]),
                 "liveTickSummary": str(paths["tickSummary"]),
                 "liveBaselineState": str(paths["baseline"]),
+                "liveActivityState": str(paths["activity"]),
+                "livePerformanceSummary": str(paths["performance"]),
                 "liveContextIndex": str(paths["contextIndex"]),
                 "liveNavigationSummary": str(paths["navigation"]),
                 "liveStatus": str(paths["status"]),
@@ -1925,8 +3138,29 @@ class LiveTargetProcessor:
         }
 
     def poll_new_records(self, force_rebuild: bool = False) -> tuple[int, dict]:
-        records = self.tailer.read_new_records()
+        realtime_tail = (
+            self.args.latency_mode == "realtime"
+            and bool(self.args.drop_backlog_to_meet_budget)
+            and not force_rebuild
+        )
+        max_records = self.args.max_new_ticks_per_update if realtime_tail else None
+        drain_this_poll = bool(
+            realtime_tail
+            and self.args.drain_backlog_on_overrun
+            and self.previous_update_overran
+        )
+        if drain_this_poll:
+            max_records = 1 if not max_records or max_records <= 0 else min(max_records, 1)
+            self.last_backlog_drain_reason = "previous update exceeded realtime budget"
+
+        records = self.tailer.read_new_records(realtime=realtime_tail, max_records=max_records)
+        if drain_this_poll and self.tailer.last_coalesced_before_parse:
+            self.backlog_drain_count += self.tailer.last_coalesced_before_parse
+            self.last_backlog_drain_tick = self.tailer.last_newest_tick_selected
+
+        started = time.perf_counter()
         added, dropped = self.add_ticks(records)
+        self.last_raw_tick_add_millis = (time.perf_counter() - started) * 1000.0
         result = self.process_window(force_rebuild=force_rebuild, rebuild_reason="force-window-rebuild" if force_rebuild else "incremental")
         result["status"]["droppedOldTicks"] = dropped
         return added, result
@@ -1937,11 +3171,16 @@ class LiveTargetProcessor:
 
 def print_startup(session: Path, args) -> None:
     print("Live target processor")
+    if args.latency_mode == "complete":
+        print("COMPLETE AUDIT MODE: processes every selected tick; not intended for live latency.")
+    else:
+        print("REALTIME MODE: latest context prioritized; intermediate ticks may be coalesced.")
     print(f"session: {session}")
     print(f"profile: {args.profile}")
     print(f"mode: {'follow' if args.follow else 'once'}")
     print(f"latency mode: {args.latency_mode}")
     print(f"candidate output window: {args.candidate_output_window}")
+    print(f"liveness mode: {args.liveness_mode}")
     print(f"window ticks: {args.window_ticks}")
     print(f"selection: {selection_label(args)}")
     print(f"emit world targets: {args.emit_world_targets}")
@@ -1953,6 +3192,10 @@ def print_result_summary(result: dict, tailer: TickJsonlTailer) -> None:
     status = result["status"]
     timing = status.get("timingBreakdownMillis") or {}
     output = status.get("outputBytes") or {}
+    if status.get("auditMode"):
+        print("COMPLETE AUDIT MODE: processes every selected tick; not intended for live latency.")
+    elif status.get("realtimeMode"):
+        print("REALTIME MODE: latest context prioritized; intermediate ticks may be coalesced.")
     print(f"processed ticks: {status['selectedTickCount']}")
     print(f"latest tick: {status['lastProcessedTick']}")
     print(f"latest raw tick seen: {status.get('latestRawTickSeen')}")
@@ -1961,10 +3204,15 @@ def print_result_summary(result: dict, tailer: TickJsonlTailer) -> None:
     print(f"world targets written: {status['worldTargetsWritten']}")
     print(f"world targets suppressed: {status['worldTargetsSuppressed']}")
     print(f"candidates in window: {status['candidateCount']}")
-    print(f"processing duration: {status['processingDurationMillis']} ms")
+    print(f"liveness mode: {status.get('livenessMode')} budgetExceeded={status.get('livenessBudgetExceeded')}")
+    if status.get("auditMode"):
+        print(f"audit duration: {status.get('auditDurationMillis')} ms")
+    else:
+        print(f"realtime duration: {status.get('realtimeDurationMillis', status['processingDurationMillis'])} ms")
     print(f"candidate selection: {timing.get('candidateSelectMillis', 0)} ms")
     print(f"output bytes total: {output.get('outputBytesTotal', 0)}")
-    print(f"budget exceeded: {str(bool(status.get('budgetExceeded'))).lower()}")
+    if status.get("realtimeMode"):
+        print(f"budget exceeded: {str(bool(status.get('budgetExceeded'))).lower()}")
     if status.get("writeRetryCount") or status.get("writeFailureCount"):
         print(f"write retries: {status.get('writeRetryCount', 0)}")
         print(f"write failures: {status.get('writeFailureCount', 0)}")
@@ -1975,17 +3223,25 @@ def print_result_summary(result: dict, tailer: TickJsonlTailer) -> None:
 def print_follow_update(added: int, result: dict) -> None:
     status = result["status"]
     timing = status.get("timingBreakdownMillis") or {}
+    raw_seen = status.get("rawRecordsSeenThisPoll", added)
+    processed = status.get("rawRecordsFullyProcessed", status.get("processedNewTicks", added))
+    coalesced = status.get("coalescedBacklogTicks", 0)
+    performance = result.get("performance") or {}
     print(
         f"latestTick={status['lastProcessedTick']} "
-        f"newTicks={added} "
-        f"coalesced={status.get('coalescedBacklogTicks', 0)} "
+        f"rawSeen={raw_seen} "
+        f"processed={processed} "
+        f"coalesced={coalesced} "
         f"worldBuilt={status['worldTargetsBuilt']} "
         f"worldWritten={status['worldTargetsWritten']} "
         f"candidates={status['candidateCount']} "
+        f"livenessMode={status.get('livenessMode')} "
         f"baselineMs={timing.get('baselineStateMillis', 0)} "
+        f"livenessMs={timing.get('livenessUpdateMillis', 0)} "
         f"candidateMs={timing.get('candidateSelectMillis', 0)} "
         f"writeMs={timing.get('outputWriteMillis', 0)} "
-        f"totalMs={status['processingDurationMillis']} "
+        f"activeMs={timing.get('totalActiveMillis', status['processingDurationMillis'])} "
+        f"p95={performance.get('p95TotalMs')} "
         f"budgetExceeded={str(bool(status.get('budgetExceeded'))).lower()} "
         f"writeRetries={status.get('writeRetryCount', 0)} "
         f"writeFailures={status.get('writeFailureCount', 0)}"
@@ -2019,6 +3275,8 @@ def parse_args():
     parser.add_argument("--candidate-output-window", choices=sorted(CANDIDATE_OUTPUT_WINDOWS), help="Write latest candidates only or rolling cached candidates. Default: latest in realtime, rolling in complete.")
     parser.add_argument("--drop-backlog-to-meet-budget", dest="drop_backlog_to_meet_budget", action="store_true", default=None, help="Coalesce intermediate ticks when realtime backlog exceeds the per-update limit.")
     parser.add_argument("--no-drop-backlog-to-meet-budget", dest="drop_backlog_to_meet_budget", action="store_false", help="Do not coalesce intermediate ticks for latency.")
+    parser.add_argument("--drain-backlog-on-overrun", dest="drain_backlog_on_overrun", action="store_true", default=None, help="After an over-budget realtime update, jump to the newest complete tick on the next poll. Default: on in realtime.")
+    parser.add_argument("--no-drain-backlog-on-overrun", dest="drain_backlog_on_overrun", action="store_false", help="Do not do emergency realtime backlog drains after over-budget updates.")
     parser.add_argument("--include-ui-targets", action="store_true", help="Include existing batch ui_targets.jsonl records for ticks in the rolling window.")
     parser.add_argument("--no-ui-targets", action="store_true", help="Disable UI target loading even if live UI files exist.")
     parser.add_argument("--latest", type=positive_int, metavar="N", help="Select latest N ticks from the rolling window.")
@@ -2026,9 +3284,17 @@ def parse_args():
     parser.add_argument("--exclude-ui-blocked", action="store_true", help="Exclude candidates whose aim point intersects known UI targets.")
     parser.add_argument("--emit-world-targets", choices=sorted(WORLD_TARGET_EMIT_MODES), default="candidates", help="Live world target output policy. Default: candidates.")
     parser.add_argument("--world-target-output-limit", type=non_negative_int, default=2000, help="Max live world target records to write. Use 0 for unlimited. Default: 2000.")
+    parser.add_argument("--depleted-suppress-ticks", type=positive_int, default=20, help="Ticks to suppress recently despawned/depleted target candidates. Default: 20.")
+    parser.add_argument("--liveness-mode", choices=sorted(LIVENESS_MODES), help="Target liveness mode. Default: delta in realtime, full in complete.")
+    parser.add_argument("--liveness-budget-ms", type=positive_float, default=20.0, help="Realtime liveness budget in milliseconds. Default: 20.")
+    parser.add_argument("--max-recently-unavailable", type=positive_int, default=1000, help="Maximum keyed recently-unavailable liveness entries. Default: 1000.")
+    parser.add_argument("--liveness-visible-ref-scan-limit", type=non_negative_int, default=500, help="Visible-ref scan limit for future/fallback liveness checks. Default: 500.")
     parser.add_argument("--target-update-ms", type=positive_float, default=100.0, help="Target update budget in milliseconds. Default: 100.")
     parser.add_argument("--warn-update-ms", type=positive_float, default=250.0, help="Warning update threshold in milliseconds. Default: 250.")
     parser.add_argument("--benchmark", action="store_true", help="Print timing and output-size summary fields.")
+    parser.add_argument("--verbose", action="store_true", help="Print detailed startup/summary information.")
+    parser.add_argument("--quiet", action="store_true", help="Suppress routine console output.")
+    parser.add_argument("--log-every", type=positive_int, default=1, help="In follow mode, print one compact update every N processed updates. Default: 1.")
     parser.add_argument("--force-window-rebuild", action="store_true", help="Rebuild cached world records for every selected tick on each update.")
     parser.add_argument("--startup-backfill-ticks", type=non_negative_int, default=10, help="Initial existing tick catch-up count. Default: 10.")
     parser.add_argument("--no-startup-backfill", action="store_true", help="Start from current end of tick files and wait for new records.")
@@ -2055,8 +3321,14 @@ def parse_args():
     if args.candidate_output_window is None:
         args.candidate_output_window = "latest" if args.latency_mode == "realtime" else "rolling"
 
+    if args.liveness_mode is None:
+        args.liveness_mode = "delta" if args.latency_mode == "realtime" else "full"
+
     if args.drop_backlog_to_meet_budget is None:
         args.drop_backlog_to_meet_budget = args.latency_mode == "realtime"
+
+    if args.drain_backlog_on_overrun is None:
+        args.drain_backlog_on_overrun = args.latency_mode == "realtime"
 
     if args.latest is not None and args.latest_with_frames is not None:
         parser.error("--latest and --latest-with-frames are mutually exclusive")
@@ -2085,26 +3357,39 @@ def main() -> int:
         clear_live_outputs(session)
 
     processor = LiveTargetProcessor(session, args)
-    print_startup(session, args)
+    if not args.quiet:
+        print_startup(session, args)
 
     startup_added = processor.initialize_from_existing()
     result = processor.process_window(force_rebuild=args.force_window_rebuild, rebuild_reason="startup")
 
-    if args.summary or args.once or args.benchmark:
+    if not args.quiet and (args.summary or args.once or args.benchmark or args.verbose):
+        print_started = time.perf_counter()
         print_result_summary(result, processor.tailer)
+        result["status"]["timingBreakdownMillis"]["consolePrintMillis"] = round((time.perf_counter() - print_started) * 1000.0, 3)
 
     if args.once:
         return 0
 
     started = time.monotonic()
-    if startup_added and args.summary:
+    update_count = 0
+    if startup_added and args.summary and not args.quiet:
+        update_count += 1
         print_follow_update(startup_added, result)
 
     try:
         while True:
             added, result = processor.poll_new_records(force_rebuild=args.force_window_rebuild)
-            if added or args.summary or args.benchmark:
+            update_count += 1
+            should_log = (
+                not args.quiet
+                and (added or args.summary or args.benchmark)
+                and (update_count % max(1, args.log_every) == 0)
+            )
+            if should_log:
+                print_started = time.perf_counter()
                 print_follow_update(added, result)
+                result["status"]["timingBreakdownMillis"]["consolePrintMillis"] = round((time.perf_counter() - print_started) * 1000.0, 3)
 
             if args.max_runtime_seconds is not None and time.monotonic() - started >= args.max_runtime_seconds:
                 break

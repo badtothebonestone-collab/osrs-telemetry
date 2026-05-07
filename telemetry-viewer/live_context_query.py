@@ -17,6 +17,7 @@ SELF_TEST_SCHEMA = "live_context_self_test.v1"
 DEFAULT_FRESHNESS_TICKS = 5
 DEFAULT_FRESHNESS_MS = 5000
 TREE_CLASSES = {"tree", "oak_tree", "willow_tree", "maple_tree", "yew_tree", "magic_tree"}
+QUERY_TIMING_KEYS = ("queryReadMillis", "queryParseMillis", "querySelectMillis", "totalQueryMillis")
 
 
 def utc_now() -> str:
@@ -59,6 +60,7 @@ def live_paths(session: Path) -> dict[str, Path]:
         "context": live_dir / "live_context_index.json",
         "candidates": live_dir / "live_candidates.jsonl",
         "status": live_dir / "live_status.json",
+        "activity": live_dir / "live_activity_state.json",
         "navigation": live_dir / "live_navigation_summary.json",
     }
 
@@ -80,13 +82,23 @@ def source_files_payload(paths: dict[str, Path]) -> list[dict]:
     return payload
 
 
-def read_json(path: Path, warnings: list[str], missing_fields: list[str], label: str) -> dict:
+def add_timing(timing: dict | None, key: str, started: float) -> None:
+    if timing is not None:
+        timing[key] = timing.get(key, 0.0) + (time.perf_counter() - started) * 1000.0
+
+
+def read_json(path: Path, warnings: list[str], missing_fields: list[str], label: str, timing: dict | None = None) -> dict:
     if not path.exists():
         warnings.append(f"{label} missing: {path}")
         missing_fields.append(label)
         return {}
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        started = time.perf_counter()
+        text = path.read_text(encoding="utf-8")
+        add_timing(timing, "queryReadMillis", started)
+        started = time.perf_counter()
+        value = json.loads(text)
+        add_timing(timing, "queryParseMillis", started)
     except (OSError, json.JSONDecodeError) as exc:
         warnings.append(f"{label} unreadable: {exc}")
         missing_fields.append(label)
@@ -98,7 +110,7 @@ def read_json(path: Path, warnings: list[str], missing_fields: list[str], label:
     return value
 
 
-def read_jsonl(path: Path, warnings: list[str], missing_fields: list[str], label: str) -> list[dict]:
+def read_jsonl(path: Path, warnings: list[str], missing_fields: list[str], label: str, timing: dict | None = None) -> list[dict]:
     records = []
     if not path.exists():
         warnings.append(f"{label} missing: {path}")
@@ -106,18 +118,22 @@ def read_jsonl(path: Path, warnings: list[str], missing_fields: list[str], label
         return records
     malformed = 0
     try:
+        read_started = time.perf_counter()
         with path.open("r", encoding="utf-8") as file:
             for line in file:
                 text = line.strip()
                 if not text:
                     continue
                 try:
+                    parse_started = time.perf_counter()
                     value = json.loads(text)
+                    add_timing(timing, "queryParseMillis", parse_started)
                 except json.JSONDecodeError:
                     malformed += 1
                     continue
                 if isinstance(value, dict):
                     records.append(value)
+        add_timing(timing, "queryReadMillis", read_started)
     except OSError as exc:
         warnings.append(f"{label} unreadable: {exc}")
         missing_fields.append(label)
@@ -127,15 +143,16 @@ def read_jsonl(path: Path, warnings: list[str], missing_fields: list[str], label
     return records
 
 
-def load_live_context(session: Path) -> dict:
+def load_live_context(session: Path, timing: dict | None = None) -> dict:
     warnings: list[str] = []
     missing_fields: list[str] = []
     paths = live_paths(session)
-    baseline = read_json(paths["baseline"], warnings, missing_fields, "live_baseline_state")
-    context = read_json(paths["context"], warnings, missing_fields, "live_context_index")
-    status = read_json(paths["status"], warnings, missing_fields, "live_status")
-    navigation = read_json(paths["navigation"], warnings, missing_fields, "live_navigation_summary") if paths["navigation"].exists() else {}
-    candidates = read_jsonl(paths["candidates"], warnings, missing_fields, "live_candidates")
+    baseline = read_json(paths["baseline"], warnings, missing_fields, "live_baseline_state", timing)
+    context = read_json(paths["context"], warnings, missing_fields, "live_context_index", timing)
+    status = read_json(paths["status"], warnings, missing_fields, "live_status", timing)
+    activity = read_json(paths["activity"], warnings, missing_fields, "live_activity_state", timing) if paths["activity"].exists() else {}
+    navigation = read_json(paths["navigation"], warnings, missing_fields, "live_navigation_summary", timing) if paths["navigation"].exists() else {}
+    candidates = read_jsonl(paths["candidates"], warnings, missing_fields, "live_candidates", timing)
     if paths["candidates"].exists() and not candidates:
         warnings.append("live_candidates is present but empty.")
     return {
@@ -144,6 +161,7 @@ def load_live_context(session: Path) -> dict:
         "baseline": baseline,
         "context": context,
         "status": status,
+        "activity": activity,
         "navigation": navigation,
         "candidates": candidates,
         "warnings": warnings,
@@ -367,6 +385,7 @@ def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int
     on_screen = candidate.get("onScreen")
     geometry_available = candidate.get("geometryAvailable")
     ui_blocked = candidate.get("uiBlocked")
+    live_state = candidate.get("targetLiveState")
 
     if on_screen is True:
         reasons.append("candidate is on screen.")
@@ -397,6 +416,14 @@ def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int
     else:
         warnings.append("candidate UI blocking is unknown.")
 
+    if live_state in ("recently_despawned", "depleted_or_stump", "stale", "changed"):
+        warnings.append(f"candidate target liveness is degraded: {live_state}.")
+    elif live_state == "live":
+        reasons.append("candidate target liveness is live.")
+    else:
+        warnings.append("candidate target liveness is unknown.")
+        missing.append("targetLiveState")
+
     if context["status"].get("budgetExceeded") is True:
         warnings.append("live processor budget was exceeded on the latest update.")
     if as_int(context["status"].get("writeFailureCount")) and as_int(context["status"].get("writeFailureCount")) > 0:
@@ -420,6 +447,7 @@ def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int
         geometry_available is True,
         bool(aim),
         ui_blocked is False,
+        live_state == "live",
     ]
     if all(pass_conditions):
         status = "PASS"
@@ -435,8 +463,11 @@ def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int
     confidence += 0.15 if geometry_available is True else 0.0
     confidence += 0.1 if aim else 0.0
     confidence += 0.1 if ui_blocked is False else 0.0
+    confidence += 0.1 if live_state == "live" else 0.0
     confidence = min(1.0, confidence)
 
+    geometry_payload = candidate.get("geometry") if isinstance(candidate.get("geometry"), dict) else {}
+    preferred_geometry = candidate.get("preferredGeometryType") or geometry_payload.get("preferredAimGeometryType")
     answer = {
         "classId": candidate_class_id(candidate),
         "targetName": first_value(candidate.get("name"), target.get("name"), target.get("targetName")),
@@ -456,13 +487,19 @@ def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int
         "qualityScore": candidate.get("qualityScore"),
         "qualityTier": candidate.get("qualityTier"),
         "aimPoint": aim,
-        "preferredGeometryType": candidate.get("preferredGeometryType") or (candidate.get("geometry") or {}).get("preferredAimGeometryType")
-        if isinstance(candidate.get("geometry"), dict)
-        else candidate.get("preferredGeometryType"),
+        "preferredGeometryType": preferred_geometry,
         "positiveSignals": candidate.get("positiveSignals") or [],
         "negativeSignals": candidate.get("negativeSignals") or [],
         "tick": candidate_tick(candidate),
         "freshness": freshness,
+        "targetLiveState": live_state,
+        "targetLiveStateConfidence": candidate.get("targetLiveStateConfidence"),
+        "targetLiveEvidence": candidate.get("targetLiveEvidence") or [],
+        "lastSeenTick": candidate.get("lastSeenTick"),
+        "lastChangedTick": candidate.get("lastChangedTick"),
+        "lastDespawnedTick": candidate.get("lastDespawnedTick"),
+        "suppressUntilTick": candidate.get("suppressUntilTick"),
+        "suppressReason": candidate.get("suppressReason"),
     }
     return answer, status, round(confidence, 3), reasons, warnings, missing
 
@@ -634,12 +671,19 @@ def woodcutting_task_payload(context: dict, args) -> dict:
     warnings = list(context["warnings"])
     missing = list(context["missingFields"])
     baseline = context["baseline"]
+    activity_doc = context["activity"]
     status_doc = context["status"]
     player = baseline.get("player") if isinstance(baseline.get("player"), dict) else {}
     candidates = tree_candidates(context["candidates"], profile=args.profile)
     visible = [candidate for candidate in candidates if candidate.get("onScreen") is True]
     nearest_tree = min(candidates, key=nearest_sort_key) if candidates else None
     best_tree = min(candidates, key=best_sort_key) if candidates else None
+    include_top = bool(getattr(args, "verbose", False)) or getattr(args, "fields", "compact") in {"normal", "full"}
+    top_limit = max(1, int(getattr(args, "top", 3) or 3))
+    top_tree_candidates = [
+        candidate_answer(candidate, context, args.freshness_ticks, args.freshness_ms)[0]
+        for candidate in sorted(candidates, key=best_sort_key)[:top_limit]
+    ] if include_top else []
     nearest_oak = nearest_candidate(candidates, "oak_tree")
     nearest_willow = nearest_candidate(candidates, "willow_tree")
     best_answer, best_status, _confidence, best_reasons, best_warnings, best_missing = candidate_answer(
@@ -652,8 +696,12 @@ def woodcutting_task_payload(context: dict, args) -> dict:
     missing.extend(best_missing)
     freshness, freshness_warnings = freshness_info(context, best_tree, args.freshness_ticks, args.freshness_ms)
     warnings.extend(freshness_warnings)
-    busy = player_busy_summary(baseline)
-    inventory = inventory_readiness(baseline)
+    busy = (activity_doc.get("activity") or {}).get("playerAppearsBusy") if isinstance((activity_doc.get("activity") or {}), dict) else None
+    busy = player_busy_summary(baseline) if busy is None else busy
+    inventory = activity_doc.get("inventory") if isinstance(activity_doc.get("inventory"), dict) else inventory_readiness(baseline)
+    activity_state = activity_doc.get("activity") if isinstance(activity_doc.get("activity"), dict) else {}
+    woodcutting_state = activity_doc.get("woodcuttingState") if isinstance(activity_doc.get("woodcuttingState"), dict) else {}
+    target_liveness = activity_doc.get("targetLiveness") if isinstance(activity_doc.get("targetLiveness"), dict) else {}
     navigation = navigation_readiness(context["navigation"], baseline)
 
     if not player_location_known(player):
@@ -663,6 +711,12 @@ def woodcutting_task_payload(context: dict, args) -> dict:
         warnings.append("no tree-like live candidates.")
     if not inventory["known"]:
         warnings.append("no inventory/status information available for woodcutting context.")
+    if not activity_doc:
+        warnings.append("live_activity_state missing; activity/inventory/liveness checks are degraded.")
+        missing.append("live_activity_state")
+    if not target_liveness:
+        warnings.append("target liveness state unavailable.")
+        missing.append("targetLiveness")
     if navigation.get("status") == "unknown":
         warnings.append(navigation.get("warning") or "collision/navigation data unavailable; reachability questions cannot be answered yet")
     if not baseline.get("latestFramePath"):
@@ -690,6 +744,7 @@ def woodcutting_task_payload(context: dict, args) -> dict:
             "treeCandidatesVisible": bool(visible),
             "bestCandidateHasAimPoint": bool(best_answer.get("aimPoint")),
             "bestCandidateUiBlocked": best_answer.get("uiBlocked"),
+            "bestCandidateLiveState": best_answer.get("targetLiveState"),
             "liveFeedFresh": bool(freshness.get("freshByTicks") and freshness.get("freshByMillis")),
             "playerAppearsBusy": busy,
         },
@@ -698,6 +753,7 @@ def woodcutting_task_payload(context: dict, args) -> dict:
             "treeCandidateCount": len(candidates),
             "nearestTree": candidate_answer(nearest_tree, context, args.freshness_ticks, args.freshness_ms)[0] if nearest_tree else None,
             "bestTree": best_answer,
+            "topTreeCandidates": top_tree_candidates,
             "nearestOakTree": candidate_answer(nearest_oak, context, args.freshness_ticks, args.freshness_ms)[0] if nearest_oak else None,
             "nearestWillowTree": candidate_answer(nearest_willow, context, args.freshness_ticks, args.freshness_ms)[0] if nearest_willow else None,
             "bestCandidateAimPoint": best_answer.get("aimPoint"),
@@ -712,7 +768,27 @@ def woodcutting_task_payload(context: dict, args) -> dict:
             "sourceSceneKnowledgeComplete": status_doc.get("sourceSceneKnowledgeComplete"),
             "sourceCapHit": status_doc.get("sourceCapHit"),
         },
+        "activityState": activity_state,
+        "inventoryState": inventory,
+        "targetLivenessState": target_liveness,
+        "taskReadiness": {
+            "bestCandidateLiveState": best_answer.get("targetLiveState"),
+            "bestCandidateUsableTelemetry": best_status,
+            "woodcuttingState": woodcutting_state.get("woodcuttingState"),
+            "sourceFresh": bool(freshness.get("freshByTicks") and freshness.get("freshByMillis")),
+        },
+        "woodcuttingState": woodcutting_state,
         "navigationReadiness": navigation,
+        "missingCapabilities": [
+            capability
+            for capability, missing_capability in (
+                ("collisionReachability", navigation.get("status") == "unknown"),
+                ("inventoryDeltas", not inventory.get("recentItemDeltas")),
+                ("animationFrame", player.get("animationFrame") is None),
+                ("explicitMovementState", player.get("isMoving") is None),
+            )
+            if missing_capability
+        ],
         "warnings": sorted(set(str(warning) for warning in warnings if warning)),
         "missingFields": sorted(set(str(field) for field in missing if field)),
         "sourceFiles": context["sourceFiles"],
@@ -724,6 +800,7 @@ def woodcutting_task_payload(context: dict, args) -> dict:
 def summary_payload(context: dict, args) -> dict:
     status = context["status"]
     baseline = context["baseline"]
+    activity = context["activity"]
     context_index = context["context"]
     candidates = filter_candidates(context["candidates"], profile=args.profile)
     player = baseline.get("player") if isinstance(baseline.get("player"), dict) else {}
@@ -802,6 +879,7 @@ def check(name: str, ok: bool | None, reason: str) -> dict:
 def self_test_payload(context: dict, args) -> dict:
     status = context["status"]
     baseline = context["baseline"]
+    activity = context["activity"]
     context_index = context["context"]
     candidates = context["candidates"]
     active_profile = args.profile or status.get("profile")
@@ -813,18 +891,29 @@ def self_test_payload(context: dict, args) -> dict:
         check("status readable", bool(status), "live_status.json was loaded."),
         check("context index readable", bool(context_index), "live_context_index.json was loaded."),
         check("candidates readable", context["paths"]["candidates"].exists(), "live_candidates.jsonl was present."),
+        check("activity state readable", bool(activity), "live_activity_state.json was loaded."),
         check("latest tick known", latest_tick(context) is not None, "latest tick is available in live status/baseline."),
         check("candidate count > 0", len(candidates) > 0, f"{len(candidates)} candidate record(s) loaded."),
         check("live data fresh", freshness.get("freshByTicks") and freshness.get("freshByMillis"), "candidate and live files are inside freshness thresholds."),
         check("no write failures", not (as_int(status.get("writeFailureCount")) and as_int(status.get("writeFailureCount")) > 0), "live_status writeFailureCount is zero."),
         check("source cap not hit", status.get("sourceCapHit") is not True, "sourceCapHit is not true."),
+        check("inventory state readable", bool((activity.get("inventory") if isinstance(activity, dict) else None)), "inventory state is available or reported unknown."),
+        check("target liveness state readable", bool((activity.get("targetLiveness") if isinstance(activity, dict) else None)), "target liveness state is available."),
     ]
+    player = activity.get("player") if isinstance(activity.get("player"), dict) else {}
+    checks.append(check("player animation/interacting fields", player.get("animation") is not None or player.get("interacting"), "activity state has animation or interacting fields."))
+    inventory = activity.get("inventory") if isinstance(activity.get("inventory"), dict) else {}
+    checks.append(check("inventory delta tracking present", "recentItemDeltas" in inventory, "inventory state has recentItemDeltas."))
+    liveness = activity.get("targetLiveness") if isinstance(activity.get("targetLiveness"), dict) else {}
+    checks.append(check("recently unavailable cache present", "recentlyUnavailableCount" in liveness, "target liveness has recentlyUnavailableCount."))
     if str(active_profile or "").lower() == "woodcutting":
         checks.extend(
             [
                 check("nearest tree candidate", nearest_tree is not None, "woodcutting profile has a nearest tree candidate."),
                 check("best tree candidate", best_tree is not None, "woodcutting profile has a best tree candidate."),
                 check("best tree aim point", candidate_aim_point(best_tree) is not None if best_tree else False, "best tree has an aim point."),
+                check("best tree liveness", bool(best_tree and best_tree.get("targetLiveState")), "best tree has target liveness state."),
+                check("woodcutting activity state", bool(activity.get("woodcuttingState") if isinstance(activity, dict) else None), "woodcuttingState is available."),
             ]
         )
     return {
@@ -833,6 +922,81 @@ def self_test_payload(context: dict, args) -> dict:
         "checks": checks,
         "warnings": sorted(set(context["warnings"] + freshness_warnings)),
         "missingFields": sorted(set(context["missingFields"])),
+        "sourceFiles": context["sourceFiles"],
+        "generatedAtUtc": utc_now(),
+    }
+
+
+def activity_payload(context: dict) -> dict:
+    activity = context["activity"]
+    if not activity:
+        return {
+            "schema": "live_activity_answer.v1",
+            "status": "WARN",
+            "activityState": {},
+            "warnings": context["warnings"] + ["live_activity_state missing."],
+            "missingFields": sorted(set(context["missingFields"] + ["live_activity_state"])),
+            "sourceFiles": context["sourceFiles"],
+            "generatedAtUtc": utc_now(),
+        }
+    return {
+        "schema": "live_activity_answer.v1",
+        "status": "PASS",
+        "latestTick": activity.get("latestTick"),
+        "activityState": activity.get("activity") or {},
+        "woodcuttingState": activity.get("woodcuttingState") or {},
+        "player": activity.get("player") or {},
+        "warnings": context["warnings"],
+        "missingFields": context["missingFields"],
+        "sourceFiles": context["sourceFiles"],
+        "generatedAtUtc": utc_now(),
+    }
+
+
+def inventory_payload(context: dict) -> dict:
+    activity = context["activity"]
+    inventory = activity.get("inventory") if isinstance(activity.get("inventory"), dict) else {}
+    if not inventory:
+        baseline = context["baseline"]
+        inventory = baseline.get("inventory") if isinstance(baseline.get("inventory"), dict) else {}
+    known = inventory.get("known") if "known" in inventory else bool(inventory)
+    return {
+        "schema": "live_inventory_answer.v1",
+        "status": "PASS" if known else "WARN",
+        "inventoryState": inventory,
+        "inventoryKnown": known,
+        "inventoryFull": inventory.get("inventoryFull") if isinstance(inventory, dict) else None,
+        "recentInventoryDeltas": inventory.get("recentItemDeltas") if isinstance(inventory, dict) else [],
+        "warnings": context["warnings"] + ([] if known else ["inventory state is unknown."]),
+        "missingFields": context["missingFields"] + ([] if known else ["inventory"]),
+        "sourceFiles": context["sourceFiles"],
+        "generatedAtUtc": utc_now(),
+    }
+
+
+def liveness_payload(context: dict) -> dict:
+    activity = context["activity"]
+    liveness = activity.get("targetLiveness") if isinstance(activity.get("targetLiveness"), dict) else {}
+    status_doc = context["status"]
+    if not liveness:
+        liveness = {
+            "recentlyUnavailableCount": status_doc.get("recentlyUnavailableCount"),
+            "recentlyDepletedCount": status_doc.get("recentlyDepletedCount"),
+            "suppressedCandidateCount": status_doc.get("candidatesSuppressedByLiveness"),
+            "candidatesSuppressedAsDepleted": status_doc.get("candidatesSuppressedAsDepleted"),
+            "previousBestCandidate": status_doc.get("previousBestCandidate"),
+            "currentBestCandidate": status_doc.get("currentBestCandidate"),
+            "bestCandidateChanged": status_doc.get("bestCandidateChanged"),
+            "bestCandidateChangeReason": status_doc.get("bestCandidateChangeReason"),
+        }
+    known = bool(liveness) and any(value is not None for value in liveness.values())
+    return {
+        "schema": "live_liveness_answer.v1",
+        "status": "PASS" if known else "WARN",
+        "targetLivenessState": liveness,
+        "candidateLiveStateCounts": status_doc.get("candidateStats", {}).get("candidateLiveStateCounts") if isinstance(status_doc.get("candidateStats"), dict) else None,
+        "warnings": context["warnings"] + ([] if known else ["target liveness state is unknown."]),
+        "missingFields": context["missingFields"] + ([] if known else ["targetLiveness"]),
         "sourceFiles": context["sourceFiles"],
         "generatedAtUtc": utc_now(),
     }
@@ -871,23 +1035,139 @@ def print_answer_human(payload: dict) -> None:
             print(f"- {warning}")
 
 
-def print_task_human(payload: dict) -> None:
+def print_task_human(payload: dict, args) -> None:
     print(f"Live Task Context: {payload.get('task')} status={payload.get('status')}")
     print(f"can answer core questions: {payload.get('canAnswerCoreQuestions')}")
+    state = payload.get("stateSummary") or {}
+    player = state.get("player") or {}
+    if player:
+        print(f"player: world={player.get('worldX')},{player.get('worldY')} plane={player.get('plane')}")
+    activity = payload.get("activityState") or {}
+    woodcutting = payload.get("woodcuttingState") or {}
+    if activity or woodcutting:
+        print(f"activity: {activity.get('apparentState', 'unknown')} woodcutting={woodcutting.get('woodcuttingState', 'unknown')}")
+    inventory = payload.get("inventoryState") or {}
+    if inventory:
+        print(f"inventory: known={inventory.get('known')} free={inventory.get('freeSlots')} full={inventory.get('inventoryFull')} changed={inventory.get('changedRecently')}")
     summary = payload.get("candidateSummary") or {}
     print(f"visible tree candidates: {summary.get('visibleTreeCandidateCount')}")
     best = summary.get("bestTree") or {}
     if best:
-        print(f"best tree: {best.get('targetName')} distance={best.get('distanceTiles')} aim={best.get('aimPoint')}")
-    state = payload.get("stateSummary") or {}
-    busy = state.get("playerAppearsBusy") or {}
-    print(f"player appears busy: {busy.get('value')} ({busy.get('reason')})")
+        print(
+            "best tree: "
+            f"{best.get('classId')}/{best.get('targetName')} id={best.get('id')} "
+            f"distance={best.get('distanceTiles')} onScreen={best.get('onScreen')} "
+            f"geometry={best.get('geometryAvailable')} uiBlocked={best.get('uiBlocked')} "
+            f"aim={best.get('aimPoint')} liveState={best.get('targetLiveState')}"
+        )
+    if getattr(args, "verbose", False) or getattr(args, "fields", "compact") in {"normal", "full"}:
+        top = (summary.get("topTreeCandidates") or [])[: max(1, int(getattr(args, "top", 3) or 3))]
+        if top:
+            print("top candidates:")
+            for index, candidate in enumerate(top, start=1):
+                print(f"{index}. {candidate.get('targetName')} distance={candidate.get('distanceTiles')} quality={candidate.get('qualityTier')} aim={candidate.get('aimPoint')}")
     navigation = payload.get("navigationReadiness") or {}
     print(f"navigation readiness: {navigation.get('status')} collisionKnown={navigation.get('collisionKnown')}")
+    missing = payload.get("missingCapabilities") or []
+    if missing:
+        print("missing capabilities:", ", ".join(str(item) for item in missing))
     if payload.get("warnings"):
         print("warnings:")
-        for warning in payload["warnings"]:
+        for warning in payload["warnings"][:20]:
             print(f"- {warning}")
+        if len(payload["warnings"]) > 20:
+            print(f"- ... {len(payload['warnings']) - 20} more warnings; use --verbose or --fields full for details")
+
+
+def compact_candidate(candidate: dict | None) -> dict | None:
+    if not candidate:
+        return None
+    return {
+        "classId": candidate.get("classId"),
+        "targetName": candidate.get("targetName"),
+        "id": candidate.get("id"),
+        "hash": candidate.get("hash"),
+        "distanceTiles": candidate.get("distanceTiles"),
+        "onScreen": candidate.get("onScreen"),
+        "geometryAvailable": candidate.get("geometryAvailable"),
+        "uiBlocked": candidate.get("uiBlocked"),
+        "aimPoint": candidate.get("aimPoint"),
+        "targetLiveState": candidate.get("targetLiveState"),
+        "qualityTier": candidate.get("qualityTier"),
+        "qualityScore": candidate.get("qualityScore"),
+        "tick": candidate.get("tick"),
+    }
+
+
+def compact_json_payload(payload: dict, args) -> dict:
+    schema = payload.get("schema")
+    compact = {
+        key: payload.get(key)
+        for key in ("schema", "status", "confidence", "generatedAtUtc", "warnings", "missingFields", "queryPerformance")
+        if key in payload
+    }
+    if schema == TASK_SCHEMA:
+        summary = payload.get("candidateSummary") or {}
+        state = payload.get("stateSummary") or {}
+        compact.update(
+            {
+                "task": payload.get("task"),
+                "canAnswerCoreQuestions": payload.get("canAnswerCoreQuestions"),
+                "latestTick": (state.get("freshness") or {}).get("latestTick"),
+                "player": state.get("player"),
+                "activityState": payload.get("activityState"),
+                "woodcuttingState": payload.get("woodcuttingState"),
+                "inventoryState": {
+                    key: (payload.get("inventoryState") or {}).get(key)
+                    for key in ("known", "freeSlots", "filledSlots", "itemCount", "inventoryFull", "changedRecently")
+                },
+                "bestTree": compact_candidate(summary.get("bestTree")),
+                "nearestTree": compact_candidate(summary.get("nearestTree")),
+                "visibleTreeCandidateCount": summary.get("visibleTreeCandidateCount"),
+                "treeCandidateCount": summary.get("treeCandidateCount"),
+                "navigationReadiness": payload.get("navigationReadiness"),
+                "missingCapabilities": payload.get("missingCapabilities"),
+            }
+        )
+    elif schema == ANSWER_SCHEMA:
+        compact.update({"query": payload.get("query"), "answer": compact_candidate(payload.get("answer"))})
+        for alias in ("nearest", "best", "candidate"):
+            if alias in payload:
+                compact[alias] = compact_candidate(payload.get(alias)) if alias == "candidate" else payload.get(alias)
+    elif schema == SUMMARY_SCHEMA:
+        compact.update(
+            {
+                "sessionPath": payload.get("sessionPath"),
+                "latestTick": payload.get("latestTick"),
+                "activeProfile": payload.get("activeProfile"),
+                "player": payload.get("player"),
+                "candidateCount": payload.get("candidateCount"),
+                "candidateCountsByClassId": payload.get("candidateCountsByClassId"),
+                "candidateCountsByQualityTier": payload.get("candidateCountsByQualityTier"),
+                "sourceSceneKnowledgeComplete": payload.get("sourceSceneKnowledgeComplete"),
+                "sourceCapHit": payload.get("sourceCapHit"),
+                "budgetExceeded": payload.get("budgetExceeded"),
+                "writeFailures": payload.get("writeFailures"),
+            }
+        )
+    else:
+        compact.update({key: value for key, value in payload.items() if key not in {"sourceFiles", "items", "recentItemDeltas"}})
+    if getattr(args, "fields", "compact") == "full" or getattr(args, "verbose", False):
+        return payload
+    return compact
+
+
+def print_query_benchmark(payload: dict) -> None:
+    performance = payload.get("queryPerformance")
+    if not isinstance(performance, dict):
+        return
+    print(
+        "query timing: "
+        f"readMs={performance.get('queryReadMillis', 0)} "
+        f"parseMs={performance.get('queryParseMillis', 0)} "
+        f"selectMs={performance.get('querySelectMillis', 0)} "
+        f"totalMs={performance.get('totalQueryMillis', 0)}"
+    )
 
 
 def print_self_test_human(payload: dict) -> None:
@@ -900,7 +1180,17 @@ def print_self_test_human(payload: dict) -> None:
             print(f"- {warning}")
 
 
+def attach_query_performance(payload: dict, timing: dict, total_started: float, args) -> dict:
+    if not getattr(args, "benchmark", False):
+        return payload
+    timing["totalQueryMillis"] = (time.perf_counter() - total_started) * 1000.0
+    payload["queryPerformance"] = {key: round(float(timing.get(key) or 0.0), 3) for key in QUERY_TIMING_KEYS}
+    return payload
+
+
 def build_payload(args) -> tuple[dict, int]:
+    total_started = time.perf_counter()
+    timing = {key: 0.0 for key in QUERY_TIMING_KEYS}
     session, session_warnings = resolve_session(args)
     if session is None:
         payload = {
@@ -915,15 +1205,32 @@ def build_payload(args) -> tuple[dict, int]:
             "sourceFiles": [],
             "generatedAtUtc": utc_now(),
         }
-        return payload, 1
-    context = load_live_context(session)
+        return attach_query_performance(payload, timing, total_started, args), 1
+    context = load_live_context(session, timing if getattr(args, "benchmark", False) else None)
     context["warnings"] = session_warnings + context["warnings"]
+    select_started = time.perf_counter()
+    if args.activity:
+        payload = activity_payload(context)
+        add_timing(timing, "querySelectMillis", select_started)
+        return attach_query_performance(payload, timing, total_started, args), 0
+    if args.inventory:
+        payload = inventory_payload(context)
+        add_timing(timing, "querySelectMillis", select_started)
+        return attach_query_performance(payload, timing, total_started, args), 0
+    if args.liveness:
+        payload = liveness_payload(context)
+        add_timing(timing, "querySelectMillis", select_started)
+        return attach_query_performance(payload, timing, total_started, args), 0
     if args.self_test:
-        return self_test_payload(context, args), 0
+        payload = self_test_payload(context, args)
+        add_timing(timing, "querySelectMillis", select_started)
+        return attach_query_performance(payload, timing, total_started, args), 0
     if args.task:
         if args.task.lower() == "woodcutting":
-            return woodcutting_task_payload(context, args), 0
-        return {
+            payload = woodcutting_task_payload(context, args)
+            add_timing(timing, "querySelectMillis", select_started)
+            return attach_query_performance(payload, timing, total_started, args), 0
+        payload = {
             "schema": TASK_SCHEMA,
             "task": args.task,
             "status": "FAIL",
@@ -936,19 +1243,29 @@ def build_payload(args) -> tuple[dict, int]:
             "missingFields": context["missingFields"],
             "sourceFiles": context["sourceFiles"],
             "generatedAtUtc": utc_now(),
-        }, 1
+        }
+        add_timing(timing, "querySelectMillis", select_started)
+        return attach_query_performance(payload, timing, total_started, args), 1
     if args.nearest:
-        return direct_query_payload(context, "nearest", args.nearest, args), 0
+        payload = direct_query_payload(context, "nearest", args.nearest, args)
+        add_timing(timing, "querySelectMillis", select_started)
+        return attach_query_performance(payload, timing, total_started, args), 0
     if args.best:
-        return direct_query_payload(context, "best", args.best, args), 0
+        payload = direct_query_payload(context, "best", args.best, args)
+        add_timing(timing, "querySelectMillis", select_started)
+        return attach_query_performance(payload, timing, total_started, args), 0
     if args.baseline:
-        return context["baseline"], 0
-    return summary_payload(context, args), 0
+        add_timing(timing, "querySelectMillis", select_started)
+        return attach_query_performance(context["baseline"], timing, total_started, args), 0
+    payload = summary_payload(context, args)
+    add_timing(timing, "querySelectMillis", select_started)
+    return attach_query_performance(payload, timing, total_started, args), 0
 
 
 def print_payload(payload: dict, args) -> None:
     if args.json:
-        print(json_dump_compact(payload))
+        json_payload = compact_json_payload(payload, args) if (args.compact_json or not args.verbose and args.fields != "full") else payload
+        print(json_dump_compact(json_payload))
         return
     schema = payload.get("schema")
     if schema == SUMMARY_SCHEMA:
@@ -956,11 +1273,16 @@ def print_payload(payload: dict, args) -> None:
     elif schema == ANSWER_SCHEMA:
         print_answer_human(payload)
     elif schema == TASK_SCHEMA:
-        print_task_human(payload)
+        print_task_human(payload, args)
     elif schema == SELF_TEST_SCHEMA:
         print_self_test_human(payload)
     else:
-        print(json.dumps(payload, indent=2))
+        if args.fields == "full" or args.verbose:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(json.dumps(compact_json_payload(payload, args), indent=2))
+    if args.benchmark:
+        print_query_benchmark(payload)
 
 
 def parse_args():
@@ -976,9 +1298,17 @@ def parse_args():
     parser.add_argument("--freshness-ticks", type=int, default=DEFAULT_FRESHNESS_TICKS, help="Maximum acceptable candidate tick delta.")
     parser.add_argument("--freshness-ms", type=int, default=DEFAULT_FRESHNESS_MS, help="Maximum acceptable live file age in milliseconds.")
     parser.add_argument("--task", help="Run a task-context QA report, currently woodcutting.")
+    parser.add_argument("--activity", action="store_true", help="Report read-only apparent activity state from live_activity_state.json.")
+    parser.add_argument("--inventory", action="store_true", help="Report read-only inventory state and recent deltas.")
+    parser.add_argument("--liveness", action="store_true", help="Report read-only target liveness/depletion state.")
     parser.add_argument("--self-test", action="store_true", help="Run read-only live context readiness checks.")
     parser.add_argument("--baseline", action="store_true", help="Return live_baseline_state.json.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON only.")
+    parser.add_argument("--compact-json", action="store_true", help="In JSON mode, omit bulky arrays and return compact answer fields.")
+    parser.add_argument("--verbose", action="store_true", help="Print expanded details.")
+    parser.add_argument("--top", type=int, default=3, help="Number of top candidates to include for normal/full output. Default: 3.")
+    parser.add_argument("--fields", choices=["compact", "normal", "full"], default="compact", help="Human/JSON detail level. Default: compact.")
+    parser.add_argument("--benchmark", action="store_true", help="Include query read/parse/select timing.")
     parser.add_argument("--watch", action="store_true", help="Repeat the query until interrupted.")
     parser.add_argument("--interval", type=float, default=1.0, help="Seconds between --watch refreshes.")
     return parser.parse_args()

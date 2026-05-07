@@ -1067,6 +1067,8 @@ should prefer the small live context files:
   candidate counts, and live file paths.
 - `live_candidates.jsonl`: selected read-only target context packets.
 - `live_navigation_summary.json`: current navigation/collision placeholder.
+- `live_performance_summary.json`: rolling latency statistics for recent live
+  processor updates.
 - `live_status.json`: timing, output byte counts, source cap status, and live
   health.
 
@@ -1098,10 +1100,15 @@ Startup/follow behavior:
 - Follow mode reuses cached per-tick work for older ticks and processes only
   newly appended ticks unless `--force-window-rebuild` is passed.
 
-`live_status.json` includes timing buckets and byte counts: tail read, JSON
-parse, raw tick ingest, baseline, world target build/filter, candidate
-selection, context index, UI target load, output write, total duration, output
-bytes, `budgetExceeded`, and `warningUpdateExceeded`.
+`live_status.json` includes timing buckets and byte counts: file discovery,
+tail read, line split, JSON parse, raw tick ingest, baseline, activity,
+inventory delta, liveness update, world target build/filter, candidate
+selection, context index, UI target load, output serialization/write, total
+wall time, output bytes, `budgetExceeded`, and `warningUpdateExceeded`.
+`live_performance_summary.json` keeps the last 100 update samples in memory and
+writes rolling `avgTotalMs`, `p50TotalMs`, `p90TotalMs`, `p95TotalMs`,
+`maxTotalMs`, average candidate/write time, raw seen/processed/coalesced
+counts, write failures, and recommendations.
 
 Fast one-shot woodcutting context test:
 
@@ -1112,7 +1119,7 @@ python telemetry-viewer\live_target_processor.py --latest-session --profile wood
 Fast follow mode:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --no-startup-backfill --window-ticks 50 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
 ```
 
 With UI blocking:
@@ -1174,6 +1181,13 @@ woodcutting context questions without implying any action. Use `--self-test`
 before longer experiments to confirm the baseline/status/context/candidate
 files are readable, fresh, and source capture is not capped.
 
+Human output is compact by default. Use `--fields normal` or `--verbose` to
+print top candidates, and `--fields full` when you want expanded details.
+`--top N` controls how many candidates are shown in normal/full output. JSON
+output is also compact by default; use `--fields full` or `--verbose` for the
+full payload, or `--compact-json` to explicitly request compact JSON. Add
+`--benchmark` to include query read/parse/select timing.
+
 Example commands:
 
 ```text
@@ -1182,6 +1196,9 @@ python telemetry-viewer\live_context_query.py --latest-session --nearest tree --
 python telemetry-viewer\live_context_query.py --latest-session --best tree --json
 python telemetry-viewer\live_context_query.py --latest-session --task woodcutting
 python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --json
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --fields normal --top 3
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --json --compact-json
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --benchmark
 python telemetry-viewer\live_context_query.py --latest-session --self-test
 python telemetry-viewer\live_context_query.py --latest-session --watch --nearest tree --interval 1
 ```
@@ -1190,6 +1207,72 @@ Navigation readiness is intentionally a placeholder unless a future read-only
 collision summary is available. When collision data is missing, the task report
 returns navigation readiness as `unknown` and warns that reachability questions
 cannot be answered yet.
+
+## Activity, Inventory, And Target Liveness QA
+
+The live processor also writes:
+
+```text
+interaction_geometry\live\live_activity_state.json
+```
+
+Schema `live_activity_state.v1` is a compact read-only interpretation layer for
+current player state, inventory changes, and target liveness. It helps validate
+whether future systems can observe context such as idle/busy, possible chopping,
+inventory changes, inventory fullness, and whether a previous best target became
+stale, despawned, or depleted. It does not click, execute actions, send input,
+manipulate menus, or mutate client state.
+
+Target liveness is heuristic. The processor uses existing scene object deltas,
+`objectKey`, object id/hash, world/scene location, visible object references,
+object names/actions, and target-library depletion hints. If a tree-like object
+despawns or a same-location replacement looks like a stump/depleted variant, the
+old candidate is marked with `targetLiveState` such as `recently_despawned` or
+`depleted_or_stump` and is temporarily suppressed from active candidate output.
+If a tree-like object returns at the same identity/location, the suppression is
+cleared. The static scene index is not deleted; this is only active candidate
+liveness filtering.
+
+Candidate packets may include:
+
+- `targetLiveState`
+- `targetLiveStateConfidence`
+- `targetLiveEvidence`
+- `lastSeenTick`
+- `lastChangedTick`
+- `lastDespawnedTick`
+- `replacementObjectId`
+- `replacementObjectName`
+- `suppressUntilTick`
+- `suppressReason`
+
+Inventory state is based on observed inventory item IDs/quantities in the tick
+window. It reports signatures, free/filled slots, whether the inventory changed
+this tick or recently, and compact item deltas. If item names are unavailable it
+reports item IDs and quantities.
+
+The woodcutting state heuristic is intentionally cautious. It can report
+`likely_idle`, `likely_chopping`, `likely_moving`, `inventory_changed`,
+`inventory_full`, `target_depleted`, `target_stale`, or `unknown`, with
+confidence and evidence. These are observations, not instructions.
+
+Commands:
+
+```text
+python telemetry-viewer\live_context_query.py --latest-session --activity
+python telemetry-viewer\live_context_query.py --latest-session --inventory
+python telemetry-viewer\live_context_query.py --latest-session --liveness
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --json
+python telemetry-viewer\live_context_query.py --latest-session --self-test
+```
+
+For short experiments where trees may be chopped/depleted, run the processor
+with the default suppression window or tune it explicitly:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 50 --limit 100 --no-ui-targets --emit-world-targets candidates --depleted-suppress-ticks 20 --summary --benchmark
+```
 
 ## Realtime live mode versus complete live mode
 
@@ -1200,7 +1283,8 @@ cannot be answered yet.
   tick or newest small batch for live output.
 - `--latency-mode complete` processes every selected tick in order. Use it for
   QA/debug runs where completeness of the derived rolling output matters more
-  than latency.
+  than latency. Complete audit mode is expected to be slower and is labelled
+  separately in console output and `live_status.json`.
 
 Coalescing live output is not capture limiting. The raw tick files and static
 scene index summaries can remain complete while realtime output writes only the
@@ -1226,12 +1310,52 @@ Important status fields:
 - `worldTargetsPrefilteredOut`
 - `classificationCacheHits` / `classificationCacheMisses`
 - `candidateTickCacheHits` / `candidateTickCacheMisses`
-- `timingMode`, currently `nested`
+- `timingMode`, currently `exclusive`
+- `modeLabel`, `auditMode`, and `realtimeMode`
+- `auditDurationMillis` for complete audit mode
+- `realtimeDurationMillis`, `targetUpdateMillis`, and `budgetExceeded` for
+  realtime mode
+
+## Realtime backlog coalescing
+
+Realtime mode is allowed to skip intermediate ticks for live latency. The raw
+session can still contain those ticks; coalescing only means they were not
+fully parsed and derived into live candidate output during that poll.
+
+Status fields use precise language:
+
+- `rawRecordsSeenThisPoll`: complete raw tick lines observed in the latest poll.
+- `rawRecordsFullyParsedThisPoll`: raw tick lines parsed into Python records.
+- `rawRecordsSkippedBeforeParse`: complete tick lines consumed without JSON
+  parsing because realtime mode kept only the newest ticks.
+- `rawRecordsFullyProcessed`: ticks fully derived into live world/candidate
+  context.
+- `coalescedBeforeParse`: ticks skipped by the fast tailer before expensive
+  parsing.
+- `coalescedAfterParse`: ticks skipped after parsing because the rolling window
+  still exceeded the realtime per-update limit.
+
+Use realtime mode for current context. Use complete mode when auditing every
+tick matters. Coalescing is not capture loss, not a Java scene cap, and not a
+static scene index limit.
+
+The live status timing buckets are exclusive where practical and do not include
+poll sleep time. Useful fields include `fileDiscoverMillis`, `tailReadMillis`,
+`lineSplitMillis`, `jsonParseMillis`, `rawTickIngestMillis`,
+`livenessUpdateMillis`, `inventoryDeltaMillis`, `classificationCacheMillis`,
+`candidateSelectMillis`, `outputSerializeMillis`, `outputWriteMillis`,
+`consolePrintMillis`, `totalExclusiveMillis`, and `totalWallMillis`.
+
+Use `--quiet` to suppress routine console output, `--verbose` for expanded
+startup/summary information, and `--log-every N` to print only every Nth follow
+update. The compact follow line reports `rawSeen`, `processed`, `coalesced`,
+`worldBuilt`, `candidates`, `totalMs`, rolling `p95`, budget status, and write
+failures.
 
 Fast realtime woodcutting:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 50 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
 ```
 
 Complete QA processing:
@@ -1240,8 +1364,131 @@ Complete QA processing:
 python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --once --latency-mode complete --startup-backfill-ticks 25 --window-ticks 25 --limit 500 --emit-world-targets candidates --summary --benchmark
 ```
 
+Complete audit mode; expected to be slower.
+
 Debug broad world:
 
 ```text
 python telemetry-viewer\live_target_processor.py --latest-session --profile broad_qa --once --latency-mode complete --window-ticks 5 --limit 2000 --emit-world-targets full --summary --benchmark
+```
+
+## Read-only context service
+
+`context_service.py` is a local Python sidecar for compact brain-facing context
+queries. It reads the rolling live files under
+`interaction_geometry\live`, caches parsed state in memory, and serves
+`context_request.v1` to `context_response.v1` over localhost HTTP. It does not
+click, send input, manipulate menus, execute actions, mutate RuneLite, or mutate
+game state. It is localhost-only by default and is intended to stabilize the
+read-only request/response contract before any Java bridge is added.
+
+Raw JSON/session recording remains the debug, audit, and training path. The
+service is only a compact observation layer over the current live files.
+
+Start realtime live processor:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+```
+
+Start context service:
+
+```text
+python telemetry-viewer\context_service.py --latest-session --port 8890
+```
+
+Health:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8890/health
+```
+
+Request context:
+
+```powershell
+$request = @{
+  schema = "context_request.v1"
+  task = "woodcutting"
+  needs = @("baseline", "best:tree", "inventory", "activity", "liveness")
+  maxCandidates = 1
+  responseMode = "compact"
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
+```
+
+Oneshot:
+
+```text
+python telemetry-viewer\context_service.py --latest-session --oneshot-request "{\"schema\":\"context_request.v1\",\"task\":\"woodcutting\",\"needs\":[\"baseline\",\"best:tree\"],\"maxCandidates\":1,\"responseMode\":\"compact\"}"
+```
+
+Useful endpoints:
+
+- `GET /health`
+- `GET /schema`
+- `GET /status`
+- `POST /context`
+- `POST /context/batch`
+
+## Realtime liveness and compact context responses
+
+Realtime target liveness is intentionally budgeted. It should preserve complete
+source scene knowledge while limiting only the live processor's liveness work
+and compact output.
+
+Liveness modes:
+
+- `off`: skip liveness checks and mark candidate liveness as unknown.
+- `basic`: direct candidate/cache lookup only; no rolling-window or visible-ref
+  scan.
+- `delta`: realtime default. Uses the latest processed tick's
+  `sceneObjectDeltas` plus keyed unavailable-target cache. If no direct
+  depletion/despawn evidence is seen, candidates are marked `live_assumed`.
+- `full`: complete audit behavior. It may scan broader visible/source state and
+  is expected to be slower.
+
+`live_status.json` reports liveness timing and budget fields including
+`livenessMode`, `livenessBudgetMs`, `livenessBudgetExceeded`,
+`livenessDegraded`, `livenessCandidatesChecked`,
+`livenessCandidatesSkippedByBudget`, `recentlyUnavailableCount`,
+`recentlyUnavailablePruned`, and `recentlyUnavailableCacheOverLimit`.
+
+Compact context responses omit bulky `sourceFiles` and full
+`recentlyUnavailableTargets` by default. They return `sourceFilesSummary` and a
+small liveness summary instead. Use `responseMode = "normal"` for capped
+liveness examples or `responseMode = "full"` for full details. Output limiting
+is not source capture limiting; `sourceSceneKnowledgeComplete` and
+`sourceCapHit` remain the source coverage signals.
+
+Realtime no liveness:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --liveness-mode off --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+```
+
+Realtime delta liveness:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+```
+
+Complete audit full liveness:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --once --latency-mode complete --liveness-mode full --startup-backfill-ticks 25 --window-ticks 25 --limit 500 --emit-world-targets candidates --summary --benchmark
+```
+
+Compact context request:
+
+```powershell
+$request = @{
+  schema = "context_request.v1"
+  task = "woodcutting"
+  needs = @("baseline", "best:tree", "nearest:tree", "inventory", "activity", "liveness", "diagnostics")
+  maxCandidates = 1
+  responseMode = "compact"
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
 ```

@@ -78,6 +78,9 @@ def candidate(
         "qualityTier": "excellent" if quality >= 90 else "good",
         "positiveSignals": ["onScreen", "geometryAvailable"],
         "negativeSignals": ["uiBlocked"] if ui_blocked else [],
+        "targetLiveState": "live",
+        "targetLiveStateConfidence": 0.9,
+        "targetLiveEvidence": ["test candidate live"],
     }
     if aim:
         value["aimPoint"] = {"x": 100 + distance, "y": 120}
@@ -141,6 +144,53 @@ def make_live_session(root: Path, *, candidates: list[dict] | None = None, stale
             "nearestCandidateByClassId": {"tree": {"name": "Tree"}},
         },
     )
+    write_json(
+        live_dir / "live_activity_state.json",
+        {
+            "schema": "live_activity_state.v1",
+            "generatedAtUtc": generated,
+            "latestTick": 10,
+            "player": {
+                "worldX": 3200,
+                "worldY": 3200,
+                "plane": 0,
+                "animation": -1,
+                "poseAnimation": 808,
+                "interacting": {},
+            },
+            "inventory": {
+                "known": True,
+                "freeSlots": 24,
+                "filledSlots": 4,
+                "itemCount": 4,
+                "inventoryFull": False,
+                "changedThisTick": False,
+                "changedRecently": False,
+                "recentItemDeltas": [],
+            },
+            "equipment": {"known": True, "items": []},
+            "targetLiveness": {
+                "bestCandidateLiveState": "live",
+                "recentlyUnavailableCount": 0,
+                "recentlyDepletedCount": 0,
+                "suppressedCandidateCount": 0,
+                "recentlyUnavailableTargets": [],
+            },
+            "activity": {
+                "apparentState": "idle",
+                "apparentTask": "unknown",
+                "confidence": 0.5,
+                "evidence": ["test idle"],
+                "warnings": [],
+            },
+            "woodcuttingState": {
+                "woodcuttingState": "likely_idle",
+                "confidence": 0.55,
+                "evidence": ["test tree available"],
+                "warnings": [],
+            },
+        },
+    )
     if navigation:
         write_json(
             live_dir / "live_navigation_summary.json",
@@ -195,6 +245,57 @@ class LiveContextQueryTest(unittest.TestCase):
             self.assertEqual(payload["query"]["type"], "nearest")
             self.assertEqual(payload["answer"]["classId"], "tree")
 
+    def test_task_default_output_is_compact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp))
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--task", "woodcutting"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("best tree:", result.stdout)
+            self.assertIn("inventory:", result.stdout)
+            self.assertNotIn("top candidates:", result.stdout)
+
+    def test_verbose_task_output_prints_top_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp))
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--task", "woodcutting", "--verbose", "--top", "1"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("top candidates:", result.stdout)
+            self.assertEqual(result.stdout.count(". Tree"), 1)
+
+    def test_compact_json_omits_bulky_source_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp))
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--task", "woodcutting", "--json", "--compact-json"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["schema"], "live_task_context.v1")
+            self.assertIn("bestTree", payload)
+            self.assertNotIn("sourceFiles", payload)
+            self.assertNotIn("candidateSummary", payload)
+
+    def test_benchmark_prints_query_timing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp))
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--summary", "--benchmark"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("query timing:", result.stdout)
+
     def test_stale_live_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_live_session(Path(tmp), stale=True)
@@ -247,6 +348,8 @@ class LiveContextQueryTest(unittest.TestCase):
             self.assertIn(payload["status"], {"PASS", "WARN"})
             self.assertTrue(payload["canAnswerCoreQuestions"])
             self.assertEqual(payload["candidateSummary"]["visibleTreeCandidateCount"], 2)
+            self.assertEqual(payload["targetLivenessState"]["bestCandidateLiveState"], "live")
+            self.assertEqual(payload["woodcuttingState"]["woodcuttingState"], "likely_idle")
 
     def test_woodcutting_task_context_with_no_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -265,6 +368,20 @@ class LiveContextQueryTest(unittest.TestCase):
             payload = query.woodcutting_task_payload(context, args)
             self.assertEqual(payload["navigationReadiness"]["status"], "unknown")
             self.assertTrue(any("collision/navigation data unavailable" in warning for warning in payload["warnings"]))
+
+    def test_activity_inventory_liveness_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp))
+            context = query.load_live_context(session)
+
+            activity = query.activity_payload(context)
+            inventory = query.inventory_payload(context)
+            liveness = query.liveness_payload(context)
+
+            self.assertEqual(activity["status"], "PASS")
+            self.assertEqual(activity["activityState"]["apparentState"], "idle")
+            self.assertEqual(inventory["inventoryFull"], False)
+            self.assertEqual(liveness["targetLivenessState"]["bestCandidateLiveState"], "live")
 
     def test_self_test_pass_warn_fail_behavior(self):
         with tempfile.TemporaryDirectory() as tmp:

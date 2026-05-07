@@ -51,7 +51,7 @@
       "includeCategories": ["tree"],
       "excludeTargetClasses": ["wall", "unknown_scene_object", "unclassified_scene_object"],
       "excludeRoles": ["obstacle", "decoration"],
-      "excludeCategories": ["wall", "obstacle"],
+      "excludeCategories": ["wall", "obstacle", "stump", "depleted"],
       "requireOnScreen": true,
       "requireGeometryAvailable": true,
       "requirePreferredGeometry": false,

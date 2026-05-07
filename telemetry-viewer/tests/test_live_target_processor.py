@@ -137,6 +137,7 @@ def live_args(**overrides):
         "max_new_ticks_per_update": 1,
         "candidate_output_window": "latest",
         "drop_backlog_to_meet_budget": True,
+        "drain_backlog_on_overrun": True,
         "include_ui_targets": False,
         "latest": None,
         "latest_with_frames": None,
@@ -146,9 +147,17 @@ def live_args(**overrides):
         "max_runtime_seconds": None,
         "emit_world_targets": "candidates",
         "world_target_output_limit": 2000,
+        "depleted_suppress_ticks": 20,
+        "liveness_mode": "delta",
+        "liveness_budget_ms": 20.0,
+        "max_recently_unavailable": 1000,
+        "liveness_visible_ref_scan_limit": 500,
         "target_update_ms": 100.0,
         "warn_update_ms": 250.0,
         "benchmark": False,
+        "verbose": False,
+        "quiet": False,
+        "log_every": 1,
         "force_window_rebuild": False,
         "startup_backfill_ticks": 10,
         "no_startup_backfill": False,
@@ -161,6 +170,8 @@ def live_args(**overrides):
         "target_profiles": str(VIEWER_DIR / "target_profiles.json"),
     }
     values.update(overrides)
+    if "liveness_mode" not in overrides:
+        values["liveness_mode"] = "full" if values.get("latency_mode") == "complete" else "delta"
     return SimpleNamespace(**values)
 
 
@@ -196,10 +207,56 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual([record[2]["tickId"] for record in records], [1, 2])
             self.assertEqual(tailer.malformed_total, 1)
 
+    def test_realtime_tailer_coalesces_before_json_parse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(index) for index in range(1, 31)])
+
+            tailer = live.TickJsonlTailer(session)
+            records = tailer.read_new_records(realtime=True, max_records=1)
+
+            self.assertEqual([record[2]["tickId"] for record in records], [30])
+            self.assertEqual(tailer.last_raw_records_seen, 30)
+            self.assertEqual(tailer.last_raw_records_fully_parsed, 1)
+            self.assertEqual(tailer.last_raw_records_skipped_before_parse, 29)
+            self.assertEqual(tailer.last_coalesced_before_parse, 29)
+
+            records = tailer.read_new_records(realtime=True, max_records=1)
+            self.assertEqual(records, [])
+            self.assertEqual(tailer.last_raw_records_seen, 0)
+
+    def test_realtime_tailer_preserves_incomplete_trailing_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [])
+            tick_path = session / "ticks" / "ticks-000001.jsonl"
+            first = json.dumps(raw_tick(1), separators=(",", ":"))
+            second = json.dumps(raw_tick(2), separators=(",", ":"))
+            tick_path.write_text(first + "\n" + second[:25], encoding="utf-8")
+
+            tailer = live.TickJsonlTailer(session)
+            records = tailer.read_new_records(realtime=True, max_records=1)
+            self.assertEqual([record[2]["tickId"] for record in records], [1])
+            self.assertTrue(tailer.partial_line_files())
+
+            with tick_path.open("a", encoding="utf-8") as file:
+                file.write(second[25:] + "\n")
+
+            records = tailer.read_new_records(realtime=True, max_records=1)
+            self.assertEqual([record[2]["tickId"] for record in records], [2])
+            self.assertEqual(tailer.last_raw_records_skipped_before_parse, 0)
+
     def test_processor_handles_segmented_files_and_rolling_window(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp), [raw_tick(1), raw_tick(2)], segmented=True)
-            processor = live.LiveTargetProcessor(session, live_args(window_ticks=1))
+            processor = live.LiveTargetProcessor(
+                session,
+                live_args(
+                    window_ticks=1,
+                    latency_mode="complete",
+                    max_new_ticks_per_update=0,
+                    candidate_output_window="rolling",
+                    drop_backlog_to_meet_budget=False,
+                ),
+            )
 
             added, result = processor.poll_once()
             status = result["status"]
@@ -209,6 +266,181 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(status["selectedTickCount"], 1)
             self.assertGreater(status["worldTargetsBuilt"], 0)
             self.assertTrue((session / "interaction_geometry" / "live" / "live_status.json").exists())
+
+    def test_realtime_processor_processes_newest_tick_only_when_backlog_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ticks = [raw_tick(index, scene_summary=True) for index in range(1, 31)]
+            session = make_session(Path(tmp), ticks)
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", max_new_ticks_per_update=1))
+
+            added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(added, 1)
+            self.assertEqual(status["rawRecordsSeenThisPoll"], 30)
+            self.assertEqual(status["rawRecordsFullyParsedThisPoll"], 1)
+            self.assertEqual(status["rawRecordsSkippedBeforeParse"], 29)
+            self.assertEqual(status["rawRecordsFullyProcessed"], 1)
+            self.assertEqual(status["processedTickIds"], [30])
+            self.assertEqual(status["coalescedBeforeParse"], 29)
+            self.assertTrue(status["fileOffsetsAdvancedPastSkippedRecords"])
+            self.assertTrue(status["sourceSceneKnowledgeComplete"])
+
+            added, result = processor.poll_once()
+            self.assertEqual(added, 0)
+            self.assertEqual(result["status"]["rawRecordsSeenThisPoll"], 0)
+
+    def test_complete_processor_processes_all_new_ticks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(index) for index in range(1, 6)])
+            processor = live.LiveTargetProcessor(
+                session,
+                live_args(
+                    latency_mode="complete",
+                    max_new_ticks_per_update=0,
+                    candidate_output_window="rolling",
+                    drop_backlog_to_meet_budget=False,
+                ),
+            )
+
+            added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(added, 5)
+            self.assertEqual(status["rawRecordsFullyParsedThisPoll"], 5)
+            self.assertEqual(status["rawRecordsSkippedBeforeParse"], 0)
+            self.assertEqual(status["rawRecordsFullyProcessed"], 5)
+            self.assertEqual(status["processedTickIds"], [1, 2, 3, 4, 5])
+
+    def test_complete_mode_status_is_labeled_audit_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(index) for index in range(1, 4)])
+            processor = live.LiveTargetProcessor(
+                session,
+                live_args(
+                    latency_mode="complete",
+                    max_new_ticks_per_update=0,
+                    candidate_output_window="rolling",
+                    drop_backlog_to_meet_budget=False,
+                ),
+            )
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertTrue(status["auditMode"])
+            self.assertFalse(status["realtimeMode"])
+            self.assertIn("COMPLETE AUDIT MODE", status["modeLabel"])
+            self.assertFalse(status["budgetExceeded"])
+            self.assertIsNotNone(status["auditDurationMillis"])
+
+    def test_realtime_mode_status_is_labeled_realtime_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args())
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertTrue(status["realtimeMode"])
+            self.assertFalse(status["auditMode"])
+            self.assertIn("REALTIME MODE", status["modeLabel"])
+            self.assertIsNotNone(status["realtimeDurationMillis"])
+
+    def test_liveness_mode_flags_and_defaults(self):
+        with mock.patch.object(sys, "argv", ["live_target_processor.py", "--session", "s", "--once"]):
+            args = live.parse_args()
+            self.assertEqual(args.liveness_mode, "delta")
+            self.assertEqual(args.liveness_budget_ms, 20.0)
+
+        with mock.patch.object(sys, "argv", ["live_target_processor.py", "--session", "s", "--once", "--latency-mode", "complete"]):
+            args = live.parse_args()
+            self.assertEqual(args.liveness_mode, "full")
+
+        with mock.patch.object(sys, "argv", ["live_target_processor.py", "--session", "s", "--once", "--liveness-mode", "off", "--liveness-budget-ms", "5"]):
+            args = live.parse_args()
+            self.assertEqual(args.liveness_mode, "off")
+            self.assertEqual(args.liveness_budget_ms, 5.0)
+
+    def test_live_performance_summary_is_written_with_percentiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting"))
+
+            _added, result = processor.poll_once()
+            summary_path = session / "interaction_geometry" / "live" / "live_performance_summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(summary["schema"], "live_performance_summary.v1")
+            self.assertEqual(summary["sampleCount"], 1)
+            self.assertEqual(summary["latestTick"], result["status"]["lastProcessedTick"])
+            self.assertIsNotNone(summary["p50TotalMs"])
+            self.assertIsNotNone(summary["p95TotalMs"])
+
+    def test_performance_summary_percentiles_are_computed_from_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [])
+            processor = live.LiveTargetProcessor(session, live_args())
+            for value in (10, 20, 30, 40, 50):
+                processor.performance_history.append(
+                    {
+                        "tick": value,
+                        "totalMs": value,
+                        "candidateMs": 1,
+                        "writeMs": 2,
+                        "worldBuilt": 3,
+                        "candidates": 4,
+                        "budgetExceeded": value > 30,
+                        "writeRetryCount": 0,
+                        "writeFailureCount": 0,
+                        "rawSeen": 1,
+                        "processed": 1,
+                        "coalesced": 0,
+                    }
+                )
+
+            summary = processor.performance_summary_payload({"mode": "follow", "lastProcessedTick": 50}, "2026-01-01T00:00:00Z")
+
+            self.assertEqual(summary["sampleCount"], 5)
+            self.assertEqual(summary["p50TotalMs"], 30)
+            self.assertEqual(summary["maxTotalMs"], 50)
+            self.assertGreater(summary["p95TotalMs"], 40)
+            self.assertEqual(summary["budgetExceededCount"], 2)
+
+    def test_realtime_activity_inventory_liveness_use_latest_state_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(index) for index in range(1, 8)])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", max_new_ticks_per_update=1))
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertFalse(status["activityUsedRollingScan"])
+            self.assertFalse(status["inventoryUsedRollingScan"])
+            self.assertIn("livenessUpdateMillis", status["timingBreakdownMillis"])
+            self.assertLessEqual(status["rawRecordsFullyProcessed"], 1)
+            self.assertEqual(status["livenessMode"], "delta")
+            self.assertEqual(status["livenessFullScanCount"], 0)
+
+    def test_backlog_drain_records_after_overrun(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args(target_update_ms=0.001, warn_update_ms=0.001))
+
+            _added, first = processor.poll_once()
+            self.assertTrue(first["status"]["budgetExceeded"])
+
+            tick_path = session / "ticks" / "ticks-000001.jsonl"
+            with tick_path.open("a", encoding="utf-8") as file:
+                for tick_id in range(2, 7):
+                    file.write(json.dumps(raw_tick(tick_id), separators=(",", ":")) + "\n")
+
+            _added, second = processor.poll_once()
+            status = second["status"]
+
+            self.assertGreaterEqual(status["backlogDrainCount"], 4)
+            self.assertEqual(status["lastBacklogDrainReason"], "previous update exceeded realtime budget")
+            self.assertEqual(status["processedTickIds"], [6])
 
     def test_processor_writes_profile_candidate_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -432,6 +664,97 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(status["worldTargetsBuilt"], 1)
             self.assertEqual(status["worldTargetsPrefilteredOut"], 1)
 
+    def test_liveness_off_marks_candidates_unknown_without_suppression(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="tree-old")
+            tick = raw_tick(1, objects=[old_tree])
+            tick["sceneObjectDeltas"] = {"despawnedObjects": [old_tree], "newObjects": [], "updatedObjects": []}
+            session = make_session(Path(tmp), [tick])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", liveness_mode="off", limit=20))
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(status["livenessMode"], "off")
+            self.assertEqual(status["candidateCount"], 1)
+            self.assertEqual(result["candidates"][0]["targetLiveState"], "unknown")
+            self.assertEqual(status["candidatesSuppressedByLiveness"], 0)
+
+    def test_basic_liveness_uses_direct_cache_without_full_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="tree-old")
+            session = make_session(Path(tmp), [raw_tick(1, objects=[tree])])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", liveness_mode="basic", limit=20))
+            processor.mark_unavailable(["objectKey:tree-old"], 1, "test unavailable", "recently_despawned", tree, {"classId": "tree"}, ["test"])
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(status["livenessMode"], "basic")
+            self.assertEqual(status["livenessFullScanCount"], 0)
+            self.assertEqual(status["candidateCount"], 0)
+            self.assertEqual(status["candidatesSuppressedByLiveness"], 1)
+
+    def test_delta_liveness_uses_latest_tick_deltas_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="tree-old")
+            other_tree = raw_scene_object(1276, 3205, 3201, 150, 100, object_key="tree-live")
+            tick1 = raw_tick(1, objects=[old_tree, other_tree])
+            tick2 = raw_tick(2, objects=[old_tree, other_tree])
+            tick2["sceneObjectDeltas"] = {"despawnedObjects": [old_tree], "newObjects": [], "updatedObjects": []}
+            session = make_session(Path(tmp), [tick1, tick2])
+            processor = live.LiveTargetProcessor(
+                session,
+                live_args(
+                    profile="woodcutting",
+                    liveness_mode="delta",
+                    latency_mode="complete",
+                    max_new_ticks_per_update=0,
+                    candidate_output_window="latest",
+                    drop_backlog_to_meet_budget=False,
+                    limit=20,
+                ),
+            )
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(status["livenessMode"], "delta")
+            self.assertEqual(status["livenessFullScanCount"], 0)
+            self.assertEqual(status["candidatesSuppressedByLiveness"], 1)
+            self.assertEqual(result["candidates"][0]["objectKey"], "tree-live")
+            self.assertEqual(result["candidates"][0]["targetLiveState"], "live_assumed")
+
+    def test_liveness_budget_degrades_instead_of_consuming_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            objects = [raw_scene_object(1276, 3200 + index, 3201, 100 + index, 100, object_key=f"tree-{index}") for index in range(1, 8)]
+            session = make_session(Path(tmp), [raw_tick(1, objects=objects)])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", liveness_budget_ms=0.0001, limit=20))
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertTrue(status["livenessBudgetExceeded"])
+            self.assertTrue(status["livenessDegraded"])
+            self.assertGreater(status["livenessCandidatesSkippedByBudget"], 0)
+            self.assertGreater(status["candidateCount"], 0)
+
+    def test_recently_unavailable_cache_prunes_expired_and_over_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(50)])
+            processor = live.LiveTargetProcessor(session, live_args(max_recently_unavailable=2))
+            for index in range(5):
+                processor.recently_unavailable_targets[f"key-{index}"] = {
+                    "unavailableSinceTick": index,
+                    "suppressUntilTick": index,
+                    "targetLiveState": "recently_despawned",
+                }
+
+            processor.prune_unavailable(50, force=True)
+
+            self.assertLessEqual(len(processor.recently_unavailable_targets), 2)
+            self.assertGreaterEqual(processor.last_recently_unavailable_pruned, 3)
+
     def test_latest_frame_path_is_used_without_frame_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp), [raw_tick(1)])
@@ -448,6 +771,96 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(status["latestFrameTick"], 1)
             self.assertIn("timingMode", status)
             self.assertIn("classificationCacheSize", status)
+
+    def test_target_liveness_suppresses_recently_despawned_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="tree-old")
+            new_tree = raw_scene_object(1276, 3204, 3201, 140, 100, object_key="tree-new")
+            tick = raw_tick(1, objects=[old_tree, new_tree])
+            tick["sceneObjectDeltas"] = {"despawnedObjects": [old_tree], "newObjects": [], "updatedObjects": []}
+            session = make_session(Path(tmp), [tick])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", limit=20))
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(status["candidatesSuppressedByLiveness"], 1)
+            self.assertEqual(status["candidateCount"], 1)
+            self.assertEqual(result["candidates"][0]["objectKey"], "tree-new")
+            self.assertEqual(result["candidates"][0]["targetLiveState"], "live_assumed")
+
+    def test_same_location_stump_suppresses_old_tree_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="tree-old")
+            stump = raw_scene_object(1342, 3201, 3201, 112, 100, name="Stump", actions=[], object_key="stump-new")
+            tick = raw_tick(1, objects=[old_tree])
+            tick["sceneObjectDeltas"] = {"despawnedObjects": [old_tree], "newObjects": [stump], "updatedObjects": []}
+            session = make_session(Path(tmp), [tick])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", limit=20))
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(status["candidateCount"], 0)
+            self.assertGreaterEqual(status["candidatesSuppressedAsDepleted"], 1)
+            self.assertGreaterEqual(status["recentlyDepletedCount"], 1)
+
+    def test_suppression_clears_when_tree_respawns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="tree-old")
+            stump = raw_scene_object(1342, 3201, 3201, 112, 100, name="Stump", actions=[], object_key="stump-new")
+            respawned_tree = raw_scene_object(1276, 3201, 3201, 111, 100, object_key="tree-respawned")
+            tick1 = raw_tick(1, objects=[old_tree])
+            tick2 = raw_tick(2, objects=[old_tree])
+            tick2["sceneObjectDeltas"] = {"despawnedObjects": [old_tree], "newObjects": [stump], "updatedObjects": []}
+            tick3 = raw_tick(3, objects=[respawned_tree])
+            tick3["sceneObjectDeltas"] = {"despawnedObjects": [stump], "newObjects": [respawned_tree], "updatedObjects": []}
+            session = make_session(Path(tmp), [tick1, tick2, tick3])
+            processor = live.LiveTargetProcessor(
+                session,
+                live_args(
+                    profile="woodcutting",
+                    latency_mode="complete",
+                    max_new_ticks_per_update=0,
+                    candidate_output_window="latest",
+                    drop_backlog_to_meet_budget=False,
+                    limit=20,
+                ),
+            )
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(status["candidateCount"], 1)
+            self.assertEqual(result["candidates"][0]["objectKey"], "tree-respawned")
+            self.assertEqual(result["candidates"][0]["targetLiveState"], "live")
+            self.assertGreaterEqual(status["candidatesRevivedAfterRespawn"], 1)
+
+    def test_live_activity_state_reports_inventory_delta_and_full(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tick1 = raw_tick(1)
+            tick1["inventory"] = [{"slot": index, "itemId": 1511, "quantity": 1} for index in range(27)]
+            tick2 = raw_tick(2)
+            tick2["inventory"] = [{"slot": index, "itemId": 1511, "quantity": 1} for index in range(28)]
+            session = make_session(Path(tmp), [tick1, tick2])
+            processor = live.LiveTargetProcessor(
+                session,
+                live_args(
+                    profile="woodcutting",
+                    latency_mode="complete",
+                    max_new_ticks_per_update=0,
+                    candidate_output_window="latest",
+                    drop_backlog_to_meet_budget=False,
+                ),
+            )
+
+            _added, result = processor.poll_once()
+            activity = result["activity"]
+
+            self.assertEqual(activity["schema"], "live_activity_state.v1")
+            self.assertTrue(activity["inventory"]["changedRecently"])
+            self.assertTrue(activity["inventory"]["inventoryFull"])
+            self.assertEqual(activity["woodcuttingState"]["woodcuttingState"], "inventory_full")
 
     def test_atomic_write_text_retries_transient_permission_error(self):
         with tempfile.TemporaryDirectory() as tmp:
