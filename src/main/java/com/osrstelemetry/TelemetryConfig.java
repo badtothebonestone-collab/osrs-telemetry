@@ -3,11 +3,55 @@ package com.osrstelemetry;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
+import net.runelite.client.config.ConfigSection;
 
 @ConfigGroup("osrs-telemetry")
 public interface TelemetryConfig extends Config
 {
+	@ConfigSection(
+			name = "Normal Live",
+			description = "Everyday compact live telemetry settings.",
+			position = 0
+	)
+	String normalLiveSection = "normalLive";
+
+	@ConfigSection(
+			name = "Visual QA Overlay",
+			description = "Optional read-only overlay settings for visual QA.",
+			position = 1
+	)
+	String visualQaOverlaySection = "visualQaOverlay";
+
+	@ConfigSection(
+			name = "Frames / Visual Capture",
+			description = "Read-only screenshot and frame capture settings.",
+			position = 2
+	)
+	String framesSection = "frames";
+
+	@ConfigSection(
+			name = "Debug / Audit Recording",
+			description = "Disk-heavy raw recording settings for audit, replay, and batch tools.",
+			position = 3
+	)
+	String debugAuditSection = "debugAudit";
+
+	@ConfigSection(
+			name = "Retention / Storage",
+			description = "Storage limits and cleanup behavior.",
+			position = 4
+	)
+	String retentionStorageSection = "retentionStorage";
+
+	@ConfigSection(
+			name = "Advanced / Experimental",
+			description = "Developer-oriented capture, projection, and packet details.",
+			position = 5
+	)
+	String advancedSection = "advanced";
+
 	@ConfigItem(
+			section = normalLiveSection,
 			keyName = "enabled",
 			name = "Enable telemetry",
 			description = "Write read-only telemetry snapshots to disk"
@@ -18,6 +62,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = normalLiveSection,
 			keyName = "outputDirectory",
 			name = "Output directory",
 			description = "Sessions root where telemetry session folders are written"
@@ -28,6 +73,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = retentionStorageSection,
 			keyName = "retentionEnabled",
 			name = "Enable retention cleanup",
 			description = "Delete old closed telemetry segments and sessions when the size cap is exceeded"
@@ -38,6 +84,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = retentionStorageSection,
 			keyName = "maxTelemetryGb",
 			name = "Max telemetry GB",
 			description = "Maximum total telemetry size under the sessions directory"
@@ -48,6 +95,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = retentionStorageSection,
 			keyName = "maxSegmentMb",
 			name = "Max segment MB",
 			description = "Approximate maximum size of each tick or event segment"
@@ -58,6 +106,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = retentionStorageSection,
 			keyName = "cleanupIntervalSeconds",
 			name = "Cleanup interval seconds",
 			description = "How often retention cleanup checks total telemetry size"
@@ -68,6 +117,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = normalLiveSection,
 			keyName = "preservePinnedSessions",
 			name = "Preserve pinned sessions",
 			description = "Do not delete sessions containing pinned.flag during retention cleanup"
@@ -78,6 +128,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = retentionStorageSection,
 			keyName = "allowDeletingClosedSegmentsFromActiveSession",
 			name = "Delete closed active segments",
 			description = "Allow retention cleanup to delete old closed segments from the current active session"
@@ -88,6 +139,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = normalLiveSection,
 			keyName = "telemetryRecordingMode",
 			name = "Recording mode",
 			description = "LIVE_COMPACT_ONLY is normal live mode; DEBUG_RECORDING preserves full raw tick/event/frame capture for audit and batch tools."
@@ -98,6 +150,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = debugAuditSection,
 			keyName = "debugRecordRawTicks",
 			name = "Debug record raw ticks",
 			description = "Write full raw tick JSONL outside DEBUG_RECORDING mode. Leave disabled for normal compact live use."
@@ -108,6 +161,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = debugAuditSection,
 			keyName = "debugRecordRawEvents",
 			name = "Debug record raw events",
 			description = "Write raw event JSONL outside DEBUG_RECORDING mode. Leave disabled for normal compact live use."
@@ -118,6 +172,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = debugAuditSection,
 			keyName = "debugRecordFrames",
 			name = "Record frames in recording modes",
 			description = "Allow frame capture in LIVE_COMPACT_WITH_FRAMES, HYBRID_DEBUG, and DEBUG_RECORDING when screenshot capture is enabled."
@@ -128,6 +183,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = debugAuditSection,
 			keyName = "debugFrameIntervalTicks",
 			name = "Live frame interval ticks",
 			description = "Frame interval used by LIVE_COMPACT_WITH_FRAMES. DEBUG_RECORDING keeps using Screenshot tick interval."
@@ -138,6 +194,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = normalLiveSection,
 			keyName = "compactLivePacketsRequiredForLive",
 			name = "Require compact packets for live",
 			description = "Force compact packet emission for live recording modes so normal live mode does not depend on raw tick JSONL."
@@ -148,6 +205,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = debugAuditSection,
 			keyName = "rawSnapshotSampleIntervalTicks",
 			name = "Raw snapshot sample interval",
 			description = "Future hybrid debug hook. 0 disables sampled raw snapshots."
@@ -158,6 +216,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "captureScreenshots",
 			name = "Capture screenshots",
 			description = "Capture one read-only canvas frame per configured game tick"
@@ -168,6 +227,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "screenshotEveryTicks",
 			name = "Screenshot tick interval",
 			description = "Capture a frame every N game ticks"
@@ -178,6 +238,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "screenshotFormat",
 			name = "Screenshot format",
 			description = "Frame image format: jpg or png"
@@ -188,6 +249,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "jpegQuality",
 			name = "JPEG quality",
 			description = "JPEG frame quality from 0.0 to 1.0"
@@ -198,6 +260,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "includeFramePathInTicks",
 			name = "Include frame path in ticks",
 			description = "Write the relative frame path into each captured tick record"
@@ -208,6 +271,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "maxFrameStorageMb",
 			name = "Max frame storage MB",
 			description = "Maximum storage for frame files in the active session"
@@ -218,6 +282,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "frameCleanupIntervalSeconds",
 			name = "Frame cleanup interval seconds",
 			description = "How often old frame cleanup checks the active frames folder"
@@ -228,6 +293,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "deleteOldFrames",
 			name = "Delete old frames",
 			description = "Delete oldest frame files when the frame storage cap is exceeded"
@@ -238,6 +304,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "maxFrameQueueSize",
 			name = "Max frame queue size",
 			description = "Maximum pending frame writes before new frames are dropped"
@@ -248,6 +315,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "frameCaptureMode",
 			name = "Frame capture mode",
 			description = "Preferred frame capture mode: RUNELITE_ONLY"
@@ -258,6 +326,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "allowScreenRectangleFallback",
 			name = "Allow screen rectangle fallback",
 			description = "Allow opt-in Robot screen rectangle capture if RuneLite-only capture is unavailable"
@@ -268,6 +337,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = framesSection,
 			keyName = "includeClientFrame",
 			name = "Include client frame",
 			description = "Include RuneLite client chrome around the game frame when supported"
@@ -278,6 +348,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "sceneCaptureMode",
 			name = "Scene capture mode",
 			description = "Diagnostic scene object coverage. LOCAL_DEFAULT preserves radius 12/max 250; wide/full are raw-force modes; static index mode reduces repeated unchanged scenery."
@@ -288,6 +359,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "sceneIndexRescanIntervalTicks",
 			name = "Scene index rescan interval",
 			description = "Diagnostic static scene index full-resync interval in ticks. 0 disables periodic resync."
@@ -298,6 +370,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "keepDespawnedSceneObjectsInIndex",
 			name = "Keep despawned scene objects",
 			description = "Keep despawned scene object records in the diagnostic static scene index."
@@ -308,6 +381,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "maxSceneIndexObjects",
 			name = "Max scene index objects",
 			description = "Safety cap for diagnostic static scene index object count."
@@ -318,6 +392,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "sceneProjectionRefreshMode",
 			name = "Scene projection refresh mode",
 			description = "Projection subset for static scene index diagnostic mode."
@@ -328,9 +403,10 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = normalLiveSection,
 			keyName = "emitCompactLivePackets",
 			name = "Emit compact live packets",
-			description = "Write bounded read-only compact NDJSON live packets alongside raw telemetry sessions. Recommended for normal live mode."
+			description = "Write bounded read-only compact NDJSON live packets for the normal live bridge."
 	)
 	default boolean emitCompactLivePackets()
 	{
@@ -338,6 +414,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = retentionStorageSection,
 			keyName = "compactLiveSegmentMb",
 			name = "Compact live segment MB",
 			description = "Approximate maximum size of each compact live packet segment."
@@ -348,6 +425,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = retentionStorageSection,
 			keyName = "compactLiveRetentionTicks",
 			name = "Compact live retention ticks",
 			description = "Approximate tick window to retain for compact live packet segments. 0 disables tick retention."
@@ -358,6 +436,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = retentionStorageSection,
 			keyName = "compactLiveRetentionMb",
 			name = "Compact live retention MB",
 			description = "Approximate maximum compact live packet storage per session. 0 disables byte retention."
@@ -368,6 +447,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = retentionStorageSection,
 			keyName = "compactLiveRetentionSegments",
 			name = "Compact live retention segments",
 			description = "Maximum compact live packet segments to keep per session. 0 disables segment-count retention."
@@ -378,6 +458,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = retentionStorageSection,
 			keyName = "compactLiveQueueSize",
 			name = "Compact live queue size",
 			description = "Maximum pending compact live packets before new live packets are dropped instead of blocking the client thread."
@@ -388,6 +469,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "compactLiveIncludeHeavyGeometry",
 			name = "Compact live heavy geometry",
 			description = "Include debug polygon geometry in compact live projection packets. Disabled keeps live packets small."
@@ -398,6 +480,51 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
+			keyName = "compactLiveIncludeClickableHull",
+			name = "Compact live clickable hull",
+			description = "Debug/overlay only: include observed clickbox/clickable hull polygons for capped visible projection refs."
+	)
+	default boolean compactLiveIncludeClickableHull()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			section = advancedSection,
+			keyName = "compactLiveGeometryMaxRefs",
+			name = "Compact live geometry max refs",
+			description = "Maximum visible refs per tick that may include compact polygon geometry. Values are clamped from 0 to 200."
+	)
+	default int compactLiveGeometryMaxRefs()
+	{
+		return 50;
+	}
+
+	@ConfigItem(
+			section = advancedSection,
+			keyName = "compactLiveIncludeCanvasTilePolygon",
+			name = "Compact live tile polygons",
+			description = "Debug/overlay only: include canvas tile polygons for capped visible projection refs."
+	)
+	default boolean compactLiveIncludeCanvasTilePolygon()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			section = advancedSection,
+			keyName = "compactLiveIncludeConvexHull",
+			name = "Compact live convex hull",
+			description = "Debug/overlay only: include convex hull fallback polygons for capped visible projection refs."
+	)
+	default boolean compactLiveIncludeConvexHull()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			section = normalLiveSection,
 			keyName = "emitCompactNavigationPackets",
 			name = "Emit compact navigation packets",
 			description = "Include read-only collision/navigation summary packets in the compact live stream."
@@ -408,6 +535,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = normalLiveSection,
 			keyName = "compactNavigationEmitCollisionWindow",
 			name = "Compact navigation collision window",
 			description = "Emit a bounded read-only local collision window around the player for lightweight reachability QA."
@@ -418,6 +546,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "compactNavigationCollisionWindowRadius",
 			name = "Compact navigation window radius",
 			description = "Scene-tile radius for compact collision window packets. Values are clamped between 8 and 52."
@@ -428,6 +557,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "compactNavigationIncludeFullCollisionGrid",
 			name = "Compact navigation full collision grid",
 			description = "Debug only: include full collision flag grids in compact live packets when the interval is enabled."
@@ -438,6 +568,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "compactNavigationGridIntervalTicks",
 			name = "Compact navigation grid interval ticks",
 			description = "Debug-only full collision grid packet interval. 0 disables full grid packets."
@@ -448,6 +579,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "compactNavigationFullGridIntervalTicks",
 			name = "Compact navigation full grid interval",
 			description = "Debug-only full collision grid packet interval. 0 disables full grid packets."
@@ -458,6 +590,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "compactNavigationHashOnly",
 			name = "Compact navigation hash only",
 			description = "Keep normal compact navigation packets to collision summary/hash fields instead of full grid data."
@@ -468,6 +601,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = advancedSection,
 			keyName = "compactLivePacketTypes",
 			name = "Compact live packet types",
 			description = "Comma-separated compact packet groups to emit: baseline,sceneDelta,projection,inventory,inventoryDelta,activity,navigation,collisionWindow,collisionGrid,writerHealth, or all."
@@ -478,6 +612,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = visualQaOverlaySection,
 			keyName = "telemetryDebugOverlayEnabled",
 			name = "Telemetry debug overlay",
 			description = "Draw a read-only telemetry QA overlay from overlay_debug_state.json. Disabled by default."
@@ -488,6 +623,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = visualQaOverlaySection,
 			keyName = "telemetryDebugOverlayMode",
 			name = "Debug overlay mode",
 			description = "Which read-only telemetry details to draw."
@@ -498,6 +634,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = visualQaOverlaySection,
 			keyName = "telemetryDebugOverlayMaxTargets",
 			name = "Debug overlay max targets",
 			description = "Maximum candidates to draw. The overlay clamps this between 0 and 200."
@@ -508,6 +645,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = visualQaOverlaySection,
 			keyName = "telemetryDebugOverlayShowLabels",
 			name = "Debug overlay labels",
 			description = "Show compact candidate labels."
@@ -518,6 +656,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = visualQaOverlaySection,
 			keyName = "telemetryDebugOverlayShowAimPoints",
 			name = "Debug overlay aim points",
 			description = "Draw read-only candidate aim point markers."
@@ -528,6 +667,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = visualQaOverlaySection,
 			keyName = "telemetryDebugOverlayShowReachability",
 			name = "Debug overlay reachability",
 			description = "Color and label candidates by read-only reachability when available."
@@ -538,6 +678,51 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = visualQaOverlaySection,
+			keyName = "telemetryDebugOverlayGeometryMode",
+			name = "Debug overlay geometry mode",
+			description = "Which read-only target geometry to draw. Clickable hull prefers the observed clickbox shape and falls back safely."
+	)
+	default TelemetryDebugOverlayGeometryMode telemetryDebugOverlayGeometryMode()
+	{
+		return TelemetryDebugOverlayGeometryMode.CLICKABLE_HULL;
+	}
+
+	@ConfigItem(
+			section = visualQaOverlaySection,
+			keyName = "telemetryDebugOverlayShowClickableHull",
+			name = "Debug overlay clickable hull",
+			description = "Draw observed clickbox/clickable hull polygons when available. Falls back to other geometry without executing actions."
+	)
+	default boolean telemetryDebugOverlayShowClickableHull()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			section = visualQaOverlaySection,
+			keyName = "telemetryDebugOverlayShowBounds",
+			name = "Debug overlay bounds",
+			description = "Draw compact bounds rectangles when enabled by geometry mode or fallback."
+	)
+	default boolean telemetryDebugOverlayShowBounds()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			section = visualQaOverlaySection,
+			keyName = "telemetryDebugOverlayShowCanvasTilePolygon",
+			name = "Debug overlay tile polygon",
+			description = "Draw canvas tile polygons for debug. Leave disabled for less clutter."
+	)
+	default boolean telemetryDebugOverlayShowCanvasTilePolygon()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			section = visualQaOverlaySection,
 			keyName = "telemetryDebugOverlayShowCollisionWindow",
 			name = "Debug overlay collision window",
 			description = "Show collision window summary in the overlay status panel."
@@ -548,6 +733,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = visualQaOverlaySection,
 			keyName = "telemetryDebugOverlayShowLatestEvent",
 			name = "Debug overlay latest event",
 			description = "Show one compact read-only live event summary in the overlay status panel."
@@ -558,6 +744,7 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			section = visualQaOverlaySection,
 			keyName = "telemetryDebugOverlayStatePath",
 			name = "Debug overlay state path",
 			description = "Optional explicit path to overlay_debug_state.json. Leave blank to use the current telemetry session."

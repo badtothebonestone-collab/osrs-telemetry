@@ -1931,8 +1931,8 @@ def enrich_live_candidate(candidate: dict, processed_at: str) -> dict:
     bounds = geometry_payload.get("aimBounds") or summary.get("aimBounds")
     enriched["geometrySummary"] = {
         **summary,
-        "hasClickbox": bool({"clickboxPolygon", "clickboxBounds"} & available),
-        "hasConvexHull": bool({"convexHullPolygon", "convexHullBounds"} & available),
+        "hasClickbox": bool({"clickableHull", "clickboxPolygon", "clickboxBounds"} & available),
+        "hasConvexHull": bool({"convexHull", "convexHullPolygon", "convexHullBounds"} & available),
         "hasCanvasTilePolygon": bool({"canvasTilePolygon", "tilePolygon"} & available),
         "bounds": bounds,
     }
@@ -2044,7 +2044,9 @@ def overlay_bounds(candidate: dict) -> dict | None:
     return None
 
 
-def compact_polygon(points, *, max_points: int = 16) -> list[list[float]] | None:
+def compact_polygon(points, *, max_points: int = 64) -> list[list[float]] | None:
+    if isinstance(points, dict):
+        points = points.get("points")
     if not isinstance(points, list) or not points or len(points) > max_points:
         return None
     compact = []
@@ -2062,13 +2064,202 @@ def compact_polygon(points, *, max_points: int = 16) -> list[list[float]] | None
     return compact
 
 
-def overlay_polygon(candidate: dict, key: str) -> list[list[float]] | None:
+def overlay_polygon_payload(points) -> dict | None:
+    compact = compact_polygon(points)
+    if not compact:
+        return None
+    return {"points": [{"x": point[0], "y": point[1]} for point in compact]}
+
+
+def overlay_polygon(candidate: dict, *keys: str) -> list[list[float]] | None:
     geometry_payload = candidate.get("geometry") if isinstance(candidate.get("geometry"), dict) else {}
     summary = candidate.get("geometrySummary") if isinstance(candidate.get("geometrySummary"), dict) else {}
-    return compact_polygon(geometry_payload.get(key) or summary.get(key) or candidate.get(key))
+    for key in keys:
+        polygon = compact_polygon(geometry_payload.get(key) or summary.get(key) or candidate.get(key))
+        if polygon:
+            return polygon
+    return None
 
 
-def overlay_target_summary(candidate: dict, status: dict | None = None, latest_tick: int | None = None) -> dict:
+def overlay_geometry_source(target: dict) -> str:
+    if target.get("clickableHull"):
+        return "clickableHull"
+    if target.get("clickboxPolygon"):
+        return "clickboxPolygon"
+    if target.get("convexHull"):
+        return "convexHull"
+    if target.get("canvasTilePolygon"):
+        return "canvasTilePolygon"
+    if target.get("bounds"):
+        return "bounds"
+    if target.get("aimPoint"):
+        return "aimPoint"
+    return "none"
+
+
+def overlay_hull_missing_reason(candidate: dict) -> str:
+    if not candidate.get("geometryAvailable"):
+        return "geometry unavailable"
+    if candidate.get("onScreen") is False:
+        return "target off screen"
+    return "clickbox polygon not present; enable compactLiveIncludeClickableHull or compactLiveIncludeHeavyGeometry"
+
+
+HULL_GEOMETRY_KEYS = ("clickableHull", "clickboxPolygon", "convexHull", "convexHullPolygon", "canvasTilePolygon", "tilePolygon")
+HULL_BOUNDS_KEYS = ("clickboxBounds", "convexHullBounds", "bounds")
+
+
+def geometry_payload_for_record(record: dict) -> dict:
+    geometry_payload = record.get("geometry") if isinstance(record.get("geometry"), dict) else {}
+    return geometry_payload if geometry_payload else record
+
+
+def record_polygon(record: dict, *keys: str) -> list[list[float]] | None:
+    payload = geometry_payload_for_record(record)
+    summary = record.get("geometrySummary") if isinstance(record.get("geometrySummary"), dict) else {}
+    for key in keys:
+        polygon = compact_polygon(payload.get(key) or summary.get(key) or record.get(key))
+        if polygon:
+            return polygon
+    return None
+
+
+def record_has_hull_geometry(record: dict) -> bool:
+    return bool(record_polygon(record, *HULL_GEOMETRY_KEYS))
+
+
+def stable_geometry_match_keys(record: dict) -> list[tuple[str, str]]:
+    target = record.get("target") if isinstance(record.get("target"), dict) else {}
+    keys = []
+    object_key = record.get("objectKey") or record.get("targetKey") or target.get("objectKey")
+    if object_key:
+        keys.append(("objectKey", str(object_key)))
+    raw_hash = record.get("hash") if record.get("hash") is not None else target.get("hash")
+    if raw_hash is not None:
+        keys.append(("hash", str(raw_hash)))
+    raw_id = first_present(record.get("id"), record.get("rawId"), target.get("id"), target.get("rawId"))
+    kind = first_present(record.get("kind"), record.get("layer"), target.get("kind"), target.get("layer"))
+    world_x = first_present(record.get("worldX"), nested_value(record, "targetWorld", "x"), nested_value(target, "world", "x"))
+    world_y = first_present(record.get("worldY"), nested_value(record, "targetWorld", "y"), nested_value(target, "world", "y"))
+    plane = first_present(record.get("plane"), nested_value(record, "targetWorld", "plane"), nested_value(target, "world", "plane"))
+    scene_x = first_present(record.get("sceneX"), nested_value(target, "scene", "x"))
+    scene_y = first_present(record.get("sceneY"), nested_value(target, "scene", "y"))
+    if raw_id is not None and world_x is not None and world_y is not None and plane is not None:
+        keys.append(("idWorld", f"{raw_id}:{world_x}:{world_y}:{plane}:{kind}"))
+    if raw_id is not None and scene_x is not None and scene_y is not None and plane is not None:
+        keys.append(("idScene", f"{raw_id}:{scene_x}:{scene_y}:{plane}:{kind}"))
+    return keys
+
+
+def first_present(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def nested_value(record: dict, *keys: str):
+    value = record
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def copy_hull_geometry_to_candidate(candidate: dict, source: dict, match_mode: str, match_key: tuple[str, str] | None) -> None:
+    source_payload = geometry_payload_for_record(source)
+    candidate_payload = candidate.setdefault("geometry", {})
+    for key in HULL_GEOMETRY_KEYS:
+        value = source_payload.get(key) or source.get(key)
+        if compact_polygon(value):
+            candidate_payload[key] = value
+    if compact_polygon(candidate_payload.get("clickboxPolygon")) and not compact_polygon(candidate_payload.get("clickableHull")):
+        candidate_payload["clickableHull"] = candidate_payload["clickboxPolygon"]
+    if compact_polygon(candidate_payload.get("clickableHull")) and not compact_polygon(candidate_payload.get("clickboxPolygon")):
+        candidate_payload["clickboxPolygon"] = candidate_payload["clickableHull"]
+    for key in HULL_BOUNDS_KEYS:
+        value = source_payload.get(key) or source.get(key)
+        if isinstance(value, dict):
+            candidate_payload.setdefault(key, value)
+    for key in ("geometrySource", "clickableHullAvailable", "clickableHullMissingReason"):
+        value = source_payload.get(key) if source_payload.get(key) is not None else source.get(key)
+        if value is not None:
+            candidate_payload[key] = value
+    candidate["_hullGeometryMatch"] = {
+        "mode": match_mode,
+        "keyType": match_key[0] if match_key else None,
+        "key": match_key[1] if match_key else None,
+    }
+
+
+def attach_candidate_hull_geometry(candidates: list[dict], source_records: list[dict], full_records: list[dict]) -> dict:
+    records = []
+    seen_records = set()
+    for record in list(source_records or []) + list(full_records or []):
+        if not isinstance(record, dict):
+            continue
+        identity = id(record)
+        if identity in seen_records:
+            continue
+        seen_records.add(identity)
+        if record_has_hull_geometry(record):
+            records.append(record)
+
+    index: dict[tuple[str, str], dict] = {}
+    for record in records:
+        for key in stable_geometry_match_keys(record):
+            index.setdefault(key, record)
+
+    used_records = set()
+    direct_matches = 0
+    fallback_matches = 0
+    missing = 0
+
+    for candidate in candidates:
+        if overlay_polygon(candidate, "clickableHull", "clickboxPolygon", "convexHull", "convexHullPolygon", "canvasTilePolygon", "tilePolygon"):
+            direct_matches += 1
+            for key in stable_geometry_match_keys(candidate):
+                if key in index:
+                    used_records.add(id(index[key]))
+                    break
+            continue
+
+        matched = None
+        matched_key = None
+        for key in stable_geometry_match_keys(candidate):
+            matched = index.get(key)
+            if matched is not None:
+                matched_key = key
+                break
+
+        if matched is None:
+            missing += 1
+            continue
+
+        mode = "direct" if matched_key and matched_key[0] == "objectKey" else "fallback"
+        copy_hull_geometry_to_candidate(candidate, matched, mode, matched_key)
+        used_records.add(id(matched))
+        if mode == "direct":
+            direct_matches += 1
+        else:
+            fallback_matches += 1
+
+    return {
+        "candidateHullDirectMatches": direct_matches,
+        "candidateHullFallbackMatches": fallback_matches,
+        "candidateHullMissing": missing,
+        "compactHullRefsAvailable": len(records),
+        "compactHullRefsUnused": max(0, len(records) - len(used_records)),
+    }
+
+
+def overlay_target_summary(
+    candidate: dict,
+    status: dict | None = None,
+    latest_tick: int | None = None,
+    include_polygons: bool = True,
+) -> dict:
     status = status or {}
     navigation = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
     live_state = candidate.get("targetLiveState")
@@ -2113,13 +2304,63 @@ def overlay_target_summary(candidate: dict, status: dict | None = None, latest_t
         "aimPoint": overlay_aim_point(candidate),
         "bounds": overlay_bounds(candidate),
     }
+    clickable_hull = overlay_polygon(candidate, "clickableHull", "clickboxPolygon")
     clickbox = overlay_polygon(candidate, "clickboxPolygon")
-    tile = overlay_polygon(candidate, "canvasTilePolygon")
-    if clickbox:
-        target["clickboxPolygon"] = clickbox
-    if tile:
-        target["canvasTilePolygon"] = tile
+    convex = overlay_polygon(candidate, "convexHull", "convexHullPolygon")
+    tile = overlay_polygon(candidate, "canvasTilePolygon", "tilePolygon")
+    if include_polygons:
+        if clickable_hull:
+            target["clickableHull"] = overlay_polygon_payload(clickable_hull)
+        if clickbox:
+            target["clickboxPolygon"] = overlay_polygon_payload(clickbox)
+        if convex:
+            target["convexHull"] = overlay_polygon_payload(convex)
+        if tile:
+            target["canvasTilePolygon"] = overlay_polygon_payload(tile)
+    target["clickableHullAvailable"] = bool(clickable_hull)
+    if clickable_hull and not include_polygons:
+        target["clickableHullAvailable"] = False
+        target["clickableHullMissingReason"] = "omitted by overlay hull cap"
+    elif not clickable_hull:
+        target["clickableHullMissingReason"] = overlay_hull_missing_reason(candidate)
+    target["geometrySource"] = overlay_geometry_source(target)
     return target
+
+
+def overlay_geometry_counts(targets: list[dict]) -> dict:
+    sources = Counter(str(target.get("geometrySource") or "none") for target in targets)
+    return {
+        "clickableHullTargets": sum(1 for target in targets if target.get("clickableHullAvailable")),
+        "clickboxPolygonTargets": sum(1 for target in targets if target.get("clickboxPolygon")),
+        "convexHullTargets": sum(1 for target in targets if target.get("convexHull")),
+        "canvasTilePolygonTargets": sum(1 for target in targets if target.get("canvasTilePolygon")),
+        "boundsOnlyTargets": sources.get("bounds", 0),
+        "aimOnlyTargets": sources.get("aimPoint", 0),
+        "missingGeometryTargets": sources.get("none", 0),
+    }
+
+
+def overlay_hull_rank_bucket(rank) -> str:
+    if rank == 1:
+        return "rank1"
+    if isinstance(rank, (int, float)) and 2 <= rank <= 5:
+        return "ranks2to5"
+    if isinstance(rank, (int, float)) and 6 <= rank <= 10:
+        return "ranks6to10"
+    return "ranks11plus"
+
+
+def overlay_hull_rank_buckets(targets: list[dict]) -> dict:
+    buckets = {
+        "rank1": 0,
+        "ranks2to5": 0,
+        "ranks6to10": 0,
+        "ranks11plus": 0,
+    }
+    for target in targets:
+        if target.get("clickableHullAvailable"):
+            buckets[overlay_hull_rank_bucket(target.get("rank"))] += 1
+    return buckets
 
 
 def overlay_liveness_interpretation(candidate: dict | None, status: dict) -> str:
@@ -2211,6 +2452,8 @@ def overlay_debug_state_for(
     latest_tick = latest_tick or {}
     player = local_player_for(latest_tick)
     limit = max(0, int(getattr(args, "overlay_debug_target_limit", 50) or 0))
+    hull_limit = max(0, int(getattr(args, "overlay_debug_hull_limit", 10) or 0))
+    hull_limit = min(hull_limit, limit)
     nearest = nearest_timeline_candidate(candidates)
     marked_candidates = []
     for index, candidate in enumerate(candidates):
@@ -2223,6 +2466,19 @@ def overlay_debug_state_for(
     recent_events = [event for event in (events or []) if isinstance(event, dict)]
     latest_event = recent_events[-1] if recent_events else {}
     warning_event_count = sum(1 for event in recent_events if event.get("severity") in {"warn", "error"})
+    targets = [
+        overlay_target_summary(
+            candidate,
+            status,
+            tick_id_for(latest_tick),
+            include_polygons=index < hull_limit,
+        )
+        for index, candidate in enumerate(capped_candidates)
+    ]
+    geometry_counts = overlay_geometry_counts(targets)
+    hull_rank_buckets = overlay_hull_rank_buckets(targets)
+    best_target = targets[0] if targets else {}
+    nearest_target = next((target for target in targets if target.get("isNearest")), {})
     return {
         "schema": LIVE_OVERLAY_DEBUG_SCHEMA,
         "generatedAtUtc": processed_at,
@@ -2244,17 +2500,45 @@ def overlay_debug_state_for(
         "summary": {
             "candidateCount": len(candidates),
             "targetLimit": limit,
+            "hullLimit": hull_limit,
             "targetsWritten": len(capped_candidates),
             "targetsSuppressedByCap": max(0, len(candidates) - len(capped_candidates)),
+            "polygonTargetsSuppressedByHullCap": sum(
+                1
+                for candidate in capped_candidates[hull_limit:]
+                if overlay_polygon(candidate, "clickableHull", "clickboxPolygon", "convexHull", "convexHullPolygon", "canvasTilePolygon", "tilePolygon")
+            ),
             "bestClass": candidates[0].get("classId") if candidates else None,
+            "bestHullAvailable": bool(best_target.get("clickableHullAvailable")),
+            "nearestHullAvailable": bool(nearest_target.get("clickableHullAvailable")),
             "budgetExceeded": bool(status.get("budgetExceeded")),
             "writeFailures": status.get("writeFailureCount", 0),
             "latestEventSummary": latest_event.get("summary"),
             "latestEventTick": latest_event.get("tick"),
             "warningEventCount": warning_event_count,
             "lastEventTick": latest_event.get("tick"),
+            "compactLiveIncludeHeavyGeometry": status.get("compactLiveIncludeHeavyGeometry"),
+            "compactLiveIncludeClickableHull": status.get("compactLiveIncludeClickableHull"),
+            "compactLiveIncludeCanvasTilePolygon": status.get("compactLiveIncludeCanvasTilePolygon"),
+            "compactLiveIncludeConvexHull": status.get("compactLiveIncludeConvexHull"),
+            "compactLiveGeometryMaxRefs": status.get("compactLiveGeometryMaxRefs"),
+            "compactLiveGeometryRefsWithPolygons": status.get("compactLiveGeometryRefsWithPolygons"),
+            "compactLiveGeometryRefsSkippedByCap": status.get("compactLiveGeometryRefsSkippedByCap"),
+            "compactLiveGeometryCapHit": status.get("compactLiveGeometryCapHit"),
+            "compactLiveHullsEmitted": status.get("compactLiveHullsEmitted"),
+            "compactLiveHullDroppedOffscreen": status.get("compactLiveHullDroppedOffscreen"),
+            "compactLiveHullDroppedNoCanvasIntersection": status.get("compactLiveHullDroppedNoCanvasIntersection"),
+            "compactLiveHullDroppedByCap": status.get("compactLiveHullDroppedByCap"),
+            "compactLiveHullDroppedNullClickbox": status.get("compactLiveHullDroppedNullClickbox"),
+            "candidateHullDirectMatches": status.get("candidateHullDirectMatches"),
+            "candidateHullFallbackMatches": status.get("candidateHullFallbackMatches"),
+            "candidateHullMissing": status.get("candidateHullMissing"),
+            "compactHullRefsAvailable": status.get("compactHullRefsAvailable"),
+            "compactHullRefsUnused": status.get("compactHullRefsUnused"),
+            "hullRankBuckets": hull_rank_buckets,
+            **geometry_counts,
         },
-        "targets": [overlay_target_summary(candidate, status, tick_id_for(latest_tick)) for candidate in capped_candidates],
+        "targets": targets,
         "collisionWindow": {
             "available": bool(navigation.get("collisionWindowAvailable")),
             "minSceneX": collision_bounds.get("minSceneX"),
@@ -2658,24 +2942,63 @@ def equipment_state_for_tick(tick: dict | None) -> dict:
     return {"known": isinstance(equipment, list), "items": items}
 
 
+UNKNOWN_ACTIVITY_VALUES = {"", "unknown", "none", "null", "n/a", "na", "-1", "0"}
+
+
+def is_unknown_activity_value(value) -> bool:
+    if value is None or value == -1:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in UNKNOWN_ACTIVITY_VALUES
+    return False
+
+
+def explicit_interacting_value(value):
+    if isinstance(value, dict):
+        for key in ("type", "name", "id", "index", "targetType", "targetName"):
+            nested = explicit_interacting_value(value.get(key))
+            if nested is not None:
+                return nested
+        return None
+    if is_unknown_activity_value(value):
+        return None
+    return value if value else None
+
+
+def interaction_marker_unknown(*values) -> bool:
+    for value in values:
+        if isinstance(value, dict):
+            if interaction_marker_unknown(*value.values()):
+                return True
+        elif is_unknown_activity_value(value):
+            return True
+    return False
+
+
 def apparent_activity_for_tick(tick: dict | None, inventory_state: dict, liveness_summary: dict) -> dict:
     tick = tick or {}
     player = local_player_for(tick)
     status = tick.get("status") if isinstance(tick.get("status"), dict) else {}
     animation = player.get("animation")
-    interacting = status.get("interactingType") or status.get("interactingName") or player.get("interacting")
+    raw_interacting_values = (
+        status.get("interactingType"),
+        status.get("interactingName"),
+        player.get("interacting"),
+    )
+    interacting = next((explicit_interacting_value(value) for value in raw_interacting_values if explicit_interacting_value(value) is not None), None)
     evidence = []
     warnings = []
     state = "unknown"
     confidence = 0.2
-    if animation not in (None, -1, 0):
-        state = "animating"
-        confidence = 0.65
-        evidence.append(f"local player animation={animation}")
-    elif interacting not in (None, "", -1):
+    if interacting is not None:
         state = "interacting"
         confidence = 0.55
-        evidence.append(f"interacting={interacting}")
+        evidence.append("explicit interacting target present")
+    elif animation not in (None, -1, 0):
+        state = "animating"
+        confidence = 0.65
+        evidence.append("active animation present")
+        evidence.append(f"local player animation={animation}")
     elif player.get("isMoving") is True:
         state = "moving"
         confidence = 0.55
@@ -2683,8 +3006,16 @@ def apparent_activity_for_tick(tick: dict | None, inventory_state: dict, livenes
     elif animation in (-1, 0):
         state = "idle"
         confidence = 0.5
-        evidence.append(f"local player animation={animation}")
+        evidence.append(f"animation={animation}/no active animation")
+        if interaction_marker_unknown(*raw_interacting_values):
+            evidence.append("interacting unknown; not treated as busy")
+        else:
+            evidence.append("no explicit busy evidence")
     else:
+        evidence.append("animation missing")
+        if interaction_marker_unknown(*raw_interacting_values):
+            evidence.append("interacting unknown; not treated as busy")
+        evidence.append("no explicit busy evidence")
         warnings.append("local player animation/movement fields are incomplete.")
 
     apparent_task = "unknown"
@@ -3232,6 +3563,13 @@ class LiveTargetProcessor:
         self.last_candidate_tick_cache_hits = 0
         self.last_candidate_tick_cache_misses = 0
         self.last_old_ticks_dropped_from_candidate_cache = 0
+        self.last_candidate_hull_stats = {
+            "candidateHullDirectMatches": 0,
+            "candidateHullFallbackMatches": 0,
+            "candidateHullMissing": 0,
+            "compactHullRefsAvailable": 0,
+            "compactHullRefsUnused": 0,
+        }
         self.classification_cache: dict[tuple, dict] = {}
         self.recently_unavailable_targets: dict[str, dict] = {}
         self.last_recently_unavailable_count = 0
@@ -4608,6 +4946,7 @@ class LiveTargetProcessor:
         timing.set("livenessTotalMillis", timing.values.get("livenessCandidateApplyMillis", 0.0))
         timing.set("livenessUpdateMillis", timing.values.get("livenessTotalMillis", 0.0))
         candidate_stats.update(liveness_stats)
+        self.last_candidate_hull_stats = attach_candidate_hull_geometry(candidates, source_records, full_records)
         self.update_best_candidate_change(candidates)
 
         with timing.measure("worldTargetFilterMillis"):
@@ -4914,6 +5253,20 @@ class LiveTargetProcessor:
             "rawEventRecordingEnabled": writer_health.get("rawEventRecordingEnabled"),
             "frameRecordingEnabled": writer_health.get("frameRecordingEnabled"),
             "compactPacketRecordingEnabled": writer_health.get("compactPacketRecordingEnabled") or writer_health.get("compactLiveEnabled"),
+            "compactLiveIncludeHeavyGeometry": writer_health.get("compactLiveIncludeHeavyGeometry"),
+            "compactLiveIncludeClickableHull": writer_health.get("compactLiveIncludeClickableHull"),
+            "compactLiveIncludeCanvasTilePolygon": writer_health.get("compactLiveIncludeCanvasTilePolygon"),
+            "compactLiveIncludeConvexHull": writer_health.get("compactLiveIncludeConvexHull"),
+            "compactLiveGeometryMaxRefs": writer_health.get("compactLiveGeometryMaxRefs"),
+            "compactLiveGeometryRefsWithPolygons": writer_health.get("compactLiveGeometryRefsWithPolygons"),
+            "compactLiveGeometryRefsSkippedByCap": writer_health.get("compactLiveGeometryRefsSkippedByCap"),
+            "compactLiveGeometryCapHit": writer_health.get("compactLiveGeometryCapHit"),
+            "compactLiveHullsEmitted": writer_health.get("compactLiveHullsEmitted"),
+            "compactLiveHullDroppedOffscreen": writer_health.get("compactLiveHullDroppedOffscreen"),
+            "compactLiveHullDroppedNoCanvasIntersection": writer_health.get("compactLiveHullDroppedNoCanvasIntersection"),
+            "compactLiveHullDroppedByCap": writer_health.get("compactLiveHullDroppedByCap"),
+            "compactLiveHullDroppedNullClickbox": writer_health.get("compactLiveHullDroppedNullClickbox"),
+            **self.last_candidate_hull_stats,
             "rawTicksWritten": writer_health.get("rawTicksWritten"),
             "rawTicksSuppressedByMode": writer_health.get("rawTicksSuppressedByMode"),
             "rawEventsWritten": writer_health.get("rawEventsWritten"),
@@ -5496,6 +5849,7 @@ def parse_args():
     parser.add_argument("--event-timeline-limit", "--event-limit", dest="event_timeline_limit", type=positive_int, default=200, help="Maximum rolling live event timeline records to retain. Default: 200.")
     parser.add_argument("--disable-event-timeline", action="store_true", help="Disable live_event_timeline.jsonl updates for this processor run.")
     parser.add_argument("--overlay-debug-target-limit", type=non_negative_int, default=50, help="Maximum candidates to include in overlay_debug_state.json. Default: 50.")
+    parser.add_argument("--overlay-debug-hull-limit", type=non_negative_int, default=10, help="Maximum top-ranked overlay targets that may carry polygon hull geometry. Default: 10.")
     parser.add_argument("--force-window-rebuild", action="store_true", help="Rebuild cached world records for every selected tick on each update.")
     parser.add_argument("--startup-backfill-ticks", type=non_negative_int, default=10, help="Initial existing tick catch-up count. Default: 10.")
     parser.add_argument("--no-startup-backfill", action="store_true", help="Start from current end of tick files and wait for new records.")

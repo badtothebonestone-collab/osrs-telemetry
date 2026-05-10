@@ -177,6 +177,9 @@ def compact_scene_object(source: dict) -> dict:
             "clickboxBounds": source.get("clickboxBounds"),
             "convexHullBounds": source.get("convexHullBounds"),
         },
+        "clickboxPolygon": source.get("clickboxPolygon"),
+        "convexHullPolygon": source.get("convexHullPolygon"),
+        "canvasTilePolygon": source.get("canvasTilePolygon"),
     }
 
 
@@ -398,6 +401,7 @@ def live_args(**overrides):
         "event_timeline_limit": 200,
         "disable_event_timeline": False,
         "overlay_debug_target_limit": 50,
+        "overlay_debug_hull_limit": 10,
         "force_window_rebuild": False,
         "startup_backfill_ticks": 10,
         "no_startup_backfill": False,
@@ -594,6 +598,102 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertTrue(result["candidates"][0]["navigation"]["collisionWindowAvailable"])
             self.assertEqual(result["candidates"][0]["navigation"]["directReachability"], "reachable")
             self.assertTrue(status["sourceSceneKnowledgeComplete"])
+
+    def test_compact_packet_clickbox_polygon_reaches_overlay_debug_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="compact-hull-tree")
+            tree["clickboxPolygon"] = [
+                {"x": 100, "y": 90},
+                {"x": 120, "y": 90},
+                {"x": 120, "y": 120},
+                {"x": 100, "y": 120},
+            ]
+            session = make_session(Path(tmp), [])
+            write_compact_packets(session, {1: [tree]})
+            processor = live.LiveTargetProcessor(session, live_args(input_source="compact-packets", overlay_debug_target_limit=1))
+
+            _added, result = processor.poll_once()
+            candidate = result["candidates"][0]
+            overlay_state = result["overlayDebug"]
+            overlay_target = overlay_state["targets"][0]
+
+            self.assertIn("clickboxPolygon", candidate["geometry"])
+            self.assertEqual(candidate["geometry"]["preferredAimGeometryType"], "clickableHull")
+            self.assertEqual(overlay_state["summary"]["clickableHullTargets"], 1)
+            self.assertTrue(overlay_target["clickableHullAvailable"])
+            self.assertEqual(overlay_target["geometrySource"], "clickableHull")
+            self.assertIn("clickableHull", overlay_target)
+            self.assertEqual(overlay_target["clickableHull"]["points"][0], {"x": 100, "y": 90})
+
+    def test_candidate_hull_geometry_matches_by_object_key(self):
+        candidate = {
+            "objectKey": "tree-a",
+            "id": 1276,
+            "worldX": 3201,
+            "worldY": 3201,
+            "plane": 0,
+            "geometry": {"aimPoint": {"x": 110, "y": 100}},
+        }
+        source = {
+            "objectKey": "tree-a",
+            "id": 1276,
+            "worldX": 3201,
+            "worldY": 3201,
+            "plane": 0,
+            "geometry": {"clickboxPolygon": [[100, 90], [120, 90], [120, 120], [100, 120]]},
+        }
+
+        stats = live.attach_candidate_hull_geometry([candidate], [source], [])
+
+        self.assertEqual(stats["candidateHullDirectMatches"], 1)
+        self.assertEqual(stats["candidateHullMissing"], 0)
+        self.assertIn("clickableHull", candidate["geometry"])
+
+    def test_candidate_hull_geometry_fallback_matches_by_world_tile(self):
+        candidate = {
+            "id": 1276,
+            "worldX": 3201,
+            "worldY": 3201,
+            "plane": 0,
+            "geometry": {"aimPoint": {"x": 110, "y": 100}},
+        }
+        source = {
+            "id": 1276,
+            "worldX": 3201,
+            "worldY": 3201,
+            "plane": 0,
+            "geometry": {"clickboxPolygon": [[100, 90], [120, 90], [120, 120], [100, 120]]},
+        }
+
+        stats = live.attach_candidate_hull_geometry([candidate], [source], [])
+
+        self.assertEqual(stats["candidateHullFallbackMatches"], 1)
+        self.assertEqual(candidate["_hullGeometryMatch"]["keyType"], "idWorld")
+        self.assertIn("clickboxPolygon", candidate["geometry"])
+
+    def test_compact_refs_with_hull_do_not_displace_unmatched_top_candidate(self):
+        candidate = {
+            "objectKey": "top-tree",
+            "id": 1276,
+            "worldX": 3201,
+            "worldY": 3201,
+            "plane": 0,
+            "geometry": {"aimPoint": {"x": 110, "y": 100}},
+        }
+        unrelated = {
+            "objectKey": "corner-tree",
+            "id": 1276,
+            "worldX": 3220,
+            "worldY": 3220,
+            "plane": 0,
+            "geometry": {"clickboxPolygon": [[1, 1], [20, 1], [20, 20], [1, 20]]},
+        }
+
+        stats = live.attach_candidate_hull_geometry([candidate], [unrelated], [])
+
+        self.assertEqual(stats["candidateHullMissing"], 1)
+        self.assertEqual(stats["compactHullRefsUnused"], 1)
+        self.assertNotIn("clickboxPolygon", candidate["geometry"])
 
     def test_input_source_auto_prefers_compact_packets_when_index_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -866,6 +966,27 @@ class LiveTargetProcessorTest(unittest.TestCase):
         activity = live.activity_state_for(tick, [tick], [], {}, "2026-01-01T00:00:00Z", 0)
         self.assertEqual(activity["activityState"]["apparentState"], "animating")
         self.assertEqual(activity["recentActivityEvents"][0]["changedFields"], ["animation"])
+
+    def test_unknown_interacting_marker_is_not_busy_activity(self):
+        tick = {
+            "tickId": 8,
+            "localPlayer": {"animation": None, "poseAnimation": -1, "interacting": None},
+            "status": {"interactingType": "UNKNOWN"},
+        }
+        activity = live.apparent_activity_for_tick(tick, {}, {})
+        self.assertEqual(activity["apparentState"], "unknown")
+        self.assertIn("interacting unknown; not treated as busy", activity["evidence"])
+        self.assertIn("no explicit busy evidence", activity["evidence"])
+
+    def test_explicit_interacting_marker_is_busy_activity(self):
+        tick = {
+            "tickId": 8,
+            "localPlayer": {"animation": -1, "poseAnimation": -1, "interacting": None},
+            "status": {"interactingType": "sceneObject", "interactingName": "Tree"},
+        }
+        activity = live.apparent_activity_for_tick(tick, {}, {})
+        self.assertEqual(activity["apparentState"], "interacting")
+        self.assertIn("explicit interacting target present", activity["evidence"])
 
     def test_live_event_timeline_does_not_duplicate_unchanged_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1166,6 +1287,11 @@ class LiveTargetProcessorTest(unittest.TestCase):
                         "navigation": {"directReachability": "reachable", "reachabilityConfidence": 0.9},
                     }
                 )
+                if index in (0, 2):
+                    candidates[-1]["geometry"] = {
+                        "clickboxPolygon": [[90 + index, 110], [110 + index, 110], [110 + index, 130], [90 + index, 130]],
+                        "convexHullPolygon": [[88 + index, 108], [112 + index, 108], [112 + index, 132], [88 + index, 132]],
+                    }
 
             state = live.overlay_debug_state_for(
                 session,
@@ -1182,6 +1308,9 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(state["summary"]["candidateCount"], 5)
             self.assertEqual(state["summary"]["targetsWritten"], 2)
             self.assertEqual(state["summary"]["targetsSuppressedByCap"], 3)
+            self.assertEqual(state["summary"]["clickableHullTargets"], 1)
+            self.assertEqual(state["summary"]["clickboxPolygonTargets"], 1)
+            self.assertEqual(state["summary"]["convexHullTargets"], 1)
             self.assertEqual(state["latestEventSummary"], "Best candidate changed: Tree at 3201,3201")
             self.assertEqual(state["latestEventTick"], 1)
             self.assertEqual(state["lastEventTick"], 1)
@@ -1189,12 +1318,70 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(len(state["targets"]), 2)
             self.assertEqual(state["targets"][0]["aimPoint"]["canvasX"], 100)
             self.assertEqual(state["targets"][0]["bounds"]["width"], 10)
+            self.assertTrue(state["targets"][0]["clickableHullAvailable"])
+            self.assertEqual(state["targets"][0]["geometrySource"], "clickableHull")
+            self.assertIn("clickableHull", state["targets"][0])
+            self.assertIn("clickboxPolygon", state["targets"][0])
+            self.assertIn("points", state["targets"][0]["clickableHull"])
+            self.assertNotIn("clickableHull", state["targets"][1])
+            self.assertEqual(state["targets"][1]["geometrySource"], "bounds")
             self.assertEqual(state["targets"][0]["directReachability"], "reachable")
             self.assertEqual(state["targets"][0]["livenessInterpretation"], "assumed")
             self.assertEqual(state["targets"][0]["labelParts"]["reachability"], "R")
             self.assertEqual(state["targets"][0]["overlayColor"], "green")
             self.assertNotIn("BLOCK", state["targets"][0]["overlayLabel"])
             self.assertTrue(state["safety"]["readOnly"])
+
+    def test_overlay_debug_state_hull_limit_is_applied_after_ranking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            candidates = []
+            for index in range(4):
+                candidates.append(
+                    {
+                        "rank": index + 1,
+                        "classId": "tree",
+                        "name": "Tree",
+                        "id": 1276,
+                        "objectKey": f"tree-{index}",
+                        "worldX": 3200 + index,
+                        "worldY": 3201,
+                        "plane": 0,
+                        "sceneX": index,
+                        "sceneY": 1,
+                        "distanceTiles": index + 1,
+                        "onScreen": True,
+                        "geometryAvailable": True,
+                        "targetLiveState": "live_assumed",
+                        "aimPointContext": {"canvasX": 100 + index, "canvasY": 120, "source": "test"},
+                        "geometrySummary": {"bounds": {"x": 95 + index, "y": 115, "width": 10, "height": 10}},
+                        "geometry": {
+                            "clickboxPolygon": [[90 + index, 110], [110 + index, 110], [110 + index, 130], [90 + index, 130]],
+                        },
+                        "navigation": {"directReachability": "reachable", "reachabilityConfidence": 0.9},
+                    }
+                )
+
+            state = live.overlay_debug_state_for(
+                session,
+                live_args(profile="woodcutting", overlay_debug_target_limit=4, overlay_debug_hull_limit=2),
+                {"tickId": 1, "localPlayer": {"worldX": 3200, "worldY": 3200, "plane": 0, "sceneX": 10, "sceneY": 10}},
+                candidates,
+                {"collisionWindowAvailable": True, "collisionWindowRadius": 24, "playerSceneX": 10, "playerSceneY": 10},
+                {"budgetExceeded": False, "writeFailureCount": 0, "warnings": []},
+                "2026-01-01T00:00:00Z",
+            )
+
+            self.assertEqual(state["summary"]["hullLimit"], 2)
+            self.assertEqual(state["summary"]["clickableHullTargets"], 2)
+            self.assertTrue(state["summary"]["bestHullAvailable"])
+            self.assertTrue(state["targets"][0]["clickableHullAvailable"])
+            self.assertTrue(state["targets"][1]["clickableHullAvailable"])
+            self.assertFalse(state["targets"][2]["clickableHullAvailable"])
+            self.assertEqual(state["targets"][2]["clickableHullMissingReason"], "omitted by overlay hull cap")
+            self.assertEqual(state["summary"]["hullRankBuckets"]["rank1"], 1)
+            self.assertEqual(state["summary"]["hullRankBuckets"]["ranks2to5"], 1)
+            self.assertEqual(state["summary"]["polygonTargetsSuppressedByHullCap"], 2)
 
     def test_overlay_debug_state_is_written_by_processor(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -69,7 +69,16 @@ class DiagnoseOverlayStateTest(unittest.TestCase):
             live_dir = session / "interaction_geometry" / "live"
             cand = candidate()
             write_jsonl(live_dir / "live_candidates.jsonl", [cand])
-            write_json(live_dir / "overlay_debug_state.json", {"schema": "telemetry_overlay_debug_state.v1", "latestTick": 10, "targets": [dict(cand, directReachability="reachable", overlayLabel="Oak tree d1 R assumed", overlayColor="green")]})
+            overlay_target = dict(
+                cand,
+                directReachability="reachable",
+                overlayLabel="Oak tree d1 R assumed",
+                overlayColor="green",
+                clickableHullAvailable=True,
+                clickableHull=[[10, 10], [20, 10], [20, 20], [10, 20]],
+                clickboxPolygon=[[10, 10], [20, 10], [20, 20], [10, 20]],
+            )
+            write_json(live_dir / "overlay_debug_state.json", {"schema": "telemetry_overlay_debug_state.v1", "latestTick": 10, "targets": [overlay_target]})
             write_json(live_dir / "live_status.json", {"lastProcessedTick": 10})
             write_json(live_dir / "live_context_index.json", {"latestTick": 10})
             write_json(live_dir / "live_navigation_summary.json", {"status": "local", "collisionKnown": True, "collisionWindowAvailable": True, "collisionWindowRadius": 24, "reachabilityComputed": True})
@@ -78,6 +87,11 @@ class DiagnoseOverlayStateTest(unittest.TestCase):
 
             self.assertEqual(report["rows"][0]["candidateDirectReachability"], "reachable")
             self.assertEqual(report["rows"][0]["overlayDirectReachability"], "reachable")
+            self.assertEqual(report["overlayGeometrySummary"]["clickableHullAvailableCount"], 1)
+            self.assertEqual(report["overlayGeometrySummary"]["clickableHullFieldCount"], 1)
+            self.assertEqual(report["overlayGeometrySummary"]["geometrySourceCounts"]["clickableHull"], 1)
+            self.assertEqual(report["rows"][0]["overlayGeometrySource"], "clickableHull")
+            self.assertTrue(report["rows"][0]["clickableHullAvailable"])
             self.assertIn("consistent", report["conclusions"][0])
 
     def test_detects_overlay_candidate_mismatch_and_stale_tick(self):
@@ -96,6 +110,40 @@ class DiagnoseOverlayStateTest(unittest.TestCase):
             self.assertTrue(report["overlayStateStale"])
             self.assertIn("overlay stale", " ".join(report["conclusions"]))
             self.assertIn("overlay label mismatch", " ".join(report["conclusions"]))
+
+    def test_reports_missing_hull_geometry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            live_dir = session / "interaction_geometry" / "live"
+            cand = candidate()
+            write_jsonl(live_dir / "live_candidates.jsonl", [cand])
+            write_json(
+                live_dir / "overlay_debug_state.json",
+                {
+                    "schema": "telemetry_overlay_debug_state.v1",
+                    "latestTick": 10,
+                    "targets": [
+                        dict(
+                            cand,
+                            directReachability="reachable",
+                            bounds={"x": 10, "y": 10, "width": 20, "height": 20},
+                            clickableHullAvailable=False,
+                            clickableHullMissingReason="clickbox polygon not present",
+                        )
+                    ],
+                },
+            )
+            write_json(live_dir / "live_status.json", {"lastProcessedTick": 10})
+            write_json(live_dir / "live_context_index.json", {"latestTick": 10})
+            write_json(live_dir / "live_navigation_summary.json", {"status": "local", "collisionKnown": True, "collisionWindowAvailable": True})
+
+            report = diagnose.build_report(session, args())
+
+            self.assertEqual(report["overlayGeometrySummary"]["boundsOnlyCount"], 1)
+            self.assertEqual(report["overlayGeometrySummary"]["missingHullCount"], 1)
+            self.assertEqual(report["overlayGeometrySummary"]["firstMissingHullReason"], "clickbox polygon not present")
+            self.assertEqual(report["rows"][0]["overlayGeometrySource"], "bounds")
+            self.assertEqual(report["rows"][0]["clickableHullMissingReason"], "clickbox polygon not present")
 
 
 if __name__ == "__main__":

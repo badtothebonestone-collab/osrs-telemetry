@@ -198,6 +198,93 @@ def color_for(record: dict) -> str:
     return "yellow"
 
 
+def has_polygon(record: dict, key: str) -> bool:
+    value = record.get(key)
+    if isinstance(value, dict):
+        value = value.get("points")
+    return isinstance(value, list) and len(value) >= 3
+
+
+def geometry_source_for(record: dict) -> str:
+    if has_polygon(record, "clickableHull"):
+        return "clickableHull"
+    if has_polygon(record, "clickboxPolygon"):
+        return "clickboxPolygon"
+    if has_polygon(record, "convexHull"):
+        return "convexHull"
+    if has_polygon(record, "convexHullPolygon"):
+        return "convexHullPolygon"
+    if has_polygon(record, "canvasTilePolygon"):
+        return "canvasTilePolygon"
+    if isinstance(record.get("bounds"), dict):
+        return "bounds"
+    if isinstance(record.get("aimPoint"), dict):
+        return "aimPoint"
+    return "none"
+
+
+def geometry_counts(records: list[dict]) -> dict:
+    sources = [geometry_source_for(record) for record in records if isinstance(record, dict)]
+    source_counts = {}
+    for source in sources:
+        source_counts[source] = source_counts.get(source, 0) + 1
+    first_missing_reason = None
+    for record in records:
+        if isinstance(record, dict) and not record.get("clickableHullAvailable") and record.get("clickableHullMissingReason"):
+            first_missing_reason = record.get("clickableHullMissingReason")
+            break
+    return {
+        "clickableHullAvailableCount": sum(1 for record in records if isinstance(record, dict) and bool(record.get("clickableHullAvailable"))),
+        "clickableHullFieldCount": sum(1 for record in records if isinstance(record, dict) and has_polygon(record, "clickableHull")),
+        "clickboxPolygonCount": sum(1 for record in records if isinstance(record, dict) and has_polygon(record, "clickboxPolygon")),
+        "convexHullCount": sum(1 for record in records if isinstance(record, dict) and (has_polygon(record, "convexHull") or has_polygon(record, "convexHullPolygon"))),
+        "canvasTilePolygonCount": sum(1 for record in records if isinstance(record, dict) and has_polygon(record, "canvasTilePolygon")),
+        "boundsOnlyCount": sources.count("bounds"),
+        "aimOnlyCount": sources.count("aimPoint"),
+        "missingHullCount": sum(1 for record in records if isinstance(record, dict) and not record.get("clickableHullAvailable")),
+        "geometrySourceCounts": source_counts,
+        "firstMissingHullReason": first_missing_reason,
+    }
+
+
+def compact_geometry_config(overlay: dict, status: dict) -> dict:
+    summary = overlay.get("summary") if isinstance(overlay.get("summary"), dict) else {}
+    return {
+        "compactLiveIncludeHeavyGeometry": first_value(
+            status.get("compactLiveIncludeHeavyGeometry"),
+            summary.get("compactLiveIncludeHeavyGeometry"),
+        ),
+        "compactLiveIncludeClickableHull": first_value(
+            status.get("compactLiveIncludeClickableHull"),
+            summary.get("compactLiveIncludeClickableHull"),
+        ),
+        "compactLiveIncludeCanvasTilePolygon": first_value(
+            status.get("compactLiveIncludeCanvasTilePolygon"),
+            summary.get("compactLiveIncludeCanvasTilePolygon"),
+        ),
+        "compactLiveIncludeConvexHull": first_value(
+            status.get("compactLiveIncludeConvexHull"),
+            summary.get("compactLiveIncludeConvexHull"),
+        ),
+        "compactLiveGeometryMaxRefs": first_value(
+            status.get("compactLiveGeometryMaxRefs"),
+            summary.get("compactLiveGeometryMaxRefs"),
+        ),
+        "compactLiveGeometryRefsWithPolygons": first_value(
+            status.get("compactLiveGeometryRefsWithPolygons"),
+            summary.get("compactLiveGeometryRefsWithPolygons"),
+        ),
+        "compactLiveGeometryRefsSkippedByCap": first_value(
+            status.get("compactLiveGeometryRefsSkippedByCap"),
+            summary.get("compactLiveGeometryRefsSkippedByCap"),
+        ),
+        "compactLiveGeometryCapHit": first_value(
+            status.get("compactLiveGeometryCapHit"),
+            summary.get("compactLiveGeometryCapHit"),
+        ),
+    }
+
+
 def latest_tick_from_status(status: dict) -> Any:
     return first_value(status.get("latestTickProcessed"), status.get("lastProcessedTick"), status.get("latestRawTickSeen"), status.get("latestTick"))
 
@@ -212,6 +299,8 @@ def build_report(session: Path, args) -> dict:
     status = read_json(paths["status"], warnings, "live_status")
 
     overlay_targets = overlay.get("targets") if isinstance(overlay.get("targets"), list) else []
+    overlay_geometry = geometry_counts([target for target in overlay_targets if isinstance(target, dict)])
+    geometry_config = compact_geometry_config(overlay, status)
     overlay_by_key = {target_key(target): target for target in overlay_targets if target_key(target) is not None}
     filtered_candidates = [candidate for candidate in candidates if passes_filters(candidate, args)]
     filtered_candidates.sort(key=sort_key)
@@ -256,6 +345,9 @@ def build_report(session: Path, args) -> dict:
                 "livenessInterpretation": (overlay_target or {}).get("livenessInterpretation"),
                 "overlayLabel": label_for(overlay_target or candidate),
                 "overlayColor": color_for(overlay_target or candidate),
+                "overlayGeometrySource": geometry_source_for(overlay_target or {}),
+                "clickableHullAvailable": (overlay_target or {}).get("clickableHullAvailable"),
+                "clickableHullMissingReason": (overlay_target or {}).get("clickableHullMissingReason"),
                 "reachabilityEvidence": candidate_nav.get("reachabilityEvidence") or [],
                 "pathLengthTiles": candidate_nav.get("pathLengthTiles"),
                 "interactionRadiusTiles": candidate_nav.get("interactionRadiusTiles"),
@@ -276,10 +368,17 @@ def build_report(session: Path, args) -> dict:
         conclusions.append("reachability actually blocked for one or more filtered candidates")
     if missing_overlay_count and filtered_candidates:
         conclusions.append("overlay/candidate mismatch: some filtered candidates are not present in overlay target cap or key set")
+    if overlay_targets and overlay_geometry.get("clickableHullAvailableCount", 0) <= 0:
+        if not geometry_config.get("compactLiveIncludeClickableHull") and not geometry_config.get("compactLiveIncludeHeavyGeometry"):
+            conclusions.append("hull geometry is not being emitted by compact packets; enable compactLiveIncludeClickableHull or compactLiveIncludeHeavyGeometry")
+        else:
+            conclusions.append("hull geometry was requested, but overlay_debug_state has no clickbox polygons for inspected targets")
     if not filtered_candidates:
         conclusions.append("classification/profile mismatch or no matching candidates for the requested filters")
     if not conclusions:
         conclusions.append("overlay and live candidate reachability are consistent for the inspected rows")
+    if overlay_geometry.get("clickableHullAvailableCount", 0) > 0:
+        conclusions.append("hull geometry is present in overlay_debug_state; if hulls are not visible, check RuneLite overlay geometry mode/drawing")
 
     return {
         "schema": SCHEMA,
@@ -293,6 +392,8 @@ def build_report(session: Path, args) -> dict:
         "overlayTargetCount": len(overlay_targets),
         "candidateCount": len(candidates),
         "filteredCandidateCount": len(filtered_candidates),
+        "overlayGeometrySummary": overlay_geometry,
+        "compactGeometryConfig": geometry_config,
         "navigationSummary": {
             "status": navigation.get("status"),
             "collisionKnown": navigation.get("collisionKnown"),
@@ -321,6 +422,35 @@ def print_report(report: dict) -> None:
         f"candidates={report.get('candidateCount')} "
         f"filtered={report.get('filteredCandidateCount')}"
     )
+    geom = report.get("overlayGeometrySummary") or {}
+    print(
+        "geometry: "
+        f"hulls={geom.get('clickableHullAvailableCount')} "
+        f"clickableHullField={geom.get('clickableHullFieldCount')} "
+        f"clickbox={geom.get('clickboxPolygonCount')} "
+        f"convex={geom.get('convexHullCount')} "
+        f"tile={geom.get('canvasTilePolygonCount')} "
+        f"boundsOnly={geom.get('boundsOnlyCount')} "
+        f"aimOnly={geom.get('aimOnlyCount')} "
+        f"missingHull={geom.get('missingHullCount')}"
+    )
+    if geom.get("geometrySourceCounts"):
+        source_text = ", ".join(f"{key}={value}" for key, value in sorted(geom["geometrySourceCounts"].items()))
+        print(f"geometry sources: {source_text}")
+    if geom.get("firstMissingHullReason"):
+        print(f"first missing hull reason: {geom.get('firstMissingHullReason')}")
+    config = report.get("compactGeometryConfig") or {}
+    print(
+        "geometry config: "
+        f"clickableHull={config.get('compactLiveIncludeClickableHull')} "
+        f"heavy={config.get('compactLiveIncludeHeavyGeometry')} "
+        f"convex={config.get('compactLiveIncludeConvexHull')} "
+        f"tile={config.get('compactLiveIncludeCanvasTilePolygon')} "
+        f"maxRefs={config.get('compactLiveGeometryMaxRefs')} "
+        f"emitted={config.get('compactLiveGeometryRefsWithPolygons')} "
+        f"skippedByCap={config.get('compactLiveGeometryRefsSkippedByCap')} "
+        f"capHit={config.get('compactLiveGeometryCapHit')}"
+    )
     nav = report.get("navigationSummary") or {}
     print(
         "navigation: "
@@ -335,8 +465,11 @@ def print_report(report: dict) -> None:
             f"scene={row.get('sceneX')},{row.get('sceneY')} d={row.get('distanceTiles')} "
             f"candidateReach={row.get('candidateDirectReachability')} overlayReach={row.get('overlayDirectReachability')} "
             f"live={row.get('targetLiveState')} label='{row.get('overlayLabel')}' color={row.get('overlayColor')} "
+            f"geometry={row.get('overlayGeometrySource')} hull={row.get('clickableHullAvailable')} "
             f"path={row.get('pathLengthTiles')} radius={row.get('interactionRadiusTiles')} inWindow={row.get('targetInCollisionWindow')}"
         )
+        if row.get("clickableHullMissingReason"):
+            print(f"  hull: {row.get('clickableHullMissingReason')}")
         evidence = row.get("reachabilityEvidence") or []
         if evidence:
             print(f"  evidence: {'; '.join(str(item) for item in evidence[:3])}")

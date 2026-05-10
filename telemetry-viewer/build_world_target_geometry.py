@@ -41,10 +41,12 @@ GEOMETRY_FIELDS = (
     "canvasPoint",
     "canvasLocation",
     "canvasCenter",
+    "clickableHull",
     "canvasTilePolygon",
     "clickboxBounds",
     "clickboxPolygon",
     "convexHullBounds",
+    "convexHull",
     "convexHullPolygon",
     "geometryAvailable",
     "onScreen",
@@ -679,19 +681,28 @@ def on_screen_value(record: dict) -> bool:
 
 
 def geometry_payload(record: dict) -> dict:
+    clickbox_polygon = record.get("clickableHull") or record.get("clickboxPolygon")
+    convex_polygon = record.get("convexHull") or record.get("convexHullPolygon")
+    tile_polygon = record.get("canvasTilePolygon") or record.get("tilePolygon")
     return {
         "coordinateSpace": "canvasPixels",
         "canvasPoint": record.get("canvasPoint"),
         "canvasLocation": record.get("canvasLocation"),
         "canvasCenter": record.get("canvasCenter"),
-        "tilePolygon": record.get("canvasTilePolygon"),
+        "clickableHull": clickbox_polygon,
+        "tilePolygon": tile_polygon,
+        "canvasTilePolygon": tile_polygon,
         "clickboxBounds": record.get("clickboxBounds"),
-        "clickboxPolygon": record.get("clickboxPolygon"),
+        "clickboxPolygon": clickbox_polygon,
         "convexHullBounds": record.get("convexHullBounds"),
-        "convexHullPolygon": record.get("convexHullPolygon"),
+        "convexHull": convex_polygon,
+        "convexHullPolygon": convex_polygon,
         "onScreen": on_screen_value(record),
         "geometryAvailable": geometry_available(record),
         "geometryWarning": record.get("geometryWarning"),
+        "geometrySource": record.get("geometrySource"),
+        "clickableHullAvailable": record.get("clickableHullAvailable"),
+        "clickableHullMissingReason": record.get("clickableHullMissingReason"),
     }
 
 
@@ -713,14 +724,12 @@ def polygon_bounds(points) -> dict | None:
     ys = []
 
     for point in points:
-        if (
-            isinstance(point, list)
-            and len(point) >= 2
-            and isinstance(point[0], int)
-            and isinstance(point[1], int)
-        ):
-            xs.append(point[0])
-            ys.append(point[1])
+        if isinstance(point, list) and len(point) >= 2 and isinstance(point[0], (int, float)) and isinstance(point[1], (int, float)):
+            xs.append(float(point[0]))
+            ys.append(float(point[1]))
+        elif isinstance(point, dict) and isinstance(point.get("x"), (int, float)) and isinstance(point.get("y"), (int, float)):
+            xs.append(float(point["x"]))
+            ys.append(float(point["y"]))
 
     if not xs or not ys:
         return None

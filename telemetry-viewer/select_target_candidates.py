@@ -19,8 +19,10 @@ DEFAULT_TARGET_PROFILES_PATH = Path(__file__).resolve().with_name("target_profil
 TARGET_TYPES = geometry.TARGET_TYPES
 TARGET_ROLES = geometry.TARGET_ROLES
 GEOMETRY_PRIORITY = (
+    "clickableHull",
     "clickboxPolygon",
     "clickboxBounds",
+    "convexHull",
     "convexHullPolygon",
     "convexHullBounds",
     "tilePolygon",
@@ -34,8 +36,10 @@ GEOMETRY_PRIORITY = (
     "bounds",
 )
 GEOMETRY_QUALITY = {
+    "clickableHull": 1.0,
     "clickboxPolygon": 1.0,
     "clickboxBounds": 0.95,
+    "convexHull": 0.9,
     "convexHullPolygon": 0.9,
     "convexHullBounds": 0.85,
     "tilePolygon": 0.75,
@@ -48,6 +52,9 @@ GEOMETRY_QUALITY = {
     "boundingBox": 0.65,
     "bounds": 0.65,
 }
+POLYGON_GEOMETRY_TYPES = {"clickableHull", "clickboxPolygon", "convexHull", "convexHullPolygon", "tilePolygon", "canvasTilePolygon"}
+BOUNDS_GEOMETRY_TYPES = {"clickboxBounds", "convexHullBounds", "pixelBox", "boundingBox", "bounds"}
+POINT_GEOMETRY_TYPES = {"canvasPoint", "canvasLocation", "canvasCenter", "center"}
 WORLD_DISTANCE_ROLES = {"entity", "interactable", "item"}
 WORLD_DISTANCE_TYPES = {"npc", "player", "sceneObject", "groundItem", "tile"}
 UNKNOWN_CLASS_IDS = {"unknown_scene_object", "unclassified_scene_object"}
@@ -175,7 +182,7 @@ def session_id_for(session: Path, records: list[dict]) -> str:
 
 
 def is_polygon(value) -> bool:
-    return isinstance(value, list) and any(is_point_list(point) for point in value)
+    return isinstance(value, list) and any(is_point_list(point) or is_point_dict(point) for point in value)
 
 
 def is_point_list(value) -> bool:
@@ -212,6 +219,9 @@ def polygon_bounds(points) -> dict | None:
         if is_point_list(point):
             xs.append(float(point[0]))
             ys.append(float(point[1]))
+        elif is_point_dict(point):
+            xs.append(float(point["x"]))
+            ys.append(float(point["y"]))
 
     if not xs or not ys:
         return None
@@ -243,11 +253,11 @@ def available_geometry_types(record: dict) -> list[str]:
     for key in GEOMETRY_PRIORITY:
         value = source.get(key)
 
-        if key in {"clickboxPolygon", "convexHullPolygon", "tilePolygon", "canvasTilePolygon"} and is_polygon(value):
+        if key in POLYGON_GEOMETRY_TYPES and is_polygon(value):
             available.append(key)
-        elif key in {"clickboxBounds", "convexHullBounds", "pixelBox", "boundingBox", "bounds"} and is_bounds(value):
+        elif key in BOUNDS_GEOMETRY_TYPES and is_bounds(value):
             available.append(key)
-        elif key in {"canvasPoint", "canvasLocation", "canvasCenter", "center"} and is_point_dict(value):
+        elif key in POINT_GEOMETRY_TYPES and is_point_dict(value):
             available.append(key)
 
     return available
@@ -263,7 +273,7 @@ def preferred_aim_geometry(record: dict) -> dict:
 
         value = source.get(key)
 
-        if key in {"clickboxPolygon", "convexHullPolygon", "tilePolygon", "canvasTilePolygon"}:
+        if key in POLYGON_GEOMETRY_TYPES:
             aim_bounds = polygon_bounds(value)
             return {
                 "preferredAimGeometryType": key,
@@ -274,7 +284,7 @@ def preferred_aim_geometry(record: dict) -> dict:
                 "geometryQuality": GEOMETRY_QUALITY.get(key, 0.5),
             }
 
-        if key in {"clickboxBounds", "convexHullBounds", "pixelBox", "boundingBox", "bounds"}:
+        if key in BOUNDS_GEOMETRY_TYPES:
             return {
                 "preferredAimGeometryType": key,
                 "preferredAimGeometry": value,
@@ -284,7 +294,7 @@ def preferred_aim_geometry(record: dict) -> dict:
                 "geometryQuality": GEOMETRY_QUALITY.get(key, 0.5),
             }
 
-        if key in {"canvasPoint", "canvasLocation", "canvasCenter", "center"}:
+        if key in POINT_GEOMETRY_TYPES:
             return {
                 "preferredAimGeometryType": key,
                 "preferredAimGeometry": value,
@@ -599,10 +609,10 @@ def record_signal_set(record: dict) -> set[str]:
 
     available = set(available_geometry_types(record))
 
-    if "clickboxPolygon" in available or "clickboxBounds" in available:
+    if "clickableHull" in available or "clickboxPolygon" in available or "clickboxBounds" in available:
         signals.add("hasClickbox")
 
-    if "convexHullPolygon" in available or "convexHullBounds" in available:
+    if "convexHull" in available or "convexHullPolygon" in available or "convexHullBounds" in available:
         signals.add("hasConvexHull")
 
     if "canvasTilePolygon" in available or "tilePolygon" in available:
@@ -1137,10 +1147,10 @@ def score_record(record: dict, aim: dict, args, frame_exists, distance: dict, cl
     elif role == "navigation":
         add("role:navigation", 4, reason="role:navigation")
 
-    if "clickboxPolygon" in aim["availableGeometryTypes"] or "clickboxBounds" in aim["availableGeometryTypes"]:
+    if "clickableHull" in aim["availableGeometryTypes"] or "clickboxPolygon" in aim["availableGeometryTypes"] or "clickboxBounds" in aim["availableGeometryTypes"]:
         add("clickbox", 20, reason="clickbox")
 
-    if "convexHullPolygon" in aim["availableGeometryTypes"] or "convexHullBounds" in aim["availableGeometryTypes"]:
+    if "convexHull" in aim["availableGeometryTypes"] or "convexHullPolygon" in aim["availableGeometryTypes"] or "convexHullBounds" in aim["availableGeometryTypes"]:
         add("convexHull", 15, reason="convexHull")
 
     if "tilePolygon" in aim["availableGeometryTypes"] or "canvasTilePolygon" in aim["availableGeometryTypes"]:
@@ -1261,12 +1271,12 @@ def quality_summary(record: dict, aim: dict, class_info: dict, ui_info: dict, pr
 
     available = set(aim.get("availableGeometryTypes") or [])
 
-    if "clickboxPolygon" in available or "clickboxBounds" in available:
+    if "clickableHull" in available or "clickboxPolygon" in available or "clickboxBounds" in available:
         positive.append("hasClickbox")
     else:
         negative.append("missingClickbox")
 
-    if "convexHullPolygon" in available or "convexHullBounds" in available:
+    if "convexHull" in available or "convexHullPolygon" in available or "convexHullBounds" in available:
         positive.append("hasConvexHull")
 
     if "canvasTilePolygon" in available or "tilePolygon" in available:
@@ -1393,6 +1403,47 @@ def geometry_summary(aim: dict) -> dict:
     }
 
 
+def preserved_overlay_geometry(record: dict, aim: dict) -> dict:
+    source = geometry.geometry_for(record)
+    payload = {}
+
+    for key in POLYGON_GEOMETRY_TYPES:
+        value = source.get(key)
+        if is_polygon(value):
+            payload[key] = value
+
+    preferred_type = aim.get("preferredAimGeometryType")
+    preferred_geometry = aim.get("preferredAimGeometry")
+    if preferred_type in POLYGON_GEOMETRY_TYPES and is_polygon(preferred_geometry):
+        payload.setdefault(preferred_type, preferred_geometry)
+
+    if is_polygon(payload.get("clickableHull")) and not is_polygon(payload.get("clickboxPolygon")):
+        payload["clickboxPolygon"] = payload["clickableHull"]
+    elif is_polygon(payload.get("clickboxPolygon")) and not is_polygon(payload.get("clickableHull")):
+        payload["clickableHull"] = payload["clickboxPolygon"]
+
+    if is_polygon(payload.get("convexHull")) and not is_polygon(payload.get("convexHullPolygon")):
+        payload["convexHullPolygon"] = payload["convexHull"]
+    elif is_polygon(payload.get("convexHullPolygon")) and not is_polygon(payload.get("convexHull")):
+        payload["convexHull"] = payload["convexHullPolygon"]
+
+    if is_polygon(payload.get("tilePolygon")) and not is_polygon(payload.get("canvasTilePolygon")):
+        payload["canvasTilePolygon"] = payload["tilePolygon"]
+    elif is_polygon(payload.get("canvasTilePolygon")) and not is_polygon(payload.get("tilePolygon")):
+        payload["tilePolygon"] = payload["canvasTilePolygon"]
+
+    for key in ("clickboxBounds", "convexHullBounds", "bounds"):
+        value = source.get(key)
+        if is_bounds(value):
+            payload[key] = value
+
+    for key in ("geometrySource", "clickableHullAvailable", "clickableHullMissingReason"):
+        if source.get(key) is not None:
+            payload[key] = source.get(key)
+
+    return payload
+
+
 def candidate_record(
     dataset: geometry.TargetGeometryDataset,
     record: dict,
@@ -1417,6 +1468,7 @@ def candidate_record(
     scene = target_scene_for_record(record)
     local = target_local_for_record(record)
     target_key = target.get("objectKey") or target.get("targetId")
+    preserved_geometry = preserved_overlay_geometry(record, aim)
     return {
         "schemaVersion": SCHEMA_VERSION_RECORD,
         "recordSchema": PACKET_SCHEMA_VERSION,
@@ -1468,6 +1520,7 @@ def candidate_record(
         },
         "geometry": {
             "coordinateSpace": geometry.geometry_for(record).get("coordinateSpace"),
+            **preserved_geometry,
             **aim,
         },
         "scoring": scoring,

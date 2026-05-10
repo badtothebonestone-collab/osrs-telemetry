@@ -745,6 +745,25 @@ def player_location_known(player: dict) -> bool:
     return player.get("worldX") is not None and player.get("worldY") is not None and player.get("plane") is not None
 
 
+UNKNOWN_ACTIVITY_VALUES = {"", "unknown", "none", "null", "n/a", "na", "-1", "0"}
+
+
+def is_unknown_activity_value(value: Any) -> bool:
+    if value is None or value == -1:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in UNKNOWN_ACTIVITY_VALUES
+    return False
+
+
+def explicit_interacting_present(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(explicit_interacting_present(value.get(key)) for key in ("type", "name", "id", "index", "targetType", "targetName"))
+    if is_unknown_activity_value(value):
+        return False
+    return bool(value)
+
+
 def player_busy_summary(baseline: dict) -> dict:
     player = baseline.get("player") if isinstance(baseline.get("player"), dict) else {}
     animation = player.get("animation")
@@ -757,15 +776,18 @@ def player_busy_summary(baseline: dict) -> dict:
         "poseAnimation": player.get("poseAnimation"),
         "idlePoseAnimation": player.get("idlePoseAnimation"),
     }
-    if animation not in (None, -1, 0) or interacting not in (None, "", -1):
+    if explicit_interacting_present(interacting):
         value = True
-        reason = "non-idle animation or interacting field is present."
-    elif animation in (-1, 0) and interacting in (None, "", -1):
+        reason = "explicit interacting target present."
+    elif animation not in (None, -1, 0):
+        value = True
+        reason = "active animation present."
+    elif animation in (-1, 0) and not explicit_interacting_present(interacting):
         value = False
-        reason = "idle animation and no interacting field were observed."
+        reason = "animation indicates no active animation and no explicit interacting target was observed."
     else:
         value = None
-        reason = "animation/interacting fields are unavailable."
+        reason = "animation/interacting fields are unavailable or unknown."
     return {"value": value, "evidence": evidence, "reason": reason}
 
 

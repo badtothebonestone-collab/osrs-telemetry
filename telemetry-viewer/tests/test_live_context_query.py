@@ -718,6 +718,17 @@ class LiveContextQueryTest(unittest.TestCase):
             self.assertEqual(inventory["inventoryFull"], False)
             self.assertEqual(liveness["targetLivenessState"]["bestCandidateLiveState"], "live")
 
+    def test_player_busy_summary_ignores_unknown_interacting(self):
+        busy = query.player_busy_summary({"player": {"animation": None, "interacting": "UNKNOWN", "isMoving": None}})
+        self.assertIsNone(busy["value"])
+        self.assertIn("unknown", busy["reason"])
+
+        idle = query.player_busy_summary({"player": {"animation": -1, "interacting": None}})
+        self.assertFalse(idle["value"])
+
+        active = query.player_busy_summary({"player": {"animation": -1, "interacting": {"name": "Tree", "id": 1276}}})
+        self.assertTrue(active["value"])
+
     def test_human_summary_formats_recent_inventory_delta(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_live_session(Path(tmp))

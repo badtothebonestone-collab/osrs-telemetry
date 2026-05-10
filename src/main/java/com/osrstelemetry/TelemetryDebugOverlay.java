@@ -12,9 +12,11 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import javax.inject.Inject;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
@@ -135,7 +137,15 @@ public class TelemetryDebugOverlay extends Overlay
 		else
 		{
 			int targetCount = state.summary == null ? 0 : safeInt(state.summary.targetsWritten, 0);
-			line2 = "tick " + valueOrUnknown(state.latestTick) + " | " + valueOrUnknown(state.profile) + " | targets " + targetCount;
+			int hullCount = state.summary == null ? 0 : safeInt(state.summary.clickableHullTargets, 0);
+			int hullLimit = state.summary == null ? 0 : safeInt(state.summary.hullLimit, 0);
+			int geometryCap = state.summary == null ? 0 : safeInt(state.summary.compactLiveGeometryMaxRefs, 0);
+			line2 = "tick " + valueOrUnknown(state.latestTick) + " | " + valueOrUnknown(state.profile)
+					+ " | targets " + targetCount + " | hulls " + hullCount + "/" + targetCount
+					+ " | best " + boolToken(state.summary == null ? null : state.summary.bestHullAvailable)
+					+ " nearest " + boolToken(state.summary == null ? null : state.summary.nearestHullAvailable)
+					+ " cap " + geometryCap + "/" + hullLimit
+					+ " | " + config.telemetryDebugOverlayGeometryMode();
 		}
 		String line3 = null;
 		if (state != null && config.telemetryDebugOverlayShowCollisionWindow() && state.collisionWindow != null)
@@ -219,7 +229,7 @@ public class TelemetryDebugOverlay extends Overlay
 		{
 			return false;
 		}
-		if (target.aimPoint == null && target.bounds == null && target.clickboxPolygon == null && target.canvasTilePolygon == null)
+		if ("none".equals(fallbackGeometrySource(target)))
 		{
 			return false;
 		}
@@ -228,12 +238,38 @@ public class TelemetryDebugOverlay extends Overlay
 
 	private void drawTargetShape(Graphics2D graphics, OverlayTarget target, Color color)
 	{
-		graphics.setStroke(new BasicStroke(2.0f));
-		graphics.setColor(color);
-		drawPolygon(graphics, target.clickboxPolygon);
-		drawPolygon(graphics, target.canvasTilePolygon);
-		if (target.bounds != null)
+		TelemetryDebugOverlayGeometryMode geometryMode = config.telemetryDebugOverlayGeometryMode();
+		float strokeWidth = Boolean.TRUE.equals(target.isBest) ? 3.0f : 2.0f;
+		graphics.setStroke(new BasicStroke(strokeWidth));
+
+		if (geometryMode == TelemetryDebugOverlayGeometryMode.ALL_GEOMETRY_DEBUG)
 		{
+			if (config.telemetryDebugOverlayShowClickableHull())
+			{
+				drawPolygon(graphics, firstPolygon(target.clickableHull, target.clickboxPolygon), color, true, strokeWidth);
+			}
+			drawPolygon(graphics, target.convexHull, color, false, 1.5f);
+			if (config.telemetryDebugOverlayShowCanvasTilePolygon())
+			{
+				drawPolygon(graphics, target.canvasTilePolygon, color, false, 1.0f);
+			}
+		}
+		else
+		{
+			drawPolygon(graphics, primaryPolygon(target, geometryMode), color, true, strokeWidth);
+		}
+
+		if (config.telemetryDebugOverlayShowCanvasTilePolygon()
+				&& geometryMode == TelemetryDebugOverlayGeometryMode.TILE_POLYGON
+				&& !hasPolygon(primaryPolygon(target, geometryMode)))
+		{
+			drawPolygon(graphics, target.canvasTilePolygon, color, false, 1.5f);
+		}
+
+		if (shouldDrawBounds(target, geometryMode))
+		{
+			graphics.setColor(color);
+			graphics.setStroke(new BasicStroke(strokeWidth));
 			graphics.draw(new Rectangle(
 					round(target.bounds.x),
 					round(target.bounds.y),
@@ -250,22 +286,234 @@ public class TelemetryDebugOverlay extends Overlay
 		}
 	}
 
-	private void drawPolygon(Graphics2D graphics, List<List<Double>> points)
+	private boolean shouldDrawBounds(OverlayTarget target, TelemetryDebugOverlayGeometryMode geometryMode)
+	{
+		if (!config.telemetryDebugOverlayShowBounds() || target.bounds == null)
+		{
+			return false;
+		}
+		return geometryMode == TelemetryDebugOverlayGeometryMode.BOUNDS
+				|| geometryMode == TelemetryDebugOverlayGeometryMode.HULL_AND_BOUNDS
+				|| geometryMode == TelemetryDebugOverlayGeometryMode.ALL_GEOMETRY_DEBUG
+				|| !hasPolygon(primaryPolygon(target, geometryMode));
+	}
+
+	private List<List<Double>> primaryPolygon(OverlayTarget target, TelemetryDebugOverlayGeometryMode geometryMode)
+	{
+		if (target == null || geometryMode == TelemetryDebugOverlayGeometryMode.AIM_ONLY || geometryMode == TelemetryDebugOverlayGeometryMode.BOUNDS)
+		{
+			return null;
+		}
+		if (geometryMode == TelemetryDebugOverlayGeometryMode.TILE_POLYGON)
+		{
+			if (config.telemetryDebugOverlayShowCanvasTilePolygon() && hasPolygon(target.canvasTilePolygon))
+			{
+				return polygonPoints(target.canvasTilePolygon);
+			}
+			return firstPolygon(target.clickableHull, target.clickboxPolygon, target.convexHull);
+		}
+		if (!config.telemetryDebugOverlayShowClickableHull())
+		{
+			return null;
+		}
+		return firstPolygon(target.clickableHull, target.clickboxPolygon, target.convexHull, target.canvasTilePolygon);
+	}
+
+	@SafeVarargs
+	private static List<List<Double>> firstPolygon(Object... polygons)
+	{
+		if (polygons == null)
+		{
+			return null;
+		}
+		for (Object polygon : polygons)
+		{
+			List<List<Double>> normalized = polygonPoints(polygon);
+			if (hasPolygon(normalized))
+			{
+				return normalized;
+			}
+		}
+		return null;
+	}
+
+	static String fallbackGeometrySource(OverlayTarget target)
+	{
+		if (target == null)
+		{
+			return "none";
+		}
+		if (hasPolygon(target.clickableHull))
+		{
+			return "clickableHull";
+		}
+		if (hasPolygon(target.clickboxPolygon))
+		{
+			return "clickboxPolygon";
+		}
+		if (hasPolygon(target.convexHull))
+		{
+			return "convexHull";
+		}
+		if (hasPolygon(target.canvasTilePolygon))
+		{
+			return "canvasTilePolygon";
+		}
+		if (target.bounds != null)
+		{
+			return "bounds";
+		}
+		if (target.aimPoint != null)
+		{
+			return "aimPoint";
+		}
+		return "none";
+	}
+
+	private static boolean hasPolygon(Object value)
+	{
+		return hasPolygon(polygonPoints(value));
+	}
+
+	private static boolean hasPolygon(List<List<Double>> points)
 	{
 		if (points == null || points.size() < 3)
 		{
-			return;
+			return false;
 		}
-		Polygon polygon = new Polygon();
 		for (List<Double> point : points)
 		{
 			if (point == null || point.size() < 2 || point.get(0) == null || point.get(1) == null)
 			{
-				return;
+				return false;
 			}
+		}
+		return true;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static List<List<Double>> polygonPoints(Object value)
+	{
+		if (value instanceof Map)
+		{
+			Map<?, ?> map = (Map<?, ?>) value;
+			Object points = map.get("points");
+			if (points != null)
+			{
+				return polygonPoints(points);
+			}
+			Object xs = map.get("x");
+			Object ys = map.get("y");
+			Object n = map.get("n");
+			if (xs instanceof List && ys instanceof List)
+			{
+				List<?> xList = (List<?>) xs;
+				List<?> yList = (List<?>) ys;
+				int count = Math.min(xList.size(), yList.size());
+				if (n instanceof Number)
+				{
+					count = Math.min(count, ((Number) n).intValue());
+				}
+				List<List<Double>> pointList = new ArrayList<>();
+				for (int index = 0; index < count; index++)
+				{
+					Double x = numberValue(xList.get(index));
+					Double y = numberValue(yList.get(index));
+					if (x == null || y == null)
+					{
+						return null;
+					}
+					pointList.add(List.of(x, y));
+				}
+				return pointList;
+			}
+			Double x = numberValue(map.get("x"));
+			Double y = numberValue(map.get("y"));
+			if (x != null && y != null)
+			{
+				return List.of(List.of(x, y));
+			}
+			return null;
+		}
+
+		if (!(value instanceof List))
+		{
+			return null;
+		}
+
+		List<?> raw = (List<?>) value;
+		List<List<Double>> points = new ArrayList<>();
+		for (Object item : raw)
+		{
+			if (item instanceof Map)
+			{
+				Map<?, ?> map = (Map<?, ?>) item;
+				Double x = numberValue(map.get("x"));
+				Double y = numberValue(map.get("y"));
+				if (x == null || y == null)
+				{
+					return null;
+				}
+				points.add(List.of(x, y));
+			}
+			else if (item instanceof List)
+			{
+				List<?> pair = (List<?>) item;
+				if (pair.size() < 2)
+				{
+					return null;
+				}
+				Double x = numberValue(pair.get(0));
+				Double y = numberValue(pair.get(1));
+				if (x == null || y == null)
+				{
+					return null;
+				}
+				points.add(List.of(x, y));
+			}
+			else
+			{
+				return null;
+			}
+		}
+		return points;
+	}
+
+	private static Double numberValue(Object value)
+	{
+		return value instanceof Number ? ((Number) value).doubleValue() : null;
+	}
+
+	private boolean drawPolygon(Graphics2D graphics, List<List<Double>> points, Color color, boolean fill, float strokeWidth)
+	{
+		if (!hasPolygon(points))
+		{
+			return false;
+		}
+		Polygon polygon = new Polygon();
+		for (List<Double> point : points)
+		{
 			polygon.addPoint(round(point.get(0)), round(point.get(1)));
 		}
+		if (fill)
+		{
+			graphics.setColor(withAlpha(color, 42));
+			graphics.fillPolygon(polygon);
+		}
+		graphics.setStroke(new BasicStroke(strokeWidth));
+		graphics.setColor(color);
 		graphics.drawPolygon(polygon);
+		return true;
+	}
+
+	private boolean drawPolygon(Graphics2D graphics, Object points, Color color, boolean fill, float strokeWidth)
+	{
+		return drawPolygon(graphics, polygonPoints(points), color, fill, strokeWidth);
+	}
+
+	private Color withAlpha(Color color, int alpha)
+	{
+		return new Color(color.getRed(), color.getGreen(), color.getBlue(), Math.max(0, Math.min(255, alpha)));
 	}
 
 	private void drawTargetLabel(Graphics2D graphics, OverlayTarget target, Color color)
@@ -408,6 +656,15 @@ public class TelemetryDebugOverlay extends Overlay
 		return value == null ? "unknown" : String.valueOf(value);
 	}
 
+	private String boolToken(Boolean value)
+	{
+		if (value == null)
+		{
+			return "?";
+		}
+		return value ? "yes" : "no";
+	}
+
 	private String truncate(String value, int maxLength)
 	{
 		if (value == null || value.length() <= maxLength)
@@ -441,6 +698,16 @@ public class TelemetryDebugOverlay extends Overlay
 		Double latestEventTick;
 		Double warningEventCount;
 		Double lastEventTick;
+		Double hullLimit;
+		Boolean bestHullAvailable;
+		Boolean nearestHullAvailable;
+		Double compactLiveGeometryMaxRefs;
+		Double clickableHullTargets;
+		Double clickboxPolygonTargets;
+		Double convexHullTargets;
+		Double canvasTilePolygonTargets;
+		Double boundsOnlyTargets;
+		Double aimOnlyTargets;
 	}
 
 	static class OverlayTarget
@@ -464,13 +731,19 @@ public class TelemetryDebugOverlay extends Overlay
 		Double reachabilityConfidence;
 		Boolean targetInCollisionWindow;
 		Double pathLengthTiles;
+		Boolean isBest;
 		String overlayLabel;
 		String overlayColor;
+		String geometrySource;
+		Boolean clickableHullAvailable;
+		String clickableHullMissingReason;
 		LabelParts labelParts;
 		AimPoint aimPoint;
 		Bounds bounds;
-		List<List<Double>> clickboxPolygon;
-		List<List<Double>> canvasTilePolygon;
+		Object clickableHull;
+		Object clickboxPolygon;
+		Object convexHull;
+		Object canvasTilePolygon;
 	}
 
 	static class AimPoint

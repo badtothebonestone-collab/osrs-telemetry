@@ -17,6 +17,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -120,6 +121,7 @@ public class TelemetryPlugin extends Plugin
 	private static final String PACKET_COLLISION_WINDOW = "live_collision_window_packet.v1";
 	private static final String PACKET_COLLISION_GRID = "live_collision_grid_packet.v1";
 	private static final String PACKET_WRITER_HEALTH = "live_writer_health_packet.v1";
+	private static final int COMPACT_LIVE_GEOMETRY_MAX_REFS_HARD_CAP = 200;
 	private static final int COLLISION_MOVEMENT_MASK = CollisionDataFlag.BLOCK_MOVEMENT_NORTH_WEST
 			| CollisionDataFlag.BLOCK_MOVEMENT_NORTH
 			| CollisionDataFlag.BLOCK_MOVEMENT_NORTH_EAST
@@ -176,6 +178,18 @@ public class TelemetryPlugin extends Plugin
 	private int lastActivityPoseAnimation = Integer.MIN_VALUE;
 	private String lastActivityInteractingSignature;
 	private boolean debugOverlayRegistered;
+	private int lastCompactGeometryRefsWithPolygons;
+	private int lastCompactGeometryRefsSkippedByCap;
+	private int lastCompactGeometryMaxRefs;
+	private boolean lastCompactGeometryCapHit;
+	private boolean lastCompactLiveIncludeClickableHull;
+	private boolean lastCompactLiveIncludeCanvasTilePolygon;
+	private boolean lastCompactLiveIncludeConvexHull;
+	private int lastCompactHullsEmitted;
+	private int lastCompactHullDroppedOffscreen;
+	private int lastCompactHullDroppedNoCanvasIntersection;
+	private int lastCompactHullDroppedByCap;
+	private int lastCompactHullDroppedNullClickbox;
 
 	@Provides
 	TelemetryConfig provideConfig(ConfigManager configManager)
@@ -1050,17 +1064,31 @@ public class TelemetryPlugin extends Plugin
 
 	private Map<String, Object> projectionPayload(TickSnapshot snapshot)
 	{
+		CompactProjectionGeometryOptions geometryOptions = compactProjectionGeometryOptions(snapshot);
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("sceneProjectionSummary", snapshot.sceneProjectionSummary);
 		payload.put("projectionStateHash", snapshot.sceneProjectionSummary == null ? null : snapshot.sceneProjectionSummary.projectionStateHash);
 		payload.put("refreshMode", snapshot.sceneProjectionSummary == null ? null : snapshot.sceneProjectionSummary.projectionRefreshMode);
-		payload.put("visibleObjectRefs", compactSceneObjects(snapshot.visibleSceneObjectRefs, true));
+		payload.put("visibleObjectRefs", compactSceneObjects(snapshot.visibleSceneObjectRefs, true, geometryOptions));
+		payload.put("geometryEmission", compactProjectionGeometrySummary(geometryOptions));
+		recordLastCompactProjectionGeometry(geometryOptions);
 		return payload;
 	}
 
 	private List<Map<String, Object>> compactSceneObjects(TickSnapshot.SceneObjectSnapshot[] objects, boolean includeProjection)
 	{
+		return compactSceneObjects(objects, includeProjection, null);
+	}
+
+	private List<Map<String, Object>> compactSceneObjects(
+			TickSnapshot.SceneObjectSnapshot[] objects,
+			boolean includeProjection,
+			CompactProjectionGeometryOptions geometryOptions)
+	{
 		List<Map<String, Object>> compact = new ArrayList<>();
+		Set<String> polygonObjectKeys = includeProjection
+				? selectProjectionPolygonObjectKeys(objects, geometryOptions)
+				: new HashSet<>();
 
 		if (objects == null)
 		{
@@ -1071,14 +1099,83 @@ public class TelemetryPlugin extends Plugin
 		{
 			if (object != null)
 			{
-				compact.add(compactSceneObject(object, includeProjection));
+				boolean includePolygons = includeProjection
+						&& polygonObjectKeys.contains(compactProjectionGeometryKey(object));
+				compact.add(compactSceneObject(object, includeProjection, geometryOptions, includePolygons));
 			}
 		}
 
 		return compact;
 	}
 
-	private Map<String, Object> compactSceneObject(TickSnapshot.SceneObjectSnapshot object, boolean includeProjection)
+	private Set<String> selectProjectionPolygonObjectKeys(
+			TickSnapshot.SceneObjectSnapshot[] objects,
+			CompactProjectionGeometryOptions geometryOptions)
+	{
+		Set<String> selected = new HashSet<>();
+
+		if (objects == null || geometryOptions == null || !geometryOptions.includeAnyPolygons)
+		{
+			return selected;
+		}
+
+		List<TickSnapshot.SceneObjectSnapshot> eligible = new ArrayList<>();
+
+		for (TickSnapshot.SceneObjectSnapshot object : objects)
+		{
+			if (object == null)
+			{
+				continue;
+			}
+			if (!object.onScreen)
+			{
+				if (object.geometryAvailable)
+				{
+					geometryOptions.hullDroppedNoCanvasIntersection++;
+				}
+				else
+				{
+					geometryOptions.hullDroppedOffscreen++;
+				}
+				continue;
+			}
+			if (geometryOptions.includeClickableHull && object.clickboxPolygon == null)
+			{
+				geometryOptions.hullDroppedNullClickbox++;
+			}
+			if (!hasEnabledProjectionPolygon(object, geometryOptions))
+			{
+				continue;
+			}
+			eligible.add(object);
+		}
+
+		eligible.sort(Comparator
+				.comparingDouble((TickSnapshot.SceneObjectSnapshot object) -> projectionGeometryPriority(object, geometryOptions))
+				.thenComparing(object -> String.valueOf(object.objectKey)));
+
+		for (TickSnapshot.SceneObjectSnapshot object : eligible)
+		{
+			if (geometryOptions.refsWithPolygons >= geometryOptions.maxRefs)
+			{
+				geometryOptions.refsSkippedByCap++;
+				geometryOptions.hullDroppedByCap++;
+				geometryOptions.capHit = true;
+				continue;
+			}
+
+			selected.add(compactProjectionGeometryKey(object));
+			geometryOptions.refsWithPolygons++;
+		}
+
+		return selected;
+	}
+
+	private Map<String, Object> compactSceneObject(
+			TickSnapshot.SceneObjectSnapshot object,
+			boolean includeProjection,
+			CompactProjectionGeometryOptions geometryOptions,
+			boolean includePolygons)
 	{
 		Map<String, Object> compact = new LinkedHashMap<>();
 		compact.put("objectKey", object.objectKey);
@@ -1110,16 +1207,336 @@ public class TelemetryPlugin extends Plugin
 			compact.put("geometrySummary", geometrySummaryPayload(object));
 			compact.put("projectionVersion", object.projectionVersion);
 			compact.put("geometryWarning", object.geometryWarning);
+			compact.put("bounds", preferredBoundsPayload(object));
+			compact.put("geometrySource", geometrySourceFor(object, geometryOptions, includePolygons));
 
-			if (config.compactLiveIncludeHeavyGeometry())
+			if (includePolygons)
 			{
-				compact.put("canvasTilePolygon", object.canvasTilePolygon);
-				compact.put("clickboxPolygon", object.clickboxPolygon);
-				compact.put("convexHullPolygon", object.convexHullPolygon);
+				putProjectionPolygonFields(compact, object, geometryOptions);
+			}
+
+			if (geometryOptions != null && geometryOptions.includeAnyPolygons)
+			{
+				compact.put("clickableHullAvailable", compact.containsKey("clickableHull"));
+				if (!compact.containsKey("clickableHull"))
+				{
+					compact.put("clickableHullMissingReason", clickableHullMissingReason(object, geometryOptions, includePolygons));
+				}
 			}
 		}
 
 		return compact;
+	}
+
+	private String compactProjectionGeometryKey(TickSnapshot.SceneObjectSnapshot object)
+	{
+		if (object == null)
+		{
+			return "";
+		}
+		if (object.objectKey != null && !object.objectKey.isBlank())
+		{
+			return object.objectKey;
+		}
+		return object.id + ":" + object.hash + ":" + object.worldX + ":" + object.worldY + ":" + object.plane + ":" + object.kind;
+	}
+
+	private double projectionGeometryPriority(
+			TickSnapshot.SceneObjectSnapshot object,
+			CompactProjectionGeometryOptions geometryOptions)
+	{
+		double sourcePriority = 3_000_000_000.0;
+		if (object.clickboxPolygon != null)
+		{
+			sourcePriority = 0.0;
+		}
+		else if (object.convexHullPolygon != null)
+		{
+			sourcePriority = 1_000_000_000.0;
+		}
+		else if (object.canvasTilePolygon != null)
+		{
+			sourcePriority = 2_000_000_000.0;
+		}
+		return sourcePriority + playerSceneDistanceSquared(object, geometryOptions) * 1_000_000.0 + screenCenterDistanceSquared(object);
+	}
+
+	private double playerSceneDistanceSquared(
+			TickSnapshot.SceneObjectSnapshot object,
+			CompactProjectionGeometryOptions geometryOptions)
+	{
+		if (object == null || geometryOptions == null
+				|| geometryOptions.playerSceneX == null
+				|| geometryOptions.playerSceneY == null
+				|| geometryOptions.playerPlane == null
+				|| object.plane != geometryOptions.playerPlane)
+		{
+			return 1_000_000.0;
+		}
+		double dx = object.sceneX - geometryOptions.playerSceneX;
+		double dy = object.sceneY - geometryOptions.playerSceneY;
+		return dx * dx + dy * dy;
+	}
+
+	private double screenCenterDistanceSquared(TickSnapshot.SceneObjectSnapshot object)
+	{
+		Rectangle visibleArea = currentVisibleArea();
+		TickSnapshot.CanvasPoint center = geometryCenterPoint(object);
+		if (visibleArea == null || center == null)
+		{
+			return Double.MAX_VALUE;
+		}
+		double dx = center.x - visibleArea.getCenterX();
+		double dy = center.y - visibleArea.getCenterY();
+		return dx * dx + dy * dy;
+	}
+
+	private TickSnapshot.CanvasPoint geometryCenterPoint(TickSnapshot.SceneObjectSnapshot object)
+	{
+		if (object.clickboxBounds != null)
+		{
+			return boundsCenter(object.clickboxBounds);
+		}
+		if (object.convexHullBounds != null)
+		{
+			return boundsCenter(object.convexHullBounds);
+		}
+		TickSnapshot.Bounds tileBounds = boundsSnapshot(object.canvasTilePolygon);
+		if (tileBounds != null)
+		{
+			return boundsCenter(tileBounds);
+		}
+		return object.canvasLocation;
+	}
+
+	private boolean hasEnabledProjectionPolygon(
+			TickSnapshot.SceneObjectSnapshot object,
+			CompactProjectionGeometryOptions geometryOptions)
+	{
+		return (geometryOptions.includeClickableHull && object.clickboxPolygon != null)
+				|| (geometryOptions.includeConvexHull && object.convexHullPolygon != null)
+				|| (geometryOptions.includeCanvasTilePolygon && object.canvasTilePolygon != null);
+	}
+
+	private void putProjectionPolygonFields(
+			Map<String, Object> compact,
+			TickSnapshot.SceneObjectSnapshot object,
+			CompactProjectionGeometryOptions geometryOptions)
+	{
+		List<Map<String, Object>> clickboxPoints = polygonPointsPayload(object.clickboxPolygon);
+		if (geometryOptions.includeClickableHull && clickboxPoints != null)
+		{
+			compact.put("clickableHull", clickboxPoints);
+			compact.put("clickboxPolygon", clickboxPoints);
+			geometryOptions.hullsEmitted++;
+		}
+
+		List<Map<String, Object>> convexPoints = polygonPointsPayload(object.convexHullPolygon);
+		if (geometryOptions.includeConvexHull && convexPoints != null)
+		{
+			compact.put("convexHull", convexPoints);
+			compact.put("convexHullPolygon", convexPoints);
+		}
+
+		List<Map<String, Object>> tilePoints = polygonPointsPayload(object.canvasTilePolygon);
+		if (geometryOptions.includeCanvasTilePolygon && tilePoints != null)
+		{
+			compact.put("canvasTilePolygon", tilePoints);
+		}
+	}
+
+	private CompactProjectionGeometryOptions compactProjectionGeometryOptions(TickSnapshot snapshot)
+	{
+		TelemetryDebugOverlayGeometryMode mode = config.telemetryDebugOverlayGeometryMode();
+		boolean heavyGeometry = config.compactLiveIncludeHeavyGeometry();
+		boolean overlayEnabled = config.telemetryDebugOverlayEnabled();
+		boolean overlayHullMode = overlayEnabled && (
+				config.telemetryDebugOverlayShowClickableHull()
+						|| mode == TelemetryDebugOverlayGeometryMode.CLICKABLE_HULL
+						|| mode == TelemetryDebugOverlayGeometryMode.HULL_AND_BOUNDS
+						|| mode == TelemetryDebugOverlayGeometryMode.ALL_GEOMETRY_DEBUG);
+		boolean overlayTileMode = overlayEnabled && (
+				config.telemetryDebugOverlayShowCanvasTilePolygon()
+						|| mode == TelemetryDebugOverlayGeometryMode.TILE_POLYGON
+						|| mode == TelemetryDebugOverlayGeometryMode.ALL_GEOMETRY_DEBUG);
+		boolean includeClickableHull = heavyGeometry || config.compactLiveIncludeClickableHull() || overlayHullMode;
+		boolean includeConvexHull = heavyGeometry || config.compactLiveIncludeConvexHull() || overlayHullMode;
+		boolean includeCanvasTilePolygon = heavyGeometry || config.compactLiveIncludeCanvasTilePolygon() || overlayTileMode;
+		int maxRefs = clampCompactLiveGeometryMaxRefs(config.compactLiveGeometryMaxRefs());
+		return new CompactProjectionGeometryOptions(
+				includeClickableHull,
+				includeConvexHull,
+				includeCanvasTilePolygon,
+				maxRefs,
+				snapshot == null || snapshot.localPlayer == null ? null : snapshot.localPlayer.sceneX,
+				snapshot == null || snapshot.localPlayer == null ? null : snapshot.localPlayer.sceneY,
+				snapshot == null || snapshot.localPlayer == null ? null : snapshot.localPlayer.plane);
+	}
+
+	private Map<String, Object> compactProjectionGeometrySummary(CompactProjectionGeometryOptions geometryOptions)
+	{
+		Map<String, Object> summary = new LinkedHashMap<>();
+		summary.put("includeClickableHull", geometryOptions.includeClickableHull);
+		summary.put("includeConvexHull", geometryOptions.includeConvexHull);
+		summary.put("includeCanvasTilePolygon", geometryOptions.includeCanvasTilePolygon);
+		summary.put("maxRefs", geometryOptions.maxRefs);
+		summary.put("refsWithPolygons", geometryOptions.refsWithPolygons);
+		summary.put("refsSkippedByCap", geometryOptions.refsSkippedByCap);
+		summary.put("capHit", geometryOptions.capHit);
+		summary.put("hullEmitted", geometryOptions.hullsEmitted);
+		summary.put("hullDroppedOffscreen", geometryOptions.hullDroppedOffscreen);
+		summary.put("hullDroppedNoCanvasIntersection", geometryOptions.hullDroppedNoCanvasIntersection);
+		summary.put("hullDroppedByCap", geometryOptions.hullDroppedByCap);
+		summary.put("hullDroppedNullClickbox", geometryOptions.hullDroppedNullClickbox);
+		return summary;
+	}
+
+	private void recordLastCompactProjectionGeometry(CompactProjectionGeometryOptions geometryOptions)
+	{
+		lastCompactGeometryRefsWithPolygons = geometryOptions.refsWithPolygons;
+		lastCompactGeometryRefsSkippedByCap = geometryOptions.refsSkippedByCap;
+		lastCompactGeometryMaxRefs = geometryOptions.maxRefs;
+		lastCompactGeometryCapHit = geometryOptions.capHit;
+		lastCompactLiveIncludeClickableHull = geometryOptions.includeClickableHull;
+		lastCompactLiveIncludeCanvasTilePolygon = geometryOptions.includeCanvasTilePolygon;
+		lastCompactLiveIncludeConvexHull = geometryOptions.includeConvexHull;
+		lastCompactHullsEmitted = geometryOptions.hullsEmitted;
+		lastCompactHullDroppedOffscreen = geometryOptions.hullDroppedOffscreen;
+		lastCompactHullDroppedNoCanvasIntersection = geometryOptions.hullDroppedNoCanvasIntersection;
+		lastCompactHullDroppedByCap = geometryOptions.hullDroppedByCap;
+		lastCompactHullDroppedNullClickbox = geometryOptions.hullDroppedNullClickbox;
+	}
+
+	static int clampCompactLiveGeometryMaxRefs(int value)
+	{
+		return Math.max(0, Math.min(COMPACT_LIVE_GEOMETRY_MAX_REFS_HARD_CAP, value));
+	}
+
+	static List<Map<String, Object>> polygonPointsPayload(int[][] polygon)
+	{
+		if (polygon == null || polygon.length < 3)
+		{
+			return null;
+		}
+
+		List<Map<String, Object>> points = new ArrayList<>();
+
+		for (int[] point : polygon)
+		{
+			if (point == null || point.length < 2)
+			{
+				return null;
+			}
+
+			Map<String, Object> payload = new LinkedHashMap<>();
+			payload.put("x", point[0]);
+			payload.put("y", point[1]);
+			points.add(payload);
+		}
+
+		return points;
+	}
+
+	private String geometrySourceFor(
+			TickSnapshot.SceneObjectSnapshot object,
+			CompactProjectionGeometryOptions geometryOptions,
+			boolean includePolygons)
+	{
+		if (includePolygons && geometryOptions != null)
+		{
+			if (geometryOptions.includeClickableHull && object.clickboxPolygon != null)
+			{
+				return "clickbox";
+			}
+			if (geometryOptions.includeConvexHull && object.convexHullPolygon != null)
+			{
+				return "convexHull";
+			}
+			if (geometryOptions.includeCanvasTilePolygon && object.canvasTilePolygon != null)
+			{
+				return "canvasTilePolygon";
+			}
+		}
+		if (geometryOptions != null && geometryOptions.includeAnyPolygons)
+		{
+			return fallbackProjectionGeometrySource(object);
+		}
+
+		return geometrySourceFor(object);
+	}
+
+	private String fallbackProjectionGeometrySource(TickSnapshot.SceneObjectSnapshot object)
+	{
+		if (object == null)
+		{
+			return "none";
+		}
+		if (object.clickboxBounds != null || object.convexHullBounds != null || boundsSnapshot(object.canvasTilePolygon) != null)
+		{
+			return "bounds";
+		}
+		if (object.canvasLocation != null)
+		{
+			return "aimPoint";
+		}
+		return "none";
+	}
+
+	private String clickableHullMissingReason(
+			TickSnapshot.SceneObjectSnapshot object,
+			CompactProjectionGeometryOptions geometryOptions,
+			boolean includePolygons)
+	{
+		if (object == null)
+		{
+			return "object unavailable";
+		}
+		if (!geometryOptions.includeClickableHull)
+		{
+			return "clickable hull emission disabled";
+		}
+		if (!object.onScreen)
+		{
+			return "target off screen";
+		}
+		if (object.clickboxPolygon == null)
+		{
+			return "clickbox unavailable";
+		}
+		if (!includePolygons)
+		{
+			return "compact geometry cap reached";
+		}
+		return "clickbox polygon unavailable";
+	}
+
+	private String geometrySourceFor(TickSnapshot.SceneObjectSnapshot object)
+	{
+		if (object == null)
+		{
+			return "none";
+		}
+		if (object.clickboxPolygon != null)
+		{
+			return "clickbox";
+		}
+		if (object.convexHullPolygon != null)
+		{
+			return "convexHull";
+		}
+		if (object.canvasTilePolygon != null)
+		{
+			return "canvasTilePolygon";
+		}
+		if (object.clickboxBounds != null || object.convexHullBounds != null || boundsSnapshot(object.canvasTilePolygon) != null)
+		{
+			return "bounds";
+		}
+		if (object.canvasLocation != null)
+		{
+			return "aimPoint";
+		}
+		return "none";
 	}
 
 	private List<String> compactActions(String[] actions)
@@ -1208,6 +1625,23 @@ public class TelemetryPlugin extends Plugin
 		TickSnapshot.Bounds tileBounds = boundsSnapshot(object.canvasTilePolygon);
 		summary.put("canvasTileBounds", boundsPayload(tileBounds));
 		return summary;
+	}
+
+	private Map<String, Object> preferredBoundsPayload(TickSnapshot.SceneObjectSnapshot object)
+	{
+		Map<String, Object> bounds = boundsPayload(object.clickboxBounds);
+		if (bounds != null)
+		{
+			return bounds;
+		}
+
+		bounds = boundsPayload(object.convexHullBounds);
+		if (bounds != null)
+		{
+			return bounds;
+		}
+
+		return boundsPayload(boundsSnapshot(object.canvasTilePolygon));
 	}
 
 	private Map<String, Object> boundsPayload(TickSnapshot.Bounds bounds)
@@ -1884,6 +2318,19 @@ public class TelemetryPlugin extends Plugin
 		payload.put("livePacketRetentionBytes", Math.max(0L, config.compactLiveRetentionMb()) * 1024L * 1024L);
 		payload.put("livePacketRetentionSegments", config.compactLiveRetentionSegments());
 		payload.put("livePacketActiveSegment", currentWriter.getLivePacketActiveSegment());
+		payload.put("compactLiveIncludeHeavyGeometry", config.compactLiveIncludeHeavyGeometry());
+		payload.put("compactLiveIncludeClickableHull", lastCompactLiveIncludeClickableHull);
+		payload.put("compactLiveIncludeCanvasTilePolygon", lastCompactLiveIncludeCanvasTilePolygon);
+		payload.put("compactLiveIncludeConvexHull", lastCompactLiveIncludeConvexHull);
+		payload.put("compactLiveGeometryMaxRefs", lastCompactGeometryMaxRefs);
+		payload.put("compactLiveGeometryRefsWithPolygons", lastCompactGeometryRefsWithPolygons);
+		payload.put("compactLiveGeometryRefsSkippedByCap", lastCompactGeometryRefsSkippedByCap);
+		payload.put("compactLiveGeometryCapHit", lastCompactGeometryCapHit);
+		payload.put("compactLiveHullsEmitted", lastCompactHullsEmitted);
+		payload.put("compactLiveHullDroppedOffscreen", lastCompactHullDroppedOffscreen);
+		payload.put("compactLiveHullDroppedNoCanvasIntersection", lastCompactHullDroppedNoCanvasIntersection);
+		payload.put("compactLiveHullDroppedByCap", lastCompactHullDroppedByCap);
+		payload.put("compactLiveHullDroppedNullClickbox", lastCompactHullDroppedNullClickbox);
 		payload.put("rawRecordingEnabled", currentWriter.isRawRecordingEnabled());
 		return payload;
 	}
@@ -3892,6 +4339,45 @@ public class TelemetryPlugin extends Plugin
 	private String exceptionSummary(Exception e)
 	{
 		return e == null ? "unknown" : e.getClass().getSimpleName();
+	}
+
+	private static class CompactProjectionGeometryOptions
+	{
+		private final boolean includeClickableHull;
+		private final boolean includeConvexHull;
+		private final boolean includeCanvasTilePolygon;
+		private final boolean includeAnyPolygons;
+		private final int maxRefs;
+		private final Integer playerSceneX;
+		private final Integer playerSceneY;
+		private final Integer playerPlane;
+		private int refsWithPolygons;
+		private int refsSkippedByCap;
+		private boolean capHit;
+		private int hullsEmitted;
+		private int hullDroppedOffscreen;
+		private int hullDroppedNoCanvasIntersection;
+		private int hullDroppedByCap;
+		private int hullDroppedNullClickbox;
+
+		private CompactProjectionGeometryOptions(
+				boolean includeClickableHull,
+				boolean includeConvexHull,
+				boolean includeCanvasTilePolygon,
+				int maxRefs,
+				Integer playerSceneX,
+				Integer playerSceneY,
+				Integer playerPlane)
+		{
+			this.includeClickableHull = includeClickableHull;
+			this.includeConvexHull = includeConvexHull;
+			this.includeCanvasTilePolygon = includeCanvasTilePolygon;
+			this.includeAnyPolygons = includeClickableHull || includeConvexHull || includeCanvasTilePolygon;
+			this.maxRefs = maxRefs;
+			this.playerSceneX = playerSceneX;
+			this.playerSceneY = playerSceneY;
+			this.playerPlane = playerPlane;
+		}
 	}
 
 	private static class ActorProjection

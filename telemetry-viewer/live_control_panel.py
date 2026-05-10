@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import queue
@@ -29,11 +30,15 @@ SAFETY_TEXT = "Read-only telemetry launcher. Starts local tools only. Does not c
 PROFILES = ("woodcutting", "broad_qa", "navigation_qa", "npc_qa", "ground_item_qa", "ui_qa")
 INPUT_SOURCES = ("auto", "compact-packets", "raw-ticks")
 LIVENESS_MODES = ("off", "basic", "delta", "full")
+WORKFLOW_MODES = ("Normal Live", "Visual QA", "Debug Audit")
+SESSION_STALE_SECONDS = 15 * 60
+COMPACT_PACKET_STALE_SECONDS = 2 * 60
 
 
 @dataclass
 class LivePanelOptions:
     profile: str = "woodcutting"
+    mode: str = "Normal Live"
     input_source: str = "auto"
     liveness_mode: str = "delta"
     window_ticks: int = 10
@@ -164,6 +169,34 @@ def build_event_timeline_command(events: int = 20) -> list[str]:
     )
 
 
+def build_mock_brain_command(goal_count: int = 5, *, watch: bool = False, interval: float = 1.0) -> list[str]:
+    command = python_command(
+        "telemetry-viewer\\mock_brain_rehearsal.py",
+        "--task",
+        "woodcutting",
+        "--goal-count",
+        str(goal_count),
+        "--human",
+    )
+    if watch:
+        command.extend(["--watch", "--interval", str(interval)])
+    return command
+
+
+def build_debug_audit_command(profile: str = "broad_qa") -> list[str]:
+    return python_command(
+        "telemetry-viewer\\run_target_geometry_pipeline.py",
+        "--latest-session",
+        "--latest-with-frames",
+        "25",
+        "--profile",
+        profile,
+        "--limit",
+        "2000",
+        "--open-inspector",
+    )
+
+
 def build_inspector_command(session: Path | None) -> list[str]:
     command = python_command("telemetry-viewer\\target_geometry_inspector.py", "--live")
     if session is not None:
@@ -187,11 +220,53 @@ def build_context_request_body(max_candidates: int = 1) -> dict:
             "activity",
             "liveness",
             "navigation_readiness",
+            "events",
             "diagnostics",
         ],
         "maxCandidates": max_candidates,
+        "maxEvents": 5,
         "responseMode": "compact",
     }
+
+
+def normal_live_options(profile: str = "woodcutting") -> LivePanelOptions:
+    return LivePanelOptions(
+        profile=profile,
+        mode="Normal Live",
+        input_source="compact-packets",
+        liveness_mode="delta",
+        window_ticks=10,
+        limit=100,
+        port=8890,
+        interval=1.0,
+        require_compact_packets=True,
+        no_ui_targets=True,
+        benchmark=True,
+        summary=True,
+    )
+
+
+def build_normal_live_stack_commands(options: LivePanelOptions, *, supports_liveness: bool = True) -> list[tuple[str, list[str], str]]:
+    stack_options = LivePanelOptions(
+        profile=options.profile,
+        mode="Normal Live",
+        input_source="compact-packets",
+        liveness_mode=options.liveness_mode or "delta",
+        window_ticks=options.window_ticks,
+        limit=options.limit,
+        port=options.port,
+        interval=options.interval,
+        require_compact_packets=True,
+        no_ui_targets=options.no_ui_targets,
+        benchmark=options.benchmark,
+        summary=options.summary,
+    )
+    return [
+        ("Check Live Setup", build_check_live_setup_command(require_compact_packets=True), "Setup/Packet tools"),
+        ("Live Processor", build_live_processor_command(stack_options, supports_liveness=supports_liveness), "Live Processor"),
+        ("Context Service", build_context_service_command(stack_options.port), "Context Service"),
+        ("Human Dashboard", build_dashboard_command(stack_options.interval), "Dashboard"),
+    ]
 
 
 def safe_load_json(path: Path, previous: dict | None = None) -> dict:
@@ -207,6 +282,86 @@ def safe_load_json(path: Path, previous: dict | None = None) -> dict:
 
 def latest_session_path(sessions_dir: str | None = None) -> Path | None:
     return find_newest_session(get_sessions_dir(sessions_dir))
+
+
+def _path_age_seconds(path: Path, now: float | None = None) -> float | None:
+    try:
+        modified = path.stat().st_mtime
+    except OSError:
+        return None
+    return max(0.0, (time.time() if now is None else now) - modified)
+
+
+def compact_packet_status(session: Path | None, *, now: float | None = None, stale_seconds: int = COMPACT_PACKET_STALE_SECONDS) -> dict:
+    if session is None:
+        return {"available": False, "recent": False, "warning": "No latest session found."}
+    packet_dir = session / "live_packets"
+    index_path = packet_dir / "live_packet_index.json"
+    pointer_path = packet_dir / "latest_segment.txt"
+    index = safe_load_json(index_path)
+    latest_segment = index.get("activeSegment") or index.get("latestSegment")
+    if not latest_segment and pointer_path.exists():
+        try:
+            latest_segment = pointer_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            latest_segment = None
+    segment_path = packet_dir / Path(str(latest_segment)).name if latest_segment else None
+    available = bool(packet_dir.exists() and index and latest_segment and segment_path and segment_path.exists())
+    ages = [
+        age
+        for age in (
+            _path_age_seconds(index_path, now),
+            _path_age_seconds(pointer_path, now),
+            _path_age_seconds(segment_path, now) if segment_path else None,
+        )
+        if age is not None
+    ]
+    age_seconds = min(ages) if ages else None
+    recent = bool(available and age_seconds is not None and age_seconds <= stale_seconds)
+    warning = ""
+    if not available:
+        warning = "Compact packets are not available yet."
+    elif not recent:
+        warning = f"Compact packets look stale ({int(age_seconds or 0)}s old)."
+    return {
+        "available": available,
+        "recent": recent,
+        "warning": warning,
+        "indexPath": str(index_path),
+        "latestSegment": str(segment_path) if segment_path else None,
+        "latestTick": index.get("latestTick"),
+        "latestSequence": index.get("latestSequence"),
+        "ageSeconds": age_seconds,
+    }
+
+
+def stale_session_warning(
+    session: Path | None,
+    *,
+    now: float | None = None,
+    max_session_age_seconds: int = SESSION_STALE_SECONDS,
+    max_packet_age_seconds: int = COMPACT_PACKET_STALE_SECONDS,
+) -> str:
+    if session is None:
+        return "No latest session found. Start RuneLite dev and collect compact packets."
+    packet = compact_packet_status(session, now=now, stale_seconds=max_packet_age_seconds)
+    if not packet["available"]:
+        return "Waiting for compact packets. Enable compact live packets in RuneLite config if this persists."
+    if not packet["recent"]:
+        return packet["warning"]
+    activity_ages = [
+        age
+        for age in (
+            _path_age_seconds(session, now),
+            packet.get("ageSeconds"),
+        )
+        if isinstance(age, (int, float))
+    ]
+    session_age = min(activity_ages) if activity_ages else None
+    if session_age is not None and session_age > max_session_age_seconds:
+        minutes = int(session_age // 60)
+        return f"Latest session folder is {minutes} minutes old; confirm this is the intended session."
+    return ""
 
 
 def status_snapshot(session: Path | None, previous: dict | None = None) -> dict:
@@ -293,6 +448,7 @@ class LiveControlPanel:
         self.session_var = tk.StringVar(value=str(self.latest_session) if self.latest_session else "No session found")
         self.packet_status_var = tk.StringVar(value="compact packets: unknown")
         self.latest_tick_var = tk.StringVar(value="latest tick: unknown")
+        self.mode_var = tk.StringVar(value="Normal Live")
         self.profile_var = tk.StringVar(value="woodcutting")
         self.input_source_var = tk.StringVar(value="auto")
         self.liveness_var = tk.StringVar(value="delta")
@@ -331,22 +487,25 @@ class LiveControlPanel:
 
         options = ttk.LabelFrame(top, text="Options", padding=8)
         options.pack(side=tk.RIGHT, fill=tk.X)
-        self._option_row(options, 0, "Profile", ttk.Combobox(options, textvariable=self.profile_var, values=PROFILES, width=18, state="readonly"))
-        self._option_row(options, 1, "Input source", ttk.Combobox(options, textvariable=self.input_source_var, values=INPUT_SOURCES, width=18, state="readonly"))
-        self._option_row(options, 2, "Liveness", ttk.Combobox(options, textvariable=self.liveness_var, values=LIVENESS_MODES, width=18, state="readonly"))
-        self._entry_row(options, 3, "Window ticks", self.window_ticks_var)
-        self._entry_row(options, 4, "Limit", self.limit_var)
-        self._entry_row(options, 5, "Port", self.port_var)
-        self._entry_row(options, 6, "Dashboard interval", self.interval_var)
-        ttk.Checkbutton(options, text="Require compact packets", variable=self.require_compact_var).grid(row=7, column=0, columnspan=2, sticky=tk.W)
-        ttk.Checkbutton(options, text="No UI targets", variable=self.no_ui_targets_var).grid(row=8, column=0, columnspan=2, sticky=tk.W)
-        ttk.Checkbutton(options, text="Summary", variable=self.summary_var).grid(row=9, column=0, sticky=tk.W)
-        ttk.Checkbutton(options, text="Benchmark", variable=self.benchmark_var).grid(row=9, column=1, sticky=tk.W)
-        ttk.Checkbutton(options, text="Open inspector URL", variable=self.open_inspector_var).grid(row=10, column=0, columnspan=2, sticky=tk.W)
+        self._option_row(options, 0, "Mode", ttk.Combobox(options, textvariable=self.mode_var, values=WORKFLOW_MODES, width=18, state="readonly"))
+        self._option_row(options, 1, "Profile", ttk.Combobox(options, textvariable=self.profile_var, values=PROFILES, width=18, state="readonly"))
+        self._option_row(options, 2, "Input source", ttk.Combobox(options, textvariable=self.input_source_var, values=INPUT_SOURCES, width=18, state="readonly"))
+        self._option_row(options, 3, "Liveness", ttk.Combobox(options, textvariable=self.liveness_var, values=LIVENESS_MODES, width=18, state="readonly"))
+        self._entry_row(options, 4, "Window ticks", self.window_ticks_var)
+        self._entry_row(options, 5, "Limit", self.limit_var)
+        self._entry_row(options, 6, "Port", self.port_var)
+        self._entry_row(options, 7, "Dashboard interval", self.interval_var)
+        ttk.Checkbutton(options, text="Require compact packets", variable=self.require_compact_var).grid(row=8, column=0, columnspan=2, sticky=tk.W)
+        ttk.Checkbutton(options, text="No UI targets", variable=self.no_ui_targets_var).grid(row=9, column=0, columnspan=2, sticky=tk.W)
+        ttk.Checkbutton(options, text="Summary", variable=self.summary_var).grid(row=10, column=0, sticky=tk.W)
+        ttk.Checkbutton(options, text="Benchmark", variable=self.benchmark_var).grid(row=10, column=1, sticky=tk.W)
+        ttk.Checkbutton(options, text="Open inspector URL", variable=self.open_inspector_var).grid(row=11, column=0, columnspan=2, sticky=tk.W)
 
         button_frame = ttk.LabelFrame(outer, text="Start / Stop", padding=8)
         button_frame.pack(fill=tk.X, pady=8)
         buttons = [
+            ("Start Normal Live Stack", self.start_normal_live_stack),
+            ("Restart Live Stack", self.restart_live_stack),
             ("Start RuneLite Dev", self.start_runelite),
             ("Check Live Setup", self.check_live_setup),
             ("Inspect Compact Packets", self.inspect_packets),
@@ -355,7 +514,9 @@ class LiveControlPanel:
             ("Start Human Dashboard", self.start_dashboard),
             ("Human Dashboard with Events", self.start_dashboard_events),
             ("Event Timeline", self.start_event_timeline),
+            ("Start Mock Brain Rehearsal", self.start_mock_brain),
             ("Start Live Inspector", self.start_inspector),
+            ("Debug Audit Tools", self.start_debug_audit_tools),
             ("Request Context Once", self.context_once),
             ("Health Check", self.health_check),
             ("Stop Selected", self.stop_selected),
@@ -408,6 +569,7 @@ class LiveControlPanel:
     def options(self) -> LivePanelOptions:
         return LivePanelOptions(
             profile=self.profile_var.get(),
+            mode=self.mode_var.get(),
             input_source=self.input_source_var.get(),
             liveness_mode=self.liveness_var.get(),
             window_ticks=self._int_var(self.window_ticks_var, 10),
@@ -451,6 +613,55 @@ class LiveControlPanel:
     def start_runelite(self) -> None:
         self.start_process("RuneLite Dev", build_runelite_command(), "RuneLite")
 
+    def apply_normal_live_defaults(self) -> None:
+        options = normal_live_options(self.profile_var.get())
+        self.mode_var.set(options.mode)
+        self.input_source_var.set(options.input_source)
+        self.liveness_var.set(options.liveness_mode)
+        self.window_ticks_var.set(str(options.window_ticks))
+        self.limit_var.set(str(options.limit))
+        self.port_var.set(str(options.port))
+        self.interval_var.set(str(options.interval))
+        self.require_compact_var.set(options.require_compact_packets)
+        self.no_ui_targets_var.set(options.no_ui_targets)
+        self.summary_var.set(options.summary)
+        self.benchmark_var.set(options.benchmark)
+
+    def start_normal_live_stack(self) -> None:
+        self.apply_normal_live_defaults()
+        if stale_session_warning(self.latest_session) and not self.is_process_running("RuneLite Dev"):
+            self.start_runelite()
+        self.log("Setup/Packet tools", "Starting normal live stack. Waiting for recent compact packets before launching sidecars.")
+        threading.Thread(target=self._normal_live_stack_worker, daemon=True).start()
+
+    def _normal_live_stack_worker(self) -> None:
+        deadline = time.time() + 90
+        last_warning = ""
+        while time.time() < deadline:
+            session = latest_session_path()
+            warning = stale_session_warning(session)
+            if session is not None and not warning:
+                self.log_queue.put(("Setup/Packet tools", f"Compact packet session ready: {session}"))
+                self.root.after(0, self.refresh_latest_session)
+                self.root.after(0, self._start_normal_live_sidecars)
+                return
+            if warning and warning != last_warning:
+                last_warning = warning
+                self.log_queue.put(("Setup/Packet tools", warning))
+            time.sleep(2)
+        self.log_queue.put(("Setup/Packet tools", "Compact packets did not become recent before timeout. Running setup check so the missing piece is visible."))
+        self.root.after(0, self.check_live_setup)
+
+    def _start_normal_live_sidecars(self) -> None:
+        supports_liveness = script_supports_flag(VIEWER_DIR / "live_target_processor.py", "--liveness-mode")
+        for name, command, log_name in build_normal_live_stack_commands(self.options(), supports_liveness=supports_liveness):
+            self.start_process(name, command, log_name)
+
+    def restart_live_stack(self) -> None:
+        for name in ("Live Processor", "Context Service", "Human Dashboard", "Human Dashboard Events", "Event Timeline", "Mock Brain Rehearsal"):
+            self.stop_process(name)
+        self.root.after(1000, self.start_normal_live_stack)
+
     def check_live_setup(self) -> None:
         self.start_process("Check Live Setup", build_check_live_setup_command(self.require_compact_var.get()), "Setup/Packet tools")
 
@@ -473,6 +684,13 @@ class LiveControlPanel:
 
     def start_event_timeline(self) -> None:
         self.start_process("Event Timeline", build_event_timeline_command(20), "Dashboard")
+
+    def start_mock_brain(self) -> None:
+        self.start_process("Mock Brain Rehearsal", build_mock_brain_command(watch=True, interval=self.options().interval), "Dashboard")
+
+    def start_debug_audit_tools(self) -> None:
+        self.log("Setup/Packet tools", "Debug audit tools expect DEBUG_RECORDING sessions with raw ticks/frames. Normal live sessions intentionally omit those files.")
+        self.start_process("Debug Audit Tools", build_debug_audit_command("broad_qa"), "Setup/Packet tools")
 
     def start_inspector(self) -> None:
         command = build_inspector_command(self.latest_session)
@@ -625,6 +843,7 @@ class LiveControlPanel:
     def poll_status(self) -> None:
         self.previous_snapshot = status_snapshot(self.latest_session, self.previous_snapshot)
         snapshot = self.previous_snapshot
+        stale_warning = stale_session_warning(self.latest_session)
         self.latest_tick_var.set(f"latest tick: {snapshot.get('latestTick') or 'unknown'}")
         self.packet_status_var.set(
             "compact packets: "
@@ -638,6 +857,7 @@ class LiveControlPanel:
             f"rawTicks={snapshot.get('rawTickRecordingEnabled')}; "
             f"frames={snapshot.get('frameRecordingEnabled')}; "
             f"event={snapshot.get('latestEventSummary') or 'none'}"
+            + (f"; warning={stale_warning}" if stale_warning else "")
         )
         if self.is_process_running("Context Service"):
             if not self.context_poll_inflight:
@@ -677,9 +897,34 @@ class LiveControlPanel:
         self.root.destroy()
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Read-only OSRS telemetry live control panel.")
+    parser.add_argument("--auto-start-normal-live", action="store_true", help="Open the panel and start the normal compact live stack.")
+    parser.add_argument("--profile", default="woodcutting", choices=PROFILES, help="Default target profile.")
+    parser.add_argument("--mode", default="normal-live", choices=("normal-live", "visual-qa", "debug-audit"), help="Initial workflow mode.")
+    return parser.parse_args(argv)
+
+
+def _mode_label(value: str) -> str:
+    mapping = {
+        "normal-live": "Normal Live",
+        "visual-qa": "Visual QA",
+        "debug-audit": "Debug Audit",
+    }
+    return mapping.get(value, "Normal Live")
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     root = tk.Tk()
-    LiveControlPanel(root)
+    panel = LiveControlPanel(root)
+    panel.profile_var.set(args.profile)
+    panel.mode_var.set(_mode_label(args.mode))
+    if args.mode == "normal-live":
+        panel.apply_normal_live_defaults()
+        panel.profile_var.set(args.profile)
+    if args.auto_start_normal_live:
+        root.after(500, panel.start_normal_live_stack)
     root.mainloop()
     return 0
 

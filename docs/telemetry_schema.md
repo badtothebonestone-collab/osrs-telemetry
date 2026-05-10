@@ -2,6 +2,23 @@
 
 Telemetry is stored as JSON Lines. Each line is one complete JSON object.
 
+## Recording Modes
+
+Normal live mode is compact-packet based. Raw tick/event/frame recording is now
+optional debug/audit output rather than the live substrate.
+
+| Mode | Normal files written | Raw/debug files |
+| --- | --- | --- |
+| `LIVE_COMPACT_ONLY` | `live_packets\live-*.ndjson`, `live_packet_index.json`, rolling `interaction_geometry\live` files | Raw ticks/events/frames disabled |
+| `LIVE_COMPACT_WITH_FRAMES` | Compact packets plus rolling live files | Frames enabled at configured interval; raw ticks/events disabled |
+| `DEBUG_RECORDING` | Compact packets when enabled | Full raw tick/event/frame recording for replay, audit, batch geometry, and training |
+| `HYBRID_DEBUG` | Compact packets | Reserved for sampled or warning-triggered raw snapshots |
+
+The RuneLite config is grouped into Normal Live, Visual QA Overlay, Frames /
+Visual Capture, Debug / Audit Recording, Retention / Storage, and Advanced /
+Experimental sections. Existing config keys are preserved so saved settings are
+not silently reset.
+
 ## Tick Records
 
 Tick records are ordered by `tickId`. The canonical current writer layout is:
@@ -104,8 +121,8 @@ client-state mutation.
 
 ## Compact Live Packets
 
-Compact live packets are the default staged bridge for live sidecars. They are
-written alongside the existing raw session files under:
+Compact live packets are the default staged bridge for live sidecars. In
+normal live mode they are written without raw tick/event/frame recording under:
 
 ```text
 live_packets\live-*.ndjson
@@ -142,8 +159,18 @@ Packet types:
   `sceneObjectDeltas` new/updated/despawned records. It intentionally does not
   include full `sceneObjects` arrays.
 - `live_projection_packet.v1`: projection summary plus compact visible refs
-  with `objectKey`, on-screen/geometry flags, aim point, and small geometry
-  bounds. Heavy polygons are excluded by default.
+  with `objectKey`, on-screen/geometry flags, aim point, geometry source, and
+  small geometry bounds. Heavy polygons are excluded by default. When
+  `compactLiveIncludeClickableHull`, `compactLiveIncludeCanvasTilePolygon`,
+  `compactLiveIncludeConvexHull`, or `compactLiveIncludeHeavyGeometry` is
+  enabled, or when the read-only telemetry debug overlay is enabled with
+  clickable hull/tile geometry, capped visible refs may also include
+  `clickableHull`, `clickboxPolygon`, `convexHull`, `convexHullPolygon`, and
+  `canvasTilePolygon`. Packet polygons are compact point objects such as
+  `{"x": 123, "y": 456}`. `geometryEmission` reports the requested geometry
+  types, the per-tick `compactLiveGeometryMaxRefs` cap, emitted polygon refs,
+  skipped refs, and whether the cap was hit. Those polygons are observed
+  geometry only; they are not action commands.
 - `live_inventory_packet.v1`: compact inventory/equipment state, slot count,
   free/filled slots, total item quantity, signature, non-empty item slots, and
   whether compact inventory delta tracking is available.
@@ -280,11 +307,55 @@ category, world and scene tile, source/latest tick, on-screen and geometry
 flags, quality tier/score, target liveness, `livenessInterpretation`, direct
 reachability, path length, `interactionRadiusTiles`, collision-window
 membership, capped reachability evidence, `labelParts`, `overlayLabel`,
-`overlayColor`, aimPoint, compact bounds, and small polygons when already
-available. `overlayColor` uses gray for depleted/stale targets, red for blocked
+`overlayColor`, aimPoint, compact bounds, and small polygons when available.
+Clickable hull overlay fields are:
+
+- `clickableHull`: preferred observed clickbox/clickable area polygon. The live
+  overlay debug state stores points as `{"points": [{"x": 123, "y": 456}, ...]}`.
+- `clickboxPolygon`: raw clickbox polygon when available.
+- `convexHull`: convex hull fallback polygon when clickbox geometry is missing.
+- `canvasTilePolygon`: tile polygon fallback/debug geometry.
+- `clickableHullAvailable`, `clickableHullMissingReason`, and
+  `geometrySource`: compact diagnostics for visual QA.
+
+The overlay geometry fallback order is clickable hull, clickbox polygon, convex
+hull, canvas tile polygon, bounds, then aim point only. If
+`overlay_debug_state.json` reports `boundsOnly` targets, the polygon was not
+available to the overlay state writer for those targets. `overlayColor` uses gray
+for depleted/stale targets, red for blocked
 reachability, green for reachable reachability, and yellow for unknown
 reachability. The overlay can optionally show one latest event summary in its
 status panel; it never draws a full event list.
+
+`live_status.json` and `overlay_debug_state.json` include lightweight geometry
+matching counters for visual QA:
+
+- `candidateHullDirectMatches`: candidates with hull geometry already attached
+  or matched by `objectKey`.
+- `candidateHullFallbackMatches`: candidates matched to compact hull geometry by
+  stable fallback keys.
+- `candidateHullMissing`: candidates that remained bounds/aim-only after
+  matching.
+- `compactHullRefsAvailable` and `compactHullRefsUnused`: compact refs with
+  polygon geometry and how many were not used by the current candidates.
+- `hullLimit`: overlay-only cap for how many top-ranked targets may carry
+  polygon payloads in `overlay_debug_state.json`.
+- `bestHullAvailable` and `nearestHullAvailable`: whether the best and nearest
+  overlay targets have clickable hull geometry after ranking and cap application.
+- `hullRankBuckets`: clickable hull counts for `rank1`, `ranks2to5`,
+  `ranks6to10`, and `ranks11plus`.
+- `polygonTargetsSuppressedByHullCap`: ranked overlay targets that had polygon
+  geometry available but did not copy it because they were beyond
+  `--overlay-debug-hull-limit`.
+- `compactLiveHullsEmitted`, `compactLiveHullDroppedByCap`,
+  `compactLiveHullDroppedNullClickbox`, `compactLiveHullDroppedOffscreen`, and
+  `compactLiveHullDroppedNoCanvasIntersection`: Java-side emission counters.
+
+When clickable hull geometry is enabled, Java now prioritizes polygon emission
+for visible refs with clickbox geometry closest to the player scene tile, then
+closest to the screen center, before applying `compactLiveGeometryMaxRefs`. This
+keeps capped geometry aligned with nearby/high-priority targets instead of
+spending the cap on arbitrary scene iteration order.
 The file does not include full collision grids, broad scene dumps, action
 commands, mouse/keyboard fields, or menu invocation fields.
 

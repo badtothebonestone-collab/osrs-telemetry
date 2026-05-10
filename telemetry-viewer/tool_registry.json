@@ -1,0 +1,132 @@
+{
+  "schema": "osrs_telemetry_tool_registry.v1",
+  "generatedFor": "everyday_live_workflow",
+  "tools": [
+    {
+      "name": "live_control_panel.py",
+      "category": "normal_live",
+      "purpose": "Windows-friendly launcher and monitor for the read-only live stack.",
+      "input": "latest telemetry session, compact live packets",
+      "output": "local helper processes and bounded GUI logs",
+      "normalLiveRequired": true,
+      "example": "python telemetry-viewer\\live_control_panel.py"
+    },
+    {
+      "name": "check_live_setup.py",
+      "category": "normal_live",
+      "purpose": "Preflight check for compact packets, live output files, navigation packets, and recording mode.",
+      "input": "session folder",
+      "output": "PASS/WARN/FAIL setup report",
+      "normalLiveRequired": true,
+      "example": "python telemetry-viewer\\check_live_setup.py --latest-session --require-compact-packets"
+    },
+    {
+      "name": "inspect_live_packets.py",
+      "category": "normal_live",
+      "purpose": "Validate and summarize compact live NDJSON packet segments.",
+      "input": "live_packets folder",
+      "output": "packet counts, latest tick, segment and retention summary",
+      "normalLiveRequired": true,
+      "example": "python telemetry-viewer\\inspect_live_packets.py --latest-session --summary"
+    },
+    {
+      "name": "live_target_processor.py",
+      "category": "normal_live",
+      "purpose": "Consumes compact packets and writes rolling live context files.",
+      "input": "compact live packets or raw ticks when explicitly requested",
+      "output": "interaction_geometry\\live rolling files",
+      "normalLiveRequired": true,
+      "example": "python telemetry-viewer\\live_target_processor.py --latest-session --input-source compact-packets --require-compact-packets --profile woodcutting --follow"
+    },
+    {
+      "name": "context_service.py",
+      "category": "normal_live",
+      "purpose": "Local read-only request/response API for context_request.v1.",
+      "input": "interaction_geometry\\live rolling files",
+      "output": "localhost context_response.v1 JSON and /summary text",
+      "normalLiveRequired": true,
+      "example": "python telemetry-viewer\\context_service.py --latest-session --port 8890"
+    },
+    {
+      "name": "live_context_query.py",
+      "category": "normal_live",
+      "purpose": "Human dashboard, event timeline, and context query helper.",
+      "input": "rolling live context files",
+      "output": "human-readable context summaries",
+      "normalLiveRequired": true,
+      "example": "python telemetry-viewer\\live_context_query.py --latest-session --task woodcutting --human --events 10"
+    },
+    {
+      "name": "mock_brain_rehearsal.py",
+      "category": "normal_live",
+      "purpose": "Read-only external-client rehearsal against context_service.py.",
+      "input": "context_response.v1 over localhost",
+      "output": "mock_brain_rehearsal.v1 or human phase report",
+      "normalLiveRequired": false,
+      "example": "python telemetry-viewer\\mock_brain_rehearsal.py --task woodcutting --goal-count 5 --human"
+    },
+    {
+      "name": "target_geometry_inspector.py",
+      "category": "visual_qa",
+      "purpose": "Browser-based visual QA for live or recorded target geometry.",
+      "input": "session folder or rolling live files",
+      "output": "local visual inspector",
+      "normalLiveRequired": false,
+      "example": "python telemetry-viewer\\target_geometry_inspector.py --latest-session --live"
+    },
+    {
+      "name": "diagnose_overlay_state.py",
+      "category": "visual_qa",
+      "purpose": "Compare RuneLite overlay debug state to live candidate/context files.",
+      "input": "overlay_debug_state.json and live candidates",
+      "output": "overlay consistency diagnosis",
+      "normalLiveRequired": false,
+      "example": "python telemetry-viewer\\diagnose_overlay_state.py --latest-session --class-id tree --top 20"
+    },
+    {
+      "name": "run_target_geometry_pipeline.py",
+      "category": "debug_audit",
+      "purpose": "Batch target geometry pipeline for full debug/audit sessions.",
+      "input": "raw tick/frame debug recording session",
+      "output": "world/UI target geometry and inspector artifacts",
+      "normalLiveRequired": false,
+      "example": "python telemetry-viewer\\run_target_geometry_pipeline.py --latest-session --latest-with-frames 25 --profile broad_qa --limit 2000 --open-inspector"
+    },
+    {
+      "name": "build_world_target_geometry.py",
+      "category": "debug_audit",
+      "purpose": "Build world target geometry from raw/debug session data.",
+      "input": "raw ticks and optional frames",
+      "output": "world target geometry files",
+      "normalLiveRequired": false,
+      "example": "python telemetry-viewer\\build_world_target_geometry.py --latest-session"
+    },
+    {
+      "name": "build_ui_target_geometry.py",
+      "category": "debug_audit",
+      "purpose": "Build UI target geometry from raw/debug session data.",
+      "input": "raw ticks and optional frames",
+      "output": "UI target geometry files",
+      "normalLiveRequired": false,
+      "example": "python telemetry-viewer\\build_ui_target_geometry.py --latest-session"
+    },
+    {
+      "name": "select_target_candidates.py",
+      "category": "debug_audit",
+      "purpose": "Select target candidates from batch geometry outputs.",
+      "input": "target geometry files and profiles",
+      "output": "candidate selection artifacts",
+      "normalLiveRequired": false,
+      "example": "python telemetry-viewer\\select_target_candidates.py --latest-session --profile woodcutting"
+    },
+    {
+      "name": "telemetry_launcher.py",
+      "category": "deprecated",
+      "purpose": "Older launcher retained for compatibility; live_control_panel.py is the daily launcher.",
+      "input": "local repo scripts",
+      "output": "legacy launcher UI",
+      "normalLiveRequired": false,
+      "example": "python telemetry-viewer\\telemetry_launcher.py"
+    }
+  ]
+}

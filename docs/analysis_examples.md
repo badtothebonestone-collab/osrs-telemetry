@@ -1,5 +1,112 @@
 # Analysis Examples
 
+## Daily Workflow
+
+For everyday live testing, use the control panel:
+
+```text
+python telemetry-viewer\live_control_panel.py
+```
+
+Then click **Start Normal Live Stack**. The panel starts the read-only helper
+stack, waits for recent compact packets, checks live setup, starts the live
+processor, starts the context service, and opens the human dashboard. It does
+not click, type, invoke menus, or execute actions.
+
+One-click Windows entrypoints are also available from the repository root:
+
+```text
+start_live_control_panel.bat
+Start-LiveControlPanel.ps1
+start_normal_live_stack.bat
+Start-NormalLiveStack.ps1
+```
+
+Daily normal live mode writes compact packets and small rolling live files:
+
+```text
+live_packets\live-*.ndjson
+live_packets\live_packet_index.json
+interaction_geometry\live\*.json
+interaction_geometry\live\live_event_timeline.jsonl
+```
+
+Normal live mode does not require raw tick JSONL, raw event JSONL, or frames.
+Use DEBUG_RECORDING mode when you want full raw data for replay, audit, batch
+geometry, or training datasets.
+
+Recommended order if you run the pieces manually:
+
+1. Start RuneLite dev.
+2. Check live setup.
+3. Start the live processor.
+4. Start the context service.
+5. Start the human dashboard or visual inspector.
+
+```text
+python telemetry-viewer\check_live_setup.py --latest-session --require-compact-packets
+python telemetry-viewer\inspect_live_packets.py --latest-session --summary
+python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --require-compact-packets --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+python telemetry-viewer\context_service.py --latest-session --port 8890
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --watch-human --interval 1 --events 5
+```
+
+## Live Control Panel
+
+`telemetry-viewer\live_control_panel.py` is the everyday launcher. It keeps a
+bounded log for each helper process, shows latest session and compact packet
+status, warns when sessions or packet files look stale, and only stops helper
+processes it started.
+
+Key buttons:
+
+- **Start Normal Live Stack** starts RuneLite dev if needed, waits for compact
+  packets, then starts setup check, live processor, context service, and human
+  dashboard.
+- **Restart Live Stack** restarts the live processor, context service, and
+  dashboard sidecars.
+- **Inspect Compact Packets** summarizes `live_packets`.
+- **Start Mock Brain Rehearsal** runs the read-only future-brain rehearsal
+  client.
+- **Debug Audit Tools** launches the batch pipeline for DEBUG_RECORDING
+  sessions and warns that normal live sessions intentionally omit raw ticks.
+
+The tool registry at `docs\tool_registry.md` and
+`telemetry-viewer\tool_registry.json` maps each script to normal live, visual
+QA, debug/audit, or legacy compatibility.
+
+## Recording Modes
+
+RuneLite config is grouped into sections for daily use:
+
+- **Normal Live**: telemetry enabled, recording mode, compact packets, output
+  directory, and pinned session preservation.
+- **Visual QA Overlay**: optional read-only overlay settings.
+- **Frames / Visual Capture**: screenshot and frame capture settings.
+- **Debug / Audit Recording**: disk-heavy raw tick/event/frame options.
+- **Retention / Storage**: compact packet and session storage caps.
+- **Advanced / Experimental**: scene capture, projection, and low-level packet
+  settings.
+
+Modes:
+
+- `LIVE_COMPACT_ONLY`: normal live use; compact packets and rolling live files,
+  no raw ticks/events/frames.
+- `LIVE_COMPACT_WITH_FRAMES`: compact live plus limited frames for visual QA.
+- `DEBUG_RECORDING`: full raw tick/event/frame recording for audit, replay,
+  batch geometry, and training data.
+- `HYBRID_DEBUG`: future/sampled debug mode when enabled by config.
+
+Debug audit flow:
+
+```text
+python telemetry-viewer\run_target_geometry_pipeline.py --latest-session --latest-with-frames 25 --profile broad_qa --limit 2000 --open-inspector
+```
+
+When normal live mode is active, batch/debug builders should report that raw
+tick recording is disabled instead of treating missing raw files as a live
+failure.
+
 The export tool writes generated summaries under the selected session:
 
 ```text
@@ -23,8 +130,8 @@ python telemetry-viewer\replay_viewer.py --port 8765
 ## Compact Live NDJSON Bridge
 
 Compact live packets are the default live bridge between the RuneLite read-only
-sensor/cache adapter and Python sidecars. Java continues writing the normal raw
-debug/audit session files and also writes small append-only packets under:
+sensor/cache adapter and Python sidecars. In normal live mode Java writes small
+append-only packets under:
 
 ```text
 live_packets\live-*.ndjson
@@ -1531,6 +1638,105 @@ $request = @{
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
 ```
 
+## Mock Brain Rehearsal
+
+`mock_brain_rehearsal.py` is a read-only rehearsal client for future
+brain-style consumers. It queries `context_service.py` over localhost, reads the
+compact `context_response.v1`, and classifies the current task phase without
+clicking, typing, walking, manipulating menus, or executing actions.
+
+Woodcutting phases include:
+
+- `no_context`
+- `stale_context`
+- `no_target_observed`
+- `target_available`
+- `target_unreachable`
+- `target_depleted`
+- `likely_busy`
+- `likely_idle`
+- `inventory_full`
+- `waiting_for_respawn`
+- `unknown`
+
+Use it to verify whether the current compact context is enough for future task
+reasoning. Output is intentionally observational and ends with
+`No action emitted.`
+
+`phase` is the current interpreted task state. `substate` is a recent or
+contextual signal, such as `recent_target_depletion_observed`, that should not
+be confused with the current best target state. Inventory changes are normally
+reported as a substate unless they block the task, while `inventory_full`
+remains a blocking phase.
+
+The report separates:
+
+- current phase
+- current target state
+- recent task signals
+- recent system signals
+- blocking conditions
+- missing capabilities
+
+Task events are shown by default. System/health events such as budget toggles,
+write failures, source cap changes, and input source changes are counted but
+hidden unless `--show-system-events` or `--event-priority all` is used.
+
+## Mock Brain Activity Classification
+
+`likely_busy` requires positive current evidence:
+
+- an explicit interacting target is present
+- an active non-idle animation is present
+- woodcutting state is `likely_chopping`
+
+`UNKNOWN`, `null`, empty, or missing interaction values are not treated as busy.
+`animation = null` means the animation is unknown, and `animation = -1` or `0`
+means no active animation. Recent target depletion and inventory changes are
+reported as task signals/substates; they do not override the current phase when
+a reachable replacement target is available.
+
+Useful substates include:
+
+- `recent_target_depletion_observed`
+- `recent_inventory_change`
+- `liveness_assumed`
+- `movement_unknown`
+- `activity_unknown`
+- `no_explicit_busy_evidence`
+- `candidate_temporarily_empty`
+
+`target_available` means a valid target exists and there is no true busy
+evidence. Missing or unknown activity fields lower confidence and are surfaced
+as substates instead of forcing `likely_busy`.
+
+Start `context_service.py` first, then run the rehearsal client.
+
+One-shot human rehearsal:
+
+```text
+python telemetry-viewer\mock_brain_rehearsal.py --task woodcutting --goal-count 5 --human
+```
+
+Refreshing rehearsal:
+
+```text
+python telemetry-viewer\mock_brain_rehearsal.py --task woodcutting --goal-count 5 --watch --interval 1
+```
+
+Machine-readable rehearsal:
+
+```text
+python telemetry-viewer\mock_brain_rehearsal.py --task woodcutting --goal-count 5 --json
+```
+
+Include system events:
+
+```text
+python telemetry-viewer\mock_brain_rehearsal.py --task woodcutting --goal-count 5 --human --show-system-events
+python telemetry-viewer\mock_brain_rehearsal.py --task woodcutting --goal-count 5 --json --event-priority all
+```
+
 ## Live Control Panel
 
 The live control panel is a small Windows-friendly Tkinter launcher for the
@@ -1546,14 +1752,15 @@ python telemetry-viewer\live_control_panel.py
 
 Recommended startup order:
 
-1. Start RuneLite Dev
-2. Check Live Setup
-3. Start Live Processor
-4. Start Context Service
-5. Start Human Dashboard or Start Live Inspector
+1. Click `Start Normal Live Stack`.
+2. Wait for compact packets and live setup to report PASS/WARN.
+3. Enable the RuneLite debug overlay only if visual QA is desired.
+4. Use `Stop All` to stop helper processes started by the panel.
 
 Useful buttons:
 
+- `Start Normal Live Stack`: starts RuneLite dev if needed, waits for compact packets, runs setup, and starts the live processor, context service, and human dashboard.
+- `Restart Live Stack`: restarts the live sidecars without killing unrelated processes.
 - `Start RuneLite Dev`: runs `.\gradlew.bat run`.
 - `Check Live Setup`: runs `check_live_setup.py --latest-session`.
 - `Inspect Compact Packets`: runs `inspect_live_packets.py --latest-session --summary`.
@@ -1562,6 +1769,8 @@ Useful buttons:
 - `Start Human Dashboard`: starts the refreshing human dashboard.
 - `Human Dashboard with Events`: starts the dashboard with an explicit recent-event count.
 - `Event Timeline`: shows only recent live timeline events.
+- `Start Mock Brain Rehearsal`: runs the read-only phase classifier against the context service.
+- `Debug Audit Tools`: launches the batch audit pipeline and warns that raw ticks are required.
 - `Start Live Inspector`: starts the browser-based live geometry inspector.
 - `Health Check`: queries `http://127.0.0.1:<port>/health`.
 - `Request Context Once`: POSTs a compact woodcutting context request and prints a readable summary.
@@ -1586,7 +1795,7 @@ arrays, full collision grids, or broad scene dumps.
 The overlay can draw:
 
 - candidate aim points
-- compact bounds or small polygons when already available
+- compact bounds or clickable hull/small polygons when available
 - labels with class, distance, reachability, and liveness
 - a small read-only status panel
 - collision-window summary when enabled
@@ -1611,6 +1820,88 @@ python telemetry-viewer\live_target_processor.py --latest-session --input-source
 If the overlay needs a specific state file, set `Debug overlay state path` to
 the full path of `overlay_debug_state.json` for the active session. Leaving it
 blank uses the current telemetry session when available.
+
+### Clickable Hull Overlay
+
+Clickable hull visualization draws the observed on-screen clickbox/clickable
+area shape for a target when that geometry is available. This is read-only
+visual QA: it does not click, send input, invoke menus, or execute actions.
+
+Overlay geometry settings:
+
+- `Debug overlay geometry mode`: `CLICKABLE_HULL`, `BOUNDS`,
+  `HULL_AND_BOUNDS`, `TILE_POLYGON`, `AIM_ONLY`, or `ALL_GEOMETRY_DEBUG`.
+- `Debug overlay clickable hull`: draw observed clickbox/clickable hull
+  polygons when available.
+- `Debug overlay bounds`: draw rectangle fallback/bounds.
+- `Debug overlay tile polygon`: optional tile polygon debug drawing.
+
+Fallback order:
+
+```text
+clickableHull -> clickboxPolygon -> convexHull -> canvasTilePolygon -> bounds -> aim point
+```
+
+Normal compact packets stay lean. Polygon geometry is included only for capped
+visible projection refs when `compactLiveIncludeClickableHull`,
+`compactLiveIncludeCanvasTilePolygon`, `compactLiveIncludeConvexHull`, or
+`compactLiveIncludeHeavyGeometry` is enabled. The optional RuneLite debug overlay
+also requests the same capped geometry when it is enabled with clickable hull or
+tile-polygon drawing. `compactLiveGeometryMaxRefs` limits how many compact
+projection refs can carry polygons per tick. The live processor also has
+`--overlay-debug-hull-limit`, so it can draw many read-only target boxes while
+copying polygon hulls only for the highest-ranked overlay targets.
+
+To make clickable hulls appear:
+
+1. Enable `Telemetry Debug Overlay`.
+2. Set `Debug overlay geometry mode` to `CLICKABLE_HULL`, `HULL_AND_BOUNDS`, or
+   `ALL_GEOMETRY_DEBUG`.
+3. Keep `Debug overlay clickable hull` enabled.
+4. If hulls are still missing, enable `compactLiveIncludeClickableHull` directly
+   or temporarily enable `compactLiveIncludeHeavyGeometry` for visual QA.
+5. Keep `compactLiveGeometryMaxRefs` modest, such as 50.
+
+Diagnostic command:
+
+```text
+python telemetry-viewer\diagnose_overlay_state.py --latest-session --class-id tree --top 10
+```
+
+The diagnostic reports clickable hull count, clickbox polygon count,
+convex-hull fallback count, bounds-only count, aim-only count, compact geometry
+config/cap counters, geometry source counts, and missing hull reasons for the
+inspected targets. The concrete Java -> compact packet -> Python candidate ->
+overlay state handoff is documented in `docs/clickable_hull_pipeline.md`.
+
+If hulls appear only on odd corner/edge objects, use the geometry diagnostic to
+compare the top candidates, overlay state, and latest compact projection refs:
+
+```text
+python telemetry-viewer\diagnose_overlay_geometry.py --latest-session --class-id tree --top 25
+python telemetry-viewer\diagnose_overlay_state.py --latest-session --class-id tree --top 25
+```
+
+`diagnose_overlay_geometry.py` reports whether each top candidate has a matching
+compact projection ref with hull geometry by `objectKey`, by stable fallback
+keys (`hash`, `id + world tile + plane`, or `id + scene tile + plane`), or no
+matching hull at all. Its summary includes total overlay targets, targets with
+hulls, whether the best and nearest targets have hulls, hull rank buckets
+(`rank1`, `ranks2to5`, `ranks6to10`, `ranks11plus`), the Java compact geometry
+cap, emitted hull refs, matched hull refs, and unused hull refs. It calls out
+whether hulls are reaching top candidates, going to lower-priority targets, being
+limited by Java clickbox availability, or failing candidate matching.
+
+Geometry matching order:
+
+```text
+objectKey -> hash -> id/worldX/worldY/plane/kind -> id/sceneX/sceneY/plane/kind
+```
+
+Bounds fallback can still happen when RuneLite returns no clickbox for that
+object, the target is outside the visible canvas/viewport, the compact geometry
+cap is hit, the overlay hull limit is intentionally lower than the overlay
+target limit, or hull geometry is disabled.
 
 ## Debugging Overlay Reachability Labels
 
