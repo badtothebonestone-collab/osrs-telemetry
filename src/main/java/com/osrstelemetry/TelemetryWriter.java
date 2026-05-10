@@ -124,6 +124,24 @@ public class TelemetryWriter implements Closeable
 		long frameCount;
 		long droppedFrameCount;
 		long deletedFrameCount;
+		boolean compactLivePacketsEnabled;
+		String livePacketDir;
+		String livePacketSchema;
+		int livePacketSegmentMb;
+		long compactLiveRetentionTicks;
+		long compactLiveRetentionBytes;
+		long compactLiveRetentionSegments;
+		int compactLiveQueueSize;
+		long livePacketsWritten;
+		long livePacketsDropped;
+		long livePacketWriteErrors;
+		long livePacketLastWriteMillis;
+		long livePacketSegmentCount;
+		long livePacketTotalBytes;
+		long livePacketSegmentsPruned;
+		long livePacketRetentionBytes;
+		long livePacketRetentionSegments;
+		String livePacketActiveSegment;
 		int screenshotEveryTicks;
 		String screenshotFormat;
 		int maxFrameStorageMb;
@@ -162,6 +180,12 @@ public class TelemetryWriter implements Closeable
 	private final long frameCleanupIntervalMillis;
 	private final String frameCaptureMode;
 	private final boolean allowScreenRectangleFallback;
+	private final boolean compactLivePacketsEnabled;
+	private final int compactLiveSegmentMb;
+	private final long compactLiveRetentionTicks;
+	private final long compactLiveRetentionBytes;
+	private final long compactLiveRetentionSegments;
+	private final int compactLiveQueueSize;
 	private final AtomicLong droppedRecords = new AtomicLong();
 	private final AtomicLong droppedFrameCount = new AtomicLong();
 	private final AtomicLong deletedFrameCount = new AtomicLong();
@@ -170,12 +194,14 @@ public class TelemetryWriter implements Closeable
 	private final Map<Integer, String> npcDictionary = new ConcurrentHashMap<>();
 	private final Map<Integer, String> objectDictionary = new ConcurrentHashMap<>();
 	private final Manifest manifest = new Manifest();
+	private LivePacketWriter livePacketWriter;
 
 	private volatile boolean running = false;
 	private Thread worker;
 	private BufferedWriter tickWriter;
 	private BufferedWriter eventWriter;
 	private BufferedWriter frameIndexWriter;
+	private long livePacketStartupErrors;
 	private Path currentTickSegment;
 	private Path currentEventSegment;
 	private long currentTickBytes;
@@ -202,7 +228,13 @@ public class TelemetryWriter implements Closeable
 			boolean deleteOldFrames,
 			int maxFrameQueueSize,
 			String frameCaptureMode,
-			boolean allowScreenRectangleFallback)
+			boolean allowScreenRectangleFallback,
+			boolean compactLivePacketsEnabled,
+			int compactLiveSegmentMb,
+			long compactLiveRetentionTicks,
+			long compactLiveRetentionBytes,
+			long compactLiveRetentionSegments,
+			int compactLiveQueueSize)
 	{
 		this.gson = gson;
 		this.frameQueue = new LinkedBlockingQueue<>(Math.max(1, maxFrameQueueSize));
@@ -232,6 +264,12 @@ public class TelemetryWriter implements Closeable
 		this.frameCleanupIntervalMillis = Duration.ofSeconds(Math.max(1L, frameCleanupIntervalSeconds)).toMillis();
 		this.frameCaptureMode = normalizeFrameCaptureMode(frameCaptureMode);
 		this.allowScreenRectangleFallback = allowScreenRectangleFallback;
+		this.compactLivePacketsEnabled = compactLivePacketsEnabled;
+		this.compactLiveSegmentMb = Math.max(1, compactLiveSegmentMb);
+		this.compactLiveRetentionTicks = Math.max(0L, compactLiveRetentionTicks);
+		this.compactLiveRetentionBytes = Math.max(0L, compactLiveRetentionBytes);
+		this.compactLiveRetentionSegments = Math.max(0L, compactLiveRetentionSegments);
+		this.compactLiveQueueSize = Math.max(1, compactLiveQueueSize);
 	}
 
 	public void start() throws IOException
@@ -253,10 +291,40 @@ public class TelemetryWriter implements Closeable
 		manifest.frameCleanupIntervalSeconds = (int) (frameCleanupIntervalMillis / 1000L);
 		manifest.frameCaptureMode = frameCaptureMode;
 		manifest.allowScreenRectangleFallback = allowScreenRectangleFallback;
+		manifest.compactLivePacketsEnabled = compactLivePacketsEnabled;
+		manifest.livePacketDir = compactLivePacketsEnabled ? LivePacketWriter.LIVE_PACKETS_DIR : null;
+		manifest.livePacketSchema = compactLivePacketsEnabled ? LivePacket.ENVELOPE_SCHEMA : null;
+		manifest.livePacketSegmentMb = compactLiveSegmentMb;
+		manifest.compactLiveRetentionTicks = compactLiveRetentionTicks;
+		manifest.compactLiveRetentionBytes = compactLiveRetentionBytes;
+		manifest.compactLiveRetentionSegments = compactLiveRetentionSegments;
+		manifest.compactLiveQueueSize = compactLiveQueueSize;
 
 		openTickSegment();
 		openEventSegment();
 		openFrameIndex();
+		if (compactLivePacketsEnabled)
+		{
+			try
+			{
+				livePacketWriter = new LivePacketWriter(
+						sessionId,
+						sessionDir,
+						gson,
+					compactLiveSegmentMb,
+					compactLiveRetentionTicks,
+					compactLiveRetentionBytes,
+					compactLiveRetentionSegments,
+					compactLiveQueueSize);
+				livePacketWriter.start();
+			}
+			catch (IOException e)
+			{
+				livePacketWriter = null;
+				livePacketStartupErrors++;
+				log.warn("Compact live packet writer failed to start; continuing with raw telemetry only", e);
+			}
+		}
 		writeManifest();
 
 		running = true;
@@ -278,6 +346,23 @@ public class TelemetryWriter implements Closeable
 	public void enqueueEvent(String json)
 	{
 		enqueue(new QueuedLine(STREAM_EVENTS, json));
+	}
+
+	public boolean enqueueLivePacket(String packetType, long tick, String timestampUtc, Object payload)
+	{
+		LivePacketWriter liveWriter = livePacketWriter;
+
+		if (liveWriter == null)
+		{
+			return false;
+		}
+
+		return liveWriter.enqueue(packetType, tick, timestampUtc, payload);
+	}
+
+	public boolean isCompactLivePacketsEnabled()
+	{
+		return livePacketWriter != null;
 	}
 
 	public boolean enqueueFrame(String relativePath, BufferedImage image)
@@ -376,6 +461,60 @@ public class TelemetryWriter implements Closeable
 		return droppedFrameCount.get();
 	}
 
+	public int getLivePacketQueueDepth()
+	{
+		LivePacketWriter liveWriter = livePacketWriter;
+		return liveWriter == null ? 0 : liveWriter.getQueueDepth();
+	}
+
+	public long getLivePacketsDropped()
+	{
+		LivePacketWriter liveWriter = livePacketWriter;
+		return liveWriter == null ? 0L : liveWriter.getDroppedPackets();
+	}
+
+	public long getLivePacketsWritten()
+	{
+		LivePacketWriter liveWriter = livePacketWriter;
+		return liveWriter == null ? 0L : liveWriter.getWrittenPackets();
+	}
+
+	public long getLivePacketWriteErrors()
+	{
+		LivePacketWriter liveWriter = livePacketWriter;
+		return livePacketStartupErrors + (liveWriter == null ? 0L : liveWriter.getWriteErrors());
+	}
+
+	public long getLivePacketLastWriteMillis()
+	{
+		LivePacketWriter liveWriter = livePacketWriter;
+		return liveWriter == null ? -1L : liveWriter.getLastWriteMillis();
+	}
+
+	public long getLivePacketSegmentCount()
+	{
+		LivePacketWriter liveWriter = livePacketWriter;
+		return liveWriter == null ? 0L : liveWriter.getSegmentCount();
+	}
+
+	public long getLivePacketTotalBytes()
+	{
+		LivePacketWriter liveWriter = livePacketWriter;
+		return liveWriter == null ? 0L : liveWriter.getTotalBytes();
+	}
+
+	public long getLivePacketSegmentsPruned()
+	{
+		LivePacketWriter liveWriter = livePacketWriter;
+		return liveWriter == null ? 0L : liveWriter.getPrunedSegments();
+	}
+
+	public String getLivePacketActiveSegment()
+	{
+		LivePacketWriter liveWriter = livePacketWriter;
+		return liveWriter == null ? null : liveWriter.getActiveSegmentName();
+	}
+
 	public void rememberItem(int id, String name)
 	{
 		rememberDictionaryEntry(itemDictionary, id, name);
@@ -456,6 +595,7 @@ public class TelemetryWriter implements Closeable
 			closeWriter(tickWriter, "ticks");
 			closeWriter(eventWriter, "events");
 			closeWriter(frameIndexWriter, "frame index");
+			closeLivePacketWriter();
 			manifest.active = false;
 			manifest.endedAtUtc = Instant.now().toString();
 			manifest.droppedRecords = droppedRecords.get();
@@ -708,12 +848,23 @@ public class TelemetryWriter implements Closeable
 	public void close()
 	{
 		running = false;
+		closeLivePacketWriter();
 
 		if (worker != null)
 		{
 			worker.interrupt();
 			worker = null;
 		}
+	}
+
+	private void closeLivePacketWriter()
+	{
+		if (livePacketWriter == null)
+		{
+			return;
+		}
+
+		livePacketWriter.close();
 	}
 
 	private void drainQueue()
@@ -832,6 +983,16 @@ public class TelemetryWriter implements Closeable
 		manifest.droppedRecords = droppedRecords.get();
 		manifest.droppedFrameCount = droppedFrameCount.get();
 		manifest.deletedFrameCount = deletedFrameCount.get();
+		manifest.livePacketsWritten = getLivePacketsWritten();
+		manifest.livePacketsDropped = getLivePacketsDropped();
+		manifest.livePacketWriteErrors = getLivePacketWriteErrors();
+		manifest.livePacketLastWriteMillis = getLivePacketLastWriteMillis();
+		manifest.livePacketSegmentCount = getLivePacketSegmentCount();
+		manifest.livePacketTotalBytes = getLivePacketTotalBytes();
+		manifest.livePacketSegmentsPruned = getLivePacketSegmentsPruned();
+		manifest.livePacketRetentionBytes = compactLiveRetentionBytes;
+		manifest.livePacketRetentionSegments = compactLiveRetentionSegments;
+		manifest.livePacketActiveSegment = getLivePacketActiveSegment();
 		Files.writeString(
 				manifestFile,
 				gson.toJson(manifest),

@@ -388,6 +388,16 @@ def combine_status(current: str, incoming: str) -> str:
 def diagnostics_payload(context: dict, mode: str) -> dict:
     status = context.get("status") or {}
     performance = context.get("performance") or {}
+    input_source = {
+        "inputSourceRequested": status.get("inputSourceRequested"),
+        "inputSourceActive": status.get("inputSourceActive"),
+        "defaultLiveInputPreference": status.get("defaultLiveInputPreference"),
+        "compactPacketsAvailable": status.get("compactPacketsAvailable"),
+        "compactPacketsRecent": status.get("compactPacketsRecent"),
+        "inputFallbackReason": status.get("inputFallbackReason"),
+        "latestCompactPacketSequence": status.get("compactPacketLastSequence") or status.get("compactPacketLatestSequence"),
+        "latestCompactPacketSegment": status.get("compactPacketLatestSegment"),
+    }
     payload = {
         "activeProfile": status.get("profile"),
         "candidateCount": status.get("candidateCount"),
@@ -401,6 +411,7 @@ def diagnostics_payload(context: dict, mode: str) -> dict:
             for key in ("avgTotalMs", "p95TotalMs", "maxTotalMs", "budgetExceededCount", "recommendations")
             if key in performance
         },
+        "inputSource": input_source,
         "cacheStats": context.get("cacheStats") or {},
     }
     return payload
@@ -625,6 +636,10 @@ def build_context_response(
             response["status"] = "WARN"
     if status_doc.get("livenessMode") == "off":
         response["missingCapabilities"] = sorted(set(response["missingCapabilities"] + ["realtimeLiveness"]))
+    if status_doc.get("inputSourceActive") == "raw-ticks" and status_doc.get("inputSourceRequested") == "auto":
+        response["warnings"] = sorted(
+            set(response["warnings"] + ["live processor is using raw tick fallback; compact packets are not active."])
+        )
     response["serviceTimingMillis"] = round((time.perf_counter() - started) * 1000.0, 3)
     return enforce_response_size(response, max_response_bytes, response_mode)
 
@@ -679,6 +694,9 @@ def status_payload(context: dict) -> dict:
         "liveProcessorFreshness": health_payload(context).get("liveFreshness"),
         "activeProfile": status_doc.get("profile") or context_index.get("activeProfile"),
         "candidateCount": len(context.get("candidates") or []),
+        "inputSourceActive": status_doc.get("inputSourceActive"),
+        "compactPacketsAvailable": status_doc.get("compactPacketsAvailable"),
+        "inputFallbackReason": status_doc.get("inputFallbackReason"),
         "sourceSceneKnowledgeComplete": status_doc.get("sourceSceneKnowledgeComplete"),
         "sourceCapHit": status_doc.get("sourceCapHit"),
         "budgetExceeded": status_doc.get("budgetExceeded"),

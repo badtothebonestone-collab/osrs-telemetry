@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import build_world_target_geometry as world_builder
 import inspect_target_geometry as geometry
+import live_packet_reader
 import select_target_candidates as candidate_builder
 from telemetry_paths import find_newest_session, get_sessions_dir, list_tick_files
 
@@ -32,11 +33,23 @@ DEFAULT_TARGET_PROFILES_PATH = Path(__file__).resolve().with_name("target_profil
 DEFAULT_WRITE_RETRY_ATTEMPTS = 10
 DEFAULT_WRITE_RETRY_DELAY_SECONDS = 0.01
 MAX_WRITE_RETRY_DELAY_SECONDS = 0.25
+COMPACT_PACKET_RECENT_SECONDS = 120.0
 WORLD_TARGET_EMIT_MODES = {"none", "candidates", "profile", "visible", "full"}
 WORLD_TARGET_TYPES = {"npc", "player", "sceneObject", "groundItem", "tile"}
 LATENCY_MODES = {"realtime", "complete"}
 CANDIDATE_OUTPUT_WINDOWS = {"latest", "rolling"}
 LIVENESS_MODES = {"off", "basic", "delta", "full"}
+INPUT_SOURCES = {"raw-ticks", "compact-packets", "auto"}
+COMPACT_PACKET_SOURCE = "compact-packets"
+RAW_TICK_SOURCE = "raw-ticks"
+COMPACT_PACKET_TYPES = {
+    "baseline": "live_baseline_packet.v1",
+    "sceneDelta": "live_scene_delta_packet.v1",
+    "projection": "live_projection_packet.v1",
+    "inventory": "live_inventory_packet.v1",
+    "activity": "live_activity_packet.v1",
+    "writerHealth": "live_writer_health_packet.v1",
+}
 ALL_LIVE_TARGET_TYPES = WORLD_TARGET_TYPES | {
     "inventorySlot",
     "equipmentSlot",
@@ -126,6 +139,70 @@ def resolve_session(args) -> Path:
         raise RuntimeError(f"No sessions found in: {get_sessions_dir(args.sessions_dir)}")
 
     return session.resolve()
+
+
+def raw_ticks_available(session: Path) -> bool:
+    return bool(list_tick_files(session))
+
+
+def compact_packet_state(session: Path) -> dict:
+    index = live_packet_reader.read_index(session)
+    index_path = live_packet_reader.live_packet_index_path(session)
+    latest = live_packet_reader.latest_segment_path(session, index=index)
+    if latest is None:
+        files = live_packet_reader.list_live_packet_files(session, latest_only=True, use_index=False)
+        latest = files[-1] if files else None
+    age_seconds = None
+    if latest is not None:
+        try:
+            age_seconds = max(0.0, time.time() - latest.stat().st_mtime)
+        except OSError:
+            age_seconds = None
+    available = latest is not None and latest.exists()
+    recent = bool(available and age_seconds is not None and age_seconds <= COMPACT_PACKET_RECENT_SECONDS)
+    return {
+        "available": available,
+        "recent": recent,
+        "indexPath": str(index_path),
+        "indexExists": index_path.exists(),
+        "latestSegment": str(latest) if latest else None,
+        "latestTick": index.get("latestTick") if isinstance(index, dict) else None,
+        "latestSequence": index.get("latestSequence") if isinstance(index, dict) else None,
+        "ageSeconds": age_seconds,
+    }
+
+
+def compact_packets_available(session: Path) -> bool:
+    return bool(compact_packet_state(session).get("available"))
+
+
+def choose_input_source(session: Path, requested: str) -> tuple[str, bool, bool, str | None]:
+    compact_state = compact_packet_state(session)
+    compact_available = bool(compact_state.get("available"))
+    compact_recent = bool(compact_state.get("recent"))
+    raw_available = raw_ticks_available(session)
+
+    if requested == RAW_TICK_SOURCE:
+        reason = None if raw_available else "raw tick files are not available"
+        return RAW_TICK_SOURCE, compact_available, raw_available, reason
+
+    if requested == COMPACT_PACKET_SOURCE:
+        reason = None if compact_available else "compact live packets are not available"
+        return COMPACT_PACKET_SOURCE, compact_available, raw_available, reason
+
+    if compact_available and compact_recent:
+        return COMPACT_PACKET_SOURCE, compact_available, raw_available, None
+
+    if compact_available and raw_available:
+        return RAW_TICK_SOURCE, compact_available, raw_available, "compact live packets are stale; falling back to raw tick JSONL"
+
+    if compact_available:
+        return COMPACT_PACKET_SOURCE, compact_available, raw_available, "compact live packets are stale, but raw tick fallback is unavailable"
+
+    if raw_available:
+        return RAW_TICK_SOURCE, compact_available, raw_available, "compact live packets unavailable; falling back to raw tick JSONL"
+
+    return RAW_TICK_SOURCE, compact_available, raw_available, "neither compact live packets nor raw tick JSONL were found"
 
 
 def live_output_dir(session: Path) -> Path:
@@ -522,6 +599,447 @@ class TickJsonlTailer:
         return records
 
 
+def packet_tick(packet: dict) -> int | None:
+    tick = packet.get("tick")
+    return tick if isinstance(tick, int) else None
+
+
+def packet_sequence(packet: dict) -> int:
+    sequence = packet.get("sequence")
+    return sequence if isinstance(sequence, int) else -1
+
+
+def normalize_compact_point(point: dict | None) -> dict | None:
+    if not isinstance(point, dict):
+        return None
+    x = point.get("x", point.get("canvasX"))
+    y = point.get("y", point.get("canvasY"))
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    return {"x": x, "y": y}
+
+
+def normalize_compact_scene_object(value: dict) -> dict:
+    record = dict(value)
+
+    if not record.get("objectName") and record.get("name"):
+        record["objectName"] = record.get("name")
+    if not record.get("objectNameSource") and record.get("nameSource"):
+        record["objectNameSource"] = record.get("nameSource")
+    if not record.get("kind") and record.get("layer"):
+        record["kind"] = record.get("layer")
+
+    aim = record.get("aimPoint") if isinstance(record.get("aimPoint"), dict) else None
+    point = normalize_compact_point(aim)
+    if point:
+        record.setdefault("canvasLocation", point)
+        record.setdefault("canvasCenter", point)
+
+    summary = record.get("geometrySummary") if isinstance(record.get("geometrySummary"), dict) else {}
+    if isinstance(summary.get("clickboxBounds"), dict):
+        record.setdefault("clickboxBounds", summary.get("clickboxBounds"))
+    if isinstance(summary.get("convexHullBounds"), dict):
+        record.setdefault("convexHullBounds", summary.get("convexHullBounds"))
+
+    if record.get("geometryAvailable") is None:
+        record["geometryAvailable"] = bool(point or record.get("clickboxBounds") or record.get("convexHullBounds"))
+    if record.get("onScreen") is None:
+        record["onScreen"] = bool(record.get("geometryAvailable"))
+
+    return record
+
+
+def normalize_compact_deltas(deltas: dict | None) -> dict:
+    deltas = deltas if isinstance(deltas, dict) else {}
+    normalized = {}
+    for field_name in ("newObjects", "updatedObjects", "despawnedObjects"):
+        normalized[field_name] = [
+            normalize_compact_scene_object(item)
+            for item in deltas.get(field_name) or []
+            if isinstance(item, dict)
+        ]
+    return normalized
+
+
+def compact_inventory_container(container) -> dict | list:
+    if isinstance(container, dict):
+        return container
+    return []
+
+
+def merge_player_status(tick: dict, player: dict | None) -> None:
+    if not isinstance(player, dict):
+        return
+
+    local_player = tick.setdefault("localPlayer", {})
+    status = tick.setdefault("status", {})
+    for key in ("worldX", "worldY", "plane", "localX", "localY", "sceneX", "sceneY", "animation", "poseAnimation", "combatLevel"):
+        if player.get(key) is not None:
+            local_player[key] = player.get(key)
+
+    for key in (
+        "runEnergyRaw",
+        "runEnergyPercent",
+        "weight",
+        "hitpointsBoosted",
+        "hitpointsReal",
+        "localHealthRatio",
+        "localHealthScale",
+    ):
+        if player.get(key) is not None:
+            status[key] = player.get(key)
+
+    interacting = player.get("interacting")
+    if isinstance(interacting, dict):
+        status["interactingType"] = interacting.get("type")
+        status["interactingIndex"] = interacting.get("index")
+        status["interactingId"] = interacting.get("id")
+        status["interactingName"] = interacting.get("name")
+        status["interactingWorldX"] = interacting.get("worldX")
+        status["interactingWorldY"] = interacting.get("worldY")
+        status["interactingPlane"] = interacting.get("plane")
+
+
+def source_capture_summary_from_compact(source: dict | None) -> dict | None:
+    if not isinstance(source, dict):
+        return None
+    fields = {
+        "sceneObjectsSeen": source.get("sceneObjectsSeen"),
+        "sceneObjectsCaptured": source.get("sceneObjectsCaptured"),
+        "sceneObjectsSkippedByCap": source.get("sceneObjectsSkippedByCap"),
+        "sceneObjectCapHit": source.get("sceneObjectCapHit"),
+    }
+    if not any(value is not None for value in fields.values()):
+        return None
+    return fields
+
+
+def compact_packets_to_tick(packets: list[dict]) -> dict | None:
+    packets = [packet for packet in packets if isinstance(packet, dict)]
+    if not packets:
+        return None
+
+    packets.sort(key=packet_sequence)
+    latest = packets[-1]
+    tick_id = packet_tick(latest)
+    if tick_id is None:
+        return None
+
+    by_type = {}
+    for packet in packets:
+        packet_type = packet.get("packetType")
+        if isinstance(packet_type, str):
+            by_type[packet_type] = packet
+
+    baseline = by_type.get(COMPACT_PACKET_TYPES["baseline"], {}).get("payload") or {}
+    scene_delta = by_type.get(COMPACT_PACKET_TYPES["sceneDelta"], {}).get("payload") or {}
+    projection = by_type.get(COMPACT_PACKET_TYPES["projection"], {}).get("payload") or {}
+    inventory = by_type.get(COMPACT_PACKET_TYPES["inventory"], {}).get("payload") or {}
+    activity = by_type.get(COMPACT_PACKET_TYPES["activity"], {}).get("payload") or {}
+    writer_health = by_type.get(COMPACT_PACKET_TYPES["writerHealth"], {}).get("payload") or {}
+
+    timestamp = next((packet.get("timestampUtc") for packet in reversed(packets) if isinstance(packet.get("timestampUtc"), str)), None)
+    session_id = next((packet.get("sessionId") for packet in reversed(packets) if packet.get("sessionId")), None)
+    tick = {
+        "schemaVersion": "compact_live_packet_synthetic_tick.v1",
+        "sessionId": session_id,
+        "tickId": tick_id,
+        "timestampUtc": timestamp,
+        "gameState": baseline.get("gameState"),
+        "_inputSource": COMPACT_PACKET_SOURCE,
+        "_compactPacketSequence": packet_sequence(latest),
+        "_compactPacketTypes": sorted(by_type.keys()),
+    }
+
+    merge_player_status(tick, baseline.get("player"))
+    merge_player_status(tick, activity)
+
+    camera = baseline.get("cameraViewport") if isinstance(baseline.get("cameraViewport"), dict) else {}
+    for key in (
+        "cameraX",
+        "cameraY",
+        "cameraZ",
+        "cameraPitch",
+        "cameraYaw",
+        "viewportWidth",
+        "viewportHeight",
+        "viewportXOffset",
+        "viewportYOffset",
+        "canvasWidth",
+        "canvasHeight",
+    ):
+        if camera.get(key) is not None:
+            tick[key] = camera.get(key)
+
+    if baseline.get("latestFramePath"):
+        tick["framePath"] = baseline.get("latestFramePath")
+    if baseline.get("frameCaptureStatus"):
+        tick["frameCaptureStatus"] = baseline.get("frameCaptureStatus")
+    if isinstance(baseline.get("source"), dict):
+        tick["_sourceCompleteness"] = baseline.get("source")
+
+    scene_capture = scene_delta.get("sceneCaptureSummary") if isinstance(scene_delta.get("sceneCaptureSummary"), dict) else None
+    if not scene_capture:
+        scene_capture = source_capture_summary_from_compact(baseline.get("source"))
+        if scene_capture and baseline.get("sceneCaptureMode"):
+            scene_capture["sceneCaptureMode"] = baseline.get("sceneCaptureMode")
+    if scene_capture:
+        tick["sceneCaptureSummary"] = scene_capture
+
+    if isinstance(scene_delta.get("sceneIndexSummary"), dict):
+        tick["sceneIndexSummary"] = scene_delta.get("sceneIndexSummary")
+    if isinstance(scene_delta.get("sceneObjectDeltas"), dict):
+        tick["sceneObjectDeltas"] = normalize_compact_deltas(scene_delta.get("sceneObjectDeltas"))
+
+    if isinstance(projection.get("sceneProjectionSummary"), dict):
+        tick["sceneProjectionSummary"] = projection.get("sceneProjectionSummary")
+    visible_refs = projection.get("visibleObjectRefs")
+    if isinstance(visible_refs, list):
+        tick["visibleSceneObjectRefs"] = [
+            normalize_compact_scene_object(item)
+            for item in visible_refs
+            if isinstance(item, dict)
+        ]
+
+    if isinstance(inventory, dict):
+        tick["inventory"] = compact_inventory_container(inventory.get("inventory"))
+        tick["equipment"] = compact_inventory_container(inventory.get("equipment"))
+
+    if isinstance(writer_health, dict):
+        tick["writerQueueSize"] = writer_health.get("rawWriterQueueDepth")
+        tick["writerDroppedRecords"] = writer_health.get("droppedRawRecords")
+        tick["_writerHealth"] = writer_health
+
+    tick.setdefault("npcs", [])
+    tick.setdefault("players", [])
+    tick.setdefault("groundItems", [])
+    return tick
+
+
+class CompactPacketTailer:
+    def __init__(self, session: Path):
+        self.session = session
+        self.states: dict[Path, TailState] = {}
+        self.malformed_counts: Counter[str] = Counter()
+        self.malformed_total = 0
+        self.read_errors: list[str] = []
+        self.last_file_discover_millis = 0.0
+        self.last_tail_read_millis = 0.0
+        self.last_line_split_millis = 0.0
+        self.last_json_parse_millis = 0.0
+        self.last_raw_records_seen = 0
+        self.last_raw_records_fully_parsed = 0
+        self.last_raw_records_skipped_before_parse = 0
+        self.last_raw_records_light_parsed = 0
+        self.last_coalesced_before_parse = 0
+        self.last_newest_tick_selected = None
+        self.last_file_offsets_advanced_past_skipped_records = False
+        self.last_compact_packets_seen = 0
+        self.last_compact_packets_processed = 0
+        self.last_compact_packets_coalesced = 0
+        self.last_compact_packet_last_sequence = None
+        self.last_compact_packet_latest_segment = None
+        self.last_compact_packet_rollover_count = 0
+        self.last_compact_packet_read_errors = 0
+        self._current_latest_segment: Path | None = None
+
+    def reset_poll_stats(self) -> None:
+        self.last_file_discover_millis = 0.0
+        self.last_tail_read_millis = 0.0
+        self.last_line_split_millis = 0.0
+        self.last_json_parse_millis = 0.0
+        self.last_raw_records_seen = 0
+        self.last_raw_records_fully_parsed = 0
+        self.last_raw_records_skipped_before_parse = 0
+        self.last_raw_records_light_parsed = 0
+        self.last_coalesced_before_parse = 0
+        self.last_newest_tick_selected = None
+        self.last_file_offsets_advanced_past_skipped_records = False
+        self.last_compact_packets_seen = 0
+        self.last_compact_packets_processed = 0
+        self.last_compact_packets_coalesced = 0
+        self.last_compact_packet_read_errors = 0
+
+    def files(self) -> list[Path]:
+        return live_packet_reader.list_live_packet_files(self.session)
+
+    def partial_line_files(self) -> list[str]:
+        return [str(path) for path, state in self.states.items() if state.pending]
+
+    def _note_latest_segment(self) -> None:
+        latest = live_packet_reader.latest_segment_path(self.session)
+        self.last_compact_packet_latest_segment = str(latest) if latest else None
+        if latest and self._current_latest_segment and latest != self._current_latest_segment:
+            self.last_compact_packet_rollover_count += 1
+        if latest:
+            self._current_latest_segment = latest
+
+    def seek_to_end(self) -> None:
+        self._note_latest_segment()
+        for path in self.files():
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            self.states[path] = TailState(offset=size)
+
+    def _records_from_packet_groups(
+        self,
+        packet_groups: dict[int, list[dict]],
+        packet_sources: dict[int, tuple[Path, int]],
+        *,
+        realtime: bool = False,
+        max_records: int | None = None,
+    ) -> list[tuple[Path, int, dict]]:
+        records = []
+        tick_ids = sorted(packet_groups)
+        self.last_raw_records_seen = len(tick_ids)
+
+        keep_ids = tick_ids
+        if realtime and max_records and max_records > 0 and len(tick_ids) > max_records:
+            skipped_ids = tick_ids[:-max_records]
+            keep_ids = tick_ids[-max_records:]
+            self.last_raw_records_skipped_before_parse = len(skipped_ids)
+            self.last_coalesced_before_parse = len(skipped_ids)
+            self.last_compact_packets_coalesced = sum(len(packet_groups[tick_id]) for tick_id in skipped_ids)
+            self.last_file_offsets_advanced_past_skipped_records = True
+
+        for tick_id in keep_ids:
+            packets = packet_groups.get(tick_id) or []
+            tick = compact_packets_to_tick(packets)
+            if not tick:
+                continue
+            path, line_number = packet_sources.get(tick_id, (live_packet_reader.live_packet_dir(self.session), 0))
+            records.append((path, line_number, tick))
+
+        self.last_raw_records_fully_parsed = len(records)
+        self.last_compact_packets_processed = sum(len(packet_groups[tick_id]) for tick_id in keep_ids)
+        selected_ids = [tick_id_for(record) for _path, _line_number, record in records]
+        selected_ids = [tick_id for tick_id in selected_ids if tick_id is not None]
+        self.last_newest_tick_selected = max(selected_ids) if selected_ids else None
+        return records
+
+    def read_existing_records(self, limit: int) -> list[tuple[Path, int, dict]]:
+        if limit <= 0:
+            return []
+
+        packet_groups: dict[int, list[dict]] = {}
+        packet_sources: dict[int, tuple[Path, int]] = {}
+        for result in live_packet_reader.iter_live_packets(self.files(), ignore_partial_last_line=True):
+            if result.error:
+                self.malformed_counts[str(result.path)] += 1
+                self.malformed_total += 1
+                continue
+            packet = result.record
+            if not isinstance(packet, dict) or packet.get("schema") != live_packet_reader.PACKET_SCHEMA:
+                continue
+            self.last_compact_packets_seen += 1
+            tick = packet_tick(packet)
+            if tick is None:
+                continue
+            packet_groups.setdefault(tick, []).append(packet)
+            packet_sources[tick] = (result.path, result.line_number)
+            sequence = packet.get("sequence")
+            if isinstance(sequence, int):
+                self.last_compact_packet_last_sequence = sequence
+
+        if len(packet_groups) > limit:
+            keep = set(sorted(packet_groups)[-limit:])
+            packet_groups = {tick: packets for tick, packets in packet_groups.items() if tick in keep}
+            packet_sources = {tick: source for tick, source in packet_sources.items() if tick in keep}
+        return self._records_from_packet_groups(packet_groups, packet_sources)
+
+    def read_new_records(self, *, realtime: bool = False, max_records: int | None = None) -> list[tuple[Path, int, dict]]:
+        self.reset_poll_stats()
+        packet_groups: dict[int, list[dict]] = {}
+        packet_sources: dict[int, tuple[Path, int]] = {}
+        complete_lines: list[tuple[Path, int, str]] = []
+
+        started = time.perf_counter()
+        files = self.files()
+        self._note_latest_segment()
+        self.last_file_discover_millis = (time.perf_counter() - started) * 1000.0
+
+        known_files = set(files)
+        for path in list(self.states):
+            if path not in known_files and not path.exists():
+                self.states.pop(path, None)
+
+        for path in files:
+            state = self.states.setdefault(path, TailState())
+            try:
+                size = path.stat().st_size
+            except OSError as error:
+                self.read_errors.append(f"could not stat {path}: {error}")
+                self.last_compact_packet_read_errors += 1
+                continue
+
+            if size < state.offset:
+                state.offset = 0
+                state.pending = ""
+                state.line_number = 0
+
+            if size == state.offset:
+                continue
+
+            started = time.perf_counter()
+            try:
+                with path.open("rb") as file:
+                    file.seek(state.offset)
+                    data = file.read()
+            except OSError as error:
+                self.read_errors.append(f"could not read {path}: {error}")
+                self.last_compact_packet_read_errors += 1
+                continue
+            self.last_tail_read_millis += (time.perf_counter() - started) * 1000.0
+            state.offset += len(data)
+
+            split_started = time.perf_counter()
+            text = state.pending + data.decode("utf-8", errors="replace")
+            last_newline = max(text.rfind("\n"), text.rfind("\r"))
+            if last_newline < 0:
+                state.pending = text
+                self.last_line_split_millis += (time.perf_counter() - split_started) * 1000.0
+                continue
+
+            complete = text[: last_newline + 1]
+            state.pending = text[last_newline + 1 :]
+            for raw_line in complete.splitlines():
+                state.line_number += 1
+                line = raw_line.strip()
+                if line:
+                    complete_lines.append((path, state.line_number, line))
+            self.last_line_split_millis += (time.perf_counter() - split_started) * 1000.0
+
+        self.last_compact_packets_seen = len(complete_lines)
+        for path, line_number, line in complete_lines:
+            parse_started = time.perf_counter()
+            try:
+                packet = json.loads(line)
+            except json.JSONDecodeError:
+                self.last_json_parse_millis += (time.perf_counter() - parse_started) * 1000.0
+                self.malformed_counts[str(path)] += 1
+                self.malformed_total += 1
+                continue
+            self.last_json_parse_millis += (time.perf_counter() - parse_started) * 1000.0
+            if not isinstance(packet, dict) or packet.get("schema") != live_packet_reader.PACKET_SCHEMA:
+                self.malformed_counts[str(path)] += 1
+                self.malformed_total += 1
+                continue
+            tick = packet_tick(packet)
+            if tick is None:
+                self.malformed_counts[str(path)] += 1
+                self.malformed_total += 1
+                continue
+            packet_groups.setdefault(tick, []).append(packet)
+            packet_sources[tick] = (path, line_number)
+            sequence = packet.get("sequence")
+            if isinstance(sequence, int):
+                self.last_compact_packet_last_sequence = sequence
+
+        return self._records_from_packet_groups(packet_groups, packet_sources, realtime=realtime, max_records=max_records)
+
+
 def parse_tick_line(path: Path, line: str, malformed: Counter[str]) -> dict | None:
     text = line.strip()
     if not text:
@@ -651,8 +1169,24 @@ def source_schema_for_tick(tick: dict) -> str:
 def source_scene_summary(ticks: list[dict]) -> dict:
     summaries = [tick.get("sceneCaptureSummary") for tick in ticks if isinstance(tick.get("sceneCaptureSummary"), dict)]
     index_summaries = [tick.get("sceneIndexSummary") for tick in ticks if isinstance(tick.get("sceneIndexSummary"), dict)]
+    explicit_sources = [tick.get("_sourceCompleteness") for tick in ticks if isinstance(tick.get("_sourceCompleteness"), dict)]
 
     if not summaries and not index_summaries:
+        if explicit_sources:
+            cap_hit = any(source.get("sourceCapHit") is True for source in explicit_sources)
+            complete_values = [source.get("sourceSceneKnowledgeComplete") for source in explicit_sources]
+            complete = all(value is True for value in complete_values) if complete_values else None
+            skipped = sum(int(source.get("sceneObjectsSkippedByCap") or 0) for source in explicit_sources)
+            return {
+                "sourceSceneKnowledgeComplete": complete,
+                "sourceCapHit": cap_hit,
+                "selectedTicksSkippedByCap": sum(1 for source in explicit_sources if source.get("sourceCapHit") is True or int(source.get("sceneObjectsSkippedByCap") or 0) > 0),
+                "sceneObjectsSeen": sum(int(source.get("sceneObjectsSeen") or 0) for source in explicit_sources),
+                "sceneObjectsCaptured": sum(int(source.get("sceneObjectsCaptured") or 0) for source in explicit_sources),
+                "sceneObjectsSkippedByCap": skipped,
+                "staticSceneIndexObjectCount": None,
+                "visibleSceneObjectRefsCount": sum(raw_count(tick.get("visibleSceneObjectRefs")) for tick in ticks),
+            }
         return {
             "sourceSceneKnowledgeComplete": None,
             "sourceCapHit": None,
@@ -1464,6 +1998,17 @@ def inventory_summary(tick: dict) -> dict:
         if item_id not in (None, -1, 0):
             filled += 1
             signature_parts.append(f"{item_id}:{quantity}")
+    if isinstance(inventory, dict):
+        filled_value = inventory.get("filledSlots")
+        free_value = inventory.get("freeSlots")
+        item_count_value = inventory.get("itemCount")
+        signature_value = inventory.get("signature")
+        return {
+            "itemCount": item_count_value if isinstance(item_count_value, int) else filled,
+            "filledSlots": filled_value if isinstance(filled_value, int) else filled,
+            "freeSlots": free_value if isinstance(free_value, int) else (max(0, 28 - filled) if items else None),
+            "signature": signature_value if isinstance(signature_value, str) and signature_value else ("|".join(signature_parts) if signature_parts else None),
+        }
     return {
         "itemCount": filled,
         "filledSlots": filled,
@@ -1889,7 +2434,17 @@ class LiveTargetProcessor:
     def __init__(self, session: Path, args):
         self.session = session
         self.args = args
-        self.tailer = TickJsonlTailer(session)
+        if not hasattr(self.args, "input_source"):
+            self.args.input_source = "auto"
+        self.compact_packet_state = compact_packet_state(session)
+        (
+            self.input_source_active,
+            self.compact_packets_available,
+            self.raw_ticks_available,
+            self.input_fallback_reason,
+        ) = choose_input_source(session, args.input_source)
+        self.compact_packets_recent = bool(self.compact_packet_state.get("recent"))
+        self.tailer = CompactPacketTailer(session) if self.input_source_active == COMPACT_PACKET_SOURCE else TickJsonlTailer(session)
         self.write_options = write_options_from(args)
         self.tick_window: OrderedDict[int, dict] = OrderedDict()
         self.processed_ticks: OrderedDict[int, ProcessedTick] = OrderedDict()
@@ -1949,6 +2504,13 @@ class LiveTargetProcessor:
         self.total_write_retries = 0
         self.total_write_failures = 0
         self.performance_history: deque[dict] = deque(maxlen=100)
+        self.last_compact_packets_seen = 0
+        self.last_compact_packets_processed = 0
+        self.last_compact_packets_coalesced = 0
+        self.last_compact_packet_last_sequence = None
+        self.last_compact_packet_latest_segment = None
+        self.last_compact_packet_rollover_count = 0
+        self.last_compact_packet_read_errors = 0
 
     def current_profile_doc_signature(self) -> tuple:
         paths = [
@@ -1970,6 +2532,24 @@ class LiveTargetProcessor:
         self.classification_cache.clear()
         self.processed_ticks.clear()
         self.last_classification_cache_invalidations += invalidated
+
+    def compact_input_warnings(self) -> list[str]:
+        if self.input_source_active != COMPACT_PACKET_SOURCE:
+            return []
+
+        warnings = []
+        target_types = target_types_for_profile(self.args, self.profile)
+        unsupported = sorted(target_types - {"sceneObject"})
+        if unsupported:
+            warnings.append(
+                "compact packet input currently builds live candidates from scene projection/delta packets; "
+                f"these target types may be missing until compact packets include them: {', '.join(unsupported)}"
+            )
+        if not self.compact_packets_available:
+            warnings.append("compact packet input selected but no compact live packet files are currently available")
+        elif not self.compact_packets_recent:
+            warnings.append("compact packet input is available but stale; collect fresh packets for normal live mode")
+        return warnings
 
     def memory_limit(self) -> int:
         selectors = [self.args.window_ticks]
@@ -1993,6 +2573,12 @@ class LiveTargetProcessor:
 
     def initialize_from_existing(self) -> int:
         limit = self.startup_backfill_limit()
+        if isinstance(self.tailer, CompactPacketTailer):
+            records = self.tailer.read_existing_records(limit)
+            added, _dropped = self.add_ticks(records)
+            self.tailer.seek_to_end()
+            return added
+
         malformed = Counter()
         records = tail_existing_records(self.tailer.files(), limit, malformed)
         for key, value in malformed.items():
@@ -2610,6 +3196,12 @@ class LiveTargetProcessor:
                 "processed": int(status.get("rawRecordsFullyProcessed") or 0),
                 "coalesced": int(status.get("coalescedBacklogTicks") or 0),
                 "livenessBudgetExceeded": bool(status.get("livenessBudgetExceeded")),
+                "inputSourceActive": status.get("inputSourceActive"),
+                "compactPacketsSeen": int(status.get("compactPacketsSeen") or 0),
+                "compactPacketsProcessed": int(status.get("compactPacketsProcessed") or 0),
+                "compactPacketsCoalesced": int(status.get("compactPacketsCoalesced") or 0),
+                "tailReadMs": float(timing.get("tailReadMillis") or 0.0),
+                "parseMs": float(timing.get("jsonParseMillis") or 0.0),
             }
         )
 
@@ -2631,6 +3223,7 @@ class LiveTargetProcessor:
             "sessionPath": str(self.session),
             "mode": status.get("mode"),
             "latencyMode": self.args.latency_mode,
+            "inputSourceActive": self.input_source_active,
             "latestTick": status.get("lastProcessedTick"),
             "sampleCount": len(samples),
             "avgTotalMs": average(totals),
@@ -2650,6 +3243,12 @@ class LiveTargetProcessor:
             "avgRawSeen": average([sample["rawSeen"] for sample in samples]),
             "avgProcessed": average([sample["processed"] for sample in samples]),
             "avgCoalesced": average([sample["coalesced"] for sample in samples]),
+            "avgCompactPacketReadMs": average([sample.get("tailReadMs", 0.0) for sample in samples if sample.get("inputSourceActive") == COMPACT_PACKET_SOURCE]),
+            "avgRawTickReadMs": average([sample.get("tailReadMs", 0.0) for sample in samples if sample.get("inputSourceActive") == RAW_TICK_SOURCE]),
+            "avgParseMs": average([sample.get("parseMs", 0.0) for sample in samples]),
+            "avgActiveMs": average(totals),
+            "p95ActiveMs": percentile(totals, 95),
+            "compactPacketCoalescedCount": sum(sample.get("compactPacketsCoalesced", 0) for sample in samples),
             "recommendations": recommendations,
         }
 
@@ -2659,7 +3258,9 @@ class LiveTargetProcessor:
         timing = Timing()
         self.last_classification_cache_invalidations = 0
         self.refresh_profile_documents_if_needed()
-        warnings = list(self.override_warnings) + list(self.profile_warnings)
+        warnings = list(self.override_warnings) + list(self.profile_warnings) + self.compact_input_warnings()
+        if self.input_source_active == RAW_TICK_SOURCE and self.input_fallback_reason and self.args.input_source == "auto":
+            warnings.append(f"live processor is using raw tick fallback; {self.input_fallback_reason}")
         selected_ticks = self.selected_ticks()
         selected_tick_ids = [tick_id_for(tick) for tick in selected_ticks if tick_id_for(tick) is not None]
         with timing.measure("tickCoalesceMillis"):
@@ -2941,6 +3542,7 @@ class LiveTargetProcessor:
         counts = counts_for_candidates(candidates)
         suppressed = max(0, len(full_records) - len(world_output_records))
         frame_index = self.session / "frames" / "frame_index.jsonl"
+        current_compact_state = compact_packet_state(self.session)
         skipped_ids = list(self.last_skipped_intermediate_tick_ids)
         coalesced_before = self.tailer.last_coalesced_before_parse
         coalesced_after = self.last_coalesced_backlog_ticks
@@ -2966,6 +3568,17 @@ class LiveTargetProcessor:
             "profile": self.args.profile,
             "profileId": self.args.profile,
             "targetType": self.args.target_type,
+            "inputSourceRequested": self.args.input_source,
+            "inputSourceActive": self.input_source_active,
+            "compactPacketsAvailable": bool(current_compact_state.get("available")),
+            "compactPacketsRecent": bool(current_compact_state.get("recent")),
+            "compactPacketIndexPath": current_compact_state.get("indexPath"),
+            "compactPacketLatestTick": current_compact_state.get("latestTick"),
+            "compactPacketLatestSequence": current_compact_state.get("latestSequence"),
+            "compactPacketAgeSeconds": current_compact_state.get("ageSeconds"),
+            "rawTicksAvailable": bool(self.raw_ticks_available),
+            "inputFallbackReason": self.input_fallback_reason,
+            "defaultLiveInputPreference": COMPACT_PACKET_SOURCE,
             "mode": "follow" if self.args.follow else "once",
             "latencyMode": self.args.latency_mode,
             "modeLabel": (
@@ -3006,6 +3619,13 @@ class LiveTargetProcessor:
             "coalescedBacklogTicks": coalesced_before + coalesced_after,
             "newestTickSelectedForProcessing": self.tailer.last_newest_tick_selected or (max(self.last_processed_tick_ids) if self.last_processed_tick_ids else None),
             "fileOffsetsAdvancedPastSkippedRecords": bool(self.tailer.last_file_offsets_advanced_past_skipped_records),
+            "compactPacketsSeen": int(getattr(self.tailer, "last_compact_packets_seen", 0) or 0),
+            "compactPacketsProcessed": int(getattr(self.tailer, "last_compact_packets_processed", 0) or 0),
+            "compactPacketsCoalesced": int(getattr(self.tailer, "last_compact_packets_coalesced", 0) or 0),
+            "compactPacketLastSequence": getattr(self.tailer, "last_compact_packet_last_sequence", None),
+            "compactPacketLatestSegment": getattr(self.tailer, "last_compact_packet_latest_segment", None) or current_compact_state.get("latestSegment"),
+            "compactPacketRolloverCount": int(getattr(self.tailer, "last_compact_packet_rollover_count", 0) or 0),
+            "compactPacketReadErrors": int(getattr(self.tailer, "last_compact_packet_read_errors", 0) or 0),
             "skippedIntermediateTickIds": skipped_ids if len(skipped_ids) <= 25 else [],
             "skippedIntermediateTickCount": len(skipped_ids),
             "skippedIntermediateTickIdsTruncated": len(skipped_ids) > 25,
@@ -3169,7 +3789,7 @@ class LiveTargetProcessor:
         return self.poll_new_records(force_rebuild=self.args.force_window_rebuild)
 
 
-def print_startup(session: Path, args) -> None:
+def print_startup(session: Path, args, processor: LiveTargetProcessor | None = None) -> None:
     print("Live target processor")
     if args.latency_mode == "complete":
         print("COMPLETE AUDIT MODE: processes every selected tick; not intended for live latency.")
@@ -3179,6 +3799,16 @@ def print_startup(session: Path, args) -> None:
     print(f"profile: {args.profile}")
     print(f"mode: {'follow' if args.follow else 'once'}")
     print(f"latency mode: {args.latency_mode}")
+    active_input = getattr(processor, "input_source_active", args.input_source)
+    if active_input == COMPACT_PACKET_SOURCE:
+        print("Live input: compact packets")
+    elif args.input_source == RAW_TICK_SOURCE:
+        print("Live input: raw ticks explicitly requested")
+    else:
+        print("Live input: raw ticks fallback because compact packets were unavailable")
+    print(f"input source: {active_input} (requested {args.input_source})")
+    if processor and processor.input_fallback_reason:
+        print(f"input fallback: {processor.input_fallback_reason}")
     print(f"candidate output window: {args.candidate_output_window}")
     print(f"liveness mode: {args.liveness_mode}")
     print(f"window ticks: {args.window_ticks}")
@@ -3198,6 +3828,9 @@ def print_result_summary(result: dict, tailer: TickJsonlTailer) -> None:
         print("REALTIME MODE: latest context prioritized; intermediate ticks may be coalesced.")
     print(f"processed ticks: {status['selectedTickCount']}")
     print(f"latest tick: {status['lastProcessedTick']}")
+    print(f"input source: {status.get('inputSourceActive')} (requested {status.get('inputSourceRequested')})")
+    if status.get("inputFallbackReason"):
+        print(f"input fallback: {status.get('inputFallbackReason')}")
     print(f"latest raw tick seen: {status.get('latestRawTickSeen')}")
     print(f"coalesced backlog ticks: {status.get('coalescedBacklogTicks', 0)}")
     print(f"world targets built: {status['worldTargetsBuilt']}")
@@ -3229,6 +3862,7 @@ def print_follow_update(added: int, result: dict) -> None:
     performance = result.get("performance") or {}
     print(
         f"latestTick={status['lastProcessedTick']} "
+        f"input={status.get('inputSourceActive')} "
         f"rawSeen={raw_seen} "
         f"processed={processed} "
         f"coalesced={coalesced} "
@@ -3248,16 +3882,107 @@ def print_follow_update(added: int, result: dict) -> None:
     )
 
 
+def args_copy(args, **overrides) -> SimpleNamespace:
+    values = dict(vars(args))
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def compare_result_summary(result: dict | None) -> dict:
+    if not result:
+        return {"available": False}
+    candidates = result.get("candidates") or []
+    status = result.get("status") or {}
+    best_tree = next((candidate for candidate in candidates if "tree" in candidate_class_ids(candidate)), None)
+    return {
+        "available": True,
+        "inputSourceActive": status.get("inputSourceActive"),
+        "latestTick": status.get("lastProcessedTick"),
+        "candidateCount": len(candidates),
+        "candidateCountsByClassId": status.get("candidateCountsByClassId") or {},
+        "bestTree": best_candidate_summary(best_tree),
+        "missingFieldWarnings": [
+            warning
+            for warning in status.get("warnings") or []
+            if "missing" in str(warning).lower() or "unavailable" in str(warning).lower()
+        ],
+    }
+
+
+def run_compare_source(session: Path, args, input_source: str) -> dict | None:
+    compare_args = args_copy(
+        args,
+        input_source=input_source,
+        once=True,
+        follow=False,
+        quiet=True,
+        summary=False,
+        clear_live_output=False,
+    )
+    processor = LiveTargetProcessor(session, compare_args)
+    if input_source == COMPACT_PACKET_SOURCE and not processor.compact_packets_available:
+        return None
+    if input_source == RAW_TICK_SOURCE and not processor.raw_ticks_available:
+        return None
+    processor.initialize_from_existing()
+    return processor.process_window(force_rebuild=args.force_window_rebuild, rebuild_reason=f"compare-{input_source}")
+
+
+def compare_input_sources(session: Path, args) -> int:
+    raw_result = run_compare_source(session, args, RAW_TICK_SOURCE)
+    compact_result = run_compare_source(session, args, COMPACT_PACKET_SOURCE)
+    raw_summary = compare_result_summary(raw_result)
+    compact_summary = compare_result_summary(compact_result)
+
+    warnings = []
+    if not raw_summary.get("available"):
+        warnings.append("raw tick source unavailable")
+    if not compact_summary.get("available"):
+        warnings.append("compact packet source unavailable")
+
+    status = "FAIL" if warnings and (not raw_summary.get("available") or not compact_summary.get("available")) else "PASS"
+    if status == "PASS":
+        if raw_summary.get("candidateCount") != compact_summary.get("candidateCount"):
+            status = "WARN"
+            warnings.append("candidate counts differ")
+        if raw_summary.get("bestTree") != compact_summary.get("bestTree"):
+            status = "WARN"
+            warnings.append("best tree candidate differs")
+
+    payload = {
+        "schema": "live_input_source_comparison.v1",
+        "status": status,
+        "sessionPath": str(session),
+        "profile": args.profile,
+        "rawTicks": raw_summary,
+        "compactPackets": compact_summary,
+        "warnings": warnings,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=False))
+    return 0 if status in {"PASS", "WARN"} else 1
+
+
+def compact_required_error() -> str:
+    return (
+        "Compact live packets are required but unavailable. Enable compact live packets in the RuneLite telemetry "
+        "config, collect a fresh session, then verify with "
+        "inspect_live_packets.py --latest-session --summary."
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Tail raw tick JSONL files and write rolling read-only target context/candidate outputs. "
+            "Tail compact live packets or raw tick JSONL files and write rolling read-only target context/candidate outputs. "
             "This does not interact with RuneLite or generate actions."
         )
     )
     parser.add_argument("--session", help="Explicit telemetry session directory.")
     parser.add_argument("--sessions-dir", help="Override telemetry sessions directory when --latest-session is used.")
     parser.add_argument("--latest-session", action="store_true", help="Use the newest available session when --session is omitted.")
+    parser.add_argument("--input-source", choices=sorted(INPUT_SOURCES), default="auto", help="Read source for live processing. Auto prefers compact live packets when available. Default: auto.")
+    parser.add_argument("--compare-input-sources", action="store_true", help="Compare compact-packet and raw-tick candidate output for the selected/latest window, then exit.")
+    parser.add_argument("--require-compact-packets", action="store_true", help="Fail fast unless compact live packets are available and recent; do not fall back to raw ticks.")
     parser.add_argument(
         "--profile",
         default="broad_qa",
@@ -3312,6 +4037,9 @@ def parse_args():
     if args.once and args.follow:
         parser.error("--once and --follow are mutually exclusive")
 
+    if args.require_compact_packets and args.input_source == RAW_TICK_SOURCE:
+        parser.error("--require-compact-packets cannot be combined with --input-source raw-ticks")
+
     if not args.once and not args.follow:
         args.once = True
 
@@ -3353,12 +4081,26 @@ def main() -> int:
         print(str(error))
         return 1
 
+    if args.compare_input_sources:
+        return compare_input_sources(session, args)
+
     if args.clear_live_output:
         clear_live_outputs(session)
 
     processor = LiveTargetProcessor(session, args)
+    if args.require_compact_packets and (
+        not processor.compact_packets_available
+        or not processor.compact_packets_recent
+        or processor.input_source_active != COMPACT_PACKET_SOURCE
+    ):
+        print(compact_required_error())
+        print(f"session: {session}")
+        print(f"compactPacketIndexPath: {processor.compact_packet_state.get('indexPath')}")
+        print(f"compactPacketLatestSegment: {processor.compact_packet_state.get('latestSegment')}")
+        print(f"compactPacketsRecent: {str(bool(processor.compact_packets_recent)).lower()}")
+        return 1
     if not args.quiet:
-        print_startup(session, args)
+        print_startup(session, args, processor)
 
     startup_added = processor.initialize_from_existing()
     result = processor.process_window(force_rebuild=args.force_window_rebuild, rebuild_reason="startup")

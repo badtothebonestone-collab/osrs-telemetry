@@ -63,6 +63,9 @@ SESSION_AWARE_PROCESS_KEYS = {
     "target_coverage",
     "target_override_suggestions",
     "target_geometry_inspector",
+    "live_setup_check",
+    "compact_packet_inspector",
+    "live_processor",
 }
 
 
@@ -267,6 +270,53 @@ PROCESS_SPECS = {
         "target_geometry_inspector",
         "Target Geometry Inspector",
         ["python", "telemetry-viewer\\target_geometry_inspector.py", "--port", "8800"],
+        True,
+    ),
+    "live_setup_check": ProcessSpec(
+        "live_setup_check",
+        "Check Live Setup",
+        ["python", "telemetry-viewer\\check_live_setup.py", "--require-compact-packets"],
+        False,
+    ),
+    "compact_packet_inspector": ProcessSpec(
+        "compact_packet_inspector",
+        "Inspect Compact Packets",
+        ["python", "telemetry-viewer\\inspect_live_packets.py", "--summary", "--latest-only"],
+        False,
+    ),
+    "live_processor": ProcessSpec(
+        "live_processor",
+        "Live Target Processor",
+        [
+            "python",
+            "telemetry-viewer\\live_target_processor.py",
+            "--input-source",
+            "auto",
+            "--profile",
+            "woodcutting",
+            "--follow",
+            "--latency-mode",
+            "realtime",
+            "--liveness-mode",
+            "delta",
+            "--liveness-budget-ms",
+            "20",
+            "--no-startup-backfill",
+            "--max-new-ticks-per-update",
+            "1",
+            "--candidate-output-window",
+            "latest",
+            "--window-ticks",
+            "10",
+            "--limit",
+            "100",
+            "--no-ui-targets",
+            "--emit-world-targets",
+            "candidates",
+            "--drain-backlog-on-overrun",
+            "--summary",
+            "--benchmark",
+        ],
         True,
     ),
 }
@@ -959,7 +1009,8 @@ class LauncherApp(Tk):
                 "3. Replay / label tick ranges  4. Build Dataset  5. Inspect Dataset  "
                 "6. Export Curated  7. Run Doctor / Status\n"
                 "Target Geometry QA: collect raw session, then build world target geometry, select target candidates, "
-                "run target coverage diagnostic, and open the target geometry inspector."
+                "run target coverage diagnostic, and open the target geometry inspector.\n"
+                "Live QA default input: compact packets. Raw ticks are debug/audit fallback."
             ),
             justify="left",
             wraplength=980,
@@ -1060,6 +1111,9 @@ class LauncherApp(Tk):
                 ("Start RuneLite Dev Client", lambda: self.start_process("runelite"), "runelite"),
                 ("Start Latest State Watcher", lambda: self.start_process("latest"), "latest"),
                 ("Start Text Viewer", lambda: self.start_process("viewer"), "viewer"),
+                ("Check Live Setup", self.check_live_setup, "live_setup_check"),
+                ("Inspect Compact Packets", self.inspect_compact_packets, "compact_packet_inspector"),
+                ("Start Live Processor", self.start_live_processor, "live_processor"),
                 ("Unlock Active Session / Use Newest Session", self.unlock_active_session, None),
                 ("Set Active Session To Newest Fresh Session", self.set_active_session_to_newest_fresh_session, None),
             ],
@@ -1707,6 +1761,36 @@ class LauncherApp(Tk):
             f"Command: {' '.join(self.command_for_process('dataset_status', session_override=session))}",
         )
         self.start_process("dataset_status", session_override=session)
+
+    def check_live_setup(self):
+        session = self.session_for_tool("Check Live Setup")
+
+        if session is None:
+            return
+
+        self.log("Check Live Setup", "Default live input is compact packets; raw ticks are debug/audit fallback.")
+        self.log("Check Live Setup", f"Resolved session: {session}")
+        self.start_process("live_setup_check", session_override=session)
+
+    def inspect_compact_packets(self):
+        session = self.session_for_tool("Inspect Compact Packets")
+
+        if session is None:
+            return
+
+        self.log("Inspect Compact Packets", "Reads live_packet_index.json/latest_segment.txt and summarizes compact NDJSON packets.")
+        self.log("Inspect Compact Packets", f"Resolved session: {session}")
+        self.start_process("compact_packet_inspector", session_override=session)
+
+    def start_live_processor(self):
+        session = self.session_for_tool("Start Live Processor")
+
+        if session is None:
+            return
+
+        self.log("Live Target Processor", "Default live input: compact packets. Raw ticks are debug/audit fallback.")
+        self.log("Live Target Processor", f"Resolved session: {session}")
+        self.start_process("live_processor", session_override=session, restart_if_command_changed=True)
 
     def build_world_target_geometry(self):
         session = self.session_for_tool("Build World Target Geometry")

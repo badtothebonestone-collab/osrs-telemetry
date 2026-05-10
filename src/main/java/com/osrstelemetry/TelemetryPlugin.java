@@ -105,6 +105,12 @@ import net.runelite.api.widgets.Widget;
 public class TelemetryPlugin extends Plugin
 {
 	private static final int MAX_GROUND_ITEMS = 250;
+	private static final String PACKET_BASELINE = "live_baseline_packet.v1";
+	private static final String PACKET_SCENE_DELTA = "live_scene_delta_packet.v1";
+	private static final String PACKET_PROJECTION = "live_projection_packet.v1";
+	private static final String PACKET_INVENTORY = "live_inventory_packet.v1";
+	private static final String PACKET_ACTIVITY = "live_activity_packet.v1";
+	private static final String PACKET_WRITER_HEALTH = "live_writer_health_packet.v1";
 
 	@Inject
 	private Client client;
@@ -173,7 +179,13 @@ public class TelemetryPlugin extends Plugin
 				config.deleteOldFrames(),
 				config.maxFrameQueueSize(),
 				config.frameCaptureMode(),
-				config.allowScreenRectangleFallback());
+				config.allowScreenRectangleFallback(),
+				config.emitCompactLivePackets(),
+				config.compactLiveSegmentMb(),
+				config.compactLiveRetentionTicks(),
+				Math.max(0L, config.compactLiveRetentionMb()) * 1024L * 1024L,
+				config.compactLiveRetentionSegments(),
+				config.compactLiveQueueSize());
 		writer.start();
 
 		log.info("Telemetry Collector started");
@@ -677,12 +689,478 @@ public class TelemetryPlugin extends Plugin
 	{
 		try
 		{
+			enqueueCompactLivePackets(currentWriter, snapshot);
 			currentWriter.enqueueTick(gson.toJson(snapshot));
 		}
 		catch (Exception e)
 		{
 			log.warn("Failed to enqueue tick telemetry", e);
 		}
+	}
+
+	private void enqueueCompactLivePackets(TelemetryWriter currentWriter, TickSnapshot snapshot)
+	{
+		if (!currentWriter.isCompactLivePacketsEnabled() || snapshot == null)
+		{
+			return;
+		}
+
+		if (compactPacketTypeEnabled("baseline"))
+		{
+			currentWriter.enqueueLivePacket(PACKET_BASELINE, snapshot.tickId, snapshot.timestampUtc, baselinePayload(snapshot));
+		}
+
+		if (compactPacketTypeEnabled("sceneDelta"))
+		{
+			currentWriter.enqueueLivePacket(PACKET_SCENE_DELTA, snapshot.tickId, snapshot.timestampUtc, sceneDeltaPayload(snapshot));
+		}
+
+		if (compactPacketTypeEnabled("projection"))
+		{
+			currentWriter.enqueueLivePacket(PACKET_PROJECTION, snapshot.tickId, snapshot.timestampUtc, projectionPayload(snapshot));
+		}
+
+		if (compactPacketTypeEnabled("inventory"))
+		{
+			currentWriter.enqueueLivePacket(PACKET_INVENTORY, snapshot.tickId, snapshot.timestampUtc, inventoryPayload(snapshot));
+		}
+
+		if (compactPacketTypeEnabled("activity"))
+		{
+			currentWriter.enqueueLivePacket(PACKET_ACTIVITY, snapshot.tickId, snapshot.timestampUtc, activityPayload(snapshot));
+		}
+
+		if (compactPacketTypeEnabled("writerHealth"))
+		{
+			currentWriter.enqueueLivePacket(PACKET_WRITER_HEALTH, snapshot.tickId, snapshot.timestampUtc, writerHealthPayload(currentWriter));
+		}
+	}
+
+	private boolean compactPacketTypeEnabled(String packetGroup)
+	{
+		String configured = config.compactLivePacketTypes();
+
+		if (configured == null || configured.isBlank())
+		{
+			return true;
+		}
+
+		for (String part : configured.split(","))
+		{
+			String normalized = normalizePacketGroup(part);
+
+			if ("all".equals(normalized) || normalizePacketGroup(packetGroup).equals(normalized))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private String normalizePacketGroup(String value)
+	{
+		if (value == null)
+		{
+			return "";
+		}
+
+		return value.trim().replace("-", "").replace("_", "").toLowerCase();
+	}
+
+	private Map<String, Object> baselinePayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("tick", snapshot.tickId);
+		payload.put("gameState", snapshot.gameState);
+		payload.put("player", playerPayload(snapshot));
+		payload.put("cameraViewport", cameraViewportPayload(snapshot));
+		payload.put("latestFramePath", snapshot.framePath);
+		payload.put("frameCaptureStatus", snapshot.frameCaptureStatus);
+		payload.put("sceneCaptureMode", snapshot.sceneCaptureSummary == null ? null : snapshot.sceneCaptureSummary.sceneCaptureMode);
+		payload.put("source", sourceCompletenessPayload(snapshot));
+		return payload;
+	}
+
+	private Map<String, Object> playerPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> player = new LinkedHashMap<>();
+
+		if (snapshot.localPlayer != null)
+		{
+			player.put("worldX", snapshot.localPlayer.worldX);
+			player.put("worldY", snapshot.localPlayer.worldY);
+			player.put("plane", snapshot.localPlayer.plane);
+			player.put("animation", snapshot.localPlayer.animation);
+			player.put("poseAnimation", snapshot.localPlayer.poseAnimation);
+			player.put("combatLevel", snapshot.localPlayer.combatLevel);
+		}
+
+		if (snapshot.status != null)
+		{
+			player.put("runEnergyRaw", snapshot.status.runEnergyRaw);
+			player.put("runEnergyPercent", snapshot.status.runEnergyPercent);
+			player.put("weight", snapshot.status.weight);
+			player.put("hitpointsBoosted", snapshot.status.hitpointsBoosted);
+			player.put("hitpointsReal", snapshot.status.hitpointsReal);
+			player.put("localHealthRatio", snapshot.status.localHealthRatio);
+			player.put("localHealthScale", snapshot.status.localHealthScale);
+			player.put("interacting", interactingPayload(snapshot.status));
+		}
+
+		return player;
+	}
+
+	private Map<String, Object> interactingPayload(TickSnapshot.StatusSnapshot status)
+	{
+		Map<String, Object> interacting = new LinkedHashMap<>();
+		interacting.put("type", status.interactingType);
+		interacting.put("index", status.interactingIndex);
+		interacting.put("id", status.interactingId);
+		interacting.put("name", status.interactingName);
+		interacting.put("worldX", status.interactingWorldX);
+		interacting.put("worldY", status.interactingWorldY);
+		interacting.put("plane", status.interactingPlane);
+		return interacting;
+	}
+
+	private Map<String, Object> cameraViewportPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> camera = new LinkedHashMap<>();
+		camera.put("cameraX", snapshot.cameraX);
+		camera.put("cameraY", snapshot.cameraY);
+		camera.put("cameraZ", snapshot.cameraZ);
+		camera.put("cameraPitch", snapshot.cameraPitch);
+		camera.put("cameraYaw", snapshot.cameraYaw);
+		camera.put("viewportWidth", snapshot.viewportWidth);
+		camera.put("viewportHeight", snapshot.viewportHeight);
+		camera.put("viewportXOffset", snapshot.viewportXOffset);
+		camera.put("viewportYOffset", snapshot.viewportYOffset);
+		camera.put("canvasWidth", snapshot.canvasWidth);
+		camera.put("canvasHeight", snapshot.canvasHeight);
+		camera.put("projectionStateHash", snapshot.sceneProjectionSummary == null ? null : snapshot.sceneProjectionSummary.projectionStateHash);
+		return camera;
+	}
+
+	private Map<String, Object> sourceCompletenessPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> source = new LinkedHashMap<>();
+		TickSnapshot.SceneCaptureSummary capture = snapshot.sceneCaptureSummary;
+		TickSnapshot.SceneIndexSummary index = snapshot.sceneIndexSummary;
+		boolean capHit = (capture != null && (capture.sceneObjectCapHit || capture.sceneObjectsSkippedByCap > 0))
+				|| (index != null && index.indexCapHit);
+		boolean complete = capture == null || (!capHit && capture.sceneObjectsSeen == capture.sceneObjectsCaptured);
+
+		source.put("sourceSceneKnowledgeComplete", complete);
+		source.put("sourceCapHit", capHit);
+		source.put("sceneObjectsSeen", capture == null ? null : capture.sceneObjectsSeen);
+		source.put("sceneObjectsCaptured", capture == null ? null : capture.sceneObjectsCaptured);
+		source.put("sceneObjectsSkippedByCap", capture == null ? null : capture.sceneObjectsSkippedByCap);
+		source.put("sceneObjectCapHit", capture == null ? null : capture.sceneObjectCapHit);
+		source.put("indexCapHit", index == null ? null : index.indexCapHit);
+		return source;
+	}
+
+	private Map<String, Object> sceneDeltaPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("sceneIndexSummary", snapshot.sceneIndexSummary);
+		payload.put("sceneCaptureSummary", snapshot.sceneCaptureSummary);
+		payload.put("sceneObjectDeltas", compactDeltas(snapshot.sceneObjectDeltas));
+		return payload;
+	}
+
+	private Map<String, Object> compactDeltas(TickSnapshot.SceneObjectDeltas deltas)
+	{
+		Map<String, Object> compact = new LinkedHashMap<>();
+
+		if (deltas == null)
+		{
+			compact.put("newObjects", new ArrayList<>());
+			compact.put("updatedObjects", new ArrayList<>());
+			compact.put("despawnedObjects", new ArrayList<>());
+			return compact;
+		}
+
+		compact.put("newObjects", compactSceneObjects(deltas.newObjects, false));
+		compact.put("updatedObjects", compactSceneObjects(deltas.updatedObjects, false));
+		compact.put("despawnedObjects", compactSceneObjects(deltas.despawnedObjects, false));
+		return compact;
+	}
+
+	private Map<String, Object> projectionPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("sceneProjectionSummary", snapshot.sceneProjectionSummary);
+		payload.put("projectionStateHash", snapshot.sceneProjectionSummary == null ? null : snapshot.sceneProjectionSummary.projectionStateHash);
+		payload.put("refreshMode", snapshot.sceneProjectionSummary == null ? null : snapshot.sceneProjectionSummary.projectionRefreshMode);
+		payload.put("visibleObjectRefs", compactSceneObjects(snapshot.visibleSceneObjectRefs, true));
+		return payload;
+	}
+
+	private List<Map<String, Object>> compactSceneObjects(TickSnapshot.SceneObjectSnapshot[] objects, boolean includeProjection)
+	{
+		List<Map<String, Object>> compact = new ArrayList<>();
+
+		if (objects == null)
+		{
+			return compact;
+		}
+
+		for (TickSnapshot.SceneObjectSnapshot object : objects)
+		{
+			if (object != null)
+			{
+				compact.add(compactSceneObject(object, includeProjection));
+			}
+		}
+
+		return compact;
+	}
+
+	private Map<String, Object> compactSceneObject(TickSnapshot.SceneObjectSnapshot object, boolean includeProjection)
+	{
+		Map<String, Object> compact = new LinkedHashMap<>();
+		compact.put("objectKey", object.objectKey);
+		compact.put("targetType", "sceneObject");
+		compact.put("id", object.id);
+		compact.put("hash", object.hash);
+		compact.put("name", object.objectName);
+		compact.put("nameSource", object.objectNameSource);
+		compact.put("actions", compactActions(object.actions));
+		compact.put("kind", object.kind);
+		compact.put("layer", object.kind);
+		compact.put("worldX", object.worldX);
+		compact.put("worldY", object.worldY);
+		compact.put("plane", object.plane);
+		compact.put("sceneX", object.sceneX);
+		compact.put("sceneY", object.sceneY);
+		compact.put("present", object.present);
+		compact.put("despawnedTick", object.despawnedTick);
+		compact.put("source", object.source);
+		compact.put("firstSeenTick", object.firstSeenTick);
+		compact.put("lastSeenTick", object.lastSeenTick);
+		compact.put("lastUpdatedTick", object.lastUpdatedTick);
+
+		if (includeProjection)
+		{
+			compact.put("onScreen", object.onScreen);
+			compact.put("geometryAvailable", object.geometryAvailable);
+			compact.put("aimPoint", aimPointPayload(object));
+			compact.put("geometrySummary", geometrySummaryPayload(object));
+			compact.put("projectionVersion", object.projectionVersion);
+			compact.put("geometryWarning", object.geometryWarning);
+
+			if (config.compactLiveIncludeHeavyGeometry())
+			{
+				compact.put("canvasTilePolygon", object.canvasTilePolygon);
+				compact.put("clickboxPolygon", object.clickboxPolygon);
+				compact.put("convexHullPolygon", object.convexHullPolygon);
+			}
+		}
+
+		return compact;
+	}
+
+	private List<String> compactActions(String[] actions)
+	{
+		List<String> compact = new ArrayList<>();
+
+		if (actions == null)
+		{
+			return compact;
+		}
+
+		for (String action : actions)
+		{
+			if (action != null && !action.isBlank() && !"null".equalsIgnoreCase(action))
+			{
+				compact.add(action);
+			}
+		}
+
+		return compact;
+	}
+
+	private Map<String, Object> aimPointPayload(TickSnapshot.SceneObjectSnapshot object)
+	{
+		TickSnapshot.CanvasPoint point = null;
+		String source = null;
+
+		if (object.clickboxBounds != null)
+		{
+			point = boundsCenter(object.clickboxBounds);
+			source = "clickboxBoundsCenter";
+		}
+		else if (object.convexHullBounds != null)
+		{
+			point = boundsCenter(object.convexHullBounds);
+			source = "convexHullBoundsCenter";
+		}
+		else if (object.canvasLocation != null)
+		{
+			point = object.canvasLocation;
+			source = "canvasLocation";
+		}
+		else if (object.canvasTilePolygon != null)
+		{
+			point = polygonCenter(object.canvasTilePolygon);
+			source = "canvasTilePolygonCenter";
+		}
+
+		if (point == null)
+		{
+			return null;
+		}
+
+		Map<String, Object> aim = new LinkedHashMap<>();
+		aim.put("canvasX", point.x);
+		aim.put("canvasY", point.y);
+		aim.put("source", source);
+		return aim;
+	}
+
+	private TickSnapshot.CanvasPoint boundsCenter(TickSnapshot.Bounds bounds)
+	{
+		if (bounds == null)
+		{
+			return null;
+		}
+
+		TickSnapshot.CanvasPoint point = new TickSnapshot.CanvasPoint();
+		point.x = bounds.x + bounds.w / 2;
+		point.y = bounds.y + bounds.h / 2;
+		return point;
+	}
+
+	private Map<String, Object> geometrySummaryPayload(TickSnapshot.SceneObjectSnapshot object)
+	{
+		Map<String, Object> summary = new LinkedHashMap<>();
+		boolean hasClickbox = object.clickboxBounds != null || object.clickboxPolygon != null;
+		boolean hasConvexHull = object.convexHullBounds != null || object.convexHullPolygon != null;
+		boolean hasCanvasTilePolygon = object.canvasTilePolygon != null;
+		summary.put("hasClickbox", hasClickbox);
+		summary.put("hasConvexHull", hasConvexHull);
+		summary.put("hasCanvasTilePolygon", hasCanvasTilePolygon);
+		summary.put("clickboxBounds", boundsPayload(object.clickboxBounds));
+		summary.put("convexHullBounds", boundsPayload(object.convexHullBounds));
+
+		TickSnapshot.Bounds tileBounds = boundsSnapshot(object.canvasTilePolygon);
+		summary.put("canvasTileBounds", boundsPayload(tileBounds));
+		return summary;
+	}
+
+	private Map<String, Object> boundsPayload(TickSnapshot.Bounds bounds)
+	{
+		if (bounds == null)
+		{
+			return null;
+		}
+
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("x", bounds.x);
+		payload.put("y", bounds.y);
+		payload.put("w", bounds.w);
+		payload.put("h", bounds.h);
+		return payload;
+	}
+
+	private Map<String, Object> inventoryPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("inventory", itemContainerSnapshot(snapshot.inventory));
+		payload.put("equipment", itemContainerSnapshot(snapshot.equipment));
+		return payload;
+	}
+
+	private Map<String, Object> itemContainerSnapshot(TickSnapshot.InventorySlot[] slots)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		List<Map<String, Object>> items = new ArrayList<>();
+		int freeSlots = 0;
+		int filledSlots = 0;
+		int itemCount = 0;
+		StringBuilder signature = new StringBuilder();
+
+		if (slots == null)
+		{
+			payload.put("known", false);
+			return payload;
+		}
+
+		for (TickSnapshot.InventorySlot slot : slots)
+		{
+			if (slot == null || slot.itemId <= 0 || slot.quantity <= 0)
+			{
+				freeSlots++;
+				continue;
+			}
+
+			filledSlots++;
+			itemCount += slot.quantity;
+			signature.append(slot.slot).append(':').append(slot.itemId).append(':').append(slot.quantity).append(';');
+
+			Map<String, Object> item = new LinkedHashMap<>();
+			item.put("slot", slot.slot);
+			item.put("itemId", slot.itemId);
+			item.put("quantity", slot.quantity);
+			items.add(item);
+		}
+
+		payload.put("known", true);
+		payload.put("freeSlots", freeSlots);
+		payload.put("filledSlots", filledSlots);
+		payload.put("itemCount", itemCount);
+		payload.put("signature", hashName(signature.toString()));
+		payload.put("items", items);
+		return payload;
+	}
+
+	private Map<String, Object> activityPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+
+		if (snapshot.localPlayer != null)
+		{
+			payload.put("animation", snapshot.localPlayer.animation);
+			payload.put("poseAnimation", snapshot.localPlayer.poseAnimation);
+			payload.put("combatLevel", snapshot.localPlayer.combatLevel);
+		}
+
+		if (snapshot.status != null)
+		{
+			payload.put("interacting", interactingPayload(snapshot.status));
+			payload.put("runEnergyRaw", snapshot.status.runEnergyRaw);
+			payload.put("runEnergyPercent", snapshot.status.runEnergyPercent);
+			payload.put("hitpointsBoosted", snapshot.status.hitpointsBoosted);
+			payload.put("hitpointsReal", snapshot.status.hitpointsReal);
+		}
+
+		payload.put("movementKnown", false);
+		payload.put("interpretation", "observed_facts_only");
+		return payload;
+	}
+
+	private Map<String, Object> writerHealthPayload(TelemetryWriter currentWriter)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("rawWriterQueueDepth", currentWriter.getQueueSize());
+		payload.put("droppedRawRecords", currentWriter.getDroppedRecords());
+		payload.put("droppedFrameCount", currentWriter.getDroppedFrameCount());
+		payload.put("compactLiveEnabled", currentWriter.isCompactLivePacketsEnabled());
+		payload.put("compactLiveQueueDepth", currentWriter.getLivePacketQueueDepth());
+		payload.put("livePacketsWritten", currentWriter.getLivePacketsWritten());
+		payload.put("livePacketsDropped", currentWriter.getLivePacketsDropped());
+		payload.put("livePacketWriteErrors", currentWriter.getLivePacketWriteErrors());
+		payload.put("livePacketLastWriteMillis", currentWriter.getLivePacketLastWriteMillis());
+		payload.put("livePacketSegmentCount", currentWriter.getLivePacketSegmentCount());
+		payload.put("livePacketTotalBytes", currentWriter.getLivePacketTotalBytes());
+		payload.put("livePacketSegmentsPruned", currentWriter.getLivePacketSegmentsPruned());
+		payload.put("livePacketRetentionBytes", Math.max(0L, config.compactLiveRetentionMb()) * 1024L * 1024L);
+		payload.put("livePacketRetentionSegments", config.compactLiveRetentionSegments());
+		payload.put("livePacketActiveSegment", currentWriter.getLivePacketActiveSegment());
+		payload.put("rawRecordingEnabled", true);
+		return payload;
 	}
 
 	private BufferedImage copyRuneliteFrame(Image image)

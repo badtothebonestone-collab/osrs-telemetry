@@ -256,4 +256,84 @@ public interface TelemetryConfig extends Config
 	{
 		return SceneProjectionRefreshMode.VISIBLE_AND_NEARBY;
 	}
+
+	@ConfigItem(
+			keyName = "emitCompactLivePackets",
+			name = "Emit compact live packets",
+			description = "Write bounded read-only compact NDJSON live packets alongside raw telemetry sessions. Recommended for normal live mode."
+	)
+	default boolean emitCompactLivePackets()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "compactLiveSegmentMb",
+			name = "Compact live segment MB",
+			description = "Approximate maximum size of each compact live packet segment."
+	)
+	default int compactLiveSegmentMb()
+	{
+		return 64;
+	}
+
+	@ConfigItem(
+			keyName = "compactLiveRetentionTicks",
+			name = "Compact live retention ticks",
+			description = "Approximate tick window to retain for compact live packet segments. 0 disables tick retention."
+	)
+	default int compactLiveRetentionTicks()
+	{
+		return 5000;
+	}
+
+	@ConfigItem(
+			keyName = "compactLiveRetentionMb",
+			name = "Compact live retention MB",
+			description = "Approximate maximum compact live packet storage per session. 0 disables byte retention."
+	)
+	default int compactLiveRetentionMb()
+	{
+		return 512;
+	}
+
+	@ConfigItem(
+			keyName = "compactLiveRetentionSegments",
+			name = "Compact live retention segments",
+			description = "Maximum compact live packet segments to keep per session. 0 disables segment-count retention."
+	)
+	default int compactLiveRetentionSegments()
+	{
+		return 16;
+	}
+
+	@ConfigItem(
+			keyName = "compactLiveQueueSize",
+			name = "Compact live queue size",
+			description = "Maximum pending compact live packets before new live packets are dropped instead of blocking the client thread."
+	)
+	default int compactLiveQueueSize()
+	{
+		return 5000;
+	}
+
+	@ConfigItem(
+			keyName = "compactLiveIncludeHeavyGeometry",
+			name = "Compact live heavy geometry",
+			description = "Include debug polygon geometry in compact live projection packets. Disabled keeps live packets small."
+	)
+	default boolean compactLiveIncludeHeavyGeometry()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			keyName = "compactLivePacketTypes",
+			name = "Compact live packet types",
+			description = "Comma-separated compact packet groups to emit: baseline,sceneDelta,projection,inventory,activity,writerHealth, or all."
+	)
+	default String compactLivePacketTypes()
+	{
+		return "all";
+	}
 }

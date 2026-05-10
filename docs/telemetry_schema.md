@@ -102,6 +102,102 @@ not be projected for that tick, while the rest of the tick remains valid. This
 telemetry does not add overlays, input hooks, menu actions, clicks, or
 client-state mutation.
 
+## Compact Live Packets
+
+Compact live packets are the default staged bridge for live sidecars. They are
+written alongside the existing raw session files under:
+
+```text
+live_packets\live-*.ndjson
+live_packets\live_packet_index.json
+live_packets\latest_segment.txt
+```
+
+Each line is one versioned packet envelope:
+
+```json
+{
+  "schema": "osrs_telemetry_live_packet.v1",
+  "packetType": "live_baseline_packet.v1",
+  "sessionId": "2026-05-09_12-00-00",
+  "tick": 123,
+  "sequence": 456,
+  "timestampUtc": "2026-05-09T17:00:00Z",
+  "payload": {}
+}
+```
+
+The compact bridge is read-only observed telemetry. It does not add overlays,
+input hooks, clicking, menu invocation, automation, action routing, or
+client-state mutation. Python sidecars still own target libraries, profiles,
+candidate scoring, task interpretation, context responses, QA tooling, and any
+future vision/model work.
+
+Packet types:
+
+- `live_baseline_packet.v1`: compact tick/game state, player facts,
+  camera/viewport fields, latest frame path, scene capture mode, and
+  source-cap/completeness summary.
+- `live_scene_delta_packet.v1`: scene capture/index summaries plus compact
+  `sceneObjectDeltas` new/updated/despawned records. It intentionally does not
+  include full `sceneObjects` arrays.
+- `live_projection_packet.v1`: projection summary plus compact visible refs
+  with `objectKey`, on-screen/geometry flags, aim point, and small geometry
+  bounds. Heavy polygons are excluded by default.
+- `live_inventory_packet.v1`: compact inventory/equipment state, free/filled
+  slots, item count, signature, and non-empty item slots.
+- `live_activity_packet.v1`: raw observed animation, pose, interacting target,
+  and status fields only. Task-state interpretation remains outside Java.
+- `live_writer_health_packet.v1`: raw writer and compact live packet queue,
+  drop, write-error, and frame-drop diagnostics.
+
+The defaults preserve existing raw recording behavior and also enable compact
+live packets for normal live mode. Compact packets are bounded by retention:
+the default segment size is 64 MB, the default retention budget is 512 MB, and
+the default retained segment count is 16. Older saved RuneLite profiles may
+still have the `emitCompactLivePackets` setting disabled; enable it for normal
+live mode.
+
+Python Phase 2 consumption is source-selectable. The live processor
+supports `--input-source raw-ticks`, `--input-source compact-packets`, and
+`--input-source auto`. Auto mode prefers compact live packets when
+`live_packet_index.json` and a recent latest segment are present, otherwise it
+falls back to raw tick JSONL with a visible warning for backward compatibility
+and audit/debug sessions. `--require-compact-packets` fails fast when compact
+packets are missing or stale, which is useful for proving that live mode is not
+using raw tick fallback.
+
+Compact packet mode converts baseline, scene-delta, projection, inventory,
+activity, and writer-health packets into the same rolling live candidate files
+under `interaction_geometry\live`, so context-service consumers do not need a
+new response schema.
+
+Compact packet mode is field-tolerant. If a packet omits a value needed by a
+profile, Python marks the capability as missing or warns rather than inventing
+state. It does not silently switch to broad raw scene processing unless
+`--input-source auto` selected the raw fallback because compact packets were not
+available.
+
+`live_status.json` and `context_response.v1` diagnostics include the active
+input source, compact packet availability/recentness, fallback reason, latest
+compact packet sequence, and latest compact segment so sidecars can tell whether
+normal live mode is using compact packets.
+
+`live_packet_index.json` summarizes the rolling segment set:
+
+- `schema`: `live_packet_index.v1`
+- `activeSegment` and `latestSegment`
+- `segments`: one entry per retained segment, with sequence/tick range, byte
+  count, and packet counts by type
+- `latestTick` and `latestSequence`
+- retention settings and total pruned segment count
+
+`latest_segment.txt` contains the current active segment filename. It is a tiny
+pointer for tailing tools so they can follow the live stream without scanning
+old segments. Segment retention prunes only completed `live-*.ndjson` files
+inside `live_packets`; the active segment is never deleted. Retention can be
+bounded by bytes, segment count, and tick window.
+
 NPC, object, and ground item names are best-effort read-only definition
 lookups. Scene objects prefer valid impostor names when an object definition can
 transform. If a definition is hidden or unavailable, derived tooling falls back

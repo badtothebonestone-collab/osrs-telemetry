@@ -1,8 +1,12 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -124,8 +128,162 @@ def make_session(root: Path, ticks: list[dict], segmented: bool = False) -> Path
     return session
 
 
+def compact_packet(packet_type: str, tick: int, sequence: int, payload: dict) -> dict:
+    return {
+        "schema": "osrs_telemetry_live_packet.v1",
+        "packetType": packet_type,
+        "sessionId": "fake",
+        "tick": tick,
+        "sequence": sequence,
+        "timestampUtc": f"2026-01-01T00:00:{tick:02d}Z",
+        "payload": payload,
+    }
+
+
+def compact_scene_object(source: dict) -> dict:
+    return {
+        "objectKey": source.get("objectKey"),
+        "targetType": "sceneObject",
+        "id": source.get("id"),
+        "hash": source.get("hash"),
+        "name": source.get("objectName"),
+        "nameSource": source.get("objectNameSource"),
+        "actions": source.get("actions"),
+        "kind": source.get("kind"),
+        "layer": source.get("kind"),
+        "worldX": source.get("worldX"),
+        "worldY": source.get("worldY"),
+        "plane": source.get("plane"),
+        "sceneX": source.get("sceneX"),
+        "sceneY": source.get("sceneY"),
+        "localX": source.get("localX"),
+        "localY": source.get("localY"),
+        "present": source.get("present", True),
+        "source": "test",
+        "firstSeenTick": 1,
+        "lastSeenTick": 1,
+        "lastUpdatedTick": 1,
+        "onScreen": source.get("onScreen"),
+        "geometryAvailable": source.get("geometryAvailable"),
+        "aimPoint": {
+            "canvasX": source.get("canvasLocation", {}).get("x"),
+            "canvasY": source.get("canvasLocation", {}).get("y"),
+            "source": "canvasLocation",
+        },
+        "geometrySummary": {
+            "hasClickbox": source.get("clickboxBounds") is not None,
+            "hasConvexHull": source.get("convexHullBounds") is not None,
+            "hasCanvasTilePolygon": source.get("canvasTilePolygon") is not None,
+            "clickboxBounds": source.get("clickboxBounds"),
+            "convexHullBounds": source.get("convexHullBounds"),
+        },
+    }
+
+
+def write_compact_packets(session: Path, tick_objects: dict[int, list[dict]]) -> None:
+    live_dir = session / "live_packets"
+    live_dir.mkdir(parents=True, exist_ok=True)
+    segment = live_dir / "live-000001.ndjson"
+    sequence = 0
+    counts = {}
+    first_tick = min(tick_objects) if tick_objects else None
+    last_tick = max(tick_objects) if tick_objects else None
+    with segment.open("w", encoding="utf-8") as file:
+        for tick_id, objects in sorted(tick_objects.items()):
+            visible = [compact_scene_object(source) for source in objects]
+            packets = [
+                compact_packet(
+                    "live_baseline_packet.v1",
+                    tick_id,
+                    sequence + 1,
+                    {
+                        "tick": tick_id,
+                        "gameState": "LOGGED_IN",
+                        "player": {"worldX": 3200, "worldY": 3200, "plane": 0, "animation": -1, "poseAnimation": -1},
+                        "cameraViewport": {"canvasWidth": 300, "canvasHeight": 300},
+                        "latestFramePath": f"frames/frame-tick-{tick_id:08d}.jpg",
+                        "sceneCaptureMode": "STATIC_SCENE_INDEX_DIAGNOSTIC",
+                        "source": {
+                            "sourceSceneKnowledgeComplete": True,
+                            "sourceCapHit": False,
+                            "sceneObjectsSeen": len(objects),
+                            "sceneObjectsCaptured": len(objects),
+                            "sceneObjectsSkippedByCap": 0,
+                            "sceneObjectCapHit": False,
+                        },
+                    },
+                ),
+                compact_packet(
+                    "live_scene_delta_packet.v1",
+                    tick_id,
+                    sequence + 2,
+                    {
+                        "sceneIndexSummary": {"indexEnabled": True, "indexObjectCount": len(objects), "presentObjectCount": len(objects), "indexCapHit": False},
+                        "sceneCaptureSummary": {
+                            "sceneCaptureMode": "STATIC_SCENE_INDEX_DIAGNOSTIC",
+                            "sceneObjectsSeen": len(objects),
+                            "sceneObjectsCaptured": len(objects),
+                            "sceneObjectsSkippedByCap": 0,
+                            "sceneObjectCapHit": False,
+                        },
+                        "sceneObjectDeltas": {"newObjects": [], "updatedObjects": [], "despawnedObjects": []},
+                    },
+                ),
+                compact_packet(
+                    "live_projection_packet.v1",
+                    tick_id,
+                    sequence + 3,
+                    {
+                        "sceneProjectionSummary": {"projectionStateHash": f"h-{tick_id}", "visibleObjectCount": len(objects), "onScreenObjectCount": len(objects), "geometryAvailableCount": len(objects)},
+                        "projectionStateHash": f"h-{tick_id}",
+                        "refreshMode": "VISIBLE_AND_NEARBY",
+                        "visibleObjectRefs": visible,
+                    },
+                ),
+                compact_packet(
+                    "live_inventory_packet.v1",
+                    tick_id,
+                    sequence + 4,
+                    {"inventory": {"known": True, "freeSlots": 28, "filledSlots": 0, "itemCount": 0, "signature": "", "items": []}, "equipment": {"known": True, "items": []}},
+                ),
+                compact_packet("live_activity_packet.v1", tick_id, sequence + 5, {"animation": -1, "poseAnimation": -1, "movementKnown": False}),
+                compact_packet("live_writer_health_packet.v1", tick_id, sequence + 6, {"rawWriterQueueDepth": 0, "droppedRawRecords": 0, "compactLiveEnabled": True}),
+            ]
+            sequence += 6
+            for packet in packets:
+                counts[packet["packetType"]] = counts.get(packet["packetType"], 0) + 1
+                file.write(json.dumps(packet, separators=(",", ":")) + "\n")
+    (live_dir / "latest_segment.txt").write_text("live-000001.ndjson\n", encoding="utf-8")
+    (live_dir / "live_packet_index.json").write_text(
+        json.dumps(
+            {
+                "schema": "live_packet_index.v1",
+                "activeSegment": "live-000001.ndjson",
+                "latestSegment": "live-000001.ndjson",
+                "segments": [
+                    {
+                        "path": "live-000001.ndjson",
+                        "firstSequence": 1,
+                        "lastSequence": sequence,
+                        "firstTick": first_tick,
+                        "lastTick": last_tick,
+                        "bytes": segment.stat().st_size,
+                        "packetCountsByType": counts,
+                    }
+                ],
+                "latestTick": last_tick,
+                "latestSequence": sequence,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def live_args(**overrides):
     values = {
+        "input_source": "raw-ticks",
+        "compare_input_sources": False,
+        "require_compact_packets": False,
         "profile": "woodcutting",
         "target_type": "all",
         "limit": 20,
@@ -312,6 +470,192 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(status["rawRecordsFullyProcessed"], 5)
             self.assertEqual(status["processedTickIds"], [1, 2, 3, 4, 5])
 
+    def test_input_source_raw_ticks_preserves_current_behavior(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args(input_source="raw-ticks"))
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(status["inputSourceRequested"], "raw-ticks")
+            self.assertEqual(status["inputSourceActive"], "raw-ticks")
+            self.assertTrue(status["rawTicksAvailable"])
+            self.assertEqual(status["candidateCount"], 1)
+
+    def test_input_source_compact_packets_reads_synthetic_packets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="compact-tree")
+            session = make_session(Path(tmp), [])
+            write_compact_packets(session, {1: [tree]})
+            processor = live.LiveTargetProcessor(session, live_args(input_source="compact-packets"))
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(status["inputSourceActive"], "compact-packets")
+            self.assertEqual(status["compactPacketsSeen"], 6)
+            self.assertEqual(status["compactPacketsProcessed"], 6)
+            self.assertEqual(status["candidateCount"], 1)
+            self.assertEqual(result["candidates"][0]["objectKey"], "compact-tree")
+            self.assertEqual(result["candidates"][0]["classId"], "tree")
+            self.assertTrue(status["sourceSceneKnowledgeComplete"])
+
+    def test_input_source_auto_prefers_compact_packets_when_index_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="compact-tree")
+            session = make_session(Path(tmp), [raw_tick(1, object_id=1111)])
+            write_compact_packets(session, {2: [tree]})
+            processor = live.LiveTargetProcessor(session, live_args(input_source="auto"))
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(status["inputSourceActive"], "compact-packets")
+            self.assertEqual(status["processedTickIds"], [2])
+            self.assertEqual(result["candidates"][0]["objectKey"], "compact-tree")
+
+    def test_input_source_auto_falls_back_to_raw_ticks_when_compact_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args(input_source="auto"))
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(status["inputSourceActive"], "raw-ticks")
+            self.assertIn("falling back", status["inputFallbackReason"])
+            self.assertEqual(status["candidateCount"], 1)
+
+    def test_require_compact_packets_fails_when_packets_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LIVE_SCRIPT),
+                    "--session",
+                    str(session),
+                    "--require-compact-packets",
+                    "--once",
+                    "--quiet",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Compact live packets are required", result.stdout)
+
+    def test_require_compact_packets_fails_when_packets_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [])
+            write_compact_packets(session, {1: [raw_scene_object(1276, 3201, 3201, 110, 100, object_key="tree-1")]})
+            stale_time = time.time() - 3600
+            os.utime(session / "live_packets" / "live-000001.ndjson", (stale_time, stale_time))
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LIVE_SCRIPT),
+                    "--session",
+                    str(session),
+                    "--input-source",
+                    "compact-packets",
+                    "--require-compact-packets",
+                    "--once",
+                    "--quiet",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Compact live packets are required", result.stdout)
+
+    def test_require_compact_packets_passes_when_packets_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [])
+            write_compact_packets(session, {1: [raw_scene_object(1276, 3201, 3201, 110, 100, object_key="tree-1")]})
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LIVE_SCRIPT),
+                    "--session",
+                    str(session),
+                    "--input-source",
+                    "compact-packets",
+                    "--require-compact-packets",
+                    "--profile",
+                    "woodcutting",
+                    "--once",
+                    "--quiet",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_compact_packet_realtime_coalesces_by_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [])
+            write_compact_packets(
+                session,
+                {
+                    1: [raw_scene_object(1276, 3201, 3201, 110, 100, object_key="tree-1")],
+                    2: [raw_scene_object(1276, 3202, 3201, 120, 100, object_key="tree-2")],
+                    3: [raw_scene_object(1276, 3203, 3201, 130, 100, object_key="tree-3")],
+                },
+            )
+            processor = live.LiveTargetProcessor(session, live_args(input_source="compact-packets", max_new_ticks_per_update=1))
+
+            _added, result = processor.poll_once()
+            status = result["status"]
+
+            self.assertEqual(status["inputSourceActive"], "compact-packets")
+            self.assertEqual(status["rawRecordsSeenThisPoll"], 3)
+            self.assertEqual(status["rawRecordsFullyProcessed"], 1)
+            self.assertEqual(status["coalescedBacklogTicks"], 2)
+            self.assertEqual(status["compactPacketsCoalesced"], 12)
+            self.assertEqual(status["processedTickIds"], [3])
+
+    def test_compact_packet_tailer_preserves_partial_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [])
+            live_dir = session / "live_packets"
+            live_dir.mkdir(parents=True, exist_ok=True)
+            segment = live_dir / "live-000001.ndjson"
+            first = compact_packet("live_baseline_packet.v1", 1, 1, {"tick": 1, "player": {}})
+            second = compact_packet("live_baseline_packet.v1", 2, 2, {"tick": 2, "player": {}})
+            second_text = json.dumps(second, separators=(",", ":"))
+            segment.write_text(json.dumps(first, separators=(",", ":")) + "\n" + second_text[:20], encoding="utf-8")
+            (live_dir / "latest_segment.txt").write_text("live-000001.ndjson\n", encoding="utf-8")
+
+            tailer = live.CompactPacketTailer(session)
+            records = tailer.read_new_records(realtime=True, max_records=1)
+
+            self.assertEqual([record[2]["tickId"] for record in records], [1])
+            self.assertTrue(tailer.partial_line_files())
+
+            with segment.open("a", encoding="utf-8") as file:
+                file.write(second_text[20:] + "\n")
+
+            records = tailer.read_new_records(realtime=True, max_records=1)
+            self.assertEqual([record[2]["tickId"] for record in records], [2])
+
+    def test_compare_input_sources_reports_warning_or_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="same-tree")
+            session = make_session(Path(tmp), [raw_tick(1, objects=[tree])])
+            write_compact_packets(session, {1: [tree]})
+            output = StringIO()
+
+            with redirect_stdout(output):
+                code = live.compare_input_sources(session, live_args(input_source="auto", latest=1))
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertIn(payload["status"], {"PASS", "WARN"})
+            self.assertTrue(payload["rawTicks"]["available"])
+            self.assertTrue(payload["compactPackets"]["available"])
+
     def test_complete_mode_status_is_labeled_audit_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp), [raw_tick(index) for index in range(1, 4)])
@@ -352,6 +696,7 @@ class LiveTargetProcessorTest(unittest.TestCase):
             args = live.parse_args()
             self.assertEqual(args.liveness_mode, "delta")
             self.assertEqual(args.liveness_budget_ms, 20.0)
+            self.assertEqual(args.input_source, "auto")
 
         with mock.patch.object(sys, "argv", ["live_target_processor.py", "--session", "s", "--once", "--latency-mode", "complete"]):
             args = live.parse_args()

@@ -20,6 +20,98 @@ python telemetry-viewer\replay_viewer.py --sessions-dir "C:\path\to\sessions"
 python telemetry-viewer\replay_viewer.py --port 8765
 ```
 
+## Compact Live NDJSON Bridge
+
+Compact live packets are the default live bridge between the RuneLite read-only
+sensor/cache adapter and Python sidecars. Java continues writing the normal raw
+debug/audit session files and also writes small append-only packets under:
+
+```text
+live_packets\live-*.ndjson
+live_packets\live_packet_index.json
+live_packets\latest_segment.txt
+```
+
+The packet stream contains observed facts only: baseline state, scene deltas,
+projection summaries, inventory/equipment summaries, activity facts, and writer
+health. Python still owns target libraries, profiles, scoring, task
+interpretation, context responses, QA tooling, and future vision/model work.
+The compact bridge does not add overlays, input hooks, clicking, menu
+invocation, automation, or Java HTTP/WebSocket endpoints.
+
+The RuneLite config option **Emit compact live packets** defaults on for new
+configurations. If an older saved profile has it disabled, turn it back on for
+normal live mode. Then check the current session and inspect the packet files:
+
+```text
+python telemetry-viewer\check_live_setup.py --latest-session
+python telemetry-viewer\inspect_live_packets.py --latest-session --summary
+python telemetry-viewer\inspect_live_packets.py --session "C:\path\to\session" --summary
+python telemetry-viewer\inspect_live_packets.py --latest-session --tail
+```
+
+Raw JSONL recording is still the debug/audit/training path. The compact packet
+bridge is the first step toward letting the live processor consume small
+baseline/delta packets instead of rereading giant raw tick snapshots.
+
+The packet files are segmented by size and retention-pruned so live runs do not
+create unbounded disk usage. `live_packet_index.json` records the retained
+segments, latest tick/sequence, packet counts by type, retention settings, and
+pruned segment count. `latest_segment.txt` points tailing tools at the active
+segment.
+
+Useful reader commands:
+
+```text
+python telemetry-viewer\inspect_live_packets.py --latest-session --summary
+python telemetry-viewer\inspect_live_packets.py --latest-session --latest-only --summary
+python telemetry-viewer\inspect_live_packets.py --latest-session --tail --packet-type live_baseline_packet.v1
+python telemetry-viewer\inspect_live_packets.py --latest-session --since-sequence 1000 --max-lines 50
+```
+
+`live_target_processor.py` consumes these compact packets by default through
+`--input-source auto`. Raw ticks/screenshots remain the authoritative
+debug/audit path and are still available with `--input-source raw-ticks`.
+
+Compact packet live processor commands:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --require-compact-packets --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --compare-input-sources --profile woodcutting --latest 5
+```
+
+`--input-source auto` prefers compact packets when `live_packet_index.json` and
+recent packet segments are present, otherwise it falls back to raw tick JSONL
+with a clear warning. Use `--require-compact-packets` when you want the live
+processor to fail fast instead of using raw fallback.
+The rolling live output schema stays the same, so `context_service.py`,
+`live_context_query.py`, and the live inspector continue reading
+`interaction_geometry\live`.
+
+## Default Live Input: Compact Packets
+
+Compact packets are now the normal live input path. Raw tick JSONL remains for
+debugging, complete audits, replay, and training datasets. Auto mode prefers
+compact packets, and the rolling live files written by `live_target_processor.py`
+stay compatible with `context_service.py`.
+
+Use these commands for the default live flow:
+
+```text
+python telemetry-viewer\check_live_setup.py --latest-session
+python telemetry-viewer\inspect_live_packets.py --latest-session --summary
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --require-compact-packets --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+python telemetry-viewer\context_service.py --latest-session --port 8890
+```
+
+If compact packets are missing, `check_live_setup.py` explains the missing
+pieces and the live processor reports the raw-tick fallback reason. Screenshots
+and raw ticks can still grow when debug recording is enabled; compact packet
+retention only bounds `live_packets`.
+
 To build a derived perception dataset for the newest session:
 
 ```text
@@ -1006,10 +1098,10 @@ training data, and reproducible QA:
 python telemetry-viewer\run_target_geometry_pipeline.py --latest-session --latest 25 --profile broad_qa --limit 2000
 ```
 
-For local live QA, use `live_target_processor.py`. It tails the selected
-session's raw tick JSONL files, keeps a rolling in-memory tick window, converts
-the current window to world target geometry and ranked candidate packets, and
-writes rolling derived files under:
+For local live QA, use `live_target_processor.py`. It uses compact live packets
+by default, keeps a rolling in-memory tick window, converts the current window
+to world target geometry and ranked candidate packets, and writes rolling
+derived files under:
 
 ```text
 sessions\<session_id>\interaction_geometry\live\
@@ -1033,13 +1125,13 @@ Primary outputs:
 Example one-shot live QA pass:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile broad_qa --window-ticks 100 --once --summary
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile broad_qa --window-ticks 100 --once --summary
 ```
 
 Example follow-mode woodcutting QA pass:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --window-ticks 100 --follow --exclude-ui-blocked --limit 500 --summary
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --window-ticks 100 --follow --exclude-ui-blocked --limit 500 --summary
 ```
 
 `--exclude-ui-blocked` automatically includes existing `ui_targets.jsonl` records
@@ -1094,7 +1186,7 @@ World target output policy:
 Startup/follow behavior:
 
 - `--startup-backfill-ticks N` limits initial catch-up. Default is `10`.
-- `--no-startup-backfill` starts from the current end of the tick files and
+- `--no-startup-backfill` starts from the current end of the live input and
   only processes newly appended records.
 - `--process-existing` processes the current rolling window before following.
 - Follow mode reuses cached per-tick work for older ticks and processes only
@@ -1113,25 +1205,25 @@ counts, write failures, and recommendations.
 Fast one-shot woodcutting context test:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --once --startup-backfill-ticks 5 --window-ticks 5 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --once --startup-backfill-ticks 5 --window-ticks 5 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
 ```
 
 Fast follow mode:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
 ```
 
 With UI blocking:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --startup-backfill-ticks 25 --window-ticks 100 --limit 500 --include-ui-targets --exclude-ui-blocked --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --startup-backfill-ticks 25 --window-ticks 100 --limit 500 --include-ui-targets --exclude-ui-blocked --emit-world-targets candidates --summary --benchmark
 ```
 
 Debug full world output:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile broad_qa --once --window-ticks 5 --limit 2000 --emit-world-targets full --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source raw-ticks --profile broad_qa --once --window-ticks 5 --limit 2000 --emit-world-targets full --summary --benchmark
 ```
 
 Live inspector:
@@ -1271,16 +1363,16 @@ For short experiments where trees may be chopped/depleted, run the processor
 with the default suppression window or tune it explicitly:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 50 --limit 100 --no-ui-targets --emit-world-targets candidates --depleted-suppress-ticks 20 --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 50 --limit 100 --no-ui-targets --emit-world-targets candidates --depleted-suppress-ticks 20 --summary --benchmark
 ```
 
 ## Realtime live mode versus complete live mode
 
 `live_target_processor.py` now has two latency modes:
 
-- `--latency-mode realtime` prioritizes the latest useful context. If raw tick
-  backlog grows, it can coalesce intermediate ticks and process only the newest
-  tick or newest small batch for live output.
+- `--latency-mode realtime` prioritizes the latest useful context. If compact
+  packet or raw tick backlog grows, it can coalesce intermediate ticks and
+  process only the newest tick or newest small batch for live output.
 - `--latency-mode complete` processes every selected tick in order. Use it for
   QA/debug runs where completeness of the derived rolling output matters more
   than latency. Complete audit mode is expected to be slower and is labelled
@@ -1339,6 +1431,81 @@ Use realtime mode for current context. Use complete mode when auditing every
 tick matters. Coalescing is not capture loss, not a Java scene cap, and not a
 static scene index limit.
 
+## Compact packet input mode
+
+`live_target_processor.py` supports three input sources:
+
+- `--input-source raw-ticks`: current raw tick JSONL tailing path. Use it for
+  offline complete audits, old sessions, and schema debugging.
+- `--input-source compact-packets`: read `live_packets\live-*.ndjson` through
+  the compact packet reader. This builds candidates from compact baseline,
+  scene-delta, projection, inventory, activity, and writer-health packets
+  without requiring a full raw `TickSnapshot`.
+- `--input-source auto`: default. Prefer compact packets when a live packet
+  index/latest segment exists and is recent, otherwise fall back to raw ticks
+  with an explicit warning.
+
+For normal live QA, use compact packets. Raw ticks remain useful for offline
+audits, replay/debug work, and old sessions. `--require-compact-packets` is the
+strict check: it fails fast if compact packets are missing or stale, proving the
+live path is not using raw tick fallback.
+
+Compact mode consumes these packet types:
+
+- `live_baseline_packet.v1`
+- `live_scene_delta_packet.v1`
+- `live_projection_packet.v1`
+- `live_inventory_packet.v1`
+- `live_activity_packet.v1`
+- `live_writer_health_packet.v1`
+
+Missing compact fields are reported as warnings or missing capabilities instead
+of silently switching to broad raw scene processing. Profiles that need target
+families not yet emitted as compact packets, such as NPC or ground-item QA, may
+still require raw tick mode until those compact packet types exist.
+
+Useful status fields:
+
+- `inputSourceRequested`
+- `inputSourceActive`
+- `compactPacketsAvailable`
+- `compactPacketsRecent`
+- `compactPacketIndexPath`
+- `rawTicksAvailable`
+- `inputFallbackReason`
+- `defaultLiveInputPreference`
+- `compactPacketsSeen`
+- `compactPacketsProcessed`
+- `compactPacketsCoalesced`
+- `compactPacketLastSequence`
+- `compactPacketLatestSegment`
+- `compactPacketRolloverCount`
+- `compactPacketReadErrors`
+
+Compact realtime woodcutting:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+```
+
+Auto input mode:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+```
+
+Strict compact mode:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --require-compact-packets --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+```
+
+Compare compact-packet and raw-tick candidate output:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --compare-input-sources --profile woodcutting --latest 5
+```
+
 The live status timing buckets are exclusive where practical and do not include
 poll sleep time. Useful fields include `fileDiscoverMillis`, `tailReadMillis`,
 `lineSplitMillis`, `jsonParseMillis`, `rawTickIngestMillis`,
@@ -1355,13 +1522,13 @@ failures.
 Fast realtime woodcutting:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
 ```
 
 Complete QA processing:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --once --latency-mode complete --startup-backfill-ticks 25 --window-ticks 25 --limit 500 --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source raw-ticks --profile woodcutting --once --latency-mode complete --startup-backfill-ticks 25 --window-ticks 25 --limit 500 --emit-world-targets candidates --summary --benchmark
 ```
 
 Complete audit mode; expected to be slower.
@@ -1369,7 +1536,7 @@ Complete audit mode; expected to be slower.
 Debug broad world:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile broad_qa --once --latency-mode complete --window-ticks 5 --limit 2000 --emit-world-targets full --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source raw-ticks --profile broad_qa --once --latency-mode complete --window-ticks 5 --limit 2000 --emit-world-targets full --summary --benchmark
 ```
 
 ## Read-only context service
@@ -1385,10 +1552,16 @@ read-only request/response contract before any Java bridge is added.
 Raw JSON/session recording remains the debug, audit, and training path. The
 service is only a compact observation layer over the current live files.
 
+Check live setup:
+
+```text
+python telemetry-viewer\check_live_setup.py --latest-session
+```
+
 Start realtime live processor:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
 ```
 
 Start context service:
@@ -1464,19 +1637,19 @@ is not source capture limiting; `sourceSceneKnowledgeComplete` and
 Realtime no liveness:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --liveness-mode off --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --latency-mode realtime --liveness-mode off --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
 ```
 
 Realtime delta liveness:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
 ```
 
 Complete audit full liveness:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --profile woodcutting --once --latency-mode complete --liveness-mode full --startup-backfill-ticks 25 --window-ticks 25 --limit 500 --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source raw-ticks --profile woodcutting --once --latency-mode complete --liveness-mode full --startup-backfill-ticks 25 --window-ticks 25 --limit 500 --emit-world-targets candidates --summary --benchmark
 ```
 
 Compact context request:

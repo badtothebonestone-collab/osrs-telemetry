@@ -115,6 +115,13 @@ def make_session(root: Path, *, candidates: list[dict] | None = None, stale: boo
             "latestTickProcessed": 10,
             "profile": "woodcutting",
             "candidateCount": len(candidates),
+            "inputSourceRequested": "auto",
+            "inputSourceActive": "compact-packets",
+            "defaultLiveInputPreference": "compact-packets",
+            "compactPacketsAvailable": True,
+            "compactPacketsRecent": True,
+            "compactPacketLastSequence": 123,
+            "compactPacketLatestSegment": str(session / "live_packets" / "live-000001.ndjson"),
             "sourceSceneKnowledgeComplete": True,
             "sourceCapHit": False,
             "budgetExceeded": False,
@@ -263,6 +270,41 @@ class ContextServiceTest(unittest.TestCase):
             self.assertNotIn("candidateSummary", response)
             self.assertNotIn("sourceFiles", response)
             self.assertIn("sourceFilesSummary", response)
+
+    def test_context_diagnostics_include_input_source_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            cache = service.LiveContextCache(session, reload_interval=0)
+            context = cache.load(force=True)
+            response = service.build_context_response(
+                context,
+                {
+                    "schema": "context_request.v1",
+                    "needs": ["diagnostics"],
+                    "responseMode": "compact",
+                },
+            )
+            input_source = response["diagnostics"]["inputSource"]
+            self.assertEqual(input_source["inputSourceActive"], "compact-packets")
+            self.assertTrue(input_source["compactPacketsAvailable"])
+            self.assertEqual(input_source["latestCompactPacketSequence"], 123)
+
+    def test_context_warns_when_live_processor_uses_raw_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            status_path = session / "interaction_geometry" / "live" / "live_status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["inputSourceActive"] = "raw-ticks"
+            status["inputSourceRequested"] = "auto"
+            status["inputFallbackReason"] = "compact live packets unavailable; falling back to raw tick JSONL"
+            write_json(status_path, status)
+            cache = service.LiveContextCache(session, reload_interval=0)
+            response = service.build_context_response(
+                cache.load(force=True),
+                {"schema": "context_request.v1", "needs": ["diagnostics"], "responseMode": "compact"},
+            )
+            self.assertTrue(any("raw tick fallback" in warning for warning in response["warnings"]))
+            self.assertEqual(response["diagnostics"]["inputSource"]["inputSourceActive"], "raw-ticks")
 
     def test_compact_liveness_omits_full_recently_unavailable_targets(self):
         with tempfile.TemporaryDirectory() as tmp:
