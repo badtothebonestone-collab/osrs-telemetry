@@ -907,6 +907,70 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertIn("target_depleted", event_types)
             self.assertIn("inventory_changed", event_types)
 
+    def test_live_event_timeline_records_source_fallback_and_suppression_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting"))
+            candidate = {
+                "classId": "tree",
+                "name": "Tree",
+                "id": 1276,
+                "objectKey": "tree-a",
+                "worldX": 3201,
+                "worldY": 3201,
+                "plane": 0,
+                "distanceTiles": 1,
+                "targetLiveState": "live_assumed",
+                "navigation": {"directReachability": "reachable"},
+            }
+            inventory = {"signature": "a", "freeSlots": 20, "inventoryFull": False}
+            activity = {"activityState": {"apparentState": "idle"}, "player": {"animation": -1}}
+            base_status = {
+                "latestTick": 1,
+                "warningCount": 0,
+                "budgetExceeded": False,
+                "writeFailureCount": 0,
+                "sourceCapHit": False,
+                "inputSourceRequested": "auto",
+                "inputSourceActive": "compact-packets",
+                "compactPacketsAvailable": True,
+                "compactPacketsRecent": True,
+                "inputFallbackReason": None,
+                "candidatesSuppressedByLiveness": 0,
+                "candidatesSuppressedAsDepleted": 0,
+            }
+            processor.emit_timeline_events(
+                latest_tick_record={"tickId": 1},
+                candidates=[candidate],
+                inventory_state=inventory,
+                activity=activity,
+                status=base_status,
+                processed_at="2026-01-01T00:00:00Z",
+            )
+            fallback_status = dict(
+                base_status,
+                latestTick=2,
+                inputSourceActive="raw-ticks",
+                compactPacketsAvailable=False,
+                compactPacketsRecent=False,
+                inputFallbackReason="auto mode falling back to raw ticks because compact packets were unavailable",
+                candidatesSuppressedByLiveness=2,
+                candidatesSuppressedAsDepleted=1,
+            )
+            processor.emit_timeline_events(
+                latest_tick_record={"tickId": 2},
+                candidates=[candidate],
+                inventory_state=inventory,
+                activity=activity,
+                status=fallback_status,
+                processed_at="2026-01-01T00:00:01Z",
+            )
+            event_types = [event["eventType"] for event in processor.event_timeline]
+            self.assertIn("input_source_changed", event_types)
+            self.assertIn("compact_packet_fallback_changed", event_types)
+            self.assertIn("liveness_suppressed_candidate", event_types)
+            self.assertIn("depleted_candidate_suppressed", event_types)
+
     def test_live_event_timeline_is_bounded_and_written(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp), [raw_tick(1)])
@@ -978,12 +1042,16 @@ class LiveTargetProcessorTest(unittest.TestCase):
                 {"collisionWindowAvailable": True, "collisionWindowRadius": 24, "playerSceneX": 10, "playerSceneY": 10},
                 {"budgetExceeded": False, "writeFailureCount": 0, "warnings": []},
                 "2026-01-01T00:00:00Z",
+                [{"tick": 1, "eventType": "best_candidate_changed", "severity": "info", "summary": "Best candidate changed: Tree at 3201,3201"}],
             )
 
             self.assertEqual(state["schema"], "telemetry_overlay_debug_state.v1")
             self.assertEqual(state["summary"]["candidateCount"], 5)
             self.assertEqual(state["summary"]["targetsWritten"], 2)
             self.assertEqual(state["summary"]["targetsSuppressedByCap"], 3)
+            self.assertEqual(state["latestEventSummary"], "Best candidate changed: Tree at 3201,3201")
+            self.assertEqual(state["lastEventTick"], 1)
+            self.assertEqual(state["warningEventCount"], 0)
             self.assertEqual(len(state["targets"]), 2)
             self.assertEqual(state["targets"][0]["aimPoint"]["canvasX"], 100)
             self.assertEqual(state["targets"][0]["bounds"]["width"], 10)

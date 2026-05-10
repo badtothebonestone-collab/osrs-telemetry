@@ -1430,6 +1430,8 @@ Typical event types include:
 - `nearest_candidate_changed`
 - `target_liveness_changed`
 - `target_depleted`
+- `liveness_suppressed_candidate`
+- `depleted_candidate_suppressed`
 - `candidate_revived`
 - `inventory_changed`
 - `inventory_free_slots_changed`
@@ -1441,6 +1443,8 @@ Typical event types include:
 - `source_cap_changed`
 - `budget_exceeded_changed`
 - `write_failures_changed`
+- `input_source_changed`
+- `compact_packet_fallback_changed`
 
 The human dashboard shows recent events by default:
 
@@ -1456,7 +1460,8 @@ $request = @{
   schema = "context_request.v1"
   task = "woodcutting"
   needs = @("baseline", "best:tree", "nearest:tree", "events", "diagnostics")
-  maxCandidates = 5
+  maxCandidates = 1
+  maxEvents = 5
   responseMode = "compact"
 } | ConvertTo-Json -Depth 10
 

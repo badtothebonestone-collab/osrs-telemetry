@@ -143,6 +143,19 @@ public class TelemetryDebugOverlay extends Overlay
 			line3 = "collision window " + (Boolean.TRUE.equals(state.collisionWindow.available) ? "available" : "unknown")
 					+ " | radius " + valueOrUnknown(state.collisionWindow.radius);
 		}
+		String line4 = null;
+		if (state != null && state.latestEventSummary != null && !state.latestEventSummary.isBlank())
+		{
+			String eventLine = "event tick " + valueOrUnknown(state.lastEventTick) + ": " + truncate(state.latestEventSummary, 70);
+			if (line3 == null)
+			{
+				line3 = eventLine;
+			}
+			else
+			{
+				line4 = eventLine;
+			}
+		}
 
 		FontMetrics metrics = graphics.getFontMetrics();
 		int width = Math.max(metrics.stringWidth(line1), metrics.stringWidth(line2));
@@ -150,7 +163,11 @@ public class TelemetryDebugOverlay extends Overlay
 		{
 			width = Math.max(width, metrics.stringWidth(line3));
 		}
-		int height = line3 == null ? 42 : 58;
+		if (line4 != null)
+		{
+			width = Math.max(width, metrics.stringWidth(line4));
+		}
+		int height = line4 == null ? (line3 == null ? 42 : 58) : 74;
 		graphics.setColor(PANEL_BACKGROUND);
 		graphics.fillRoundRect(x - 4, y - metrics.getAscent() - 4, width + 12, height, 6, 6);
 		graphics.setColor(TEXT_COLOR);
@@ -159,6 +176,10 @@ public class TelemetryDebugOverlay extends Overlay
 		if (line3 != null)
 		{
 			graphics.drawString(line3, x, y + 32);
+		}
+		if (line4 != null)
+		{
+			graphics.drawString(line4, x, y + 48);
 		}
 	}
 
@@ -386,11 +407,23 @@ public class TelemetryDebugOverlay extends Overlay
 		return value == null ? "unknown" : String.valueOf(value);
 	}
 
+	private String truncate(String value, int maxLength)
+	{
+		if (value == null || value.length() <= maxLength)
+		{
+			return value;
+		}
+		return value.substring(0, Math.max(0, maxLength - 3)) + "...";
+	}
+
 	static class OverlayDebugState
 	{
 		String schema;
 		Double latestTick;
 		String profile;
+		String latestEventSummary;
+		Double warningEventCount;
+		Double lastEventTick;
 		OverlaySummary summary;
 		List<OverlayTarget> targets;
 		CollisionWindow collisionWindow;
@@ -402,6 +435,9 @@ public class TelemetryDebugOverlay extends Overlay
 		Double targetsWritten;
 		Boolean budgetExceeded;
 		Double writeFailures;
+		String latestEventSummary;
+		Double warningEventCount;
+		Double lastEventTick;
 	}
 
 	static class OverlayTarget

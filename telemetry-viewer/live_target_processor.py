@@ -2206,6 +2206,7 @@ def overlay_debug_state_for(
     navigation: dict,
     status: dict,
     processed_at: str,
+    events: list[dict] | None = None,
 ) -> dict:
     latest_tick = latest_tick or {}
     player = local_player_for(latest_tick)
@@ -2219,6 +2220,9 @@ def overlay_debug_state_for(
         marked_candidates.append(marked)
     capped_candidates = marked_candidates[:limit]
     collision_bounds = navigation.get("collisionWindowBounds") if isinstance(navigation.get("collisionWindowBounds"), dict) else {}
+    recent_events = [event for event in (events or []) if isinstance(event, dict)]
+    latest_event = recent_events[-1] if recent_events else {}
+    warning_event_count = sum(1 for event in recent_events if event.get("severity") in {"warn", "error"})
     return {
         "schema": LIVE_OVERLAY_DEBUG_SCHEMA,
         "generatedAtUtc": processed_at,
@@ -2226,6 +2230,9 @@ def overlay_debug_state_for(
         "latestTick": tick_id_for(latest_tick),
         "profile": args.profile,
         "status": "WARN" if status.get("warnings") else "PASS",
+        "latestEventSummary": latest_event.get("summary"),
+        "warningEventCount": warning_event_count,
+        "lastEventTick": latest_event.get("tick"),
         "player": {
             "worldX": player.get("worldX"),
             "worldY": player.get("worldY"),
@@ -2241,6 +2248,9 @@ def overlay_debug_state_for(
             "bestClass": candidates[0].get("classId") if candidates else None,
             "budgetExceeded": bool(status.get("budgetExceeded")),
             "writeFailures": status.get("writeFailureCount", 0),
+            "latestEventSummary": latest_event.get("summary"),
+            "warningEventCount": warning_event_count,
+            "lastEventTick": latest_event.get("tick"),
         },
         "targets": [overlay_target_summary(candidate, status, tick_id_for(latest_tick)) for candidate in capped_candidates],
         "collisionWindow": {
@@ -4018,6 +4028,21 @@ class LiveTargetProcessor:
                 )
             )
 
+        suppressed_depleted = status.get("candidatesSuppressedAsDepleted")
+        suppressed_depleted_changed, suppressed_depleted_previous = changed("candidatesSuppressedAsDepleted", suppressed_depleted)
+        if suppressed_depleted_changed and suppressed_depleted_previous is not None and suppressed_depleted:
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="depleted_candidate_suppressed",
+                    severity="warn",
+                    summary=f"Depleted/stale liveness suppressed {suppressed_depleted} candidate(s)",
+                    previous_value=suppressed_depleted_previous,
+                    current_value=suppressed_depleted,
+                )
+            )
+
         revived = status.get("candidatesRevivedAfterRespawn")
         revived_changed, revived_previous = changed("candidatesRevivedAfterRespawn", revived)
         if revived_changed and revived_previous is not None and revived:
@@ -4141,6 +4166,55 @@ class LiveTargetProcessor:
                         current_value=current,
                     )
                 )
+
+        input_source = status.get("inputSourceActive")
+        source_changed, source_previous = changed("inputSourceActive", input_source)
+        if source_changed and (source_previous is not None or input_source is not None):
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="input_source_changed",
+                    severity="warn" if input_source == RAW_TICK_SOURCE and status.get("inputFallbackReason") else "info",
+                    summary=f"Live input source changed: {input_source or 'unknown'}",
+                    details={
+                        "inputSourceRequested": status.get("inputSourceRequested"),
+                        "inputSourceActive": input_source,
+                        "compactPacketsAvailable": status.get("compactPacketsAvailable"),
+                        "compactPacketsRecent": status.get("compactPacketsRecent"),
+                        "inputFallbackReason": status.get("inputFallbackReason"),
+                    },
+                    previous_value=source_previous,
+                    current_value=input_source,
+                )
+            )
+
+        fallback_reason = status.get("inputFallbackReason")
+        fallback_changed, fallback_previous = changed("inputFallbackReason", fallback_reason)
+        if fallback_changed and (fallback_previous is not None or fallback_reason):
+            if fallback_reason:
+                summary = f"Compact packet fallback active: {fallback_reason}"
+                severity = "warn"
+            else:
+                summary = "Compact packet fallback cleared"
+                severity = "info"
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="compact_packet_fallback_changed",
+                    severity=severity,
+                    summary=summary,
+                    details={
+                        "inputSourceRequested": status.get("inputSourceRequested"),
+                        "inputSourceActive": input_source,
+                        "compactPacketsAvailable": status.get("compactPacketsAvailable"),
+                        "compactPacketsRecent": status.get("compactPacketsRecent"),
+                    },
+                    previous_value=fallback_previous,
+                    current_value=fallback_reason,
+                )
+            )
 
         return list(self.event_timeline)[events_before:]
 
@@ -4532,6 +4606,7 @@ class LiveTargetProcessor:
             navigation,
             status,
             processed_at,
+            list(self.event_timeline),
         )
         status["overlayDebugStatePath"] = str(paths["overlayDebug"])
         overlay_debug_text = json.dumps(overlay_debug, indent=2, sort_keys=False) + "\n"

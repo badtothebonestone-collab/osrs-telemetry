@@ -246,7 +246,11 @@ timeline of notable live context changes. Each line uses schema
 Events are summaries only. They do not contain click, movement, menu, or input
 commands. Typical event types include candidate changes, target liveness or
 depletion changes, inventory changes, activity changes, reachability changes,
-and live health changes such as budget or write-failure state.
+input-source/fallback changes, and live health changes such as budget or
+write-failure state. `context_request.v1` can request recent timeline entries
+with `needs: ["events"]`; `maxEvents` caps the returned event list separately
+from `maxCandidates`. The context service returns the capped entries as both
+`events` and `recentEvents` for compatibility with existing dashboard helpers.
 
 `interaction_geometry\live\overlay_debug_state.json` is a tiny read-only file
 for the optional RuneLite debug overlay. It uses schema
@@ -261,6 +265,8 @@ Top-level fields:
 - `status`
 - `player`: world and scene tile fields.
 - `summary`: candidate count, cap, budget, and write-failure summary.
+- `latestEventSummary`, `warningEventCount`, and `lastEventTick`: compact
+  timeline status for the overlay panel.
 - `targets`: capped candidate summaries only.
 - `collisionWindow`: availability, bounds, radius, and player scene tile.
 - `safety`: read-only/draw-only flags.

@@ -581,6 +581,10 @@ def build_context_response(
         needs = ["task_summary"] if request.get("task") else ["baseline", "diagnostics"]
     max_candidates = int(request.get("maxCandidates") or default_max_candidates or 3)
     max_candidates = max(1, max_candidates)
+    try:
+        max_events = max(0, int(request.get("maxEvents") if request.get("maxEvents") is not None else max_candidates))
+    except (TypeError, ValueError):
+        max_events = max_candidates
     args = request_args(request, max_candidates)
     scoped_context = constrained_context(context, request)
     warnings = list(scoped_context.get("warnings") or [])
@@ -660,8 +664,10 @@ def build_context_response(
             "items": candidate_items(scoped_context, request, args, max_candidates, response_mode),
         }
     if "events" in needs:
-        events = query.events_payload(scoped_context, max_candidates)
-        response["events"] = events.get("events") or []
+        events = query.events_payload(scoped_context, max_events)
+        event_items = events.get("events") or []
+        response["events"] = event_items
+        response["recentEvents"] = event_items
         response["eventCount"] = events.get("eventCount")
         if not events.get("events"):
             status = combine_status(status, "WARN")
@@ -838,6 +844,7 @@ def schema_payload() -> dict:
         "supportedNeeds": SUPPORTED_NEEDS,
         "supportedTasks": SUPPORTED_TASKS,
         "supportedResponseModes": SUPPORTED_RESPONSE_MODES,
+        "supportedRequestOptions": ["maxCandidates", "maxEvents", "responseMode", "constraints", "maxAgeTicks", "maxAgeMillis"],
         "endpoints": {
             "GET": ["/health", "/schema", "/status", "/summary"],
             "POST": ["/context", "/context/batch"],
@@ -989,6 +996,7 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
                 "task_summary",
             ],
             "maxCandidates": top,
+            "maxEvents": top,
             "responseMode": "compact",
         }
         response = build_context_response(

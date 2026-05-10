@@ -342,12 +342,52 @@ class ContextServiceTest(unittest.TestCase):
     def test_context_events_need_returns_recent_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp))
+            generated = fresh_time()
+            write_jsonl(
+                session / "interaction_geometry" / "live" / "live_event_timeline.jsonl",
+                [
+                    {
+                        "schema": "live_context_event.v1",
+                        "generatedAtUtc": generated,
+                        "tick": 8,
+                        "eventType": "nearest_candidate_changed",
+                        "severity": "info",
+                        "summary": "Nearest candidate changed: Tree at 3201,3200",
+                        "details": {},
+                        "source": "live_target_processor",
+                        "profile": "woodcutting",
+                    },
+                    {
+                        "schema": "live_context_event.v1",
+                        "generatedAtUtc": generated,
+                        "tick": 9,
+                        "eventType": "best_candidate_changed",
+                        "severity": "info",
+                        "summary": "Best candidate changed: Tree at 3202,3200",
+                        "details": {},
+                        "source": "live_target_processor",
+                        "profile": "woodcutting",
+                    },
+                    {
+                        "schema": "live_context_event.v1",
+                        "generatedAtUtc": generated,
+                        "tick": 10,
+                        "eventType": "inventory_changed",
+                        "severity": "info",
+                        "summary": "Inventory changed: +1 item 1511",
+                        "details": {},
+                        "source": "live_target_processor",
+                        "profile": "woodcutting",
+                    },
+                ],
+            )
             response = service.build_context_response(
                 service.LiveContextCache(session, reload_interval=0).load(force=True),
-                {"schema": "context_request.v1", "needs": ["events"], "responseMode": "compact", "maxCandidates": 1},
+                {"schema": "context_request.v1", "needs": ["events"], "responseMode": "compact", "maxCandidates": 1, "maxEvents": 2},
             )
-            self.assertEqual(response["events"][0]["eventType"], "best_candidate_changed")
-            self.assertEqual(response["eventCount"], 1)
+            self.assertEqual([event["eventType"] for event in response["events"]], ["best_candidate_changed", "inventory_changed"])
+            self.assertEqual(response["recentEvents"], response["events"])
+            self.assertEqual(response["eventCount"], 3)
 
     def test_context_response_includes_recent_inventory_delta(self):
         with tempfile.TemporaryDirectory() as tmp:
