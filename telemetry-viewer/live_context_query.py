@@ -612,6 +612,7 @@ def reachability_candidate_record(candidate: dict, context: dict, args) -> dict:
         "directReachability": navigation.get("directReachability"),
         "targetInCollisionWindow": navigation.get("targetInCollisionWindow"),
         "pathLengthTiles": navigation.get("pathLengthTiles"),
+        "interactionRadiusTiles": navigation.get("interactionRadiusTiles"),
         "reachabilityConfidence": navigation.get("reachabilityConfidence"),
         "reachabilityEvidence": navigation.get("reachabilityEvidence") or [],
         "missingNavigationFields": navigation.get("missingNavigationFields") or [],
@@ -624,6 +625,33 @@ def reachability_payload(context: dict, class_id: str, args) -> dict:
     profile = getattr(args, "profile", None)
     top_limit = max(1, int(getattr(args, "top", 10) or 10))
     candidates = select_candidates(context["candidates"], class_id, max_distance=max_distance, profile=profile)
+    name_contains = getattr(args, "name_contains", None)
+    id_filter = getattr(args, "id", None)
+    if name_contains:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if str(name_contains).lower() in str(candidate.get("name") or "").lower()
+        ]
+    if id_filter is not None:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if first_value(candidate.get("rawId"), candidate.get("id")) == id_filter
+        ]
+    if getattr(args, "show_blocked", False) or getattr(args, "show_reachable", False) or getattr(args, "show_unknown", False):
+        requested = set()
+        if getattr(args, "show_blocked", False):
+            requested.add("blocked")
+        if getattr(args, "show_reachable", False):
+            requested.add("reachable")
+        if getattr(args, "show_unknown", False):
+            requested.add("unknown")
+        candidates = [
+            candidate
+            for candidate in candidates
+            if ((candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}).get("directReachability") in requested)
+        ]
     sorted_candidates = sorted(candidates, key=best_sort_key)
     navigation = navigation_readiness(context["navigation"], context["baseline"])
     player = context["baseline"].get("player") if isinstance(context["baseline"].get("player"), dict) else {}
@@ -1713,6 +1741,11 @@ def parse_args():
     parser.add_argument("--liveness", action="store_true", help="Report read-only target liveness/depletion state.")
     parser.add_argument("--reachability", action="store_true", help="Report read-only candidate local collision reachability QA.")
     parser.add_argument("--class-id", default="tree", help="Class id for --reachability, such as tree, npc, or ground_item. Default: tree.")
+    parser.add_argument("--name-contains", help="Filter --reachability candidates by case-insensitive target name text.")
+    parser.add_argument("--id", type=int, help="Filter --reachability candidates by target/object id.")
+    parser.add_argument("--show-blocked", action="store_true", help="With --reachability, show only blocked candidates.")
+    parser.add_argument("--show-reachable", action="store_true", help="With --reachability, show only reachable candidates.")
+    parser.add_argument("--show-unknown", action="store_true", help="With --reachability, show only candidates with unknown reachability.")
     parser.add_argument("--self-test", action="store_true", help="Run read-only live context readiness checks.")
     parser.add_argument("--baseline", action="store_true", help="Return live_baseline_state.json.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON only.")

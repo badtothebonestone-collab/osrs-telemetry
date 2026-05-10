@@ -66,6 +66,73 @@ class NavigationReachabilityTest(unittest.TestCase):
         self.assertEqual(result["directReachability"], "blocked")
         self.assertIn("no 4-direction local path", result["reason"])
 
+    def test_blocked_object_tile_can_use_adjacent_interaction_tile(self):
+        flags = [[0 for _x in range(5)] for _y in range(5)]
+        flags[2][2] = reachability.BLOCK_MOVEMENT_FULL
+
+        result = reachability.reachability_for_target(
+            window(flags, player_x=0, player_y=2),
+            player_scene_x=0,
+            player_scene_y=2,
+            player_plane=0,
+            target_scene_x=2,
+            target_scene_y=2,
+            target_plane=0,
+        )
+
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["directReachability"], "reachable")
+        self.assertIn("reachable adjacent interaction tile found", result["reachabilityEvidence"])
+
+    def test_blocked_when_object_and_all_adjacent_tiles_blocked(self):
+        flags = [[0 for _x in range(5)] for _y in range(5)]
+        for x, y in (
+            (2, 2),
+            (1, 2),
+            (3, 2),
+            (2, 1),
+            (2, 3),
+            (1, 1),
+            (1, 3),
+            (3, 1),
+            (3, 3),
+        ):
+            flags[y][x] = reachability.BLOCK_MOVEMENT_FULL
+
+        result = reachability.reachability_for_target(
+            window(flags, player_x=0, player_y=2),
+            player_scene_x=0,
+            player_scene_y=2,
+            player_plane=0,
+            target_scene_x=2,
+            target_scene_y=2,
+            target_plane=0,
+        )
+
+        self.assertFalse(result["reachable"])
+        self.assertEqual(result["directReachability"], "blocked")
+        self.assertIn("target tile and nearby interaction tiles are blocked", result["reason"])
+
+    def test_expanded_interaction_radius_can_reach_nearby_tile(self):
+        flags = [[0 for _x in range(7)] for _y in range(7)]
+        for x, y in ((3, 3), (2, 3), (4, 3), (3, 2), (3, 4)):
+            flags[y][x] = reachability.BLOCK_MOVEMENT_FULL
+
+        result = reachability.reachability_for_target(
+            window(flags, player_x=0, player_y=3),
+            player_scene_x=0,
+            player_scene_y=3,
+            player_plane=0,
+            target_scene_x=3,
+            target_scene_y=3,
+            target_plane=0,
+            interaction_radius=2,
+        )
+
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["directReachability"], "reachable")
+        self.assertIn("reachable nearby interaction tile found", " ".join(result["reachabilityEvidence"]))
+
     def test_target_outside_window_is_unknown(self):
         flags = [[0 for _x in range(3)] for _y in range(3)]
         result = reachability.reachability_for_target(

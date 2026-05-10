@@ -2068,14 +2068,23 @@ def overlay_polygon(candidate: dict, key: str) -> list[list[float]] | None:
     return compact_polygon(geometry_payload.get(key) or summary.get(key) or candidate.get(key))
 
 
-def overlay_target_summary(candidate: dict) -> dict:
+def overlay_target_summary(candidate: dict, status: dict | None = None, latest_tick: int | None = None) -> dict:
+    status = status or {}
     navigation = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
+    live_state = candidate.get("targetLiveState")
+    reachability = navigation.get("directReachability")
+    liveness = overlay_liveness_interpretation(candidate, status)
+    label_parts = overlay_label_parts(candidate, reachability, liveness)
     target = {
+        "rank": candidate.get("rank"),
+        "isBest": bool(candidate.get("_overlayIsBest")),
+        "isNearest": bool(candidate.get("_overlayIsNearest")),
         "classId": candidate.get("classId"),
         "name": candidate.get("name"),
         "id": candidate.get("rawId") if candidate.get("rawId") is not None else candidate.get("id"),
         "hash": candidate.get("hash"),
         "objectKey": candidate.get("objectKey"),
+        "category": candidate.get("category"),
         "worldX": candidate.get("worldX"),
         "worldY": candidate.get("worldY"),
         "plane": candidate.get("plane"),
@@ -2086,11 +2095,21 @@ def overlay_target_summary(candidate: dict) -> dict:
         "geometryAvailable": candidate.get("geometryAvailable"),
         "qualityTier": candidate.get("qualityTier"),
         "qualityScore": candidate.get("qualityScore"),
-        "targetLiveState": candidate.get("targetLiveState"),
-        "directReachability": navigation.get("directReachability"),
+        "targetLiveState": live_state,
+        "livenessInterpretation": liveness,
+        "directReachability": reachability,
         "reachabilityConfidence": navigation.get("reachabilityConfidence"),
+        "reachabilityEvidence": (navigation.get("reachabilityEvidence") or [])[:3],
+        "missingNavigationFields": navigation.get("missingNavigationFields") or [],
+        "suppressReason": candidate.get("suppressReason"),
         "targetInCollisionWindow": navigation.get("targetInCollisionWindow"),
         "pathLengthTiles": navigation.get("pathLengthTiles"),
+        "interactionRadiusTiles": navigation.get("interactionRadiusTiles"),
+        "labelParts": label_parts,
+        "overlayLabel": overlay_label_for(candidate, label_parts),
+        "overlayColor": overlay_color_for(reachability, live_state),
+        "sourceTick": candidate.get("tickId"),
+        "latestTick": latest_tick,
         "aimPoint": overlay_aim_point(candidate),
         "bounds": overlay_bounds(candidate),
     }
@@ -2101,6 +2120,82 @@ def overlay_target_summary(candidate: dict) -> dict:
     if tile:
         target["canvasTilePolygon"] = tile
     return target
+
+
+def overlay_liveness_interpretation(candidate: dict | None, status: dict) -> str:
+    live_state = candidate.get("targetLiveState") if isinstance(candidate, dict) else None
+    if status.get("livenessDegraded") or status.get("livenessBudgetExceeded"):
+        return "degraded"
+    if live_state in ("recently_despawned", "depleted_or_stump", "stale", "changed"):
+        return "degraded"
+    if live_state == "live":
+        return "direct"
+    if live_state == "live_assumed":
+        return "assumed"
+    return "unknown"
+
+
+def overlay_reachability_token(value) -> str:
+    if value == "reachable":
+        return "R"
+    if value == "blocked":
+        return "BLOCK"
+    if value == "unknown":
+        return "?"
+    return "-"
+
+
+def overlay_liveness_token(value) -> str:
+    if value == "live_assumed":
+        return "assumed"
+    if value == "depleted_or_stump":
+        return "depleted"
+    if value == "recently_despawned":
+        return "gone"
+    if value == "stale":
+        return "stale"
+    if value == "live":
+        return "live"
+    if value:
+        return str(value)
+    return "unknown"
+
+
+def overlay_color_for(reachability, live_state) -> str:
+    if live_state in ("depleted_or_stump", "recently_despawned", "stale"):
+        return "gray"
+    if reachability == "blocked":
+        return "red"
+    if reachability == "reachable":
+        return "green"
+    if reachability == "unknown" or live_state in ("live_assumed", "unknown", None):
+        return "yellow"
+    return "green"
+
+
+def overlay_label_parts(candidate: dict, reachability, liveness: str) -> dict:
+    return {
+        "distance": candidate.get("distanceTiles", candidate.get("targetDistanceChebyshev")),
+        "reachability": overlay_reachability_token(reachability),
+        "liveness": overlay_liveness_token(candidate.get("targetLiveState")),
+        "livenessInterpretation": liveness,
+        "quality": candidate.get("qualityTier"),
+    }
+
+
+def overlay_label_for(candidate: dict, label_parts: dict) -> str:
+    name = candidate.get("name") or candidate.get("classId") or "target"
+    parts = [str(name)]
+    distance = label_parts.get("distance")
+    if isinstance(distance, (int, float)):
+        parts.append(f"d{distance:g}")
+    reachability = label_parts.get("reachability")
+    if reachability and reachability != "-":
+        parts.append(str(reachability))
+    liveness = label_parts.get("liveness")
+    if liveness and liveness not in ("live", "unknown"):
+        parts.append(str(liveness))
+    return " ".join(parts)
 
 
 def overlay_debug_state_for(
@@ -2115,7 +2210,14 @@ def overlay_debug_state_for(
     latest_tick = latest_tick or {}
     player = local_player_for(latest_tick)
     limit = max(0, int(getattr(args, "overlay_debug_target_limit", 50) or 0))
-    capped_candidates = candidates[:limit]
+    nearest = nearest_timeline_candidate(candidates)
+    marked_candidates = []
+    for index, candidate in enumerate(candidates):
+        marked = dict(candidate)
+        marked["_overlayIsBest"] = index == 0
+        marked["_overlayIsNearest"] = candidate is nearest
+        marked_candidates.append(marked)
+    capped_candidates = marked_candidates[:limit]
     collision_bounds = navigation.get("collisionWindowBounds") if isinstance(navigation.get("collisionWindowBounds"), dict) else {}
     return {
         "schema": LIVE_OVERLAY_DEBUG_SCHEMA,
@@ -2140,7 +2242,7 @@ def overlay_debug_state_for(
             "budgetExceeded": bool(status.get("budgetExceeded")),
             "writeFailures": status.get("writeFailureCount", 0),
         },
-        "targets": [overlay_target_summary(candidate) for candidate in capped_candidates],
+        "targets": [overlay_target_summary(candidate, status, tick_id_for(latest_tick)) for candidate in capped_candidates],
         "collisionWindow": {
             "available": bool(navigation.get("collisionWindowAvailable")),
             "minSceneX": collision_bounds.get("minSceneX"),
@@ -2794,7 +2896,9 @@ def candidate_navigation_for(candidate: dict, navigation: dict) -> dict:
     path_length = None
     checked_tiles = None
     conservative_mode = True
+    interaction_radius = 1
     if collision_known and player_tile_known and target_tile_known and same_plane and window_payload:
+        interaction_radius = 2 if candidate.get("targetType") == "sceneObject" else 1
         reachability = navigation_reachability.reachability_for_target(
             window_payload,
             player_scene_x=player_scene_x,
@@ -2803,6 +2907,7 @@ def candidate_navigation_for(candidate: dict, navigation: dict) -> dict:
             target_scene_x=target_scene_x,
             target_scene_y=target_scene_y,
             target_plane=target_plane,
+            interaction_radius=interaction_radius,
         )
         direct = reachability.get("directReachability", "unknown")
         confidence = reachability.get("confidence", 0.0)
@@ -2836,6 +2941,7 @@ def candidate_navigation_for(candidate: dict, navigation: dict) -> dict:
         "directReachability": direct,
         "pathLengthTiles": path_length,
         "checkedTiles": checked_tiles,
+        "interactionRadiusTiles": interaction_radius,
         "reachabilityConfidence": confidence,
         "reachabilityEvidence": evidence,
         "missingNavigationFields": sorted(set(missing)),

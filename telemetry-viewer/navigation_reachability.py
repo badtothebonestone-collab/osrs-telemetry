@@ -122,15 +122,18 @@ def step_allowed(window: CollisionWindow, x: int, y: int, nx: int, ny: int) -> b
     return False
 
 
-def goal_tiles(window: CollisionWindow, target_x: int, target_y: int) -> set[tuple[int, int]]:
+def goal_tiles(window: CollisionWindow, target_x: int, target_y: int, *, interaction_radius: int = 1) -> set[tuple[int, int]]:
     goals: set[tuple[int, int]] = set()
     if tile_walkable(window, target_x, target_y):
         goals.add((target_x, target_y))
-    for dx, dy, _source_block, _dest_block in DIRECTIONS:
-        x = target_x + dx
-        y = target_y + dy
-        if tile_walkable(window, x, y):
-            goals.add((x, y))
+    radius = max(1, min(3, interaction_radius))
+    for distance in range(1, radius + 1):
+        for x in range(target_x - distance, target_x + distance + 1):
+            for y in range(target_y - distance, target_y + distance + 1):
+                if max(abs(x - target_x), abs(y - target_y)) != distance:
+                    continue
+                if tile_walkable(window, x, y):
+                    goals.add((x, y))
     return goals
 
 
@@ -143,6 +146,7 @@ def reachability_for_target(
     target_scene_x: int | None,
     target_scene_y: int | None,
     target_plane: int | None,
+    interaction_radius: int = 1,
     max_checked_tiles: int = 4096,
 ) -> dict:
     window = parse_collision_window(window_payload)
@@ -207,17 +211,27 @@ def reachability_for_target(
             "missingNavigationFields": ["targetInCollisionWindow"],
             "conservativeMode": True,
         }
-    goals = goal_tiles(window, target_scene_x, target_scene_y)
+    interaction_radius = max(1, min(3, int(interaction_radius)))
+    goals = goal_tiles(window, target_scene_x, target_scene_y, interaction_radius=interaction_radius)
     if (player_scene_x, player_scene_y) in goals:
+        player_distance_to_target = max(abs(player_scene_x - target_scene_x), abs(player_scene_y - target_scene_y))
+        evidence.append(
+            "player is on target tile"
+            if (player_scene_x, player_scene_y) == (target_scene_x, target_scene_y)
+            else "player is already on a reachable adjacent interaction tile"
+            if player_distance_to_target <= 1
+            else "player is already on a reachable nearby interaction tile"
+        )
         return {
             "reachable": True,
             "directReachability": "reachable",
             "pathLengthTiles": 0,
             "checkedTiles": 1,
-            "reason": "player is already on or adjacent to a reachable target tile",
-            "confidence": 0.9,
+            "reason": "player is already on or near a reachable target interaction tile",
+            "confidence": 0.9 if player_distance_to_target <= 1 else 0.7,
             "warnings": warnings,
             "missingNavigationFields": [],
+            "reachabilityEvidence": evidence,
             "conservativeMode": True,
         }
     if not tile_walkable(window, player_scene_x, player_scene_y):
@@ -238,7 +252,7 @@ def reachability_for_target(
             "directReachability": "blocked",
             "pathLengthTiles": None,
             "checkedTiles": 1,
-            "reason": "target tile and adjacent tiles are blocked in collision window",
+            "reason": "target tile and nearby interaction tiles are blocked in collision window",
             "confidence": 0.7,
             "warnings": warnings,
             "missingNavigationFields": [],
@@ -260,6 +274,13 @@ def reachability_for_target(
                 continue
             next_distance = distance + 1
             if (nx, ny) in goals:
+                goal_distance_to_target = max(abs(nx - target_scene_x), abs(ny - target_scene_y))
+                if (nx, ny) == (target_scene_x, target_scene_y):
+                    evidence.append("reachable target tile found")
+                elif goal_distance_to_target <= 1:
+                    evidence.append("reachable adjacent interaction tile found")
+                else:
+                    evidence.append("reachable nearby interaction tile found from expanded object interaction radius")
                 evidence.append("4-direction BFS found a local path to target or adjacent tile")
                 return {
                     "reachable": True,
@@ -267,7 +288,7 @@ def reachability_for_target(
                     "pathLengthTiles": next_distance,
                     "checkedTiles": checked,
                     "reason": "local collision window path found",
-                    "confidence": 0.85,
+                    "confidence": 0.85 if goal_distance_to_target <= 1 else 0.68,
                     "warnings": warnings,
                     "missingNavigationFields": [],
                     "reachabilityEvidence": evidence,

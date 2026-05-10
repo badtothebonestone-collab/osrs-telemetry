@@ -542,6 +542,36 @@ class LiveContextQueryTest(unittest.TestCase):
             self.assertEqual(summary["blockedCount"], 1)
             self.assertEqual(summary["unknownCount"], 1)
 
+    def test_reachability_qa_filters_oak_and_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidates = [
+                candidate(10, "oak_tree", 2, 99, name="Oak tree", reachability="reachable", in_collision_window=True),
+                candidate(10, "oak_tree", 4, 95, name="Oak tree", reachability="blocked", in_collision_window=True),
+                candidate(10, "tree", 8, 90, name="Tree", reachability="blocked", in_collision_window=True),
+            ]
+            session = make_live_session(Path(tmp), candidates=candidates, navigation=True)
+            context = query.load_live_context(session)
+            args = type(
+                "Args",
+                (),
+                {
+                    "profile": None,
+                    "max_distance": None,
+                    "freshness_ticks": 5,
+                    "freshness_ms": 60000,
+                    "top": 10,
+                    "name_contains": "Oak",
+                    "id": None,
+                    "show_blocked": True,
+                    "show_reachable": False,
+                    "show_unknown": False,
+                },
+            )()
+            payload = query.reachability_payload(context, "tree", args)
+            self.assertEqual(payload["reachabilitySummary"]["candidateCount"], 1)
+            self.assertEqual(payload["reachabilitySummary"]["blockedCount"], 1)
+            self.assertEqual(payload["candidates"][0]["targetName"], "Oak tree")
+
     def test_reachability_json_output_purity(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_live_session(Path(tmp))

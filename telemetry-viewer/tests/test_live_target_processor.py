@@ -987,6 +987,11 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(len(state["targets"]), 2)
             self.assertEqual(state["targets"][0]["aimPoint"]["canvasX"], 100)
             self.assertEqual(state["targets"][0]["bounds"]["width"], 10)
+            self.assertEqual(state["targets"][0]["directReachability"], "reachable")
+            self.assertEqual(state["targets"][0]["livenessInterpretation"], "assumed")
+            self.assertEqual(state["targets"][0]["labelParts"]["reachability"], "R")
+            self.assertEqual(state["targets"][0]["overlayColor"], "green")
+            self.assertNotIn("BLOCK", state["targets"][0]["overlayLabel"])
             self.assertTrue(state["safety"]["readOnly"])
 
     def test_overlay_debug_state_is_written_by_processor(self):

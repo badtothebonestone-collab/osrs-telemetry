@@ -275,15 +275,19 @@ public class TelemetryDebugOverlay extends Overlay
 
 	private String formatLabel(OverlayTarget target)
 	{
+		if (target.overlayLabel != null && !target.overlayLabel.isBlank())
+		{
+			return target.overlayLabel;
+		}
 		StringBuilder label = new StringBuilder();
-		label.append(target.classId == null ? valueOrUnknown(target.name) : target.classId);
+		label.append(target.name == null ? valueOrUnknown(target.classId) : target.name);
 		if (target.distanceTiles != null)
 		{
-			label.append(" d=").append(trimNumber(target.distanceTiles));
+			label.append(" d").append(trimNumber(target.distanceTiles));
 		}
 		if (config.telemetryDebugOverlayShowReachability() && target.directReachability != null)
 		{
-			label.append(" ").append(target.directReachability);
+			label.append(" ").append(reachabilityToken(target.directReachability));
 		}
 		if (target.targetLiveState != null)
 		{
@@ -294,24 +298,50 @@ public class TelemetryDebugOverlay extends Overlay
 
 	private Color colorFor(OverlayTarget target)
 	{
-		String live = target.targetLiveState == null ? "" : target.targetLiveState;
-		String reachability = target.directReachability == null ? "" : target.directReachability;
-		if ("depleted_or_stump".equals(live) || "recently_despawned".equals(live) || "stale".equals(live))
+		return colorFor(target.directReachability, target.targetLiveState);
+	}
+
+	static Color colorFor(String reachability, String live)
+	{
+		String liveState = live == null ? "" : live;
+		String reachabilityState = reachability == null ? "" : reachability;
+		if ("depleted_or_stump".equals(liveState) || "recently_despawned".equals(liveState) || "stale".equals(liveState))
 		{
 			return GRAY;
 		}
-		if ("blocked".equals(reachability))
+		if ("blocked".equals(reachabilityState))
 		{
 			return RED;
 		}
-		if ("unknown".equals(reachability) || "live_assumed".equals(live) || "unknown".equals(live))
+		if ("reachable".equals(reachabilityState))
+		{
+			return GREEN;
+		}
+		if ("unknown".equals(reachabilityState) || "live_assumed".equals(liveState) || "unknown".equals(liveState))
 		{
 			return YELLOW;
 		}
 		return GREEN;
 	}
 
-	private String readableLiveState(String value)
+	static String reachabilityToken(String value)
+	{
+		if ("reachable".equals(value))
+		{
+			return "R";
+		}
+		if ("blocked".equals(value))
+		{
+			return "BLOCK";
+		}
+		if ("unknown".equals(value))
+		{
+			return "?";
+		}
+		return value;
+	}
+
+	static String readableLiveState(String value)
 	{
 		if ("live_assumed".equals(value))
 		{
@@ -390,10 +420,14 @@ public class TelemetryDebugOverlay extends Overlay
 		String qualityTier;
 		Double qualityScore;
 		String targetLiveState;
+		String livenessInterpretation;
 		String directReachability;
 		Double reachabilityConfidence;
 		Boolean targetInCollisionWindow;
 		Double pathLengthTiles;
+		String overlayLabel;
+		String overlayColor;
+		LabelParts labelParts;
 		AimPoint aimPoint;
 		Bounds bounds;
 		List<List<Double>> clickboxPolygon;
@@ -413,6 +447,15 @@ public class TelemetryDebugOverlay extends Overlay
 		Double y;
 		Double width;
 		Double height;
+	}
+
+	static class LabelParts
+	{
+		Double distance;
+		String reachability;
+		String liveness;
+		String livenessInterpretation;
+		String quality;
 	}
 
 	static class CollisionWindow

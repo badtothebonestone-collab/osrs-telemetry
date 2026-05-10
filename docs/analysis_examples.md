@@ -1541,6 +1541,40 @@ If the overlay needs a specific state file, set `Debug overlay state path` to
 the full path of `overlay_debug_state.json` for the active session. Leaving it
 blank uses the current telemetry session when available.
 
+## Debugging Overlay Reachability Labels
+
+Overlay labels combine two independent observations:
+
+- `blocked`, `R`, or `?` describes local collision-window reachability.
+- `assumed` describes liveness when delta mode has no direct depletion/despawn
+  evidence for the current candidate.
+
+So `BLOCK assumed` means collision reachability appears blocked while liveness
+is only assumed. `R assumed` means the candidate is locally reachable and the
+target is assumed live. A reachable assumed target should not be colored red.
+
+Use the overlay diagnostic to compare what the overlay is drawing against the
+live candidate/context files:
+
+```text
+python telemetry-viewer\diagnose_overlay_state.py --latest-session --class-id tree --top 20
+python telemetry-viewer\diagnose_overlay_state.py --latest-session --class-id tree --name-contains Oak --top 20
+python telemetry-viewer\live_context_query.py --latest-session --reachability --class-id tree --top 10 --human
+```
+
+Useful filters:
+
+```text
+python telemetry-viewer\diagnose_overlay_state.py --latest-session --class-id tree --show-blocked --top 20
+python telemetry-viewer\diagnose_overlay_state.py --latest-session --class-id tree --show-reachable --top 20
+python telemetry-viewer\live_context_query.py --latest-session --reachability --class-id tree --name-contains Oak --show-blocked --top 20
+```
+
+If the diagnostic reports stale overlay ticks, the RuneLite overlay may be
+reading an older session path. Set `Debug overlay state path` to the current
+session's `overlay_debug_state.json` or leave it blank when RuneLite and the
+live processor are on the same active session.
+
 ## Candidate Reachability QA
 
 Candidate reachability QA is a read-only report over the per-candidate

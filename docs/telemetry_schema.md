@@ -265,11 +265,16 @@ Top-level fields:
 - `collisionWindow`: availability, bounds, radius, and player scene tile.
 - `safety`: read-only/draw-only flags.
 
-Target summaries may include class/name/id, world and scene tile, on-screen and
-geometry flags, quality tier/score, target liveness, direct reachability,
-aimPoint, compact bounds, and small polygons when already available. The file
-does not include full collision grids, broad scene dumps, action commands,
-mouse/keyboard fields, or menu invocation fields.
+Target summaries may include rank, `isBest`, `isNearest`, class/name/id,
+category, world and scene tile, source/latest tick, on-screen and geometry
+flags, quality tier/score, target liveness, `livenessInterpretation`, direct
+reachability, path length, `interactionRadiusTiles`, collision-window
+membership, capped reachability evidence, `labelParts`, `overlayLabel`,
+`overlayColor`, aimPoint, compact bounds, and small polygons when already
+available. `overlayColor` uses gray for depleted/stale targets, red for blocked
+reachability, green for reachable reachability, and yellow for unknown
+reachability. The file does not include full collision grids, broad scene
+dumps, action commands, mouse/keyboard fields, or menu invocation fields.
 
 ## Local Collision Window And Reachability QA
 
