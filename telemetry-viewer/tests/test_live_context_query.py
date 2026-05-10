@@ -47,6 +47,8 @@ def candidate(
     geometry: bool = True,
     object_key: str | None = None,
     live_state: str = "live",
+    reachability: str = "reachable",
+    in_collision_window: bool | None = True,
 ) -> dict:
     value = {
         "schema": "live_candidate_packet.v1",
@@ -85,16 +87,16 @@ def candidate(
         "navigation": {
             "collisionKnown": True,
             "collisionWindowAvailable": True,
-            "targetInCollisionWindow": True,
+            "targetInCollisionWindow": in_collision_window,
             "playerTileKnown": True,
             "targetTileKnown": True,
             "samePlane": True,
-            "directReachability": "reachable",
-            "pathLengthTiles": max(0, distance - 1),
+            "directReachability": reachability,
+            "pathLengthTiles": max(0, distance - 1) if reachability == "reachable" else None,
             "checkedTiles": distance + 1,
-            "reachabilityConfidence": 0.85,
-            "reachabilityEvidence": ["synthetic local path"],
-            "missingNavigationFields": [],
+            "reachabilityConfidence": 0.85 if reachability == "reachable" else 0.75 if reachability == "blocked" else 0.2,
+            "reachabilityEvidence": ["synthetic local path"] if reachability == "reachable" else ["synthetic blocked path"] if reachability == "blocked" else [],
+            "missingNavigationFields": [] if reachability != "unknown" else ["localReachability"],
             "conservativeMode": True,
         },
     }
@@ -486,6 +488,146 @@ class LiveContextQueryTest(unittest.TestCase):
             self.assertTrue(payload["navigationReadiness"]["collisionWindowAvailable"])
             self.assertEqual(payload["candidateSummary"]["bestTree"]["navigation"]["directReachability"], "reachable")
             self.assertIn("fullPathfinding", payload["missingCapabilities"])
+
+    def test_reachability_qa_summary_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidates = [
+                candidate(10, "tree", 2, 99, reachability="reachable", in_collision_window=True),
+                candidate(10, "tree", 4, 95, reachability="blocked", in_collision_window=True),
+                candidate(10, "tree", 8, 90, reachability="unknown", in_collision_window=False),
+            ]
+            session = make_live_session(Path(tmp), candidates=candidates, navigation=True)
+            write_json(
+                session / "interaction_geometry" / "live" / "live_navigation_summary.json",
+                {
+                    "schema": "live_navigation_summary.v1",
+                    "collisionKnown": True,
+                    "collisionWindowAvailable": True,
+                    "collisionWindowRadius": 24,
+                    "collisionWindowBounds": {"minSceneX": 0, "maxSceneX": 48, "minSceneY": 0, "maxSceneY": 48, "width": 49, "height": 49},
+                    "plane": 0,
+                    "playerSceneX": 10,
+                    "playerSceneY": 10,
+                    "playerTileKnown": True,
+                    "reachabilityComputed": True,
+                },
+            )
+            context = query.load_live_context(session)
+            args = type("Args", (), {"profile": None, "max_distance": None, "freshness_ticks": 5, "freshness_ms": 60000, "top": 10})()
+            payload = query.reachability_payload(context, "tree", args)
+            summary = payload["reachabilitySummary"]
+            self.assertEqual(payload["schema"], "live_candidate_reachability_qa.v1")
+            self.assertEqual(payload["status"], "PASS")
+            self.assertEqual(summary["candidateCount"], 3)
+            self.assertEqual(summary["candidatesInsideCollisionWindow"], 2)
+            self.assertEqual(summary["candidatesOutsideCollisionWindow"], 1)
+            self.assertEqual(summary["reachableCount"], 1)
+            self.assertEqual(summary["blockedCount"], 1)
+            self.assertEqual(summary["unknownCount"], 1)
+
+    def test_reachability_json_output_purity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp))
+            write_json(
+                session / "interaction_geometry" / "live" / "live_navigation_summary.json",
+                {
+                    "schema": "live_navigation_summary.v1",
+                    "collisionKnown": True,
+                    "collisionWindowAvailable": True,
+                    "collisionWindowRadius": 24,
+                    "collisionWindowBounds": {"minSceneX": 0, "maxSceneX": 48, "minSceneY": 0, "maxSceneY": 48, "width": 49, "height": 49},
+                    "plane": 0,
+                    "playerSceneX": 10,
+                    "playerSceneY": 10,
+                    "playerTileKnown": True,
+                    "reachabilityComputed": True,
+                },
+            )
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--reachability", "--class-id", "tree", "--top", "2", "--json"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["schema"], "live_candidate_reachability_qa.v1")
+            self.assertIn("reachabilitySummary", payload)
+            self.assertLessEqual(len(payload["candidates"]), 2)
+
+    def test_reachability_missing_collision_window_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp), navigation=True)
+            context = query.load_live_context(session)
+            args = type("Args", (), {"profile": None, "max_distance": None, "freshness_ticks": 5, "freshness_ms": 60000, "top": 10})()
+            payload = query.reachability_payload(context, "tree", args)
+            self.assertEqual(payload["status"], "WARN")
+            self.assertIn("collisionWindow", payload["missingFields"])
+            self.assertTrue(any("collision window unavailable" in warning for warning in payload["warnings"]))
+
+    def test_human_woodcutting_summary_is_readable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp))
+            write_json(
+                session / "interaction_geometry" / "live" / "live_navigation_summary.json",
+                {
+                    "schema": "live_navigation_summary.v1",
+                    "collisionKnown": True,
+                    "collisionWindowAvailable": True,
+                    "collisionWindowRadius": 24,
+                    "collisionWindowBounds": {"minSceneX": 0, "maxSceneX": 48, "minSceneY": 0, "maxSceneY": 48, "width": 49, "height": 49},
+                    "plane": 0,
+                    "playerSceneX": 10,
+                    "playerSceneY": 10,
+                    "playerTileKnown": True,
+                    "reachabilityComputed": True,
+                },
+            )
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--task", "woodcutting", "--human"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("WOODCUTTING CONTEXT", result.stdout)
+            self.assertIn("Best tree:", result.stdout)
+            self.assertIn("Reachable: yes", result.stdout)
+            self.assertIn("Collision window: available, radius 24", result.stdout)
+            self.assertNotIn("sourceFiles", result.stdout)
+
+    def test_compact_human_omits_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp))
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--task", "woodcutting", "--compact-human"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("WOODCUTTING CONTEXT", result.stdout)
+            self.assertNotIn("Diagnostics:", result.stdout)
+
+    def test_human_summary_handles_missing_best_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp), candidates=[])
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--task", "woodcutting", "--human"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("Best tree:", result.stdout)
+            self.assertIn("unavailable", result.stdout)
+
+    def test_human_summary_maps_unknown_liveness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp), candidates=[candidate(10, "tree", 2, 95, live_state="unknown")])
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--task", "woodcutting", "--human"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("Liveness: unknown", result.stdout)
 
     def test_activity_inventory_liveness_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:

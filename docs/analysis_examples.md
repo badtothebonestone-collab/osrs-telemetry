@@ -1366,6 +1366,90 @@ $request = @{
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
 ```
 
+## Human-Readable Live Context Summary
+
+JSON responses are for machines. The human summary is for quick read-only QA
+while the live processor and context service are running. It summarizes current
+context such as player location, inventory, best tree, reachability, liveness,
+and diagnostics. It does not click, execute actions, send input, manipulate
+menus, or mutate game/client state.
+
+One-shot mission-control summary:
+
+```text
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --human
+```
+
+Shorter one-screen summary:
+
+```text
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --compact-human
+```
+
+Refreshing terminal summary:
+
+```text
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --watch-human --interval 1
+```
+
+Reachability-focused human report:
+
+```text
+python telemetry-viewer\live_context_query.py --latest-session --reachability --class-id tree --human --top 5
+```
+
+Context service friendly endpoint:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8890/summary?task=woodcutting
+```
+
+The same endpoint can return the underlying compact `context_response.v1`:
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8890/summary?task=woodcutting&format=json&top=3"
+```
+
+## Candidate Reachability QA
+
+Candidate reachability QA is a read-only report over the per-candidate
+navigation fields written by the live processor. It helps verify that local
+collision-window reachability looks structurally sane for visible candidates.
+It does not click, move, execute paths, manipulate menus, or emit movement
+commands.
+
+Human report:
+
+```text
+python telemetry-viewer\live_context_query.py --latest-session --reachability --class-id tree --top 10
+```
+
+JSON report:
+
+```text
+python telemetry-viewer\live_context_query.py --latest-session --reachability --class-id tree --top 10 --json
+```
+
+The report includes the latest tick, player scene tile, collision window
+radius/bounds, candidate counts inside and outside the collision window, and
+reachable/blocked/unknown counts. Top candidate rows include class/name/id,
+world and scene tile, distance, screen/geometry/liveness fields, aim point, and
+the read-only reachability observation.
+
+The context service also accepts `reachability:<classId>` needs:
+
+```powershell
+$request = @{
+  schema = "context_request.v1"
+  task = "woodcutting"
+  needs = @("baseline", "best:tree", "nearest:tree", "reachability:tree", "navigation_readiness")
+  maxCandidates = 5
+  responseMode = "compact"
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
+```
+
 ## Activity, Inventory, And Target Liveness QA
 
 The live processor also writes:

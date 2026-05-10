@@ -7,8 +7,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import live_context_query as query
+from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
 
 
@@ -32,6 +34,7 @@ SUPPORTED_NEEDS = [
     "task_summary",
     "best:<classId>",
     "nearest:<classId>",
+    "reachability:<classId>",
 ]
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
@@ -471,6 +474,56 @@ def compact_liveness_state(state: dict, *, examples: int = 0) -> dict:
     return compact
 
 
+def compact_reachability_report(report: dict, mode: str) -> tuple[dict, list[dict]]:
+    if mode == "full":
+        return report, report.get("candidates") or []
+    summary = report.get("reachabilitySummary") or {}
+    compact_summary = {
+        "status": report.get("status"),
+        "latestTick": report.get("latestTick"),
+        "classId": report.get("classId"),
+        "player": report.get("player"),
+        "collisionWindow": report.get("collisionWindow"),
+        "navigationStatus": (report.get("navigationReadiness") or {}).get("status"),
+        "candidateCount": summary.get("candidateCount"),
+        "candidatesInsideCollisionWindow": summary.get("candidatesInsideCollisionWindow"),
+        "candidatesOutsideCollisionWindow": summary.get("candidatesOutsideCollisionWindow"),
+        "reachableCount": summary.get("reachableCount"),
+        "blockedCount": summary.get("blockedCount"),
+        "unknownCount": summary.get("unknownCount"),
+    }
+    candidates = []
+    for candidate in report.get("candidates") or []:
+        item = {
+            key: candidate.get(key)
+            for key in (
+                "classId",
+                "targetName",
+                "id",
+                "hash",
+                "worldX",
+                "worldY",
+                "plane",
+                "sceneX",
+                "sceneY",
+                "distanceTiles",
+                "onScreen",
+                "geometryAvailable",
+                "targetLiveState",
+                "aimPoint",
+                "directReachability",
+                "targetInCollisionWindow",
+                "pathLengthTiles",
+                "reachabilityConfidence",
+                "reachabilityEvidence",
+                "missingNavigationFields",
+            )
+            if key in candidate
+        }
+        candidates.append(item)
+    return compact_summary, candidates
+
+
 def frame_payload(context: dict) -> dict:
     baseline = context.get("baseline") or {}
     status = context.get("status") or {}
@@ -582,6 +635,28 @@ def build_context_response(
             "count": len(scoped_context.get("candidates") or []),
             "items": candidate_items(scoped_context, request, args, max_candidates, response_mode),
         }
+
+    reachability_summary: dict[str, Any] = {}
+    reachability_candidates: dict[str, list[dict]] = {}
+    reachability_reports: dict[str, dict] = {}
+    for class_id in requested_class_needs(needs, "reachability"):
+        report = query.reachability_payload(scoped_context, class_id, args)
+        compact_summary, items = compact_reachability_report(report, response_mode)
+        if response_mode == "full":
+            reachability_reports[class_id] = compact_summary
+        else:
+            reachability_summary[class_id] = compact_summary
+            reachability_candidates[class_id] = items[:max_candidates]
+        status = combine_status(status, report.get("status", "WARN"))
+        warnings.extend(report.get("warnings") or [])
+        missing.extend(report.get("missingCapabilities") or [])
+        missing.extend(report.get("missingFields") or [])
+    if reachability_summary:
+        response["reachabilitySummary"] = reachability_summary
+    if reachability_candidates:
+        response["reachabilityCandidates"] = reachability_candidates
+    if reachability_reports:
+        response["reachabilityReports"] = reachability_reports
 
     best_candidates: dict[str, dict | None] = {}
     nearest_candidates: dict[str, dict | None] = {}
@@ -733,7 +808,7 @@ def schema_payload() -> dict:
         "supportedTasks": SUPPORTED_TASKS,
         "supportedResponseModes": SUPPORTED_RESPONSE_MODES,
         "endpoints": {
-            "GET": ["/health", "/schema", "/status"],
+            "GET": ["/health", "/schema", "/status", "/summary"],
             "POST": ["/context", "/context/batch"],
         },
         "notes": [
@@ -792,12 +867,17 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
             self.send_json(error_payload("missing or invalid X-Context-Token"), status_code=401)
             return
         context = self.server.context_state.load_context()
-        if self.path == "/health":
+        parsed = urlparse(self.path)
+        path = parsed.path
+        params = parse_qs(parsed.query)
+        if path == "/health":
             self.send_json(health_payload(context))
-        elif self.path == "/schema":
+        elif path == "/schema":
             self.send_json(schema_payload())
-        elif self.path == "/status":
+        elif path == "/status":
             self.send_json(status_payload(context))
+        elif path == "/summary":
+            self.handle_summary(context, params)
         else:
             self.send_json(error_payload(f"unknown endpoint: {self.path}"), status_code=404)
 
@@ -844,6 +924,53 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def send_text(self, text: str, status_code: int = 200) -> None:
+        data = text.encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def handle_summary(self, context: dict, params: dict[str, list[str]]) -> None:
+        task = (params.get("task") or ["woodcutting"])[0] or "woodcutting"
+        response_format = ((params.get("format") or ["text"])[0] or "text").lower()
+        try:
+            top = max(1, int((params.get("top") or ["3"])[0]))
+        except ValueError:
+            top = 3
+        request = {
+            "schema": REQUEST_SCHEMA,
+            "task": task,
+            "needs": [
+                "baseline",
+                "best:tree",
+                "nearest:tree",
+                "reachability:tree",
+                "inventory",
+                "activity",
+                "liveness",
+                "navigation_readiness",
+                "diagnostics",
+                "task_summary",
+            ],
+            "maxCandidates": top,
+            "responseMode": "compact",
+        }
+        response = build_context_response(
+            context,
+            request,
+            default_max_candidates=self.server.context_state.max_candidates,
+            max_response_bytes=self.server.context_state.max_response_bytes,
+            compact_include_source_files=self.server.context_state.compact_include_source_files,
+            compact_liveness_examples=self.server.context_state.compact_include_liveness_examples,
+        )
+        if response_format == "json":
+            self.send_json(response)
+            return
+        self.send_text(format_context_human(response, compact=False, top=top))
 
 
 def handle_context_request(context: dict, payload: Any, state: ContextState) -> dict:

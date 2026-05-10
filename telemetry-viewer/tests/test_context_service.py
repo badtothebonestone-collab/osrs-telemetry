@@ -37,7 +37,16 @@ def stale_time() -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
 
 
-def candidate(distance: int, quality: int, *, class_id: str = "tree", ui_blocked: bool = False, live_state: str = "live") -> dict:
+def candidate(
+    distance: int,
+    quality: int,
+    *,
+    class_id: str = "tree",
+    ui_blocked: bool = False,
+    live_state: str = "live",
+    reachability: str = "reachable",
+    in_collision_window: bool | None = True,
+) -> dict:
     return {
         "schema": "live_candidate_packet.v1",
         "tick": 10,
@@ -77,16 +86,16 @@ def candidate(distance: int, quality: int, *, class_id: str = "tree", ui_blocked
         "navigation": {
             "collisionKnown": True,
             "collisionWindowAvailable": True,
-            "targetInCollisionWindow": True,
+            "targetInCollisionWindow": in_collision_window,
             "samePlane": True,
             "playerTileKnown": True,
             "targetTileKnown": True,
-            "directReachability": "reachable",
-            "pathLengthTiles": max(0, distance - 1),
+            "directReachability": reachability,
+            "pathLengthTiles": max(0, distance - 1) if reachability == "reachable" else None,
             "checkedTiles": distance + 1,
-            "reachabilityConfidence": 0.85,
-            "reachabilityEvidence": ["synthetic local path"],
-            "missingNavigationFields": [],
+            "reachabilityConfidence": 0.85 if reachability == "reachable" else 0.75 if reachability == "blocked" else 0.2,
+            "reachabilityEvidence": ["synthetic local path"] if reachability == "reachable" else ["synthetic blocked path"] if reachability == "blocked" else [],
+            "missingNavigationFields": [] if reachability != "unknown" else ["localReachability"],
             "conservativeMode": True,
         },
     }
@@ -248,6 +257,16 @@ class ServerFixture:
         data = json.loads(resp.read().decode("utf-8"))
         conn.close()
         return resp.status, data
+
+    def get_raw(self, path: str, token: str | None = None) -> tuple[int, str, str]:
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        headers = {"X-Context-Token": token} if token else {}
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        content_type = resp.getheader("Content-Type") or ""
+        text = resp.read().decode("utf-8")
+        conn.close()
+        return resp.status, content_type, text
 
     def post(self, path: str, payload, token: str | None = None) -> tuple[int, dict]:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -491,6 +510,58 @@ class ContextServiceTest(unittest.TestCase):
             self.assertEqual(response["bestCandidates"]["tree"]["navigation"]["directReachability"], "reachable")
             self.assertIn("fullPathfinding", response["missingCapabilities"])
 
+    def test_context_response_includes_reachability_need(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(
+                Path(tmp),
+                candidates=[
+                    candidate(2, 99, reachability="reachable", in_collision_window=True),
+                    candidate(4, 95, reachability="blocked", in_collision_window=True),
+                    candidate(8, 90, reachability="unknown", in_collision_window=False),
+                ],
+            )
+            live_dir = session / "interaction_geometry" / "live"
+            write_json(
+                live_dir / "live_navigation_summary.json",
+                {
+                    "schema": "live_navigation_summary.v1",
+                    "latestTick": 10,
+                    "collisionKnown": True,
+                    "collisionWindowAvailable": True,
+                    "collisionWindowRadius": 24,
+                    "collisionWindowBounds": {"minSceneX": 0, "maxSceneX": 48, "minSceneY": 0, "maxSceneY": 48, "width": 49, "height": 49},
+                    "plane": 0,
+                    "playerSceneX": 10,
+                    "playerSceneY": 10,
+                    "playerTileKnown": True,
+                    "reachabilityComputed": True,
+                    "fullCollisionGridAvailable": False,
+                },
+            )
+            context = service.LiveContextCache(session, reload_interval=0).load(force=True)
+            response = service.build_context_response(
+                context,
+                {"schema": "context_request.v1", "needs": ["reachability:tree"], "maxCandidates": 2, "responseMode": "compact"},
+            )
+            summary = response["reachabilitySummary"]["tree"]
+            self.assertEqual(summary["candidateCount"], 3)
+            self.assertEqual(summary["reachableCount"], 1)
+            self.assertEqual(summary["blockedCount"], 1)
+            self.assertEqual(summary["unknownCount"], 1)
+            self.assertLessEqual(len(response["reachabilityCandidates"]["tree"]), 2)
+            self.assertNotIn("pathSteps", json.dumps(response))
+
+    def test_context_reachability_missing_collision_window_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            context = service.LiveContextCache(session, reload_interval=0).load(force=True)
+            response = service.build_context_response(
+                context,
+                {"schema": "context_request.v1", "needs": ["reachability:tree"], "responseMode": "compact"},
+            )
+            self.assertEqual(response["status"], "WARN")
+            self.assertTrue(any("collision window unavailable" in warning for warning in response["warnings"]))
+
     def test_missing_live_files_warn_or_fail_cleanly(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "missing"
@@ -547,6 +618,45 @@ class ContextServiceTest(unittest.TestCase):
                 self.assertEqual(code, 200)
                 self.assertEqual(response["schema"], "context_response.v1")
                 self.assertEqual(response["bestCandidates"]["tree"]["targetName"], "Tree")
+
+    def test_summary_endpoint_returns_text_plain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            live_dir = session / "interaction_geometry" / "live"
+            write_json(
+                live_dir / "live_navigation_summary.json",
+                {
+                    "schema": "live_navigation_summary.v1",
+                    "latestTick": 10,
+                    "collisionKnown": True,
+                    "collisionWindowAvailable": True,
+                    "collisionWindowRadius": 24,
+                    "collisionWindowBounds": {"minSceneX": 0, "maxSceneX": 48, "minSceneY": 0, "maxSceneY": 48, "width": 49, "height": 49},
+                    "plane": 0,
+                    "playerSceneX": 10,
+                    "playerSceneY": 10,
+                    "playerTileKnown": True,
+                    "reachabilityComputed": True,
+                    "fullCollisionGridAvailable": False,
+                },
+            )
+            with ServerFixture(session) as server:
+                code, content_type, text = server.get_raw("/summary?task=woodcutting&top=2")
+                self.assertEqual(code, 200)
+                self.assertIn("text/plain", content_type)
+                self.assertIn("WOODCUTTING CONTEXT", text)
+                self.assertIn("Best tree:", text)
+                self.assertIn("Reachable: yes", text)
+                self.assertNotIn("sourceFiles", text)
+
+    def test_summary_endpoint_can_return_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            with ServerFixture(session) as server:
+                code, payload = server.get("/summary?task=woodcutting&format=json&top=2")
+                self.assertEqual(code, 200)
+                self.assertEqual(payload["schema"], "context_response.v1")
+                self.assertIn("bestCandidates", payload)
 
     def test_batch_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:

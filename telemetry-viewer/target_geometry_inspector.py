@@ -1237,6 +1237,7 @@ class GeometryDataset:
     def decorate_candidate(self, record: dict) -> dict:
         target = target_for(record)
         geom = geometry_for(record)
+        navigation = record.get("navigation") if isinstance(record.get("navigation"), dict) else {}
         scoring = record.get("scoring") if isinstance(record.get("scoring"), dict) else {}
         inspector = record.get("_inspector", {})
         return {
@@ -1266,6 +1267,10 @@ class GeometryDataset:
                 "rank": record.get("rank"),
                 "score": record.get("score"),
                 "preferredAimGeometryType": geom.get("preferredAimGeometryType"),
+                "reachability": navigation.get("directReachability"),
+                "targetInCollisionWindow": navigation.get("targetInCollisionWindow"),
+                "pathLengthTiles": navigation.get("pathLengthTiles"),
+                "reachabilityConfidence": navigation.get("reachabilityConfidence"),
                 "reasons": scoring.get("reasons") if isinstance(scoring.get("reasons"), list) else [],
                 "penalties": scoring.get("penalties") if isinstance(scoring.get("penalties"), list) else [],
             },
@@ -2813,6 +2818,7 @@ def html_page() -> str:
       const info = selected._inspector || {};
       const target = selected.target || {};
       const geometry = selected.geometry || {};
+      const navigation = selected.navigation || {};
       const scoring = selected.scoring || {};
       const area = boundsAreaDetail(geometry);
       el.targetDetails.textContent = JSON.stringify({
@@ -2854,6 +2860,12 @@ def html_page() -> str:
         uiBlocked: selected.uiBlocked,
         blockingUiRegions: selected.blockingUiRegions,
         blockedReason: selected.blockedReason,
+        reachability: navigation.directReachability || info.reachability,
+        pathLengthTiles: navigation.pathLengthTiles ?? info.pathLengthTiles,
+        targetInCollisionWindow: navigation.targetInCollisionWindow ?? info.targetInCollisionWindow,
+        reachabilityConfidence: navigation.reachabilityConfidence ?? info.reachabilityConfidence,
+        reachabilityEvidence: navigation.reachabilityEvidence,
+        missingNavigationFields: navigation.missingNavigationFields,
         positiveSignals: selected.positiveSignals,
         negativeSignals: selected.negativeSignals,
         rejectReasons: selected.rejectReasons,

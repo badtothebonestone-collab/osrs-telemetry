@@ -1,6 +1,7 @@
 import argparse
 import json
 import math
+import os
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -8,12 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from telemetry_paths import find_newest_session, get_sessions_dir
+from live_context_format import format_context_human
 
 
 SUMMARY_SCHEMA = "live_context_summary.v1"
 ANSWER_SCHEMA = "live_context_answer.v1"
 TASK_SCHEMA = "live_task_context.v1"
 SELF_TEST_SCHEMA = "live_context_self_test.v1"
+REACHABILITY_SCHEMA = "live_candidate_reachability_qa.v1"
 DEFAULT_FRESHNESS_TICKS = 5
 DEFAULT_FRESHNESS_MS = 5000
 TREE_CLASSES = {"tree", "oak_tree", "willow_tree", "maple_tree", "yew_tree", "magic_tree"}
@@ -579,6 +582,133 @@ def direct_query_payload(context: dict, query_type: str, class_id: str, args) ->
     return payload
 
 
+def reachability_candidate_record(candidate: dict, context: dict, args) -> dict:
+    answer, _status, _confidence, _reasons, _warnings, _missing = candidate_answer(
+        candidate,
+        context,
+        getattr(args, "freshness_ticks", DEFAULT_FRESHNESS_TICKS),
+        getattr(args, "freshness_ms", DEFAULT_FRESHNESS_MS),
+    )
+    navigation = answer.get("navigation") if isinstance(answer.get("navigation"), dict) else {}
+    return {
+        "classId": answer.get("classId"),
+        "targetName": answer.get("targetName"),
+        "id": answer.get("id"),
+        "rawId": answer.get("rawId"),
+        "hash": answer.get("hash"),
+        "worldX": answer.get("worldX"),
+        "worldY": answer.get("worldY"),
+        "plane": answer.get("plane"),
+        "sceneX": answer.get("sceneX"),
+        "sceneY": answer.get("sceneY"),
+        "distanceTiles": answer.get("distanceTiles"),
+        "onScreen": answer.get("onScreen"),
+        "geometryAvailable": answer.get("geometryAvailable"),
+        "targetLiveState": answer.get("targetLiveState"),
+        "aimPoint": answer.get("aimPoint"),
+        "directReachability": navigation.get("directReachability"),
+        "targetInCollisionWindow": navigation.get("targetInCollisionWindow"),
+        "pathLengthTiles": navigation.get("pathLengthTiles"),
+        "reachabilityConfidence": navigation.get("reachabilityConfidence"),
+        "reachabilityEvidence": navigation.get("reachabilityEvidence") or [],
+        "missingNavigationFields": navigation.get("missingNavigationFields") or [],
+    }
+
+
+def reachability_payload(context: dict, class_id: str, args) -> dict:
+    class_id = str(class_id or "tree")
+    max_distance = getattr(args, "max_distance", None)
+    profile = getattr(args, "profile", None)
+    top_limit = max(1, int(getattr(args, "top", 10) or 10))
+    candidates = select_candidates(context["candidates"], class_id, max_distance=max_distance, profile=profile)
+    sorted_candidates = sorted(candidates, key=best_sort_key)
+    navigation = navigation_readiness(context["navigation"], context["baseline"])
+    player = context["baseline"].get("player") if isinstance(context["baseline"].get("player"), dict) else {}
+
+    inside_window = 0
+    outside_window = 0
+    unknown_window = 0
+    reachable = 0
+    blocked = 0
+    unknown = 0
+    for candidate in candidates:
+        nav = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
+        in_window = nav.get("targetInCollisionWindow")
+        if in_window is True:
+            inside_window += 1
+        elif in_window is False:
+            outside_window += 1
+        else:
+            unknown_window += 1
+        direct = nav.get("directReachability")
+        if direct == "reachable":
+            reachable += 1
+        elif direct == "blocked":
+            blocked += 1
+        else:
+            unknown += 1
+
+    warnings = list(context["warnings"])
+    missing = list(context["missingFields"])
+    nav_status = navigation.get("status")
+    if nav_status != "local":
+        warnings.extend(navigation.get("warnings") or [])
+        warning = navigation.get("warning")
+        if warning:
+            warnings.append(warning)
+        warnings.append("collision window unavailable; candidate reachability remains unknown or summary-only.")
+        missing.append("collisionWindow")
+    if not candidates:
+        warnings.append(f"no candidates found for classId {class_id}.")
+
+    if not context.get("baseline") or "live_baseline_state" in missing:
+        status = "FAIL"
+    elif nav_status != "local" or not candidates:
+        status = "WARN"
+    else:
+        status = "PASS"
+
+    summary = {
+        "classId": class_id,
+        "candidateCount": len(candidates),
+        "candidatesInsideCollisionWindow": inside_window,
+        "candidatesOutsideCollisionWindow": outside_window,
+        "candidatesWithUnknownCollisionWindow": unknown_window,
+        "reachableCount": reachable,
+        "blockedCount": blocked,
+        "unknownCount": unknown,
+    }
+    return {
+        "schema": REACHABILITY_SCHEMA,
+        "status": status,
+        "generatedAtUtc": utc_now(),
+        "latestTick": latest_tick(context),
+        "classId": class_id,
+        "player": {
+            "sceneX": first_value(navigation.get("playerSceneX"), player.get("sceneX")),
+            "sceneY": first_value(navigation.get("playerSceneY"), player.get("sceneY")),
+            "plane": first_value(navigation.get("plane"), player.get("plane")),
+        },
+        "navigationReadiness": navigation,
+        "collisionWindow": {
+            "available": navigation.get("collisionWindowAvailable"),
+            "radius": navigation.get("collisionWindowRadius"),
+            "bounds": navigation.get("collisionWindowBounds"),
+            "tick": navigation.get("collisionWindowTick"),
+            "hash": navigation.get("collisionWindowHash"),
+        },
+        "reachabilitySummary": summary,
+        "candidates": [
+            reachability_candidate_record(candidate, context, args)
+            for candidate in sorted_candidates[:top_limit]
+        ],
+        "warnings": sorted(set(str(warning) for warning in warnings if warning)),
+        "missingFields": sorted(set(str(field) for field in missing if field)),
+        "missingCapabilities": sorted(set(navigation.get("missingCapabilities") or [])),
+        "sourceFiles": context["sourceFiles"],
+    }
+
+
 def player_location_known(player: dict) -> bool:
     return player.get("worldX") is not None and player.get("worldY") is not None and player.get("plane") is not None
 
@@ -818,6 +948,7 @@ def woodcutting_task_payload(context: dict, args) -> dict:
     woodcutting_state = activity_doc.get("woodcuttingState") if isinstance(activity_doc.get("woodcuttingState"), dict) else {}
     target_liveness = activity_doc.get("targetLiveness") if isinstance(activity_doc.get("targetLiveness"), dict) else {}
     navigation = navigation_readiness(context["navigation"], baseline)
+    reachability_report = reachability_payload(context, "tree", args)
 
     if not player_location_known(player):
         warnings.append("no player location.")
@@ -898,6 +1029,8 @@ def woodcutting_task_payload(context: dict, args) -> dict:
         },
         "woodcuttingState": woodcutting_state,
         "navigationReadiness": navigation,
+        "reachabilitySummary": reachability_report.get("reachabilitySummary"),
+        "reachabilityCandidates": reachability_report.get("candidates") or [],
         "missingCapabilities": [
             capability
             for capability, missing_capability in (
@@ -1217,6 +1350,50 @@ def print_task_human(payload: dict, args) -> None:
             print(f"- ... {len(payload['warnings']) - 20} more warnings; use --verbose or --fields full for details")
 
 
+def print_reachability_human(payload: dict) -> None:
+    summary = payload.get("reachabilitySummary") or {}
+    player = payload.get("player") or {}
+    window = payload.get("collisionWindow") or {}
+    print(f"Candidate Reachability QA: class={payload.get('classId')} status={payload.get('status')}")
+    print(f"latest tick: {payload.get('latestTick')}")
+    print(f"player scene: {player.get('sceneX', 'unknown')},{player.get('sceneY', 'unknown')} plane={player.get('plane', 'unknown')}")
+    print(f"collision window: available={window.get('available')} radius={window.get('radius')} bounds={window.get('bounds')}")
+    print(
+        "counts: "
+        f"candidates={summary.get('candidateCount')} "
+        f"inside={summary.get('candidatesInsideCollisionWindow')} "
+        f"outside={summary.get('candidatesOutsideCollisionWindow')} "
+        f"reachable={summary.get('reachableCount')} "
+        f"blocked={summary.get('blockedCount')} "
+        f"unknown={summary.get('unknownCount')}"
+    )
+    candidates = payload.get("candidates") or []
+    if candidates:
+        print("top candidates:")
+        for index, candidate in enumerate(candidates, start=1):
+            aim = candidate.get("aimPoint") or {}
+            aim_text = f"{aim.get('canvasX')},{aim.get('canvasY')}" if aim else "unknown"
+            print(
+                f"{index}. {candidate.get('classId')}/{candidate.get('targetName')} "
+                f"id={candidate.get('id')} world={candidate.get('worldX')},{candidate.get('worldY')} "
+                f"scene={candidate.get('sceneX')},{candidate.get('sceneY')} "
+                f"distance={candidate.get('distanceTiles')} onScreen={candidate.get('onScreen')} "
+                f"geometry={candidate.get('geometryAvailable')} live={candidate.get('targetLiveState')} "
+                f"aim={aim_text} reachability={candidate.get('directReachability')} "
+                f"pathLength={candidate.get('pathLengthTiles')} confidence={candidate.get('reachabilityConfidence')}"
+            )
+            missing = candidate.get("missingNavigationFields") or []
+            evidence = candidate.get("reachabilityEvidence") or []
+            if evidence:
+                print(f"   evidence: {', '.join(str(item) for item in evidence[:3])}")
+            if missing:
+                print(f"   missing navigation fields: {', '.join(str(item) for item in missing[:5])}")
+    if payload.get("warnings"):
+        print("warnings:")
+        for warning in payload["warnings"][:20]:
+            print(f"- {warning}")
+
+
 def compact_candidate(candidate: dict | None) -> dict | None:
     if not candidate:
         return None
@@ -1298,6 +1475,19 @@ def compact_json_payload(payload: dict, args) -> dict:
                 "writeFailures": payload.get("writeFailures"),
             }
         )
+    elif schema == REACHABILITY_SCHEMA:
+        compact.update(
+            {
+                "latestTick": payload.get("latestTick"),
+                "classId": payload.get("classId"),
+                "player": payload.get("player"),
+                "collisionWindow": payload.get("collisionWindow"),
+                "navigationReadiness": payload.get("navigationReadiness"),
+                "reachabilitySummary": payload.get("reachabilitySummary"),
+                "candidates": payload.get("candidates"),
+                "missingCapabilities": payload.get("missingCapabilities"),
+            }
+        )
     else:
         compact.update({key: value for key, value in payload.items() if key not in {"sourceFiles", "items", "recentItemDeltas"}})
     if getattr(args, "fields", "compact") == "full" or getattr(args, "verbose", False):
@@ -1373,6 +1563,10 @@ def build_payload(args) -> tuple[dict, int]:
         payload = self_test_payload(context, args)
         add_timing(timing, "querySelectMillis", select_started)
         return attach_query_performance(payload, timing, total_started, args), 0
+    if args.reachability:
+        payload = reachability_payload(context, args.class_id or "tree", args)
+        add_timing(timing, "querySelectMillis", select_started)
+        return attach_query_performance(payload, timing, total_started, args), 0
     if args.task:
         if args.task.lower() == "woodcutting":
             payload = woodcutting_task_payload(context, args)
@@ -1411,6 +1605,15 @@ def build_payload(args) -> tuple[dict, int]:
 
 
 def print_payload(payload: dict, args) -> None:
+    wants_human = bool(getattr(args, "human", False) or getattr(args, "compact_human", False) or getattr(args, "watch_human", False))
+    if wants_human:
+        print(format_context_human(payload, compact=bool(getattr(args, "compact_human", False)), top=max(1, int(getattr(args, "top", 3) or 3))), end="")
+        if getattr(args, "benchmark", False):
+            print_query_benchmark(payload)
+        if getattr(args, "show_json", False):
+            print()
+            print(json_dump_compact(compact_json_payload(payload, args)))
+        return
     if args.json:
         json_payload = compact_json_payload(payload, args) if (args.compact_json or not args.verbose and args.fields != "full") else payload
         print(json_dump_compact(json_payload))
@@ -1424,6 +1627,8 @@ def print_payload(payload: dict, args) -> None:
         print_task_human(payload, args)
     elif schema == SELF_TEST_SCHEMA:
         print_self_test_human(payload)
+    elif schema == REACHABILITY_SCHEMA:
+        print_reachability_human(payload)
     else:
         if args.fields == "full" or args.verbose:
             print(json.dumps(payload, indent=2))
@@ -1449,10 +1654,16 @@ def parse_args():
     parser.add_argument("--activity", action="store_true", help="Report read-only apparent activity state from live_activity_state.json.")
     parser.add_argument("--inventory", action="store_true", help="Report read-only inventory state and recent deltas.")
     parser.add_argument("--liveness", action="store_true", help="Report read-only target liveness/depletion state.")
+    parser.add_argument("--reachability", action="store_true", help="Report read-only candidate local collision reachability QA.")
+    parser.add_argument("--class-id", default="tree", help="Class id for --reachability, such as tree, npc, or ground_item. Default: tree.")
     parser.add_argument("--self-test", action="store_true", help="Run read-only live context readiness checks.")
     parser.add_argument("--baseline", action="store_true", help="Return live_baseline_state.json.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON only.")
     parser.add_argument("--compact-json", action="store_true", help="In JSON mode, omit bulky arrays and return compact answer fields.")
+    parser.add_argument("--human", action="store_true", help="Print a readable mission-control style context report.")
+    parser.add_argument("--watch-human", action="store_true", help="Refresh a readable mission-control style context report until interrupted.")
+    parser.add_argument("--compact-human", action="store_true", help="Print a shorter one-screen readable context report.")
+    parser.add_argument("--show-json", action="store_true", help="Print compact JSON after the human report.")
     parser.add_argument("--verbose", action="store_true", help="Print expanded details.")
     parser.add_argument("--top", type=int, default=3, help="Number of top candidates to include for normal/full output. Default: 3.")
     parser.add_argument("--fields", choices=["compact", "normal", "full"], default="compact", help="Human/JSON detail level. Default: compact.")
@@ -1468,8 +1679,10 @@ def main() -> int:
     while True:
         payload, code = build_payload(args)
         exit_code = max(exit_code, code)
+        if args.watch_human:
+            os.system("cls")
         print_payload(payload, args)
-        if not args.watch:
+        if not (args.watch or args.watch_human):
             break
         try:
             time.sleep(max(0.1, args.interval))
