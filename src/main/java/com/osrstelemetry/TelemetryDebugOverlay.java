@@ -144,9 +144,10 @@ public class TelemetryDebugOverlay extends Overlay
 					+ " | radius " + valueOrUnknown(state.collisionWindow.radius);
 		}
 		String line4 = null;
-		if (state != null && state.latestEventSummary != null && !state.latestEventSummary.isBlank())
+		if (state != null && config.telemetryDebugOverlayShowLatestEvent()
+				&& state.latestEventSummary != null && !state.latestEventSummary.isBlank())
 		{
-			String eventLine = "event tick " + valueOrUnknown(state.lastEventTick) + ": " + truncate(state.latestEventSummary, 70);
+			String eventLine = "event tick " + valueOrUnknown(state.latestEventTick) + ": " + truncate(state.latestEventSummary, 70);
 			if (line3 == null)
 			{
 				line3 = eventLine;
@@ -422,6 +423,7 @@ public class TelemetryDebugOverlay extends Overlay
 		Double latestTick;
 		String profile;
 		String latestEventSummary;
+		Double latestEventTick;
 		Double warningEventCount;
 		Double lastEventTick;
 		OverlaySummary summary;
@@ -436,6 +438,7 @@ public class TelemetryDebugOverlay extends Overlay
 		Boolean budgetExceeded;
 		Double writeFailures;
 		String latestEventSummary;
+		Double latestEventTick;
 		Double warningEventCount;
 		Double lastEventTick;
 	}

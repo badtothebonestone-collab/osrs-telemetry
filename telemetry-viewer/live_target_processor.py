@@ -2231,6 +2231,7 @@ def overlay_debug_state_for(
         "profile": args.profile,
         "status": "WARN" if status.get("warnings") else "PASS",
         "latestEventSummary": latest_event.get("summary"),
+        "latestEventTick": latest_event.get("tick"),
         "warningEventCount": warning_event_count,
         "lastEventTick": latest_event.get("tick"),
         "player": {
@@ -2249,6 +2250,7 @@ def overlay_debug_state_for(
             "budgetExceeded": bool(status.get("budgetExceeded")),
             "writeFailures": status.get("writeFailureCount", 0),
             "latestEventSummary": latest_event.get("summary"),
+            "latestEventTick": latest_event.get("tick"),
             "warningEventCount": warning_event_count,
             "lastEventTick": latest_event.get("tick"),
         },
@@ -2295,6 +2297,42 @@ def candidate_timeline_label(candidate: dict | None) -> str:
     if world_x is not None and world_y is not None:
         return f"{name} at {world_x},{world_y}"
     return str(name)
+
+
+def candidate_aim_point(candidate: dict | None) -> dict | None:
+    if not isinstance(candidate, dict):
+        return None
+    aim = candidate.get("aimPointContext") if isinstance(candidate.get("aimPointContext"), dict) else candidate.get("aimPoint")
+    if not isinstance(aim, dict):
+        return None
+    x = aim.get("canvasX", aim.get("x"))
+    y = aim.get("canvasY", aim.get("y"))
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    return {"canvasX": round(float(x), 3), "canvasY": round(float(y), 3), "source": aim.get("source")}
+
+
+def candidate_aim_bucket(candidate: dict | None, *, bucket_pixels: float = 8.0) -> tuple | None:
+    aim = candidate_aim_point(candidate)
+    if not aim:
+        return None
+    return (
+        round(float(aim["canvasX"]) / bucket_pixels),
+        round(float(aim["canvasY"]) / bucket_pixels),
+        aim.get("source"),
+    )
+
+
+def candidate_count_change_significant(previous_key, current_count: int) -> bool:
+    try:
+        previous = json.loads(previous_key) if isinstance(previous_key, str) else previous_key
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return True
+    if not isinstance(previous, int):
+        return True
+    delta = abs(int(current_count) - previous)
+    threshold = max(3, int(max(previous, current_count) * 0.25))
+    return delta >= threshold or (previous == 0 and current_count > 0) or (previous > 0 and current_count == 0)
 
 
 def nearest_timeline_candidate(candidates: list[dict]) -> dict | None:
@@ -3898,6 +3936,7 @@ class LiveTargetProcessor:
         activity: dict,
         status: dict,
         processed_at: str,
+        navigation: dict | None = None,
     ) -> list[dict]:
         tick = tick_id_for(latest_tick_record or {}) or status.get("latestTick") or status.get("lastProcessedTick")
         events_before = len(self.event_timeline)
@@ -3915,6 +3954,21 @@ class LiveTargetProcessor:
         best_key = candidate_timeline_key(best)
         nearest_key = candidate_timeline_key(nearest)
 
+        candidate_count = int(status.get("candidateCount") if status.get("candidateCount") is not None else len(candidates))
+        count_changed, count_previous = changed("candidateCount", candidate_count)
+        if count_changed and count_previous is not None and candidate_count_change_significant(count_previous, candidate_count):
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="candidate_count_changed",
+                    severity="info",
+                    summary=f"Candidate count changed: {candidate_count}",
+                    previous_value=count_previous,
+                    current_value=candidate_count,
+                )
+            )
+
         best_changed, best_previous = changed("bestCandidate", best_key)
         if best_changed and (best_previous is not None or best_key is not None):
             self.append_timeline_event(
@@ -3928,6 +3982,23 @@ class LiveTargetProcessor:
                     related_candidate=best,
                     previous_value=best_previous,
                     current_value=best_key,
+                )
+            )
+
+        best_aim = candidate_aim_bucket(best)
+        aim_changed, aim_previous = changed("bestCandidateAimPoint", {"candidate": best_key, "aim": best_aim})
+        if aim_changed and aim_previous is not None and best_aim is not None and not best_changed:
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="best_candidate_aim_point_changed",
+                    severity="info",
+                    summary=f"Best candidate aim point changed: {candidate_timeline_label(best)}",
+                    details={"aimPoint": candidate_aim_point(best), "bucketPixels": 8},
+                    related_candidate=best,
+                    previous_value=aim_previous,
+                    current_value=candidate_aim_point(best),
                 )
             )
 
@@ -3945,6 +4016,40 @@ class LiveTargetProcessor:
                     current_value=nearest_key,
                 )
             )
+
+        for role, candidate in (("best", best), ("nearest", nearest)):
+            key = candidate_timeline_key(candidate)
+            nav = candidate.get("navigation") if isinstance(candidate, dict) and isinstance(candidate.get("navigation"), dict) else {}
+            reachability = nav.get("directReachability")
+            reach_changed, reach_previous = changed(f"{role}CandidateReachability", {"candidate": key, "reachability": reachability})
+            if reach_changed and reach_previous is not None:
+                self.append_timeline_event(
+                    self.timeline_event(
+                        processed_at=processed_at,
+                        tick=tick,
+                        event_type=f"{role}_candidate_reachability_changed",
+                        severity="warn" if reachability == "blocked" else "info",
+                        summary=f"{role.title()} candidate reachability changed: {reachability or 'unknown'}",
+                        related_candidate=candidate,
+                        previous_value=reach_previous,
+                        current_value=reachability,
+                    )
+                )
+            in_window = nav.get("targetInCollisionWindow")
+            window_changed, window_previous = changed(f"{role}CandidateInCollisionWindow", {"candidate": key, "inWindow": in_window})
+            if window_changed and window_previous is not None and in_window is False:
+                self.append_timeline_event(
+                    self.timeline_event(
+                        processed_at=processed_at,
+                        tick=tick,
+                        event_type="target_outside_collision_window",
+                        severity="warn",
+                        summary=f"{role.title()} candidate moved outside collision window: {candidate_timeline_label(candidate)}",
+                        related_candidate=candidate,
+                        previous_value=window_previous,
+                        current_value=in_window,
+                    )
+                )
 
         for candidate in candidates[: max(1, min(len(candidates), int(self.args.limit or 20)))]:
             key = candidate_timeline_key(candidate)
@@ -3971,8 +4076,8 @@ class LiveTargetProcessor:
                     )
                 )
 
-            navigation = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
-            reachability = navigation.get("directReachability")
+            candidate_navigation = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
+            reachability = candidate_navigation.get("directReachability")
             reach_changed, reach_previous = changed(f"candidateReachability:{key}", reachability)
             if reach_changed and reach_previous is not None:
                 self.append_timeline_event(
@@ -4110,6 +4215,23 @@ class LiveTargetProcessor:
                 )
             )
 
+        woodcutting = activity.get("woodcuttingState") if isinstance(activity.get("woodcuttingState"), dict) else {}
+        woodcutting_label = woodcutting.get("woodcuttingState") if isinstance(woodcutting, dict) else None
+        woodcutting_changed, woodcutting_previous = changed("woodcuttingState", woodcutting_label)
+        if woodcutting_changed and woodcutting_previous is not None:
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="woodcutting_state_changed",
+                    severity="info",
+                    summary=f"Woodcutting state changed: {woodcutting_label or 'unknown'}",
+                    details={"confidence": woodcutting.get("confidence"), "evidence": woodcutting.get("evidence") if isinstance(woodcutting, dict) else []},
+                    previous_value=woodcutting_previous,
+                    current_value=woodcutting_label,
+                )
+            )
+
         player = activity.get("player") if isinstance(activity.get("player"), dict) else {}
         animation = player.get("animation")
         animation_changed, animation_previous = changed("playerAnimation", animation)
@@ -4125,6 +4247,57 @@ class LiveTargetProcessor:
                     current_value=animation,
                 )
             )
+
+        interacting = player.get("interacting")
+        interacting_changed, interacting_previous = changed("playerInteracting", interacting)
+        if interacting_changed and interacting_previous is not None:
+            name = interacting.get("name") if isinstance(interacting, dict) else interacting
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="interacting_target_changed",
+                    severity="info",
+                    summary=f"Interacting target changed: {name or 'none'}",
+                    previous_value=interacting_previous,
+                    current_value=interacting,
+                )
+            )
+
+        navigation = navigation if isinstance(navigation, dict) else {}
+        collision_available = navigation.get("collisionWindowAvailable")
+        collision_changed, collision_previous = changed("collisionWindowAvailable", collision_available)
+        if collision_changed and collision_previous is not None:
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="collision_window_availability_changed",
+                    severity="warn" if not collision_available else "info",
+                    summary=f"Collision window availability changed: {collision_available}",
+                    previous_value=collision_previous,
+                    current_value=collision_available,
+                )
+            )
+
+        freshness_ms = status.get("liveFreshnessMillis")
+        if isinstance(freshness_ms, (int, float)):
+            freshness_threshold_ms = max(2000.0, float(getattr(self.args, "poll_interval", 0.5) or 0.5) * 3000.0)
+            freshness_state = "fresh" if freshness_ms <= freshness_threshold_ms else "stale"
+            freshness_changed, freshness_previous = changed("liveFreshnessState", freshness_state)
+            if freshness_changed and freshness_previous is not None:
+                self.append_timeline_event(
+                    self.timeline_event(
+                        processed_at=processed_at,
+                        tick=tick,
+                        event_type="live_freshness_changed",
+                        severity="warn" if freshness_state == "stale" else "info",
+                        summary=f"Live freshness changed: {freshness_state}",
+                        details={"liveFreshnessMillis": freshness_ms, "thresholdMillis": freshness_threshold_ms},
+                        previous_value=freshness_previous,
+                        current_value=freshness_state,
+                    )
+                )
 
         warnings_key = {
             "warningCount": status.get("warningCount"),
@@ -4594,6 +4767,7 @@ class LiveTargetProcessor:
             activity=activity,
             status=status,
             processed_at=processed_at,
+            navigation=navigation,
         )
         status["eventTimelinePath"] = str(paths["events"])
         status["eventTimelineCount"] = len(self.event_timeline)

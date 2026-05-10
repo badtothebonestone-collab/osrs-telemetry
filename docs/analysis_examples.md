@@ -1428,29 +1428,40 @@ Typical event types include:
 
 - `best_candidate_changed`
 - `nearest_candidate_changed`
+- `candidate_count_changed`
 - `target_liveness_changed`
 - `target_depleted`
 - `liveness_suppressed_candidate`
 - `depleted_candidate_suppressed`
 - `candidate_revived`
+- `best_candidate_aim_point_changed`
 - `inventory_changed`
 - `inventory_free_slots_changed`
 - `inventory_full_changed`
 - `activity_state_changed`
+- `woodcutting_state_changed`
 - `player_animation_changed`
+- `interacting_target_changed`
 - `reachability_changed`
+- `best_candidate_reachability_changed`
+- `nearest_candidate_reachability_changed`
+- `collision_window_availability_changed`
+- `target_outside_collision_window`
 - `warning_status_changed`
 - `source_cap_changed`
 - `budget_exceeded_changed`
 - `write_failures_changed`
 - `input_source_changed`
 - `compact_packet_fallback_changed`
+- `live_freshness_changed`
 
 The human dashboard shows recent events by default:
 
 ```text
 python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --human --events 5
 python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --watch-human --interval 1 --events 5
+python telemetry-viewer\live_context_query.py --latest-session --events-only --events 20
+python telemetry-viewer\live_context_query.py --latest-session --events-only --events 20 --json
 ```
 
 The context service can return recent events for machine consumers:
@@ -1525,6 +1536,7 @@ The overlay can draw:
 - labels with class, distance, reachability, and liveness
 - a small read-only status panel
 - collision-window summary when enabled
+- one latest event summary when `Debug overlay latest event` is enabled
 
 It does not click, type, invoke menus, execute actions, or mutate game/client
 state.

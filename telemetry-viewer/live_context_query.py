@@ -17,6 +17,7 @@ ANSWER_SCHEMA = "live_context_answer.v1"
 TASK_SCHEMA = "live_task_context.v1"
 SELF_TEST_SCHEMA = "live_context_self_test.v1"
 REACHABILITY_SCHEMA = "live_candidate_reachability_qa.v1"
+EVENTS_SCHEMA = "live_context_events.v1"
 DEFAULT_FRESHNESS_TICKS = 5
 DEFAULT_FRESHNESS_MS = 5000
 TREE_CLASSES = {"tree", "oak_tree", "willow_tree", "maple_tree", "yew_tree", "magic_tree"}
@@ -1297,7 +1298,7 @@ def events_payload(context: dict, limit: int = 5) -> dict:
     limit = max(0, int(limit or 0))
     recent = events[-limit:] if limit else []
     return {
-        "schema": "live_context_events.v1",
+        "schema": EVENTS_SCHEMA,
         "status": "PASS" if events else "WARN",
         "latestTick": latest_tick(context),
         "eventCount": len(events),
@@ -1474,6 +1475,23 @@ def print_reachability_human(payload: dict) -> None:
             print(f"- {warning}")
 
 
+def print_events_human(payload: dict) -> None:
+    print(f"Live Event Timeline: {payload.get('status')} latestTick={payload.get('latestTick')}")
+    print(f"event count: {payload.get('eventCount', 0)}")
+    events = payload.get("events") if isinstance(payload.get("events"), list) else []
+    if events:
+        print("recent events:")
+        for event in events:
+            tick = event.get("tick", "unknown")
+            severity = event.get("severity") or "info"
+            summary = event.get("summary") or event.get("eventType") or "event"
+            print(f"  [tick {tick}] {summary} ({severity})")
+    if payload.get("warnings"):
+        print("warnings:")
+        for warning in payload["warnings"][:20]:
+            print(f"- {warning}")
+
+
 def compact_candidate(candidate: dict | None) -> dict | None:
     if not candidate:
         return None
@@ -1573,6 +1591,15 @@ def compact_json_payload(payload: dict, args) -> dict:
                 "missingCapabilities": payload.get("missingCapabilities"),
             }
         )
+    elif schema == EVENTS_SCHEMA:
+        compact.update(
+            {
+                "latestTick": payload.get("latestTick"),
+                "eventCount": payload.get("eventCount"),
+                "events": payload.get("events"),
+                "warnings": payload.get("warnings"),
+            }
+        )
     else:
         compact.update({key: value for key, value in payload.items() if key not in {"sourceFiles", "items", "recentItemDeltas"}})
     if getattr(args, "fields", "compact") == "full" or getattr(args, "verbose", False):
@@ -1632,6 +1659,10 @@ def build_payload(args) -> tuple[dict, int]:
     context = load_live_context(session, timing if getattr(args, "benchmark", False) else None)
     context["warnings"] = session_warnings + context["warnings"]
     select_started = time.perf_counter()
+    if args.events_only:
+        payload = events_payload(context, getattr(args, "events", 5) or 5)
+        add_timing(timing, "querySelectMillis", select_started)
+        return attach_query_performance(payload, timing, total_started, args), 0
     if args.activity:
         payload = activity_payload(context)
         add_timing(timing, "querySelectMillis", select_started)
@@ -1714,6 +1745,8 @@ def print_payload(payload: dict, args) -> None:
         print_self_test_human(payload)
     elif schema == REACHABILITY_SCHEMA:
         print_reachability_human(payload)
+    elif schema == EVENTS_SCHEMA:
+        print_events_human(payload)
     else:
         if args.fields == "full" or args.verbose:
             print(json.dumps(payload, indent=2))
@@ -1740,6 +1773,7 @@ def parse_args():
     parser.add_argument("--inventory", action="store_true", help="Report read-only inventory state and recent deltas.")
     parser.add_argument("--liveness", action="store_true", help="Report read-only target liveness/depletion state.")
     parser.add_argument("--reachability", action="store_true", help="Report read-only candidate local collision reachability QA.")
+    parser.add_argument("--events-only", action="store_true", help="Print only the rolling live event timeline.")
     parser.add_argument("--class-id", default="tree", help="Class id for --reachability, such as tree, npc, or ground_item. Default: tree.")
     parser.add_argument("--name-contains", help="Filter --reachability candidates by case-insensitive target name text.")
     parser.add_argument("--id", type=int, help="Filter --reachability candidates by target/object id.")

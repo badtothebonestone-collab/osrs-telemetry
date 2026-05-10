@@ -478,6 +478,16 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			keyName = "telemetryDebugOverlayShowLatestEvent",
+			name = "Debug overlay latest event",
+			description = "Show one compact read-only live event summary in the overlay status panel."
+	)
+	default boolean telemetryDebugOverlayShowLatestEvent()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 			keyName = "telemetryDebugOverlayStatePath",
 			name = "Debug overlay state path",
 			description = "Optional explicit path to overlay_debug_state.json. Leave blank to use the current telemetry session."

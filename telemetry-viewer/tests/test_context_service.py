@@ -364,7 +364,7 @@ class ContextServiceTest(unittest.TestCase):
                         "eventType": "best_candidate_changed",
                         "severity": "info",
                         "summary": "Best candidate changed: Tree at 3202,3200",
-                        "details": {},
+                        "details": {"reason": "test"},
                         "source": "live_target_processor",
                         "profile": "woodcutting",
                     },
@@ -375,7 +375,7 @@ class ContextServiceTest(unittest.TestCase):
                         "eventType": "inventory_changed",
                         "severity": "info",
                         "summary": "Inventory changed: +1 item 1511",
-                        "details": {},
+                        "details": {"recentDelta": {"itemId": 1511, "delta": 1}},
                         "source": "live_target_processor",
                         "profile": "woodcutting",
                     },
@@ -388,6 +388,14 @@ class ContextServiceTest(unittest.TestCase):
             self.assertEqual([event["eventType"] for event in response["events"]], ["best_candidate_changed", "inventory_changed"])
             self.assertEqual(response["recentEvents"], response["events"])
             self.assertEqual(response["eventCount"], 3)
+            self.assertNotIn("details", response["events"][0])
+
+            full_response = service.build_context_response(
+                service.LiveContextCache(session, reload_interval=0).load(force=True),
+                {"schema": "context_request.v1", "needs": ["events"], "responseMode": "full", "maxEvents": 1},
+            )
+            self.assertEqual(full_response["events"][0]["eventType"], "inventory_changed")
+            self.assertIn("details", full_response["events"][0])
 
     def test_context_response_includes_recent_inventory_delta(self):
         with tempfile.TemporaryDirectory() as tmp:

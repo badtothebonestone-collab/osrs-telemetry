@@ -938,6 +938,7 @@ class LiveTargetProcessorTest(unittest.TestCase):
                 "inputFallbackReason": None,
                 "candidatesSuppressedByLiveness": 0,
                 "candidatesSuppressedAsDepleted": 0,
+                "candidatesRevivedAfterRespawn": 0,
             }
             processor.emit_timeline_events(
                 latest_tick_record={"tickId": 1},
@@ -956,6 +957,7 @@ class LiveTargetProcessorTest(unittest.TestCase):
                 inputFallbackReason="auto mode falling back to raw ticks because compact packets were unavailable",
                 candidatesSuppressedByLiveness=2,
                 candidatesSuppressedAsDepleted=1,
+                candidatesRevivedAfterRespawn=1,
             )
             processor.emit_timeline_events(
                 latest_tick_record={"tickId": 2},
@@ -970,6 +972,78 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertIn("compact_packet_fallback_changed", event_types)
             self.assertIn("liveness_suppressed_candidate", event_types)
             self.assertIn("depleted_candidate_suppressed", event_types)
+            self.assertIn("candidate_revived", event_types)
+
+    def test_live_event_timeline_records_activity_navigation_and_candidate_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting"))
+            candidate = {
+                "classId": "tree",
+                "name": "Tree",
+                "id": 1276,
+                "objectKey": "tree-a",
+                "worldX": 3201,
+                "worldY": 3201,
+                "plane": 0,
+                "distanceTiles": 1,
+                "targetLiveState": "live_assumed",
+                "aimPointContext": {"canvasX": 100, "canvasY": 120, "source": "test"},
+                "navigation": {"directReachability": "reachable", "targetInCollisionWindow": True},
+            }
+            inventory = {"signature": "a", "freeSlots": 20, "inventoryFull": False}
+            activity = {
+                "activityState": {"apparentState": "idle"},
+                "woodcuttingState": {"woodcuttingState": "likely_idle", "confidence": 0.5},
+                "player": {"animation": -1, "interacting": None},
+            }
+            status = {
+                "latestTick": 1,
+                "candidateCount": 1,
+                "warningCount": 0,
+                "budgetExceeded": False,
+                "writeFailureCount": 0,
+                "sourceCapHit": False,
+                "liveFreshnessMillis": 100,
+            }
+            processor.emit_timeline_events(
+                latest_tick_record={"tickId": 1},
+                candidates=[candidate],
+                inventory_state=inventory,
+                activity=activity,
+                status=status,
+                processed_at="2026-01-01T00:00:00Z",
+                navigation={"collisionWindowAvailable": True},
+            )
+
+            changed_candidate = dict(candidate)
+            changed_candidate["aimPointContext"] = {"canvasX": 190, "canvasY": 120, "source": "test"}
+            changed_candidate["navigation"] = {"directReachability": "blocked", "targetInCollisionWindow": False}
+            changed_activity = {
+                "activityState": {"apparentState": "animating"},
+                "woodcuttingState": {"woodcuttingState": "likely_chopping", "confidence": 0.7, "evidence": ["test animation"]},
+                "player": {"animation": 879, "interacting": {"type": "sceneObject", "name": "Tree", "id": 1276}},
+            }
+            changed_status = dict(status, latestTick=2, candidateCount=5, liveFreshnessMillis=10000)
+            processor.emit_timeline_events(
+                latest_tick_record={"tickId": 2},
+                candidates=[changed_candidate],
+                inventory_state=inventory,
+                activity=changed_activity,
+                status=changed_status,
+                processed_at="2026-01-01T00:00:01Z",
+                navigation={"collisionWindowAvailable": False},
+            )
+            event_types = [event["eventType"] for event in processor.event_timeline]
+            self.assertIn("candidate_count_changed", event_types)
+            self.assertIn("best_candidate_aim_point_changed", event_types)
+            self.assertIn("best_candidate_reachability_changed", event_types)
+            self.assertIn("target_outside_collision_window", event_types)
+            self.assertIn("activity_state_changed", event_types)
+            self.assertIn("woodcutting_state_changed", event_types)
+            self.assertIn("interacting_target_changed", event_types)
+            self.assertIn("collision_window_availability_changed", event_types)
+            self.assertIn("live_freshness_changed", event_types)
 
     def test_live_event_timeline_is_bounded_and_written(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1050,6 +1124,7 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(state["summary"]["targetsWritten"], 2)
             self.assertEqual(state["summary"]["targetsSuppressedByCap"], 3)
             self.assertEqual(state["latestEventSummary"], "Best candidate changed: Tree at 3201,3201")
+            self.assertEqual(state["latestEventTick"], 1)
             self.assertEqual(state["lastEventTick"], 1)
             self.assertEqual(state["warningEventCount"], 0)
             self.assertEqual(len(state["targets"]), 2)

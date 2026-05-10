@@ -281,6 +281,32 @@ class LiveContextQueryTest(unittest.TestCase):
             self.assertEqual(payload["query"]["type"], "nearest")
             self.assertEqual(payload["answer"]["classId"], "tree")
 
+    def test_events_only_human_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp))
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--events-only", "--events", "20"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("Live Event Timeline", result.stdout)
+            self.assertIn("Inventory changed: +1 item 1511", result.stdout)
+
+    def test_events_only_json_output_purity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp))
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--events-only", "--events", "20", "--json"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["schema"], "live_context_events.v1")
+            self.assertEqual(payload["events"][0]["eventType"], "inventory_changed")
+            self.assertNotIn("Live Event Timeline", result.stdout)
+
     def test_task_default_output_is_compact(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_live_session(Path(tmp))
