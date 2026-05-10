@@ -64,6 +64,16 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertEqual(service_command[service_command.index("--port") + 1], "8890")
         self.assertEqual(dashboard_command[:2], [sys.executable, "telemetry-viewer\\live_context_query.py"])
         self.assertIn("--watch-human", dashboard_command)
+        self.assertIn("--events", dashboard_command)
+
+    def test_event_timeline_commands(self):
+        dashboard_events = panel.build_dashboard_events_command(1.5)
+        timeline = panel.build_event_timeline_command(20)
+        self.assertIn("--watch-human", dashboard_events)
+        self.assertIn("--events", dashboard_events)
+        self.assertEqual(dashboard_events[dashboard_events.index("--events") + 1], "10")
+        self.assertIn("--events-only", timeline)
+        self.assertEqual(timeline[timeline.index("--events") + 1], "20")
 
     def test_safe_load_json_keeps_previous_on_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,6 +109,10 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                     "frameRecordingEnabled": False,
                 },
             )
+            write_json(
+                session / "interaction_geometry" / "live" / "overlay_debug_state.json",
+                {"latestEventSummary": "Inventory changed: +1 item 1511", "latestEventTick": 13},
+            )
             snapshot = panel.status_snapshot(session)
             self.assertEqual(snapshot["latestTick"], 12)
             self.assertEqual(snapshot["inputSourceActive"], "compact-packets")
@@ -106,6 +120,8 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
             self.assertTrue(snapshot["compactPacketsAvailable"])
             self.assertEqual(snapshot["recordingMode"], "LIVE_COMPACT_ONLY")
             self.assertFalse(snapshot["rawTickRecordingEnabled"])
+            self.assertEqual(snapshot["latestEventSummary"], "Inventory changed: +1 item 1511")
+            self.assertEqual(snapshot["latestEventTick"], 13)
 
     def test_context_request_body(self):
         body = panel.build_context_request_body(max_candidates=2)

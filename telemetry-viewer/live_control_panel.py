@@ -135,6 +135,32 @@ def build_dashboard_command(interval: float) -> list[str]:
         "--watch-human",
         "--interval",
         str(interval),
+        "--events",
+        "5",
+    )
+
+
+def build_dashboard_events_command(interval: float) -> list[str]:
+    return python_command(
+        "telemetry-viewer\\live_context_query.py",
+        "--latest-session",
+        "--task",
+        "woodcutting",
+        "--watch-human",
+        "--interval",
+        str(interval),
+        "--events",
+        "10",
+    )
+
+
+def build_event_timeline_command(events: int = 20) -> list[str]:
+    return python_command(
+        "telemetry-viewer\\live_context_query.py",
+        "--latest-session",
+        "--events-only",
+        "--events",
+        str(events),
     )
 
 
@@ -201,6 +227,10 @@ def status_snapshot(session: Path | None, previous: dict | None = None) -> dict:
         session / "live_packets" / "live_packet_index.json",
         previous.get("packetIndex") if isinstance(previous.get("packetIndex"), dict) else None,
     )
+    overlay = safe_load_json(
+        live_dir / "overlay_debug_state.json",
+        previous.get("overlayDebug") if isinstance(previous.get("overlayDebug"), dict) else None,
+    )
     manifest = safe_load_json(
         session / "manifest.json",
         previous.get("manifest") if isinstance(previous.get("manifest"), dict) else None,
@@ -210,6 +240,7 @@ def status_snapshot(session: Path | None, previous: dict | None = None) -> dict:
         "performance": performance,
         "context": context,
         "packetIndex": packet_index,
+        "overlayDebug": overlay,
         "manifest": manifest,
         "latestTick": status.get("latestTickProcessed") or status.get("latestTick") or context.get("latestTick") or packet_index.get("latestTick"),
         "inputSourceActive": status.get("inputSourceActive"),
@@ -221,6 +252,8 @@ def status_snapshot(session: Path | None, previous: dict | None = None) -> dict:
         "recordingMode": status.get("recordingMode") or manifest.get("recordingMode"),
         "rawTickRecordingEnabled": status.get("rawTickRecordingEnabled") if status.get("rawTickRecordingEnabled") is not None else manifest.get("rawTickRecordingEnabled"),
         "frameRecordingEnabled": status.get("frameRecordingEnabled") if status.get("frameRecordingEnabled") is not None else manifest.get("frameRecordingEnabled"),
+        "latestEventSummary": overlay.get("latestEventSummary"),
+        "latestEventTick": overlay.get("latestEventTick"),
     }
 
 
@@ -320,6 +353,8 @@ class LiveControlPanel:
             ("Start Live Processor", self.start_live_processor),
             ("Start Context Service", self.start_context_service),
             ("Start Human Dashboard", self.start_dashboard),
+            ("Human Dashboard with Events", self.start_dashboard_events),
+            ("Event Timeline", self.start_event_timeline),
             ("Start Live Inspector", self.start_inspector),
             ("Request Context Once", self.context_once),
             ("Health Check", self.health_check),
@@ -432,6 +467,12 @@ class LiveControlPanel:
 
     def start_dashboard(self) -> None:
         self.start_process("Human Dashboard", build_dashboard_command(self.options().interval), "Dashboard")
+
+    def start_dashboard_events(self) -> None:
+        self.start_process("Human Dashboard Events", build_dashboard_events_command(self.options().interval), "Dashboard")
+
+    def start_event_timeline(self) -> None:
+        self.start_process("Event Timeline", build_event_timeline_command(20), "Dashboard")
 
     def start_inspector(self) -> None:
         command = build_inspector_command(self.latest_session)
@@ -595,7 +636,8 @@ class LiveControlPanel:
             f"segment={Path(str(snapshot.get('latestSegment'))).name if snapshot.get('latestSegment') else 'unknown'}; "
             f"recording={snapshot.get('recordingMode') or 'unknown'}; "
             f"rawTicks={snapshot.get('rawTickRecordingEnabled')}; "
-            f"frames={snapshot.get('frameRecordingEnabled')}"
+            f"frames={snapshot.get('frameRecordingEnabled')}; "
+            f"event={snapshot.get('latestEventSummary') or 'none'}"
         )
         if self.is_process_running("Context Service"):
             if not self.context_poll_inflight:

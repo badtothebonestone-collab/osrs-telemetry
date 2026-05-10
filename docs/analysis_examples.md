@@ -1465,7 +1465,10 @@ Each line uses schema `live_context_event.v1` and records important state
 changes without producing actions or instructions. Event fields include
 `generatedAtUtc`, `tick`, `eventType`, `severity`, `summary`, `details`,
 `relatedCandidate`, `previousValue`, `currentValue`, `source`, and `profile`.
-The timeline is capped by `--event-limit` so it does not grow forever.
+The timeline is capped by `--event-timeline-limit` (default 200; `--event-limit`
+remains a compatibility alias) so it does not grow forever. Use
+`--disable-event-timeline` when you want the processor to skip timeline output
+for a diagnostic run.
 
 Typical event types include:
 
@@ -1505,6 +1508,12 @@ python telemetry-viewer\live_context_query.py --latest-session --task woodcuttin
 python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --watch-human --interval 1 --events 5
 python telemetry-viewer\live_context_query.py --latest-session --events-only --events 20
 python telemetry-viewer\live_context_query.py --latest-session --events-only --events 20 --json
+```
+
+Live processor timeline controls:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --require-compact-packets --profile woodcutting --follow --latency-mode realtime --event-timeline-limit 200 --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
 ```
 
 The context service can return recent events for machine consumers:
@@ -1551,6 +1560,8 @@ Useful buttons:
 - `Start Live Processor`: starts the compact-packet realtime live processor using the selected profile/options.
 - `Start Context Service`: starts `context_service.py --latest-session --port <port>`.
 - `Start Human Dashboard`: starts the refreshing human dashboard.
+- `Human Dashboard with Events`: starts the dashboard with an explicit recent-event count.
+- `Event Timeline`: shows only recent live timeline events.
 - `Start Live Inspector`: starts the browser-based live geometry inspector.
 - `Health Check`: queries `http://127.0.0.1:<port>/health`.
 - `Request Context Once`: POSTs a compact woodcutting context request and prints a readable summary.

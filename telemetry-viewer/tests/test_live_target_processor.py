@@ -395,6 +395,8 @@ def live_args(**overrides):
         "quiet": False,
         "log_every": 1,
         "event_limit": 200,
+        "event_timeline_limit": 200,
+        "disable_event_timeline": False,
         "overlay_debug_target_limit": 50,
         "force_window_rebuild": False,
         "startup_backfill_ticks": 10,
@@ -410,6 +412,8 @@ def live_args(**overrides):
     values.update(overrides)
     if "liveness_mode" not in overrides:
         values["liveness_mode"] = "full" if values.get("latency_mode") == "complete" else "delta"
+    if "event_timeline_limit" not in overrides and "event_limit" in overrides:
+        values["event_timeline_limit"] = values["event_limit"]
     return SimpleNamespace(**values)
 
 
@@ -1073,7 +1077,7 @@ class LiveTargetProcessorTest(unittest.TestCase):
     def test_live_event_timeline_is_bounded_and_written(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp), [raw_tick(1)])
-            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", event_limit=2))
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", event_timeline_limit=2))
             candidate = {
                 "classId": "tree",
                 "name": "Tree",
@@ -1105,6 +1109,36 @@ class LiveTargetProcessorTest(unittest.TestCase):
             events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertLessEqual(len(events), 2)
             self.assertIn("events", result)
+
+    def test_live_event_timeline_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", disable_event_timeline=True))
+
+            _added, result = processor.poll_once()
+
+            self.assertFalse(result["status"]["eventTimelineEnabled"])
+            self.assertEqual(result["status"]["eventTimelineCount"], 0)
+            self.assertEqual(result["events"], [])
+            events_path = session / "interaction_geometry" / "live" / "live_event_timeline.jsonl"
+            self.assertTrue(events_path.exists())
+            self.assertEqual(events_path.read_text(encoding="utf-8"), "")
+
+    def test_event_timeline_cli_controls_parse(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                str(LIVE_SCRIPT),
+                "--event-timeline-limit",
+                "7",
+                "--disable-event-timeline",
+            ],
+        ):
+            args = live.parse_args()
+
+        self.assertEqual(args.event_timeline_limit, 7)
+        self.assertTrue(args.disable_event_timeline)
 
     def test_overlay_debug_state_caps_targets_and_uses_compact_schema(self):
         with tempfile.TemporaryDirectory() as tmp:

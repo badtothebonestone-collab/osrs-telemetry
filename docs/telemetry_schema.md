@@ -253,6 +253,8 @@ from `maxCandidates`. The context service returns the capped entries as both
 `events` and `recentEvents` for compatibility with existing dashboard helpers.
 Compact responses omit bulky event `details`; full responses preserve the
 recorded event detail objects.
+The live processor keeps this file bounded by `--event-timeline-limit`
+(default 200) and can skip timeline output with `--disable-event-timeline`.
 
 `interaction_geometry\live\overlay_debug_state.json` is a tiny read-only file
 for the optional RuneLite debug overlay. It uses schema

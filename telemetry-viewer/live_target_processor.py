@@ -3180,8 +3180,12 @@ class LiveTargetProcessor:
         self.args = args
         if not hasattr(self.args, "input_source"):
             self.args.input_source = "auto"
+        if not hasattr(self.args, "event_timeline_limit"):
+            self.args.event_timeline_limit = getattr(self.args, "event_limit", 200)
         if not hasattr(self.args, "event_limit"):
-            self.args.event_limit = 200
+            self.args.event_limit = self.args.event_timeline_limit
+        if not hasattr(self.args, "disable_event_timeline"):
+            self.args.disable_event_timeline = False
         self.compact_packet_state = compact_packet_state(session)
         (
             self.input_source_active,
@@ -3248,9 +3252,10 @@ class LiveTargetProcessor:
         self.previous_best_candidate: dict | None = None
         self.last_best_candidate_change: dict = {}
         self.event_state: dict[str, object] = {}
+        event_limit = max(1, int(self.args.event_timeline_limit or 200))
         self.event_timeline: deque[dict] = deque(
-            read_jsonl_objects(live_output_paths(session)["events"], limit=max(1, int(self.args.event_limit or 200))),
-            maxlen=max(1, int(self.args.event_limit or 200)),
+            [] if self.args.disable_event_timeline else read_jsonl_objects(live_output_paths(session)["events"], limit=event_limit),
+            maxlen=event_limit,
         )
         self.total_write_retries = 0
         self.total_write_failures = 0
@@ -4760,15 +4765,20 @@ class LiveTargetProcessor:
         if warning_exceeded and not budget_exceeded:
             status.setdefault("warnings", []).append(f"update warning threshold exceeded: {final_duration_ms:.1f} ms > {self.args.warn_update_ms} ms")
             status["warningCount"] = len(status["warnings"])
-        new_events = self.emit_timeline_events(
-            latest_tick_record=latest_tick_record,
-            candidates=candidates,
-            inventory_state=inventory_state,
-            activity=activity,
-            status=status,
-            processed_at=processed_at,
-            navigation=navigation,
-        )
+        if self.args.disable_event_timeline:
+            new_events = []
+        else:
+            new_events = self.emit_timeline_events(
+                latest_tick_record=latest_tick_record,
+                candidates=candidates,
+                inventory_state=inventory_state,
+                activity=activity,
+                status=status,
+                processed_at=processed_at,
+                navigation=navigation,
+            )
+        status["eventTimelineEnabled"] = not self.args.disable_event_timeline
+        status["eventTimelineLimit"] = self.event_timeline.maxlen
         status["eventTimelinePath"] = str(paths["events"])
         status["eventTimelineCount"] = len(self.event_timeline)
         status["eventsEmittedThisUpdate"] = len(new_events)
@@ -4792,7 +4802,7 @@ class LiveTargetProcessor:
         with timing.measure("outputSerializeMillis"):
             final_status_text = json.dumps(status, indent=2, sort_keys=False) + "\n"
             performance_text = json.dumps(performance, indent=2, sort_keys=False) + "\n"
-            events_text = "".join(json_dump_compact(record) + "\n" for record in self.event_timeline)
+            events_text = "" if self.args.disable_event_timeline else "".join(json_dump_compact(record) + "\n" for record in self.event_timeline)
         with timing.measure("outputWriteMillis"):
             if suppress_output_writes:
                 status_size = len(final_status_text)
@@ -5483,7 +5493,8 @@ def parse_args():
     parser.add_argument("--verbose", action="store_true", help="Print detailed startup/summary information.")
     parser.add_argument("--quiet", action="store_true", help="Suppress routine console output.")
     parser.add_argument("--log-every", type=positive_int, default=1, help="In follow mode, print one compact update every N processed updates. Default: 1.")
-    parser.add_argument("--event-limit", type=positive_int, default=200, help="Maximum rolling live event timeline records to retain. Default: 200.")
+    parser.add_argument("--event-timeline-limit", "--event-limit", dest="event_timeline_limit", type=positive_int, default=200, help="Maximum rolling live event timeline records to retain. Default: 200.")
+    parser.add_argument("--disable-event-timeline", action="store_true", help="Disable live_event_timeline.jsonl updates for this processor run.")
     parser.add_argument("--overlay-debug-target-limit", type=non_negative_int, default=50, help="Maximum candidates to include in overlay_debug_state.json. Default: 50.")
     parser.add_argument("--force-window-rebuild", action="store_true", help="Rebuild cached world records for every selected tick on each update.")
     parser.add_argument("--startup-backfill-ticks", type=non_negative_int, default=10, help="Initial existing tick catch-up count. Default: 10.")
