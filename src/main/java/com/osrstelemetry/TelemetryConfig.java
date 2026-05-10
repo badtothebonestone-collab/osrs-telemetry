@@ -400,10 +400,90 @@ public interface TelemetryConfig extends Config
 	@ConfigItem(
 			keyName = "compactLivePacketTypes",
 			name = "Compact live packet types",
-			description = "Comma-separated compact packet groups to emit: baseline,sceneDelta,projection,inventory,activity,navigation,collisionWindow,collisionGrid,writerHealth, or all."
+			description = "Comma-separated compact packet groups to emit: baseline,sceneDelta,projection,inventory,inventoryDelta,activity,navigation,collisionWindow,collisionGrid,writerHealth, or all."
 	)
 	default String compactLivePacketTypes()
 	{
 		return "all";
+	}
+
+	@ConfigItem(
+			keyName = "telemetryDebugOverlayEnabled",
+			name = "Telemetry debug overlay",
+			description = "Draw a read-only telemetry QA overlay from overlay_debug_state.json. Disabled by default."
+	)
+	default boolean telemetryDebugOverlayEnabled()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			keyName = "telemetryDebugOverlayMode",
+			name = "Debug overlay mode",
+			description = "Which read-only telemetry details to draw."
+	)
+	default TelemetryDebugOverlayMode telemetryDebugOverlayMode()
+	{
+		return TelemetryDebugOverlayMode.CANDIDATES;
+	}
+
+	@ConfigItem(
+			keyName = "telemetryDebugOverlayMaxTargets",
+			name = "Debug overlay max targets",
+			description = "Maximum candidates to draw. The overlay clamps this between 0 and 200."
+	)
+	default int telemetryDebugOverlayMaxTargets()
+	{
+		return 25;
+	}
+
+	@ConfigItem(
+			keyName = "telemetryDebugOverlayShowLabels",
+			name = "Debug overlay labels",
+			description = "Show compact candidate labels."
+	)
+	default boolean telemetryDebugOverlayShowLabels()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "telemetryDebugOverlayShowAimPoints",
+			name = "Debug overlay aim points",
+			description = "Draw read-only candidate aim point markers."
+	)
+	default boolean telemetryDebugOverlayShowAimPoints()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "telemetryDebugOverlayShowReachability",
+			name = "Debug overlay reachability",
+			description = "Color and label candidates by read-only reachability when available."
+	)
+	default boolean telemetryDebugOverlayShowReachability()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "telemetryDebugOverlayShowCollisionWindow",
+			name = "Debug overlay collision window",
+			description = "Show collision window summary in the overlay status panel."
+	)
+	default boolean telemetryDebugOverlayShowCollisionWindow()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			keyName = "telemetryDebugOverlayStatePath",
+			name = "Debug overlay state path",
+			description = "Optional explicit path to overlay_debug_state.json. Leave blank to use the current telemetry session."
+	)
+	default String telemetryDebugOverlayStatePath()
+	{
+		return "";
 	}
 }

@@ -64,6 +64,7 @@ def live_paths(session: Path) -> dict[str, Path]:
         "candidates": live_dir / "live_candidates.jsonl",
         "status": live_dir / "live_status.json",
         "activity": live_dir / "live_activity_state.json",
+        "events": live_dir / "live_event_timeline.jsonl",
         "navigation": live_dir / "live_navigation_summary.json",
     }
 
@@ -154,6 +155,7 @@ def load_live_context(session: Path, timing: dict | None = None) -> dict:
     context = read_json(paths["context"], warnings, missing_fields, "live_context_index", timing)
     status = read_json(paths["status"], warnings, missing_fields, "live_status", timing)
     activity = read_json(paths["activity"], warnings, missing_fields, "live_activity_state", timing) if paths["activity"].exists() else {}
+    events = read_jsonl(paths["events"], warnings, missing_fields, "live_event_timeline", timing) if paths["events"].exists() else []
     navigation = read_json(paths["navigation"], warnings, missing_fields, "live_navigation_summary", timing) if paths["navigation"].exists() else {}
     candidates = read_jsonl(paths["candidates"], warnings, missing_fields, "live_candidates", timing)
     if paths["candidates"].exists() and not candidates:
@@ -165,6 +167,7 @@ def load_live_context(session: Path, timing: dict | None = None) -> dict:
         "context": context,
         "status": status,
         "activity": activity,
+        "events": events,
         "navigation": navigation,
         "candidates": candidates,
         "warnings": warnings,
@@ -939,14 +942,21 @@ def woodcutting_task_payload(context: dict, args) -> dict:
     warnings.extend(freshness_warnings)
     busy = (activity_doc.get("activity") or {}).get("playerAppearsBusy") if isinstance((activity_doc.get("activity") or {}), dict) else None
     busy = player_busy_summary(baseline) if busy is None else busy
+    inventory_source = activity_doc.get("inventoryState") if isinstance(activity_doc.get("inventoryState"), dict) else activity_doc.get("inventory")
     inventory = (
-        normalize_inventory_state(activity_doc.get("inventory"))
-        if isinstance(activity_doc.get("inventory"), dict)
+        normalize_inventory_state(inventory_source)
+        if isinstance(inventory_source, dict)
         else inventory_readiness(baseline)
     )
-    activity_state = activity_doc.get("activity") if isinstance(activity_doc.get("activity"), dict) else {}
+    activity_state = activity_doc.get("activityState") if isinstance(activity_doc.get("activityState"), dict) else activity_doc.get("activity")
+    activity_state = activity_state if isinstance(activity_state, dict) else {}
     woodcutting_state = activity_doc.get("woodcuttingState") if isinstance(activity_doc.get("woodcuttingState"), dict) else {}
     target_liveness = activity_doc.get("targetLiveness") if isinstance(activity_doc.get("targetLiveness"), dict) else {}
+    recent_inventory_deltas = activity_doc.get("recentInventoryDeltas")
+    if not isinstance(recent_inventory_deltas, list):
+        recent_inventory_deltas = inventory.get("recentItemDeltas") if isinstance(inventory.get("recentItemDeltas"), list) else []
+    recent_activity_events = activity_doc.get("recentActivityEvents") if isinstance(activity_doc.get("recentActivityEvents"), list) else []
+    recent_events = events_payload(context, getattr(args, "events", 5) or 5).get("events", [])
     navigation = navigation_readiness(context["navigation"], baseline)
     reachability_report = reachability_payload(context, "tree", args)
 
@@ -1014,12 +1024,17 @@ def woodcutting_task_payload(context: dict, args) -> dict:
             "playerAppearsBusy": busy,
             "inventoryKnown": inventory["known"],
             "inventory": inventory,
+            "recentInventoryDeltas": recent_inventory_deltas,
+            "recentActivityEvents": recent_activity_events,
             "freshness": freshness,
             "sourceSceneKnowledgeComplete": status_doc.get("sourceSceneKnowledgeComplete"),
             "sourceCapHit": status_doc.get("sourceCapHit"),
         },
         "activityState": activity_state,
         "inventoryState": inventory,
+        "recentInventoryDeltas": recent_inventory_deltas,
+        "recentActivityEvents": recent_activity_events,
+        "recentEvents": recent_events,
         "targetLivenessState": target_liveness,
         "taskReadiness": {
             "bestCandidateLiveState": best_answer.get("targetLiveState"),
@@ -1197,8 +1212,9 @@ def activity_payload(context: dict) -> dict:
         "schema": "live_activity_answer.v1",
         "status": "PASS",
         "latestTick": activity.get("latestTick"),
-        "activityState": activity.get("activity") or {},
+        "activityState": activity.get("activityState") or activity.get("activity") or {},
         "woodcuttingState": activity.get("woodcuttingState") or {},
+        "recentActivityEvents": activity.get("recentActivityEvents") or [],
         "player": activity.get("player") or {},
         "warnings": context["warnings"],
         "missingFields": context["missingFields"],
@@ -1209,12 +1225,13 @@ def activity_payload(context: dict) -> dict:
 
 def inventory_payload(context: dict) -> dict:
     activity = context["activity"]
-    inventory = activity.get("inventory") if isinstance(activity.get("inventory"), dict) else {}
+    inventory = activity.get("inventoryState") if isinstance(activity.get("inventoryState"), dict) else activity.get("inventory") if isinstance(activity.get("inventory"), dict) else {}
     if not inventory:
         baseline = context["baseline"]
         inventory = baseline.get("inventory") if isinstance(baseline.get("inventory"), dict) else {}
     inventory = normalize_inventory_state(inventory)
     known = inventory.get("known") if "known" in inventory else bool(inventory)
+    inventory_warnings = inventory.get("warnings") if isinstance(inventory.get("warnings"), list) else []
     return {
         "schema": "live_inventory_answer.v1",
         "status": "PASS" if known else "WARN",
@@ -1222,8 +1239,43 @@ def inventory_payload(context: dict) -> dict:
         "inventoryKnown": known,
         "inventoryFull": inventory.get("inventoryFull") if isinstance(inventory, dict) else None,
         "recentInventoryDeltas": inventory.get("recentItemDeltas") if isinstance(inventory, dict) else [],
-        "warnings": context["warnings"] + ([] if known else ["inventory state is unknown."]),
+        "warnings": context["warnings"] + ([] if known else ["inventory state is unknown."]) + inventory_warnings,
         "missingFields": context["missingFields"] + ([] if known else ["inventory"]),
+        "sourceFiles": context["sourceFiles"],
+        "generatedAtUtc": utc_now(),
+    }
+
+
+def compact_event(event: dict) -> dict:
+    return {
+        key: event.get(key)
+        for key in (
+            "generatedAtUtc",
+            "tick",
+            "eventType",
+            "severity",
+            "summary",
+            "relatedCandidate",
+            "previousValue",
+            "currentValue",
+            "profile",
+        )
+        if key in event
+    }
+
+
+def events_payload(context: dict, limit: int = 5) -> dict:
+    events = context.get("events") if isinstance(context.get("events"), list) else []
+    limit = max(0, int(limit or 0))
+    recent = events[-limit:] if limit else []
+    return {
+        "schema": "live_context_events.v1",
+        "status": "PASS" if events else "WARN",
+        "latestTick": latest_tick(context),
+        "eventCount": len(events),
+        "events": [compact_event(event) for event in recent if isinstance(event, dict)],
+        "warnings": context["warnings"] + ([] if events else ["live event timeline is empty or unavailable."]),
+        "missingFields": context["missingFields"],
         "sourceFiles": context["sourceFiles"],
         "generatedAtUtc": utc_now(),
     }
@@ -1443,9 +1495,14 @@ def compact_json_payload(payload: dict, args) -> dict:
                         "itemCount",
                         "totalItemQuantity",
                         "inventoryFull",
+                        "changedThisTick",
                         "changedRecently",
+                        "inventoryDeltaTrackingKnown",
                     )
                 },
+                "recentInventoryDeltaCount": len(payload.get("recentInventoryDeltas") or []),
+                "recentActivityEventCount": len(payload.get("recentActivityEvents") or []),
+                "recentEvents": payload.get("recentEvents") or [],
                 "bestTree": compact_candidate(summary.get("bestTree")),
                 "nearestTree": compact_candidate(summary.get("nearestTree")),
                 "visibleTreeCandidateCount": summary.get("visibleTreeCandidateCount"),
@@ -1666,6 +1723,7 @@ def parse_args():
     parser.add_argument("--show-json", action="store_true", help="Print compact JSON after the human report.")
     parser.add_argument("--verbose", action="store_true", help="Print expanded details.")
     parser.add_argument("--top", type=int, default=3, help="Number of top candidates to include for normal/full output. Default: 3.")
+    parser.add_argument("--events", type=int, default=5, help="Number of recent live timeline events to show in human/task output. Default: 5.")
     parser.add_argument("--fields", choices=["compact", "normal", "full"], default="compact", help="Human/JSON detail level. Default: compact.")
     parser.add_argument("--benchmark", action="store_true", help="Include query read/parse/select timing.")
     parser.add_argument("--watch", action="store_true", help="Repeat the query until interrupted.")

@@ -12,6 +12,7 @@ import java.awt.Shape;
 import java.awt.geom.PathIterator;
 import java.awt.image.BufferedImage;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -92,6 +93,7 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.DrawManager;
+import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ImageCapture;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.api.events.WidgetClosed;
@@ -112,6 +114,7 @@ public class TelemetryPlugin extends Plugin
 	private static final String PACKET_SCENE_DELTA = "live_scene_delta_packet.v1";
 	private static final String PACKET_PROJECTION = "live_projection_packet.v1";
 	private static final String PACKET_INVENTORY = "live_inventory_packet.v1";
+	private static final String PACKET_INVENTORY_DELTA = "live_inventory_delta_packet.v1";
 	private static final String PACKET_ACTIVITY = "live_activity_packet.v1";
 	private static final String PACKET_NAVIGATION = "live_navigation_packet.v1";
 	private static final String PACKET_COLLISION_WINDOW = "live_collision_window_packet.v1";
@@ -143,6 +146,12 @@ public class TelemetryPlugin extends Plugin
 	private DrawManager drawManager;
 
 	@Inject
+	private OverlayManager overlayManager;
+
+	@Inject
+	private TelemetryDebugOverlay debugOverlay;
+
+	@Inject
 	private ImageCapture imageCapture;
 
 	private TelemetryWriter writer;
@@ -162,6 +171,11 @@ public class TelemetryPlugin extends Plugin
 	private int sceneIndexPlane = -1;
 	private long lastSceneIndexResyncTick = -1;
 	private String lastSceneProjectionStateHash;
+	private Map<String, Object> lastCompactInventorySnapshot;
+	private int lastActivityAnimation = Integer.MIN_VALUE;
+	private int lastActivityPoseAnimation = Integer.MIN_VALUE;
+	private String lastActivityInteractingSignature;
+	private boolean debugOverlayRegistered;
 
 	@Provides
 	TelemetryConfig provideConfig(ConfigManager configManager)
@@ -179,6 +193,10 @@ public class TelemetryPlugin extends Plugin
 		npcNameCache.clear();
 		objectNameCache.clear();
 		clearSceneIndex("startup");
+		lastCompactInventorySnapshot = null;
+		lastActivityAnimation = Integer.MIN_VALUE;
+		lastActivityPoseAnimation = Integer.MIN_VALUE;
+		lastActivityInteractingSignature = null;
 
 		writer = new TelemetryWriter(
 				config.outputDirectory(),
@@ -205,6 +223,11 @@ public class TelemetryPlugin extends Plugin
 				config.compactLiveRetentionSegments(),
 				config.compactLiveQueueSize());
 		writer.start();
+		if (!debugOverlayRegistered)
+		{
+			overlayManager.add(debugOverlay);
+			debugOverlayRegistered = true;
+		}
 
 		log.info("Telemetry Collector started");
 	}
@@ -212,6 +235,11 @@ public class TelemetryPlugin extends Plugin
 	@Override
 	protected void shutDown() throws Exception
 	{
+		if (debugOverlayRegistered)
+		{
+			overlayManager.remove(debugOverlay);
+			debugOverlayRegistered = false;
+		}
 		if (writer != null)
 		{
 			writer.close();
@@ -220,6 +248,16 @@ public class TelemetryPlugin extends Plugin
 		clearSceneIndex("shutdown");
 
 		log.info("Telemetry Collector stopped");
+	}
+
+	Path currentOverlayDebugStatePath()
+	{
+		TelemetryWriter currentWriter = writer;
+		if (currentWriter == null)
+		{
+			return null;
+		}
+		return currentWriter.getSessionDir().resolve("interaction_geometry").resolve("live").resolve("overlay_debug_state.json");
 	}
 
 	@Subscribe
@@ -738,9 +776,24 @@ public class TelemetryPlugin extends Plugin
 			currentWriter.enqueueLivePacket(PACKET_PROJECTION, snapshot.tickId, snapshot.timestampUtc, projectionPayload(snapshot));
 		}
 
+		Map<String, Object> compactInventoryPayload = null;
+		if (compactPacketTypeEnabled("inventory") || compactPacketTypeEnabled("inventoryDelta"))
+		{
+			compactInventoryPayload = inventoryPayload(snapshot);
+		}
+
 		if (compactPacketTypeEnabled("inventory"))
 		{
-			currentWriter.enqueueLivePacket(PACKET_INVENTORY, snapshot.tickId, snapshot.timestampUtc, inventoryPayload(snapshot));
+			currentWriter.enqueueLivePacket(PACKET_INVENTORY, snapshot.tickId, snapshot.timestampUtc, compactInventoryPayload);
+		}
+
+		if (compactPacketTypeEnabled("inventoryDelta"))
+		{
+			Map<String, Object> deltaPayload = inventoryDeltaPayload(snapshot, compactInventoryPayload);
+			if (deltaPayload != null)
+			{
+				currentWriter.enqueueLivePacket(PACKET_INVENTORY_DELTA, snapshot.tickId, snapshot.timestampUtc, deltaPayload);
+			}
 		}
 
 		if (compactPacketTypeEnabled("activity"))
@@ -1113,6 +1166,8 @@ public class TelemetryPlugin extends Plugin
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("inventory", itemContainerSnapshot(snapshot.inventory));
 		payload.put("equipment", itemContainerSnapshot(snapshot.equipment));
+		payload.put("inventoryDeltaTrackingAvailable", true);
+		payload.put("inventoryDeltaPacketType", PACKET_INVENTORY_DELTA);
 		return payload;
 	}
 
@@ -1161,29 +1216,294 @@ public class TelemetryPlugin extends Plugin
 		return payload;
 	}
 
+	@SuppressWarnings("unchecked")
+	private Map<String, Object> inventoryDeltaPayload(TickSnapshot snapshot, Map<String, Object> compactInventoryPayload)
+	{
+		if (compactInventoryPayload == null)
+		{
+			return null;
+		}
+
+		Object inventoryObject = compactInventoryPayload.get("inventory");
+		if (!(inventoryObject instanceof Map))
+		{
+			return null;
+		}
+
+		Map<String, Object> current = (Map<String, Object>) inventoryObject;
+		if (!Boolean.TRUE.equals(current.get("known")))
+		{
+			lastCompactInventorySnapshot = current;
+			return null;
+		}
+
+		Map<String, Object> previous = lastCompactInventorySnapshot;
+		lastCompactInventorySnapshot = current;
+
+		if (previous == null || !Boolean.TRUE.equals(previous.get("known")))
+		{
+			return null;
+		}
+
+		String previousSignature = stringValue(previous.get("signature"));
+		String currentSignature = stringValue(current.get("signature"));
+		boolean sameSignature = previousSignature.equals(currentSignature);
+		boolean sameFreeSlots = getInt(previous.get("freeSlots"), -1) == getInt(current.get("freeSlots"), -1);
+		boolean sameFilledSlots = getInt(previous.get("filledSlots"), -1) == getInt(current.get("filledSlots"), -1);
+
+		if (sameSignature && sameFreeSlots && sameFilledSlots)
+		{
+			return null;
+		}
+
+		List<Map<String, Object>> changedSlots = changedInventorySlots(previous, current);
+		List<Map<String, Object>> quantityChanges = inventoryQuantityChanges(previous, current);
+		List<Map<String, Object>> addedItems = new ArrayList<>();
+		List<Map<String, Object>> removedItems = new ArrayList<>();
+
+		for (Map<String, Object> change : quantityChanges)
+		{
+			int delta = getInt(change.get("delta"), 0);
+			if (delta > 0)
+			{
+				addedItems.add(change);
+			}
+			else if (delta < 0)
+			{
+				removedItems.add(change);
+			}
+		}
+
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("tick", snapshot.tickId);
+		payload.put("inventorySignatureBefore", previousSignature);
+		payload.put("inventorySignatureAfter", currentSignature);
+		payload.put("changedSlots", changedSlots);
+		payload.put("addedItems", addedItems);
+		payload.put("removedItems", removedItems);
+		payload.put("quantityChanges", quantityChanges);
+		payload.put("freeSlotsBefore", nullableInt(previous.get("freeSlots")));
+		payload.put("freeSlotsAfter", nullableInt(current.get("freeSlots")));
+		payload.put("filledSlotsBefore", nullableInt(previous.get("filledSlots")));
+		payload.put("filledSlotsAfter", nullableInt(current.get("filledSlots")));
+		payload.put("inventoryFull", getInt(current.get("freeSlots"), -1) == 0);
+		payload.put("generatedFromItemContainerChanged", false);
+		payload.put("eventSource", "gameTickInventorySnapshot");
+		return payload;
+	}
+
+	private List<Map<String, Object>> changedInventorySlots(Map<String, Object> previous, Map<String, Object> current)
+	{
+		Map<Integer, Map<String, Object>> previousSlots = itemsBySlot(previous);
+		Map<Integer, Map<String, Object>> currentSlots = itemsBySlot(current);
+		Set<Integer> slots = new HashSet<>();
+		slots.addAll(previousSlots.keySet());
+		slots.addAll(currentSlots.keySet());
+
+		List<Map<String, Object>> changes = new ArrayList<>();
+		for (Integer slot : slots)
+		{
+			Map<String, Object> before = previousSlots.get(slot);
+			Map<String, Object> after = currentSlots.get(slot);
+			int beforeItemId = before == null ? -1 : getInt(before.get("itemId"), -1);
+			int beforeQuantity = before == null ? 0 : getInt(before.get("quantity"), 0);
+			int afterItemId = after == null ? -1 : getInt(after.get("itemId"), -1);
+			int afterQuantity = after == null ? 0 : getInt(after.get("quantity"), 0);
+
+			if (beforeItemId == afterItemId && beforeQuantity == afterQuantity)
+			{
+				continue;
+			}
+
+			Map<String, Object> change = new LinkedHashMap<>();
+			change.put("slot", slot);
+			change.put("beforeItemId", beforeItemId);
+			change.put("beforeQuantity", beforeQuantity);
+			change.put("afterItemId", afterItemId);
+			change.put("afterQuantity", afterQuantity);
+			changes.add(change);
+		}
+
+		return changes;
+	}
+
+	@SuppressWarnings("unchecked")
+	private Map<Integer, Map<String, Object>> itemsBySlot(Map<String, Object> snapshot)
+	{
+		Map<Integer, Map<String, Object>> bySlot = new LinkedHashMap<>();
+		Object itemsObject = snapshot.get("items");
+		if (!(itemsObject instanceof List))
+		{
+			return bySlot;
+		}
+
+		for (Object itemObject : (List<Object>) itemsObject)
+		{
+			if (!(itemObject instanceof Map))
+			{
+				continue;
+			}
+
+			Map<String, Object> item = (Map<String, Object>) itemObject;
+			Integer slot = nullableInt(item.get("slot"));
+			if (slot != null)
+			{
+				bySlot.put(slot, item);
+			}
+		}
+
+		return bySlot;
+	}
+
+	private List<Map<String, Object>> inventoryQuantityChanges(Map<String, Object> previous, Map<String, Object> current)
+	{
+		Map<Integer, Integer> previousCounts = itemQuantityById(previous);
+		Map<Integer, Integer> currentCounts = itemQuantityById(current);
+		Set<Integer> itemIds = new HashSet<>();
+		itemIds.addAll(previousCounts.keySet());
+		itemIds.addAll(currentCounts.keySet());
+
+		List<Map<String, Object>> changes = new ArrayList<>();
+		for (Integer itemId : itemIds)
+		{
+			int before = previousCounts.getOrDefault(itemId, 0);
+			int after = currentCounts.getOrDefault(itemId, 0);
+			if (before == after)
+			{
+				continue;
+			}
+
+			Map<String, Object> change = new LinkedHashMap<>();
+			change.put("itemId", itemId);
+			change.put("beforeQuantity", before);
+			change.put("afterQuantity", after);
+			change.put("delta", after - before);
+			change.put("changeType", after > before ? "itemAdded" : "itemRemoved");
+			changes.add(change);
+		}
+
+		return changes;
+	}
+
+	@SuppressWarnings("unchecked")
+	private Map<Integer, Integer> itemQuantityById(Map<String, Object> snapshot)
+	{
+		Map<Integer, Integer> counts = new LinkedHashMap<>();
+		Object itemsObject = snapshot.get("items");
+		if (!(itemsObject instanceof List))
+		{
+			return counts;
+		}
+
+		for (Object itemObject : (List<Object>) itemsObject)
+		{
+			if (!(itemObject instanceof Map))
+			{
+				continue;
+			}
+
+			Map<String, Object> item = (Map<String, Object>) itemObject;
+			int itemId = getInt(item.get("itemId"), -1);
+			int quantity = getInt(item.get("quantity"), 0);
+			if (itemId > 0 && quantity > 0)
+			{
+				counts.put(itemId, counts.getOrDefault(itemId, 0) + quantity);
+			}
+		}
+
+		return counts;
+	}
+
+	private Integer nullableInt(Object value)
+	{
+		return value instanceof Number ? ((Number) value).intValue() : null;
+	}
+
+	private String stringValue(Object value)
+	{
+		return value == null ? "" : String.valueOf(value);
+	}
+
 	private Map<String, Object> activityPayload(TickSnapshot snapshot)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
+		List<String> changedFields = new ArrayList<>();
+		int animation = Integer.MIN_VALUE;
+		int poseAnimation = Integer.MIN_VALUE;
+		String interactingSignature = null;
 
 		if (snapshot.localPlayer != null)
 		{
-			payload.put("animation", snapshot.localPlayer.animation);
-			payload.put("poseAnimation", snapshot.localPlayer.poseAnimation);
+			animation = snapshot.localPlayer.animation;
+			poseAnimation = snapshot.localPlayer.poseAnimation;
+			payload.put("animation", animation);
+			payload.put("previousAnimation", lastActivityAnimation == Integer.MIN_VALUE ? null : lastActivityAnimation);
+			payload.put("poseAnimation", poseAnimation);
+			payload.put("previousPoseAnimation", lastActivityPoseAnimation == Integer.MIN_VALUE ? null : lastActivityPoseAnimation);
 			payload.put("combatLevel", snapshot.localPlayer.combatLevel);
+
+			if (lastActivityAnimation != Integer.MIN_VALUE && lastActivityAnimation != animation)
+			{
+				changedFields.add("animation");
+			}
+			if (lastActivityPoseAnimation != Integer.MIN_VALUE && lastActivityPoseAnimation != poseAnimation)
+			{
+				changedFields.add("poseAnimation");
+			}
 		}
 
 		if (snapshot.status != null)
 		{
 			payload.put("interacting", interactingPayload(snapshot.status));
+			interactingSignature = interactingSignature(snapshot.status);
+			payload.put("previousInteractingSignature", lastActivityInteractingSignature);
+			payload.put("interactingSignature", interactingSignature);
+			if (lastActivityInteractingSignature != null && !lastActivityInteractingSignature.equals(interactingSignature))
+			{
+				changedFields.add("interacting");
+			}
 			payload.put("runEnergyRaw", snapshot.status.runEnergyRaw);
 			payload.put("runEnergyPercent", snapshot.status.runEnergyPercent);
 			payload.put("hitpointsBoosted", snapshot.status.hitpointsBoosted);
 			payload.put("hitpointsReal", snapshot.status.hitpointsReal);
 		}
 
+		payload.put("changedFields", changedFields);
+		payload.put("activityChanged", !changedFields.isEmpty());
+		payload.put("eventSource", "gameTickActivitySnapshot");
 		payload.put("movementKnown", false);
 		payload.put("interpretation", "observed_facts_only");
+
+		if (animation != Integer.MIN_VALUE)
+		{
+			lastActivityAnimation = animation;
+		}
+		if (poseAnimation != Integer.MIN_VALUE)
+		{
+			lastActivityPoseAnimation = poseAnimation;
+		}
+		if (interactingSignature != null)
+		{
+			lastActivityInteractingSignature = interactingSignature;
+		}
+
 		return payload;
+	}
+
+	private String interactingSignature(TickSnapshot.StatusSnapshot status)
+	{
+		if (status == null)
+		{
+			return "";
+		}
+
+		return stringValue(status.interactingType)
+				+ ":" + status.interactingIndex
+				+ ":" + status.interactingId
+				+ ":" + stringValue(status.interactingName)
+				+ ":" + status.interactingWorldX
+				+ ":" + status.interactingWorldY
+				+ ":" + status.interactingPlane;
 	}
 
 	private Map<String, Object> navigationPayload(TickSnapshot snapshot)

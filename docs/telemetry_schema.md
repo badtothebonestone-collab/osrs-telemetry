@@ -145,9 +145,15 @@ Packet types:
   with `objectKey`, on-screen/geometry flags, aim point, and small geometry
   bounds. Heavy polygons are excluded by default.
 - `live_inventory_packet.v1`: compact inventory/equipment state, slot count,
-  free/filled slots, total item quantity, signature, and non-empty item slots.
+  free/filled slots, total item quantity, signature, non-empty item slots, and
+  whether compact inventory delta tracking is available.
+- `live_inventory_delta_packet.v1`: compact read-only inventory change packet
+  emitted when the observed inventory signature or slot occupancy changes. It
+  can include before/after signatures, changed slots, added/removed items,
+  quantity changes, free/filled slot transitions, and `inventoryFull`.
 - `live_activity_packet.v1`: raw observed animation, pose, interacting target,
-  and status fields only. Task-state interpretation remains outside Java.
+  status fields, previous animation/pose/interacting signatures, and changed
+  field names. Task-state interpretation remains outside Java.
 - `live_navigation_packet.v1`: compact read-only navigation readiness facts:
   player tile/world location, collision summary/hash, map dimensions, blocked
   tile counts, and scene bounds. It does not contain routes or movement
@@ -179,8 +185,8 @@ packets are missing or stale, which is useful for proving that live mode is not
 using raw tick fallback.
 
 Compact packet mode converts baseline, scene-delta, projection, inventory,
-activity, navigation, local collision-window, optional debug collision-grid, and
-writer-health packets into the same rolling live candidate files under
+inventory-delta, activity, navigation, local collision-window, optional debug
+collision-grid, and writer-health packets into the same rolling live candidate files under
 `interaction_geometry\live`, so context-service consumers do not need a new
 response schema.
 
@@ -199,6 +205,16 @@ Inventory fields use explicit meanings:
   slots.
 - `totalItemQuantity`: explicit total quantity sum.
 - `inventoryFull`: derived from `freeSlots == 0` when slot count is known.
+- `inventoryDeltaTrackingKnown`: true when the live processor has enough
+  rolling tick state or compact delta capability to distinguish "no recent
+  change observed" from "delta tracking unavailable."
+
+Activity fields are observed facts. `live_activity_packet.v1` may include
+`previousAnimation`, `previousPoseAnimation`, `previousInteractingSignature`,
+`interactingSignature`, `changedFields`, `activityChanged`, and `eventSource`.
+Python uses these to populate `recentActivityEvents` and conservative apparent
+state labels such as `idle`, `animating`, `interacting`, or `unknown`; Java does
+not infer task intent.
 
 Realtime liveness distinguishes `live_assumed` from `unknown`. In delta mode,
 `live_assumed` means the candidate is currently present in the candidate stream
@@ -210,6 +226,50 @@ stale/despawned/depleted evidence.
 input source, compact packet availability/recentness, fallback reason, latest
 compact packet sequence, and latest compact segment so sidecars can tell whether
 normal live mode is using compact packets.
+
+`interaction_geometry\live\live_event_timeline.jsonl` is a bounded read-only
+timeline of notable live context changes. Each line uses schema
+`live_context_event.v1`:
+
+- `generatedAtUtc`
+- `tick`
+- `eventType`
+- `severity`: `info`, `warn`, or `error`
+- `summary`
+- `details`
+- `relatedCandidate`
+- `previousValue`
+- `currentValue`
+- `source`: currently `live_target_processor`
+- `profile`
+
+Events are summaries only. They do not contain click, movement, menu, or input
+commands. Typical event types include candidate changes, target liveness or
+depletion changes, inventory changes, activity changes, reachability changes,
+and live health changes such as budget or write-failure state.
+
+`interaction_geometry\live\overlay_debug_state.json` is a tiny read-only file
+for the optional RuneLite debug overlay. It uses schema
+`telemetry_overlay_debug_state.v1` and is rewritten atomically by the live
+processor.
+
+Top-level fields:
+
+- `generatedAtUtc`
+- `latestTick`
+- `profile`
+- `status`
+- `player`: world and scene tile fields.
+- `summary`: candidate count, cap, budget, and write-failure summary.
+- `targets`: capped candidate summaries only.
+- `collisionWindow`: availability, bounds, radius, and player scene tile.
+- `safety`: read-only/draw-only flags.
+
+Target summaries may include class/name/id, world and scene tile, on-screen and
+geometry flags, quality tier/score, target liveness, direct reachability,
+aimPoint, compact bounds, and small polygons when already available. The file
+does not include full collision grids, broad scene dumps, action commands,
+mouse/keyboard fields, or menu invocation fields.
 
 ## Local Collision Window And Reachability QA
 

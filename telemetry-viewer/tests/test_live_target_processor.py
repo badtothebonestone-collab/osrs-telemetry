@@ -374,6 +374,8 @@ def live_args(**overrides):
         "verbose": False,
         "quiet": False,
         "log_every": 1,
+        "event_limit": 200,
+        "overlay_debug_target_limit": 50,
         "force_window_rebuild": False,
         "startup_backfill_ticks": 10,
         "no_startup_backfill": False,
@@ -768,6 +770,240 @@ class LiveTargetProcessorTest(unittest.TestCase):
         self.assertEqual(state["freeSlots"], 12)
         self.assertEqual(state["filledSlots"], 16)
         self.assertEqual(state["totalItemQuantity"], 723)
+
+    def test_compact_inventory_delta_packet_marks_recent_change(self):
+        packets = [
+            compact_packet("live_baseline_packet.v1", 5, 1, {"player": {"worldX": 3200, "worldY": 3200, "plane": 0}}),
+            compact_packet(
+                "live_inventory_packet.v1",
+                5,
+                2,
+                {
+                    "inventoryDeltaTrackingAvailable": True,
+                    "inventory": {
+                        "known": True,
+                        "slotCount": 28,
+                        "freeSlots": 26,
+                        "filledSlots": 2,
+                        "itemCount": 2,
+                        "totalItemQuantity": 2,
+                        "signature": "after",
+                        "items": [{"slot": 0, "itemId": 1511, "quantity": 2}],
+                    },
+                    "equipment": {"known": True, "items": []},
+                },
+            ),
+            compact_packet(
+                "live_inventory_delta_packet.v1",
+                5,
+                3,
+                {
+                    "tick": 5,
+                    "inventorySignatureBefore": "before",
+                    "inventorySignatureAfter": "after",
+                    "quantityChanges": [{"itemId": 1511, "beforeQuantity": 1, "afterQuantity": 2, "delta": 1, "changeType": "itemAdded"}],
+                    "changedSlots": [{"slot": 0, "beforeItemId": 1511, "beforeQuantity": 1, "afterItemId": 1511, "afterQuantity": 2}],
+                    "freeSlotsBefore": 27,
+                    "freeSlotsAfter": 26,
+                    "filledSlotsBefore": 1,
+                    "filledSlotsAfter": 2,
+                    "inventoryFull": False,
+                    "generatedFromItemContainerChanged": False,
+                },
+            ),
+        ]
+        tick = live.compact_packets_to_tick(packets)
+        state = live.inventory_state_for_ticks([tick], tick)
+        self.assertTrue(state["changedThisTick"])
+        self.assertTrue(state["changedRecently"])
+        self.assertTrue(state["inventoryDeltaTrackingKnown"])
+        self.assertEqual(state["recentItemDeltas"][0]["changes"][0]["itemId"], 1511)
+
+    def test_activity_state_reports_recent_activity_events(self):
+        tick = {
+            "tickId": 8,
+            "localPlayer": {"animation": 879, "poseAnimation": 808},
+            "_activityPacket": {
+                "animation": 879,
+                "previousAnimation": -1,
+                "poseAnimation": 808,
+                "previousPoseAnimation": 808,
+                "changedFields": ["animation"],
+                "activityChanged": True,
+                "eventSource": "gameTickActivitySnapshot",
+            },
+            "inventory": {"known": True, "slotCount": 28, "freeSlots": 20, "filledSlots": 8, "items": []},
+        }
+        activity = live.activity_state_for(tick, [tick], [], {}, "2026-01-01T00:00:00Z", 0)
+        self.assertEqual(activity["activityState"]["apparentState"], "animating")
+        self.assertEqual(activity["recentActivityEvents"][0]["changedFields"], ["animation"])
+
+    def test_live_event_timeline_does_not_duplicate_unchanged_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting"))
+            candidate = {
+                "classId": "tree",
+                "name": "Tree",
+                "id": 1276,
+                "objectKey": "tree-a",
+                "worldX": 3201,
+                "worldY": 3201,
+                "plane": 0,
+                "distanceTiles": 1,
+                "targetLiveState": "live_assumed",
+                "navigation": {"directReachability": "reachable"},
+            }
+            inventory = {"signature": "a", "freeSlots": 20, "inventoryFull": False}
+            activity = {"activityState": {"apparentState": "idle"}, "player": {"animation": -1}}
+            status = {"latestTick": 1, "warningCount": 0, "budgetExceeded": False, "writeFailureCount": 0, "sourceCapHit": False}
+
+            processor.emit_timeline_events(latest_tick_record={"tickId": 1}, candidates=[candidate], inventory_state=inventory, activity=activity, status=status, processed_at="2026-01-01T00:00:00Z")
+            count = len(processor.event_timeline)
+            processor.emit_timeline_events(latest_tick_record={"tickId": 2}, candidates=[candidate], inventory_state=inventory, activity=activity, status=status, processed_at="2026-01-01T00:00:01Z")
+            self.assertEqual(len(processor.event_timeline), count)
+
+    def test_live_event_timeline_records_candidate_liveness_and_inventory_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting"))
+            base_candidate = {
+                "classId": "tree",
+                "name": "Tree",
+                "id": 1276,
+                "objectKey": "tree-a",
+                "worldX": 3201,
+                "worldY": 3201,
+                "plane": 0,
+                "distanceTiles": 1,
+                "targetLiveState": "live_assumed",
+                "navigation": {"directReachability": "reachable"},
+            }
+            activity = {"activityState": {"apparentState": "idle"}, "player": {"animation": -1}}
+            status = {"latestTick": 1, "warningCount": 0, "budgetExceeded": False, "writeFailureCount": 0, "sourceCapHit": False}
+            processor.emit_timeline_events(
+                latest_tick_record={"tickId": 1},
+                candidates=[base_candidate],
+                inventory_state={"signature": "a", "freeSlots": 20, "inventoryFull": False},
+                activity=activity,
+                status=status,
+                processed_at="2026-01-01T00:00:00Z",
+            )
+            depleted = dict(base_candidate, targetLiveState="depleted_or_stump")
+            processor.emit_timeline_events(
+                latest_tick_record={"tickId": 2},
+                candidates=[depleted],
+                inventory_state={
+                    "signature": "b",
+                    "freeSlots": 19,
+                    "inventoryFull": False,
+                    "recentItemDeltas": [{"toTick": 2, "changes": [{"itemId": 1511, "delta": 1}]}],
+                },
+                activity=activity,
+                status=status,
+                processed_at="2026-01-01T00:00:01Z",
+            )
+            event_types = [event["eventType"] for event in processor.event_timeline]
+            self.assertIn("target_depleted", event_types)
+            self.assertIn("inventory_changed", event_types)
+
+    def test_live_event_timeline_is_bounded_and_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", event_limit=2))
+            candidate = {
+                "classId": "tree",
+                "name": "Tree",
+                "id": 1276,
+                "objectKey": "tree-a",
+                "worldX": 3201,
+                "worldY": 3201,
+                "plane": 0,
+                "distanceTiles": 1,
+                "targetLiveState": "live_assumed",
+                "navigation": {"directReachability": "reachable"},
+            }
+            activity = {"activityState": {"apparentState": "idle"}, "player": {"animation": -1}}
+            status = {"latestTick": 1, "warningCount": 0, "budgetExceeded": False, "writeFailureCount": 0, "sourceCapHit": False}
+            for index in range(5):
+                processor.emit_timeline_events(
+                    latest_tick_record={"tickId": index + 1},
+                    candidates=[dict(candidate, objectKey=f"tree-{index}")],
+                    inventory_state={"signature": str(index), "freeSlots": 20 - index, "inventoryFull": False},
+                    activity=activity,
+                    status=status,
+                    processed_at=f"2026-01-01T00:00:0{index}Z",
+                )
+            self.assertLessEqual(len(processor.event_timeline), 2)
+
+            _added, result = processor.poll_once()
+            events_path = session / "interaction_geometry" / "live" / "live_event_timeline.jsonl"
+            self.assertTrue(events_path.exists())
+            events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertLessEqual(len(events), 2)
+            self.assertIn("events", result)
+
+    def test_overlay_debug_state_caps_targets_and_uses_compact_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            candidates = []
+            for index in range(5):
+                candidates.append(
+                    {
+                        "classId": "tree",
+                        "name": "Tree",
+                        "id": 1276,
+                        "objectKey": f"tree-{index}",
+                        "worldX": 3200 + index,
+                        "worldY": 3201,
+                        "plane": 0,
+                        "sceneX": index,
+                        "sceneY": 1,
+                        "onScreen": True,
+                        "geometryAvailable": True,
+                        "qualityTier": "excellent",
+                        "qualityScore": 1.0,
+                        "targetLiveState": "live_assumed",
+                        "aimPointContext": {"canvasX": 100 + index, "canvasY": 120, "source": "test"},
+                        "geometrySummary": {"bounds": {"x": 95 + index, "y": 115, "width": 10, "height": 10}},
+                        "navigation": {"directReachability": "reachable", "reachabilityConfidence": 0.9},
+                    }
+                )
+
+            state = live.overlay_debug_state_for(
+                session,
+                live_args(profile="woodcutting", overlay_debug_target_limit=2),
+                {"tickId": 1, "localPlayer": {"worldX": 3200, "worldY": 3200, "plane": 0, "sceneX": 10, "sceneY": 10}},
+                candidates,
+                {"collisionWindowAvailable": True, "collisionWindowRadius": 24, "playerSceneX": 10, "playerSceneY": 10},
+                {"budgetExceeded": False, "writeFailureCount": 0, "warnings": []},
+                "2026-01-01T00:00:00Z",
+            )
+
+            self.assertEqual(state["schema"], "telemetry_overlay_debug_state.v1")
+            self.assertEqual(state["summary"]["candidateCount"], 5)
+            self.assertEqual(state["summary"]["targetsWritten"], 2)
+            self.assertEqual(state["summary"]["targetsSuppressedByCap"], 3)
+            self.assertEqual(len(state["targets"]), 2)
+            self.assertEqual(state["targets"][0]["aimPoint"]["canvasX"], 100)
+            self.assertEqual(state["targets"][0]["bounds"]["width"], 10)
+            self.assertTrue(state["safety"]["readOnly"])
+
+    def test_overlay_debug_state_is_written_by_processor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            processor = live.LiveTargetProcessor(session, live_args(profile="woodcutting", overlay_debug_target_limit=1))
+
+            _added, result = processor.poll_once()
+            overlay_path = session / "interaction_geometry" / "live" / "overlay_debug_state.json"
+            self.assertTrue(overlay_path.exists())
+            state = json.loads(overlay_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["schema"], "telemetry_overlay_debug_state.v1")
+            self.assertLessEqual(len(state["targets"]), 1)
+            self.assertIn("overlayDebug", result)
+            text = json.dumps(state)
+            for forbidden in ("clickCommand", "mouse", "keyboard", "menu", "execute", "automation", "actionCommand"):
+                self.assertNotIn(forbidden, text)
 
     def test_complete_mode_status_is_labeled_audit_mode(self):
         with tempfile.TemporaryDirectory() as tmp:

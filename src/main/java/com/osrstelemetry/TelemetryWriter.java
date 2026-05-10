@@ -365,6 +365,11 @@ public class TelemetryWriter implements Closeable
 		return livePacketWriter != null;
 	}
 
+	Path getSessionDir()
+	{
+		return sessionDir;
+	}
+
 	public boolean enqueueFrame(String relativePath, BufferedImage image)
 	{
 		return enqueueFrame(-1L, relativePath, image, null, null, null);

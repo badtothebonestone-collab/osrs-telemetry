@@ -229,6 +229,50 @@ def response_activity(response: dict) -> tuple[str, str]:
     return text(activity.get("apparentState")), text(woodcutting.get("woodcuttingState"), "")
 
 
+def response_recent_inventory_deltas(response: dict) -> list[dict]:
+    deltas = response.get("recentInventoryDeltas")
+    if not isinstance(deltas, list):
+        deltas = safe_get(response, "taskSummary.recentInventoryDeltas")
+    if not isinstance(deltas, list):
+        inventory = response_inventory(response)
+        deltas = inventory.get("recentItemDeltas") if isinstance(inventory.get("recentItemDeltas"), list) else []
+    return [delta for delta in deltas if isinstance(delta, dict)]
+
+
+def response_recent_events(response: dict) -> list[dict]:
+    events = response.get("events")
+    if not isinstance(events, list):
+        events = response.get("recentEvents")
+    if not isinstance(events, list):
+        events = safe_get(response, "taskSummary.recentEvents")
+    return [event for event in events if isinstance(event, dict)] if isinstance(events, list) else []
+
+
+def inventory_delta_label(delta: dict) -> str:
+    changes = delta.get("changes") if isinstance(delta.get("changes"), list) else delta.get("quantityChanges")
+    if isinstance(changes, list) and changes:
+        parts = []
+        for change in changes[:3]:
+            if not isinstance(change, dict):
+                continue
+            item_id = text(change.get("itemId"))
+            amount = change.get("delta")
+            if amount is None:
+                before = change.get("beforeQuantity")
+                after = change.get("afterQuantity")
+                parts.append(f"item {item_id}: {text(before)} -> {text(after)}")
+            else:
+                sign = "+" if isinstance(amount, (int, float)) and amount > 0 else ""
+                parts.append(f"item {item_id}: {sign}{amount}")
+        if parts:
+            extra = "" if len(changes) <= 3 else f", +{len(changes) - 3} more"
+            return "; ".join(parts) + extra
+    changed_slots = delta.get("changedSlots") if isinstance(delta.get("changedSlots"), list) else []
+    if changed_slots:
+        return f"{len(changed_slots)} slot changes"
+    return "inventory signature changed"
+
+
 def all_warnings(response: dict) -> list[str]:
     values: list[str] = []
     for key in ("warnings", "missingCapabilities"):
@@ -271,6 +315,8 @@ def format_woodcutting_summary(response: dict, compact: bool = False, top: int =
     player = response_player(response)
     inventory = response_inventory(response)
     activity, woodcutting_state = response_activity(response)
+    recent_inventory_deltas = response_recent_inventory_deltas(response)
+    recent_events = response_recent_events(response)
     best = response_best(response, "tree")
     nearest = response_nearest(response, "tree")
     navigation = response_navigation(response)
@@ -296,9 +342,24 @@ def format_woodcutting_summary(response: dict, compact: bool = False, top: int =
             f"  Scene tile: {text(player.get('sceneX'))}, {text(player.get('sceneY'))}",
             f"  Activity: {activity if not woodcutting_state else activity + ' / ' + woodcutting_state}",
             f"  Inventory: {text(inventory.get('freeSlots'))} free slots, {full_label(inventory.get('inventoryFull'))}",
+            f"  Inventory changed recently: {bool_label(inventory.get('changedRecently'))}",
             "",
         ]
     )
+    if recent_inventory_deltas and not compact:
+        lines.append("Recent inventory changes:")
+        for delta in recent_inventory_deltas[:3]:
+            tick = delta.get("toTick") or delta.get("tick")
+            lines.append(f"  Tick {text(tick)}: {inventory_delta_label(delta)}")
+        lines.append("")
+
+    if recent_events:
+        lines.append("Recent events:")
+        for event in recent_events[:top]:
+            tick = text(event.get("tick"))
+            severity = text(event.get("severity"), "info")
+            lines.append(f"  - [tick {tick}] {event.get('summary') or event.get('eventType')} ({severity})")
+        lines.append("")
 
     lines.extend(candidate_block("Best tree", best, compact=compact))
     lines.append("")

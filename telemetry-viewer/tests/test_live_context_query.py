@@ -184,6 +184,7 @@ def make_live_session(root: Path, *, candidates: list[dict] | None = None, stale
                 "inventoryFull": False,
                 "changedThisTick": False,
                 "changedRecently": False,
+                "inventoryDeltaTrackingKnown": True,
                 "recentItemDeltas": [],
             },
             "equipment": {"known": True, "items": []},
@@ -225,6 +226,22 @@ def make_live_session(root: Path, *, candidates: list[dict] | None = None, stale
                 "notes": ["collision maps are not captured"],
             },
         )
+    write_jsonl(
+        live_dir / "live_event_timeline.jsonl",
+        [
+            {
+                "schema": "live_context_event.v1",
+                "generatedAtUtc": generated,
+                "tick": 10,
+                "eventType": "inventory_changed",
+                "severity": "info",
+                "summary": "Inventory changed: +1 item 1511",
+                "details": {},
+                "source": "live_target_processor",
+                "profile": "woodcutting",
+            }
+        ],
+    )
     write_jsonl(live_dir / "live_candidates.jsonl", candidates)
     return session
 
@@ -590,6 +607,8 @@ class LiveContextQueryTest(unittest.TestCase):
             )
             self.assertIn("WOODCUTTING CONTEXT", result.stdout)
             self.assertIn("Best tree:", result.stdout)
+            self.assertIn("Recent events:", result.stdout)
+            self.assertIn("Inventory changed: +1 item 1511", result.stdout)
             self.assertIn("Reachable: yes", result.stdout)
             self.assertIn("Collision window: available, radius 24", result.stdout)
             self.assertNotIn("sourceFiles", result.stdout)
@@ -642,6 +661,31 @@ class LiveContextQueryTest(unittest.TestCase):
             self.assertEqual(activity["activityState"]["apparentState"], "idle")
             self.assertEqual(inventory["inventoryFull"], False)
             self.assertEqual(liveness["targetLivenessState"]["bestCandidateLiveState"], "live")
+
+    def test_human_summary_formats_recent_inventory_delta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp))
+            activity_path = session / "interaction_geometry" / "live" / "live_activity_state.json"
+            activity = json.loads(activity_path.read_text(encoding="utf-8"))
+            delta = {
+                "toTick": 10,
+                "changes": [{"itemId": 1511, "beforeQuantity": 0, "afterQuantity": 1, "delta": 1}],
+                "freeSlotsBefore": 25,
+                "freeSlotsAfter": 24,
+            }
+            activity["inventory"]["changedRecently"] = True
+            activity["inventory"]["recentItemDeltas"] = [delta]
+            activity["recentInventoryDeltas"] = [delta]
+            write_json(activity_path, activity)
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--session", str(session), "--task", "woodcutting", "--human"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("Inventory changed recently: yes", result.stdout)
+            self.assertIn("Recent inventory changes:", result.stdout)
+            self.assertIn("item 1511: +1", result.stdout)
 
     def test_self_test_pass_warn_fail_behavior(self):
         with tempfile.TemporaryDirectory() as tmp:

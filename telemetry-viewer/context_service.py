@@ -30,6 +30,7 @@ SUPPORTED_NEEDS = [
     "navigation_readiness",
     "frame",
     "candidates",
+    "events",
     "aim_point",
     "task_summary",
     "best:<classId>",
@@ -144,6 +145,7 @@ class LiveContextCache:
                     "context": {},
                     "status": {},
                     "activity": {},
+                    "events": [],
                     "navigation": {},
                     "performance": {},
                     "candidates": [],
@@ -204,6 +206,22 @@ class LiveContextCache:
                     missing.append("candidates")
                     return []
 
+            def load_events() -> list[dict]:
+                path = paths["events"]
+                exists, _mtime, _size = signatures["events"]
+                if not exists:
+                    return []
+                try:
+                    return read_jsonl_file(path)
+                except (FileNotFoundError, PermissionError, OSError, json.JSONDecodeError) as exc:
+                    self._record_error(path, exc)
+                    cached = previous.get("events")
+                    if isinstance(cached, list):
+                        warnings.append(f"events transient read failure; kept previous cached data: {exc}")
+                        return cached
+                    warnings.append(f"events unreadable: {exc}")
+                    return []
+
             context = {
                 "session": self.session,
                 "paths": paths,
@@ -211,6 +229,7 @@ class LiveContextCache:
                 "context": load_json("context", True),
                 "status": load_json("status", True),
                 "activity": load_json("activity", False),
+                "events": load_events(),
                 "navigation": load_json("navigation", False),
                 "performance": load_json("performance", False),
                 "candidates": load_candidates(),
@@ -595,13 +614,18 @@ def build_context_response(
     if "inventory" in needs:
         inventory = query.inventory_payload(scoped_context)
         response["inventory"] = inventory.get("inventoryState") if response_mode != "full" else inventory
+        if response_mode == "compact":
+            response["recentInventoryDeltas"] = (inventory.get("recentInventoryDeltas") or [])[:max_candidates]
         status = combine_status(status, inventory.get("status", "WARN"))
         warnings.extend(inventory.get("warnings") or [])
         missing.extend(inventory.get("missingFields") or [])
     if "activity" in needs:
         activity = query.activity_payload(scoped_context)
         response["activity"] = activity.get("activityState") if response_mode != "full" else activity
-        if response_mode != "compact":
+        if response_mode == "compact":
+            response["woodcuttingState"] = activity.get("woodcuttingState")
+            response["recentActivityEvents"] = (activity.get("recentActivityEvents") or [])[:max_candidates]
+        else:
             response["woodcuttingState"] = activity.get("woodcuttingState")
         status = combine_status(status, activity.get("status", "WARN"))
         warnings.extend(activity.get("warnings") or [])
@@ -635,6 +659,13 @@ def build_context_response(
             "count": len(scoped_context.get("candidates") or []),
             "items": candidate_items(scoped_context, request, args, max_candidates, response_mode),
         }
+    if "events" in needs:
+        events = query.events_payload(scoped_context, max_candidates)
+        response["events"] = events.get("events") or []
+        response["eventCount"] = events.get("eventCount")
+        if not events.get("events"):
+            status = combine_status(status, "WARN")
+            warnings.extend(events.get("warnings") or [])
 
     reachability_summary: dict[str, Any] = {}
     reachability_candidates: dict[str, list[dict]] = {}
@@ -952,6 +983,7 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
                 "inventory",
                 "activity",
                 "liveness",
+                "events",
                 "navigation_readiness",
                 "diagnostics",
                 "task_summary",

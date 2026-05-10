@@ -1410,6 +1410,137 @@ The same endpoint can return the underlying compact `context_response.v1`:
 Invoke-RestMethod "http://127.0.0.1:8890/summary?task=woodcutting&format=json&top=3"
 ```
 
+## Live Event Timeline
+
+`live_target_processor.py` writes a bounded read-only event timeline:
+
+```text
+interaction_geometry\live\live_event_timeline.jsonl
+```
+
+Each line uses schema `live_context_event.v1` and records important state
+changes without producing actions or instructions. Event fields include
+`generatedAtUtc`, `tick`, `eventType`, `severity`, `summary`, `details`,
+`relatedCandidate`, `previousValue`, `currentValue`, `source`, and `profile`.
+The timeline is capped by `--event-limit` so it does not grow forever.
+
+Typical event types include:
+
+- `best_candidate_changed`
+- `nearest_candidate_changed`
+- `target_liveness_changed`
+- `target_depleted`
+- `candidate_revived`
+- `inventory_changed`
+- `inventory_free_slots_changed`
+- `inventory_full_changed`
+- `activity_state_changed`
+- `player_animation_changed`
+- `reachability_changed`
+- `warning_status_changed`
+- `source_cap_changed`
+- `budget_exceeded_changed`
+- `write_failures_changed`
+
+The human dashboard shows recent events by default:
+
+```text
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --human --events 5
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --watch-human --interval 1 --events 5
+```
+
+The context service can return recent events for machine consumers:
+
+```powershell
+$request = @{
+  schema = "context_request.v1"
+  task = "woodcutting"
+  needs = @("baseline", "best:tree", "nearest:tree", "events", "diagnostics")
+  maxCandidates = 5
+  responseMode = "compact"
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
+```
+
+## Live Control Panel
+
+The live control panel is a small Windows-friendly Tkinter launcher for the
+read-only live workflow. It starts and monitors local helper processes, shows
+bounded logs, and polls the current live status files. It does not click, type,
+invoke menus, execute actions, mutate RuneLite/game state, or add overlays.
+
+Start it from the plugin root:
+
+```text
+python telemetry-viewer\live_control_panel.py
+```
+
+Recommended startup order:
+
+1. Start RuneLite Dev
+2. Check Live Setup
+3. Start Live Processor
+4. Start Context Service
+5. Start Human Dashboard or Start Live Inspector
+
+Useful buttons:
+
+- `Start RuneLite Dev`: runs `.\gradlew.bat run`.
+- `Check Live Setup`: runs `check_live_setup.py --latest-session`.
+- `Inspect Compact Packets`: runs `inspect_live_packets.py --latest-session --summary`.
+- `Start Live Processor`: starts the compact-packet realtime live processor using the selected profile/options.
+- `Start Context Service`: starts `context_service.py --latest-session --port <port>`.
+- `Start Human Dashboard`: starts the refreshing human dashboard.
+- `Start Live Inspector`: starts the browser-based live geometry inspector.
+- `Health Check`: queries `http://127.0.0.1:<port>/health`.
+- `Request Context Once`: POSTs a compact woodcutting context request and prints a readable summary.
+- `Stop Selected` / `Stop All`: terminates only helper processes started by this panel.
+
+The panel prints each command before starting it. Logs are capped to the latest
+lines so the UI stays responsive during longer live sessions.
+
+## Telemetry Debug Overlay
+
+The telemetry debug overlay is an optional RuneLite overlay for visual QA. It
+is disabled by default and only draws read-only observations from:
+
+```text
+interaction_geometry\live\overlay_debug_state.json
+```
+
+The live processor writes this tiny file from already-selected candidates. It
+is capped by `--overlay-debug-target-limit` and does not include full candidate
+arrays, full collision grids, or broad scene dumps.
+
+The overlay can draw:
+
+- candidate aim points
+- compact bounds or small polygons when already available
+- labels with class, distance, reachability, and liveness
+- a small read-only status panel
+- collision-window summary when enabled
+
+It does not click, type, invoke menus, execute actions, or mutate game/client
+state.
+
+Usage:
+
+1. Start RuneLite dev.
+2. Enable `Telemetry debug overlay` in the plugin config.
+3. Start the live processor so `overlay_debug_state.json` is refreshed.
+4. Compare the overlay with the human dashboard and live inspector.
+
+Start live processor with overlay state output:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --overlay-debug-target-limit 25 --summary --benchmark
+```
+
+If the overlay needs a specific state file, set `Debug overlay state path` to
+the full path of `overlay_debug_state.json` for the active session. Leaving it
+blank uses the current telemetry session when available.
+
 ## Candidate Reachability QA
 
 Candidate reachability QA is a read-only report over the per-candidate
@@ -1495,8 +1626,18 @@ inventory slots, `freeSlots` is empty inventory slots, and `inventoryFull` is
 derived from `freeSlots == 0` when the slot count is known. `itemCount` is kept
 as a compatibility alias for the total quantity sum; newer outputs also include
 `totalItemQuantity` and `inventorySlotCount` so slot occupancy and stack
-quantity are not confused. If item names are unavailable it reports item IDs and
+quantity are not confused. Compact packet live sessions can also emit
+`live_inventory_delta_packet.v1` when the observed signature changes; Python
+uses that packet plus rolling tick comparison to populate
+`recentInventoryDeltas`. If item names are unavailable it reports item IDs and
 quantities.
+
+Activity state is based on observed animation, pose animation, interacting
+target facts, and compact activity packet transition fields such as
+`previousAnimation`, `changedFields`, and `eventSource`. These are still just
+observations. Animation alone is not proof of a task, but paired with nearby
+tree candidates and inventory/liveness evidence it can support a cautious
+`woodcutting_possible` or `likely_chopping` label.
 
 The woodcutting state heuristic is intentionally cautious. It can report
 `likely_idle`, `likely_chopping`, `likely_moving`, `inventory_changed`,
@@ -1510,6 +1651,7 @@ python telemetry-viewer\live_context_query.py --latest-session --activity
 python telemetry-viewer\live_context_query.py --latest-session --inventory
 python telemetry-viewer\live_context_query.py --latest-session --liveness
 python telemetry-viewer\live_context_query.py --latest-session --task woodcutting
+python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --human
 python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --json
 python telemetry-viewer\live_context_query.py --latest-session --self-test
 ```
@@ -1611,6 +1753,7 @@ Compact mode consumes these packet types:
 - `live_scene_delta_packet.v1`
 - `live_projection_packet.v1`
 - `live_inventory_packet.v1`
+- `live_inventory_delta_packet.v1`
 - `live_activity_packet.v1`
 - `live_navigation_packet.v1`
 - `live_collision_window_packet.v1`

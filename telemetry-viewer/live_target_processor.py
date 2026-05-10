@@ -23,8 +23,10 @@ LIVE_INDEX_SCHEMA = "live_index.v1"
 LIVE_CONTEXT_INDEX_SCHEMA = "live_context_index.v1"
 LIVE_BASELINE_SCHEMA = "live_baseline_state.v1"
 LIVE_ACTIVITY_SCHEMA = "live_activity_state.v1"
+LIVE_EVENT_SCHEMA = "live_context_event.v1"
 LIVE_PERFORMANCE_SCHEMA = "live_performance_summary.v1"
 LIVE_NAVIGATION_SCHEMA = "live_navigation_summary.v1"
+LIVE_OVERLAY_DEBUG_SCHEMA = "telemetry_overlay_debug_state.v1"
 LIVE_TICK_SUMMARY_SCHEMA = "live_tick_summary.v1"
 LIVE_WORLD_TARGET_SCHEMA = "live_world_target_update.v1"
 LIVE_UI_TARGET_SCHEMA = "live_ui_target_update.v1"
@@ -48,6 +50,7 @@ COMPACT_PACKET_TYPES = {
     "sceneDelta": "live_scene_delta_packet.v1",
     "projection": "live_projection_packet.v1",
     "inventory": "live_inventory_packet.v1",
+    "inventoryDelta": "live_inventory_delta_packet.v1",
     "activity": "live_activity_packet.v1",
     "navigation": "live_navigation_packet.v1",
     "collisionWindow": "live_collision_window_packet.v1",
@@ -68,6 +71,8 @@ LIVE_OUTPUT_FILES = (
     "live_tick_summary.jsonl",
     "live_baseline_state.json",
     "live_activity_state.json",
+    "live_event_timeline.jsonl",
+    "overlay_debug_state.json",
     "live_performance_summary.json",
     "live_context_index.json",
     "live_navigation_summary.json",
@@ -223,6 +228,8 @@ def live_output_paths(session: Path) -> dict[str, Path]:
         "tickSummary": output_dir / "live_tick_summary.jsonl",
         "baseline": output_dir / "live_baseline_state.json",
         "activity": output_dir / "live_activity_state.json",
+        "events": output_dir / "live_event_timeline.jsonl",
+        "overlayDebug": output_dir / "overlay_debug_state.json",
         "performance": output_dir / "live_performance_summary.json",
         "contextIndex": output_dir / "live_context_index.json",
         "navigation": output_dir / "live_navigation_summary.json",
@@ -285,6 +292,29 @@ def atomic_write_json(path: Path, data: dict, *, options: WriteOptions | None = 
 
 def atomic_write_jsonl(path: Path, records: list[dict], *, options: WriteOptions | None = None, stats: WriteStats | None = None) -> int:
     return atomic_write_text(path, "".join(json_dump_compact(record) + "\n" for record in records), options=options, stats=stats)
+
+
+def read_jsonl_objects(path: Path, *, limit: int | None = None) -> list[dict]:
+    records: list[dict] = []
+    if not path.exists():
+        return records
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            for line in file:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    value = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict):
+                    records.append(value)
+    except OSError:
+        return records
+    if limit is not None and limit >= 0:
+        return records[-limit:]
+    return records
 
 
 def remove_file_if_exists(path: Path) -> int:
@@ -739,6 +769,7 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
     scene_delta = by_type.get(COMPACT_PACKET_TYPES["sceneDelta"], {}).get("payload") or {}
     projection = by_type.get(COMPACT_PACKET_TYPES["projection"], {}).get("payload") or {}
     inventory = by_type.get(COMPACT_PACKET_TYPES["inventory"], {}).get("payload") or {}
+    inventory_delta_packet = by_type.get(COMPACT_PACKET_TYPES["inventoryDelta"], {}).get("payload") or {}
     activity = by_type.get(COMPACT_PACKET_TYPES["activity"], {}).get("payload") or {}
     navigation = by_type.get(COMPACT_PACKET_TYPES["navigation"], {}).get("payload") or {}
     collision_window = by_type.get(COMPACT_PACKET_TYPES["collisionWindow"], {}).get("payload") or {}
@@ -811,6 +842,11 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
     if isinstance(inventory, dict):
         tick["inventory"] = compact_inventory_container(inventory.get("inventory"))
         tick["equipment"] = compact_inventory_container(inventory.get("equipment"))
+        tick["_inventoryDeltaTrackingAvailable"] = bool(inventory.get("inventoryDeltaTrackingAvailable"))
+    if isinstance(inventory_delta_packet, dict) and inventory_delta_packet:
+        tick["_inventoryDelta"] = inventory_delta_packet
+    if isinstance(activity, dict) and activity:
+        tick["_activityPacket"] = activity
 
     if isinstance(navigation, dict) and navigation:
         tick["_navigation"] = navigation
@@ -1945,6 +1981,255 @@ def best_candidate_summary(candidate: dict | None) -> dict | None:
     }
 
 
+def candidate_timeline_summary(candidate: dict | None) -> dict | None:
+    if not candidate:
+        return None
+    aim = candidate.get("aimPointContext") if isinstance(candidate.get("aimPointContext"), dict) else candidate.get("aimPoint")
+    navigation = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
+    return {
+        "classId": candidate.get("classId"),
+        "targetType": candidate.get("targetType"),
+        "name": candidate.get("name"),
+        "id": candidate.get("rawId") if candidate.get("rawId") is not None else candidate.get("id"),
+        "hash": candidate.get("hash"),
+        "objectKey": candidate.get("objectKey"),
+        "worldX": candidate.get("worldX"),
+        "worldY": candidate.get("worldY"),
+        "plane": candidate.get("plane"),
+        "sceneX": candidate.get("sceneX"),
+        "sceneY": candidate.get("sceneY"),
+        "distanceTiles": candidate.get("distanceTiles", candidate.get("targetDistanceChebyshev")),
+        "qualityTier": candidate.get("qualityTier"),
+        "qualityScore": candidate.get("qualityScore"),
+        "targetLiveState": candidate.get("targetLiveState"),
+        "directReachability": navigation.get("directReachability"),
+        "aimPoint": aim,
+    }
+
+
+def overlay_aim_point(candidate: dict) -> dict | None:
+    context = candidate.get("aimPointContext") if isinstance(candidate.get("aimPointContext"), dict) else {}
+    aim = candidate.get("aimPoint") if isinstance(candidate.get("aimPoint"), dict) else {}
+    canvas_x = context.get("canvasX", aim.get("canvasX", aim.get("x")))
+    canvas_y = context.get("canvasY", aim.get("canvasY", aim.get("y")))
+    if not isinstance(canvas_x, (int, float)) or not isinstance(canvas_y, (int, float)):
+        return None
+    return {
+        "canvasX": canvas_x,
+        "canvasY": canvas_y,
+        "source": context.get("source") or candidate.get("preferredGeometryType") or aim.get("source"),
+    }
+
+
+def overlay_bounds(candidate: dict) -> dict | None:
+    geometry_payload = candidate.get("geometry") if isinstance(candidate.get("geometry"), dict) else {}
+    summary = candidate.get("geometrySummary") if isinstance(candidate.get("geometrySummary"), dict) else {}
+    for value in (
+        geometry_payload.get("aimBounds"),
+        summary.get("bounds"),
+        summary.get("aimBounds"),
+        summary.get("clickboxBounds"),
+        summary.get("convexHullBounds"),
+        candidate.get("clickboxBounds"),
+        candidate.get("convexHullBounds"),
+    ):
+        if not isinstance(value, dict):
+            continue
+        x = value.get("x")
+        y = value.get("y")
+        width = value.get("width", value.get("w"))
+        height = value.get("height", value.get("h"))
+        if all(isinstance(part, (int, float)) for part in (x, y, width, height)):
+            return {"x": x, "y": y, "width": width, "height": height}
+    return None
+
+
+def compact_polygon(points, *, max_points: int = 16) -> list[list[float]] | None:
+    if not isinstance(points, list) or not points or len(points) > max_points:
+        return None
+    compact = []
+    for point in points:
+        if isinstance(point, dict):
+            x = point.get("x")
+            y = point.get("y")
+        elif isinstance(point, (list, tuple)) and len(point) >= 2:
+            x, y = point[0], point[1]
+        else:
+            return None
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return None
+        compact.append([x, y])
+    return compact
+
+
+def overlay_polygon(candidate: dict, key: str) -> list[list[float]] | None:
+    geometry_payload = candidate.get("geometry") if isinstance(candidate.get("geometry"), dict) else {}
+    summary = candidate.get("geometrySummary") if isinstance(candidate.get("geometrySummary"), dict) else {}
+    return compact_polygon(geometry_payload.get(key) or summary.get(key) or candidate.get(key))
+
+
+def overlay_target_summary(candidate: dict) -> dict:
+    navigation = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
+    target = {
+        "classId": candidate.get("classId"),
+        "name": candidate.get("name"),
+        "id": candidate.get("rawId") if candidate.get("rawId") is not None else candidate.get("id"),
+        "hash": candidate.get("hash"),
+        "objectKey": candidate.get("objectKey"),
+        "worldX": candidate.get("worldX"),
+        "worldY": candidate.get("worldY"),
+        "plane": candidate.get("plane"),
+        "sceneX": candidate.get("sceneX"),
+        "sceneY": candidate.get("sceneY"),
+        "distanceTiles": candidate.get("distanceTiles", candidate.get("targetDistanceChebyshev")),
+        "onScreen": candidate.get("onScreen"),
+        "geometryAvailable": candidate.get("geometryAvailable"),
+        "qualityTier": candidate.get("qualityTier"),
+        "qualityScore": candidate.get("qualityScore"),
+        "targetLiveState": candidate.get("targetLiveState"),
+        "directReachability": navigation.get("directReachability"),
+        "reachabilityConfidence": navigation.get("reachabilityConfidence"),
+        "targetInCollisionWindow": navigation.get("targetInCollisionWindow"),
+        "pathLengthTiles": navigation.get("pathLengthTiles"),
+        "aimPoint": overlay_aim_point(candidate),
+        "bounds": overlay_bounds(candidate),
+    }
+    clickbox = overlay_polygon(candidate, "clickboxPolygon")
+    tile = overlay_polygon(candidate, "canvasTilePolygon")
+    if clickbox:
+        target["clickboxPolygon"] = clickbox
+    if tile:
+        target["canvasTilePolygon"] = tile
+    return target
+
+
+def overlay_debug_state_for(
+    session: Path,
+    args,
+    latest_tick: dict | None,
+    candidates: list[dict],
+    navigation: dict,
+    status: dict,
+    processed_at: str,
+) -> dict:
+    latest_tick = latest_tick or {}
+    player = local_player_for(latest_tick)
+    limit = max(0, int(getattr(args, "overlay_debug_target_limit", 50) or 0))
+    capped_candidates = candidates[:limit]
+    collision_bounds = navigation.get("collisionWindowBounds") if isinstance(navigation.get("collisionWindowBounds"), dict) else {}
+    return {
+        "schema": LIVE_OVERLAY_DEBUG_SCHEMA,
+        "generatedAtUtc": processed_at,
+        "sessionPath": str(session),
+        "latestTick": tick_id_for(latest_tick),
+        "profile": args.profile,
+        "status": "WARN" if status.get("warnings") else "PASS",
+        "player": {
+            "worldX": player.get("worldX"),
+            "worldY": player.get("worldY"),
+            "plane": player.get("plane"),
+            "sceneX": player.get("sceneX"),
+            "sceneY": player.get("sceneY"),
+        },
+        "summary": {
+            "candidateCount": len(candidates),
+            "targetLimit": limit,
+            "targetsWritten": len(capped_candidates),
+            "targetsSuppressedByCap": max(0, len(candidates) - len(capped_candidates)),
+            "bestClass": candidates[0].get("classId") if candidates else None,
+            "budgetExceeded": bool(status.get("budgetExceeded")),
+            "writeFailures": status.get("writeFailureCount", 0),
+        },
+        "targets": [overlay_target_summary(candidate) for candidate in capped_candidates],
+        "collisionWindow": {
+            "available": bool(navigation.get("collisionWindowAvailable")),
+            "minSceneX": collision_bounds.get("minSceneX"),
+            "maxSceneX": collision_bounds.get("maxSceneX"),
+            "minSceneY": collision_bounds.get("minSceneY"),
+            "maxSceneY": collision_bounds.get("maxSceneY"),
+            "radius": navigation.get("collisionWindowRadius"),
+            "playerSceneX": navigation.get("playerSceneX"),
+            "playerSceneY": navigation.get("playerSceneY"),
+        },
+        "safety": {
+            "readOnly": True,
+            "drawOnly": True,
+            "actionGenerated": False,
+            "inputGenerated": False,
+        },
+    }
+
+
+def candidate_timeline_key(candidate: dict | None) -> tuple | None:
+    if not candidate:
+        return None
+    return (
+        candidate.get("objectKey"),
+        candidate.get("rawId") if candidate.get("rawId") is not None else candidate.get("id"),
+        candidate.get("hash"),
+        candidate.get("worldX"),
+        candidate.get("worldY"),
+        candidate.get("plane"),
+        candidate.get("classId"),
+    )
+
+
+def candidate_timeline_label(candidate: dict | None) -> str:
+    if not candidate:
+        return "no candidate"
+    name = candidate.get("name") or candidate.get("classId") or "candidate"
+    world_x = candidate.get("worldX")
+    world_y = candidate.get("worldY")
+    if world_x is not None and world_y is not None:
+        return f"{name} at {world_x},{world_y}"
+    return str(name)
+
+
+def nearest_timeline_candidate(candidates: list[dict]) -> dict | None:
+    if not candidates:
+        return None
+    with_distance = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate.get("distanceTiles", candidate.get("targetDistanceChebyshev")), (int, float))
+    ]
+    if with_distance:
+        return min(with_distance, key=lambda candidate: candidate.get("distanceTiles", candidate.get("targetDistanceChebyshev")))
+    return candidates[0]
+
+
+def event_value_key(value) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        return str(value)
+
+
+def inventory_delta_summary(delta: dict | None) -> str:
+    if not isinstance(delta, dict):
+        return "inventory changed"
+    changes = delta.get("changes") if isinstance(delta.get("changes"), list) else delta.get("quantityChanges")
+    if isinstance(changes, list) and changes:
+        parts = []
+        for change in changes[:3]:
+            if not isinstance(change, dict):
+                continue
+            item_id = change.get("itemId")
+            delta_value = change.get("delta")
+            if isinstance(delta_value, (int, float)):
+                sign = "+" if delta_value > 0 else ""
+                parts.append(f"{sign}{delta_value} item {item_id}")
+            else:
+                parts.append(f"item {item_id}")
+        if parts:
+            suffix = "" if len(changes) <= 3 else f", +{len(changes) - 3} more"
+            return ", ".join(parts) + suffix
+    changed_slots = delta.get("changedSlots") if isinstance(delta.get("changedSlots"), list) else []
+    if changed_slots:
+        return f"{len(changed_slots)} inventory slot(s) changed"
+    return "inventory signature changed"
+
+
 def context_index_for(session: Path, args, ticks: list[dict], candidates: list[dict], processed_at: str) -> dict:
     paths = live_output_paths(session)
     counts = counts_for_candidates(candidates)
@@ -2120,10 +2405,47 @@ def inventory_delta(previous_tick: dict | None, current_tick: dict | None) -> di
         "fromTick": tick_id_for(previous_tick),
         "toTick": tick_id_for(current_tick),
         "changes": changes,
+        "changedSlots": [],
+        "generatedFromItemContainerChanged": False,
         "filledSlotsBefore": previous_summary.get("filledSlots"),
         "filledSlotsAfter": current_summary.get("filledSlots"),
         "freeSlotsBefore": previous_summary.get("freeSlots"),
         "freeSlotsAfter": current_summary.get("freeSlots"),
+    }
+
+
+def explicit_inventory_delta_for_tick(tick: dict | None) -> dict | None:
+    tick = tick or {}
+    delta = tick.get("_inventoryDelta")
+    if not isinstance(delta, dict):
+        return None
+
+    changes = delta.get("quantityChanges")
+    if not isinstance(changes, list):
+        changes = delta.get("changes") if isinstance(delta.get("changes"), list) else []
+
+    return {
+        "fromTick": delta.get("fromTick"),
+        "toTick": delta.get("toTick") if delta.get("toTick") is not None else delta.get("tick", tick_id_for(tick)),
+        "changes": [change for change in changes if isinstance(change, dict)],
+        "changedSlots": [change for change in delta.get("changedSlots", []) if isinstance(change, dict)]
+        if isinstance(delta.get("changedSlots"), list)
+        else [],
+        "addedItems": [change for change in delta.get("addedItems", []) if isinstance(change, dict)]
+        if isinstance(delta.get("addedItems"), list)
+        else [],
+        "removedItems": [change for change in delta.get("removedItems", []) if isinstance(change, dict)]
+        if isinstance(delta.get("removedItems"), list)
+        else [],
+        "filledSlotsBefore": delta.get("filledSlotsBefore"),
+        "filledSlotsAfter": delta.get("filledSlotsAfter"),
+        "freeSlotsBefore": delta.get("freeSlotsBefore"),
+        "freeSlotsAfter": delta.get("freeSlotsAfter"),
+        "inventorySignatureBefore": delta.get("inventorySignatureBefore"),
+        "inventorySignatureAfter": delta.get("inventorySignatureAfter"),
+        "inventoryFull": delta.get("inventoryFull"),
+        "generatedFromItemContainerChanged": bool(delta.get("generatedFromItemContainerChanged")),
+        "eventSource": delta.get("eventSource"),
     }
 
 
@@ -2139,7 +2461,17 @@ def inventory_state_for_ticks(ticks: list[dict], latest_tick: dict | None) -> di
         delta = inventory_delta(previous, current)
         if delta:
             deltas.append(delta)
+    for tick in ordered:
+        explicit_delta = explicit_inventory_delta_for_tick(tick)
+        if explicit_delta:
+            deltas.append(explicit_delta)
+    deltas.sort(key=lambda delta: delta.get("toTick") if delta.get("toTick") is not None else -1)
     latest_delta = deltas[-1] if deltas else None
+    delta_tracking_known = (
+        len(ordered) >= 2
+        or any(isinstance(tick.get("_inventoryDelta"), dict) for tick in ordered)
+        or bool(latest_tick.get("_inventoryDeltaTrackingAvailable"))
+    )
     return {
         "known": known,
         "inventorySlotCount": summary.get("inventorySlotCount") if known else None,
@@ -2154,6 +2486,9 @@ def inventory_state_for_ticks(ticks: list[dict], latest_tick: dict | None) -> di
         "changedThisTick": bool(latest_delta and latest_delta.get("toTick") == tick_id_for(latest_tick)),
         "changedRecently": bool(deltas),
         "recentItemDeltas": deltas[-10:],
+        "inventoryDeltaTrackingKnown": delta_tracking_known,
+        "inventoryDeltasAvailable": delta_tracking_known,
+        "warnings": [] if delta_tracking_known else ["inventory deltas unavailable in the current live window"],
         "inventoryFull": summary.get("freeSlots") == 0 if known and summary.get("freeSlots") is not None else None,
     }
 
@@ -2217,6 +2552,55 @@ def apparent_activity_for_tick(tick: dict | None, inventory_state: dict, livenes
         "evidence": evidence,
         "warnings": warnings,
     }
+
+
+def activity_events_for_ticks(ticks: list[dict], latest_tick: dict | None) -> list[dict]:
+    ordered = [tick for tick in ticks if tick_id_for(tick) is not None]
+    ordered.sort(key=lambda tick: tick_id_for(tick) or -1)
+    events: list[dict] = []
+
+    for tick in ordered:
+        packet = tick.get("_activityPacket")
+        tick_id = tick_id_for(tick)
+        if isinstance(packet, dict):
+            changed_fields = packet.get("changedFields") if isinstance(packet.get("changedFields"), list) else []
+            if changed_fields or packet.get("activityChanged"):
+                events.append(
+                    {
+                        "tick": tick_id,
+                        "changedFields": [field for field in changed_fields if isinstance(field, str)],
+                        "animation": packet.get("animation"),
+                        "previousAnimation": packet.get("previousAnimation"),
+                        "poseAnimation": packet.get("poseAnimation"),
+                        "previousPoseAnimation": packet.get("previousPoseAnimation"),
+                        "interactingSignature": packet.get("interactingSignature"),
+                        "previousInteractingSignature": packet.get("previousInteractingSignature"),
+                        "eventSource": packet.get("eventSource"),
+                    }
+                )
+
+    if not events and len(ordered) >= 2:
+        previous = local_player_for(ordered[-2])
+        current = local_player_for(ordered[-1])
+        changed_fields = []
+        if previous.get("animation") != current.get("animation"):
+            changed_fields.append("animation")
+        if previous.get("poseAnimation") != current.get("poseAnimation"):
+            changed_fields.append("poseAnimation")
+        if changed_fields:
+            events.append(
+                {
+                    "tick": tick_id_for(ordered[-1]),
+                    "changedFields": changed_fields,
+                    "animation": current.get("animation"),
+                    "previousAnimation": previous.get("animation"),
+                    "poseAnimation": current.get("poseAnimation"),
+                    "previousPoseAnimation": previous.get("poseAnimation"),
+                    "eventSource": "rollingTickComparison",
+                }
+            )
+
+    return events[-10:]
 
 
 def baseline_state_for(session: Path, args, latest_tick: dict | None, ticks: list[dict], candidates: list[dict], processed_at: str, duration_ms: float, budget_exceeded: bool) -> dict:
@@ -2539,6 +2923,7 @@ def activity_state_for(
     inventory_state = inventory_state or inventory_state_for_ticks(ticks, latest_tick)
     equipment_state = equipment_state_for_tick(latest_tick)
     activity = apparent_activity_for_tick(latest_tick, inventory_state, liveness_summary)
+    recent_activity_events = activity_events_for_ticks(ticks, latest_tick)
     woodcutting = woodcutting_state_for(activity, inventory_state, candidates, liveness_summary)
     elapsed = build_duration_ms or (time.perf_counter() - started) * 1000.0
     return {
@@ -2573,6 +2958,8 @@ def activity_state_for(
             "hitpointsReal": status.get("hitpointsReal"),
         },
         "inventory": inventory_state,
+        "inventoryState": inventory_state,
+        "recentInventoryDeltas": inventory_state.get("recentItemDeltas", []),
         "equipment": equipment_state,
         "targetLiveness": {
             "activeCandidateLiveState": candidates[0].get("targetLiveState") if candidates else None,
@@ -2580,6 +2967,8 @@ def activity_state_for(
             **liveness_summary,
         },
         "activity": activity,
+        "activityState": activity,
+        "recentActivityEvents": recent_activity_events,
         "woodcuttingState": woodcutting,
         "performance": {
             "buildDurationMillis": round(elapsed, 3),
@@ -2637,6 +3026,8 @@ class LiveTargetProcessor:
         self.args = args
         if not hasattr(self.args, "input_source"):
             self.args.input_source = "auto"
+        if not hasattr(self.args, "event_limit"):
+            self.args.event_limit = 200
         self.compact_packet_state = compact_packet_state(session)
         (
             self.input_source_active,
@@ -2702,6 +3093,11 @@ class LiveTargetProcessor:
         self.last_prune_tick = None
         self.previous_best_candidate: dict | None = None
         self.last_best_candidate_change: dict = {}
+        self.event_state: dict[str, object] = {}
+        self.event_timeline: deque[dict] = deque(
+            read_jsonl_objects(live_output_paths(session)["events"], limit=max(1, int(self.args.event_limit or 200))),
+            maxlen=max(1, int(self.args.event_limit or 200)),
+        )
         self.total_write_retries = 0
         self.total_write_failures = 0
         self.performance_history: deque[dict] = deque(maxlen=100)
@@ -3328,6 +3724,320 @@ class LiveTargetProcessor:
         }
         self.previous_best_candidate = current
 
+    def timeline_event(
+        self,
+        *,
+        processed_at: str,
+        tick: int | None,
+        event_type: str,
+        severity: str,
+        summary: str,
+        details: dict | None = None,
+        related_candidate: dict | None = None,
+        previous_value=None,
+        current_value=None,
+    ) -> dict:
+        return {
+            "schema": LIVE_EVENT_SCHEMA,
+            "generatedAtUtc": processed_at,
+            "tick": tick,
+            "eventType": event_type,
+            "severity": severity,
+            "summary": summary,
+            "details": details or {},
+            "relatedCandidate": candidate_timeline_summary(related_candidate),
+            "previousValue": previous_value,
+            "currentValue": current_value,
+            "source": "live_target_processor",
+            "profile": self.args.profile,
+        }
+
+    def append_timeline_event(self, event: dict) -> None:
+        fingerprint = (
+            event.get("tick"),
+            event.get("eventType"),
+            event_value_key(event.get("previousValue")),
+            event_value_key(event.get("currentValue")),
+            event.get("summary"),
+        )
+        last = self.event_timeline[-1] if self.event_timeline else None
+        last_fingerprint = None
+        if last:
+            last_fingerprint = (
+                last.get("tick"),
+                last.get("eventType"),
+                event_value_key(last.get("previousValue")),
+                event_value_key(last.get("currentValue")),
+                last.get("summary"),
+            )
+        if fingerprint != last_fingerprint:
+            self.event_timeline.append(event)
+
+    def emit_timeline_events(
+        self,
+        *,
+        latest_tick_record: dict | None,
+        candidates: list[dict],
+        inventory_state: dict,
+        activity: dict,
+        status: dict,
+        processed_at: str,
+    ) -> list[dict]:
+        tick = tick_id_for(latest_tick_record or {}) or status.get("latestTick") or status.get("lastProcessedTick")
+        events_before = len(self.event_timeline)
+
+        def changed(key: str, current) -> tuple[bool, object]:
+            previous = self.event_state.get(key)
+            current_key = event_value_key(current)
+            if previous == current_key:
+                return False, None
+            self.event_state[key] = current_key
+            return True, previous
+
+        best = candidates[0] if candidates else None
+        nearest = nearest_timeline_candidate(candidates)
+        best_key = candidate_timeline_key(best)
+        nearest_key = candidate_timeline_key(nearest)
+
+        best_changed, best_previous = changed("bestCandidate", best_key)
+        if best_changed and (best_previous is not None or best_key is not None):
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="best_candidate_changed",
+                    severity="info",
+                    summary=f"Best candidate changed: {candidate_timeline_label(best)}",
+                    details={"reason": self.last_best_candidate_change.get("bestCandidateChangeReason")},
+                    related_candidate=best,
+                    previous_value=best_previous,
+                    current_value=best_key,
+                )
+            )
+
+        nearest_changed, nearest_previous = changed("nearestCandidate", nearest_key)
+        if nearest_changed and (nearest_previous is not None or nearest_key is not None):
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="nearest_candidate_changed",
+                    severity="info",
+                    summary=f"Nearest candidate changed: {candidate_timeline_label(nearest)}",
+                    related_candidate=nearest,
+                    previous_value=nearest_previous,
+                    current_value=nearest_key,
+                )
+            )
+
+        for candidate in candidates[: max(1, min(len(candidates), int(self.args.limit or 20)))]:
+            key = candidate_timeline_key(candidate)
+            if key is None:
+                continue
+            live_state = candidate.get("targetLiveState")
+            live_changed, live_previous = changed(f"candidateLiveState:{key}", live_state)
+            if live_changed and live_previous is not None:
+                event_type = "target_depleted" if live_state == "depleted_or_stump" else "target_liveness_changed"
+                severity = "warn" if live_state in {"recently_despawned", "depleted_or_stump", "stale", "changed"} else "info"
+                summary = f"Target liveness changed: {candidate_timeline_label(candidate)} is {live_state or 'unknown'}"
+                if live_state == "depleted_or_stump":
+                    summary = f"Target depleted: {candidate_timeline_label(candidate)}"
+                self.append_timeline_event(
+                    self.timeline_event(
+                        processed_at=processed_at,
+                        tick=tick,
+                        event_type=event_type,
+                        severity=severity,
+                        summary=summary,
+                        related_candidate=candidate,
+                        previous_value=live_previous,
+                        current_value=live_state,
+                    )
+                )
+
+            navigation = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
+            reachability = navigation.get("directReachability")
+            reach_changed, reach_previous = changed(f"candidateReachability:{key}", reachability)
+            if reach_changed and reach_previous is not None:
+                self.append_timeline_event(
+                    self.timeline_event(
+                        processed_at=processed_at,
+                        tick=tick,
+                        event_type="reachability_changed",
+                        severity="warn" if reachability == "blocked" else "info",
+                        summary=f"Reachability changed: {candidate_timeline_label(candidate)} is {reachability or 'unknown'}",
+                        related_candidate=candidate,
+                        previous_value=reach_previous,
+                        current_value=reachability,
+                    )
+                )
+
+        for unavailable_key, unavailable in list(self.recently_unavailable_targets.items())[:50]:
+            if not isinstance(unavailable, dict):
+                continue
+            state = unavailable.get("targetLiveState") or unavailable.get("reason")
+            did_change, previous = changed(f"recentlyUnavailable:{unavailable_key}", state)
+            if did_change and previous is not None and state:
+                event_type = "target_depleted" if state == "depleted_or_stump" else "target_liveness_changed"
+                severity = "warn" if state in {"recently_despawned", "depleted_or_stump", "stale", "changed"} else "info"
+                name = unavailable.get("name") or unavailable.get("replacementObjectName") or unavailable.get("classId") or "target"
+                world_x = unavailable.get("worldX")
+                world_y = unavailable.get("worldY")
+                suffix = f" at {world_x},{world_y}" if world_x is not None and world_y is not None else ""
+                self.append_timeline_event(
+                    self.timeline_event(
+                        processed_at=processed_at,
+                        tick=tick,
+                        event_type=event_type,
+                        severity=severity,
+                        summary=f"Target depleted: {name}{suffix}" if event_type == "target_depleted" else f"Target liveness changed: {name}{suffix} is {state}",
+                        details=unavailable,
+                        previous_value=previous,
+                        current_value=state,
+                    )
+                )
+
+        suppressed = status.get("candidatesSuppressedByLiveness")
+        suppressed_changed, suppressed_previous = changed("candidatesSuppressedByLiveness", suppressed)
+        if suppressed_changed and suppressed_previous is not None and suppressed:
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="liveness_suppressed_candidate",
+                    severity="warn",
+                    summary=f"Liveness suppressed {suppressed} candidate(s)",
+                    previous_value=suppressed_previous,
+                    current_value=suppressed,
+                )
+            )
+
+        revived = status.get("candidatesRevivedAfterRespawn")
+        revived_changed, revived_previous = changed("candidatesRevivedAfterRespawn", revived)
+        if revived_changed and revived_previous is not None and revived:
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="candidate_revived",
+                    severity="info",
+                    summary=f"{revived} candidate(s) revived after respawn",
+                    previous_value=revived_previous,
+                    current_value=revived,
+                )
+            )
+
+        inventory_signature = inventory_state.get("signature") or inventory_state.get("inventoryHash")
+        signature_changed, signature_previous = changed("inventorySignature", inventory_signature)
+        if signature_changed and signature_previous is not None:
+            delta = (inventory_state.get("recentItemDeltas") or [None])[-1]
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="inventory_changed",
+                    severity="info",
+                    summary=f"Inventory changed: {inventory_delta_summary(delta)}",
+                    details={"recentDelta": delta} if isinstance(delta, dict) else {},
+                    previous_value=signature_previous,
+                    current_value=inventory_signature,
+                )
+            )
+
+        for key, event_type, label in (
+            ("freeSlots", "inventory_free_slots_changed", "Inventory free slots changed"),
+            ("inventoryFull", "inventory_full_changed", "Inventory full state changed"),
+        ):
+            current = inventory_state.get(key)
+            did_change, previous = changed(key, current)
+            if did_change and previous is not None:
+                self.append_timeline_event(
+                    self.timeline_event(
+                        processed_at=processed_at,
+                        tick=tick,
+                        event_type=event_type,
+                        severity="warn" if key == "inventoryFull" and current is True else "info",
+                        summary=f"{label}: {current}",
+                        previous_value=previous,
+                        current_value=current,
+                    )
+                )
+
+        activity_state = activity.get("activityState") if isinstance(activity.get("activityState"), dict) else activity.get("activity")
+        activity_label = activity_state.get("apparentState") if isinstance(activity_state, dict) else None
+        activity_changed, activity_previous = changed("activityState", activity_label)
+        if activity_changed and activity_previous is not None:
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="activity_state_changed",
+                    severity="info",
+                    summary=f"Activity state changed: {activity_label or 'unknown'}",
+                    previous_value=activity_previous,
+                    current_value=activity_label,
+                )
+            )
+
+        player = activity.get("player") if isinstance(activity.get("player"), dict) else {}
+        animation = player.get("animation")
+        animation_changed, animation_previous = changed("playerAnimation", animation)
+        if animation_changed and animation_previous is not None:
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="player_animation_changed",
+                    severity="info",
+                    summary=f"Player animation changed: {animation}",
+                    previous_value=animation_previous,
+                    current_value=animation,
+                )
+            )
+
+        warnings_key = {
+            "warningCount": status.get("warningCount"),
+            "budgetExceeded": status.get("budgetExceeded"),
+            "writeFailureCount": status.get("writeFailureCount"),
+            "sourceCapHit": status.get("sourceCapHit"),
+        }
+        warning_changed, warning_previous = changed("warningStatus", warnings_key)
+        if warning_changed and warning_previous is not None:
+            self.append_timeline_event(
+                self.timeline_event(
+                    processed_at=processed_at,
+                    tick=tick,
+                    event_type="warning_status_changed",
+                    severity="warn" if status.get("warningCount") else "info",
+                    summary=f"Warning status changed: {status.get('warningCount', 0)} warning(s)",
+                    previous_value=warning_previous,
+                    current_value=warnings_key,
+                )
+            )
+
+        for key, event_type, label in (
+            ("sourceCapHit", "source_cap_changed", "Source cap state changed"),
+            ("budgetExceeded", "budget_exceeded_changed", "Realtime budget state changed"),
+            ("writeFailureCount", "write_failures_changed", "Write failure count changed"),
+        ):
+            current = status.get(key)
+            did_change, previous = changed(key, current)
+            if did_change and previous is not None:
+                severity = "error" if key == "writeFailureCount" and current else "warn" if current else "info"
+                self.append_timeline_event(
+                    self.timeline_event(
+                        processed_at=processed_at,
+                        tick=tick,
+                        event_type=event_type,
+                        severity=severity,
+                        summary=f"{label}: {current}",
+                        previous_value=previous,
+                        current_value=current,
+                    )
+                )
+
+        return list(self.event_timeline)[events_before:]
+
     def liveness_summary(self) -> dict:
         sample = []
         seen = set()
@@ -3671,6 +4381,7 @@ class LiveTargetProcessor:
             "outputBytesCandidates": output_bytes.get("candidates", 0),
             "outputBytesBaseline": output_bytes.get("baseline", 0),
             "outputBytesActivity": output_bytes.get("activity", 0),
+            "outputBytesOverlayDebug": output_bytes.get("overlayDebug", 0),
             "outputBytesStatus": output_bytes.get("status", 0),
             "outputBytesIndex": output_bytes.get("contextIndex", 0),
             "outputBytesTotal": sum(output_bytes.values()),
@@ -3696,22 +4407,53 @@ class LiveTargetProcessor:
         if warning_exceeded and not budget_exceeded:
             status.setdefault("warnings", []).append(f"update warning threshold exceeded: {final_duration_ms:.1f} ms > {self.args.warn_update_ms} ms")
             status["warningCount"] = len(status["warnings"])
+        new_events = self.emit_timeline_events(
+            latest_tick_record=latest_tick_record,
+            candidates=candidates,
+            inventory_state=inventory_state,
+            activity=activity,
+            status=status,
+            processed_at=processed_at,
+        )
+        status["eventTimelinePath"] = str(paths["events"])
+        status["eventTimelineCount"] = len(self.event_timeline)
+        status["eventsEmittedThisUpdate"] = len(new_events)
+        overlay_debug = overlay_debug_state_for(
+            self.session,
+            self.args,
+            latest_tick_record,
+            candidates,
+            navigation,
+            status,
+            processed_at,
+        )
+        status["overlayDebugStatePath"] = str(paths["overlayDebug"])
+        overlay_debug_text = json.dumps(overlay_debug, indent=2, sort_keys=False) + "\n"
+        status.setdefault("outputBytes", {})["outputBytesOverlayDebug"] = len(overlay_debug_text)
+        status["outputBytes"]["outputBytesTotal"] = sum(output_bytes.values()) + len(overlay_debug_text)
         before_status_failures = write_stats.failure_count
         self.record_performance_sample(status)
         performance = self.performance_summary_payload(status, processed_at)
         with timing.measure("outputSerializeMillis"):
             final_status_text = json.dumps(status, indent=2, sort_keys=False) + "\n"
             performance_text = json.dumps(performance, indent=2, sort_keys=False) + "\n"
+            events_text = "".join(json_dump_compact(record) + "\n" for record in self.event_timeline)
         with timing.measure("outputWriteMillis"):
             if suppress_output_writes:
                 status_size = len(final_status_text)
                 performance_size = len(performance_text)
+                events_size = len(events_text)
+                overlay_debug_size = len(overlay_debug_text)
             else:
                 status_size = atomic_write_text(paths["status"], final_status_text, options=self.write_options, stats=write_stats)
                 performance_size = atomic_write_text(paths["performance"], performance_text, options=self.write_options, stats=write_stats)
+                events_size = atomic_write_text(paths["events"], events_text, options=self.write_options, stats=write_stats)
+                overlay_debug_size = atomic_write_text(paths["overlayDebug"], overlay_debug_text, options=self.write_options, stats=write_stats)
         if status_size:
             output_bytes["status"] = status_size
         output_bytes["performance"] = performance_size
+        output_bytes["events"] = events_size
+        output_bytes["overlayDebug"] = overlay_debug_size
         if write_stats.retry_count or write_stats.failure_count:
             self.total_write_retries += write_stats.retry_count - status.get("writeRetryCount", 0)
             self.total_write_failures += write_stats.failure_count - status.get("writeFailureCount", 0)
@@ -3726,6 +4468,8 @@ class LiveTargetProcessor:
             "tickSummaries": tick_summaries,
             "baseline": baseline,
             "activity": activity,
+            "events": list(self.event_timeline),
+            "overlayDebug": overlay_debug,
             "performance": performance,
             "contextIndex": context_index,
             "navigation": navigation,
@@ -3969,6 +4713,7 @@ class LiveTargetProcessor:
                 "liveTickSummary": str(paths["tickSummary"]),
                 "liveBaselineState": str(paths["baseline"]),
                 "liveActivityState": str(paths["activity"]),
+                "liveEventTimeline": str(paths["events"]),
                 "livePerformanceSummary": str(paths["performance"]),
                 "liveContextIndex": str(paths["contextIndex"]),
                 "liveNavigationSummary": str(paths["navigation"]),
@@ -4370,6 +5115,8 @@ def parse_args():
     parser.add_argument("--verbose", action="store_true", help="Print detailed startup/summary information.")
     parser.add_argument("--quiet", action="store_true", help="Suppress routine console output.")
     parser.add_argument("--log-every", type=positive_int, default=1, help="In follow mode, print one compact update every N processed updates. Default: 1.")
+    parser.add_argument("--event-limit", type=positive_int, default=200, help="Maximum rolling live event timeline records to retain. Default: 200.")
+    parser.add_argument("--overlay-debug-target-limit", type=non_negative_int, default=50, help="Maximum candidates to include in overlay_debug_state.json. Default: 50.")
     parser.add_argument("--force-window-rebuild", action="store_true", help="Rebuild cached world records for every selected tick on each update.")
     parser.add_argument("--startup-backfill-ticks", type=non_negative_int, default=10, help="Initial existing tick catch-up count. Default: 10.")
     parser.add_argument("--no-startup-backfill", action="store_true", help="Start from current end of tick files and wait for new records.")

@@ -186,6 +186,7 @@ def make_session(root: Path, *, candidates: list[dict] | None = None, stale: boo
                 "generatedAtUtc": generated,
                 "latestTick": 10,
                 "activity": {"apparentState": "idle", "confidence": 0.5, "evidence": ["test"]},
+                "activityState": {"apparentState": "idle", "confidence": 0.5, "evidence": ["test"]},
                 "woodcuttingState": {"woodcuttingState": "likely_idle", "confidence": 0.55},
                 "inventory": {
                     "known": True,
@@ -194,8 +195,21 @@ def make_session(root: Path, *, candidates: list[dict] | None = None, stale: boo
                     "itemCount": 4,
                     "inventoryFull": False,
                     "changedRecently": False,
+                    "inventoryDeltaTrackingKnown": True,
                     "recentItemDeltas": [],
                 },
+                "inventoryState": {
+                    "known": True,
+                    "freeSlots": 24,
+                    "filledSlots": 4,
+                    "itemCount": 4,
+                    "inventoryFull": False,
+                    "changedRecently": False,
+                    "inventoryDeltaTrackingKnown": True,
+                    "recentItemDeltas": [],
+                },
+                "recentInventoryDeltas": [],
+                "recentActivityEvents": [],
                 "targetLiveness": {
                     "activeCandidateLiveState": candidates[0].get("targetLiveState") if candidates else None,
                     "bestCandidateLiveState": candidates[0].get("targetLiveState") if candidates else None,
@@ -212,6 +226,22 @@ def make_session(root: Path, *, candidates: list[dict] | None = None, stale: boo
                 },
             },
         )
+    write_jsonl(
+        live_dir / "live_event_timeline.jsonl",
+        [
+            {
+                "schema": "live_context_event.v1",
+                "generatedAtUtc": generated,
+                "tick": 10,
+                "eventType": "best_candidate_changed",
+                "severity": "info",
+                "summary": "Best candidate changed: Tree at 3202,3200",
+                "details": {},
+                "source": "live_target_processor",
+                "profile": "woodcutting",
+            }
+        ],
+    )
     write_jsonl(live_dir / "live_candidates.jsonl", candidates)
     return session
 
@@ -305,6 +335,36 @@ class ContextServiceTest(unittest.TestCase):
             self.assertNotIn("candidateSummary", response)
             self.assertNotIn("sourceFiles", response)
             self.assertIn("sourceFilesSummary", response)
+            self.assertIn("woodcuttingState", response)
+            self.assertIn("recentInventoryDeltas", response)
+            self.assertIn("recentActivityEvents", response)
+
+    def test_context_events_need_returns_recent_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            response = service.build_context_response(
+                service.LiveContextCache(session, reload_interval=0).load(force=True),
+                {"schema": "context_request.v1", "needs": ["events"], "responseMode": "compact", "maxCandidates": 1},
+            )
+            self.assertEqual(response["events"][0]["eventType"], "best_candidate_changed")
+            self.assertEqual(response["eventCount"], 1)
+
+    def test_context_response_includes_recent_inventory_delta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            activity_path = session / "interaction_geometry" / "live" / "live_activity_state.json"
+            activity = json.loads(activity_path.read_text(encoding="utf-8"))
+            delta = {"toTick": 10, "changes": [{"itemId": 1511, "delta": 1}], "freeSlotsBefore": 25, "freeSlotsAfter": 24}
+            activity["inventoryState"]["changedRecently"] = True
+            activity["inventoryState"]["recentItemDeltas"] = [delta]
+            activity["recentInventoryDeltas"] = [delta]
+            write_json(activity_path, activity)
+            response = service.build_context_response(
+                service.LiveContextCache(session, reload_interval=0).load(force=True),
+                {"schema": "context_request.v1", "needs": ["inventory", "activity"], "responseMode": "compact", "maxCandidates": 1},
+            )
+            self.assertTrue(response["inventory"]["changedRecently"])
+            self.assertEqual(response["recentInventoryDeltas"][0]["changes"][0]["itemId"], 1511)
 
     def test_context_diagnostics_include_input_source_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
