@@ -91,11 +91,21 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                 },
             )
             write_json(session / "live_packets" / "live_packet_index.json", {"latestTick": 12, "activeSegment": "live-000001.ndjson"})
+            write_json(
+                session / "manifest.json",
+                {
+                    "recordingMode": "LIVE_COMPACT_ONLY",
+                    "rawTickRecordingEnabled": False,
+                    "frameRecordingEnabled": False,
+                },
+            )
             snapshot = panel.status_snapshot(session)
             self.assertEqual(snapshot["latestTick"], 12)
             self.assertEqual(snapshot["inputSourceActive"], "compact-packets")
             self.assertEqual(snapshot["candidateCount"], 4)
             self.assertTrue(snapshot["compactPacketsAvailable"])
+            self.assertEqual(snapshot["recordingMode"], "LIVE_COMPACT_ONLY")
+            self.assertFalse(snapshot["rawTickRecordingEnabled"])
 
     def test_context_request_body(self):
         body = panel.build_context_request_body(max_candidates=2)

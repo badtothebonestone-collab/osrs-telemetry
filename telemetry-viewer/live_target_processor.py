@@ -4865,6 +4865,8 @@ class LiveTargetProcessor:
         coalesced_before = self.tailer.last_coalesced_before_parse
         coalesced_after = self.last_coalesced_backlog_ticks
         raw_records_fully_processed = len(self.last_processed_tick_ids)
+        latest_tick_record = selected_ticks[-1] if selected_ticks else {}
+        writer_health = latest_tick_record.get("_writerHealth") if isinstance(latest_tick_record.get("_writerHealth"), dict) else {}
         if self.args.latency_mode == "realtime" and self.last_full_window_rebuild and not self.args.force_window_rebuild:
             warnings.append("Realtime mode performed a full window rebuild without --force-window-rebuild.")
         if (
@@ -4897,6 +4899,17 @@ class LiveTargetProcessor:
             "rawTicksAvailable": bool(self.raw_ticks_available),
             "inputFallbackReason": self.input_fallback_reason,
             "defaultLiveInputPreference": COMPACT_PACKET_SOURCE,
+            "recordingMode": writer_health.get("recordingMode"),
+            "rawTickRecordingEnabled": writer_health.get("rawTickRecordingEnabled"),
+            "rawEventRecordingEnabled": writer_health.get("rawEventRecordingEnabled"),
+            "frameRecordingEnabled": writer_health.get("frameRecordingEnabled"),
+            "compactPacketRecordingEnabled": writer_health.get("compactPacketRecordingEnabled") or writer_health.get("compactLiveEnabled"),
+            "rawTicksWritten": writer_health.get("rawTicksWritten"),
+            "rawTicksSuppressedByMode": writer_health.get("rawTicksSuppressedByMode"),
+            "rawEventsWritten": writer_health.get("rawEventsWritten"),
+            "rawEventsSuppressedByMode": writer_health.get("rawEventsSuppressedByMode"),
+            "framesWritten": writer_health.get("framesWritten"),
+            "framesSuppressedByMode": writer_health.get("framesSuppressedByMode"),
             "mode": "follow" if self.args.follow else "once",
             "latencyMode": self.args.latency_mode,
             "modeLabel": (

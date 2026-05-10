@@ -88,6 +88,76 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			keyName = "telemetryRecordingMode",
+			name = "Recording mode",
+			description = "LIVE_COMPACT_ONLY is normal live mode; DEBUG_RECORDING preserves full raw tick/event/frame capture for audit and batch tools."
+	)
+	default TelemetryRecordingMode telemetryRecordingMode()
+	{
+		return TelemetryRecordingMode.LIVE_COMPACT_ONLY;
+	}
+
+	@ConfigItem(
+			keyName = "debugRecordRawTicks",
+			name = "Debug record raw ticks",
+			description = "Write full raw tick JSONL outside DEBUG_RECORDING mode. Leave disabled for normal compact live use."
+	)
+	default boolean debugRecordRawTicks()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			keyName = "debugRecordRawEvents",
+			name = "Debug record raw events",
+			description = "Write raw event JSONL outside DEBUG_RECORDING mode. Leave disabled for normal compact live use."
+	)
+	default boolean debugRecordRawEvents()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			keyName = "debugRecordFrames",
+			name = "Record frames in recording modes",
+			description = "Allow frame capture in LIVE_COMPACT_WITH_FRAMES, HYBRID_DEBUG, and DEBUG_RECORDING when screenshot capture is enabled."
+	)
+	default boolean debugRecordFrames()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "debugFrameIntervalTicks",
+			name = "Live frame interval ticks",
+			description = "Frame interval used by LIVE_COMPACT_WITH_FRAMES. DEBUG_RECORDING keeps using Screenshot tick interval."
+	)
+	default int debugFrameIntervalTicks()
+	{
+		return 5;
+	}
+
+	@ConfigItem(
+			keyName = "compactLivePacketsRequiredForLive",
+			name = "Require compact packets for live",
+			description = "Force compact packet emission for live recording modes so normal live mode does not depend on raw tick JSONL."
+	)
+	default boolean compactLivePacketsRequiredForLive()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "rawSnapshotSampleIntervalTicks",
+			name = "Raw snapshot sample interval",
+			description = "Future hybrid debug hook. 0 disables sampled raw snapshots."
+	)
+	default int rawSnapshotSampleIntervalTicks()
+	{
+		return 0;
+	}
+
+	@ConfigItem(
 			keyName = "captureScreenshots",
 			name = "Capture screenshots",
 			description = "Capture one read-only canvas frame per configured game tick"

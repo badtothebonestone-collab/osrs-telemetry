@@ -305,7 +305,27 @@ def write_compact_packets(session: Path, tick_objects: dict[int, list[dict]]) ->
                     sequence + 7,
                     compact_collision_window(tick_id),
                 ),
-                compact_packet("live_writer_health_packet.v1", tick_id, sequence + 8, {"rawWriterQueueDepth": 0, "droppedRawRecords": 0, "compactLiveEnabled": True}),
+                compact_packet(
+                    "live_writer_health_packet.v1",
+                    tick_id,
+                    sequence + 8,
+                    {
+                        "recordingMode": "LIVE_COMPACT_ONLY",
+                        "rawTickRecordingEnabled": False,
+                        "rawEventRecordingEnabled": False,
+                        "frameRecordingEnabled": False,
+                        "compactPacketRecordingEnabled": True,
+                        "rawTicksWritten": 0,
+                        "rawTicksSuppressedByMode": tick_id,
+                        "rawEventsWritten": 0,
+                        "rawEventsSuppressedByMode": 0,
+                        "framesWritten": 0,
+                        "framesSuppressedByMode": tick_id,
+                        "rawWriterQueueDepth": 0,
+                        "droppedRawRecords": 0,
+                        "compactLiveEnabled": True,
+                    },
+                ),
             ]
             sequence += 8
             for packet in packets:
@@ -557,6 +577,11 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(status["compactPacketsSeen"], 8)
             self.assertEqual(status["compactPacketsProcessed"], 8)
             self.assertEqual(status["candidateCount"], 1)
+            self.assertEqual(status["recordingMode"], "LIVE_COMPACT_ONLY")
+            self.assertFalse(status["rawTickRecordingEnabled"])
+            self.assertFalse(status["rawEventRecordingEnabled"])
+            self.assertFalse(status["frameRecordingEnabled"])
+            self.assertEqual(status["rawTicksWritten"], 0)
             self.assertEqual(result["candidates"][0]["objectKey"], "compact-tree")
             self.assertEqual(result["candidates"][0]["classId"], "tree")
             self.assertTrue(result["navigation"]["collisionKnown"])

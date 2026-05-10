@@ -671,6 +671,9 @@ def collect_health(
     manifest = safe_read_json(session / "manifest.json")
     manifest = manifest if isinstance(manifest, dict) else None
     active = manifest.get("active") if manifest else None
+    packet_index_path = session / "live_packets" / "live_packet_index.json"
+    packet_index = safe_read_json(packet_index_path)
+    packet_index = packet_index if isinstance(packet_index, dict) else None
     tick_files = list_tick_files(session)
     event_files = list_event_files(session)
     frame_index_summaries = load_frame_index_summaries(session)
@@ -708,6 +711,11 @@ def collect_health(
 
     values["newest_session"] = str(session)
     values["active"] = format_bool(active)
+    values["recording_mode"] = str((manifest or {}).get("recordingMode") or "unknown")
+    values["raw_tick_recording"] = format_bool((manifest or {}).get("rawTickRecordingEnabled"))
+    values["frame_recording"] = format_bool((manifest or {}).get("frameRecordingEnabled"))
+    values["compact_packets"] = "yes" if packet_index else "no"
+    values["compact_latest_tick"] = str((packet_index or {}).get("latestTick", "-"))
     values["tick_files"] = str(len(tick_files))
     values["event_files"] = str(len(event_files))
     values["frame_files"] = str(count_frame_files(session))
@@ -791,6 +799,7 @@ def collect_health(
     paths["latest_frame"] = str(latest_frame) if latest_frame else None
     paths["latest_status"] = str(session / "latest" / "latest_status.json")
     paths["manifest"] = str(session / "manifest.json")
+    paths["compact_packet_index"] = str(packet_index_path)
     paths["newest_tick_segment"] = str(tick_files[-1]) if tick_files else None
     paths["newest_event_segment"] = str(event_files[-1]) if event_files else None
     paths["perception"] = str(session / "perception")
@@ -798,7 +807,15 @@ def collect_health(
     paths["curated"] = str(curated_dir)
 
     if latest_tick is None:
-        return health_result("stale", "No ticks found", values, paths)
+        packet_mtime = path_mtime_utc(packet_index_path)
+        if packet_index and packet_mtime is not None:
+            age = (utc_now() - packet_mtime).total_seconds()
+            values["compact_packet_age"] = format_age(age)
+            if age < FRESH_TICK_SECONDS and active is True:
+                return health_result("ok", "Active compact live session is fresh; raw ticks are optional in compact recording mode", values, paths)
+            if age < FRESH_TICK_SECONDS * 3:
+                return health_result("warning", "Compact live packets are present but not currently fresh", values, paths)
+        return health_result("stale", "No raw ticks found. In normal live mode this is expected until compact packets are present.", values, paths)
 
     local_player = latest_tick.get("localPlayer") or {}
     status = latest_tick.get("status") or {}
@@ -1564,11 +1581,17 @@ class LauncherApp(Tk):
 
             tick_files = list_tick_files(session)
             tick_file, latest_tick = read_latest_jsonl_record_with_source(tick_files)
+            packet_index_path = session / "live_packets" / "live_packet_index.json"
 
             if latest_tick is None:
-                continue
-
-            tick_age = tick_age_seconds(latest_tick)
+                packet_index = safe_read_json(packet_index_path)
+                packet_mtime = path_mtime_utc(packet_index_path)
+                if isinstance(packet_index, dict) and packet_mtime is not None:
+                    tick_age = (utc_now() - packet_mtime).total_seconds()
+                else:
+                    continue
+            else:
+                tick_age = tick_age_seconds(latest_tick)
 
             if tick_age is None or tick_age >= FRESH_TICK_SECONDS:
                 continue
@@ -1585,6 +1608,8 @@ class LauncherApp(Tk):
                     session / "manifest.json",
                     session / "ticks",
                     tick_file,
+                    packet_index_path,
+                    session / "live_packets",
                     session / "frames",
                     latest_existing_frame_file(session),
                 ])
@@ -1611,6 +1636,8 @@ class LauncherApp(Tk):
                     newest_session / "manifest.json",
                     newest_session / "ticks",
                     tick_file,
+                    newest_session / "live_packets",
+                    newest_session / "live_packets" / "live_packet_index.json",
                     newest_session / "frames",
                     latest_existing_frame_file(newest_session),
                 ])

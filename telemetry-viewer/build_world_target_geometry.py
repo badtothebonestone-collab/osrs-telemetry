@@ -12,6 +12,7 @@ from telemetry_paths import (
     get_sessions_dir,
     iter_jsonl,
     list_tick_files,
+    raw_recording_unavailable_message,
     resolve_frame_path,
     safe_read_json,
 )
@@ -204,7 +205,7 @@ def read_selected_ticks(session: Path, args) -> tuple[list[dict], dict]:
     tick_files = list_tick_files(session)
 
     if not tick_files:
-        raise FileNotFoundError(f"Raw tick files not found in session: {session}")
+        raise FileNotFoundError(raw_recording_unavailable_message(session))
 
     ticks = []
     retained_ticks = retained_frame_tick_ids(session)

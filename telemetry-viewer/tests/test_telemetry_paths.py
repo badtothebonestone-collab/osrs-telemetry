@@ -9,8 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from telemetry_paths import (  # noqa: E402
     classify_frame_state,
+    find_newest_session,
     list_event_files,
     list_tick_files,
+    raw_recording_unavailable_message,
     resolve_frame_path,
 )
 
@@ -107,6 +109,28 @@ class TelemetryPathsTest(unittest.TestCase):
             self.assertTrue(existing_state["frameExists"])
             self.assertFalse(existing_state["framePending"])
             self.assertFalse(existing_state["frameExpiredOrMissing"])
+
+    def test_find_newest_session_considers_compact_packet_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            old = root / "old-debug"
+            live = root / "live-compact"
+            old.mkdir(parents=True)
+            live_index = live / "live_packets" / "live_packet_index.json"
+            live_index.parent.mkdir(parents=True)
+            (old / "manifest.json").write_text("{}", encoding="utf-8")
+            live_index.write_text("{}", encoding="utf-8")
+
+            self.assertEqual(find_newest_session(root), live)
+
+    def test_raw_recording_unavailable_message_mentions_compact_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            session.mkdir()
+            (session / "manifest.json").write_text('{"recordingMode":"LIVE_COMPACT_ONLY"}', encoding="utf-8")
+            message = raw_recording_unavailable_message(session)
+            self.assertIn("LIVE_COMPACT_ONLY", message)
+            self.assertIn("DEBUG_RECORDING", message)
 
 
 if __name__ == "__main__":

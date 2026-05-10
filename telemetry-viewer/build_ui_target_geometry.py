@@ -14,7 +14,15 @@ from prepare_visual_perception import (
     region_to_pixel_geometry,
 )
 from tab_profile_names import canonical_tab_profile_key, resolve_tab_profile_key
-from telemetry_paths import find_newest_session, get_sessions_dir, iter_jsonl, list_tick_files, resolve_frame_path, safe_read_json
+from telemetry_paths import (
+    find_newest_session,
+    get_sessions_dir,
+    iter_jsonl,
+    list_tick_files,
+    raw_recording_unavailable_message,
+    resolve_frame_path,
+    safe_read_json,
+)
 
 
 SCHEMA_VERSION_INDEX = "interaction_geometry.ui_index.v1"
@@ -435,7 +443,7 @@ def read_raw_ticks(session: Path, tick_ids: set[int]) -> dict[int, dict]:
     tick_files = list_tick_files(session)
 
     if not tick_files:
-        raise FileNotFoundError(f"Raw tick files not found in session: {session}")
+        raise FileNotFoundError(raw_recording_unavailable_message(session))
 
     ticks = {}
 

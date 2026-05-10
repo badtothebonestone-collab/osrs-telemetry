@@ -93,11 +93,26 @@ class CheckLiveSetupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             session.mkdir()
+            (session / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "recordingMode": "LIVE_COMPACT_ONLY",
+                        "rawTickRecordingEnabled": False,
+                        "rawEventRecordingEnabled": False,
+                        "frameRecordingEnabled": False,
+                        "compactPacketRecordingEnabled": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
             write_packet_segment(session)
             payload = check_live_setup.check_live_setup(session, require_compact_packets=True)
             self.assertEqual(payload["status"], "PASS")
             self.assertTrue(payload["compactPacketsAvailable"])
             self.assertTrue(payload["compactPacketsRecent"])
+            self.assertFalse(payload["rawTicksAvailable"])
+            self.assertEqual(payload["recordingMode"], "LIVE_COMPACT_ONLY")
+            self.assertFalse(payload["rawTickRecordingEnabled"])
             self.assertEqual(payload["compactPacketLatestSequence"], 44)
             self.assertTrue(payload["collisionWindowAvailable"])
             self.assertEqual(payload["latestCollisionWindowTick"], 7)

@@ -565,3 +565,40 @@ point-in-time tool-derived values. `export_session.py` writes
 `exports\frame_index_summary.jsonl`, adds frame-index counts and timing
 statistics to `session_index.json`, and joins frame timing into
 `tick_summary.jsonl` by `tickId` when available.
+
+## Recording Modes
+
+The Java writer reports its recording behavior in `manifest.json` and in
+`live_writer_health_packet.v1` payloads.
+
+Common fields:
+
+- `recordingMode`: `LIVE_COMPACT_ONLY`, `LIVE_COMPACT_WITH_FRAMES`,
+  `DEBUG_RECORDING`, or `HYBRID_DEBUG`.
+- `rawTickRecordingEnabled`: whether full `ticks\ticks-*.jsonl` records are
+  being written.
+- `rawEventRecordingEnabled`: whether full `events\events-*.jsonl` records are
+  being written.
+- `frameRecordingEnabled`: whether `frames\*` and `frame_index.jsonl` are being
+  written.
+- `compactPacketRecordingEnabled`: whether compact live packets are active.
+- `rawTicksWritten`, `rawTicksSuppressedByMode`, `rawEventsWritten`,
+  `rawEventsSuppressedByMode`, `framesWritten`, and
+  `framesSuppressedByMode`: counters for written or mode-suppressed data.
+
+Mode behavior:
+
+- `LIVE_COMPACT_ONLY` is the normal live mode. Compact packets under
+  `live_packets\` are emitted; full raw ticks/events and frames are not written.
+- `LIVE_COMPACT_WITH_FRAMES` emits compact packets and bounded frame capture;
+  full raw ticks/events remain off.
+- `DEBUG_RECORDING` preserves the historical full session layout for audit,
+  replay, batch geometry builders, and training/debug datasets.
+- `HYBRID_DEBUG` is reserved for compact live plus sampled debug snapshots.
+
+Compact-only live sessions may not contain `ticks\`, `events\`, `frames\`, or
+`frame_index.jsonl`. That is expected and is not capture loss. Use compact
+packet health and source completeness fields, including
+`sourceSceneKnowledgeComplete` and `sourceCapHit`, to evaluate live capture
+health. Tools that require raw ticks should ask for `DEBUG_RECORDING` sessions
+instead of failing with generic file-not-found errors.

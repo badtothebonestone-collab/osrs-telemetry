@@ -1366,6 +1366,49 @@ $request = @{
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
 ```
 
+## Recording modes
+
+Compact packets are now the normal live substrate. Raw tick/event JSONL and
+screenshots are optional debug/audit outputs, not required by
+`live_target_processor.py`, `context_service.py`, the human dashboard, or the
+debug overlay when compact packets are active.
+
+RuneLite config modes:
+
+- `LIVE_COMPACT_ONLY`: normal live use. Writes compact live packets and small
+  session metadata. Full raw ticks, raw events, and frames are suppressed by
+  mode.
+- `LIVE_COMPACT_WITH_FRAMES`: compact live packets plus bounded frame capture
+  at the live frame interval for visual QA. Full raw ticks/events remain off.
+- `DEBUG_RECORDING`: preserves full raw tick JSONL, event JSONL, frame capture,
+  dictionaries, manifest data, and existing batch/audit workflows.
+- `HYBRID_DEBUG`: reserved for compact packets plus sampled debug snapshots.
+  The current pass keeps normal live and full debug behavior separate.
+
+`manifest.json` and live writer-health packets expose
+`recordingMode`, `rawTickRecordingEnabled`, `rawEventRecordingEnabled`,
+`frameRecordingEnabled`, `compactPacketRecordingEnabled`, and written/suppressed
+counters. Missing raw ticks are expected in `LIVE_COMPACT_ONLY`; use
+`DEBUG_RECORDING` when you need batch builders, replay/debug datasets, or full
+audit/training files.
+
+Normal live:
+
+```text
+python telemetry-viewer\check_live_setup.py --latest-session --require-compact-packets
+python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --require-compact-packets --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+```
+
+Debug audit:
+
+```text
+Set RuneLite Telemetry Collector recording mode to DEBUG_RECORDING, collect a session, then run:
+python telemetry-viewer\run_target_geometry_pipeline.py --latest-session --latest-with-frames 25 --profile broad_qa --limit 2000 --open-inspector
+```
+
+Batch/debug builders that require raw ticks will print a clear message when a
+compact-only live session is selected.
+
 ## Human-Readable Live Context Summary
 
 JSON responses are for machines. The human summary is for quick read-only QA

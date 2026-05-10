@@ -166,6 +166,17 @@ def check_live_setup(session: Path | None, *, require_compact_packets: bool = Fa
     compact_recent = bool(compact_available and isinstance(latest_age, (int, float)) and latest_age <= RECENT_SECONDS)
     raw_ticks = list_tick_files(session)
     live_output_dir = session / "interaction_geometry" / "live"
+    manifest_path = session / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        manifest = {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    recording_mode = manifest.get("recordingMode")
+    raw_tick_recording_enabled = manifest.get("rawTickRecordingEnabled")
+    raw_event_recording_enabled = manifest.get("rawEventRecordingEnabled")
+    frame_recording_enabled = manifest.get("frameRecordingEnabled")
 
     add_check("compact live packet directory", live_dir.exists(), f"directory: {live_dir}", required=require_compact_packets)
     add_check("live_packet_index.json", index_path.exists() and isinstance(index, dict), f"index: {index_path}", required=require_compact_packets)
@@ -177,7 +188,13 @@ def check_live_setup(session: Path | None, *, require_compact_packets: bool = Fa
     add_check("collision summary known", latest_parse.get("collisionKnown") is True, f"collisionKnown: {latest_parse.get('collisionKnown')}")
     add_check("collision window packets present", int((latest_parse.get("packetCountsByType") or {}).get("live_collision_window_packet.v1") or 0) > 0, f"latest collision window tick: {latest_parse.get('latestCollisionWindowTick')}")
     add_check("collision window available", latest_parse.get("collisionWindowAvailable") is True, f"radius: {latest_parse.get('collisionWindowRadius')} size: {latest_parse.get('collisionWindowWidth')}x{latest_parse.get('collisionWindowHeight')}")
-    add_check("raw tick fallback available", bool(raw_ticks) or compact_available, f"raw tick files: {len(raw_ticks)}")
+    add_check("normal live input available", compact_available or bool(raw_ticks), f"compact packets: {compact_available}; raw tick files: {len(raw_ticks)}")
+    if recording_mode == "LIVE_COMPACT_ONLY" and not raw_ticks:
+        checks.append({
+            "name": "raw debug ticks optional",
+            "status": "PASS",
+            "message": "raw tick recording is disabled for compact-only live mode",
+        })
     add_check("rolling live output directory", live_output_dir.exists() or compact_available, f"live output: {live_output_dir}")
 
     status = "FAIL" if failures else "WARN" if warnings else "PASS"
@@ -216,6 +233,11 @@ def check_live_setup(session: Path | None, *, require_compact_packets: bool = Fa
         "collisionWindowHash": latest_parse.get("collisionWindowHash"),
         "rawTicksAvailable": bool(raw_ticks),
         "rawTickFileCount": len(raw_ticks),
+        "recordingMode": recording_mode,
+        "rawTickRecordingEnabled": raw_tick_recording_enabled,
+        "rawEventRecordingEnabled": raw_event_recording_enabled,
+        "frameRecordingEnabled": frame_recording_enabled,
+        "compactPacketRecordingEnabled": manifest.get("compactPacketRecordingEnabled") or manifest.get("compactLivePacketsEnabled"),
         "liveOutputExists": live_output_dir.exists(),
         "retention": {
             "compactLiveRetentionBytes": (index or {}).get("retentionBytes") if isinstance(index, dict) else None,
@@ -234,7 +256,8 @@ def check_live_setup(session: Path | None, *, require_compact_packets: bool = Fa
         "recommendedNextCommand": recommended,
         "notes": [
             "Compact packets are the default live input path.",
-            "Raw ticks remain available for debug, audit, replay, and fallback.",
+            "Raw ticks are optional and are normally only present in DEBUG_RECORDING or explicit debug modes.",
+            "Batch/debug builders require DEBUG_RECORDING mode when they need raw tick JSONL.",
         ],
     }
 
@@ -246,6 +269,13 @@ def print_human(payload: dict) -> None:
     print(f"compact packets recent: {payload.get('compactPacketsRecent')}")
     print(f"latest segment: {payload.get('compactPacketLatestSegment')}")
     print(f"latest tick: {payload.get('compactPacketLatestTick')} sequence: {payload.get('compactPacketLatestSequence')}")
+    print(
+        "recording mode: "
+        f"{payload.get('recordingMode') or 'unknown'} "
+        f"rawTicks={payload.get('rawTickRecordingEnabled')} "
+        f"rawEvents={payload.get('rawEventRecordingEnabled')} "
+        f"frames={payload.get('frameRecordingEnabled')}"
+    )
     print(f"latest navigation tick: {payload.get('latestNavigationTick')} collisionKnown={payload.get('collisionKnown')}")
     dimensions = payload.get("collisionWindowDimensions") or {}
     print(
@@ -255,7 +285,7 @@ def print_human(payload: dict) -> None:
         f"radius={payload.get('collisionWindowRadius')} "
         f"size={dimensions.get('width')}x{dimensions.get('height')}"
     )
-    print(f"raw tick fallback available: {payload.get('rawTicksAvailable')}")
+    print(f"raw debug tick files present: {payload.get('rawTicksAvailable')}")
     for check in payload.get("checks") or []:
         print(f"{check.get('status'):4} {check.get('name')}: {check.get('message')}")
     if not payload.get("compactPacketsAvailable"):

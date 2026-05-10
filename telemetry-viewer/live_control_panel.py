@@ -201,11 +201,16 @@ def status_snapshot(session: Path | None, previous: dict | None = None) -> dict:
         session / "live_packets" / "live_packet_index.json",
         previous.get("packetIndex") if isinstance(previous.get("packetIndex"), dict) else None,
     )
+    manifest = safe_load_json(
+        session / "manifest.json",
+        previous.get("manifest") if isinstance(previous.get("manifest"), dict) else None,
+    )
     return {
         "status": status,
         "performance": performance,
         "context": context,
         "packetIndex": packet_index,
+        "manifest": manifest,
         "latestTick": status.get("latestTickProcessed") or status.get("latestTick") or context.get("latestTick") or packet_index.get("latestTick"),
         "inputSourceActive": status.get("inputSourceActive"),
         "candidateCount": status.get("candidateCount"),
@@ -213,6 +218,9 @@ def status_snapshot(session: Path | None, previous: dict | None = None) -> dict:
         "writeFailures": status.get("writeFailureCount"),
         "compactPacketsAvailable": status.get("compactPacketsAvailable") or bool(packet_index),
         "latestSegment": status.get("compactPacketLatestSegment") or packet_index.get("activeSegment") or packet_index.get("latestSegment"),
+        "recordingMode": status.get("recordingMode") or manifest.get("recordingMode"),
+        "rawTickRecordingEnabled": status.get("rawTickRecordingEnabled") if status.get("rawTickRecordingEnabled") is not None else manifest.get("rawTickRecordingEnabled"),
+        "frameRecordingEnabled": status.get("frameRecordingEnabled") if status.get("frameRecordingEnabled") is not None else manifest.get("frameRecordingEnabled"),
     }
 
 
@@ -584,7 +592,10 @@ class LiveControlPanel:
             f"candidates={snapshot.get('candidateCount') if snapshot.get('candidateCount') is not None else 'unknown'}; "
             f"budgetExceeded={snapshot.get('budgetExceeded')}; "
             f"writeFailures={snapshot.get('writeFailures')}; "
-            f"segment={Path(str(snapshot.get('latestSegment'))).name if snapshot.get('latestSegment') else 'unknown'}"
+            f"segment={Path(str(snapshot.get('latestSegment'))).name if snapshot.get('latestSegment') else 'unknown'}; "
+            f"recording={snapshot.get('recordingMode') or 'unknown'}; "
+            f"rawTicks={snapshot.get('rawTickRecordingEnabled')}; "
+            f"frames={snapshot.get('frameRecordingEnabled')}"
         )
         if self.is_process_running("Context Service"):
             if not self.context_poll_inflight:

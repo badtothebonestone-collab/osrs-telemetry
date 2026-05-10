@@ -421,6 +421,11 @@ def diagnostics_payload(context: dict, mode: str) -> dict:
         "inputFallbackReason": status.get("inputFallbackReason"),
         "latestCompactPacketSequence": status.get("compactPacketLastSequence") or status.get("compactPacketLatestSequence"),
         "latestCompactPacketSegment": status.get("compactPacketLatestSegment"),
+        "recordingMode": status.get("recordingMode"),
+        "rawTickRecordingEnabled": status.get("rawTickRecordingEnabled"),
+        "rawEventRecordingEnabled": status.get("rawEventRecordingEnabled"),
+        "frameRecordingEnabled": status.get("frameRecordingEnabled"),
+        "compactPacketRecordingEnabled": status.get("compactPacketRecordingEnabled"),
     }
     payload = {
         "activeProfile": status.get("profile"),
@@ -831,6 +836,10 @@ def status_payload(context: dict) -> dict:
         "inputSourceActive": status_doc.get("inputSourceActive"),
         "compactPacketsAvailable": status_doc.get("compactPacketsAvailable"),
         "inputFallbackReason": status_doc.get("inputFallbackReason"),
+        "recordingMode": status_doc.get("recordingMode"),
+        "rawTickRecordingEnabled": status_doc.get("rawTickRecordingEnabled"),
+        "rawEventRecordingEnabled": status_doc.get("rawEventRecordingEnabled"),
+        "frameRecordingEnabled": status_doc.get("frameRecordingEnabled"),
         "sourceSceneKnowledgeComplete": status_doc.get("sourceSceneKnowledgeComplete"),
         "sourceCapHit": status_doc.get("sourceCapHit"),
         "budgetExceeded": status_doc.get("budgetExceeded"),

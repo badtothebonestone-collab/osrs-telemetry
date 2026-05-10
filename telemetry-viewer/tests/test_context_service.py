@@ -146,6 +146,11 @@ def make_session(root: Path, *, candidates: list[dict] | None = None, stale: boo
             "compactPacketsRecent": True,
             "compactPacketLastSequence": 123,
             "compactPacketLatestSegment": str(session / "live_packets" / "live-000001.ndjson"),
+            "recordingMode": "LIVE_COMPACT_ONLY",
+            "rawTickRecordingEnabled": False,
+            "rawEventRecordingEnabled": False,
+            "frameRecordingEnabled": False,
+            "compactPacketRecordingEnabled": True,
             "sourceSceneKnowledgeComplete": True,
             "sourceCapHit": False,
             "budgetExceeded": False,
@@ -431,6 +436,8 @@ class ContextServiceTest(unittest.TestCase):
             self.assertEqual(input_source["inputSourceActive"], "compact-packets")
             self.assertTrue(input_source["compactPacketsAvailable"])
             self.assertEqual(input_source["latestCompactPacketSequence"], 123)
+            self.assertEqual(input_source["recordingMode"], "LIVE_COMPACT_ONLY")
+            self.assertFalse(input_source["rawTickRecordingEnabled"])
 
     def test_context_warns_when_live_processor_uses_raw_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:

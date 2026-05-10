@@ -124,6 +124,18 @@ public class TelemetryWriter implements Closeable
 		long frameCount;
 		long droppedFrameCount;
 		long deletedFrameCount;
+		String recordingMode;
+		boolean rawTickRecordingEnabled;
+		boolean rawEventRecordingEnabled;
+		boolean frameRecordingEnabled;
+		boolean rawRecordingEnabled;
+		boolean compactPacketRecordingEnabled;
+		long rawTicksWritten;
+		long rawTicksSuppressedByMode;
+		long rawEventsWritten;
+		long rawEventsSuppressedByMode;
+		long framesWritten;
+		long framesSuppressedByMode;
 		boolean compactLivePacketsEnabled;
 		String livePacketDir;
 		String livePacketSchema;
@@ -172,6 +184,10 @@ public class TelemetryWriter implements Closeable
 	private final long cleanupIntervalMillis;
 	private final boolean preservePinnedSessions;
 	private final boolean allowDeletingClosedSegmentsFromActiveSession;
+	private final TelemetryRecordingMode recordingMode;
+	private final boolean rawTickRecordingEnabled;
+	private final boolean rawEventRecordingEnabled;
+	private final boolean frameRecordingEnabled;
 	private final int screenshotEveryTicks;
 	private final String screenshotFormat;
 	private final float jpegQuality;
@@ -189,6 +205,9 @@ public class TelemetryWriter implements Closeable
 	private final AtomicLong droppedRecords = new AtomicLong();
 	private final AtomicLong droppedFrameCount = new AtomicLong();
 	private final AtomicLong deletedFrameCount = new AtomicLong();
+	private final AtomicLong rawTicksSuppressedByMode = new AtomicLong();
+	private final AtomicLong rawEventsSuppressedByMode = new AtomicLong();
+	private final AtomicLong framesSuppressedByMode = new AtomicLong();
 	private final AtomicBoolean dictionariesDirty = new AtomicBoolean(false);
 	private final Map<Integer, String> itemDictionary = new ConcurrentHashMap<>();
 	private final Map<Integer, String> npcDictionary = new ConcurrentHashMap<>();
@@ -220,6 +239,10 @@ public class TelemetryWriter implements Closeable
 			int cleanupIntervalSeconds,
 			boolean preservePinnedSessions,
 			boolean allowDeletingClosedSegmentsFromActiveSession,
+			TelemetryRecordingMode recordingMode,
+			boolean rawTickRecordingEnabled,
+			boolean rawEventRecordingEnabled,
+			boolean frameRecordingEnabled,
 			int screenshotEveryTicks,
 			String screenshotFormat,
 			double jpegQuality,
@@ -256,7 +279,11 @@ public class TelemetryWriter implements Closeable
 		this.cleanupIntervalMillis = Duration.ofSeconds(Math.max(1L, cleanupIntervalSeconds)).toMillis();
 		this.preservePinnedSessions = preservePinnedSessions;
 		this.allowDeletingClosedSegmentsFromActiveSession = allowDeletingClosedSegmentsFromActiveSession;
-		this.screenshotEveryTicks = screenshotEveryTicks;
+		this.recordingMode = recordingMode == null ? TelemetryRecordingMode.LIVE_COMPACT_ONLY : recordingMode;
+		this.rawTickRecordingEnabled = rawTickRecordingEnabled;
+		this.rawEventRecordingEnabled = rawEventRecordingEnabled;
+		this.frameRecordingEnabled = frameRecordingEnabled;
+		this.screenshotEveryTicks = Math.max(0, screenshotEveryTicks);
 		this.screenshotFormat = normalizeScreenshotFormat(screenshotFormat);
 		this.jpegQuality = (float) Math.max(0.0, Math.min(1.0, jpegQuality));
 		this.deleteOldFrames = deleteOldFrames;
@@ -274,17 +301,32 @@ public class TelemetryWriter implements Closeable
 
 	public void start() throws IOException
 	{
-		Files.createDirectories(ticksDir);
-		Files.createDirectories(eventsDir);
-		Files.createDirectories(framesDir);
-		Files.createDirectories(dictionariesDir);
+		Files.createDirectories(sessionDir);
+		if (rawTickRecordingEnabled)
+		{
+			Files.createDirectories(ticksDir);
+		}
+		if (rawEventRecordingEnabled)
+		{
+			Files.createDirectories(eventsDir);
+		}
+		if (frameRecordingEnabled)
+		{
+			Files.createDirectories(framesDir);
+		}
 
 		manifest.sessionId = sessionId;
 		manifest.startedAtUtc = Instant.now().toString();
 		manifest.schemaVersion = SCHEMA_VERSION;
 		manifest.active = true;
-		manifest.tickSegmentIndex = 1;
-		manifest.eventSegmentIndex = 1;
+		manifest.tickSegmentIndex = rawTickRecordingEnabled ? 1 : 0;
+		manifest.eventSegmentIndex = rawEventRecordingEnabled ? 1 : 0;
+		manifest.recordingMode = this.recordingMode.name();
+		manifest.rawTickRecordingEnabled = rawTickRecordingEnabled;
+		manifest.rawEventRecordingEnabled = rawEventRecordingEnabled;
+		manifest.frameRecordingEnabled = frameRecordingEnabled;
+		manifest.rawRecordingEnabled = rawTickRecordingEnabled || rawEventRecordingEnabled;
+		manifest.compactPacketRecordingEnabled = isCompactLivePacketsEnabled();
 		manifest.screenshotEveryTicks = screenshotEveryTicks;
 		manifest.screenshotFormat = this.screenshotFormat;
 		manifest.maxFrameStorageMb = (int) (maxFrameStorageBytes / (1024L * 1024L));
@@ -300,9 +342,18 @@ public class TelemetryWriter implements Closeable
 		manifest.compactLiveRetentionSegments = compactLiveRetentionSegments;
 		manifest.compactLiveQueueSize = compactLiveQueueSize;
 
-		openTickSegment();
-		openEventSegment();
-		openFrameIndex();
+		if (rawTickRecordingEnabled)
+		{
+			openTickSegment();
+		}
+		if (rawEventRecordingEnabled)
+		{
+			openEventSegment();
+		}
+		if (frameRecordingEnabled)
+		{
+			openFrameIndex();
+		}
 		if (compactLivePacketsEnabled)
 		{
 			try
@@ -340,11 +391,21 @@ public class TelemetryWriter implements Closeable
 
 	public void enqueueTick(String json)
 	{
+		if (!rawTickRecordingEnabled)
+		{
+			recordRawTickSuppressedByMode();
+			return;
+		}
 		enqueue(new QueuedLine(STREAM_TICKS, json));
 	}
 
 	public void enqueueEvent(String json)
 	{
+		if (!rawEventRecordingEnabled)
+		{
+			recordRawEventSuppressedByMode();
+			return;
+		}
 		enqueue(new QueuedLine(STREAM_EVENTS, json));
 	}
 
@@ -365,6 +426,51 @@ public class TelemetryWriter implements Closeable
 		return livePacketWriter != null;
 	}
 
+	public String getRecordingMode()
+	{
+		return recordingMode.name();
+	}
+
+	public boolean isRawTickRecordingEnabled()
+	{
+		return rawTickRecordingEnabled;
+	}
+
+	public boolean isRawEventRecordingEnabled()
+	{
+		return rawEventRecordingEnabled;
+	}
+
+	public boolean isRawRecordingEnabled()
+	{
+		return rawTickRecordingEnabled || rawEventRecordingEnabled;
+	}
+
+	public boolean isFrameRecordingEnabled()
+	{
+		return frameRecordingEnabled;
+	}
+
+	public int getScreenshotEveryTicks()
+	{
+		return screenshotEveryTicks;
+	}
+
+	public void recordRawTickSuppressedByMode()
+	{
+		rawTicksSuppressedByMode.incrementAndGet();
+	}
+
+	public void recordRawEventSuppressedByMode()
+	{
+		rawEventsSuppressedByMode.incrementAndGet();
+	}
+
+	public void recordFrameSuppressedByMode()
+	{
+		framesSuppressedByMode.incrementAndGet();
+	}
+
 	Path getSessionDir()
 	{
 		return sessionDir;
@@ -383,6 +489,11 @@ public class TelemetryWriter implements Closeable
 			String requestedAtUtc,
 			String capturedAtUtc)
 	{
+		if (!frameRecordingEnabled)
+		{
+			recordFrameSuppressedByMode();
+			return false;
+		}
 		if (!running || relativePath == null || image == null)
 		{
 			return false;
@@ -435,6 +546,10 @@ public class TelemetryWriter implements Closeable
 			String capturedAtUtc,
 			String error)
 	{
+		if (!frameRecordingEnabled)
+		{
+			return;
+		}
 		enqueueFrameIndex(frameIndexRecord(
 				tickId,
 				relativePath,
@@ -464,6 +579,36 @@ public class TelemetryWriter implements Closeable
 	public long getDroppedFrameCount()
 	{
 		return droppedFrameCount.get();
+	}
+
+	public long getRawTicksWritten()
+	{
+		return manifest.tickCount;
+	}
+
+	public long getRawTicksSuppressedByMode()
+	{
+		return rawTicksSuppressedByMode.get();
+	}
+
+	public long getRawEventsWritten()
+	{
+		return manifest.eventCount;
+	}
+
+	public long getRawEventsSuppressedByMode()
+	{
+		return rawEventsSuppressedByMode.get();
+	}
+
+	public long getFramesWritten()
+	{
+		return manifest.frameCount;
+	}
+
+	public long getFramesSuppressedByMode()
+	{
+		return framesSuppressedByMode.get();
 	}
 
 	public int getLivePacketQueueDepth()
@@ -658,6 +803,7 @@ public class TelemetryWriter implements Closeable
 			writeImage(path, frame.image);
 			String writtenAtUtc = Instant.now().toString();
 			manifest.frameCount++;
+			manifest.framesWritten = manifest.frameCount;
 			manifest.droppedFrameCount = droppedFrameCount.get();
 			enqueueFrameIndex(frameIndexRecord(
 					frame.tickId,
@@ -756,9 +902,15 @@ public class TelemetryWriter implements Closeable
 
 	private void writeTick(String json) throws IOException
 	{
+		if (tickWriter == null)
+		{
+			recordRawTickSuppressedByMode();
+			return;
+		}
 		long bytes = writeJsonLine(tickWriter, json);
 		currentTickBytes += bytes;
 		manifest.tickCount++;
+		manifest.rawTicksWritten = manifest.tickCount;
 		manifest.droppedRecords = droppedRecords.get();
 		writeManifest();
 
@@ -770,9 +922,15 @@ public class TelemetryWriter implements Closeable
 
 	private void writeEvent(String json) throws IOException
 	{
+		if (eventWriter == null)
+		{
+			recordRawEventSuppressedByMode();
+			return;
+		}
 		long bytes = writeJsonLine(eventWriter, json);
 		currentEventBytes += bytes;
 		manifest.eventCount++;
+		manifest.rawEventsWritten = manifest.eventCount;
 		manifest.droppedRecords = droppedRecords.get();
 		writeManifest();
 
@@ -784,6 +942,10 @@ public class TelemetryWriter implements Closeable
 
 	private void writeFrameIndex(String json) throws IOException
 	{
+		if (frameIndexWriter == null)
+		{
+			return;
+		}
 		writeJsonLine(frameIndexWriter, json);
 	}
 
@@ -830,6 +992,10 @@ public class TelemetryWriter implements Closeable
 
 	private void rotateTickSegment() throws IOException
 	{
+		if (!rawTickRecordingEnabled)
+		{
+			return;
+		}
 		closeWriter(tickWriter, "ticks");
 		manifest.tickSegmentIndex++;
 		openTickSegment();
@@ -838,6 +1004,10 @@ public class TelemetryWriter implements Closeable
 
 	private void rotateEventSegment() throws IOException
 	{
+		if (!rawEventRecordingEnabled)
+		{
+			return;
+		}
 		closeWriter(eventWriter, "events");
 		manifest.eventSegmentIndex++;
 		openEventSegment();
@@ -920,7 +1090,7 @@ public class TelemetryWriter implements Closeable
 
 	private void enqueueFrameIndex(FrameIndexRecord record)
 	{
-		if (record == null)
+		if (record == null || !frameRecordingEnabled)
 		{
 			return;
 		}
@@ -988,6 +1158,14 @@ public class TelemetryWriter implements Closeable
 		manifest.droppedRecords = droppedRecords.get();
 		manifest.droppedFrameCount = droppedFrameCount.get();
 		manifest.deletedFrameCount = deletedFrameCount.get();
+		manifest.rawTicksWritten = manifest.tickCount;
+		manifest.rawTicksSuppressedByMode = rawTicksSuppressedByMode.get();
+		manifest.rawEventsWritten = manifest.eventCount;
+		manifest.rawEventsSuppressedByMode = rawEventsSuppressedByMode.get();
+		manifest.framesWritten = manifest.frameCount;
+		manifest.framesSuppressedByMode = framesSuppressedByMode.get();
+		manifest.rawRecordingEnabled = rawTickRecordingEnabled || rawEventRecordingEnabled;
+		manifest.compactPacketRecordingEnabled = compactLivePacketsEnabled;
 		manifest.livePacketsWritten = getLivePacketsWritten();
 		manifest.livePacketsDropped = getLivePacketsDropped();
 		manifest.livePacketWriteErrors = getLivePacketWriteErrors();

@@ -4,7 +4,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from telemetry_paths import find_newest_session, get_sessions_dir
+from telemetry_paths import find_newest_session, get_sessions_dir, list_tick_files, raw_recording_unavailable_message
 
 
 VIEWER_DIR = Path(__file__).resolve().parent
@@ -388,6 +388,8 @@ def main() -> int:
         print("tick selection: tool defaults")
 
     print(f"UI mode: {args.ui_mode}")
+    if not list_tick_files(session):
+        print(f"warning: {raw_recording_unavailable_message(session)}")
 
     steps = build_steps(args, session)
     print_step_plan(steps, args.dry_run)

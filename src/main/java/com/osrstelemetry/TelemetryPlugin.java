@@ -186,6 +186,8 @@ public class TelemetryPlugin extends Plugin
 	@Override
 	protected void startUp() throws Exception
 	{
+		TelemetryRecordingMode recordingMode = recordingMode();
+
 		knownItemIds.clear();
 		knownNpcIds.clear();
 		knownObjectIds.clear();
@@ -207,7 +209,11 @@ public class TelemetryPlugin extends Plugin
 				config.cleanupIntervalSeconds(),
 				config.preservePinnedSessions(),
 				config.allowDeletingClosedSegmentsFromActiveSession(),
-				config.screenshotEveryTicks(),
+				recordingMode,
+				rawTickRecordingEnabled(recordingMode),
+				rawEventRecordingEnabled(recordingMode),
+				frameRecordingEnabled(recordingMode),
+				effectiveScreenshotEveryTicks(recordingMode),
 				config.screenshotFormat(),
 				config.jpegQuality(),
 				config.maxFrameStorageMb(),
@@ -216,7 +222,7 @@ public class TelemetryPlugin extends Plugin
 				config.maxFrameQueueSize(),
 				config.frameCaptureMode(),
 				config.allowScreenRectangleFallback(),
-				config.emitCompactLivePackets(),
+				compactPacketsEnabled(recordingMode),
 				config.compactLiveSegmentMb(),
 				config.compactLiveRetentionTicks(),
 				Math.max(0L, config.compactLiveRetentionMb()) * 1024L * 1024L,
@@ -230,6 +236,56 @@ public class TelemetryPlugin extends Plugin
 		}
 
 		log.info("Telemetry Collector started");
+	}
+
+	private TelemetryRecordingMode recordingMode()
+	{
+		TelemetryRecordingMode mode = config.telemetryRecordingMode();
+		return mode == null ? TelemetryRecordingMode.LIVE_COMPACT_ONLY : mode;
+	}
+
+	private boolean compactPacketsEnabled(TelemetryRecordingMode mode)
+	{
+		if (mode == TelemetryRecordingMode.LIVE_COMPACT_ONLY
+				|| mode == TelemetryRecordingMode.LIVE_COMPACT_WITH_FRAMES
+				|| mode == TelemetryRecordingMode.HYBRID_DEBUG)
+		{
+			return config.compactLivePacketsRequiredForLive() || config.emitCompactLivePackets();
+		}
+
+		return config.emitCompactLivePackets();
+	}
+
+	private boolean rawTickRecordingEnabled(TelemetryRecordingMode mode)
+	{
+		return mode == TelemetryRecordingMode.DEBUG_RECORDING || config.debugRecordRawTicks();
+	}
+
+	private boolean rawEventRecordingEnabled(TelemetryRecordingMode mode)
+	{
+		return mode == TelemetryRecordingMode.DEBUG_RECORDING || config.debugRecordRawEvents();
+	}
+
+	private boolean frameRecordingEnabled(TelemetryRecordingMode mode)
+	{
+		if (!config.captureScreenshots() || !config.debugRecordFrames())
+		{
+			return false;
+		}
+
+		return mode == TelemetryRecordingMode.LIVE_COMPACT_WITH_FRAMES
+				|| mode == TelemetryRecordingMode.DEBUG_RECORDING
+				|| mode == TelemetryRecordingMode.HYBRID_DEBUG;
+	}
+
+	private int effectiveScreenshotEveryTicks(TelemetryRecordingMode mode)
+	{
+		if (mode == TelemetryRecordingMode.LIVE_COMPACT_WITH_FRAMES)
+		{
+			return Math.max(1, config.debugFrameIntervalTicks());
+		}
+
+		return Math.max(1, config.screenshotEveryTicks());
 	}
 
 	@Override
@@ -565,13 +621,14 @@ public class TelemetryPlugin extends Plugin
 
 	private boolean captureFrame(TickSnapshot snapshot, List<String> captureErrors, TelemetryWriter currentWriter)
 	{
-		if (!config.captureScreenshots())
+		if (!currentWriter.isFrameRecordingEnabled())
 		{
-			snapshot.frameCaptureStatus = "DISABLED";
+			snapshot.frameCaptureStatus = "DISABLED_BY_RECORDING_MODE";
+			currentWriter.recordFrameSuppressedByMode();
 			return false;
 		}
 
-		int interval = config.screenshotEveryTicks();
+		int interval = currentWriter.getScreenshotEveryTicks();
 
 		if (interval <= 0)
 		{
@@ -746,7 +803,14 @@ public class TelemetryPlugin extends Plugin
 		try
 		{
 			enqueueCompactLivePackets(currentWriter, snapshot);
-			currentWriter.enqueueTick(gson.toJson(snapshot));
+			if (currentWriter.isRawTickRecordingEnabled())
+			{
+				currentWriter.enqueueTick(gson.toJson(snapshot));
+			}
+			else
+			{
+				currentWriter.recordRawTickSuppressedByMode();
+			}
 		}
 		catch (Exception e)
 		{
@@ -1794,6 +1858,17 @@ public class TelemetryPlugin extends Plugin
 	private Map<String, Object> writerHealthPayload(TelemetryWriter currentWriter)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("recordingMode", currentWriter.getRecordingMode());
+		payload.put("rawTickRecordingEnabled", currentWriter.isRawTickRecordingEnabled());
+		payload.put("rawEventRecordingEnabled", currentWriter.isRawEventRecordingEnabled());
+		payload.put("frameRecordingEnabled", currentWriter.isFrameRecordingEnabled());
+		payload.put("compactPacketRecordingEnabled", currentWriter.isCompactLivePacketsEnabled());
+		payload.put("rawTicksWritten", currentWriter.getRawTicksWritten());
+		payload.put("rawTicksSuppressedByMode", currentWriter.getRawTicksSuppressedByMode());
+		payload.put("rawEventsWritten", currentWriter.getRawEventsWritten());
+		payload.put("rawEventsSuppressedByMode", currentWriter.getRawEventsSuppressedByMode());
+		payload.put("framesWritten", currentWriter.getFramesWritten());
+		payload.put("framesSuppressedByMode", currentWriter.getFramesSuppressedByMode());
 		payload.put("rawWriterQueueDepth", currentWriter.getQueueSize());
 		payload.put("droppedRawRecords", currentWriter.getDroppedRecords());
 		payload.put("droppedFrameCount", currentWriter.getDroppedFrameCount());
@@ -1809,7 +1884,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("livePacketRetentionBytes", Math.max(0L, config.compactLiveRetentionMb()) * 1024L * 1024L);
 		payload.put("livePacketRetentionSegments", config.compactLiveRetentionSegments());
 		payload.put("livePacketActiveSegment", currentWriter.getLivePacketActiveSegment());
-		payload.put("rawRecordingEnabled", true);
+		payload.put("rawRecordingEnabled", currentWriter.isRawRecordingEnabled());
 		return payload;
 	}
 
@@ -3993,6 +4068,12 @@ public class TelemetryPlugin extends Plugin
 
 		if (!config.enabled() || currentWriter == null)
 		{
+			return;
+		}
+
+		if (!currentWriter.isRawEventRecordingEnabled())
+		{
+			currentWriter.recordRawEventSuppressedByMode();
 			return;
 		}
 
