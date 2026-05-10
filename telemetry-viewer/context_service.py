@@ -354,6 +354,8 @@ def compact_candidate_answer(answer: dict | None, mode: str) -> dict | None:
         "tick",
         "freshness",
         "targetLiveState",
+        "livenessInterpretation",
+        "navigation",
     ]
     if mode == "normal":
         keys.extend(["positiveSignals", "negativeSignals", "targetLiveEvidence", "lastSeenTick", "lastChangedTick", "lastDespawnedTick"])
@@ -434,6 +436,7 @@ def compact_liveness_state(state: dict, *, examples: int = 0) -> dict:
     keys = [
         "activeCandidateLiveState",
         "bestCandidateLiveState",
+        "livenessInterpretation",
         "recentlyUnavailableCount",
         "recentlyDepletedCount",
         "suppressedCandidateCount",
@@ -447,6 +450,18 @@ def compact_liveness_state(state: dict, *, examples: int = 0) -> dict:
         "livenessCandidatesSkippedByBudget",
     ]
     compact = {key: state.get(key) for key in keys if key in state}
+    if "livenessInterpretation" not in compact:
+        live_state = state.get("bestCandidateLiveState") or state.get("activeCandidateLiveState")
+        if state.get("livenessDegraded") or state.get("livenessBudgetExceeded"):
+            compact["livenessInterpretation"] = "degraded"
+        elif live_state in ("recently_despawned", "depleted_or_stump", "stale", "changed"):
+            compact["livenessInterpretation"] = "degraded"
+        elif live_state == "live":
+            compact["livenessInterpretation"] = "direct"
+        elif live_state == "live_assumed":
+            compact["livenessInterpretation"] = "assumed"
+        else:
+            compact["livenessInterpretation"] = "unknown"
     if state.get("bestCandidateChanged"):
         for key in ("previousBestCandidate", "currentBestCandidate", "bestCandidateChanged", "bestCandidateChangeReason", "previousBestSuppressedReason"):
             if key in state:
@@ -551,8 +566,10 @@ def build_context_response(
         missing.extend(liveness.get("missingFields") or [])
     if "navigation_readiness" in needs:
         response["navigationReadiness"] = query.navigation_readiness(scoped_context.get("navigation") or {}, scoped_context.get("baseline") or {})
-        if response["navigationReadiness"].get("status") == "unknown":
+        missing.extend(response["navigationReadiness"].get("missingCapabilities") or [])
+        if response["navigationReadiness"].get("status") in {"unknown", "summary"}:
             status = combine_status(status, "WARN")
+            warnings.extend(response["navigationReadiness"].get("warnings") or [])
             warning = response["navigationReadiness"].get("warning")
             if warning:
                 warnings.append(warning)
@@ -617,6 +634,7 @@ def build_context_response(
             status = combine_status(status, task_payload.get("status", "WARN"))
             warnings.extend(task_payload.get("warnings") or [])
             missing.extend(task_payload.get("missingFields") or [])
+            missing.extend(task_payload.get("missingCapabilities") or [])
         elif task:
             status = combine_status(status, "FAIL")
             warnings.append(f"Unsupported task context: {task}")

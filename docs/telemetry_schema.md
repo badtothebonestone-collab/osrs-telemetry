@@ -144,10 +144,21 @@ Packet types:
 - `live_projection_packet.v1`: projection summary plus compact visible refs
   with `objectKey`, on-screen/geometry flags, aim point, and small geometry
   bounds. Heavy polygons are excluded by default.
-- `live_inventory_packet.v1`: compact inventory/equipment state, free/filled
-  slots, item count, signature, and non-empty item slots.
+- `live_inventory_packet.v1`: compact inventory/equipment state, slot count,
+  free/filled slots, total item quantity, signature, and non-empty item slots.
 - `live_activity_packet.v1`: raw observed animation, pose, interacting target,
   and status fields only. Task-state interpretation remains outside Java.
+- `live_navigation_packet.v1`: compact read-only navigation readiness facts:
+  player tile/world location, collision summary/hash, map dimensions, blocked
+  tile counts, and scene bounds. It does not contain routes or movement
+  instructions.
+- `live_collision_window_packet.v1`: bounded local collision flags around the
+  player for lightweight reachability QA. It includes window bounds, radius,
+  dimensions, row-encoded flags, and a window hash. It is not a movement or
+  route packet.
+- `live_collision_grid_packet.v1`: optional debug-only full collision flag grid
+  packet. Disabled by default; normal live mode emits the summary/hash packet
+  instead.
 - `live_writer_health_packet.v1`: raw writer and compact live packet queue,
   drop, write-error, and frame-drop diagnostics.
 
@@ -168,9 +179,10 @@ packets are missing or stale, which is useful for proving that live mode is not
 using raw tick fallback.
 
 Compact packet mode converts baseline, scene-delta, projection, inventory,
-activity, and writer-health packets into the same rolling live candidate files
-under `interaction_geometry\live`, so context-service consumers do not need a
-new response schema.
+activity, navigation, local collision-window, optional debug collision-grid, and
+writer-health packets into the same rolling live candidate files under
+`interaction_geometry\live`, so context-service consumers do not need a new
+response schema.
 
 Compact packet mode is field-tolerant. If a packet omits a value needed by a
 profile, Python marks the capability as missing or warns rather than inventing
@@ -178,10 +190,110 @@ state. It does not silently switch to broad raw scene processing unless
 `--input-source auto` selected the raw fallback because compact packets were not
 available.
 
+Inventory fields use explicit meanings:
+
+- `inventorySlotCount` / `slotCount`: known inventory capacity for the packet.
+- `filledSlots`: occupied inventory slots.
+- `freeSlots`: empty inventory slots.
+- `itemCount`: compatibility alias for total item quantity across occupied
+  slots.
+- `totalItemQuantity`: explicit total quantity sum.
+- `inventoryFull`: derived from `freeSlots == 0` when slot count is known.
+
+Realtime liveness distinguishes `live_assumed` from `unknown`. In delta mode,
+`live_assumed` means the candidate is currently present in the candidate stream
+and no direct depletion/despawn delta was observed. `unknown` means liveness is
+off, missing, or unavailable. `degraded` indicates budget pressure or direct
+stale/despawned/depleted evidence.
+
 `live_status.json` and `context_response.v1` diagnostics include the active
 input source, compact packet availability/recentness, fallback reason, latest
 compact packet sequence, and latest compact segment so sidecars can tell whether
 normal live mode is using compact packets.
+
+## Local Collision Window And Reachability QA
+
+Navigation telemetry is read-only context. It does not click, walk, send input,
+invoke menus, mutate client state, or execute routes.
+
+Normal compact live mode emits `live_navigation_packet.v1` when compact packets
+are enabled. Its payload is intentionally small:
+
+- `player`: `worldX`, `worldY`, `plane`, `sceneX`, `sceneY`, `localX`,
+  `localY` when available.
+- `collision.collisionKnown`: whether a collision map summary was available.
+- `collision.mapWidth` / `collision.mapHeight`: local collision map size,
+  typically `104x104`.
+- `collision.blockedMovementTileCount`: count of tiles with movement-blocking
+  collision flags.
+- `collision.blockedFullTileCount`: count of fully movement-blocked tiles.
+- `collision.collisionHash`: summary hash for change detection.
+- `bounds`: scene min/max bounds.
+- `source`: world-view/base-plane metadata and read-only warnings.
+
+Normal compact live mode also emits `live_collision_window_packet.v1` when
+compact navigation packets are enabled. Its payload is a bounded local grid:
+
+- `plane`
+- `playerSceneX` / `playerSceneY`
+- `windowRadius`
+- `minSceneX` / `maxSceneX` / `minSceneY` / `maxSceneY`
+- `width` / `height`
+- `encoding`: currently `json-rows-int-flags`
+- `flags`: row-encoded collision flags for tiles inside the window
+- `collisionWindowTileCount`
+- `collisionWindowHash` / `windowHash`
+- `mapWidth` / `mapHeight`
+- `generatedFromPlane`
+- `warnings`
+
+The default window radius is 24 scene tiles, clamped between 8 and 52. Full
+collision-grid packets remain disabled by default and are debug-only.
+
+`live_target_processor.py` converts this into
+`interaction_geometry\live\live_navigation_summary.json` with:
+
+- `collisionKnown`
+- `playerTileKnown`
+- `mapBounds`
+- `mapWidth` / `mapHeight`
+- `blockedMovementTileCount`
+- `blockedFullTileCount`
+- `collisionHash` / `signature`
+- `obstaclesKnown`
+- `collisionWindowAvailable`
+- `collisionWindowRadius`
+- `collisionWindowBounds`
+- `collisionWindowHash`
+- `collisionWindowTick`
+- `reachabilityComputed`
+- `fullCollisionGridAvailable`
+- `warnings` and `notes`
+
+Candidate packets may include a compact `navigation` object:
+
+- `collisionKnown`
+- `collisionWindowAvailable`
+- `targetInCollisionWindow`
+- `playerTileKnown`
+- `targetTileKnown`
+- `samePlane`
+- `distanceTiles`
+- `directReachability`: `reachable`, `blocked`, or `unknown`
+- `pathLengthTiles`
+- `checkedTiles`
+- `reachabilityConfidence`
+- `reachabilityEvidence`
+- `missingNavigationFields`
+- `conservativeMode`
+
+The current local reachability helper is conservative: it uses 4-direction BFS
+inside the local collision window and searches for the target tile or a walkable
+adjacent tile. Diagonal movement and full long-distance pathfinding are
+deferred. If the local window is present, context responses report
+`navigationReadiness.status="local"` and include per-candidate navigation
+results. If only the summary exists, status is `summary`; if collision data is
+missing, status is `unknown`.
 
 `live_packet_index.json` summarizes the rolling segment set:
 

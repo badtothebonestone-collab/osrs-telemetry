@@ -45,6 +45,56 @@ public class LivePacketTest
 	}
 
 	@Test
+	public void navigationPacketEnvelopeUsesReadOnlyPacketType()
+	{
+		Map<String, Object> collision = new LinkedHashMap<>();
+		collision.put("collisionKnown", true);
+		collision.put("blockedMovementTileCount", 12);
+		collision.put("collisionHash", "abc123");
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("collision", collision);
+		payload.put("reachabilityComputed", false);
+
+		LivePacket packet = new LivePacket(
+				"live_navigation_packet.v1",
+				"session-1",
+				124L,
+				2L,
+				"2026-05-09T00:00:01Z",
+				payload);
+
+		assertEquals(LivePacket.ENVELOPE_SCHEMA, packet.schema);
+		assertEquals("live_navigation_packet.v1", packet.packetType);
+		assertEquals(124L, packet.tick);
+		assertNotNull(packet.payload);
+	}
+
+	@Test
+	public void collisionWindowPacketEnvelopeUsesReadOnlyPacketType()
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("collisionKnown", true);
+		payload.put("windowRadius", 24);
+		payload.put("width", 49);
+		payload.put("height", 49);
+		payload.put("collisionWindowTileCount", 2401);
+		payload.put("collisionWindowHash", "abc123");
+
+		LivePacket packet = new LivePacket(
+				"live_collision_window_packet.v1",
+				"session-1",
+				125L,
+				3L,
+				"2026-05-09T00:00:02Z",
+				payload);
+
+		assertEquals(LivePacket.ENVELOPE_SCHEMA, packet.schema);
+		assertEquals("live_collision_window_packet.v1", packet.packetType);
+		assertEquals(125L, packet.tick);
+		assertNotNull(packet.payload);
+	}
+
+	@Test
 	public void livePacketWriterSequencesIncrease()
 	{
 		LivePacketWriter writer = new LivePacketWriter(

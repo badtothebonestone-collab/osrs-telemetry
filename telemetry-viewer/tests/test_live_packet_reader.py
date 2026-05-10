@@ -97,6 +97,71 @@ class LivePacketReaderTest(unittest.TestCase):
             self.assertIsNone(results[0].error)
             self.assertEqual(results[0].record["sequence"], 2)
 
+    def test_iter_packets_reads_navigation_packet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            live_dir = session / "live_packets"
+            live_dir.mkdir(parents=True)
+            segment = live_dir / "live-000001.ndjson"
+            segment.write_text(
+                json.dumps(
+                    {
+                        "schema": "osrs_telemetry_live_packet.v1",
+                        "packetType": "live_navigation_packet.v1",
+                        "sessionId": "session",
+                        "tick": 3,
+                        "sequence": 3,
+                        "timestampUtc": "2026-05-09T00:00:00Z",
+                        "payload": {"collision": {"collisionKnown": True}},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            results = list(iter_live_packets([segment], packet_type="live_navigation_packet.v1"))
+
+            self.assertEqual(len(results), 1)
+            self.assertIsNone(results[0].error)
+            self.assertEqual(results[0].record["packetType"], "live_navigation_packet.v1")
+            self.assertTrue(results[0].record["payload"]["collision"]["collisionKnown"])
+
+    def test_iter_packets_reads_collision_window_packet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            live_dir = session / "live_packets"
+            live_dir.mkdir(parents=True)
+            segment = live_dir / "live-000001.ndjson"
+            segment.write_text(
+                json.dumps(
+                    {
+                        "schema": "osrs_telemetry_live_packet.v1",
+                        "packetType": "live_collision_window_packet.v1",
+                        "sessionId": "session",
+                        "tick": 4,
+                        "sequence": 4,
+                        "timestampUtc": "2026-05-09T00:00:00Z",
+                        "payload": {
+                            "collisionKnown": True,
+                            "windowRadius": 24,
+                            "width": 3,
+                            "height": 3,
+                            "flags": [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
+                            "collisionWindowHash": "abc",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            results = list(iter_live_packets([segment], packet_type="live_collision_window_packet.v1"))
+
+            self.assertEqual(len(results), 1)
+            self.assertIsNone(results[0].error)
+            self.assertEqual(results[0].record["packetType"], "live_collision_window_packet.v1")
+            self.assertEqual(results[0].record["payload"]["windowRadius"], 24)
+
 
 if __name__ == "__main__":
     unittest.main()

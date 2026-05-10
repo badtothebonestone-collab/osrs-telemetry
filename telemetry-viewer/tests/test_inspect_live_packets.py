@@ -156,6 +156,82 @@ class InspectLivePacketsTest(unittest.TestCase):
             self.assertEqual(summary["latestTick"], 20)
             self.assertEqual(summary["packetTypeCounts"]["live_writer_health_packet.v1"], 1)
 
+    def test_summary_reports_latest_navigation_packet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            live_dir = session / "live_packets"
+            live_dir.mkdir(parents=True)
+            (live_dir / "live-000001.ndjson").write_text(
+                json.dumps(
+                    {
+                        "schema": "osrs_telemetry_live_packet.v1",
+                        "packetType": "live_navigation_packet.v1",
+                        "sessionId": "session",
+                        "tick": 21,
+                        "sequence": 4,
+                        "timestampUtc": "2026-05-09T00:00:03Z",
+                        "payload": {
+                            "collision": {
+                                "collisionKnown": True,
+                                "blockedMovementTileCount": 12,
+                                "blockedFullTileCount": 3,
+                                "collisionHash": "abc123",
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (live_dir / "latest_segment.txt").write_text("live-000001.ndjson\n", encoding="utf-8")
+
+            summary = summarize_live_packets(session)
+
+            self.assertEqual(summary["packetTypeCounts"]["live_navigation_packet.v1"], 1)
+            self.assertEqual(summary["navigation"]["latestNavigationTick"], 21)
+            self.assertTrue(summary["navigation"]["collisionKnown"])
+            self.assertEqual(summary["navigation"]["blockedMovementTileCount"], 12)
+
+    def test_summary_reports_latest_collision_window_packet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            live_dir = session / "live_packets"
+            live_dir.mkdir(parents=True)
+            (live_dir / "live-000001.ndjson").write_text(
+                json.dumps(
+                    {
+                        "schema": "osrs_telemetry_live_packet.v1",
+                        "packetType": "live_collision_window_packet.v1",
+                        "sessionId": "session",
+                        "tick": 22,
+                        "sequence": 5,
+                        "timestampUtc": "2026-05-09T00:00:04Z",
+                        "payload": {
+                            "collisionKnown": True,
+                            "windowRadius": 24,
+                            "width": 49,
+                            "height": 49,
+                            "flags": [[0, 0], [0, 0]],
+                            "collisionWindowTileCount": 2401,
+                            "collisionWindowHash": "win123",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (live_dir / "latest_segment.txt").write_text("live-000001.ndjson\n", encoding="utf-8")
+
+            summary = summarize_live_packets(session)
+
+            self.assertEqual(summary["packetTypeCounts"]["live_collision_window_packet.v1"], 1)
+            self.assertEqual(summary["collisionWindow"]["latestCollisionWindowTick"], 22)
+            self.assertTrue(summary["collisionWindow"]["collisionWindowAvailable"])
+            self.assertEqual(summary["collisionWindow"]["windowRadius"], 24)
+            self.assertEqual(summary["collisionWindow"]["tileCount"], 2401)
+            self.assertEqual(summary["collisionWindow"]["collisionWindowHash"], "win123")
+            self.assertGreater(summary["collisionWindow"]["approxPacketBytes"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

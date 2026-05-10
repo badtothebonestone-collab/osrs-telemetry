@@ -1158,7 +1158,8 @@ should prefer the small live context files:
 - `live_context_index.json`: query-ready best/nearest candidates by class,
   candidate counts, and live file paths.
 - `live_candidates.jsonl`: selected read-only target context packets.
-- `live_navigation_summary.json`: current navigation/collision placeholder.
+- `live_navigation_summary.json`: current read-only navigation/collision
+  readiness summary.
 - `live_performance_summary.json`: rolling latency statistics for recent live
   processor updates.
 - `live_status.json`: timing, output byte counts, source cap status, and live
@@ -1295,10 +1296,75 @@ python telemetry-viewer\live_context_query.py --latest-session --self-test
 python telemetry-viewer\live_context_query.py --latest-session --watch --nearest tree --interval 1
 ```
 
-Navigation readiness is intentionally a placeholder unless a future read-only
-collision summary is available. When collision data is missing, the task report
-returns navigation readiness as `unknown` and warns that reachability questions
-cannot be answered yet.
+## Local Collision Window And Reachability QA
+
+Navigation readiness is read-only context. It does not move the player, click,
+send input, invoke menus, route actions, or execute movement. It answers
+whether the current telemetry knows enough to reason about navigation later.
+
+Compact live packets include `live_navigation_packet.v1` when compact packets
+are enabled. The packet carries player world/scene/local tile fields, collision
+map dimensions, blocked-tile counts, and a collision hash/signature. Normal live
+mode also emits `live_collision_window_packet.v1`, a bounded local collision
+window around the player. The optional `live_collision_grid_packet.v1` is
+debug-only and disabled by default; normal live QA does not emit the full
+`104x104` collision grid.
+
+The live processor writes:
+
+```text
+interaction_geometry\live\live_navigation_summary.json
+```
+
+Important fields:
+
+- `collisionKnown`: collision summary was available.
+- `playerTileKnown`: player scene tile was known.
+- `mapWidth` / `mapHeight`: local collision map dimensions.
+- `blockedMovementTileCount` / `blockedFullTileCount`: compact obstacle counts.
+- `collisionHash`: summary hash for detecting collision-map changes.
+- `collisionWindowAvailable`: local collision flags are available around the
+  player.
+- `collisionWindowRadius` / `collisionWindowBounds` / `collisionWindowHash`:
+  window metadata.
+- `reachabilityComputed`: `true` when local window reachability was attempted.
+- `fullCollisionGridAvailable`: whether a debug full-grid packet was present.
+
+Candidate packets may include a compact `navigation` object with
+`playerTileKnown`, `targetTileKnown`, `samePlane`, `distanceTiles`, and
+`directReachability`. With a local collision window, the processor performs a
+small conservative 4-direction BFS from the player tile to the target tile or a
+walkable adjacent tile. Results are read-only observations:
+`reachable`, `blocked`, or `unknown`.
+
+If the local collision window is available, context responses return
+`navigationReadiness.status="local"` and candidate packets carry per-candidate
+reachability details. If only the collision summary is available, the status is
+`summary`. If collision data is missing, the task report returns `unknown`.
+Full pathfinding remains a future capability and is reported separately from
+local reachability.
+
+Useful checks:
+
+```text
+python telemetry-viewer\inspect_live_packets.py --latest-session --summary
+python telemetry-viewer\check_live_setup.py --latest-session
+python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+```
+
+Context request with navigation readiness:
+
+```powershell
+$request = @{
+  schema = "context_request.v1"
+  task = "woodcutting"
+  needs = @("baseline", "best:tree", "nearest:tree", "inventory", "activity", "liveness", "navigation_readiness", "diagnostics")
+  maxCandidates = 1
+  responseMode = "compact"
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
+```
 
 ## Activity, Inventory, And Target Liveness QA
 
@@ -1340,8 +1406,13 @@ Candidate packets may include:
 
 Inventory state is based on observed inventory item IDs/quantities in the tick
 window. It reports signatures, free/filled slots, whether the inventory changed
-this tick or recently, and compact item deltas. If item names are unavailable it
-reports item IDs and quantities.
+this tick or recently, and compact item deltas. `filledSlots` is occupied
+inventory slots, `freeSlots` is empty inventory slots, and `inventoryFull` is
+derived from `freeSlots == 0` when the slot count is known. `itemCount` is kept
+as a compatibility alias for the total quantity sum; newer outputs also include
+`totalItemQuantity` and `inventorySlotCount` so slot occupancy and stack
+quantity are not confused. If item names are unavailable it reports item IDs and
+quantities.
 
 The woodcutting state heuristic is intentionally cautious. It can report
 `likely_idle`, `likely_chopping`, `likely_moving`, `inventory_changed`,
@@ -1457,6 +1528,9 @@ Compact mode consumes these packet types:
 - `live_projection_packet.v1`
 - `live_inventory_packet.v1`
 - `live_activity_packet.v1`
+- `live_navigation_packet.v1`
+- `live_collision_window_packet.v1`
+- `live_collision_grid_packet.v1` when debug full-grid emission is enabled
 - `live_writer_health_packet.v1`
 
 Missing compact fields are reported as warnings or missing capabilities instead
@@ -1620,6 +1694,16 @@ Liveness modes:
   depletion/despawn evidence is seen, candidates are marked `live_assumed`.
 - `full`: complete audit behavior. It may scan broader visible/source state and
   is expected to be slower.
+
+Liveness wording:
+
+- `live` means direct live/present evidence is available.
+- `live_assumed` means delta mode saw no direct depletion/despawn evidence for
+  the current candidate. This is not reported as unknown when liveness is
+  healthy.
+- `unknown` means liveness is off, missing, or unavailable.
+- `degraded` means budget limits, stale/depleted/despawned evidence, or data
+  gaps affected liveness reliability.
 
 `live_status.json` reports liveness timing and budget fields including
 `livenessMode`, `livenessBudgetMs`, `livenessBudgetExceeded`,

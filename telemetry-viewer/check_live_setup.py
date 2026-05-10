@@ -52,6 +52,15 @@ def parse_latest_segment(session: Path, max_lines: int = 500) -> dict:
     latest_tick = None
     latest_sequence = None
     parsed = 0
+    latest_navigation_tick = None
+    collision_known = None
+    latest_collision_window_tick = None
+    collision_window_available = False
+    collision_window_radius = None
+    collision_window_width = None
+    collision_window_height = None
+    collision_window_tile_count = None
+    collision_window_hash = None
 
     if latest is None:
         return {
@@ -81,6 +90,21 @@ def parse_latest_segment(session: Path, max_lines: int = 500) -> dict:
             latest_tick = tick if latest_tick is None else max(latest_tick, tick)
         if isinstance(sequence, int):
             latest_sequence = sequence if latest_sequence is None else max(latest_sequence, sequence)
+        if packet_type == "live_navigation_packet.v1":
+            latest_navigation_tick = tick if isinstance(tick, int) else latest_navigation_tick
+            payload = packet.get("payload") if isinstance(packet.get("payload"), dict) else {}
+            collision = payload.get("collision") if isinstance(payload.get("collision"), dict) else {}
+            if collision.get("collisionKnown") is not None:
+                collision_known = collision.get("collisionKnown")
+        if packet_type == "live_collision_window_packet.v1":
+            latest_collision_window_tick = tick if isinstance(tick, int) else latest_collision_window_tick
+            payload = packet.get("payload") if isinstance(packet.get("payload"), dict) else {}
+            collision_window_available = bool(payload.get("flags"))
+            collision_window_radius = payload.get("windowRadius")
+            collision_window_width = payload.get("width")
+            collision_window_height = payload.get("height")
+            collision_window_tile_count = payload.get("collisionWindowTileCount")
+            collision_window_hash = payload.get("collisionWindowHash") or payload.get("windowHash")
 
     return {
         "latestSegment": str(latest),
@@ -91,6 +115,15 @@ def parse_latest_segment(session: Path, max_lines: int = 500) -> dict:
         "packetCountsByType": counts,
         "latestTick": latest_tick,
         "latestSequence": latest_sequence,
+        "latestNavigationTick": latest_navigation_tick,
+        "collisionKnown": collision_known,
+        "latestCollisionWindowTick": latest_collision_window_tick,
+        "collisionWindowAvailable": collision_window_available,
+        "collisionWindowRadius": collision_window_radius,
+        "collisionWindowWidth": collision_window_width,
+        "collisionWindowHeight": collision_window_height,
+        "collisionWindowTileCount": collision_window_tile_count,
+        "collisionWindowHash": collision_window_hash,
     }
 
 
@@ -140,6 +173,10 @@ def check_live_setup(session: Path | None, *, require_compact_packets: bool = Fa
     add_check("latest segment exists", latest is not None and latest.exists(), f"latest segment: {latest}", required=require_compact_packets)
     add_check("latest segment parses", int(latest_parse.get("parsedPackets") or 0) > 0, "latest segment has parseable packets", required=require_compact_packets)
     add_check("compact packets recent", compact_recent, f"latest segment age seconds: {latest_age}", required=require_compact_packets)
+    add_check("compact navigation packets present", int((latest_parse.get("packetCountsByType") or {}).get("live_navigation_packet.v1") or 0) > 0, f"latest navigation tick: {latest_parse.get('latestNavigationTick')}")
+    add_check("collision summary known", latest_parse.get("collisionKnown") is True, f"collisionKnown: {latest_parse.get('collisionKnown')}")
+    add_check("collision window packets present", int((latest_parse.get("packetCountsByType") or {}).get("live_collision_window_packet.v1") or 0) > 0, f"latest collision window tick: {latest_parse.get('latestCollisionWindowTick')}")
+    add_check("collision window available", latest_parse.get("collisionWindowAvailable") is True, f"radius: {latest_parse.get('collisionWindowRadius')} size: {latest_parse.get('collisionWindowWidth')}x{latest_parse.get('collisionWindowHeight')}")
     add_check("raw tick fallback available", bool(raw_ticks) or compact_available, f"raw tick files: {len(raw_ticks)}")
     add_check("rolling live output directory", live_output_dir.exists() or compact_available, f"live output: {live_output_dir}")
 
@@ -164,6 +201,19 @@ def check_live_setup(session: Path | None, *, require_compact_packets: bool = Fa
         "latestSegmentParsedPackets": latest_parse.get("parsedPackets"),
         "latestSegmentMalformedLines": latest_parse.get("malformedLines"),
         "packetCountsByType": latest_parse.get("packetCountsByType"),
+        "navigationPacketsPresent": int((latest_parse.get("packetCountsByType") or {}).get("live_navigation_packet.v1") or 0) > 0,
+        "latestNavigationTick": latest_parse.get("latestNavigationTick"),
+        "collisionKnown": latest_parse.get("collisionKnown"),
+        "collisionWindowPacketsPresent": int((latest_parse.get("packetCountsByType") or {}).get("live_collision_window_packet.v1") or 0) > 0,
+        "latestCollisionWindowTick": latest_parse.get("latestCollisionWindowTick"),
+        "collisionWindowAvailable": latest_parse.get("collisionWindowAvailable"),
+        "collisionWindowRadius": latest_parse.get("collisionWindowRadius"),
+        "collisionWindowDimensions": {
+            "width": latest_parse.get("collisionWindowWidth"),
+            "height": latest_parse.get("collisionWindowHeight"),
+        },
+        "collisionWindowTileCount": latest_parse.get("collisionWindowTileCount"),
+        "collisionWindowHash": latest_parse.get("collisionWindowHash"),
         "rawTicksAvailable": bool(raw_ticks),
         "rawTickFileCount": len(raw_ticks),
         "liveOutputExists": live_output_dir.exists(),
@@ -196,6 +246,15 @@ def print_human(payload: dict) -> None:
     print(f"compact packets recent: {payload.get('compactPacketsRecent')}")
     print(f"latest segment: {payload.get('compactPacketLatestSegment')}")
     print(f"latest tick: {payload.get('compactPacketLatestTick')} sequence: {payload.get('compactPacketLatestSequence')}")
+    print(f"latest navigation tick: {payload.get('latestNavigationTick')} collisionKnown={payload.get('collisionKnown')}")
+    dimensions = payload.get("collisionWindowDimensions") or {}
+    print(
+        "latest collision window tick: "
+        f"{payload.get('latestCollisionWindowTick')} "
+        f"available={payload.get('collisionWindowAvailable')} "
+        f"radius={payload.get('collisionWindowRadius')} "
+        f"size={dimensions.get('width')}x{dimensions.get('height')}"
+    )
     print(f"raw tick fallback available: {payload.get('rawTicksAvailable')}")
     for check in payload.get("checks") or []:
         print(f"{check.get('status'):4} {check.get('name')}: {check.get('message')}")

@@ -371,6 +371,20 @@ def freshness_info(context: dict, candidate: dict | None, freshness_ticks: int, 
     }, warnings
 
 
+def liveness_interpretation(candidate: dict | None, context: dict) -> str:
+    status = context.get("status") if isinstance(context.get("status"), dict) else {}
+    live_state = candidate.get("targetLiveState") if isinstance(candidate, dict) else None
+    if status.get("livenessDegraded") or status.get("livenessBudgetExceeded"):
+        return "degraded"
+    if live_state in ("recently_despawned", "depleted_or_stump", "stale", "changed"):
+        return "degraded"
+    if live_state == "live":
+        return "direct"
+    if live_state == "live_assumed":
+        return "assumed"
+    return "unknown"
+
+
 def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int, freshness_ms: int) -> tuple[dict, str, float, list[str], list[str], list[str]]:
     reasons = []
     warnings = []
@@ -386,6 +400,10 @@ def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int
     geometry_available = candidate.get("geometryAvailable")
     ui_blocked = candidate.get("uiBlocked")
     live_state = candidate.get("targetLiveState")
+    live_interpretation = liveness_interpretation(candidate, context)
+    status_doc = context.get("status") if isinstance(context.get("status"), dict) else {}
+    navigation = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
+    direct_reachability = navigation.get("directReachability") if navigation else None
 
     if on_screen is True:
         reasons.append("candidate is on screen.")
@@ -420,17 +438,32 @@ def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int
         warnings.append(f"candidate target liveness is degraded: {live_state}.")
     elif live_state == "live":
         reasons.append("candidate target liveness is live.")
+    elif live_state == "live_assumed" and live_interpretation == "assumed":
+        reasons.append("target liveness assumed from current candidate data; no direct depletion delta seen.")
+    elif live_state == "live_assumed":
+        warnings.append("candidate target liveness is assumed but degraded by realtime liveness status.")
     else:
-        warnings.append("candidate target liveness is unknown.")
+        if status_doc.get("livenessMode") == "off":
+            warnings.append("candidate target liveness is unknown because liveness mode is off.")
+        else:
+            warnings.append("candidate target liveness is unknown.")
         missing.append("targetLiveState")
 
-    if context["status"].get("budgetExceeded") is True:
+    if direct_reachability == "reachable":
+        reasons.append("candidate has a reachable local collision-window path observation.")
+    elif direct_reachability == "blocked":
+        warnings.append("candidate local collision-window reachability appears blocked.")
+    elif direct_reachability == "unknown" and navigation.get("collisionWindowAvailable"):
+        warnings.append("candidate local collision-window reachability is unknown.")
+        missing.extend(navigation.get("missingNavigationFields") or ["localReachability"])
+
+    if status_doc.get("budgetExceeded") is True:
         warnings.append("live processor budget was exceeded on the latest update.")
-    if as_int(context["status"].get("writeFailureCount")) and as_int(context["status"].get("writeFailureCount")) > 0:
+    if as_int(status_doc.get("writeFailureCount")) and as_int(status_doc.get("writeFailureCount")) > 0:
         warnings.append("live processor reported write failures.")
-    if context["status"].get("sourceCapHit") is True:
+    if status_doc.get("sourceCapHit") is True:
         warnings.append("source scene object cap was hit.")
-    if context["status"].get("sourceSceneKnowledgeComplete") is False:
+    if status_doc.get("sourceSceneKnowledgeComplete") is False:
         warnings.append("source scene knowledge is not complete.")
 
     canvas = context["baseline"].get("cameraViewport") if isinstance(context["baseline"].get("cameraViewport"), dict) else {}
@@ -440,6 +473,8 @@ def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int
         if aim["canvasX"] < 0 or aim["canvasY"] < 0 or aim["canvasX"] > width or aim["canvasY"] > height:
             warnings.append("candidate aim point is outside known canvas bounds.")
 
+    liveness_ok = live_state == "live" or (live_state == "live_assumed" and live_interpretation == "assumed")
+    navigation_ok = direct_reachability in (None, "reachable") or not navigation.get("collisionWindowAvailable")
     pass_conditions = [
         freshness.get("freshByTicks"),
         freshness.get("freshByMillis"),
@@ -447,7 +482,8 @@ def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int
         geometry_available is True,
         bool(aim),
         ui_blocked is False,
-        live_state == "live",
+        liveness_ok,
+        navigation_ok,
     ]
     if all(pass_conditions):
         status = "PASS"
@@ -463,7 +499,7 @@ def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int
     confidence += 0.15 if geometry_available is True else 0.0
     confidence += 0.1 if aim else 0.0
     confidence += 0.1 if ui_blocked is False else 0.0
-    confidence += 0.1 if live_state == "live" else 0.0
+    confidence += 0.1 if live_state == "live" else 0.06 if live_state == "live_assumed" and live_interpretation == "assumed" else 0.0
     confidence = min(1.0, confidence)
 
     geometry_payload = candidate.get("geometry") if isinstance(candidate.get("geometry"), dict) else {}
@@ -493,8 +529,10 @@ def candidate_answer(candidate: dict | None, context: dict, freshness_ticks: int
         "tick": candidate_tick(candidate),
         "freshness": freshness,
         "targetLiveState": live_state,
+        "livenessInterpretation": live_interpretation,
         "targetLiveStateConfidence": candidate.get("targetLiveStateConfidence"),
         "targetLiveEvidence": candidate.get("targetLiveEvidence") or [],
+        "navigation": navigation or None,
         "lastSeenTick": candidate.get("lastSeenTick"),
         "lastChangedTick": candidate.get("lastChangedTick"),
         "lastDespawnedTick": candidate.get("lastDespawnedTick"),
@@ -569,13 +607,55 @@ def player_busy_summary(baseline: dict) -> dict:
     return {"value": value, "evidence": evidence, "reason": reason}
 
 
+def normalize_inventory_state(inventory: dict) -> dict:
+    if not isinstance(inventory, dict):
+        return {"known": False}
+    normalized = dict(inventory)
+    filled = as_int(normalized.get("filledSlots"))
+    free = as_int(normalized.get("freeSlots"))
+    slot_count = as_int(first_value(normalized.get("inventorySlotCount"), normalized.get("slotCount")))
+    if slot_count is None and filled is not None and free is not None:
+        slot_count = max(28, filled + free)
+    if slot_count is None and normalized.get("known") is True:
+        slot_count = 28
+    if filled is None and slot_count is not None and free is not None:
+        filled = max(0, slot_count - free)
+    if free is None and slot_count is not None and filled is not None:
+        free = max(0, slot_count - filled)
+    elif slot_count is not None and filled is not None and free is not None and filled + free != slot_count:
+        free = max(0, slot_count - filled)
+    total_quantity = as_int(first_value(normalized.get("totalItemQuantity"), normalized.get("itemCount")))
+    if total_quantity is None and isinstance(normalized.get("items"), list):
+        total_quantity = sum(as_int(item.get("quantity")) or 1 for item in normalized["items"] if isinstance(item, dict))
+    known = normalized.get("known")
+    if known is None:
+        known = any(value is not None for value in (free, filled, total_quantity, normalized.get("signature")))
+    normalized.update(
+        {
+            "known": bool(known),
+            "inventorySlotCount": slot_count,
+            "slotCount": slot_count,
+            "freeSlots": free,
+            "filledSlots": filled,
+            "itemCount": total_quantity,
+            "totalItemQuantity": total_quantity,
+            "inventoryFull": (free == 0) if free is not None else normalized.get("inventoryFull"),
+        }
+    )
+    return normalized
+
+
 def inventory_readiness(baseline: dict) -> dict:
-    inventory = baseline.get("inventory") if isinstance(baseline.get("inventory"), dict) else {}
-    known = any(inventory.get(key) is not None for key in ("freeSlots", "itemCount", "signature"))
+    inventory = normalize_inventory_state(baseline.get("inventory") if isinstance(baseline.get("inventory"), dict) else {})
+    known = bool(inventory.get("known"))
     return {
         "known": known,
+        "inventorySlotCount": inventory.get("inventorySlotCount"),
         "freeSlots": inventory.get("freeSlots"),
+        "filledSlots": inventory.get("filledSlots"),
         "itemCount": inventory.get("itemCount"),
+        "totalItemQuantity": inventory.get("totalItemQuantity"),
+        "inventoryFull": inventory.get("inventoryFull"),
         "signature": inventory.get("signature"),
     }
 
@@ -592,19 +672,50 @@ def navigation_readiness(navigation: dict, baseline: dict) -> dict:
             "warning": "collision/navigation data unavailable; reachability questions cannot be answered yet",
         }
     collision_known = navigation.get("collisionKnown")
+    collision_window_available = bool(navigation.get("collisionWindowAvailable"))
+    player_tile_known = navigation.get("playerTileKnown")
+    if player_tile_known is None:
+        player_tile_known = navigation.get("playerSceneX") is not None and navigation.get("playerSceneY") is not None
+    notes = navigation.get("notes") or []
+    warnings = list(navigation.get("warnings") or [])
+    missing_capabilities = []
+    if collision_known and collision_window_available:
+        warnings.append("local collision window available; full pathfinding is not implemented")
+        missing_capabilities.append("fullPathfinding")
+    elif collision_known:
+        warnings.append("collision summary available; full reachability/pathing not implemented")
+        missing_capabilities.append("fullPathfinding")
+        if not navigation.get("fullCollisionGridAvailable"):
+            missing_capabilities.append("collisionGridPathing")
+    else:
+        warnings.append("collision/navigation data unavailable; reachability questions cannot be answered yet")
+        missing_capabilities.append("collisionSummary")
     return {
-        "status": "known" if collision_known else "unknown",
+        "status": "local" if collision_known and collision_window_available else "summary" if collision_known else "unknown",
         "collisionKnown": collision_known,
+        "collisionWindowAvailable": collision_window_available,
+        "collisionWindowRadius": navigation.get("collisionWindowRadius"),
+        "collisionWindowBounds": navigation.get("collisionWindowBounds"),
+        "collisionWindowHash": navigation.get("collisionWindowHash"),
+        "collisionWindowTick": navigation.get("collisionWindowTick"),
         "plane": navigation.get("plane"),
         "currentPlaneKnown": navigation.get("plane") is not None or player.get("plane") is not None,
         "playerSceneX": navigation.get("playerSceneX"),
         "playerSceneY": navigation.get("playerSceneY"),
-        "playerTileKnown": navigation.get("playerSceneX") is not None and navigation.get("playerSceneY") is not None,
+        "playerTileKnown": player_tile_known,
         "mapBounds": navigation.get("mapBounds"),
+        "mapWidth": navigation.get("mapWidth"),
+        "mapHeight": navigation.get("mapHeight"),
         "blockedMovementTileCount": navigation.get("blockedMovementTileCount"),
+        "blockedFullTileCount": navigation.get("blockedFullTileCount"),
+        "collisionHash": navigation.get("collisionHash") or navigation.get("signature"),
         "obstaclesKnown": navigation.get("obstaclesKnown"),
-        "reachabilityComputed": False,
-        "notes": navigation.get("notes") or [],
+        "reachabilityComputed": bool(navigation.get("reachabilityComputed")),
+        "fullCollisionGridAvailable": bool(navigation.get("fullCollisionGridAvailable")),
+        "directReachability": "per_candidate" if collision_window_available else "unknown",
+        "missingCapabilities": sorted(set(missing_capabilities)),
+        "warnings": sorted(set(str(warning) for warning in warnings if warning)),
+        "notes": notes,
     }
 
 
@@ -698,7 +809,11 @@ def woodcutting_task_payload(context: dict, args) -> dict:
     warnings.extend(freshness_warnings)
     busy = (activity_doc.get("activity") or {}).get("playerAppearsBusy") if isinstance((activity_doc.get("activity") or {}), dict) else None
     busy = player_busy_summary(baseline) if busy is None else busy
-    inventory = activity_doc.get("inventory") if isinstance(activity_doc.get("inventory"), dict) else inventory_readiness(baseline)
+    inventory = (
+        normalize_inventory_state(activity_doc.get("inventory"))
+        if isinstance(activity_doc.get("inventory"), dict)
+        else inventory_readiness(baseline)
+    )
     activity_state = activity_doc.get("activity") if isinstance(activity_doc.get("activity"), dict) else {}
     woodcutting_state = activity_doc.get("woodcuttingState") if isinstance(activity_doc.get("woodcuttingState"), dict) else {}
     target_liveness = activity_doc.get("targetLiveness") if isinstance(activity_doc.get("targetLiveness"), dict) else {}
@@ -718,7 +833,9 @@ def woodcutting_task_payload(context: dict, args) -> dict:
         warnings.append("target liveness state unavailable.")
         missing.append("targetLiveness")
     if navigation.get("status") == "unknown":
-        warnings.append(navigation.get("warning") or "collision/navigation data unavailable; reachability questions cannot be answered yet")
+        warnings.extend(navigation.get("warnings") or [navigation.get("warning") or "collision/navigation data unavailable; reachability questions cannot be answered yet"])
+    elif navigation.get("status") == "summary":
+        warnings.extend(navigation.get("warnings") or [])
     if not baseline.get("latestFramePath"):
         warnings.append("no frame path in live baseline.")
     if status_doc.get("sourceCapHit") is True:
@@ -733,6 +850,8 @@ def woodcutting_task_payload(context: dict, args) -> dict:
         overall = "PASS" if inventory["known"] and navigation.get("currentPlaneKnown") else "WARN"
     else:
         overall = "WARN" if core_ok or candidates else "FAIL"
+    if overall == "PASS" and navigation.get("directReachability") == "unknown":
+        overall = "WARN"
 
     return {
         "schema": TASK_SCHEMA,
@@ -782,7 +901,9 @@ def woodcutting_task_payload(context: dict, args) -> dict:
         "missingCapabilities": [
             capability
             for capability, missing_capability in (
-                ("collisionReachability", navigation.get("status") == "unknown"),
+                ("collisionSummary", navigation.get("status") == "unknown"),
+                ("fullPathfinding", navigation.get("status") in {"summary", "local"}),
+                ("collisionGridPathing", navigation.get("status") == "summary" and not navigation.get("fullCollisionGridAvailable")),
                 ("inventoryDeltas", not inventory.get("recentItemDeltas")),
                 ("animationFrame", player.get("animationFrame") is None),
                 ("explicitMovementState", player.get("isMoving") is None),
@@ -959,6 +1080,7 @@ def inventory_payload(context: dict) -> dict:
     if not inventory:
         baseline = context["baseline"]
         inventory = baseline.get("inventory") if isinstance(baseline.get("inventory"), dict) else {}
+    inventory = normalize_inventory_state(inventory)
     known = inventory.get("known") if "known" in inventory else bool(inventory)
     return {
         "schema": "live_inventory_answer.v1",
@@ -989,7 +1111,23 @@ def liveness_payload(context: dict) -> dict:
             "bestCandidateChanged": status_doc.get("bestCandidateChanged"),
             "bestCandidateChangeReason": status_doc.get("bestCandidateChangeReason"),
         }
-    known = bool(liveness) and any(value is not None for value in liveness.values())
+    if "livenessInterpretation" not in liveness:
+        live_state = liveness.get("bestCandidateLiveState") or liveness.get("activeCandidateLiveState")
+        if status_doc.get("livenessDegraded") or status_doc.get("livenessBudgetExceeded"):
+            liveness["livenessInterpretation"] = "degraded"
+        elif live_state in ("recently_despawned", "depleted_or_stump", "stale", "changed"):
+            liveness["livenessInterpretation"] = "degraded"
+        elif live_state == "live":
+            liveness["livenessInterpretation"] = "direct"
+        elif live_state == "live_assumed":
+            liveness["livenessInterpretation"] = "assumed"
+        else:
+            liveness["livenessInterpretation"] = "unknown"
+    known = bool(liveness) and any(
+        value is not None
+        for key, value in liveness.items()
+        if key != "livenessInterpretation"
+    )
     return {
         "schema": "live_liveness_answer.v1",
         "status": "PASS" if known else "WARN",
@@ -1093,6 +1231,7 @@ def compact_candidate(candidate: dict | None) -> dict | None:
         "uiBlocked": candidate.get("uiBlocked"),
         "aimPoint": candidate.get("aimPoint"),
         "targetLiveState": candidate.get("targetLiveState"),
+        "navigation": candidate.get("navigation"),
         "qualityTier": candidate.get("qualityTier"),
         "qualityScore": candidate.get("qualityScore"),
         "tick": candidate.get("tick"),
@@ -1119,7 +1258,16 @@ def compact_json_payload(payload: dict, args) -> dict:
                 "woodcuttingState": payload.get("woodcuttingState"),
                 "inventoryState": {
                     key: (payload.get("inventoryState") or {}).get(key)
-                    for key in ("known", "freeSlots", "filledSlots", "itemCount", "inventoryFull", "changedRecently")
+                    for key in (
+                        "known",
+                        "inventorySlotCount",
+                        "freeSlots",
+                        "filledSlots",
+                        "itemCount",
+                        "totalItemQuantity",
+                        "inventoryFull",
+                        "changedRecently",
+                    )
                 },
                 "bestTree": compact_candidate(summary.get("bestTree")),
                 "nearestTree": compact_candidate(summary.get("nearestTree")),

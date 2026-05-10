@@ -46,6 +46,7 @@ def candidate(
     on_screen: bool = True,
     geometry: bool = True,
     object_key: str | None = None,
+    live_state: str = "live",
 ) -> dict:
     value = {
         "schema": "live_candidate_packet.v1",
@@ -78,9 +79,24 @@ def candidate(
         "qualityTier": "excellent" if quality >= 90 else "good",
         "positiveSignals": ["onScreen", "geometryAvailable"],
         "negativeSignals": ["uiBlocked"] if ui_blocked else [],
-        "targetLiveState": "live",
-        "targetLiveStateConfidence": 0.9,
-        "targetLiveEvidence": ["test candidate live"],
+        "targetLiveState": live_state,
+        "targetLiveStateConfidence": 0.55 if live_state == "live_assumed" else 0.9 if live_state == "live" else 0.2,
+        "targetLiveEvidence": ["no direct depletion delta seen"] if live_state == "live_assumed" else ["test candidate live"],
+        "navigation": {
+            "collisionKnown": True,
+            "collisionWindowAvailable": True,
+            "targetInCollisionWindow": True,
+            "playerTileKnown": True,
+            "targetTileKnown": True,
+            "samePlane": True,
+            "directReachability": "reachable",
+            "pathLengthTiles": max(0, distance - 1),
+            "checkedTiles": distance + 1,
+            "reachabilityConfidence": 0.85,
+            "reachabilityEvidence": ["synthetic local path"],
+            "missingNavigationFields": [],
+            "conservativeMode": True,
+        },
     }
     if aim:
         value["aimPoint"] = {"x": 100 + distance, "y": 120}
@@ -170,7 +186,8 @@ def make_live_session(root: Path, *, candidates: list[dict] | None = None, stale
             },
             "equipment": {"known": True, "items": []},
             "targetLiveness": {
-                "bestCandidateLiveState": "live",
+                "activeCandidateLiveState": candidates[0].get("targetLiveState") if candidates else None,
+                "bestCandidateLiveState": candidates[0].get("targetLiveState") if candidates else None,
                 "recentlyUnavailableCount": 0,
                 "recentlyDepletedCount": 0,
                 "suppressedCandidateCount": 0,
@@ -331,6 +348,42 @@ class LiveContextQueryTest(unittest.TestCase):
             payload = query.direct_query_payload(context, "nearest", "tree", args)
             self.assertTrue(any("cap was hit" in warning for warning in payload["warnings"]))
 
+    def test_live_assumed_liveness_does_not_warn_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp), candidates=[candidate(10, "tree", 2, 95, live_state="live_assumed")])
+            context = query.load_live_context(session)
+            args = type("Args", (), {"profile": None, "max_distance": None, "freshness_ticks": 5, "freshness_ms": 60000})()
+            payload = query.direct_query_payload(context, "best", "tree", args)
+            self.assertEqual(payload["answer"]["livenessInterpretation"], "assumed")
+            self.assertFalse(any("liveness is unknown" in warning for warning in payload["warnings"]))
+            self.assertTrue(any("liveness assumed" in reason for reason in payload["reasons"]))
+
+    def test_unknown_liveness_still_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp), candidates=[candidate(10, "tree", 2, 95, live_state="unknown")])
+            context = query.load_live_context(session)
+            args = type("Args", (), {"profile": None, "max_distance": None, "freshness_ticks": 5, "freshness_ms": 60000})()
+            payload = query.direct_query_payload(context, "best", "tree", args)
+            self.assertEqual(payload["answer"]["livenessInterpretation"], "unknown")
+            self.assertTrue(any("liveness is unknown" in warning for warning in payload["warnings"]))
+
+    def test_inventory_state_normalizes_slot_counts(self):
+        state = query.normalize_inventory_state(
+            {
+                "known": True,
+                "freeSlots": 1,
+                "filledSlots": 16,
+                "itemCount": 723,
+                "items": [{"slot": 0, "itemId": 1511, "quantity": 700}, {"slot": 1, "itemId": 995, "quantity": 23}],
+            }
+        )
+        self.assertEqual(state["inventorySlotCount"], 28)
+        self.assertEqual(state["filledSlots"], 16)
+        self.assertEqual(state["freeSlots"], 12)
+        self.assertEqual(state["itemCount"], 723)
+        self.assertEqual(state["totalItemQuantity"], 723)
+        self.assertFalse(state["inventoryFull"])
+
     def test_missing_files_behavior(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
@@ -368,6 +421,71 @@ class LiveContextQueryTest(unittest.TestCase):
             payload = query.woodcutting_task_payload(context, args)
             self.assertEqual(payload["navigationReadiness"]["status"], "unknown")
             self.assertTrue(any("collision/navigation data unavailable" in warning for warning in payload["warnings"]))
+
+    def test_navigation_readiness_summary_with_collision_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp), navigation=True)
+            write_json(
+                session / "interaction_geometry" / "live" / "live_navigation_summary.json",
+                {
+                    "schema": "live_navigation_summary.v1",
+                    "collisionKnown": True,
+                    "plane": 0,
+                    "playerSceneX": 10,
+                    "playerSceneY": 10,
+                    "playerTileKnown": True,
+                    "mapWidth": 104,
+                    "mapHeight": 104,
+                    "blockedMovementTileCount": 12,
+                    "blockedFullTileCount": 3,
+                    "collisionHash": "abc123",
+                    "obstaclesKnown": True,
+                    "reachabilityComputed": False,
+                    "fullCollisionGridAvailable": False,
+                },
+            )
+            context = query.load_live_context(session)
+            args = type("Args", (), {"profile": None, "freshness_ticks": 5, "freshness_ms": 60000})()
+            payload = query.woodcutting_task_payload(context, args)
+            self.assertEqual(payload["navigationReadiness"]["status"], "summary")
+            self.assertTrue(payload["navigationReadiness"]["collisionKnown"])
+            self.assertIn("fullPathfinding", payload["missingCapabilities"])
+
+    def test_navigation_readiness_local_with_collision_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_live_session(Path(tmp), navigation=True)
+            write_json(
+                session / "interaction_geometry" / "live" / "live_navigation_summary.json",
+                {
+                    "schema": "live_navigation_summary.v1",
+                    "collisionKnown": True,
+                    "collisionWindowAvailable": True,
+                    "collisionWindowRadius": 24,
+                    "collisionWindowBounds": {"minSceneX": 0, "maxSceneX": 48, "minSceneY": 0, "maxSceneY": 48, "width": 49, "height": 49},
+                    "collisionWindowHash": "win123",
+                    "collisionWindowTick": 10,
+                    "plane": 0,
+                    "playerSceneX": 10,
+                    "playerSceneY": 10,
+                    "playerTileKnown": True,
+                    "mapWidth": 104,
+                    "mapHeight": 104,
+                    "blockedMovementTileCount": 12,
+                    "blockedFullTileCount": 3,
+                    "collisionHash": "abc123",
+                    "obstaclesKnown": True,
+                    "reachabilityComputed": True,
+                    "fullCollisionGridAvailable": False,
+                },
+            )
+            context = query.load_live_context(session)
+            args = type("Args", (), {"profile": None, "freshness_ticks": 5, "freshness_ms": 60000})()
+            payload = query.woodcutting_task_payload(context, args)
+
+            self.assertEqual(payload["navigationReadiness"]["status"], "local")
+            self.assertTrue(payload["navigationReadiness"]["collisionWindowAvailable"])
+            self.assertEqual(payload["candidateSummary"]["bestTree"]["navigation"]["directReachability"], "reachable")
+            self.assertIn("fullPathfinding", payload["missingCapabilities"])
 
     def test_activity_inventory_liveness_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:

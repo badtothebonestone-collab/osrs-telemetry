@@ -15,6 +15,75 @@ from live_packet_reader import (
 )
 from telemetry_paths import find_newest_session
 
+PACKET_NAVIGATION = "live_navigation_packet.v1"
+PACKET_COLLISION_WINDOW = "live_collision_window_packet.v1"
+PACKET_COLLISION_GRID = "live_collision_grid_packet.v1"
+
+
+def latest_packet(session_path: Path, packet_type: str) -> dict | None:
+    latest = None
+    for result in iter_live_packets(
+        list_live_packet_files(session_path, latest_only=True, use_index=True),
+        packet_type=packet_type,
+        ignore_partial_last_line=True,
+    ):
+        if result.error is not None or not isinstance(result.record, dict):
+            continue
+        latest = result.record
+    return latest
+
+
+def latest_navigation_packet_summary(session_path: Path) -> dict:
+    latest = latest_packet(session_path, PACKET_NAVIGATION)
+
+    if not latest:
+        return {
+            "latestNavigationTick": None,
+            "collisionKnown": None,
+            "blockedMovementTileCount": None,
+            "blockedFullTileCount": None,
+            "collisionHash": None,
+        }
+
+    payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+    collision = payload.get("collision") if isinstance(payload.get("collision"), dict) else {}
+    return {
+        "latestNavigationTick": latest.get("tick"),
+        "collisionKnown": collision.get("collisionKnown"),
+        "blockedMovementTileCount": collision.get("blockedMovementTileCount"),
+        "blockedFullTileCount": collision.get("blockedFullTileCount"),
+        "collisionHash": collision.get("collisionHash") or collision.get("collisionMapVersion"),
+    }
+
+
+def latest_collision_window_packet_summary(session_path: Path) -> dict:
+    latest = latest_packet(session_path, PACKET_COLLISION_WINDOW)
+
+    if not latest:
+        return {
+            "latestCollisionWindowTick": None,
+            "collisionWindowAvailable": False,
+            "windowRadius": None,
+            "width": None,
+            "height": None,
+            "tileCount": None,
+            "collisionWindowHash": None,
+            "approxPacketBytes": None,
+        }
+
+    payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+    approximate_bytes = len(json.dumps(latest, separators=(",", ":")).encode("utf-8"))
+    return {
+        "latestCollisionWindowTick": latest.get("tick"),
+        "collisionWindowAvailable": bool(payload.get("flags")),
+        "windowRadius": payload.get("windowRadius"),
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+        "tileCount": payload.get("collisionWindowTileCount"),
+        "collisionWindowHash": payload.get("collisionWindowHash") or payload.get("windowHash"),
+        "approxPacketBytes": approximate_bytes,
+    }
+
 
 def summarize_live_packets(
     session_path: Path,
@@ -114,6 +183,9 @@ def summarize_live_packets(
             "latestSegment": index.get("latestSegment"),
         }
 
+    navigation_summary = latest_navigation_packet_summary(session_path)
+    collision_window_summary = latest_collision_window_packet_summary(session_path)
+
     return {
         "schema": "live_packet_inspection.v1",
         "sessionPath": str(session_path),
@@ -131,6 +203,8 @@ def summarize_live_packets(
         "unreadableFiles": unreadable,
         "expectedEnvelopeSchemaPresent": PACKET_SCHEMA in schemas or bool(packet_types),
         "retention": retention,
+        "navigation": navigation_summary,
+        "collisionWindow": collision_window_summary,
     }
 
 
@@ -144,6 +218,22 @@ def print_summary(summary: dict) -> None:
     print(f"bytes: {summary['totalBytes']}")
     print(f"latest tick: {summary['latestTick']}")
     print(f"latest sequence: {summary['latestSequence']}")
+    navigation = summary.get("navigation") or {}
+    print(f"latest navigation tick: {navigation.get('latestNavigationTick')}")
+    print(f"collision known: {navigation.get('collisionKnown')}")
+    print(f"blocked movement tiles: {navigation.get('blockedMovementTileCount')}")
+    print(f"collision hash: {navigation.get('collisionHash')}")
+    collision_window = summary.get("collisionWindow") or {}
+    print(f"latest collision window tick: {collision_window.get('latestCollisionWindowTick')}")
+    print(f"collision window available: {collision_window.get('collisionWindowAvailable')}")
+    print(
+        "collision window: "
+        f"radius={collision_window.get('windowRadius')} "
+        f"size={collision_window.get('width')}x{collision_window.get('height')} "
+        f"tiles={collision_window.get('tileCount')} "
+        f"hash={collision_window.get('collisionWindowHash')}"
+    )
+    print(f"latest collision window packet bytes: {collision_window.get('approxPacketBytes')}")
     print(f"malformed lines: {summary['malformedLines']}")
     print(f"unreadable files: {summary['unreadableFiles']}")
 

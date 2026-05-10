@@ -37,7 +37,7 @@ def stale_time() -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
 
 
-def candidate(distance: int, quality: int, *, class_id: str = "tree", ui_blocked: bool = False) -> dict:
+def candidate(distance: int, quality: int, *, class_id: str = "tree", ui_blocked: bool = False, live_state: str = "live") -> dict:
     return {
         "schema": "live_candidate_packet.v1",
         "tick": 10,
@@ -71,9 +71,24 @@ def candidate(distance: int, quality: int, *, class_id: str = "tree", ui_blocked
         "preferredGeometryType": "clickboxBounds",
         "positiveSignals": ["onScreen", "geometryAvailable"],
         "negativeSignals": ["uiBlocked"] if ui_blocked else [],
-        "targetLiveState": "live",
-        "targetLiveStateConfidence": 0.95,
-        "targetLiveEvidence": ["test live"],
+        "targetLiveState": live_state,
+        "targetLiveStateConfidence": 0.55 if live_state == "live_assumed" else 0.95 if live_state == "live" else 0.2,
+        "targetLiveEvidence": ["no direct depletion delta seen"] if live_state == "live_assumed" else ["test live"],
+        "navigation": {
+            "collisionKnown": True,
+            "collisionWindowAvailable": True,
+            "targetInCollisionWindow": True,
+            "samePlane": True,
+            "playerTileKnown": True,
+            "targetTileKnown": True,
+            "directReachability": "reachable",
+            "pathLengthTiles": max(0, distance - 1),
+            "checkedTiles": distance + 1,
+            "reachabilityConfidence": 0.85,
+            "reachabilityEvidence": ["synthetic local path"],
+            "missingNavigationFields": [],
+            "conservativeMode": True,
+        },
     }
 
 
@@ -173,7 +188,8 @@ def make_session(root: Path, *, candidates: list[dict] | None = None, stale: boo
                     "recentItemDeltas": [],
                 },
                 "targetLiveness": {
-                    "bestCandidateLiveState": "live",
+                    "activeCandidateLiveState": candidates[0].get("targetLiveState") if candidates else None,
+                    "bestCandidateLiveState": candidates[0].get("targetLiveState") if candidates else None,
                     "recentlyUnavailableCount": 0,
                     "recentlyDepletedCount": 0,
                     "suppressedCandidateCount": 0,
@@ -306,6 +322,27 @@ class ContextServiceTest(unittest.TestCase):
             self.assertTrue(any("raw tick fallback" in warning for warning in response["warnings"]))
             self.assertEqual(response["diagnostics"]["inputSource"]["inputSourceActive"], "raw-ticks")
 
+    def test_live_assumed_liveness_is_assumed_not_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), candidates=[candidate(2, 95, live_state="live_assumed")])
+            response = service.build_context_response(
+                service.LiveContextCache(session, reload_interval=0).load(force=True),
+                {"schema": "context_request.v1", "needs": ["best:tree", "liveness"], "responseMode": "compact"},
+            )
+            self.assertEqual(response["bestCandidates"]["tree"]["livenessInterpretation"], "assumed")
+            self.assertEqual(response["liveness"]["livenessInterpretation"], "assumed")
+            self.assertFalse(any("liveness is unknown" in warning for warning in response["warnings"]))
+
+    def test_degraded_liveness_still_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), candidates=[candidate(2, 95, live_state="unknown")])
+            response = service.build_context_response(
+                service.LiveContextCache(session, reload_interval=0).load(force=True),
+                {"schema": "context_request.v1", "needs": ["best:tree"], "responseMode": "compact"},
+            )
+            self.assertEqual(response["bestCandidates"]["tree"]["livenessInterpretation"], "unknown")
+            self.assertTrue(any("liveness is unknown" in warning for warning in response["warnings"]))
+
     def test_compact_liveness_omits_full_recently_unavailable_targets(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp))
@@ -378,6 +415,81 @@ class ContextServiceTest(unittest.TestCase):
             response = service.build_context_response(context, {"schema": "context_request.v1", "task": "woodcutting", "needs": ["task_summary"]})
             self.assertIn("taskSummary", response)
             self.assertEqual(response["taskSummary"]["task"], "woodcutting")
+
+    def test_context_response_includes_navigation_readiness_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            live_dir = session / "interaction_geometry" / "live"
+            write_json(
+                live_dir / "live_navigation_summary.json",
+                {
+                    "schema": "live_navigation_summary.v1",
+                    "latestTick": 10,
+                    "collisionKnown": True,
+                    "plane": 0,
+                    "playerSceneX": 10,
+                    "playerSceneY": 10,
+                    "playerTileKnown": True,
+                    "mapWidth": 104,
+                    "mapHeight": 104,
+                    "blockedMovementTileCount": 12,
+                    "blockedFullTileCount": 3,
+                    "collisionHash": "abc123",
+                    "obstaclesKnown": True,
+                    "reachabilityComputed": False,
+                    "fullCollisionGridAvailable": False,
+                },
+            )
+            context = service.LiveContextCache(session, reload_interval=0).load(force=True)
+            response = service.build_context_response(
+                context,
+                {"schema": "context_request.v1", "needs": ["navigation_readiness", "best:tree"], "responseMode": "compact"},
+            )
+
+            self.assertEqual(response["navigationReadiness"]["status"], "summary")
+            self.assertTrue(response["navigationReadiness"]["collisionKnown"])
+            self.assertEqual(response["navigationReadiness"]["blockedMovementTileCount"], 12)
+            self.assertIn("fullPathfinding", response["missingCapabilities"])
+
+    def test_context_response_includes_local_candidate_navigation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            live_dir = session / "interaction_geometry" / "live"
+            write_json(
+                live_dir / "live_navigation_summary.json",
+                {
+                    "schema": "live_navigation_summary.v1",
+                    "latestTick": 10,
+                    "collisionKnown": True,
+                    "collisionWindowAvailable": True,
+                    "collisionWindowRadius": 24,
+                    "collisionWindowBounds": {"minSceneX": 0, "maxSceneX": 48, "minSceneY": 0, "maxSceneY": 48, "width": 49, "height": 49},
+                    "collisionWindowHash": "win123",
+                    "collisionWindowTick": 10,
+                    "plane": 0,
+                    "playerSceneX": 10,
+                    "playerSceneY": 10,
+                    "playerTileKnown": True,
+                    "mapWidth": 104,
+                    "mapHeight": 104,
+                    "blockedMovementTileCount": 12,
+                    "blockedFullTileCount": 3,
+                    "collisionHash": "abc123",
+                    "obstaclesKnown": True,
+                    "reachabilityComputed": True,
+                    "fullCollisionGridAvailable": False,
+                },
+            )
+            context = service.LiveContextCache(session, reload_interval=0).load(force=True)
+            response = service.build_context_response(
+                context,
+                {"schema": "context_request.v1", "needs": ["navigation_readiness", "best:tree"], "responseMode": "compact"},
+            )
+
+            self.assertEqual(response["navigationReadiness"]["status"], "local")
+            self.assertTrue(response["navigationReadiness"]["collisionWindowAvailable"])
+            self.assertEqual(response["bestCandidates"]["tree"]["navigation"]["directReachability"], "reachable")
+            self.assertIn("fullPathfinding", response["missingCapabilities"])
 
     def test_missing_live_files_warn_or_fail_cleanly(self):
         with tempfile.TemporaryDirectory() as tmp:

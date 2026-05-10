@@ -63,6 +63,10 @@ public class TickSnapshot
         public int worldX;
         public int worldY;
         public int plane;
+        public Integer localX;
+        public Integer localY;
+        public Integer sceneX;
+        public Integer sceneY;
         public int animation;
         public int poseAnimation;
         public int combatLevel;

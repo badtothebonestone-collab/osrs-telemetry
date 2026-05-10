@@ -25,6 +25,8 @@ import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
 import net.runelite.api.Client;
+import net.runelite.api.CollisionData;
+import net.runelite.api.CollisionDataFlag;
 import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameState;
 import net.runelite.api.GameObject;
@@ -105,12 +107,28 @@ import net.runelite.api.widgets.Widget;
 public class TelemetryPlugin extends Plugin
 {
 	private static final int MAX_GROUND_ITEMS = 250;
+	private static final int INVENTORY_SLOT_COUNT = 28;
 	private static final String PACKET_BASELINE = "live_baseline_packet.v1";
 	private static final String PACKET_SCENE_DELTA = "live_scene_delta_packet.v1";
 	private static final String PACKET_PROJECTION = "live_projection_packet.v1";
 	private static final String PACKET_INVENTORY = "live_inventory_packet.v1";
 	private static final String PACKET_ACTIVITY = "live_activity_packet.v1";
+	private static final String PACKET_NAVIGATION = "live_navigation_packet.v1";
+	private static final String PACKET_COLLISION_WINDOW = "live_collision_window_packet.v1";
+	private static final String PACKET_COLLISION_GRID = "live_collision_grid_packet.v1";
 	private static final String PACKET_WRITER_HEALTH = "live_writer_health_packet.v1";
+	private static final int COLLISION_MOVEMENT_MASK = CollisionDataFlag.BLOCK_MOVEMENT_NORTH_WEST
+			| CollisionDataFlag.BLOCK_MOVEMENT_NORTH
+			| CollisionDataFlag.BLOCK_MOVEMENT_NORTH_EAST
+			| CollisionDataFlag.BLOCK_MOVEMENT_EAST
+			| CollisionDataFlag.BLOCK_MOVEMENT_SOUTH_EAST
+			| CollisionDataFlag.BLOCK_MOVEMENT_SOUTH
+			| CollisionDataFlag.BLOCK_MOVEMENT_SOUTH_WEST
+			| CollisionDataFlag.BLOCK_MOVEMENT_WEST
+			| CollisionDataFlag.BLOCK_MOVEMENT_OBJECT
+			| CollisionDataFlag.BLOCK_MOVEMENT_FLOOR_DECORATION
+			| CollisionDataFlag.BLOCK_MOVEMENT_FLOOR
+			| CollisionDataFlag.BLOCK_MOVEMENT_FULL;
 
 	@Inject
 	private Client client;
@@ -730,6 +748,27 @@ public class TelemetryPlugin extends Plugin
 			currentWriter.enqueueLivePacket(PACKET_ACTIVITY, snapshot.tickId, snapshot.timestampUtc, activityPayload(snapshot));
 		}
 
+		if (config.emitCompactNavigationPackets() && compactPacketTypeEnabled("navigation"))
+		{
+			currentWriter.enqueueLivePacket(PACKET_NAVIGATION, snapshot.tickId, snapshot.timestampUtc, navigationPayload(snapshot));
+		}
+
+		if (config.emitCompactNavigationPackets()
+				&& config.compactNavigationEmitCollisionWindow()
+				&& compactPacketTypeEnabled("collisionWindow"))
+		{
+			currentWriter.enqueueLivePacket(PACKET_COLLISION_WINDOW, snapshot.tickId, snapshot.timestampUtc, collisionWindowPayload(snapshot));
+		}
+
+		if (config.emitCompactNavigationPackets()
+				&& config.compactNavigationIncludeFullCollisionGrid()
+				&& compactNavigationFullGridIntervalTicks() > 0
+				&& snapshot.tickId % compactNavigationFullGridIntervalTicks() == 0
+				&& compactPacketTypeEnabled("collisionGrid"))
+		{
+			currentWriter.enqueueLivePacket(PACKET_COLLISION_GRID, snapshot.tickId, snapshot.timestampUtc, collisionGridPayload(snapshot));
+		}
+
 		if (compactPacketTypeEnabled("writerHealth"))
 		{
 			currentWriter.enqueueLivePacket(PACKET_WRITER_HEALTH, snapshot.tickId, snapshot.timestampUtc, writerHealthPayload(currentWriter));
@@ -791,6 +830,10 @@ public class TelemetryPlugin extends Plugin
 			player.put("worldX", snapshot.localPlayer.worldX);
 			player.put("worldY", snapshot.localPlayer.worldY);
 			player.put("plane", snapshot.localPlayer.plane);
+			player.put("localX", snapshot.localPlayer.localX);
+			player.put("localY", snapshot.localPlayer.localY);
+			player.put("sceneX", snapshot.localPlayer.sceneX);
+			player.put("sceneY", snapshot.localPlayer.sceneY);
 			player.put("animation", snapshot.localPlayer.animation);
 			player.put("poseAnimation", snapshot.localPlayer.poseAnimation);
 			player.put("combatLevel", snapshot.localPlayer.combatLevel);
@@ -1079,7 +1122,7 @@ public class TelemetryPlugin extends Plugin
 		List<Map<String, Object>> items = new ArrayList<>();
 		int freeSlots = 0;
 		int filledSlots = 0;
-		int itemCount = 0;
+		int totalItemQuantity = 0;
 		StringBuilder signature = new StringBuilder();
 
 		if (slots == null)
@@ -1088,6 +1131,7 @@ public class TelemetryPlugin extends Plugin
 			return payload;
 		}
 
+		payload.put("slotCount", slots.length);
 		for (TickSnapshot.InventorySlot slot : slots)
 		{
 			if (slot == null || slot.itemId <= 0 || slot.quantity <= 0)
@@ -1097,7 +1141,7 @@ public class TelemetryPlugin extends Plugin
 			}
 
 			filledSlots++;
-			itemCount += slot.quantity;
+			totalItemQuantity += slot.quantity;
 			signature.append(slot.slot).append(':').append(slot.itemId).append(':').append(slot.quantity).append(';');
 
 			Map<String, Object> item = new LinkedHashMap<>();
@@ -1110,7 +1154,8 @@ public class TelemetryPlugin extends Plugin
 		payload.put("known", true);
 		payload.put("freeSlots", freeSlots);
 		payload.put("filledSlots", filledSlots);
-		payload.put("itemCount", itemCount);
+		payload.put("itemCount", totalItemQuantity);
+		payload.put("totalItemQuantity", totalItemQuantity);
 		payload.put("signature", hashName(signature.toString()));
 		payload.put("items", items);
 		return payload;
@@ -1139,6 +1184,291 @@ public class TelemetryPlugin extends Plugin
 		payload.put("movementKnown", false);
 		payload.put("interpretation", "observed_facts_only");
 		return payload;
+	}
+
+	private Map<String, Object> navigationPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("tick", snapshot.tickId);
+		payload.put("plane", snapshot.localPlayer == null ? null : snapshot.localPlayer.plane);
+		payload.put("player", navigationPlayerPayload(snapshot));
+		payload.put("collision", collisionSummaryPayload(snapshot, false));
+		payload.put("bounds", navigationBoundsPayload(snapshot));
+		payload.put("source", navigationSourcePayload());
+		payload.put("fullCollisionGridIncluded", false);
+		payload.put("fullCollisionGridConfigured", config.compactNavigationIncludeFullCollisionGrid());
+		payload.put("hashOnly", config.compactNavigationHashOnly());
+		return payload;
+	}
+
+	private Map<String, Object> collisionGridPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("tick", snapshot.tickId);
+		payload.put("plane", snapshot.localPlayer == null ? null : snapshot.localPlayer.plane);
+		payload.put("collision", collisionSummaryPayload(snapshot, true));
+		payload.put("source", navigationSourcePayload());
+		payload.put("encoding", "json-int-grid");
+		payload.put("debugOnly", true);
+		return payload;
+	}
+
+	private Map<String, Object> collisionWindowPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		int plane = snapshot.localPlayer == null ? -1 : snapshot.localPlayer.plane;
+		Integer playerSceneX = snapshot.localPlayer == null ? null : snapshot.localPlayer.sceneX;
+		Integer playerSceneY = snapshot.localPlayer == null ? null : snapshot.localPlayer.sceneY;
+		int radius = compactNavigationCollisionWindowRadius();
+		CollisionData collisionData = collisionDataForPlane(plane);
+		int[][] flags = collisionData == null ? null : collisionData.getFlags();
+		List<String> warnings = new ArrayList<>();
+
+		payload.put("tick", snapshot.tickId);
+		payload.put("plane", plane >= 0 ? plane : null);
+		payload.put("playerSceneX", playerSceneX);
+		payload.put("playerSceneY", playerSceneY);
+		payload.put("windowRadius", radius);
+		payload.put("mapWidth", flags == null ? null : flags.length);
+		payload.put("mapHeight", flags == null ? null : collisionHeight(flags));
+		payload.put("generatedFromPlane", plane >= 0 ? plane : null);
+		payload.put("encoding", "json-rows-int-flags");
+
+		if (flags == null || playerSceneX == null || playerSceneY == null)
+		{
+			warnings.add("collision window unavailable: collision flags or player scene tile missing");
+			payload.put("collisionKnown", false);
+			payload.put("warnings", warnings);
+			return payload;
+		}
+
+		int mapWidth = flags.length;
+		int mapHeight = collisionHeight(flags);
+		int minSceneX = Math.max(0, playerSceneX - radius);
+		int maxSceneX = Math.min(mapWidth - 1, playerSceneX + radius);
+		int minSceneY = Math.max(0, playerSceneY - radius);
+		int maxSceneY = Math.min(mapHeight - 1, playerSceneY + radius);
+		List<List<Integer>> rows = new ArrayList<>();
+		long hash = 1469598103934665603L;
+
+		for (int sceneY = minSceneY; sceneY <= maxSceneY; sceneY++)
+		{
+			List<Integer> row = new ArrayList<>();
+			for (int sceneX = minSceneX; sceneX <= maxSceneX; sceneX++)
+			{
+				int value = collisionFlagAt(flags, sceneX, sceneY);
+				row.add(value);
+				hash = collisionHashStep(hash, value);
+			}
+			rows.add(row);
+		}
+
+		int width = Math.max(0, maxSceneX - minSceneX + 1);
+		int height = Math.max(0, maxSceneY - minSceneY + 1);
+		payload.put("collisionKnown", true);
+		payload.put("minSceneX", minSceneX);
+		payload.put("maxSceneX", maxSceneX);
+		payload.put("minSceneY", minSceneY);
+		payload.put("maxSceneY", maxSceneY);
+		payload.put("width", width);
+		payload.put("height", height);
+		payload.put("flags", rows);
+		payload.put("collisionWindowTileCount", width * height);
+		payload.put("collisionWindowHash", Long.toUnsignedString(hash, 16));
+		payload.put("windowHash", Long.toUnsignedString(hash, 16));
+		payload.put("movementMask", COLLISION_MOVEMENT_MASK);
+		payload.put("warnings", warnings);
+		return payload;
+	}
+
+	private Map<String, Object> navigationPlayerPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> player = new LinkedHashMap<>();
+
+		if (snapshot.localPlayer == null)
+		{
+			return player;
+		}
+
+		player.put("worldX", snapshot.localPlayer.worldX);
+		player.put("worldY", snapshot.localPlayer.worldY);
+		player.put("plane", snapshot.localPlayer.plane);
+		player.put("sceneX", snapshot.localPlayer.sceneX);
+		player.put("sceneY", snapshot.localPlayer.sceneY);
+		player.put("localX", snapshot.localPlayer.localX);
+		player.put("localY", snapshot.localPlayer.localY);
+		return player;
+	}
+
+	private Map<String, Object> navigationBoundsPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> bounds = new LinkedHashMap<>();
+		int width = 0;
+		int height = 0;
+		int plane = snapshot.localPlayer == null ? -1 : snapshot.localPlayer.plane;
+		CollisionData collision = collisionDataForPlane(plane);
+
+		if (collision != null && collision.getFlags() != null)
+		{
+			int[][] flags = collision.getFlags();
+			width = flags.length;
+			height = collisionHeight(flags);
+		}
+
+		bounds.put("sceneMinX", width > 0 ? 0 : null);
+		bounds.put("sceneMaxX", width > 0 ? width - 1 : null);
+		bounds.put("sceneMinY", height > 0 ? 0 : null);
+		bounds.put("sceneMaxY", height > 0 ? height - 1 : null);
+		return bounds;
+	}
+
+	private Map<String, Object> navigationSourcePayload()
+	{
+		Map<String, Object> source = new LinkedHashMap<>();
+		WorldView worldView = client.getTopLevelWorldView();
+		source.put("worldViewId", worldView == null ? null : worldView.getId());
+		source.put("topLevelWorldView", worldView == null || worldView.isTopLevel());
+		source.put("currentPlane", worldView == null ? client.getPlane() : worldView.getPlane());
+		source.put("baseX", worldView == null ? client.getBaseX() : worldView.getBaseX());
+		source.put("baseY", worldView == null ? client.getBaseY() : worldView.getBaseY());
+		source.put("warning", "Collision summary is read-only and does not include route planning.");
+		return source;
+	}
+
+	private Map<String, Object> collisionSummaryPayload(TickSnapshot snapshot, boolean includeGrid)
+	{
+		Map<String, Object> collision = new LinkedHashMap<>();
+		int plane = snapshot.localPlayer == null ? -1 : snapshot.localPlayer.plane;
+		CollisionData collisionData = collisionDataForPlane(plane);
+
+		collision.put("collisionKnown", collisionData != null && collisionData.getFlags() != null);
+		collision.put("planeKnown", plane >= 0);
+		collision.put("plane", plane >= 0 ? plane : null);
+
+		if (collisionData == null || collisionData.getFlags() == null)
+		{
+			collision.put("warning", "collision maps unavailable");
+			return collision;
+		}
+
+		int[][] flags = collisionData.getFlags();
+		int width = flags.length;
+		int height = collisionHeight(flags);
+		int blockedMovementTileCount = 0;
+		int blockedFullTileCount = 0;
+		long hash = 1469598103934665603L;
+
+		for (int x = 0; x < flags.length; x++)
+		{
+			int[] column = flags[x];
+			if (column == null)
+			{
+				hash = collisionHashStep(hash, 0);
+				continue;
+			}
+
+			for (int y = 0; y < column.length; y++)
+			{
+				int value = column[y];
+				hash = collisionHashStep(hash, value);
+				if ((value & COLLISION_MOVEMENT_MASK) != 0)
+				{
+					blockedMovementTileCount++;
+				}
+				if ((value & CollisionDataFlag.BLOCK_MOVEMENT_FULL) != 0)
+				{
+					blockedFullTileCount++;
+				}
+			}
+		}
+
+		collision.put("mapWidth", width);
+		collision.put("mapHeight", height);
+		collision.put("blockedMovementTileCount", blockedMovementTileCount);
+		collision.put("blockedFullTileCount", blockedFullTileCount);
+		collision.put("collisionHash", Long.toUnsignedString(hash, 16));
+		collision.put("collisionMapVersion", Long.toUnsignedString(hash, 16));
+		collision.put("movementMask", COLLISION_MOVEMENT_MASK);
+
+		if (includeGrid)
+		{
+			collision.put("flags", flags);
+		}
+
+		return collision;
+	}
+
+	private CollisionData collisionDataForPlane(int plane)
+	{
+		if (plane < 0)
+		{
+			return null;
+		}
+
+		WorldView worldView = client.getTopLevelWorldView();
+		CollisionData[] collisionMaps = worldView == null ? client.getCollisionMaps() : worldView.getCollisionMaps();
+
+		if (collisionMaps == null || plane >= collisionMaps.length)
+		{
+			return null;
+		}
+
+		return collisionMaps[plane];
+	}
+
+	private int compactNavigationCollisionWindowRadius()
+	{
+		return Math.max(8, Math.min(52, config.compactNavigationCollisionWindowRadius()));
+	}
+
+	private int compactNavigationFullGridIntervalTicks()
+	{
+		int configured = config.compactNavigationFullGridIntervalTicks();
+		if (configured > 0)
+		{
+			return configured;
+		}
+		return config.compactNavigationGridIntervalTicks();
+	}
+
+	private int collisionFlagAt(int[][] flags, int sceneX, int sceneY)
+	{
+		if (flags == null || sceneX < 0 || sceneX >= flags.length)
+		{
+			return 0;
+		}
+
+		int[] column = flags[sceneX];
+		if (column == null || sceneY < 0 || sceneY >= column.length)
+		{
+			return 0;
+		}
+
+		return column[sceneY];
+	}
+
+	private int collisionHeight(int[][] flags)
+	{
+		int height = 0;
+		if (flags == null)
+		{
+			return height;
+		}
+
+		for (int[] column : flags)
+		{
+			if (column != null)
+			{
+				height = Math.max(height, column.length);
+			}
+		}
+		return height;
+	}
+
+	private long collisionHashStep(long current, int value)
+	{
+		long hash = current ^ (value & 0xffffffffL);
+		return hash * 1099511628211L;
 	}
 
 	private Map<String, Object> writerHealthPayload(TelemetryWriter currentWriter)
@@ -1445,6 +1775,14 @@ public class TelemetryPlugin extends Plugin
 			localPlayer.worldY = wp.getY();
 			localPlayer.plane = wp.getPlane();
 		}
+		LocalPoint localLocation = player.getLocalLocation();
+		if (localLocation != null)
+		{
+			localPlayer.localX = localLocation.getX();
+			localPlayer.localY = localLocation.getY();
+			localPlayer.sceneX = localLocation.getSceneX();
+			localPlayer.sceneY = localLocation.getSceneY();
+		}
 		localPlayer.animation = player.getAnimation();
 		localPlayer.poseAnimation = player.getPoseAnimation();
 		localPlayer.combatLevel = player.getCombatLevel();
@@ -1462,11 +1800,12 @@ public class TelemetryPlugin extends Plugin
 		}
 
 		Item[] items = inventory.getItems();
-		snapshot.inventory = new TickSnapshot.InventorySlot[items.length];
+		int slotCount = Math.max(INVENTORY_SLOT_COUNT, items.length);
+		snapshot.inventory = new TickSnapshot.InventorySlot[slotCount];
 
-		for (int i = 0; i < items.length; i++)
+		for (int i = 0; i < slotCount; i++)
 		{
-			Item item = items[i];
+			Item item = i < items.length ? items[i] : null;
 
 			TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
 			slot.slot = i;

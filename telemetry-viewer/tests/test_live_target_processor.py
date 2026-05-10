@@ -180,6 +180,36 @@ def compact_scene_object(source: dict) -> dict:
     }
 
 
+def compact_collision_window(tick_id: int, *, player_scene_x: int = 10, player_scene_y: int = 10) -> dict:
+    min_scene_x = 0
+    min_scene_y = 0
+    width = 21
+    height = 21
+    return {
+        "tick": tick_id,
+        "plane": 0,
+        "playerSceneX": player_scene_x,
+        "playerSceneY": player_scene_y,
+        "windowRadius": 10,
+        "minSceneX": min_scene_x,
+        "maxSceneX": min_scene_x + width - 1,
+        "minSceneY": min_scene_y,
+        "maxSceneY": min_scene_y + height - 1,
+        "width": width,
+        "height": height,
+        "encoding": "json-rows-int-flags",
+        "flags": [[0 for _x in range(width)] for _y in range(height)],
+        "collisionWindowTileCount": width * height,
+        "collisionWindowHash": f"window-{tick_id}",
+        "windowHash": f"window-{tick_id}",
+        "mapWidth": 104,
+        "mapHeight": 104,
+        "collisionKnown": True,
+        "generatedFromPlane": 0,
+        "warnings": [],
+    }
+
+
 def write_compact_packets(session: Path, tick_objects: dict[int, list[dict]]) -> None:
     live_dir = session / "live_packets"
     live_dir.mkdir(parents=True, exist_ok=True)
@@ -199,7 +229,7 @@ def write_compact_packets(session: Path, tick_objects: dict[int, list[dict]]) ->
                     {
                         "tick": tick_id,
                         "gameState": "LOGGED_IN",
-                        "player": {"worldX": 3200, "worldY": 3200, "plane": 0, "animation": -1, "poseAnimation": -1},
+                        "player": {"worldX": 3200, "worldY": 3200, "plane": 0, "sceneX": 10, "sceneY": 10, "localX": 1280, "localY": 1280, "animation": -1, "poseAnimation": -1},
                         "cameraViewport": {"canvasWidth": 300, "canvasHeight": 300},
                         "latestFramePath": f"frames/frame-tick-{tick_id:08d}.jpg",
                         "sceneCaptureMode": "STATIC_SCENE_INDEX_DIAGNOSTIC",
@@ -247,9 +277,37 @@ def write_compact_packets(session: Path, tick_objects: dict[int, list[dict]]) ->
                     {"inventory": {"known": True, "freeSlots": 28, "filledSlots": 0, "itemCount": 0, "signature": "", "items": []}, "equipment": {"known": True, "items": []}},
                 ),
                 compact_packet("live_activity_packet.v1", tick_id, sequence + 5, {"animation": -1, "poseAnimation": -1, "movementKnown": False}),
-                compact_packet("live_writer_health_packet.v1", tick_id, sequence + 6, {"rawWriterQueueDepth": 0, "droppedRawRecords": 0, "compactLiveEnabled": True}),
+                compact_packet(
+                    "live_navigation_packet.v1",
+                    tick_id,
+                    sequence + 6,
+                    {
+                        "tick": tick_id,
+                        "plane": 0,
+                        "player": {"worldX": 3200, "worldY": 3200, "plane": 0, "sceneX": 10, "sceneY": 10, "localX": 1280, "localY": 1280},
+                        "collision": {
+                            "collisionKnown": True,
+                            "planeKnown": True,
+                            "plane": 0,
+                            "mapWidth": 104,
+                            "mapHeight": 104,
+                            "blockedMovementTileCount": 12,
+                            "blockedFullTileCount": 3,
+                            "collisionHash": f"collision-{tick_id}",
+                        },
+                        "bounds": {"sceneMinX": 0, "sceneMaxX": 103, "sceneMinY": 0, "sceneMaxY": 103},
+                        "source": {"worldViewId": 0, "topLevelWorldView": True},
+                    },
+                ),
+                compact_packet(
+                    "live_collision_window_packet.v1",
+                    tick_id,
+                    sequence + 7,
+                    compact_collision_window(tick_id),
+                ),
+                compact_packet("live_writer_health_packet.v1", tick_id, sequence + 8, {"rawWriterQueueDepth": 0, "droppedRawRecords": 0, "compactLiveEnabled": True}),
             ]
-            sequence += 6
+            sequence += 8
             for packet in packets:
                 counts[packet["packetType"]] = counts.get(packet["packetType"], 0) + 1
                 file.write(json.dumps(packet, separators=(",", ":")) + "\n")
@@ -494,11 +552,16 @@ class LiveTargetProcessorTest(unittest.TestCase):
             status = result["status"]
 
             self.assertEqual(status["inputSourceActive"], "compact-packets")
-            self.assertEqual(status["compactPacketsSeen"], 6)
-            self.assertEqual(status["compactPacketsProcessed"], 6)
+            self.assertEqual(status["compactPacketsSeen"], 8)
+            self.assertEqual(status["compactPacketsProcessed"], 8)
             self.assertEqual(status["candidateCount"], 1)
             self.assertEqual(result["candidates"][0]["objectKey"], "compact-tree")
             self.assertEqual(result["candidates"][0]["classId"], "tree")
+            self.assertTrue(result["navigation"]["collisionKnown"])
+            self.assertTrue(result["navigation"]["collisionWindowAvailable"])
+            self.assertTrue(result["candidates"][0]["navigation"]["collisionKnown"])
+            self.assertTrue(result["candidates"][0]["navigation"]["collisionWindowAvailable"])
+            self.assertEqual(result["candidates"][0]["navigation"]["directReachability"], "reachable")
             self.assertTrue(status["sourceSceneKnowledgeComplete"])
 
     def test_input_source_auto_prefers_compact_packets_when_index_exists(self):
@@ -613,7 +676,7 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(status["rawRecordsSeenThisPoll"], 3)
             self.assertEqual(status["rawRecordsFullyProcessed"], 1)
             self.assertEqual(status["coalescedBacklogTicks"], 2)
-            self.assertEqual(status["compactPacketsCoalesced"], 12)
+            self.assertEqual(status["compactPacketsCoalesced"], 16)
             self.assertEqual(status["processedTickIds"], [3])
 
     def test_compact_packet_tailer_preserves_partial_line(self):
@@ -655,6 +718,56 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertIn(payload["status"], {"PASS", "WARN"})
             self.assertTrue(payload["rawTicks"]["available"])
             self.assertTrue(payload["compactPackets"]["available"])
+
+    def test_inventory_summary_recomputes_compact_free_slots(self):
+        tick = {
+            "inventory": {
+                "known": True,
+                "freeSlots": 1,
+                "filledSlots": 16,
+                "itemCount": 723,
+                "items": [{"slot": 0, "itemId": 1511, "quantity": 700}, {"slot": 1, "itemId": 995, "quantity": 23}],
+            }
+        }
+        summary = live.inventory_summary(tick)
+        self.assertEqual(summary["inventorySlotCount"], 28)
+        self.assertEqual(summary["filledSlots"], 16)
+        self.assertEqual(summary["freeSlots"], 12)
+        self.assertEqual(summary["itemCount"], 723)
+        self.assertEqual(summary["totalItemQuantity"], 723)
+
+    def test_inventory_full_calculation(self):
+        tick = {"inventory": {"known": True, "slotCount": 28, "filledSlots": 28, "freeSlots": 0, "itemCount": 1200, "items": []}}
+        state = live.inventory_state_for_ticks([tick], tick)
+        self.assertEqual(state["inventorySlotCount"], 28)
+        self.assertEqual(state["freeSlots"], 0)
+        self.assertTrue(state["inventoryFull"])
+
+    def test_compact_packet_inventory_mapping(self):
+        packets = [
+            compact_packet("live_baseline_packet.v1", 4, 1, {"player": {"worldX": 3200, "worldY": 3200, "plane": 0}}),
+            compact_packet(
+                "live_inventory_packet.v1",
+                4,
+                2,
+                {
+                    "inventory": {
+                        "known": True,
+                        "freeSlots": 1,
+                        "filledSlots": 16,
+                        "itemCount": 723,
+                        "items": [{"slot": 0, "itemId": 1511, "quantity": 700}, {"slot": 1, "itemId": 995, "quantity": 23}],
+                    },
+                    "equipment": {"known": True, "items": []},
+                },
+            ),
+        ]
+        tick = live.compact_packets_to_tick(packets)
+        state = live.inventory_state_for_ticks([tick], tick)
+        self.assertEqual(state["inventorySlotCount"], 28)
+        self.assertEqual(state["freeSlots"], 12)
+        self.assertEqual(state["filledSlots"], 16)
+        self.assertEqual(state["totalItemQuantity"], 723)
 
     def test_complete_mode_status_is_labeled_audit_mode(self):
         with tempfile.TemporaryDirectory() as tmp:

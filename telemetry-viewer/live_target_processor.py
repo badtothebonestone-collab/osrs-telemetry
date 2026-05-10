@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import build_world_target_geometry as world_builder
 import inspect_target_geometry as geometry
 import live_packet_reader
+import navigation_reachability
 import select_target_candidates as candidate_builder
 from telemetry_paths import find_newest_session, get_sessions_dir, list_tick_files
 
@@ -48,6 +49,9 @@ COMPACT_PACKET_TYPES = {
     "projection": "live_projection_packet.v1",
     "inventory": "live_inventory_packet.v1",
     "activity": "live_activity_packet.v1",
+    "navigation": "live_navigation_packet.v1",
+    "collisionWindow": "live_collision_window_packet.v1",
+    "collisionGrid": "live_collision_grid_packet.v1",
     "writerHealth": "live_writer_health_packet.v1",
 }
 ALL_LIVE_TARGET_TYPES = WORLD_TARGET_TYPES | {
@@ -736,6 +740,9 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
     projection = by_type.get(COMPACT_PACKET_TYPES["projection"], {}).get("payload") or {}
     inventory = by_type.get(COMPACT_PACKET_TYPES["inventory"], {}).get("payload") or {}
     activity = by_type.get(COMPACT_PACKET_TYPES["activity"], {}).get("payload") or {}
+    navigation = by_type.get(COMPACT_PACKET_TYPES["navigation"], {}).get("payload") or {}
+    collision_window = by_type.get(COMPACT_PACKET_TYPES["collisionWindow"], {}).get("payload") or {}
+    collision_grid = by_type.get(COMPACT_PACKET_TYPES["collisionGrid"], {}).get("payload") or {}
     writer_health = by_type.get(COMPACT_PACKET_TYPES["writerHealth"], {}).get("payload") or {}
 
     timestamp = next((packet.get("timestampUtc") for packet in reversed(packets) if isinstance(packet.get("timestampUtc"), str)), None)
@@ -804,6 +811,13 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
     if isinstance(inventory, dict):
         tick["inventory"] = compact_inventory_container(inventory.get("inventory"))
         tick["equipment"] = compact_inventory_container(inventory.get("equipment"))
+
+    if isinstance(navigation, dict) and navigation:
+        tick["_navigation"] = navigation
+    if isinstance(collision_window, dict) and collision_window:
+        tick["_collisionWindow"] = collision_window
+    if isinstance(collision_grid, dict) and collision_grid:
+        tick["_collisionGrid"] = collision_grid
 
     if isinstance(writer_health, dict):
         tick["writerQueueSize"] = writer_health.get("rawWriterQueueDepth")
@@ -1984,11 +1998,16 @@ def local_player_for(tick: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def int_field(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def inventory_summary(tick: dict) -> dict:
     inventory = tick.get("inventory")
     items = inventory if isinstance(inventory, list) else inventory.get("items") if isinstance(inventory, dict) else []
     items = items if isinstance(items, list) else []
     filled = 0
+    total_quantity = 0
     signature_parts = []
     for item in items:
         if not isinstance(item, dict):
@@ -1997,22 +2016,45 @@ def inventory_summary(tick: dict) -> dict:
         quantity = item.get("quantity")
         if item_id not in (None, -1, 0):
             filled += 1
+            total_quantity += int(quantity) if isinstance(quantity, int) and not isinstance(quantity, bool) else 1
             signature_parts.append(f"{item_id}:{quantity}")
     if isinstance(inventory, dict):
-        filled_value = inventory.get("filledSlots")
-        free_value = inventory.get("freeSlots")
-        item_count_value = inventory.get("itemCount")
+        filled_value = int_field(inventory.get("filledSlots"))
+        free_value = int_field(inventory.get("freeSlots"))
+        slot_count_value = int_field(inventory.get("inventorySlotCount"))
+        if slot_count_value is None:
+            slot_count_value = int_field(inventory.get("slotCount"))
+        if slot_count_value is None and filled_value is not None and free_value is not None:
+            slot_count_value = max(28, filled_value + free_value)
+        if slot_count_value is None and inventory.get("known") is True:
+            slot_count_value = 28
+        filled_slots = filled_value if filled_value is not None else filled
+        free_slots = (
+            max(0, slot_count_value - filled_slots)
+            if slot_count_value is not None
+            else free_value if free_value is not None else (max(0, 28 - filled_slots) if items else None)
+        )
+        total_quantity_value = int_field(inventory.get("totalItemQuantity"))
+        if total_quantity_value is None:
+            total_quantity_value = int_field(inventory.get("itemCount"))
         signature_value = inventory.get("signature")
         return {
-            "itemCount": item_count_value if isinstance(item_count_value, int) else filled,
-            "filledSlots": filled_value if isinstance(filled_value, int) else filled,
-            "freeSlots": free_value if isinstance(free_value, int) else (max(0, 28 - filled) if items else None),
+            "inventorySlotCount": slot_count_value,
+            "slotCount": slot_count_value,
+            "itemCount": total_quantity_value if total_quantity_value is not None else total_quantity,
+            "totalItemQuantity": total_quantity_value if total_quantity_value is not None else total_quantity,
+            "filledSlots": filled_slots,
+            "freeSlots": free_slots,
             "signature": signature_value if isinstance(signature_value, str) and signature_value else ("|".join(signature_parts) if signature_parts else None),
         }
+    slot_count = max(28, len(inventory)) if isinstance(inventory, list) else None
     return {
-        "itemCount": filled,
+        "inventorySlotCount": slot_count,
+        "slotCount": slot_count,
+        "itemCount": total_quantity,
+        "totalItemQuantity": total_quantity,
         "filledSlots": filled,
-        "freeSlots": max(0, 28 - filled) if items else None,
+        "freeSlots": max(0, slot_count - filled) if slot_count is not None else None,
         "signature": "|".join(signature_parts) if signature_parts else None,
     }
 
@@ -2100,9 +2142,12 @@ def inventory_state_for_ticks(ticks: list[dict], latest_tick: dict | None) -> di
     latest_delta = deltas[-1] if deltas else None
     return {
         "known": known,
+        "inventorySlotCount": summary.get("inventorySlotCount") if known else None,
+        "slotCount": summary.get("slotCount") if known else None,
         "freeSlots": summary.get("freeSlots") if known else None,
         "filledSlots": summary.get("filledSlots") if known else None,
         "itemCount": summary.get("itemCount") if known else None,
+        "totalItemQuantity": summary.get("totalItemQuantity") if known else None,
         "items": items if known else [],
         "inventoryHash": summary.get("signature"),
         "signature": summary.get("signature"),
@@ -2248,21 +2293,177 @@ def baseline_state_for(session: Path, args, latest_tick: dict | None, ticks: lis
 def navigation_summary_for(tick: dict | None, processed_at: str) -> dict:
     tick = tick or {}
     player = local_player_for(tick)
+    navigation_packet = tick.get("_navigation") if isinstance(tick.get("_navigation"), dict) else {}
+    collision_window = tick.get("_collisionWindow") if isinstance(tick.get("_collisionWindow"), dict) else {}
+    collision_grid = tick.get("_collisionGrid") if isinstance(tick.get("_collisionGrid"), dict) else {}
+    collision = navigation_packet.get("collision") if isinstance(navigation_packet.get("collision"), dict) else {}
+    grid_collision = collision_grid.get("collision") if isinstance(collision_grid.get("collision"), dict) else {}
+    nav_player = navigation_packet.get("player") if isinstance(navigation_packet.get("player"), dict) else {}
+    bounds = navigation_packet.get("bounds") if isinstance(navigation_packet.get("bounds"), dict) else {}
+    source = navigation_packet.get("source") if isinstance(navigation_packet.get("source"), dict) else {}
+    collision_known = collision.get("collisionKnown")
+    if collision_known is None and grid_collision:
+        collision_known = grid_collision.get("collisionKnown")
+    plane = collision.get("plane")
+    if plane is None:
+        plane = navigation_packet.get("plane", player.get("plane") if player else tick.get("plane"))
+    map_width = collision.get("mapWidth", grid_collision.get("mapWidth"))
+    map_height = collision.get("mapHeight", grid_collision.get("mapHeight"))
+    player_scene_x = nav_player.get("sceneX", player.get("sceneX"))
+    player_scene_y = nav_player.get("sceneY", player.get("sceneY"))
+    notes = []
+    warnings = []
+    if navigation_packet:
+        notes.append("Collision summary is available from compact live navigation packets.")
+        notes.append("Full route planning is not implemented in this read-only QA layer.")
+    else:
+        warnings.append("collision/navigation packet unavailable; reachability questions cannot be answered yet")
+        notes.append("Navigation profiles can use target/player tile fields now; collision-aware pathing needs compact navigation packets.")
+    if collision_known and not collision_grid:
+        notes.append("Collision hash/count summary is known; full collision grid pathing is not available.")
+    collision_window_available = bool(collision_window.get("flags"))
     return {
         "schema": LIVE_NAVIGATION_SCHEMA,
         "generatedAtUtc": processed_at,
-        "collisionKnown": False,
-        "plane": player.get("plane") if player else tick.get("plane"),
-        "playerSceneX": player.get("sceneX"),
-        "playerSceneY": player.get("sceneY"),
-        "mapBounds": None,
-        "blockedMovementTileCount": None,
-        "obstaclesKnown": False,
-        "notes": [
-            "Collision maps are not captured in the current read-only live context.",
-            "Navigation profiles can use scene-object obstacle geometry now; collision-aware pathing needs a future read-only collision summary.",
-        ],
+        "latestTick": tick_id_for(tick),
+        "collisionKnown": bool(collision_known) if collision_known is not None else False,
+        "plane": plane,
+        "playerWorldX": nav_player.get("worldX", player.get("worldX")),
+        "playerWorldY": nav_player.get("worldY", player.get("worldY")),
+        "playerPlane": nav_player.get("plane", player.get("plane")),
+        "playerSceneX": player_scene_x,
+        "playerSceneY": player_scene_y,
+        "playerTileKnown": player_scene_x is not None and player_scene_y is not None,
+        "mapBounds": {
+            "sceneMinX": bounds.get("sceneMinX"),
+            "sceneMaxX": bounds.get("sceneMaxX"),
+            "sceneMinY": bounds.get("sceneMinY"),
+            "sceneMaxY": bounds.get("sceneMaxY"),
+        } if bounds else None,
+        "mapWidth": map_width,
+        "mapHeight": map_height,
+        "blockedMovementTileCount": collision.get("blockedMovementTileCount", grid_collision.get("blockedMovementTileCount")),
+        "blockedFullTileCount": collision.get("blockedFullTileCount", grid_collision.get("blockedFullTileCount")),
+        "collisionHash": collision.get("collisionHash", grid_collision.get("collisionHash")),
+        "signature": collision.get("collisionHash", grid_collision.get("collisionHash")),
+        "collisionMapVersion": collision.get("collisionMapVersion", grid_collision.get("collisionMapVersion")),
+        "obstaclesKnown": bool(collision_known),
+        "collisionWindowAvailable": collision_window_available,
+        "collisionWindowRadius": collision_window.get("windowRadius"),
+        "collisionWindowBounds": {
+            "minSceneX": collision_window.get("minSceneX"),
+            "maxSceneX": collision_window.get("maxSceneX"),
+            "minSceneY": collision_window.get("minSceneY"),
+            "maxSceneY": collision_window.get("maxSceneY"),
+            "width": collision_window.get("width"),
+            "height": collision_window.get("height"),
+        } if collision_window else None,
+        "collisionWindowHash": collision_window.get("collisionWindowHash") or collision_window.get("windowHash"),
+        "collisionWindowTick": tick_id_for(tick) if collision_window else None,
+        "collisionWindowTileCount": collision_window.get("collisionWindowTileCount"),
+        "collisionWindowEncoding": collision_window.get("encoding"),
+        "collisionWindow": collision_window if collision_window_available else None,
+        "reachabilityComputed": collision_window_available,
+        "fullCollisionGridAvailable": bool(grid_collision.get("flags")),
+        "notes": notes,
+        "warnings": warnings,
+        "source": "compact-packets" if navigation_packet else tick.get("_inputSource", RAW_TICK_SOURCE),
+        "sourceDetails": source,
     }
+
+
+def candidate_navigation_for(candidate: dict, navigation: dict) -> dict:
+    target_scene_x = candidate.get("sceneX")
+    target_scene_y = candidate.get("sceneY")
+    target_plane = candidate.get("plane")
+    player_scene_x = navigation.get("playerSceneX")
+    player_scene_y = navigation.get("playerSceneY")
+    player_plane = navigation.get("playerPlane", navigation.get("plane"))
+    collision_known = navigation.get("collisionKnown")
+    player_tile_known = player_scene_x is not None and player_scene_y is not None
+    target_tile_known = target_scene_x is not None and target_scene_y is not None
+    same_plane = player_plane is not None and target_plane is not None and player_plane == target_plane
+    distance = candidate.get("distanceTiles")
+    if distance is None and player_tile_known and target_tile_known:
+        distance = max(abs(target_scene_x - player_scene_x), abs(target_scene_y - player_scene_y))
+    missing = []
+    if not collision_known:
+        missing.append("collisionSummary")
+    if not player_tile_known:
+        missing.append("playerTile")
+    if not target_tile_known:
+        missing.append("targetTile")
+    if not same_plane:
+        missing.append("samePlane") if player_plane is not None and target_plane is not None else missing.append("plane")
+    direct = "unknown"
+    confidence = 0.0
+    evidence = []
+    window_payload = navigation.get("collisionWindow") if isinstance(navigation.get("collisionWindow"), dict) else None
+    target_in_window = None
+    if window_payload:
+        min_x = window_payload.get("minSceneX")
+        max_x = window_payload.get("maxSceneX")
+        min_y = window_payload.get("minSceneY")
+        max_y = window_payload.get("maxSceneY")
+        if all(isinstance(value, int) for value in (min_x, max_x, min_y, max_y)) and target_tile_known:
+            target_in_window = min_x <= target_scene_x <= max_x and min_y <= target_scene_y <= max_y
+    path_length = None
+    checked_tiles = None
+    conservative_mode = True
+    if collision_known and player_tile_known and target_tile_known and same_plane and window_payload:
+        reachability = navigation_reachability.reachability_for_target(
+            window_payload,
+            player_scene_x=player_scene_x,
+            player_scene_y=player_scene_y,
+            player_plane=player_plane,
+            target_scene_x=target_scene_x,
+            target_scene_y=target_scene_y,
+            target_plane=target_plane,
+        )
+        direct = reachability.get("directReachability", "unknown")
+        confidence = reachability.get("confidence", 0.0)
+        path_length = reachability.get("pathLengthTiles")
+        checked_tiles = reachability.get("checkedTiles")
+        conservative_mode = bool(reachability.get("conservativeMode", True))
+        evidence.extend(reachability.get("reachabilityEvidence") or [])
+        if reachability.get("reason"):
+            evidence.append(reachability.get("reason"))
+        missing.extend(reachability.get("missingNavigationFields") or [])
+    elif collision_known and player_tile_known and target_tile_known and same_plane:
+        evidence.append("collision summary, player tile, and target tile are known")
+        if navigation.get("fullCollisionGridAvailable"):
+            direct = "unknown"
+            confidence = 0.35
+            evidence.append("full collision grid is present, but pathing is not implemented in this pass")
+            missing.append("pathfinding")
+        else:
+            direct = "unknown"
+            confidence = 0.25
+            evidence.append("collision summary is available, but full grid pathing is not available")
+            missing.append("collisionGridPathing")
+    return {
+        "collisionKnown": bool(collision_known),
+        "collisionWindowAvailable": bool(window_payload),
+        "targetInCollisionWindow": target_in_window,
+        "playerTileKnown": player_tile_known,
+        "targetTileKnown": target_tile_known,
+        "samePlane": same_plane,
+        "distanceTiles": distance,
+        "directReachability": direct,
+        "pathLengthTiles": path_length,
+        "checkedTiles": checked_tiles,
+        "reachabilityConfidence": confidence,
+        "reachabilityEvidence": evidence,
+        "missingNavigationFields": sorted(set(missing)),
+        "conservativeMode": conservative_mode,
+    }
+
+
+def apply_navigation_to_candidates(candidates: list[dict], navigation: dict) -> list[dict]:
+    return [
+        dict(candidate, navigation=candidate_navigation_for(candidate, navigation))
+        for candidate in candidates
+    ]
 
 
 def woodcutting_state_for(activity: dict, inventory_state: dict, candidates: list[dict], liveness_summary: dict) -> dict:
@@ -3349,6 +3550,8 @@ class LiveTargetProcessor:
         candidate_counts = Counter(candidate.get("tickId") for candidate in candidates)
         tick_summaries = tick_summaries_for(self.session, output_ticks, self.source_files, world_counts, candidate_counts, build_durations, processed_at)
         latest_tick_record = output_ticks[-1] if output_ticks else (selected_ticks[-1] if selected_ticks else (next(reversed(self.tick_window.values())) if self.tick_window else None))
+        navigation = navigation_summary_for(latest_tick_record, processed_at)
+        candidates = apply_navigation_to_candidates(candidates, navigation)
 
         total_duration_ms = (time.perf_counter() - total_started) * 1000.0
         budget_exceeded = total_duration_ms > self.args.target_update_ms
@@ -3373,7 +3576,6 @@ class LiveTargetProcessor:
 
         with timing.measure("contextIndexMillis"):
             context_index = context_index_for(self.session, self.args, selected_ticks, candidates, processed_at)
-            navigation = navigation_summary_for(latest_tick_record, processed_at)
 
         source_summary = source_scene_summary(selected_ticks)
         latest_frame, latest_frame_path, frame_ticks = latest_frame_tick(self.session, output_ticks or selected_ticks)
@@ -3420,20 +3622,33 @@ class LiveTargetProcessor:
             }
             if self.args.emit_world_targets != "none":
                 serialized_outputs["worldTargets"] = "".join(json_dump_compact(record) + "\n" for record in world_output_records)
+        suppress_output_writes = bool(getattr(self.args, "suppress_output_writes", False))
         with timing.measure("outputWriteMillis"):
-            if self.args.emit_world_targets == "none":
-                output_bytes["worldTargets"] = remove_file_if_exists(paths["worldTargets"])
+            if suppress_output_writes:
+                output_bytes["worldTargets"] = len(serialized_outputs.get("worldTargets", ""))
+                output_bytes["uiTargets"] = len(serialized_outputs["uiTargets"])
+                output_bytes["candidates"] = len(serialized_outputs["candidates"])
+                output_bytes["tickSummary"] = len(serialized_outputs["tickSummary"])
+                output_bytes["baseline"] = len(serialized_outputs["baseline"])
+                output_bytes["activity"] = len(serialized_outputs["activity"])
+                output_bytes["contextIndex"] = len(serialized_outputs["contextIndex"])
+                output_bytes["navigation"] = len(serialized_outputs["navigation"])
+                output_bytes["index"] = len(serialized_outputs["index"])
+                output_bytes["status"] = len(serialized_outputs["status"])
             else:
-                output_bytes["worldTargets"] = atomic_write_text(paths["worldTargets"], serialized_outputs["worldTargets"], options=self.write_options, stats=write_stats)
-            output_bytes["uiTargets"] = atomic_write_text(paths["uiTargets"], serialized_outputs["uiTargets"], options=self.write_options, stats=write_stats)
-            output_bytes["candidates"] = atomic_write_text(paths["candidates"], serialized_outputs["candidates"], options=self.write_options, stats=write_stats)
-            output_bytes["tickSummary"] = atomic_write_text(paths["tickSummary"], serialized_outputs["tickSummary"], options=self.write_options, stats=write_stats)
-            output_bytes["baseline"] = atomic_write_text(paths["baseline"], serialized_outputs["baseline"], options=self.write_options, stats=write_stats)
-            output_bytes["activity"] = atomic_write_text(paths["activity"], serialized_outputs["activity"], options=self.write_options, stats=write_stats)
-            output_bytes["contextIndex"] = atomic_write_text(paths["contextIndex"], serialized_outputs["contextIndex"], options=self.write_options, stats=write_stats)
-            output_bytes["navigation"] = atomic_write_text(paths["navigation"], serialized_outputs["navigation"], options=self.write_options, stats=write_stats)
-            output_bytes["index"] = atomic_write_text(paths["index"], serialized_outputs["index"], options=self.write_options, stats=write_stats)
-            output_bytes["status"] = atomic_write_text(paths["status"], serialized_outputs["status"], options=self.write_options, stats=write_stats)
+                if self.args.emit_world_targets == "none":
+                    output_bytes["worldTargets"] = remove_file_if_exists(paths["worldTargets"])
+                else:
+                    output_bytes["worldTargets"] = atomic_write_text(paths["worldTargets"], serialized_outputs["worldTargets"], options=self.write_options, stats=write_stats)
+                output_bytes["uiTargets"] = atomic_write_text(paths["uiTargets"], serialized_outputs["uiTargets"], options=self.write_options, stats=write_stats)
+                output_bytes["candidates"] = atomic_write_text(paths["candidates"], serialized_outputs["candidates"], options=self.write_options, stats=write_stats)
+                output_bytes["tickSummary"] = atomic_write_text(paths["tickSummary"], serialized_outputs["tickSummary"], options=self.write_options, stats=write_stats)
+                output_bytes["baseline"] = atomic_write_text(paths["baseline"], serialized_outputs["baseline"], options=self.write_options, stats=write_stats)
+                output_bytes["activity"] = atomic_write_text(paths["activity"], serialized_outputs["activity"], options=self.write_options, stats=write_stats)
+                output_bytes["contextIndex"] = atomic_write_text(paths["contextIndex"], serialized_outputs["contextIndex"], options=self.write_options, stats=write_stats)
+                output_bytes["navigation"] = atomic_write_text(paths["navigation"], serialized_outputs["navigation"], options=self.write_options, stats=write_stats)
+                output_bytes["index"] = atomic_write_text(paths["index"], serialized_outputs["index"], options=self.write_options, stats=write_stats)
+                output_bytes["status"] = atomic_write_text(paths["status"], serialized_outputs["status"], options=self.write_options, stats=write_stats)
 
         process_window_ms = (time.perf_counter() - total_started) * 1000.0
         pre_window_ms = (
@@ -3488,8 +3703,12 @@ class LiveTargetProcessor:
             final_status_text = json.dumps(status, indent=2, sort_keys=False) + "\n"
             performance_text = json.dumps(performance, indent=2, sort_keys=False) + "\n"
         with timing.measure("outputWriteMillis"):
-            status_size = atomic_write_text(paths["status"], final_status_text, options=self.write_options, stats=write_stats)
-            performance_size = atomic_write_text(paths["performance"], performance_text, options=self.write_options, stats=write_stats)
+            if suppress_output_writes:
+                status_size = len(final_status_text)
+                performance_size = len(performance_text)
+            else:
+                status_size = atomic_write_text(paths["status"], final_status_text, options=self.write_options, stats=write_stats)
+                performance_size = atomic_write_text(paths["performance"], performance_text, options=self.write_options, stats=write_stats)
         if status_size:
             output_bytes["status"] = status_size
         output_bytes["performance"] = performance_size
@@ -3888,19 +4107,116 @@ def args_copy(args, **overrides) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+def compare_distance(candidate: dict) -> float | None:
+    for key in ("distanceTiles", "targetDistanceChebyshev", "targetDistanceTiles"):
+        value = candidate.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def compare_aim_point(candidate: dict | None) -> dict | None:
+    if not candidate:
+        return None
+    context = candidate.get("aimPointContext") if isinstance(candidate.get("aimPointContext"), dict) else {}
+    aim = candidate.get("aimPoint") if isinstance(candidate.get("aimPoint"), dict) else {}
+    x = context.get("canvasX", context.get("x"))
+    y = context.get("canvasY", context.get("y"))
+    if x is None or y is None:
+        x = aim.get("canvasX", aim.get("x"))
+        y = aim.get("canvasY", aim.get("y"))
+    return {"canvasX": x, "canvasY": y} if x is not None and y is not None else None
+
+
+def compare_candidate_summary(candidate: dict | None) -> dict | None:
+    if not candidate:
+        return None
+    return {
+        "classId": candidate.get("classId"),
+        "name": candidate.get("name"),
+        "id": candidate.get("rawId") if candidate.get("rawId") is not None else candidate.get("id"),
+        "hash": candidate.get("hash"),
+        "worldX": candidate.get("worldX"),
+        "worldY": candidate.get("worldY"),
+        "plane": candidate.get("plane"),
+        "sceneX": candidate.get("sceneX"),
+        "sceneY": candidate.get("sceneY"),
+        "distanceTiles": compare_distance(candidate),
+        "aimPoint": compare_aim_point(candidate),
+        "targetLiveState": candidate.get("targetLiveState"),
+    }
+
+
+def compare_player_summary(result: dict) -> dict:
+    baseline = result.get("baseline") if isinstance(result.get("baseline"), dict) else {}
+    player = baseline.get("player") if isinstance(baseline.get("player"), dict) else {}
+    return {key: player.get(key) for key in ("worldX", "worldY", "plane", "sceneX", "sceneY", "localX", "localY")}
+
+
+def compare_inventory_summary(result: dict) -> dict:
+    activity = result.get("activity") if isinstance(result.get("activity"), dict) else {}
+    baseline = result.get("baseline") if isinstance(result.get("baseline"), dict) else {}
+    inventory = activity.get("inventory") if isinstance(activity.get("inventory"), dict) else baseline.get("inventory") if isinstance(baseline.get("inventory"), dict) else {}
+    return {
+        "known": inventory.get("known") if "known" in inventory else bool(inventory),
+        "inventorySlotCount": inventory.get("inventorySlotCount") or inventory.get("slotCount"),
+        "freeSlots": inventory.get("freeSlots"),
+        "filledSlots": inventory.get("filledSlots"),
+        "itemCount": inventory.get("itemCount"),
+        "totalItemQuantity": inventory.get("totalItemQuantity"),
+        "signature": inventory.get("signature") or inventory.get("inventoryHash"),
+        "inventoryFull": inventory.get("inventoryFull"),
+    }
+
+
+def compare_inventory_core_matches(raw_inventory: dict, compact_inventory: dict) -> bool:
+    core_fields = ("inventorySlotCount", "freeSlots", "filledSlots", "itemCount", "totalItemQuantity", "inventoryFull")
+    for field in core_fields:
+        raw_value = raw_inventory.get(field)
+        compact_value = compact_inventory.get(field)
+        if raw_value is not None and compact_value is not None and raw_value != compact_value:
+            return False
+    return True
+
+
+def compare_liveness_summary(result: dict) -> dict:
+    activity = result.get("activity") if isinstance(result.get("activity"), dict) else {}
+    status = result.get("status") if isinstance(result.get("status"), dict) else {}
+    liveness = activity.get("targetLiveness") if isinstance(activity.get("targetLiveness"), dict) else {}
+    return {
+        "bestCandidateLiveState": liveness.get("bestCandidateLiveState"),
+        "activeCandidateLiveState": liveness.get("activeCandidateLiveState"),
+        "recentlyUnavailableCount": liveness.get("recentlyUnavailableCount", status.get("recentlyUnavailableCount")),
+        "recentlyDepletedCount": liveness.get("recentlyDepletedCount", status.get("recentlyDepletedCount")),
+        "candidatesSuppressedByLiveness": liveness.get("candidatesSuppressedByLiveness", status.get("candidatesSuppressedByLiveness")),
+        "candidatesSuppressedAsDepleted": liveness.get("candidatesSuppressedAsDepleted", status.get("candidatesSuppressedAsDepleted")),
+        "livenessMode": status.get("livenessMode"),
+        "livenessDegraded": status.get("livenessDegraded"),
+        "livenessBudgetExceeded": status.get("livenessBudgetExceeded"),
+    }
+
+
 def compare_result_summary(result: dict | None) -> dict:
     if not result:
         return {"available": False}
     candidates = result.get("candidates") or []
     status = result.get("status") or {}
-    best_tree = next((candidate for candidate in candidates if "tree" in candidate_class_ids(candidate)), None)
+    tree_candidates = [candidate for candidate in candidates if "tree" in candidate_class_ids(candidate)]
+    best_tree = tree_candidates[0] if tree_candidates else None
+    nearest_tree = min(tree_candidates, key=lambda candidate: compare_distance(candidate) if compare_distance(candidate) is not None else 999999) if tree_candidates else None
     return {
         "available": True,
         "inputSourceActive": status.get("inputSourceActive"),
         "latestTick": status.get("lastProcessedTick"),
+        "player": compare_player_summary(result),
         "candidateCount": len(candidates),
         "candidateCountsByClassId": status.get("candidateCountsByClassId") or {},
-        "bestTree": best_candidate_summary(best_tree),
+        "bestTree": compare_candidate_summary(best_tree),
+        "nearestTree": compare_candidate_summary(nearest_tree),
+        "inventory": compare_inventory_summary(result),
+        "liveness": compare_liveness_summary(result),
+        "sourceSceneKnowledgeComplete": status.get("sourceSceneKnowledgeComplete"),
+        "sourceCapHit": status.get("sourceCapHit"),
         "missingFieldWarnings": [
             warning
             for warning in status.get("warnings") or []
@@ -3918,6 +4234,7 @@ def run_compare_source(session: Path, args, input_source: str) -> dict | None:
         quiet=True,
         summary=False,
         clear_live_output=False,
+        suppress_output_writes=True,
     )
     processor = LiveTargetProcessor(session, compare_args)
     if input_source == COMPACT_PACKET_SOURCE and not processor.compact_packets_available:
@@ -3935,19 +4252,51 @@ def compare_input_sources(session: Path, args) -> int:
     compact_summary = compare_result_summary(compact_result)
 
     warnings = []
+    failures = []
     if not raw_summary.get("available"):
-        warnings.append("raw tick source unavailable")
+        failures.append("raw tick source unavailable")
     if not compact_summary.get("available"):
-        warnings.append("compact packet source unavailable")
+        failures.append("compact packet source unavailable")
 
-    status = "FAIL" if warnings and (not raw_summary.get("available") or not compact_summary.get("available")) else "PASS"
+    status = "FAIL" if failures else "PASS"
     if status == "PASS":
+        if raw_summary.get("latestTick") != compact_summary.get("latestTick"):
+            warnings.append("latest tick differs")
+        if raw_summary.get("player") != compact_summary.get("player"):
+            warnings.append("player baseline differs")
         if raw_summary.get("candidateCount") != compact_summary.get("candidateCount"):
-            status = "WARN"
             warnings.append("candidate counts differ")
         if raw_summary.get("bestTree") != compact_summary.get("bestTree"):
-            status = "WARN"
-            warnings.append("best tree candidate differs")
+            failures.append("best tree candidate differs")
+        if raw_summary.get("nearestTree") != compact_summary.get("nearestTree"):
+            failures.append("nearest tree candidate differs")
+        raw_inventory = raw_summary.get("inventory") or {}
+        compact_inventory = compact_summary.get("inventory") or {}
+        if raw_inventory.get("known") and compact_inventory.get("known") and not compare_inventory_core_matches(raw_inventory, compact_inventory):
+            failures.append("inventory slot/quantity summary differs")
+        elif raw_inventory != compact_inventory:
+            warnings.append("inventory summary differs or is missing optional fields")
+        if raw_inventory.get("signature") and compact_inventory.get("signature") and raw_inventory.get("signature") != compact_inventory.get("signature"):
+            warnings.append("inventory signatures differ or use different formats")
+        raw_complete = raw_summary.get("sourceSceneKnowledgeComplete")
+        compact_complete = compact_summary.get("sourceSceneKnowledgeComplete")
+        if raw_complete is not None and compact_complete is not None and raw_complete != compact_complete:
+            failures.append("sourceSceneKnowledgeComplete differs")
+        elif raw_complete != compact_complete:
+            warnings.append("sourceSceneKnowledgeComplete is missing from one source")
+        raw_cap_hit = raw_summary.get("sourceCapHit")
+        compact_cap_hit = compact_summary.get("sourceCapHit")
+        if raw_cap_hit is not None and compact_cap_hit is not None and raw_cap_hit != compact_cap_hit:
+            failures.append("sourceCapHit differs")
+        elif raw_cap_hit != compact_cap_hit:
+            warnings.append("sourceCapHit is missing from one source")
+        if raw_summary.get("liveness") != compact_summary.get("liveness"):
+            warnings.append("liveness summary differs")
+
+    if failures:
+        status = "FAIL"
+    elif warnings:
+        status = "WARN"
 
     payload = {
         "schema": "live_input_source_comparison.v1",
@@ -3957,6 +4306,7 @@ def compare_input_sources(session: Path, args) -> int:
         "rawTicks": raw_summary,
         "compactPackets": compact_summary,
         "warnings": warnings,
+        "failures": failures,
     }
     print(json.dumps(payload, indent=2, sort_keys=False))
     return 0 if status in {"PASS", "WARN"} else 1

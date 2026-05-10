@@ -328,9 +328,79 @@ public interface TelemetryConfig extends Config
 	}
 
 	@ConfigItem(
+			keyName = "emitCompactNavigationPackets",
+			name = "Emit compact navigation packets",
+			description = "Include read-only collision/navigation summary packets in the compact live stream."
+	)
+	default boolean emitCompactNavigationPackets()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "compactNavigationEmitCollisionWindow",
+			name = "Compact navigation collision window",
+			description = "Emit a bounded read-only local collision window around the player for lightweight reachability QA."
+	)
+	default boolean compactNavigationEmitCollisionWindow()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			keyName = "compactNavigationCollisionWindowRadius",
+			name = "Compact navigation window radius",
+			description = "Scene-tile radius for compact collision window packets. Values are clamped between 8 and 52."
+	)
+	default int compactNavigationCollisionWindowRadius()
+	{
+		return 24;
+	}
+
+	@ConfigItem(
+			keyName = "compactNavigationIncludeFullCollisionGrid",
+			name = "Compact navigation full collision grid",
+			description = "Debug only: include full collision flag grids in compact live packets when the interval is enabled."
+	)
+	default boolean compactNavigationIncludeFullCollisionGrid()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			keyName = "compactNavigationGridIntervalTicks",
+			name = "Compact navigation grid interval ticks",
+			description = "Debug-only full collision grid packet interval. 0 disables full grid packets."
+	)
+	default int compactNavigationGridIntervalTicks()
+	{
+		return 0;
+	}
+
+	@ConfigItem(
+			keyName = "compactNavigationFullGridIntervalTicks",
+			name = "Compact navigation full grid interval",
+			description = "Debug-only full collision grid packet interval. 0 disables full grid packets."
+	)
+	default int compactNavigationFullGridIntervalTicks()
+	{
+		return 0;
+	}
+
+	@ConfigItem(
+			keyName = "compactNavigationHashOnly",
+			name = "Compact navigation hash only",
+			description = "Keep normal compact navigation packets to collision summary/hash fields instead of full grid data."
+	)
+	default boolean compactNavigationHashOnly()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 			keyName = "compactLivePacketTypes",
 			name = "Compact live packet types",
-			description = "Comma-separated compact packet groups to emit: baseline,sceneDelta,projection,inventory,activity,writerHealth, or all."
+			description = "Comma-separated compact packet groups to emit: baseline,sceneDelta,projection,inventory,activity,navigation,collisionWindow,collisionGrid,writerHealth, or all."
 	)
 	default String compactLivePacketTypes()
 	{
