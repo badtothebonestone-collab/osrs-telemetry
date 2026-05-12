@@ -2,6 +2,8 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 VIEWER_DIR = Path(__file__).resolve().parents[1]
@@ -112,6 +114,7 @@ class MockBrainRehearsalTest(unittest.TestCase):
         self.assertEqual(request["maxEvents"], 6)
         self.assertIn("best:tree", request["needs"])
         self.assertIn("events", request["needs"])
+        self.assertIn("watches", request["needs"])
 
     def test_target_available_phase(self):
         result = brain.evaluate_response(context_response(), goal_count=5)
@@ -243,6 +246,45 @@ class MockBrainRehearsalTest(unittest.TestCase):
         self.assertNotIn("moveCommand", raw)
         self.assertNotIn("executeCommand", raw)
         self.assertTrue(result["noActionEmitted"])
+
+    def test_watchable_missing_capabilities_are_separated(self):
+        response = context_response()
+        response["missingCapabilities"] = ["watch:example_state"]
+        response["suggestedWatchRequests"] = [
+            {"alias": "example_state", "type": "builtin", "id": "inventory.summary", "sampleMode": "on_change", "ttlTicks": 500}
+        ]
+        result = brain.evaluate_response(response)
+
+        self.assertEqual(result["missingCapabilities"], ["watch:example_state"])
+        self.assertEqual(result["watchableMissingCapabilities"][0]["alias"], "example_state")
+        output = brain.format_human(result)
+        self.assertIn("Watchable missing fields:", output)
+
+    def test_request_missing_watches_posts_only_when_flag_enabled(self):
+        response = context_response()
+        response["missingCapabilities"] = ["watch:example_state"]
+        response["suggestedWatchRequests"] = [
+            {"alias": "example_state", "type": "builtin", "id": "inventory.summary", "sampleMode": "on_change", "ttlTicks": 500}
+        ]
+        args = SimpleNamespace(
+            task="woodcutting",
+            max_candidates=3,
+            max_events=5,
+            host="127.0.0.1",
+            port=8890,
+            timeout=1.0,
+            goal_count=5,
+            show_system_events=False,
+            event_priority="task",
+            request_missing_watches=True,
+        )
+        with mock.patch.object(brain, "fetch_context", return_value=response), mock.patch.object(
+            brain, "post_watch_request", return_value={"schema": "context_watch_response.v1", "accepted": []}
+        ) as post:
+            result = brain.rehearsal_once(args)
+
+        self.assertIn("watchRequest", result)
+        post.assert_called_once()
 
     def test_human_output_says_no_action_emitted(self):
         output = brain.format_human(brain.evaluate_response(context_response()))

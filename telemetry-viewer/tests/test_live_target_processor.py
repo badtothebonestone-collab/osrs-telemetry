@@ -1,12 +1,15 @@
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -17,6 +20,7 @@ LIVE_SCRIPT = VIEWER_DIR / "live_target_processor.py"
 sys.path.insert(0, str(VIEWER_DIR))
 
 import live_target_processor as live
+import diagnose_plugin_snapshot as diagnose_snapshot
 import target_geometry_inspector as inspector
 
 
@@ -213,7 +217,7 @@ def compact_collision_window(tick_id: int, *, player_scene_x: int = 10, player_s
     }
 
 
-def write_compact_packets(session: Path, tick_objects: dict[int, list[dict]]) -> None:
+def write_compact_packets(session: Path, tick_objects: dict[int, list[dict]], *, include_watch_values: bool = False) -> None:
     live_dir = session / "live_packets"
     live_dir.mkdir(parents=True, exist_ok=True)
     segment = live_dir / "live-000001.ndjson"
@@ -330,7 +334,31 @@ def write_compact_packets(session: Path, tick_objects: dict[int, list[dict]]) ->
                     },
                 ),
             ]
-            sequence += 8
+            if include_watch_values:
+                packets.append(
+                    compact_packet(
+                        "live_watch_values_packet.v1",
+                        tick_id,
+                        sequence + 9,
+                        {
+                            "activeWatchCount": 1,
+                            "rejectedWatchCount": 0,
+                            "watchBudgetExceeded": False,
+                            "values": [
+                                {
+                                    "alias": "test_varbit",
+                                    "type": "varbit",
+                                    "id": 123,
+                                    "value": 7,
+                                    "changed": True,
+                                    "latestTick": tick_id,
+                                    "source": "synthetic",
+                                }
+                            ],
+                        },
+                    )
+                )
+            sequence += len(packets)
             for packet in packets:
                 counts[packet["packetType"]] = counts.get(packet["packetType"], 0) + 1
                 file.write(json.dumps(packet, separators=(",", ":")) + "\n")
@@ -360,9 +388,135 @@ def write_compact_packets(session: Path, tick_objects: dict[int, list[dict]]) ->
     )
 
 
+def compact_packet_lines(session: Path, tick_objects: dict[int, list[dict]]) -> list[str]:
+    write_compact_packets(session, tick_objects)
+    segment = session / "live_packets" / "live-000001.ndjson"
+    return [line + "\n" for line in segment.read_text(encoding="utf-8").splitlines()]
+
+
+PACKET_TYPE_TO_SNAPSHOT_NEED = {
+    "live_baseline_packet.v1": "baseline",
+    "live_scene_delta_packet.v1": "scene_delta",
+    "live_projection_packet.v1": "projection",
+    "live_inventory_packet.v1": "inventory",
+    "live_inventory_delta_packet.v1": "inventory_delta",
+    "live_activity_packet.v1": "activity",
+    "live_navigation_packet.v1": "navigation",
+    "live_collision_window_packet.v1": "collision_window",
+    "live_writer_health_packet.v1": "writer_health",
+    "live_watch_values_packet.v1": "watch_values",
+}
+
+
+def snapshot_response_from_lines(lines: list[str], *, omit_needs=None, status: str = "PASS", warnings=None) -> dict:
+    omit_needs = set(omit_needs or [])
+    payloads = {}
+    latest_tick = None
+    latest_sequence = None
+    latest_tick_by_type = {}
+    latest_sequence_by_type = {}
+    for line in lines:
+        packet = json.loads(line)
+        packet_type = packet.get("packetType")
+        need = PACKET_TYPE_TO_SNAPSHOT_NEED.get(packet_type)
+        if not need or need in omit_needs:
+            continue
+        payloads[need] = packet.get("payload") or {}
+        tick = packet.get("tick")
+        sequence = packet.get("sequence")
+        if isinstance(tick, int):
+            latest_tick = tick if latest_tick is None else max(latest_tick, tick)
+            latest_tick_by_type[packet_type] = tick
+        if isinstance(sequence, int):
+            latest_sequence = sequence if latest_sequence is None else max(latest_sequence, sequence)
+            latest_sequence_by_type[packet_type] = sequence
+    missing = sorted(set(live.PLUGIN_SNAPSHOT_REQUIRED_NEEDS) - set(payloads))
+    response_warnings = list(warnings or [])
+    if missing and status == "PASS":
+        status = "WARN"
+    return {
+        "schema": "plugin_snapshot_response.v1",
+        "requestId": "test",
+        "generatedAtUtc": "2026-01-01T00:00:01Z",
+        "latestTick": latest_tick,
+        "status": status,
+        "freshness": {"latestTick": latest_tick, "fresh": True, "ageTicksByNeed": {key: 0 for key in payloads}},
+        "payloads": payloads,
+        "missingCapabilities": missing,
+        "warnings": response_warnings,
+        "serviceTimingMillis": 1.0,
+        "cacheHealth": {
+            "liveCacheLatestSequence": latest_sequence,
+            "liveCacheLatestTickByType": latest_tick_by_type,
+            "liveCacheLatestSequenceByType": latest_sequence_by_type,
+        },
+    }
+
+
+class NdjsonTestServer:
+    def __init__(self, chunks: list[bytes], *, pause_after_first: bool = False):
+        self.chunks = chunks
+        self.pause_after_first = pause_after_first
+        self.continue_event = threading.Event()
+        self.ready = threading.Event()
+        self.done = threading.Event()
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.bind(("127.0.0.1", 0))
+        self.socket.listen(1)
+        self.port = self.socket.getsockname()[1]
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        self.ready.wait(timeout=1.0)
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        self.continue_event.set()
+        try:
+            self.socket.close()
+        except OSError:
+            pass
+        self.thread.join(timeout=1.0)
+
+    def _run(self):
+        self.ready.set()
+        try:
+            conn, _addr = self.socket.accept()
+        except OSError:
+            self.done.set()
+            return
+        with conn:
+            for index, chunk in enumerate(self.chunks):
+                try:
+                    conn.sendall(chunk)
+                except OSError:
+                    break
+                if index == 0 and self.pause_after_first:
+                    self.continue_event.wait(timeout=2.0)
+        self.done.set()
+
+
 def live_args(**overrides):
     values = {
         "input_source": "raw-ticks",
+        "compact_stream_host": "127.0.0.1",
+        "compact_stream_port": 1,
+        "compact_stream_timeout": 0.1,
+        "plugin_snapshot_host": "127.0.0.1",
+        "plugin_snapshot_port": 8893,
+        "plugin_snapshot_token": "",
+        "plugin_snapshot_timeout": 0.1,
+        "plugin_snapshot_tier": "hot",
+        "plugin_snapshot_max_projection_refs": None,
+        "plugin_snapshot_max_age_ticks": 5,
+        "plugin_snapshot_include_geometry": False,
+        "plugin_snapshot_response_mode": "compact",
+        "plugin_snapshot_projection_field_mode": "compact",
+        "plugin_snapshot_fallback": "none",
+        "plugin_snapshot_auto_escalate": False,
+        "plugin_snapshot_min_candidates": 1,
+        "auto_prefer_plugin_snapshot": False,
         "compare_input_sources": False,
         "require_compact_packets": False,
         "profile": "woodcutting",
@@ -599,6 +753,734 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(result["candidates"][0]["navigation"]["directReachability"], "reachable")
             self.assertTrue(status["sourceSceneKnowledgeComplete"])
 
+    def test_compact_stream_tailer_preserves_partial_line(self):
+        baseline = compact_packet(
+            "live_baseline_packet.v1",
+            1,
+            1,
+            {"tick": 1, "gameState": "LOGGED_IN", "player": {"worldX": 3200, "worldY": 3200, "plane": 0}},
+        )
+        projection = compact_packet(
+            "live_projection_packet.v1",
+            1,
+            2,
+            {"tick": 1, "visibleObjectRefs": []},
+        )
+        baseline_line = json.dumps(baseline, separators=(",", ":")) + "\n"
+        projection_line = json.dumps(projection, separators=(",", ":")) + "\n"
+        split_at = len(projection_line) // 2
+        with NdjsonTestServer(
+            [(baseline_line + projection_line[:split_at]).encode("utf-8"), projection_line[split_at:].encode("utf-8")],
+            pause_after_first=True,
+        ) as server:
+            tailer = live.CompactStreamTailer("127.0.0.1", server.port, 0.05)
+
+            first = tailer.read_new_records(realtime=True, max_records=1)
+            self.assertEqual(first, [])
+            self.assertTrue(tailer.partial_line_files())
+            self.assertEqual(tailer.last_stream_ticks_waiting_for_projection, 1)
+
+            server.continue_event.set()
+            second = tailer.read_new_records(realtime=True, max_records=1)
+            tailer.close()
+
+            self.assertEqual(len(second), 1)
+            self.assertEqual(second[0][2]["tickId"], 1)
+            self.assertEqual(second[0][2]["_inputSource"], "compact-stream")
+
+    def test_input_source_compact_stream_reads_synthetic_packets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="stream-tree")
+            session = make_session(Path(tmp), [])
+            lines = compact_packet_lines(session, {1: [tree]})
+            with NdjsonTestServer([line.encode("utf-8") for line in lines]) as server:
+                processor = live.LiveTargetProcessor(
+                    session,
+                    live_args(
+                        input_source="compact-stream",
+                        compact_stream_port=server.port,
+                        compact_stream_timeout=0.05,
+                    ),
+                )
+
+                result = {}
+                for _attempt in range(5):
+                    _added, result = processor.poll_once()
+                    if result.get("status", {}).get("candidateCount"):
+                        break
+                    time.sleep(0.02)
+                status = result["status"]
+                processor.tailer.close()
+
+            self.assertEqual(status["inputSourceActive"], "compact-stream")
+            self.assertGreaterEqual(status["compactStreamReconnects"], 1)
+            self.assertGreaterEqual(status["compactPacketsProcessed"], 2)
+            self.assertGreaterEqual(status["compactStreamPacketsSeen"], 2)
+            self.assertEqual(status["compactStreamPacketsByType"]["live_projection_packet.v1"], 1)
+            self.assertEqual(status["compactStreamLatestTickByType"]["live_projection_packet.v1"], 1)
+            self.assertEqual(status["compactStreamMissingRequiredTypesForLatestTick"], [])
+            self.assertEqual(status["candidateCount"], 1)
+            self.assertEqual(result["candidates"][0]["objectKey"], "stream-tree")
+            self.assertEqual(result["candidates"][0]["classId"], "tree")
+
+    def test_plugin_snapshot_to_tick_conversion_with_synthetic_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="snapshot-tree")
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}))
+
+            tick = live.plugin_snapshot_to_tick(response)
+
+            self.assertIsNotNone(tick)
+            self.assertEqual(tick["tickId"], 1)
+            self.assertEqual(tick["_inputSource"], "plugin-snapshot")
+            self.assertIn("visibleSceneObjectRefs", tick)
+            self.assertEqual(tick["visibleSceneObjectRefs"][0]["objectKey"], "snapshot-tree")
+
+    def test_plugin_snapshot_projection_refs_shape_converts_to_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="snapshot-refs-tree")
+            compact_tree = compact_scene_object(tree)
+            compact_tree["aimPoint"] = {"x": 110, "y": 100}
+            compact_tree.pop("actions", None)
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}))
+            response["payloads"]["projection"] = {
+                "sceneProjectionSummary": {"visibleObjectCount": 1},
+                "refs": [compact_tree],
+            }
+
+            tick = live.plugin_snapshot_to_tick(response)
+
+            self.assertIsNotNone(tick)
+            self.assertEqual(tick["visibleSceneObjectRefs"][0]["objectKey"], "snapshot-refs-tree")
+            self.assertEqual(tick["visibleSceneObjectRefs"][0]["canvasLocation"], {"x": 110, "y": 100})
+            self.assertEqual(tick["_pluginSnapshotProjectionDiagnostics"]["refListPath"], "refs")
+
+    def test_plugin_snapshot_packet_envelope_shape_converts_to_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="snapshot-envelope-tree")
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}))
+            projection_payload = response["payloads"]["projection"]
+            response["payloads"]["projection"] = compact_packet(
+                "live_projection_packet.v1",
+                1,
+                3,
+                projection_payload,
+            )
+
+            tick = live.plugin_snapshot_to_tick(response)
+
+            self.assertIsNotNone(tick)
+            self.assertEqual(tick["visibleSceneObjectRefs"][0]["objectKey"], "snapshot-envelope-tree")
+            self.assertEqual(tick["_pluginSnapshotProjectionDiagnostics"]["refListPath"], "visibleObjectRefs")
+
+    def test_input_source_plugin_snapshot_builds_candidates_from_refs_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(10820, 3201, 3201, 110, 100, name="Oak tree", object_key="snapshot-oak")
+            compact_tree = compact_scene_object(tree)
+            compact_tree["aimPoint"] = {"canvasX": 110, "canvasY": 100}
+            compact_tree.pop("actions", None)
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}))
+            response["payloads"]["projection"] = {
+                "sceneProjectionSummary": {"visibleObjectCount": 1},
+                "projectedRefs": [compact_tree],
+            }
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot"))
+                _added, result = processor.poll_once()
+
+            status = result["status"]
+            self.assertEqual(status["candidateCount"], 1)
+            self.assertEqual(result["candidates"][0]["objectKey"], "snapshot-oak")
+            self.assertIn(result["candidates"][0]["classId"], {"tree", "oak_tree"})
+            self.assertEqual(result["candidates"][0]["name"], "Oak tree")
+            self.assertEqual(status["pluginSnapshotProjectionRefListPath"], "projectedRefs")
+            self.assertEqual(status["pluginSnapshotRefsConverted"], 1)
+
+    def test_plugin_snapshot_missing_name_actions_still_builds_world_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(10820, 3201, 3201, 110, 100, name="Oak tree", object_key="snapshot-unknown-oak")
+            compact_tree = compact_scene_object(tree)
+            compact_tree.pop("name", None)
+            compact_tree.pop("objectName", None)
+            compact_tree.pop("actions", None)
+            compact_tree["aimPoint"] = {"x": 110, "y": 100}
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}))
+            response["payloads"]["projection"] = {
+                "sceneProjectionSummary": {"visibleObjectCount": 1},
+                "visibleObjectRefs": [compact_tree],
+            }
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot"))
+                _added, result = processor.poll_once()
+
+            status = result["status"]
+            self.assertEqual(status["worldTargetsBuilt"], 1)
+            self.assertEqual(status["pluginSnapshotRefsAcceptedForWorldTargets"], 1)
+            self.assertEqual(status["pluginSnapshotVisibleRefsExpectedPathCount"], 1)
+            self.assertEqual(status["candidateCount"], 0)
+            self.assertTrue(status["pluginSnapshotCandidateRejectReasons"])
+
+    def test_plugin_snapshot_synthetic_tick_shape_matches_compact_packet_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="same-shape-tree")
+            session = make_session(Path(tmp), [])
+            lines = compact_packet_lines(session, {1: [tree]})
+            response = snapshot_response_from_lines(lines)
+            packets = [json.loads(line) for line in lines]
+            compact_tick = live.compact_packets_to_tick(packets)
+            snapshot_tick = live.plugin_snapshot_to_tick(response)
+
+            compact_diag = live.synthetic_tick_ref_diagnostics(compact_tick)
+            snapshot_diag = live.synthetic_tick_ref_diagnostics(snapshot_tick)
+            self.assertEqual(compact_diag["pathCounts"]["visibleSceneObjectRefs"], 1)
+            self.assertEqual(snapshot_diag["pathCounts"]["visibleSceneObjectRefs"], 1)
+            self.assertEqual(snapshot_diag["refsAcceptedForWorldTargets"], compact_diag["refsAcceptedForWorldTargets"])
+            self.assertEqual(snapshot_tick["visibleSceneObjectRefs"][0]["objectKey"], compact_tick["visibleSceneObjectRefs"][0]["objectKey"])
+
+    def test_input_source_plugin_snapshot_reads_synthetic_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="snapshot-tree")
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}), warnings=["projection refs capped"])
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot"))
+                _added, result = processor.poll_once()
+
+            status = result["status"]
+            self.assertEqual(status["inputSourceActive"], "plugin-snapshot")
+            self.assertTrue(status["pluginSnapshotAvailable"])
+            self.assertEqual(status["pluginSnapshotStatus"], "PASS")
+            self.assertEqual(status["pluginSnapshotLatestTick"], 1)
+            self.assertIn("projection", status["pluginSnapshotPayloadTypes"])
+            self.assertEqual(status["pluginSnapshotProjectionRefs"], 1)
+            self.assertTrue(status["pluginSnapshotProjectionCapped"])
+            self.assertEqual(status["candidateCount"], 1)
+            self.assertEqual(result["candidates"][0]["objectKey"], "snapshot-tree")
+
+    def test_plugin_snapshot_missing_projection_warns_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="snapshot-tree")
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}), omit_needs={"projection"})
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot"))
+                _added, result = processor.poll_once()
+
+            status = result["status"]
+            self.assertEqual(status["inputSourceActive"], "plugin-snapshot")
+            self.assertTrue(status["pluginSnapshotAvailable"])
+            self.assertIn("projection", status["pluginSnapshotMissingCapabilities"])
+            self.assertEqual(status["candidateCount"], 0)
+            self.assertTrue(any("missing required payload" in warning for warning in status["warnings"]))
+
+    def test_plugin_snapshot_auto_escalates_from_hot_to_expanded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(10820, 3201, 3201, 110, 100, name="Oak tree", object_key="expanded-oak")
+            session = make_session(Path(tmp), [])
+            hot_response = snapshot_response_from_lines(compact_packet_lines(session, {1: []}), warnings=["projection refs capped"])
+            hot_response["snapshotTier"] = "hot"
+            expanded_response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}), warnings=["projection refs capped"])
+            expanded_response["snapshotTier"] = "expanded"
+
+            with mock.patch.object(
+                live.PluginSnapshotTailer,
+                "_request_snapshot",
+                side_effect=[
+                    (hot_response, len(json.dumps(hot_response))),
+                    (expanded_response, len(json.dumps(expanded_response))),
+                ],
+            ):
+                processor = live.LiveTargetProcessor(
+                    session,
+                    live_args(
+                        input_source="plugin-snapshot",
+                        plugin_snapshot_auto_escalate=True,
+                        plugin_snapshot_min_candidates=1,
+                    ),
+                )
+                _added, result = processor.poll_once()
+
+            status = result["status"]
+            self.assertTrue(status["pluginSnapshotEscalated"])
+            self.assertEqual(status["pluginSnapshotTier"], "expanded")
+            self.assertEqual(status["pluginSnapshotInitialRefs"], 0)
+            self.assertEqual(status["pluginSnapshotFinalRefs"], 1)
+            self.assertEqual(status["candidateCount"], 1)
+            self.assertEqual(result["candidates"][0]["objectKey"], "expanded-oak")
+
+    def test_plugin_snapshot_request_body_construction(self):
+        args = live_args(
+            plugin_snapshot_max_projection_refs=123,
+            plugin_snapshot_max_age_ticks=7,
+            plugin_snapshot_include_geometry=True,
+            plugin_snapshot_response_mode="normal",
+            plugin_snapshot_projection_field_mode="compact",
+        )
+        body = live.plugin_snapshot_request_body(args)
+
+        self.assertEqual(body["schema"], "plugin_snapshot_request.v1")
+        self.assertEqual(body["maxProjectionRefs"], 123)
+        self.assertEqual(body["maxAgeTicks"], 7)
+        self.assertTrue(body["includeGeometry"])
+        self.assertEqual(body["responseMode"], "normal")
+        self.assertEqual(body["projectionFieldMode"], "compact")
+        self.assertEqual(body["snapshotTier"], "hot")
+        self.assertEqual(body["profileHint"], "woodcutting")
+        self.assertEqual(body["classHint"], "tree")
+        self.assertEqual(body["targetTypeHint"], "sceneObject")
+        self.assertTrue(body["requireOnScreen"])
+        self.assertTrue(body["requireGeometryAvailable"])
+        self.assertEqual(body["desiredClasses"], ["tree"])
+        self.assertIn("projection", body["needs"])
+        self.assertIn("writer_health", body["needs"])
+
+    def test_plugin_snapshot_tier_defaults_and_manual_override(self):
+        hot = live.plugin_snapshot_request_body(live_args(plugin_snapshot_tier="hot", plugin_snapshot_max_projection_refs=None))
+        expanded = live.plugin_snapshot_request_body(live_args(plugin_snapshot_tier="expanded", plugin_snapshot_max_projection_refs=None))
+        audit = live.plugin_snapshot_request_body(live_args(plugin_snapshot_tier="audit", plugin_snapshot_max_projection_refs=None))
+        manual = live.plugin_snapshot_request_body(live_args(plugin_snapshot_tier="expanded", plugin_snapshot_max_projection_refs=77))
+
+        self.assertEqual(hot["maxProjectionRefs"], 100)
+        self.assertEqual(expanded["maxProjectionRefs"], 500)
+        self.assertEqual(audit["maxProjectionRefs"], 2000)
+        self.assertEqual(manual["maxProjectionRefs"], 77)
+
+    def test_plugin_snapshot_timeout_is_reported(self):
+        tailer = live.PluginSnapshotTailer("127.0.0.1", 8893, timeout=0.01)
+        with mock.patch("urllib.request.urlopen", side_effect=TimeoutError("slow endpoint")):
+            records = tailer.read_new_records()
+
+        self.assertEqual(records, [])
+        self.assertEqual(tailer.snapshot_timeouts, 1)
+        self.assertEqual(tailer.snapshot_endpoint_errors, 1)
+        self.assertFalse(tailer.snapshot_available)
+
+    def test_plugin_snapshot_structured_response_too_large_is_endpoint_available(self):
+        body = json.dumps(
+            {
+                "schema": "plugin_snapshot_response.v1",
+                "status": "FAIL",
+                "errorCode": "response_too_large",
+                "warnings": ["responseTooLarge"],
+                "responseSizing": {
+                    "cachedProjectionBytes": 3452972,
+                    "estimatedResponseBytes": 1200000,
+                    "maxResponseBytes": 1048576,
+                },
+            }
+        ).encode("utf-8")
+        error = urllib.error.HTTPError(
+            url="http://127.0.0.1:8893/snapshot",
+            code=413,
+            msg="response too large",
+            hdrs=None,
+            fp=BytesIO(body),
+        )
+        tailer = live.PluginSnapshotTailer("127.0.0.1", 8893, timeout=0.01)
+
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            records = tailer.read_new_records()
+
+        self.assertEqual(records, [])
+        self.assertTrue(tailer.snapshot_available)
+        self.assertEqual(tailer.snapshot_status, "FAIL")
+        self.assertEqual(tailer.snapshot_error_code, "response_too_large")
+        self.assertEqual(tailer.snapshot_response_sizing["maxResponseBytes"], 1048576)
+        self.assertIn("size limit", tailer.last_snapshot_incomplete_reason)
+
+    def test_diagnose_plugin_snapshot_parses_structured_response_too_large(self):
+        body = json.dumps(
+            {
+                "schema": "plugin_snapshot_response.v1",
+                "status": "FAIL",
+                "errorCode": "response_too_large",
+                "warnings": ["responseTooLarge"],
+                "responseSizing": {
+                    "cachedProjectionBytes": 3452972,
+                    "estimatedResponseBytes": 1200000,
+                    "maxResponseBytes": 1048576,
+                },
+            }
+        ).encode("utf-8")
+        error = urllib.error.HTTPError(
+            url="http://127.0.0.1:8893/snapshot",
+            code=413,
+            msg="response too large",
+            hdrs=None,
+            fp=BytesIO(body),
+        )
+        args = SimpleNamespace(
+            host="127.0.0.1",
+            port=8893,
+            token="",
+            timeout=0.1,
+            max_age_ticks=5,
+            max_projection_refs=500,
+            include_geometry=False,
+            response_mode="compact",
+            projection_field_mode="compact",
+        )
+
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            response, request_error, response_bytes = diagnose_snapshot.request_snapshot(args)
+
+        snapshot_diag = {
+            "available": bool(response and response.get("schema") in {"plugin_snapshot_response.v1", "plugin_snapshot_error.v1"}),
+            "requestFailed": bool(response and (response.get("errorCode") or response.get("status") == "FAIL")),
+            "errorCode": response.get("errorCode") if isinstance(response, dict) else None,
+        }
+
+        self.assertIsNone(request_error)
+        self.assertGreater(response_bytes, 0)
+        self.assertTrue(snapshot_diag["available"])
+        self.assertTrue(snapshot_diag["requestFailed"])
+        self.assertEqual(snapshot_diag["errorCode"], "response_too_large")
+        self.assertEqual(
+            diagnose_snapshot.conclusion(snapshot_diag, {}, {}),
+            "snapshot endpoint available but response exceeded configured size limit",
+        )
+
+    def test_diagnose_plugin_snapshot_tier_sweep_reports_recommendation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(10820, 3201, 3201, 110, 100, name="Oak tree", object_key="sweep-oak")
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}))
+            args = SimpleNamespace(
+                host="127.0.0.1",
+                port=8893,
+                token="",
+                timeout=0.1,
+                session=None,
+                sessions_dir=None,
+                latest_session=False,
+                profile="woodcutting",
+                tier="hot",
+                max_projection_refs=None,
+                max_age_ticks=5,
+                include_geometry=False,
+                response_mode="compact",
+                projection_field_mode="compact",
+                limit=100,
+                dump_synthetic_shape=False,
+                json=False,
+            )
+
+            with mock.patch.object(diagnose_snapshot, "request_snapshot", return_value=(response, None, len(json.dumps(response)))):
+                payload = diagnose_snapshot.tier_sweep_payload(args, session)
+
+            self.assertEqual(payload["schema"], "plugin_snapshot_tier_sweep.v1")
+            self.assertIn("hot", payload["tiers"])
+            self.assertIn(payload["recommendation"], {"hot", "expanded", "compact-packets"})
+
+    def test_plugin_snapshot_unchanged_tick_does_not_emit_new_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="snapshot-tree")
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}))
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot"))
+                _added, first = processor.poll_once()
+                _added, second = processor.poll_once()
+
+            self.assertEqual(first["status"]["candidateCount"], 1)
+            self.assertEqual(second["status"]["pluginSnapshotTicksSkippedAsUnchanged"], 1)
+            self.assertEqual(second["status"]["rawRecordsFullyParsedThisPoll"], 0)
+            self.assertEqual(second["status"]["processedNewTicks"], 0)
+            self.assertTrue(second["status"]["pluginSnapshotCandidateOutputSkippedUnchanged"])
+            self.assertEqual(second["status"]["candidateCount"], 1)
+            self.assertIn(second["status"]["pluginSnapshotBottleneck"], {"endpoint_service", "http_request", "response_read", "json_parse", "output_serialize", "output_write", "unknown"})
+
+    def test_plugin_snapshot_candidate_signature_skips_heavy_output_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="stable-snapshot-tree")
+            session = make_session(Path(tmp), [])
+            first_response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}))
+            second_response = snapshot_response_from_lines(compact_packet_lines(session, {2: [tree]}))
+
+            with mock.patch.object(
+                live.PluginSnapshotTailer,
+                "_request_snapshot",
+                side_effect=[(first_response, len(json.dumps(first_response))), (second_response, len(json.dumps(second_response)))],
+            ):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot"))
+                _added, first = processor.poll_once()
+                _added, second = processor.poll_once()
+
+            self.assertEqual(first["status"]["candidateCount"], 1)
+            self.assertEqual(second["status"]["candidateCount"], 1)
+            self.assertTrue(second["status"]["pluginSnapshotCandidateOutputSkippedUnchanged"])
+            self.assertTrue(second["status"]["pluginSnapshotCandidateSignature"])
+            self.assertGreaterEqual(second["status"]["pluginSnapshotOutputBytesSkipped"], 0)
+
+    def test_plugin_snapshot_prefilter_reduces_refs_without_losing_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(10820, 3201, 3201, 110, 100, name="Oak tree", object_key="prefilter-oak")
+            rock = raw_scene_object(11364, 3202, 3201, 130, 100, name="Copper rock", actions=["Mine"], object_key="prefilter-rock")
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree, rock]}))
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot"))
+                _added, result = processor.poll_once()
+
+            status = result["status"]
+            self.assertEqual(status["pluginSnapshotRefsBeforePrefilter"], 2)
+            self.assertEqual(status["pluginSnapshotRefsAfterPrefilter"], 1)
+            self.assertEqual(status["worldTargetsBuilt"], 1)
+            self.assertEqual(result["candidates"][0]["objectKey"], "prefilter-oak")
+
+    def test_plugin_snapshot_bottleneck_identifies_largest_bucket(self):
+        self.assertEqual(
+            live.plugin_snapshot_bottleneck(
+                {
+                    "pluginSnapshotEndpointServiceMillis": 5.0,
+                    "pluginSnapshotHttpRequestMillis": 3.0,
+                    "pluginSnapshotOutputWriteMillis": 8.0,
+                }
+            ),
+            "output_write",
+        )
+
+    def test_plugin_snapshot_bad_projection_shape_retains_previous_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="snapshot-tree")
+            session = make_session(Path(tmp), [])
+            good_response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}))
+            bad_response = snapshot_response_from_lines(compact_packet_lines(session, {2: [tree]}))
+            bad_response["payloads"]["projection"] = {"sceneProjectionSummary": {"visibleObjectCount": 1}, "unexpectedRefs": [compact_scene_object(tree)]}
+
+            with mock.patch.object(
+                live.PluginSnapshotTailer,
+                "_request_snapshot",
+                side_effect=[(good_response, len(json.dumps(good_response))), (bad_response, len(json.dumps(bad_response)))],
+            ):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot"))
+                _added, first = processor.poll_once()
+                _added, second = processor.poll_once()
+
+            self.assertEqual(first["status"]["candidateCount"], 1)
+            self.assertEqual(second["status"]["candidateCount"], 1)
+            self.assertEqual(second["candidates"][0]["objectKey"], "snapshot-tree")
+            self.assertTrue(any("retaining previous candidates" in warning for warning in second["status"]["warnings"]))
+
+    def test_compact_stream_incomplete_tick_waits_for_projection(self):
+        baseline = compact_packet(
+            "live_baseline_packet.v1",
+            5,
+            1,
+            {"tick": 5, "gameState": "LOGGED_IN", "player": {"worldX": 3200, "worldY": 3200, "plane": 0}},
+        )
+        line = json.dumps(baseline, separators=(",", ":")) + "\n"
+        with NdjsonTestServer([line.encode("utf-8")]) as server:
+            tailer = live.CompactStreamTailer("127.0.0.1", server.port, 0.05)
+            records = tailer.read_new_records(realtime=True, max_records=1)
+            tailer.close()
+
+        self.assertEqual(records, [])
+        self.assertEqual(tailer.last_raw_records_seen, 0)
+        self.assertEqual(tailer.last_stream_tick_buffer_size, 1)
+        self.assertEqual(tailer.last_stream_ticks_waiting_for_projection, 1)
+        self.assertIn("live_projection_packet.v1", tailer.last_missing_required_types_for_latest_tick)
+
+    def test_compact_stream_incomplete_tick_retains_previous_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="stream-tree")
+            session = make_session(Path(tmp), [])
+            first_tick = "".join(compact_packet_lines(session, {1: [tree]}))
+            second_baseline = json.dumps(
+                compact_packet(
+                    "live_baseline_packet.v1",
+                    2,
+                    99,
+                    {"tick": 2, "gameState": "LOGGED_IN", "player": {"worldX": 3200, "worldY": 3200, "plane": 0}},
+                ),
+                separators=(",", ":"),
+            ) + "\n"
+            with NdjsonTestServer([first_tick.encode("utf-8"), second_baseline.encode("utf-8")], pause_after_first=True) as server:
+                processor = live.LiveTargetProcessor(
+                    session,
+                    live_args(
+                        input_source="compact-stream",
+                        compact_stream_port=server.port,
+                        compact_stream_timeout=0.05,
+                    ),
+                )
+
+                _added, first_result = processor.poll_once()
+                server.continue_event.set()
+                _added, second_result = processor.poll_once()
+                processor.tailer.close()
+
+            self.assertEqual(first_result["status"]["candidateCount"], 1)
+            self.assertEqual(second_result["status"]["candidateCount"], 1)
+            self.assertEqual(second_result["candidates"][0]["objectKey"], "stream-tree")
+            self.assertEqual(second_result["status"]["lastProcessedTick"], 1)
+            self.assertEqual(second_result["status"]["compactStreamTickBufferSize"], 1)
+            self.assertIn("live_projection_packet.v1", second_result["status"]["compactStreamMissingRequiredTypesForLatestTick"])
+            self.assertTrue(any("retaining previous candidates" in warning for warning in second_result["status"]["warnings"]))
+
+    def test_compact_stream_can_fallback_to_packet_files_when_projection_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="file-tree")
+            session = make_session(Path(tmp), [])
+            write_compact_packets(session, {1: [tree]})
+            baseline = json.dumps(
+                compact_packet(
+                    "live_baseline_packet.v1",
+                    2,
+                    99,
+                    {"tick": 2, "gameState": "LOGGED_IN", "player": {"worldX": 3200, "worldY": 3200, "plane": 0}},
+                ),
+                separators=(",", ":"),
+            ) + "\n"
+            with NdjsonTestServer([baseline.encode("utf-8")]) as server:
+                processor = live.LiveTargetProcessor(
+                    session,
+                    live_args(
+                        input_source="compact-stream",
+                        compact_stream_port=server.port,
+                        compact_stream_timeout=0.05,
+                        stream_fallback_to_compact_packets=True,
+                        stream_required_types_timeout=0.001,
+                    ),
+                )
+                _added, first_result = processor.poll_once()
+                processor.tailer.first_packet_seen_at = time.monotonic() - 10
+                _added, second_result = processor.poll_once()
+
+            self.assertEqual(first_result["status"]["candidateCount"], 0)
+            self.assertEqual(second_result["status"]["inputSourceActive"], "compact-packets")
+            self.assertTrue(second_result["status"]["streamFallbackToFile"])
+            self.assertIn("falling back to compact packet files", second_result["status"]["streamFallbackReason"])
+            self.assertEqual(second_result["status"]["candidateCount"], 1)
+            self.assertEqual(second_result["candidates"][0]["objectKey"], "file-tree")
+
+    def test_timing_payload_excludes_stream_reconnect_from_active_ms(self):
+        tailer = live.CompactStreamTailer("127.0.0.1", 1, 0.05)
+        tailer.last_stream_reconnect_millis = 900.0
+        payload = live.timing_payload(live.Timing(), 5.0, tailer)
+
+        self.assertEqual(payload["streamReconnectMillis"], 900.0)
+        self.assertEqual(payload["totalActiveMillis"], 5.0)
+
+    def test_input_source_auto_prefers_compact_stream_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            active, compact_available, raw_available, reason = live.choose_input_source(
+                session,
+                "auto",
+                {"available": True, "host": "127.0.0.1", "port": 8891},
+            )
+
+            self.assertEqual(active, "compact-stream")
+            self.assertFalse(compact_available)
+            self.assertTrue(raw_available)
+            self.assertIn("experimental compact stream", reason)
+
+    def test_input_source_auto_prefers_compact_packets_over_stream_when_recent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="compact-tree")
+            session = make_session(Path(tmp), [raw_tick(1)])
+            write_compact_packets(session, {2: [tree]})
+            active, compact_available, raw_available, reason = live.choose_input_source(
+                session,
+                "auto",
+                {"available": True, "host": "127.0.0.1", "port": 8891},
+            )
+
+            self.assertEqual(active, "compact-packets")
+            self.assertTrue(compact_available)
+            self.assertTrue(raw_available)
+            self.assertIsNone(reason)
+
+    def test_input_source_auto_does_not_prefer_plugin_snapshot_without_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            active, _compact_available, _raw_available, reason = live.choose_input_source(
+                session,
+                "auto",
+                {"available": False},
+                {"available": True, "host": "127.0.0.1", "port": 8893},
+            )
+
+            self.assertEqual(active, "raw-ticks")
+            self.assertIn("compact live packets unavailable", reason)
+
+    def test_input_source_auto_can_prefer_plugin_snapshot_with_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            active, _compact_available, _raw_available, reason = live.choose_input_source(
+                session,
+                "auto",
+                {"available": False},
+                {"available": True, "host": "127.0.0.1", "port": 8893},
+                auto_prefer_plugin_snapshot=True,
+            )
+
+            self.assertEqual(active, "plugin-snapshot")
+            self.assertIn("auto-prefer-plugin-snapshot", reason)
+
+    def test_explicit_plugin_snapshot_does_not_fallback_without_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="file-tree")
+            session = make_session(Path(tmp), [])
+            write_compact_packets(session, {1: [tree]})
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", side_effect=TimeoutError("slow endpoint")):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot"))
+                _added, result = processor.poll_once()
+
+            self.assertEqual(result["status"]["inputSourceActive"], "plugin-snapshot")
+            self.assertFalse(result["status"]["pluginSnapshotAvailable"])
+            self.assertEqual(result["status"]["candidateCount"], 0)
+
+    def test_plugin_snapshot_can_fallback_to_compact_packets_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="file-tree")
+            session = make_session(Path(tmp), [])
+            write_compact_packets(session, {1: [tree]})
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", side_effect=TimeoutError("slow endpoint")):
+                processor = live.LiveTargetProcessor(
+                    session,
+                    live_args(input_source="plugin-snapshot", plugin_snapshot_fallback="compact-packets"),
+                )
+                _added, result = processor.poll_once()
+
+            self.assertEqual(result["status"]["inputSourceActive"], "compact-packets")
+            self.assertTrue(result["status"]["pluginSnapshotFallbackToFile"])
+            self.assertIn("falling back to compact packet files", result["status"]["pluginSnapshotFallbackReason"])
+            self.assertEqual(result["status"]["candidateCount"], 1)
+            self.assertEqual(result["candidates"][0]["objectKey"], "file-tree")
+
+    def test_compact_watch_values_packet_writes_live_watch_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="compact-watch-tree")
+            session = make_session(Path(tmp), [])
+            write_compact_packets(session, {1: [tree]}, include_watch_values=True)
+            processor = live.LiveTargetProcessor(session, live_args(input_source="compact-packets"))
+
+            _added, result = processor.poll_once()
+            watch_values = result["watchValues"]
+
+            self.assertEqual(watch_values["schema"], "live_watch_values.v1")
+            self.assertIn("inventory_summary", watch_values["valuesByAlias"])
+            self.assertEqual(watch_values["valuesByAlias"]["test_varbit"]["value"], 7)
+            self.assertIn("test_varbit", watch_values["changedAliases"])
+            self.assertEqual(result["status"]["watchValueCount"], len(watch_values["valuesByAlias"]))
+            watch_path = session / "interaction_geometry" / "live" / "live_watch_values.json"
+            self.assertTrue(watch_path.exists())
+
     def test_compact_packet_clickbox_polygon_reaches_overlay_debug_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="compact-hull-tree")
@@ -731,6 +1613,8 @@ class LiveTargetProcessorTest(unittest.TestCase):
                     "--session",
                     str(session),
                     "--require-compact-packets",
+                    "--compact-stream-port",
+                    "1",
                     "--once",
                     "--quiet",
                 ],
@@ -738,7 +1622,7 @@ class LiveTargetProcessorTest(unittest.TestCase):
                 capture_output=True,
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Compact live packets are required", result.stdout)
+            self.assertIn("A compact live input is required", result.stdout)
 
     def test_require_compact_packets_fails_when_packets_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -762,7 +1646,7 @@ class LiveTargetProcessorTest(unittest.TestCase):
                 capture_output=True,
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Compact live packets are required", result.stdout)
+            self.assertIn("A compact live input is required", result.stdout)
 
     def test_require_compact_packets_passes_when_packets_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -850,6 +1734,92 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertTrue(payload["rawTicks"]["available"])
             self.assertTrue(payload["compactPackets"]["available"])
 
+    def test_compare_stream_vs_file_detects_missing_projection_packets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="same-tree")
+            session = make_session(Path(tmp), [])
+            write_compact_packets(session, {1: [tree]})
+            baseline = json.dumps(
+                compact_packet(
+                    "live_baseline_packet.v1",
+                    1,
+                    1,
+                    {"tick": 1, "gameState": "LOGGED_IN", "player": {"worldX": 3200, "worldY": 3200, "plane": 0}},
+                ),
+                separators=(",", ":"),
+            ) + "\n"
+            output = StringIO()
+
+            with NdjsonTestServer([baseline.encode("utf-8")]) as server:
+                with redirect_stdout(output):
+                    code = live.compare_input_sources(
+                        session,
+                        live_args(
+                            input_source="auto",
+                            latest=1,
+                            compare_input_sources="stream-vs-file",
+                            compact_stream_port=server.port,
+                            compact_stream_timeout=0.05,
+                        ),
+                    )
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["mode"], "stream-vs-file")
+            self.assertIn("stream has no projection packets", " ".join(payload["failures"]))
+            self.assertTrue(payload["compactPackets"]["available"])
+
+    def test_compare_plugin_snapshot_vs_file_passes_on_matching_synthetic_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="same-tree")
+            session = make_session(Path(tmp), [])
+            lines = compact_packet_lines(session, {1: [tree]})
+            response = snapshot_response_from_lines(lines)
+            output = StringIO()
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with redirect_stdout(output):
+                    code = live.compare_input_sources(
+                        session,
+                        live_args(
+                            input_source="auto",
+                            latest=1,
+                            compare_input_sources="plugin-snapshot-vs-file",
+                        ),
+                    )
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertIn(payload["status"], {"PASS", "WARN"})
+            self.assertEqual(payload["mode"], "plugin-snapshot-vs-file")
+            self.assertTrue(payload["pluginSnapshot"]["available"])
+            self.assertTrue(payload["compactPackets"]["available"])
+
+    def test_compare_plugin_snapshot_vs_file_detects_missing_projection_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="same-tree")
+            session = make_session(Path(tmp), [])
+            lines = compact_packet_lines(session, {1: [tree]})
+            response = snapshot_response_from_lines(lines, omit_needs={"projection"})
+            output = StringIO()
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with redirect_stdout(output):
+                    code = live.compare_input_sources(
+                        session,
+                        live_args(
+                            input_source="auto",
+                            latest=1,
+                            compare_input_sources="plugin-snapshot-vs-file",
+                        ),
+                    )
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["mode"], "plugin-snapshot-vs-file")
+            self.assertIn("plugin snapshot has no projection payload", " ".join(payload["failures"]))
+            self.assertTrue(payload["compactPackets"]["available"])
+
     def test_inventory_summary_recomputes_compact_free_slots(self):
         tick = {
             "inventory": {
@@ -899,6 +1869,28 @@ class LiveTargetProcessorTest(unittest.TestCase):
         self.assertEqual(state["freeSlots"], 12)
         self.assertEqual(state["filledSlots"], 16)
         self.assertEqual(state["totalItemQuantity"], 723)
+        self.assertEqual(state["resourceCounts"]["normal_logs"]["count"], 700)
+        self.assertEqual(state["resourceCounts"]["woodcutting_logs"]["matchedSlots"], [0])
+
+    def test_inventory_resource_counts_preserve_high_slots(self):
+        tick = {
+            "inventory": {
+                "known": True,
+                "slotCount": 28,
+                "freeSlots": 25,
+                "filledSlots": 3,
+                "items": [
+                    {"slot": 27, "itemId": 1511, "quantity": 1},
+                    {"slot": 0, "itemId": 1521, "quantity": 1},
+                    {"slot": 13, "itemId": 995, "quantity": 100},
+                ],
+            }
+        }
+        state = live.inventory_state_for_ticks([tick], tick)
+        logs = state["resourceCounts"]["woodcutting_logs"]
+        self.assertEqual(logs["count"], 2)
+        self.assertEqual(logs["matchedSlots"], [0, 27])
+        self.assertTrue(state["slotDiagnostics"]["consistent"])
 
     def test_compact_inventory_delta_packet_marks_recent_change(self):
         packets = [
@@ -1450,6 +2442,30 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(args.liveness_mode, "off")
             self.assertEqual(args.liveness_budget_ms, 5.0)
 
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "live_target_processor.py",
+                "--session",
+                "s",
+                "--once",
+                "--input-source",
+                "plugin-snapshot",
+                "--plugin-snapshot-port",
+                "8893",
+                "--plugin-snapshot-response-mode",
+                "compact",
+                "--plugin-snapshot-projection-field-mode",
+                "compact",
+            ],
+        ):
+            args = live.parse_args()
+            self.assertEqual(args.input_source, "plugin-snapshot")
+            self.assertEqual(args.plugin_snapshot_port, 8893)
+            self.assertEqual(args.plugin_snapshot_projection_field_mode, "compact")
+            self.assertFalse(args.auto_prefer_plugin_snapshot)
+
     def test_live_performance_summary_is_written_with_percentiles(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp), [raw_tick(1)])
@@ -1554,6 +2570,8 @@ class LiveTargetProcessorTest(unittest.TestCase):
                     str(session),
                     "--profile",
                     "woodcutting",
+                    "--compact-stream-port",
+                    "1",
                     "--once",
                     "--summary",
                 ],

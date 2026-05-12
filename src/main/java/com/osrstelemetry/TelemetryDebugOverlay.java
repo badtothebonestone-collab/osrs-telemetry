@@ -196,7 +196,7 @@ public class TelemetryDebugOverlay extends Overlay
 
 	private void drawTargets(Graphics2D graphics, OverlayDebugState state, TelemetryDebugOverlayMode mode)
 	{
-		List<OverlayTarget> targets = state.targets == null ? Collections.emptyList() : state.targets;
+		List<OverlayTarget> targets = drawableTargets(state);
 		int limit = Math.max(0, Math.min(MAX_TARGET_CAP, config.telemetryDebugOverlayMaxTargets()));
 		int drawn = 0;
 		for (OverlayTarget target : targets)
@@ -225,7 +225,7 @@ public class TelemetryDebugOverlay extends Overlay
 		{
 			return false;
 		}
-		if (mode == TelemetryDebugOverlayMode.REACHABILITY && target.directReachability == null)
+		if (mode == TelemetryDebugOverlayMode.REACHABILITY && target.directReachability == null && target.reachability == null)
 		{
 			return false;
 		}
@@ -239,7 +239,7 @@ public class TelemetryDebugOverlay extends Overlay
 	private void drawTargetShape(Graphics2D graphics, OverlayTarget target, Color color)
 	{
 		TelemetryDebugOverlayGeometryMode geometryMode = config.telemetryDebugOverlayGeometryMode();
-		float strokeWidth = Boolean.TRUE.equals(target.isBest) ? 3.0f : 2.0f;
+		float strokeWidth = Boolean.TRUE.equals(target.isBest) || "selected_target".equals(target.markerType) ? 3.0f : 2.0f;
 		graphics.setStroke(new BasicStroke(strokeWidth));
 
 		if (geometryMode == TelemetryDebugOverlayGeometryMode.ALL_GEOMETRY_DEBUG)
@@ -549,26 +549,58 @@ public class TelemetryDebugOverlay extends Overlay
 		{
 			return target.overlayLabel;
 		}
+		if (target.label != null && !target.label.isBlank())
+		{
+			return target.label;
+		}
 		StringBuilder label = new StringBuilder();
 		label.append(target.name == null ? valueOrUnknown(target.classId) : target.name);
 		if (target.distanceTiles != null)
 		{
 			label.append(" d").append(trimNumber(target.distanceTiles));
 		}
-		if (config.telemetryDebugOverlayShowReachability() && target.directReachability != null)
+		String reachability = target.directReachability == null ? target.reachability : target.directReachability;
+		if (config.telemetryDebugOverlayShowReachability() && reachability != null)
 		{
-			label.append(" ").append(reachabilityToken(target.directReachability));
+			label.append(" ").append(reachabilityToken(reachability));
 		}
-		if (target.targetLiveState != null)
+		String liveState = target.targetLiveState == null ? target.liveness : target.targetLiveState;
+		if (liveState != null)
 		{
-			label.append(" ").append(readableLiveState(target.targetLiveState));
+			label.append(" ").append(readableLiveState(liveState));
 		}
 		return label.toString();
 	}
 
 	private Color colorFor(OverlayTarget target)
 	{
-		return colorFor(target.directReachability, target.targetLiveState);
+		if ("warning".equals(target.markerType))
+		{
+			return RED;
+		}
+		if ("backup_candidate".equals(target.markerType))
+		{
+			return YELLOW;
+		}
+		return colorFor(target.directReachability == null ? target.reachability : target.directReachability,
+				target.targetLiveState == null ? target.liveness : target.targetLiveState);
+	}
+
+	static List<OverlayTarget> drawableTargets(OverlayDebugState state)
+	{
+		if (state == null)
+		{
+			return Collections.emptyList();
+		}
+		if (state.intentState != null && state.intentState.markers != null && !state.intentState.markers.isEmpty())
+		{
+			return state.intentState.markers;
+		}
+		if (state.markers != null && !state.markers.isEmpty())
+		{
+			return state.markers;
+		}
+		return state.targets == null ? Collections.emptyList() : state.targets;
 	}
 
 	static Color colorFor(String reachability, String live)
@@ -684,8 +716,19 @@ public class TelemetryDebugOverlay extends Overlay
 		Double warningEventCount;
 		Double lastEventTick;
 		OverlaySummary summary;
+		OverlayIntentState intentState;
+		List<OverlayTarget> markers;
 		List<OverlayTarget> targets;
 		CollisionWindow collisionWindow;
+	}
+
+	static class OverlayIntentState
+	{
+		String schema;
+		String activeTask;
+		String activeIntent;
+		String status;
+		List<OverlayTarget> markers;
 	}
 
 	static class OverlaySummary
@@ -713,6 +756,11 @@ public class TelemetryDebugOverlay extends Overlay
 	static class OverlayTarget
 	{
 		String classId;
+		String markerType;
+		String label;
+		String reason;
+		String source;
+		String targetType;
 		String name;
 		Double id;
 		Double worldX;
@@ -726,8 +774,10 @@ public class TelemetryDebugOverlay extends Overlay
 		String qualityTier;
 		Double qualityScore;
 		String targetLiveState;
+		String liveness;
 		String livenessInterpretation;
 		String directReachability;
+		String reachability;
 		Double reachabilityConfidence;
 		Boolean targetInCollisionWindow;
 		Double pathLengthTiles;

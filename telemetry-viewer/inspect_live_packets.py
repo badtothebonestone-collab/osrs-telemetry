@@ -18,6 +18,7 @@ from telemetry_paths import find_newest_session
 PACKET_NAVIGATION = "live_navigation_packet.v1"
 PACKET_COLLISION_WINDOW = "live_collision_window_packet.v1"
 PACKET_COLLISION_GRID = "live_collision_grid_packet.v1"
+PACKET_WATCH_VALUES = "live_watch_values_packet.v1"
 
 
 def latest_packet(session_path: Path, packet_type: str) -> dict | None:
@@ -82,6 +83,30 @@ def latest_collision_window_packet_summary(session_path: Path) -> dict:
         "tileCount": payload.get("collisionWindowTileCount"),
         "collisionWindowHash": payload.get("collisionWindowHash") or payload.get("windowHash"),
         "approxPacketBytes": approximate_bytes,
+    }
+
+
+def latest_watch_values_packet_summary(session_path: Path) -> dict:
+    latest = latest_packet(session_path, PACKET_WATCH_VALUES)
+
+    if not latest:
+        return {
+            "latestWatchValuesTick": None,
+            "activeWatchCount": None,
+            "valueCount": 0,
+            "changedCount": 0,
+            "watchBudgetExceeded": None,
+        }
+
+    payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+    values = payload.get("values") if isinstance(payload.get("values"), list) else []
+    changed = [item for item in values if isinstance(item, dict) and item.get("changed")]
+    return {
+        "latestWatchValuesTick": latest.get("tick"),
+        "activeWatchCount": payload.get("activeWatchCount"),
+        "valueCount": len(values),
+        "changedCount": len(changed),
+        "watchBudgetExceeded": payload.get("watchBudgetExceeded"),
     }
 
 
@@ -185,6 +210,7 @@ def summarize_live_packets(
 
     navigation_summary = latest_navigation_packet_summary(session_path)
     collision_window_summary = latest_collision_window_packet_summary(session_path)
+    watch_values_summary = latest_watch_values_packet_summary(session_path)
 
     return {
         "schema": "live_packet_inspection.v1",
@@ -205,6 +231,7 @@ def summarize_live_packets(
         "retention": retention,
         "navigation": navigation_summary,
         "collisionWindow": collision_window_summary,
+        "watchValues": watch_values_summary,
     }
 
 
@@ -234,6 +261,15 @@ def print_summary(summary: dict) -> None:
         f"hash={collision_window.get('collisionWindowHash')}"
     )
     print(f"latest collision window packet bytes: {collision_window.get('approxPacketBytes')}")
+    watch_values = summary.get("watchValues") or {}
+    print(f"latest watch values tick: {watch_values.get('latestWatchValuesTick')}")
+    print(
+        "watch values: "
+        f"active={watch_values.get('activeWatchCount')} "
+        f"values={watch_values.get('valueCount')} "
+        f"changed={watch_values.get('changedCount')} "
+        f"budgetExceeded={watch_values.get('watchBudgetExceeded')}"
+    )
     print(f"malformed lines: {summary['malformedLines']}")
     print(f"unreadable files: {summary['unreadableFiles']}")
 

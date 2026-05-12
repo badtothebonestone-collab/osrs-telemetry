@@ -102,6 +102,27 @@ public class TelemetryDebugOverlayTest
 		Assert.assertEquals(2, points.get(0).get("y"));
 	}
 
+	@Test
+	public void drawableTargetsPreferIntentMarkers()
+	{
+		TelemetryDebugOverlay.OverlayDebugState state = new TelemetryDebugOverlay.OverlayDebugState();
+		TelemetryDebugOverlay.OverlayTarget oldTarget = new TelemetryDebugOverlay.OverlayTarget();
+		oldTarget.name = "Old candidate";
+		state.targets = List.of(oldTarget);
+		state.intentState = new TelemetryDebugOverlay.OverlayIntentState();
+		TelemetryDebugOverlay.OverlayTarget marker = new TelemetryDebugOverlay.OverlayTarget();
+		marker.markerType = "selected_target";
+		marker.label = "Target: Oak tree";
+		marker.targetType = "sceneObject";
+		state.intentState.markers = List.of(marker);
+
+		List<TelemetryDebugOverlay.OverlayTarget> targets = TelemetryDebugOverlay.drawableTargets(state);
+
+		Assert.assertEquals(1, targets.size());
+		Assert.assertEquals("Target: Oak tree", targets.get(0).label);
+		Assert.assertEquals("selected_target", targets.get(0).markerType);
+	}
+
 	private static java.util.List<java.util.List<Double>> polygon()
 	{
 		return Arrays.asList(

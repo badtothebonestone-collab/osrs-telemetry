@@ -1,110 +1,114 @@
 # Cleanup Report
 
-This report classifies the current project files before any cleanup or
-deprecation. No user session data is touched by this cleanup pass.
+This pass focused on daily live stability and workflow clarity. No user session
+data was touched, and no source script was deleted.
 
-## A. Normal Live Workflow
+## Files Moved
 
-These files are part of the daily compact-packet live path and should be kept:
+None.
 
-- `src/main/java/com/osrstelemetry/LivePacket.java`
-- `src/main/java/com/osrstelemetry/LivePacketWriter.java`
-- `src/main/java/com/osrstelemetry/TelemetryPlugin.java`
-- `src/main/java/com/osrstelemetry/TelemetryConfig.java`
-- `src/main/java/com/osrstelemetry/TelemetryRecordingMode.java`
-- `telemetry-viewer/check_live_setup.py`
-- `telemetry-viewer/inspect_live_packets.py`
-- `telemetry-viewer/live_packet_reader.py`
-- `telemetry-viewer/live_target_processor.py`
-- `telemetry-viewer/context_service.py`
-- `telemetry-viewer/live_context_query.py`
-- `telemetry-viewer/live_context_format.py`
-- `telemetry-viewer/mock_brain_rehearsal.py`
-- `telemetry-viewer/navigation_reachability.py`
-- `telemetry-viewer/live_control_panel.py`
-- `telemetry-viewer/target_library.json`
-- `telemetry-viewer/target_profiles.json`
-- `start_live_control_panel.bat`
-- `start_normal_live_stack.bat`
-- `Start-LiveControlPanel.ps1`
-- `Start-NormalLiveStack.ps1`
+`telemetry-viewer\legacy\README.md` was kept as a quarantine marker for future
+cleanup, but no script was moved into it. The current rule is conservative:
+only move a script after imports, tests, docs, and local workflows prove it is
+obsolete.
 
-## B. Debug / Audit Workflow
+## Daily Files Kept
 
-These tools are intentionally preserved for DEBUG_RECORDING sessions, batch
-geometry builds, replay, diagnostics, and future training data:
+These files are part of the official daily path:
 
-- `telemetry-viewer/run_target_geometry_pipeline.py`
-- `telemetry-viewer/build_world_target_geometry.py`
-- `telemetry-viewer/build_ui_target_geometry.py`
-- `telemetry-viewer/select_target_candidates.py`
-- `telemetry-viewer/diagnose_target_coverage.py`
-- `telemetry-viewer/export_session.py`
-- `telemetry-viewer/export_target_handoff.py`
-- `telemetry-viewer/replay_viewer.py`
-- `telemetry-viewer/viewer.py`
-- `telemetry-viewer/validate_session.py`
-- `telemetry-viewer/build_perception_dataset.py`
-- `telemetry-viewer/build_scenario_dataset.py`
-- `telemetry-viewer/build_training_dataset.py`
-- `telemetry-viewer/export_curated_training_dataset.py`
-- `telemetry-viewer/prepare_visual_perception.py`
-- `telemetry-viewer/training_dataset_inspector.py`
-- `telemetry-viewer/dataset_status.py`
-- `telemetry-viewer/scenario_inspector.py`
-- `telemetry-viewer/label_ranges.py`
-- `telemetry-viewer/suggest_target_overrides.py`
-- `telemetry-viewer/summarize_candidate_quality.py`
+- `telemetry-viewer\live_control_panel.py`
+- `telemetry-viewer\live_core_daemon.py`
+- `telemetry-viewer\live_config_doctor.py`
+- `telemetry-viewer\run_daily_gauntlet.py`
+- `telemetry-viewer\run_stabilization_suite.py`
+- `telemetry-viewer\resource_progress.py`
+- `telemetry-viewer\brain_core.py`
+- `telemetry-viewer\live_context_format.py`
+- `telemetry-viewer\live_packet_reader.py`
+- `telemetry-viewer\navigation_reachability.py`
+- `telemetry-viewer\telemetry_paths.py`
+- `telemetry-viewer\task_resources.json`
+- `telemetry-viewer\target_library.json`
+- `telemetry-viewer\target_profiles.json`
 
-## C. Visual QA Workflow
-
-These files support visual QA and are retained:
-
-- `src/main/java/com/osrstelemetry/TelemetryDebugOverlay.java`
-- `src/main/java/com/osrstelemetry/TelemetryDebugOverlayMode.java`
-- `telemetry-viewer/target_geometry_inspector.py`
-- `telemetry-viewer/inspect_target_geometry.py`
-- `telemetry-viewer/diagnose_overlay_state.py`
-- `telemetry-viewer/calibrate_screen_regions.py`
-- `telemetry-viewer/inspect_perception.py`
-- `telemetry-viewer/inspect_tab_detection.py`
-- `telemetry-viewer/tab_detection.py`
-- `telemetry-viewer/tab_detection_rules.json`
-- `telemetry-viewer/tab_labels.json`
-- `telemetry-viewer/tab_profile_names.py`
-- `telemetry-viewer/calibration_profiles/default_screen_regions.json`
-
-## D. Legacy / Deprecated Candidates
-
-| Path | Reference check | Proposed action |
-| --- | --- | --- |
-| `telemetry-viewer/telemetry_launcher.py` | Still intentionally present as an older launcher; not used by the daily flow. | Keep and document as legacy compatibility. |
-| `telemetry-viewer/test_telemetry_paths.py` | Older top-level path smoke script; test suite uses `telemetry-viewer/tests/test_telemetry_paths.py`. | Keep for now; consider moving to `legacy` only after confirming no local workflow uses it. |
-| `telemetry-viewer/inspect_target_geometry.py` | Overlaps with `target_geometry_inspector.py`, but remains useful for debug inspection. | Keep as debug/audit helper. |
-| Dataset/scenario builders | Not part of normal live, but referenced by training/debug workflows. | Keep. |
-
-No source script met the deletion bar in this pass. The safe cleanup action is
-limited to generated cache folders/files.
-
-## E. Generated Data That Should Not Be In Repo
-
-Generated artifacts that are safe to remove from the workspace when present:
-
-- `__pycache__`
-- `.pytest_cache`
-- `.mypy_cache`
-- temporary local output folders
-- accidental session artifacts
-
-Do not delete user sessions under:
+Daily live now means:
 
 ```text
-C:\Users\stone\.osrs-telemetry\sessions
+RuneLite plugin -> compact-packets -> live_core_daemon.py -> in-memory context
 ```
 
-## Cleanup Decision
+The daemon may write the tiny overlay state when requested, but rolling legacy
+live files stay off by default.
 
-- No source files were deleted.
-- No debug/audit tools were removed.
-- Generated Python cache folders may be removed after verification.
-- `live_control_panel.py` is now the recommended daily launcher.
+## Marked Legacy
+
+These are still useful, but they are no longer the daily workflow:
+
+- `telemetry-viewer\live_target_processor.py`
+- `telemetry-viewer\context_service.py`
+- `telemetry-viewer\live_context_query.py`
+- `telemetry-viewer\mock_brain_rehearsal.py`
+
+They are kept under the Live Control Panel's Advanced section as the legacy
+file-based stack.
+
+## Marked Advanced Debug
+
+These remain available for diagnosis and inspection:
+
+- `telemetry-viewer\check_live_setup.py`
+- `telemetry-viewer\inspect_live_packets.py`
+- `telemetry-viewer\diagnose_brain_progress.py`
+- `telemetry-viewer\diagnose_inventory_slots.py`
+- `telemetry-viewer\diagnose_overlay_state.py`
+- `telemetry-viewer\diagnose_overlay_geometry.py`
+- `telemetry-viewer\diagnose_target_coverage.py`
+- visual/perception/tab inspection helpers
+
+## Marked Batch/Audit
+
+These remain for DEBUG_RECORDING, offline analysis, geometry building, dataset
+work, replay, and visual QA:
+
+- `telemetry-viewer\run_target_geometry_pipeline.py`
+- `telemetry-viewer\build_world_target_geometry.py`
+- `telemetry-viewer\build_ui_target_geometry.py`
+- `telemetry-viewer\select_target_candidates.py`
+- `telemetry-viewer\target_geometry_inspector.py`
+- `telemetry-viewer\inspect_target_geometry.py`
+- dataset builders and inspectors
+- replay/viewer/export/validation tools
+
+## Marked Experimental
+
+These are intentionally hidden from the daily mode and labelled
+`EXPERIMENTAL`:
+
+- plugin-snapshot input and comparison diagnostics
+- compact-stream transport testing
+
+`compact-packets` remains the daily stable source/fallback.
+
+## Left Alone Because Uncertain
+
+The following are compatibility or uncertain scripts and were not moved:
+
+- `telemetry-viewer\telemetry_launcher.py`
+- `telemetry-viewer\test_telemetry_paths.py`
+
+They are documented as `deprecated` in
+`telemetry-viewer\tool_registry.json`, but they stay in place until a stronger
+reference check says they can be quarantined.
+
+## References Checked
+
+The cleanup reviewed:
+
+- Live Control Panel command construction and labels.
+- Daily gauntlet process/conflict checks.
+- Tool registry documentation and JSON metadata.
+- Existing test references for legacy tools.
+- Current imports and docs references where practical.
+
+No tests, plugin code, target libraries, profiles, or batch/audit tools were
+deleted or moved.

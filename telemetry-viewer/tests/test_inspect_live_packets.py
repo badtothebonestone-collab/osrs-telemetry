@@ -232,6 +232,43 @@ class InspectLivePacketsTest(unittest.TestCase):
             self.assertEqual(summary["collisionWindow"]["collisionWindowHash"], "win123")
             self.assertGreater(summary["collisionWindow"]["approxPacketBytes"], 0)
 
+    def test_summary_reports_latest_watch_values_packet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            live_dir = session / "live_packets"
+            live_dir.mkdir(parents=True)
+            (live_dir / "live-000001.ndjson").write_text(
+                json.dumps(
+                    {
+                        "schema": "osrs_telemetry_live_packet.v1",
+                        "packetType": "live_watch_values_packet.v1",
+                        "sessionId": "session",
+                        "tick": 23,
+                        "sequence": 6,
+                        "timestampUtc": "2026-05-09T00:00:05Z",
+                        "payload": {
+                            "activeWatchCount": 2,
+                            "watchBudgetExceeded": False,
+                            "values": [
+                                {"alias": "a", "changed": True, "value": 1},
+                                {"alias": "b", "changed": False, "value": 2},
+                            ],
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (live_dir / "latest_segment.txt").write_text("live-000001.ndjson\n", encoding="utf-8")
+
+            summary = summarize_live_packets(session)
+
+            self.assertEqual(summary["packetTypeCounts"]["live_watch_values_packet.v1"], 1)
+            self.assertEqual(summary["watchValues"]["latestWatchValuesTick"], 23)
+            self.assertEqual(summary["watchValues"]["activeWatchCount"], 2)
+            self.assertEqual(summary["watchValues"]["valueCount"], 2)
+            self.assertEqual(summary["watchValues"]["changedCount"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

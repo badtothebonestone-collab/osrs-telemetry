@@ -9,6 +9,13 @@ import net.runelite.client.config.ConfigSection;
 public interface TelemetryConfig extends Config
 {
 	@ConfigSection(
+			name = "Workflow Presets",
+			description = "Apply safe telemetry-only workflow presets.",
+			position = -1
+	)
+	String workflowPresetsSection = "workflowPresets";
+
+	@ConfigSection(
 			name = "Normal Live",
 			description = "Everyday compact live telemetry settings.",
 			position = 0
@@ -49,6 +56,46 @@ public interface TelemetryConfig extends Config
 			position = 5
 	)
 	String advancedSection = "advanced";
+
+	@ConfigSection(
+			name = "Plugin Snapshot Bridge",
+			description = "Optional read-only localhost bridge that serves cached compact telemetry only.",
+			position = 6
+	)
+	String pluginSnapshotSection = "pluginSnapshot";
+
+	@ConfigItem(
+			section = workflowPresetsSection,
+			keyName = "workflowPreset",
+			name = "Workflow preset",
+			description = "Telemetry settings preset to preview/apply. Presets only change whitelisted telemetry config keys."
+	)
+	default TelemetryWorkflowPreset workflowPreset()
+	{
+		return TelemetryWorkflowPreset.DAILY_LIVE;
+	}
+
+	@ConfigItem(
+			section = workflowPresetsSection,
+			keyName = "presetPreviewOnly",
+			name = "Preview preset only",
+			description = "When enabled, Apply workflow preset logs the changes that would be made without saving them."
+	)
+	default boolean presetPreviewOnly()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			section = workflowPresetsSection,
+			keyName = "applyWorkflowPreset",
+			name = "Apply workflow preset",
+			description = "Toggle on to apply the selected telemetry preset to whitelisted telemetry settings only. It does not click, type, invoke menus, or change game state."
+	)
+	default boolean applyWorkflowPreset()
+	{
+		return false;
+	}
 
 	@ConfigItem(
 			section = normalLiveSection,
@@ -411,6 +458,182 @@ public interface TelemetryConfig extends Config
 	default boolean emitCompactLivePackets()
 	{
 		return true;
+	}
+
+	@ConfigItem(
+			section = normalLiveSection,
+			keyName = "emitCompactLiveStream",
+			name = "Emit compact live stream",
+			description = "Publish compact live packets over a read-only localhost TCP NDJSON stream. Disabled until a local processor is ready."
+	)
+	default boolean emitCompactLiveStream()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			section = normalLiveSection,
+			keyName = "compactLiveStreamHost",
+			name = "Compact stream host",
+			description = "Loopback bind host for compact live stream. Non-loopback addresses are rejected."
+	)
+	default String compactLiveStreamHost()
+	{
+		return "127.0.0.1";
+	}
+
+	@ConfigItem(
+			section = normalLiveSection,
+			keyName = "compactLiveStreamPort",
+			name = "Compact stream port",
+			description = "Local TCP port for compact live stream NDJSON packets."
+	)
+	default int compactLiveStreamPort()
+	{
+		return 8891;
+	}
+
+	@ConfigItem(
+			section = normalLiveSection,
+			keyName = "compactLiveStreamQueueSize",
+			name = "Compact stream queue size",
+			description = "Maximum pending stream packets before dropping new stream packets instead of blocking RuneLite."
+	)
+	default int compactLiveStreamQueueSize()
+	{
+		return 5000;
+	}
+
+	@ConfigItem(
+			section = normalLiveSection,
+			keyName = "compactLiveStreamCircuitBreakerEnabled",
+			name = "Compact stream circuit breaker",
+			description = "Temporarily disables the experimental stream if writes or queue pressure look unsafe. Compact packet files stay unaffected."
+	)
+	default boolean compactLiveStreamCircuitBreakerEnabled()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			section = normalLiveSection,
+			keyName = "compactLiveStreamMaxWriteMillis",
+			name = "Compact stream max write ms",
+			description = "Maximum stream worker write time before the circuit breaker pauses stream publishing."
+	)
+	default int compactLiveStreamMaxWriteMillis()
+	{
+		return 20;
+	}
+
+	@ConfigItem(
+			section = normalLiveSection,
+			keyName = "compactLiveStreamDisableSeconds",
+			name = "Compact stream pause seconds",
+			description = "How long the circuit breaker pauses stream publishing after unsafe stream behavior is detected."
+	)
+	default int compactLiveStreamDisableSeconds()
+	{
+		return 10;
+	}
+
+	@ConfigItem(
+			section = normalLiveSection,
+			keyName = "compactLiveStreamAlsoWriteFiles",
+			name = "Stream also writes files",
+			description = "Keep the compact packet file bridge as a debug mirror when compact live stream is enabled."
+	)
+	default boolean compactLiveStreamAlsoWriteFiles()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+			section = pluginSnapshotSection,
+			keyName = "enablePluginSnapshotEndpoint",
+			name = "Enable plugin snapshot endpoint",
+			description = "Opt-in local dev bridge. Disabled by default. Serves cached read-only telemetry only and does not execute game actions."
+	)
+	default boolean enablePluginSnapshotEndpoint()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			section = pluginSnapshotSection,
+			keyName = "pluginSnapshotHost",
+			name = "Snapshot host",
+			description = "Local bind host for the read-only snapshot endpoint. Default is 127.0.0.1."
+	)
+	default String pluginSnapshotHost()
+	{
+		return "127.0.0.1";
+	}
+
+	@ConfigItem(
+			section = pluginSnapshotSection,
+			keyName = "pluginSnapshotPort",
+			name = "Snapshot port",
+			description = "Local port for the read-only cached snapshot endpoint."
+	)
+	default int pluginSnapshotPort()
+	{
+		return 8893;
+	}
+
+	@ConfigItem(
+			section = pluginSnapshotSection,
+			keyName = "pluginSnapshotAuthToken",
+			name = "Snapshot auth token",
+			description = "Optional local token. When set, requests must include X-Plugin-Snapshot-Token."
+	)
+	default String pluginSnapshotAuthToken()
+	{
+		return "";
+	}
+
+	@ConfigItem(
+			section = pluginSnapshotSection,
+			keyName = "pluginSnapshotMaxProjectionRefs",
+			name = "Snapshot max projection refs",
+			description = "Maximum projection refs returned by the read-only snapshot endpoint."
+	)
+	default int pluginSnapshotMaxProjectionRefs()
+	{
+		return 500;
+	}
+
+	@ConfigItem(
+			section = pluginSnapshotSection,
+			keyName = "pluginSnapshotMaxResponseBytes",
+			name = "Snapshot max response bytes",
+			description = "Maximum response bytes for cached snapshot responses. Requests above this fail safely."
+	)
+	default int pluginSnapshotMaxResponseBytes()
+	{
+		return 1048576;
+	}
+
+	@ConfigItem(
+			section = pluginSnapshotSection,
+			keyName = "pluginSnapshotAllowNonLocalHost",
+			name = "Allow non-local snapshot host",
+			description = "Leave disabled. When false, the endpoint only binds loopback addresses."
+	)
+	default boolean pluginSnapshotAllowNonLocalHost()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+			section = pluginSnapshotSection,
+			keyName = "pluginSnapshotEnabledInNormalLive",
+			name = "Snapshot endpoint in normal live",
+			description = "Experimental opt-in. Normal live still uses compact packet files until snapshot-vs-file comparison is implemented."
+	)
+	default boolean pluginSnapshotEnabledInNormalLive()
+	{
+		return false;
 	}
 
 	@ConfigItem(

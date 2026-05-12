@@ -19,6 +19,50 @@ RESPONSE_SCHEMA = "context_response.v1"
 HEALTH_SCHEMA = "context_health.v1"
 STATUS_SCHEMA = "context_status.v1"
 SCHEMA_SCHEMA = "context_schema.v1"
+CAPABILITY_REGISTRY_SCHEMA = "capability_registry.v1"
+WATCH_LIBRARY_SCHEMA = "watch_library.v1"
+WATCH_REQUEST_SCHEMA = "context_watch_request.v1"
+WATCH_RESPONSE_SCHEMA = "context_watch_response.v1"
+CAPABILITY_REGISTRY_PATH = Path(__file__).resolve().with_name("capability_registry.json")
+WATCH_LIBRARY_PATH = Path(__file__).resolve().with_name("watch_library.json")
+WATCH_REQUEST_DIR = "live_requests"
+WATCH_REQUEST_FILE = "watch_requests.json"
+WATCH_REQUEST_LIMIT = 32
+WATCH_MAX_TTL_TICKS = 5000
+WATCH_DEFAULT_TTL_TICKS = 500
+WATCH_MAX_VALUES_PER_TICK = 32
+WATCH_SUPPORTED_TYPES = {"varbit", "varp", "varclient_int", "varclient_str", "item_container", "widget_summary", "builtin"}
+WATCH_SAMPLE_MODES = {"on_change", "every_tick", "interval"}
+WATCH_TYPE_LIMITS = {
+    "varbit": 16,
+    "varp": 16,
+    "varclient_int": 8,
+    "varclient_str": 8,
+    "item_container": 4,
+    "widget_summary": 4,
+    "builtin": 16,
+}
+DISALLOWED_WATCH_KEYS = {
+    "action",
+    "actions",
+    "clickCommand",
+    "click",
+    "mouse",
+    "mouseCommand",
+    "keyboard",
+    "keyboardCommand",
+    "menu",
+    "menuCommand",
+    "invoke",
+    "move",
+    "moveCommand",
+    "actionCommand",
+    "execute",
+    "executeCommand",
+    "automation",
+    "antiDetection",
+}
+DISALLOWED_WATCH_KEYS_LOWER = {key.lower() for key in DISALLOWED_WATCH_KEYS}
 SUPPORTED_TASKS = ["woodcutting"]
 SUPPORTED_RESPONSE_MODES = ["compact", "normal", "full"]
 SUPPORTED_NEEDS = [
@@ -31,6 +75,10 @@ SUPPORTED_NEEDS = [
     "frame",
     "candidates",
     "events",
+    "watches",
+    "capabilities",
+    "watch:<alias>",
+    "capability:<id>",
     "aim_point",
     "task_summary",
     "best:<classId>",
@@ -95,6 +143,385 @@ def read_jsonl_file(path: Path) -> list[dict]:
     return records
 
 
+def safe_load_json(path: Path, fallback: dict | None = None) -> dict:
+    try:
+        return read_json_file(path)
+    except (FileNotFoundError, PermissionError, OSError, json.JSONDecodeError, ValueError):
+        return dict(fallback or {})
+
+
+def atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+    with temp.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=False)
+        handle.write("\n")
+        handle.flush()
+    temp.replace(path)
+
+
+def watch_request_path(session: Path | None) -> Path | None:
+    if session is None:
+        return None
+    return session / WATCH_REQUEST_DIR / WATCH_REQUEST_FILE
+
+
+def load_capability_registry() -> dict:
+    registry = safe_load_json(CAPABILITY_REGISTRY_PATH, {"schema": CAPABILITY_REGISTRY_SCHEMA, "capabilities": []})
+    if registry.get("schema") != CAPABILITY_REGISTRY_SCHEMA:
+        return {"schema": CAPABILITY_REGISTRY_SCHEMA, "capabilities": [], "warnings": ["capability registry schema mismatch"]}
+    return registry
+
+
+def load_watch_library() -> dict:
+    library = safe_load_json(WATCH_LIBRARY_PATH, {"schema": WATCH_LIBRARY_SCHEMA, "watches": [], "limits": {}})
+    if library.get("schema") != WATCH_LIBRARY_SCHEMA:
+        return {"schema": WATCH_LIBRARY_SCHEMA, "watches": [], "limits": {}, "warnings": ["watch library schema mismatch"]}
+    return library
+
+
+def active_watch_file_payload(session: Path | None) -> dict:
+    path = watch_request_path(session)
+    if path is None:
+        return {"schema": WATCH_RESPONSE_SCHEMA, "activeWatches": []}
+    payload = safe_load_json(path, {"schema": WATCH_RESPONSE_SCHEMA, "activeWatches": []})
+    if not isinstance(payload.get("activeWatches"), list):
+        payload["activeWatches"] = []
+    return payload
+
+
+def contains_disallowed_watch_key(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() in DISALLOWED_WATCH_KEYS_LOWER:
+                return key
+            found = contains_disallowed_watch_key(item)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = contains_disallowed_watch_key(item)
+            if found:
+                return found
+    return None
+
+
+def watch_library_by_alias(library: dict) -> dict[str, dict]:
+    return {
+        str(item.get("alias")): item
+        for item in library.get("watches") or []
+        if isinstance(item, dict) and item.get("alias")
+    }
+
+
+def watch_library_by_id(library: dict) -> dict[str, dict]:
+    return {
+        str(item.get("id")): item
+        for item in library.get("watches") or []
+        if isinstance(item, dict) and item.get("id") is not None
+    }
+
+
+def capability_by_id(registry: dict) -> dict[str, dict]:
+    return {
+        str(item.get("id")): item
+        for item in registry.get("capabilities") or []
+        if isinstance(item, dict) and item.get("id")
+    }
+
+
+def bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def normalize_watch_request_item(item: dict, library: dict) -> tuple[dict | None, str | None]:
+    if not isinstance(item, dict):
+        return None, "watch entry must be an object"
+    disallowed = contains_disallowed_watch_key(item)
+    if disallowed:
+        return None, f"watch entry contains disallowed action/input field: {disallowed}"
+    alias = str(item.get("alias") or "").strip()
+    watch_type = str(item.get("type") or "").strip()
+    if not alias:
+        return None, "watch alias is required"
+    if any(char in alias for char in "*?[]{}"):
+        return None, f"wildcard/unbounded alias rejected: {alias}"
+    if watch_type not in WATCH_SUPPORTED_TYPES:
+        return None, f"unsupported watch type for {alias}: {watch_type}"
+    library_entry = watch_library_by_alias(library).get(alias)
+    watch_id = item.get("id", library_entry.get("id") if library_entry else None)
+    if watch_type == "item_container" and watch_id is None:
+        watch_id = item.get("containerId")
+    if isinstance(watch_id, str) and watch_id.strip() in {"*", "all", "ALL"}:
+        return None, f"wildcard/unbounded id rejected for {alias}"
+    if watch_type == "builtin" and not isinstance(watch_id, str):
+        return None, f"builtin watch {alias} requires a string id"
+    if watch_type in {"varbit", "varp", "varclient_int", "item_container"} and not isinstance(watch_id, int):
+        return None, f"{watch_type} watch {alias} requires an integer id"
+    if watch_type == "varclient_str" and not isinstance(watch_id, int):
+        return None, f"varclient_str watch {alias} requires an integer id"
+    if watch_type == "widget_summary":
+        group = item.get("group", item.get("groupId"))
+        child = item.get("child", item.get("childId"))
+        if not isinstance(group, int) or not isinstance(child, int):
+            return None, f"widget_summary watch {alias} requires integer group/child"
+    sample_mode = str(item.get("sampleMode") or (library_entry or {}).get("sampleMode") or "on_change")
+    if sample_mode not in WATCH_SAMPLE_MODES:
+        return None, f"unsupported sampleMode for {alias}: {sample_mode}"
+    interval_ticks = bounded_int(item.get("intervalTicks", (library_entry or {}).get("intervalTicks", 0)), 0, 0, WATCH_MAX_TTL_TICKS)
+    if sample_mode == "interval" and interval_ticks <= 0:
+        return None, f"interval watch {alias} requires intervalTicks > 0"
+    ttl_source = item.get("ttlTicks")
+    if ttl_source is None or ttl_source == 0:
+        ttl_source = (library_entry or {}).get("ttlTicks")
+    if ttl_source in (None, 0):
+        ttl_source = WATCH_DEFAULT_TTL_TICKS
+    ttl_ticks = bounded_int(ttl_source, WATCH_DEFAULT_TTL_TICKS, 1, WATCH_MAX_TTL_TICKS)
+    max_emit = bounded_int(item.get("maxEmitPerTick", (library_entry or {}).get("maxEmitPerTick", 1)), 1, 1, WATCH_MAX_VALUES_PER_TICK)
+    normal_live_allowed = bool(item.get("normalLiveAllowed", (library_entry or {}).get("normalLiveAllowed", True)))
+    if not normal_live_allowed:
+        return None, f"watch {alias} is not allowed in normal live mode"
+    normalized = {
+        "alias": alias,
+        "type": watch_type,
+        "id": watch_id,
+        "group": item.get("group", item.get("groupId")),
+        "child": item.get("child", item.get("childId")),
+        "containerId": item.get("containerId"),
+        "sampleMode": sample_mode,
+        "intervalTicks": interval_ticks,
+        "ttlTicks": ttl_ticks,
+        "maxEmitPerTick": max_emit,
+        "taskProfiles": item.get("taskProfiles") or (library_entry or {}).get("taskProfiles") or [],
+        "normalLiveAllowed": normal_live_allowed,
+        "debugAuditOnly": bool(item.get("debugAuditOnly", (library_entry or {}).get("debugAuditOnly", False))),
+        "requestedAtUtc": utc_now(),
+        "source": "context_service",
+    }
+    return {key: value for key, value in normalized.items() if value is not None}, None
+
+
+def runtime_capability_status(capability: dict, context: dict) -> str:
+    cap_id = capability.get("id")
+    status_doc = context.get("status") or {}
+    baseline = context.get("baseline") or {}
+    activity = context.get("activity") or {}
+    navigation = context.get("navigation") or {}
+    watch_values = context.get("watchValues") or {}
+    if cap_id == "compact_packets.input":
+        return "available" if status_doc.get("inputSourceActive") == "compact-packets" or status_doc.get("compactPacketsAvailable") else "missing"
+    if cap_id == "baseline.player_location":
+        player = baseline.get("player") if isinstance(baseline.get("player"), dict) else {}
+        return "available" if player.get("worldX") is not None or player.get("sceneX") is not None else "missing"
+    if cap_id == "baseline.camera_viewport":
+        viewport = baseline.get("cameraViewport") if isinstance(baseline.get("cameraViewport"), dict) else {}
+        return "available" if viewport.get("canvasWidth") is not None or viewport.get("canvasHeight") is not None else "missing"
+    if cap_id in {"inventory.summary", "inventory.items", "inventory.deltas"}:
+        if not isinstance(activity, dict) or not activity:
+            return "missing"
+        inventory = activity.get("inventoryState") or activity.get("inventory") or {}
+        if cap_id == "inventory.deltas":
+            return "available" if activity.get("recentInventoryDeltas") is not None or inventory.get("inventoryDeltaTrackingKnown") is True else "missing"
+        return "available" if isinstance(inventory, dict) and inventory.get("known") is not False and inventory else "missing"
+    if cap_id == "activity.summary":
+        return "available" if activity.get("activityState") or activity.get("activity") else "missing"
+    if cap_id == "liveness.summary":
+        return "available" if activity.get("targetLiveness") or status_doc.get("livenessMode") else "missing"
+    if cap_id == "navigation.summary":
+        return "available" if navigation.get("collisionKnown") is not None or navigation.get("playerTileKnown") is not None else "missing"
+    if cap_id == "navigation.local_reachability":
+        return "available" if navigation.get("reachabilityComputed") else "missing"
+    if cap_id in {"candidates.best", "candidates.nearest"}:
+        return "available" if context.get("candidates") else "missing"
+    if cap_id == "overlay.debug_state":
+        path = (context.get("paths") or {}).get("overlayDebug")
+        return "available" if isinstance(path, Path) and path.exists() else "missing"
+    if cap_id == "diagnostics.writer_health":
+        return "available" if status_doc else "missing"
+    if cap_id == "watch_values.java_runtime":
+        return "unsupported"
+    if cap_id == "watch_values.builtin":
+        return "available" if watch_values.get("valuesByAlias") else "missing"
+    if cap_id == "events.timeline":
+        return "available" if context.get("events") else "stale"
+    if capability.get("status") in {"watchable", "future", "debug_only", "unavailable"}:
+        return capability.get("status")
+    return "available"
+
+
+def capabilities_payload(context: dict) -> dict:
+    registry = load_capability_registry()
+    capabilities = []
+    for capability in registry.get("capabilities") or []:
+        if not isinstance(capability, dict):
+            continue
+        item = dict(capability)
+        item["runtimeStatus"] = runtime_capability_status(item, context)
+        item["availableNow"] = item["runtimeStatus"] == "available"
+        item["watchable"] = item.get("status") == "watchable" or str(item.get("id", "")).startswith("watch:")
+        capabilities.append(item)
+    return {
+        "schema": CAPABILITY_REGISTRY_SCHEMA,
+        "generatedAtUtc": utc_now(),
+        "sessionPath": str(context.get("session")) if context.get("session") else None,
+        "capabilities": capabilities,
+        "runtimeSummary": {
+            "available": sum(1 for item in capabilities if item.get("runtimeStatus") == "available"),
+            "missing": sum(1 for item in capabilities if item.get("runtimeStatus") in {"missing", "stale"}),
+            "watchable": sum(1 for item in capabilities if item.get("watchable")),
+            "unsupported": sum(1 for item in capabilities if item.get("runtimeStatus") == "unsupported"),
+        },
+    }
+
+
+def watches_payload(context: dict) -> dict:
+    library = load_watch_library()
+    active = active_watch_file_payload(context.get("session")).get("activeWatches") or []
+    watch_values = context.get("watchValues") if isinstance(context.get("watchValues"), dict) else {}
+    return {
+        "schema": WATCH_LIBRARY_SCHEMA,
+        "generatedAtUtc": utc_now(),
+        "sessionPath": str(context.get("session")) if context.get("session") else None,
+        "limits": library.get("limits") or {},
+        "watches": library.get("watches") or [],
+        "activeWatches": active,
+        "activeWatchCount": len(active),
+        "currentValues": compact_watch_values(watch_values, response_mode="compact"),
+        "javaWatchRuntime": "future",
+        "warnings": ["Java dynamic watch polling is not implemented yet; builtin watch values are produced by the Python live processor."],
+    }
+
+
+def compact_watch_record(record: dict, response_mode: str) -> dict:
+    if response_mode == "full":
+        return dict(record)
+    return {
+        key: record.get(key)
+        for key in (
+            "alias",
+            "type",
+            "value",
+            "changed",
+            "latestTick",
+            "source",
+            "unavailableReason",
+        )
+        if key in record
+    }
+
+
+def compact_watch_values(watch_values: dict, *, response_mode: str, aliases: list[str] | None = None) -> dict:
+    values = watch_values.get("valuesByAlias") if isinstance(watch_values.get("valuesByAlias"), dict) else {}
+    selected_aliases = aliases if aliases is not None else sorted(values)
+    selected = {
+        alias: compact_watch_record(values[alias], response_mode)
+        for alias in selected_aliases
+        if isinstance(values.get(alias), dict)
+    }
+    return {
+        "schema": watch_values.get("schema", "live_watch_values.v1"),
+        "latestTick": watch_values.get("latestTick"),
+        "activeWatchCount": watch_values.get("activeWatchCount"),
+        "watchBudgetExceeded": watch_values.get("watchBudgetExceeded"),
+        "changedAliases": watch_values.get("changedAliases") or [],
+        "unavailableWatches": watch_values.get("unavailableWatches") or [],
+        "valuesByAlias": selected,
+        "warnings": watch_values.get("warnings") or [],
+    }
+
+
+def suggested_watch_for(alias_or_capability: str, library: dict | None = None) -> dict | None:
+    library = library or load_watch_library()
+    by_alias = watch_library_by_alias(library)
+    by_id = watch_library_by_id(library)
+    item = by_alias.get(alias_or_capability) or by_id.get(alias_or_capability)
+    if not isinstance(item, dict):
+        return None
+    if item.get("normalLiveAllowed") is False:
+        return None
+    return {
+        "alias": item.get("alias"),
+        "type": item.get("type"),
+        "id": item.get("id"),
+        "sampleMode": item.get("sampleMode") or "on_change",
+        "intervalTicks": item.get("intervalTicks", 0),
+        "ttlTicks": item.get("ttlTicks") or WATCH_DEFAULT_TTL_TICKS,
+    }
+
+
+def handle_watch_request_payload(context: dict, payload: Any) -> dict:
+    if not isinstance(payload, dict):
+        return {"schema": WATCH_RESPONSE_SCHEMA, "accepted": [], "rejected": [{"reason": "watch request must be an object"}], "activeWatches": [], "warnings": []}
+    if payload.get("schema") != WATCH_REQUEST_SCHEMA:
+        return {"schema": WATCH_RESPONSE_SCHEMA, "requestId": payload.get("requestId"), "accepted": [], "rejected": [{"reason": f"unsupported schema: {payload.get('schema')}"}], "activeWatches": [], "warnings": []}
+    library = load_watch_library()
+    requested = payload.get("watches") if isinstance(payload.get("watches"), list) else []
+    accepted: list[dict] = []
+    rejected: list[dict] = []
+    type_counts: dict[str, int] = {}
+    for item in requested[: WATCH_REQUEST_LIMIT + 1]:
+        normalized, reason = normalize_watch_request_item(item, library)
+        alias = item.get("alias") if isinstance(item, dict) else None
+        if reason:
+            rejected.append({"alias": alias, "reason": reason})
+            continue
+        assert normalized is not None
+        watch_type = normalized["type"]
+        if len(accepted) >= WATCH_REQUEST_LIMIT:
+            rejected.append({"alias": normalized["alias"], "reason": f"watch request limit exceeded ({WATCH_REQUEST_LIMIT})"})
+            continue
+        type_counts[watch_type] = type_counts.get(watch_type, 0) + 1
+        if type_counts[watch_type] > WATCH_TYPE_LIMITS.get(watch_type, WATCH_REQUEST_LIMIT):
+            rejected.append({"alias": normalized["alias"], "reason": f"{watch_type} watch limit exceeded"})
+            continue
+        accepted.append(normalized)
+    request_path = watch_request_path(context.get("session"))
+    request_written = False
+    warnings = ["Java dynamic watch polling is not implemented yet; request file is written for future plugin support."]
+    if request_path is not None:
+        active_payload = {
+            "schema": WATCH_RESPONSE_SCHEMA,
+            "requestSchema": WATCH_REQUEST_SCHEMA,
+            "requestId": payload.get("requestId"),
+            "task": payload.get("task"),
+            "generatedAtUtc": utc_now(),
+            "activeWatches": accepted,
+            "rejected": rejected,
+            "limits": {
+                "maxTotalWatches": WATCH_REQUEST_LIMIT,
+                "maxTtlTicks": WATCH_MAX_TTL_TICKS,
+                "maxValuesPerTick": WATCH_MAX_VALUES_PER_TICK,
+                "typeLimits": WATCH_TYPE_LIMITS,
+            },
+            "source": "context_service",
+            "readOnly": True,
+        }
+        atomic_write_json(request_path, active_payload)
+        request_written = True
+    return {
+        "schema": WATCH_RESPONSE_SCHEMA,
+        "requestId": payload.get("requestId"),
+        "generatedAtUtc": utc_now(),
+        "accepted": accepted,
+        "rejected": rejected,
+        "activeWatches": accepted,
+        "warnings": warnings,
+        "limits": {
+            "maxTotalWatches": WATCH_REQUEST_LIMIT,
+            "maxTtlTicks": WATCH_MAX_TTL_TICKS,
+            "maxValuesPerTick": WATCH_MAX_VALUES_PER_TICK,
+            "typeLimits": WATCH_TYPE_LIMITS,
+        },
+        "requestWritten": request_written,
+        "requestPath": str(request_path) if request_path else None,
+        "noActionEmitted": True,
+    }
+
+
 class LiveContextCache:
     def __init__(self, session: Path | None, reload_interval: float = 0.5):
         self.session = session
@@ -147,6 +574,7 @@ class LiveContextCache:
                     "activity": {},
                     "events": [],
                     "navigation": {},
+                    "watchValues": {},
                     "performance": {},
                     "candidates": [],
                     "warnings": ["No telemetry session selected."],
@@ -231,6 +659,7 @@ class LiveContextCache:
                 "activity": load_json("activity", False),
                 "events": load_events(),
                 "navigation": load_json("navigation", False),
+                "watchValues": load_json("watchValues", False),
                 "performance": load_json("performance", False),
                 "candidates": load_candidates(),
                 "warnings": warnings,
@@ -682,6 +1111,95 @@ def build_context_response(
             status = combine_status(status, "WARN")
             warnings.extend(events.get("warnings") or [])
 
+    requested_watch_aliases = requested_class_needs(needs, "watch")
+    requested_capability_ids = requested_class_needs(needs, "capability")
+    suggested_watch_requests: list[dict] = []
+    if "watches" in needs or requested_watch_aliases:
+        watch_values = scoped_context.get("watchValues") if isinstance(scoped_context.get("watchValues"), dict) else {}
+        if "watches" in needs:
+            response["watches"] = compact_watch_values(watch_values, response_mode=response_mode)
+        if requested_watch_aliases:
+            requested_values = compact_watch_values(watch_values, response_mode=response_mode, aliases=requested_watch_aliases)
+            response["watchValues"] = requested_values
+            present_aliases = set(requested_values.get("valuesByAlias") or {})
+            library = load_watch_library()
+            for alias in requested_watch_aliases:
+                if alias in present_aliases:
+                    continue
+                status = combine_status(status, "WARN")
+                missing.append(f"watch:{alias}")
+                suggestion = suggested_watch_for(alias, library)
+                if suggestion:
+                    suggested_watch_requests.append(suggestion)
+                else:
+                    warnings.append(f"Watch value is unavailable and no safe bounded watch is registered for alias: {alias}")
+    if "capabilities" in needs:
+        full_capabilities = capabilities_payload(scoped_context)
+        if response_mode == "compact":
+            response["capabilities"] = {
+                "schema": full_capabilities.get("schema"),
+                "runtimeSummary": full_capabilities.get("runtimeSummary"),
+                "capabilities": [
+                    {
+                        key: item.get(key)
+                        for key in ("id", "status", "runtimeStatus", "availableNow", "watchable")
+                        if key in item
+                    }
+                    for item in full_capabilities.get("capabilities") or []
+                    if isinstance(item, dict)
+                ],
+            }
+        else:
+            response["capabilities"] = full_capabilities
+    if requested_capability_ids:
+        registry_payload = capabilities_payload(scoped_context)
+        by_id = capability_by_id(registry_payload)
+        if not isinstance(response.get("capabilityStatus"), dict):
+            response["capabilityStatus"] = {}
+        library = load_watch_library()
+        for capability_id in requested_capability_ids:
+            capability = by_id.get(capability_id)
+            if not capability:
+                status = combine_status(status, "WARN")
+                missing.append(f"capability:{capability_id}")
+                warnings.append(f"Capability is not registered: {capability_id}")
+                continue
+            compact_capability = dict(capability)
+            if response_mode == "compact":
+                compact_capability = {
+                    key: capability.get(key)
+                    for key in (
+                        "id",
+                        "status",
+                        "runtimeStatus",
+                        "availableNow",
+                        "watchable",
+                        "normalLiveAllowed",
+                        "debugAuditOnly",
+                        "missingReason",
+                    )
+                    if key in capability
+                }
+            response["capabilityStatus"][capability_id] = compact_capability
+            if not capability.get("availableNow"):
+                status = combine_status(status, "WARN")
+                missing.append(f"capability:{capability_id}")
+                suggestion = suggested_watch_for(capability_id, library)
+                if suggestion:
+                    suggested_watch_requests.append(suggestion)
+                elif capability.get("missingReason"):
+                    warnings.append(str(capability.get("missingReason")))
+    if suggested_watch_requests:
+        deduped_suggestions: list[dict] = []
+        seen_suggestions: set[tuple[str, str]] = set()
+        for suggestion in suggested_watch_requests:
+            key = (str(suggestion.get("alias")), str(suggestion.get("id")))
+            if key in seen_suggestions:
+                continue
+            seen_suggestions.add(key)
+            deduped_suggestions.append(suggestion)
+        response["suggestedWatchRequests"] = deduped_suggestions
+
     reachability_summary: dict[str, Any] = {}
     reachability_candidates: dict[str, list[dict]] = {}
     reachability_reports: dict[str, dict] = {}
@@ -852,19 +1370,20 @@ def status_payload(context: dict) -> dict:
 def schema_payload() -> dict:
     return {
         "schema": SCHEMA_SCHEMA,
-        "supportedRequestSchemas": [REQUEST_SCHEMA],
-        "supportedResponseSchemas": [RESPONSE_SCHEMA, HEALTH_SCHEMA, STATUS_SCHEMA],
+        "supportedRequestSchemas": [REQUEST_SCHEMA, WATCH_REQUEST_SCHEMA],
+        "supportedResponseSchemas": [RESPONSE_SCHEMA, HEALTH_SCHEMA, STATUS_SCHEMA, CAPABILITY_REGISTRY_SCHEMA, WATCH_LIBRARY_SCHEMA, WATCH_RESPONSE_SCHEMA],
         "supportedNeeds": SUPPORTED_NEEDS,
         "supportedTasks": SUPPORTED_TASKS,
         "supportedResponseModes": SUPPORTED_RESPONSE_MODES,
         "supportedRequestOptions": ["maxCandidates", "maxEvents", "responseMode", "constraints", "maxAgeTicks", "maxAgeMillis"],
         "endpoints": {
-            "GET": ["/health", "/schema", "/status", "/summary"],
-            "POST": ["/context", "/context/batch"],
+            "GET": ["/health", "/schema", "/status", "/summary", "/capabilities", "/watches"],
+            "POST": ["/context", "/context/batch", "/watch-request"],
         },
         "notes": [
             "This service is read-only.",
             "Responses contain observations and readiness hints only.",
+            "Watch requests are bounded, typed, TTL-limited, and observation-only.",
             "No action, click, menu, mouse, or keyboard endpoints are implemented.",
         ],
     }
@@ -929,6 +1448,10 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
             self.send_json(status_payload(context))
         elif path == "/summary":
             self.handle_summary(context, params)
+        elif path == "/capabilities":
+            self.send_json(capabilities_payload(context))
+        elif path == "/watches":
+            self.send_json(watches_payload(context))
         else:
             self.send_json(error_payload(f"unknown endpoint: {self.path}"), status_code=404)
 
@@ -936,7 +1459,7 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
         if not self.authorized():
             self.send_json(error_payload("missing or invalid X-Context-Token"), status_code=401)
             return
-        if self.path not in {"/context", "/context/batch"}:
+        if self.path not in {"/context", "/context/batch", "/watch-request"}:
             self.send_json(error_payload(f"unknown endpoint: {self.path}"), status_code=404)
             return
         try:
@@ -951,7 +1474,9 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
             return
         state = self.server.context_state
         context = state.load_context()
-        if self.path == "/context/batch":
+        if self.path == "/watch-request":
+            self.send_json(handle_watch_request_payload(context, payload))
+        elif self.path == "/context/batch":
             if not isinstance(payload, list):
                 self.send_json(error_payload("/context/batch expects a JSON list"), status_code=400)
                 return
@@ -1058,7 +1583,7 @@ def serve(args) -> int:
     server.context_state = state
     print(f"Read-only context service listening on http://{args.host}:{args.port}")
     print(f"session: {state.cache.session}")
-    print("endpoints: GET /health /schema /status, POST /context /context/batch")
+    print("endpoints: GET /health /schema /status /capabilities /watches, POST /context /context/batch /watch-request")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

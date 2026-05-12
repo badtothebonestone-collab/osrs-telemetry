@@ -66,6 +66,7 @@ def missing_capability_label(value: Any) -> str:
     return {
         "fullPathfinding": "full pathfinding is not implemented yet",
         "inventoryDeltas": "inventory change tracking is not available yet",
+        "inventory.deltas": "inventory change tracking is not available yet",
         "animationFrame": "animation frame detail is unavailable",
         "explicitMovementState": "explicit movement state is unavailable",
         "collisionGridPathing": "collision grid pathing is not available yet",
@@ -226,7 +227,10 @@ def response_activity(response: dict) -> tuple[str, str]:
         woodcutting = safe_get(response, "taskSummary.woodcuttingState")
     if not isinstance(woodcutting, dict):
         woodcutting = {}
-    return text(activity.get("apparentState")), text(woodcutting.get("woodcuttingState"), "")
+    woodcutting_state = text(woodcutting.get("woodcuttingState"), "")
+    if woodcutting_state in {"target_depleted", "waiting_for_respawn", "depleted_or_stump"}:
+        woodcutting_state = ""
+    return text(activity.get("apparentState")), woodcutting_state
 
 
 def response_recent_inventory_deltas(response: dict) -> list[dict]:
@@ -273,7 +277,7 @@ def inventory_delta_label(delta: dict) -> str:
     return "inventory signature changed"
 
 
-def all_warnings(response: dict) -> list[str]:
+def all_warnings(response: dict, compact: bool = False) -> list[str]:
     values: list[str] = []
     for key in ("warnings", "missingCapabilities"):
         for item in response.get(key) or []:
@@ -287,9 +291,36 @@ def all_warnings(response: dict) -> list[str]:
     seen = set()
     result = []
     for value in values:
+        lowered = str(value).lower()
+        if compact and ("no frame path" in lowered or ("frame path" in lowered and "baseline" in lowered)):
+            continue
+        if compact and value == missing_capability_label("animationFrame"):
+            continue
         if value and value not in seen:
             seen.add(value)
             result.append(value)
+    return result
+
+
+def recent_task_signals(response: dict, woodcutting_state: str, events: list[dict]) -> list[str]:
+    signals: list[str] = []
+    if woodcutting_state in {"target_depleted", "waiting_for_respawn", "depleted_or_stump"}:
+        signals.append("target depleted recently")
+    for event in events:
+        joined = " ".join(str(event.get(key) or "") for key in ("eventType", "summary", "severity")).lower()
+        if any(token in joined for token in ("target_depleted", "depleted", "stump", "despawned")):
+            signals.append("target depleted recently")
+        if "inventory" in joined and "change" in joined:
+            signals.append("inventory changed recently")
+    task_signals = response.get("recentTaskSignals")
+    if isinstance(task_signals, list):
+        signals.extend(str(item) for item in task_signals if item)
+    seen: set[str] = set()
+    result: list[str] = []
+    for signal in signals:
+        if signal and signal not in seen:
+            seen.add(signal)
+            result.append(signal)
     return result
 
 
@@ -314,6 +345,10 @@ def format_woodcutting_summary(response: dict, compact: bool = False, top: int =
     freshness = response.get("freshness") if isinstance(response.get("freshness"), dict) else safe_get(response, "stateSummary.freshness", {})
     player = response_player(response)
     inventory = response_inventory(response)
+    raw_woodcutting = response.get("woodcuttingState")
+    if not isinstance(raw_woodcutting, dict):
+        raw_woodcutting = safe_get(response, "taskSummary.woodcuttingState")
+    raw_woodcutting_state = text(raw_woodcutting.get("woodcuttingState") if isinstance(raw_woodcutting, dict) else None, "")
     activity, woodcutting_state = response_activity(response)
     recent_inventory_deltas = response_recent_inventory_deltas(response)
     recent_events = response_recent_events(response)
@@ -346,6 +381,12 @@ def format_woodcutting_summary(response: dict, compact: bool = False, top: int =
             "",
         ]
     )
+    signals = recent_task_signals(response, raw_woodcutting_state, recent_events)
+    if signals:
+        lines.append("Recent task signals:")
+        for signal in signals[:top]:
+            lines.append(f"  - {signal}")
+        lines.append("")
     if recent_inventory_deltas and not compact:
         lines.append("Recent inventory changes:")
         for delta in recent_inventory_deltas[:3]:
@@ -382,7 +423,7 @@ def format_woodcutting_summary(response: dict, compact: bool = False, top: int =
         ]
     )
 
-    warnings = all_warnings(response)
+    warnings = all_warnings(response, compact=compact)
     if warnings:
         lines.append("Warnings:")
         for warning in warnings[:10 if compact else 20]:

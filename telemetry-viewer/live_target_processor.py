@@ -3,7 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
+import socket
 import time
+import urllib.error
+import urllib.request
 from collections import Counter, OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,6 +28,7 @@ LIVE_CONTEXT_INDEX_SCHEMA = "live_context_index.v1"
 LIVE_BASELINE_SCHEMA = "live_baseline_state.v1"
 LIVE_ACTIVITY_SCHEMA = "live_activity_state.v1"
 LIVE_EVENT_SCHEMA = "live_context_event.v1"
+LIVE_WATCH_VALUES_SCHEMA = "live_watch_values.v1"
 LIVE_PERFORMANCE_SCHEMA = "live_performance_summary.v1"
 LIVE_NAVIGATION_SCHEMA = "live_navigation_summary.v1"
 LIVE_OVERLAY_DEBUG_SCHEMA = "telemetry_overlay_debug_state.v1"
@@ -33,6 +38,28 @@ LIVE_UI_TARGET_SCHEMA = "live_ui_target_update.v1"
 LIVE_CANDIDATE_SCHEMA = "live_candidate_packet.v1"
 DEFAULT_TARGET_LIBRARY_PATH = Path(__file__).resolve().with_name("target_library.json")
 DEFAULT_TARGET_PROFILES_PATH = Path(__file__).resolve().with_name("target_profiles.json")
+WOODCUTTING_RESOURCE_DEFINITIONS = OrderedDict(
+    [
+        ("normal_logs", {"displayName": "Logs", "itemIds": [1511]}),
+        ("oak_logs", {"displayName": "Oak logs", "itemIds": [1521]}),
+        ("willow_logs", {"displayName": "Willow logs", "itemIds": [1519]}),
+        ("maple_logs", {"displayName": "Maple logs", "itemIds": [1517]}),
+        ("yew_logs", {"displayName": "Yew logs", "itemIds": [1515]}),
+        ("magic_logs", {"displayName": "Magic logs", "itemIds": [1513]}),
+    ]
+)
+WOODCUTTING_RESOURCE_GROUPS = OrderedDict(
+    [
+        (
+            "woodcutting_logs",
+            {
+                "displayName": "Woodcutting logs",
+                "itemIds": [1511, 1521, 1519, 1517, 1515, 1513],
+                "resources": ["normal_logs", "oak_logs", "willow_logs", "maple_logs", "yew_logs", "magic_logs"],
+            },
+        )
+    ]
+)
 DEFAULT_WRITE_RETRY_ATTEMPTS = 10
 DEFAULT_WRITE_RETRY_DELAY_SECONDS = 0.01
 MAX_WRITE_RETRY_DELAY_SECONDS = 0.25
@@ -42,9 +69,15 @@ WORLD_TARGET_TYPES = {"npc", "player", "sceneObject", "groundItem", "tile"}
 LATENCY_MODES = {"realtime", "complete"}
 CANDIDATE_OUTPUT_WINDOWS = {"latest", "rolling"}
 LIVENESS_MODES = {"off", "basic", "delta", "full"}
-INPUT_SOURCES = {"raw-ticks", "compact-packets", "auto"}
+INPUT_SOURCES = {"raw-ticks", "compact-packets", "compact-stream", "plugin-snapshot", "auto"}
 COMPACT_PACKET_SOURCE = "compact-packets"
+COMPACT_STREAM_SOURCE = "compact-stream"
+PLUGIN_SNAPSHOT_SOURCE = "plugin-snapshot"
 RAW_TICK_SOURCE = "raw-ticks"
+COMPACT_INPUT_SOURCES = {COMPACT_PACKET_SOURCE, COMPACT_STREAM_SOURCE}
+ENABLE_MAX_DRAW = True
+MAX_DRAW_LIMIT = 50
+MAX_DRAW_HULL_LIMIT = 10
 COMPACT_PACKET_TYPES = {
     "baseline": "live_baseline_packet.v1",
     "sceneDelta": "live_scene_delta_packet.v1",
@@ -55,8 +88,50 @@ COMPACT_PACKET_TYPES = {
     "navigation": "live_navigation_packet.v1",
     "collisionWindow": "live_collision_window_packet.v1",
     "collisionGrid": "live_collision_grid_packet.v1",
+    "watchValues": "live_watch_values_packet.v1",
     "writerHealth": "live_writer_health_packet.v1",
 }
+COMPACT_STREAM_REQUIRED_PACKET_TYPES = {
+    COMPACT_PACKET_TYPES["baseline"],
+    COMPACT_PACKET_TYPES["projection"],
+}
+PLUGIN_SNAPSHOT_REQUIRED_NEEDS = {"baseline", "projection"}
+PLUGIN_SNAPSHOT_TIERS = {"hot", "expanded", "audit"}
+PLUGIN_SNAPSHOT_TIER_DEFAULT_MAX_REFS = {
+    "hot": 100,
+    "expanded": 500,
+    "audit": 2000,
+}
+PLUGIN_SNAPSHOT_DEFAULT_TIER = "hot"
+PLUGIN_SNAPSHOT_DEFAULT_MAX_PROJECTION_REFS = PLUGIN_SNAPSHOT_TIER_DEFAULT_MAX_REFS[PLUGIN_SNAPSHOT_DEFAULT_TIER]
+PLUGIN_SNAPSHOT_PROJECTION_FIELD_MODES = {"compact", "normal", "full"}
+PLUGIN_SNAPSHOT_NEED_TO_PACKET_TYPE = {
+    "baseline": COMPACT_PACKET_TYPES["baseline"],
+    "scene_delta": COMPACT_PACKET_TYPES["sceneDelta"],
+    "projection": COMPACT_PACKET_TYPES["projection"],
+    "inventory": COMPACT_PACKET_TYPES["inventory"],
+    "inventory_delta": COMPACT_PACKET_TYPES["inventoryDelta"],
+    "activity": COMPACT_PACKET_TYPES["activity"],
+    "navigation": COMPACT_PACKET_TYPES["navigation"],
+    "collision_window": COMPACT_PACKET_TYPES["collisionWindow"],
+    "collision_grid": COMPACT_PACKET_TYPES["collisionGrid"],
+    "watch_values": COMPACT_PACKET_TYPES["watchValues"],
+    "writer_health": COMPACT_PACKET_TYPES["writerHealth"],
+}
+PLUGIN_SNAPSHOT_DEFAULT_NEEDS = [
+    "baseline",
+    "scene_delta",
+    "projection",
+    "inventory",
+    "inventory_delta",
+    "activity",
+    "navigation",
+    "collision_window",
+    "writer_health",
+    "watch_values",
+]
+COMPACT_STREAM_TICK_BUFFER_LIMIT = 64
+COMPARE_INPUT_SOURCE_MODES = {"raw-vs-file", "stream-vs-file", "plugin-snapshot-vs-file"}
 ALL_LIVE_TARGET_TYPES = WORLD_TARGET_TYPES | {
     "inventorySlot",
     "equipmentSlot",
@@ -72,6 +147,7 @@ LIVE_OUTPUT_FILES = (
     "live_baseline_state.json",
     "live_activity_state.json",
     "live_event_timeline.jsonl",
+    "live_watch_values.json",
     "overlay_debug_state.json",
     "live_performance_summary.json",
     "live_context_index.json",
@@ -110,6 +186,20 @@ def freshness_millis_for(ticks: list[dict]) -> float | None:
 
 def json_dump_compact(data) -> str:
     return json.dumps(data, separators=(",", ":"), sort_keys=False)
+
+
+def dedupe_preserve_order(values) -> list:
+    seen = set()
+    result = []
+    for value in values:
+        if value in (None, ""):
+            continue
+        text = str(value)
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(value)
+    return result
 
 
 def positive_int(value: str) -> int:
@@ -185,10 +275,85 @@ def compact_packets_available(session: Path) -> bool:
     return bool(compact_packet_state(session).get("available"))
 
 
-def choose_input_source(session: Path, requested: str) -> tuple[str, bool, bool, str | None]:
+def compact_stream_state(host: str = "127.0.0.1", port: int = 8891, timeout: float = 0.1, *, probe: bool = True) -> dict:
+    host = host or "127.0.0.1"
+    port = int(port or 8891)
+    state = {
+        "available": False,
+        "host": host,
+        "port": port,
+        "timeoutSeconds": timeout,
+        "error": None,
+    }
+    if not probe:
+        return state
+    started = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=max(0.001, float(timeout))):
+            state["available"] = True
+    except OSError as error:
+        state["error"] = f"{type(error).__name__}: {error}"
+    state["probeMillis"] = round((time.perf_counter() - started) * 1000.0, 3)
+    return state
+
+
+def plugin_snapshot_url(host: str = "127.0.0.1", port: int = 8893, path: str = "/snapshot") -> str:
+    host = host or "127.0.0.1"
+    return f"http://{host}:{int(port or 8893)}{path}"
+
+
+def plugin_snapshot_state(
+    host: str = "127.0.0.1",
+    port: int = 8893,
+    token: str | None = None,
+    timeout: float = 0.5,
+    *,
+    probe: bool = True,
+) -> dict:
+    host = host or "127.0.0.1"
+    port = int(port or 8893)
+    state = {
+        "available": False,
+        "host": host,
+        "port": port,
+        "timeoutSeconds": timeout,
+        "error": None,
+    }
+    if not probe:
+        return state
+    started = time.perf_counter()
+    request = urllib.request.Request(plugin_snapshot_url(host, port, "/health"), method="GET")
+    if token:
+        request.add_header("X-Plugin-Snapshot-Token", token)
+    try:
+        with urllib.request.urlopen(request, timeout=max(0.001, float(timeout))) as response:
+            body = response.read()
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+        if isinstance(payload, dict):
+            state["available"] = payload.get("schema") == "plugin_snapshot_health.v1" and payload.get("status") in {"PASS", "WARN"}
+            state["latestTick"] = payload.get("latestTick")
+            state["latestSequence"] = payload.get("latestSequence")
+            state["cachedPacketTypes"] = payload.get("cachedPacketTypes") or []
+            state["status"] = payload.get("status")
+    except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as error:
+        state["error"] = f"{type(error).__name__}: {error}"
+    state["probeMillis"] = round((time.perf_counter() - started) * 1000.0, 3)
+    return state
+
+
+def choose_input_source(
+    session: Path,
+    requested: str,
+    stream_state: dict | None = None,
+    plugin_snapshot_state_value: dict | None = None,
+    *,
+    auto_prefer_plugin_snapshot: bool = False,
+) -> tuple[str, bool, bool, str | None]:
     compact_state = compact_packet_state(session)
     compact_available = bool(compact_state.get("available"))
     compact_recent = bool(compact_state.get("recent"))
+    stream_available = bool((stream_state or {}).get("available"))
+    plugin_snapshot_available = bool((plugin_snapshot_state_value or {}).get("available"))
     raw_available = raw_ticks_available(session)
 
     if requested == RAW_TICK_SOURCE:
@@ -199,8 +364,25 @@ def choose_input_source(session: Path, requested: str) -> tuple[str, bool, bool,
         reason = None if compact_available else "compact live packets are not available"
         return COMPACT_PACKET_SOURCE, compact_available, raw_available, reason
 
+    if requested == COMPACT_STREAM_SOURCE:
+        reason = None if stream_available else "compact live stream is not connected yet; waiting for reconnect"
+        return COMPACT_STREAM_SOURCE, compact_available, raw_available, reason
+
+    if requested == PLUGIN_SNAPSHOT_SOURCE:
+        return PLUGIN_SNAPSHOT_SOURCE, compact_available, raw_available, None
+
+    if auto_prefer_plugin_snapshot and plugin_snapshot_available:
+        return PLUGIN_SNAPSHOT_SOURCE, compact_available, raw_available, "auto-prefer-plugin-snapshot selected the experimental plugin snapshot endpoint"
+
     if compact_available and compact_recent:
         return COMPACT_PACKET_SOURCE, compact_available, raw_available, None
+
+    if stream_available:
+        return COMPACT_STREAM_SOURCE, compact_available, raw_available, (
+            "compact live packet files are unavailable or stale; using experimental compact stream"
+            if compact_available
+            else "compact live packet files are unavailable; using experimental compact stream"
+        )
 
     if compact_available and raw_available:
         return RAW_TICK_SOURCE, compact_available, raw_available, "compact live packets are stale; falling back to raw tick JSONL"
@@ -229,6 +411,7 @@ def live_output_paths(session: Path) -> dict[str, Path]:
         "baseline": output_dir / "live_baseline_state.json",
         "activity": output_dir / "live_activity_state.json",
         "events": output_dir / "live_event_timeline.jsonl",
+        "watchValues": output_dir / "live_watch_values.json",
         "overlayDebug": output_dir / "overlay_debug_state.json",
         "performance": output_dir / "live_performance_summary.json",
         "contextIndex": output_dir / "live_context_index.json",
@@ -433,6 +616,19 @@ TIMING_BUCKETS = [
     "uiTargetLoadMillis",
     "outputWriteMillis",
     "outputSerializeMillis",
+    "pluginSnapshotHttpRequestMillis",
+    "pluginSnapshotResponseReadMillis",
+    "pluginSnapshotJsonParseMillis",
+    "pluginSnapshotEndpointServiceMillis",
+    "pluginSnapshotConvertMillis",
+    "pluginSnapshotPrefilterMillis",
+    "pluginSnapshotWorldBuildMillis",
+    "pluginSnapshotCandidateSelectMillis",
+    "pluginSnapshotOutputSerializeMillis",
+    "pluginSnapshotOutputWriteMillis",
+    "pluginSnapshotOverlayStateWriteMillis",
+    "pluginSnapshotStatusWriteMillis",
+    "pluginSnapshotTotalActiveMillis",
     "consolePrintMillis",
     "sleepMillis",
     "idleWaitMillis",
@@ -445,6 +641,30 @@ TIMING_BUCKETS = [
 
 TIMING_MODE = "exclusive"
 
+PLUGIN_SNAPSHOT_BOTTLENECK_BUCKETS = {
+    "endpoint_service": "pluginSnapshotEndpointServiceMillis",
+    "http_request": "pluginSnapshotHttpRequestMillis",
+    "response_read": "pluginSnapshotResponseReadMillis",
+    "json_parse": "pluginSnapshotJsonParseMillis",
+    "conversion": "pluginSnapshotConvertMillis",
+    "prefilter": "pluginSnapshotPrefilterMillis",
+    "world_build": "pluginSnapshotWorldBuildMillis",
+    "candidate_select": "pluginSnapshotCandidateSelectMillis",
+    "output_serialize": "pluginSnapshotOutputSerializeMillis",
+    "output_write": "pluginSnapshotOutputWriteMillis",
+}
+
+
+def plugin_snapshot_bottleneck(timing: dict) -> str:
+    largest_label = "unknown"
+    largest_value = 0.0
+    for label, key in PLUGIN_SNAPSHOT_BOTTLENECK_BUCKETS.items():
+        value = timing.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and float(value) > largest_value:
+            largest_label = label
+            largest_value = float(value)
+    return largest_label
+
 
 def timing_payload(timing: Timing, total_duration_ms: float, tailer=None, *, raw_tick_ingest_millis: float = 0.0) -> dict:
     payload = {key: 0.0 for key in TIMING_BUCKETS}
@@ -454,6 +674,18 @@ def timing_payload(timing: Timing, total_duration_ms: float, tailer=None, *, raw
         payload["tailReadMillis"] = round(tailer.last_tail_read_millis, 3)
         payload["lineSplitMillis"] = round(tailer.last_line_split_millis, 3)
         payload["jsonParseMillis"] = round(tailer.last_json_parse_millis, 3)
+        if hasattr(tailer, "last_stream_reconnect_millis"):
+            payload["streamReconnectMillis"] = round(float(getattr(tailer, "last_stream_reconnect_millis", 0.0) or 0.0), 3)
+            payload["streamWaitMillis"] = round(float(getattr(tailer, "last_stream_wait_millis", 0.0) or 0.0), 3)
+            payload["streamDisconnectedDurationMillis"] = round(float(getattr(tailer, "last_stream_disconnected_duration_millis", 0.0) or 0.0), 3)
+        if hasattr(tailer, "snapshot_request_millis"):
+            payload["pluginSnapshotRequestMillis"] = round(float(getattr(tailer, "snapshot_request_millis", 0.0) or 0.0), 3)
+            payload["pluginSnapshotHttpRequestMillis"] = round(float(getattr(tailer, "snapshot_http_request_millis", 0.0) or 0.0), 3)
+            payload["pluginSnapshotResponseReadMillis"] = round(float(getattr(tailer, "snapshot_response_read_millis", 0.0) or 0.0), 3)
+            payload["pluginSnapshotJsonParseMillis"] = round(float(getattr(tailer, "snapshot_parse_millis", 0.0) or 0.0), 3)
+            payload["pluginSnapshotParseMillis"] = payload["pluginSnapshotJsonParseMillis"]
+            payload["pluginSnapshotEndpointServiceMillis"] = round(float(getattr(tailer, "snapshot_endpoint_service_millis", 0.0) or 0.0), 3)
+            payload["pluginSnapshotConvertMillis"] = round(float(getattr(tailer, "snapshot_convert_millis", 0.0) or 0.0), 3)
     payload["rawTickIngestMillis"] = round(raw_tick_ingest_millis, 3)
     if not payload.get("livenessTotalMillis"):
         payload["livenessTotalMillis"] = round(
@@ -487,6 +719,11 @@ def timing_payload(timing: Timing, total_duration_ms: float, tailer=None, *, raw
     payload["totalActiveMillis"] = round(total_duration_ms, 3)
     payload["pollLoopMillis"] = round(total_duration_ms, 3)
     payload["totalDurationMillis"] = round(total_duration_ms, 3)
+    if tailer is not None and hasattr(tailer, "snapshot_request_millis"):
+        payload["pluginSnapshotCandidateSelectMillis"] = round(float(payload.get("candidateSelectMillis") or 0.0), 3)
+        payload["pluginSnapshotOutputSerializeMillis"] = round(float(payload.get("outputSerializeMillis") or 0.0), 3)
+        payload["pluginSnapshotOutputWriteMillis"] = round(float(payload.get("outputWriteMillis") or 0.0), 3)
+        payload["pluginSnapshotTotalActiveMillis"] = payload["totalActiveMillis"]
     return payload
 
 
@@ -653,30 +890,164 @@ def normalize_compact_point(point: dict | None) -> dict | None:
     return {"x": x, "y": y}
 
 
+def normalize_compact_bounds(bounds: dict | None) -> dict | None:
+    if not isinstance(bounds, dict):
+        return None
+    x = bounds.get("x", bounds.get("left"))
+    y = bounds.get("y", bounds.get("top"))
+    w = bounds.get("w", bounds.get("width"))
+    h = bounds.get("h", bounds.get("height"))
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (x, y, w, h)):
+        return None
+    return {"x": x, "y": y, "w": w, "h": h}
+
+
+def bounds_center_point(bounds: dict | None) -> dict | None:
+    normalized = normalize_compact_bounds(bounds)
+    if not normalized:
+        return None
+    return {
+        "x": normalized["x"] + normalized["w"] / 2.0,
+        "y": normalized["y"] + normalized["h"] / 2.0,
+    }
+
+
+def normalize_compact_polygon(value) -> list[dict] | None:
+    if isinstance(value, dict):
+        if isinstance(value.get("points"), list):
+            value = value.get("points")
+        elif isinstance(value.get("x"), list) and isinstance(value.get("y"), list):
+            xs = value.get("x")
+            ys = value.get("y")
+            count = min(len(xs), len(ys), int(value.get("n") or min(len(xs), len(ys))))
+            points = []
+            for index in range(count):
+                point = normalize_compact_point({"x": xs[index], "y": ys[index]})
+                if point:
+                    points.append(point)
+            return points if len(points) >= 3 else None
+        else:
+            return None
+    if not isinstance(value, list):
+        return None
+    points = []
+    for point in value:
+        if isinstance(point, dict):
+            normalized = normalize_compact_point(point)
+        elif isinstance(point, (list, tuple)) and len(point) >= 2:
+            normalized = normalize_compact_point({"x": point[0], "y": point[1]})
+        else:
+            normalized = None
+        if normalized:
+            points.append(normalized)
+    return points if len(points) >= 3 else None
+
+
+def nested_payload_value(record: dict, key: str):
+    if not isinstance(record, dict):
+        return None
+    target = record.get("target") if isinstance(record.get("target"), dict) else {}
+    geometry_payload = record.get("geometry") if isinstance(record.get("geometry"), dict) else {}
+    summary = record.get("geometrySummary") if isinstance(record.get("geometrySummary"), dict) else {}
+    for source in (record, target, geometry_payload, summary):
+        if isinstance(source, dict) and source.get(key) is not None:
+            return source.get(key)
+    return None
+
+
+def nested_coordinate(record: dict, container_name: str, axis: str):
+    for source in (record, record.get("target") if isinstance(record.get("target"), dict) else {}):
+        container = source.get(container_name) if isinstance(source, dict) and isinstance(source.get(container_name), dict) else {}
+        value = container.get(axis)
+        if value is not None:
+            return value
+    return None
+
+
 def normalize_compact_scene_object(value: dict) -> dict:
     record = dict(value)
 
-    if not record.get("objectName") and record.get("name"):
-        record["objectName"] = record.get("name")
-    if not record.get("objectNameSource") and record.get("nameSource"):
-        record["objectNameSource"] = record.get("nameSource")
-    if not record.get("kind") and record.get("layer"):
-        record["kind"] = record.get("layer")
+    if record.get("id") is None:
+        record["id"] = nested_payload_value(record, "rawId") or nested_payload_value(record, "objectId")
+    if record.get("rawId") is None and record.get("id") is not None:
+        record["rawId"] = record.get("id")
+    if record.get("hash") is None:
+        record["hash"] = nested_payload_value(record, "hash")
+    if not record.get("targetType"):
+        record["targetType"] = nested_payload_value(record, "targetType") or "sceneObject"
+    if not record.get("objectName"):
+        record["objectName"] = (
+            nested_payload_value(record, "objectName")
+            or nested_payload_value(record, "targetName")
+            or nested_payload_value(record, "name")
+        )
+    if not record.get("name") and record.get("objectName"):
+        record["name"] = record.get("objectName")
+    if not record.get("objectNameSource"):
+        record["objectNameSource"] = nested_payload_value(record, "objectNameSource") or nested_payload_value(record, "nameSource")
+    if not record.get("kind"):
+        record["kind"] = nested_payload_value(record, "kind") or nested_payload_value(record, "layer")
+    if not record.get("layer") and record.get("kind"):
+        record["layer"] = record.get("kind")
+    if not isinstance(record.get("actions"), list):
+        actions = nested_payload_value(record, "actions")
+        if isinstance(actions, list):
+            record["actions"] = actions
 
-    aim = record.get("aimPoint") if isinstance(record.get("aimPoint"), dict) else None
-    point = normalize_compact_point(aim)
+    for flat_key, container_name, axis in (
+        ("worldX", "world", "x"),
+        ("worldY", "world", "y"),
+        ("plane", "world", "plane"),
+        ("sceneX", "scene", "x"),
+        ("sceneY", "scene", "y"),
+        ("localX", "local", "x"),
+        ("localY", "local", "y"),
+    ):
+        if record.get(flat_key) is None:
+            value = nested_coordinate(record, container_name, axis)
+            if value is not None:
+                record[flat_key] = value
+
+    point = None
+    for point_key in ("aimPoint", "canvasPoint", "canvasLocation", "canvasCenter", "center", "screenPoint"):
+        candidate = nested_payload_value(record, point_key)
+        point = normalize_compact_point(candidate) if isinstance(candidate, dict) else None
+        if point:
+            break
+    if not point:
+        point = bounds_center_point(nested_payload_value(record, "bounds"))
     if point:
         record.setdefault("canvasLocation", point)
         record.setdefault("canvasCenter", point)
 
     summary = record.get("geometrySummary") if isinstance(record.get("geometrySummary"), dict) else {}
+    for key in ("bounds", "clickboxBounds", "convexHullBounds", "pixelBox", "boundingBox"):
+        bounds = normalize_compact_bounds(nested_payload_value(record, key))
+        if bounds:
+            record[key] = bounds
+    if record.get("bounds") and not record.get("clickboxBounds"):
+        record["clickboxBounds"] = record.get("bounds")
+
+    for key in ("clickableHull", "clickboxPolygon", "convexHull", "convexHullPolygon", "canvasTilePolygon", "tilePolygon"):
+        polygon = normalize_compact_polygon(nested_payload_value(record, key))
+        if polygon:
+            record[key] = polygon
+
     if isinstance(summary.get("clickboxBounds"), dict):
-        record.setdefault("clickboxBounds", summary.get("clickboxBounds"))
+        record.setdefault("clickboxBounds", normalize_compact_bounds(summary.get("clickboxBounds")) or summary.get("clickboxBounds"))
     if isinstance(summary.get("convexHullBounds"), dict):
-        record.setdefault("convexHullBounds", summary.get("convexHullBounds"))
+        record.setdefault("convexHullBounds", normalize_compact_bounds(summary.get("convexHullBounds")) or summary.get("convexHullBounds"))
 
     if record.get("geometryAvailable") is None:
-        record["geometryAvailable"] = bool(point or record.get("clickboxBounds") or record.get("convexHullBounds"))
+        record["geometryAvailable"] = bool(
+            point
+            or record.get("clickboxBounds")
+            or record.get("convexHullBounds")
+            or record.get("bounds")
+            or record.get("clickboxPolygon")
+            or record.get("canvasTilePolygon")
+            or record.get("convexHullPolygon")
+        )
     if record.get("onScreen") is None:
         record["onScreen"] = bool(record.get("geometryAvailable"))
 
@@ -693,6 +1064,176 @@ def normalize_compact_deltas(deltas: dict | None) -> dict:
             if isinstance(item, dict)
         ]
     return normalized
+
+
+PROJECTION_REF_FIELD_NAMES = (
+    "visibleObjectRefs",
+    "visibleSceneObjectRefs",
+    "projectedRefs",
+    "refs",
+    "targets",
+    "sceneObjects",
+    "projectedSceneObjects",
+)
+PROJECTION_WRAPPER_FIELD_NAMES = ("payload", "projection", "sceneProjection", "sceneProjectionPayload")
+
+
+def unwrap_packet_payload(value):
+    if not isinstance(value, dict):
+        return value
+    payload = value.get("payload")
+    if isinstance(payload, dict) and (
+        value.get("packetType")
+        or value.get("schema") == live_packet_reader.PACKET_SCHEMA
+        or value.get("schema") == "osrs_telemetry_live_packet.v1"
+    ):
+        return payload
+    return value
+
+
+def find_projection_ref_list(projection: dict | None) -> tuple[list | None, str | None]:
+    projection = unwrap_packet_payload(projection)
+    if not isinstance(projection, dict):
+        return None, None
+
+    for field_name in PROJECTION_REF_FIELD_NAMES:
+        value = projection.get(field_name)
+        if isinstance(value, list):
+            return value, field_name
+
+    for wrapper_name in PROJECTION_WRAPPER_FIELD_NAMES:
+        nested = projection.get(wrapper_name)
+        if not isinstance(nested, dict):
+            continue
+        for field_name in PROJECTION_REF_FIELD_NAMES:
+            value = nested.get(field_name)
+            if isinstance(value, list):
+                return value, f"{wrapper_name}.{field_name}"
+
+    return None, None
+
+
+def projection_field_present(ref: dict, field_group: str) -> bool:
+    target = ref.get("target") if isinstance(ref.get("target"), dict) else {}
+    geometry_payload = ref.get("geometry") if isinstance(ref.get("geometry"), dict) else {}
+    if field_group == "objectKey":
+        return bool(ref.get("objectKey") or target.get("objectKey"))
+    if field_group == "id":
+        return any(ref.get(key) is not None for key in ("id", "rawId", "objectId")) or any(target.get(key) is not None for key in ("id", "rawId", "objectId"))
+    if field_group == "hash":
+        return ref.get("hash") is not None or target.get("hash") is not None
+    if field_group == "name":
+        return bool(ref.get("name") or ref.get("objectName") or ref.get("targetName") or target.get("name") or target.get("targetName") or target.get("objectName"))
+    if field_group == "actions":
+        return isinstance(ref.get("actions"), list) or isinstance(target.get("actions"), list)
+    if field_group == "targetType":
+        return bool(ref.get("targetType") or target.get("targetType"))
+    if field_group == "worldLocation":
+        return (
+            ref.get("worldX") is not None
+            and ref.get("worldY") is not None
+            and ref.get("plane") is not None
+        ) or isinstance(ref.get("world"), dict) or isinstance(target.get("world"), dict)
+    if field_group == "sceneLocation":
+        return (
+            ref.get("sceneX") is not None
+            and ref.get("sceneY") is not None
+        ) or isinstance(ref.get("scene"), dict) or isinstance(target.get("scene"), dict)
+    if field_group == "onScreen":
+        return ref.get("onScreen") is not None or geometry_payload.get("onScreen") is not None
+    if field_group == "geometryAvailable":
+        return ref.get("geometryAvailable") is not None or geometry_payload.get("geometryAvailable") is not None
+    if field_group == "aimPoint":
+        return any(
+            isinstance(nested_payload_value(ref, key), dict)
+            for key in ("aimPoint", "canvasPoint", "canvasLocation", "canvasCenter", "center", "screenPoint")
+        )
+    if field_group == "bounds":
+        return any(isinstance(nested_payload_value(ref, key), dict) for key in ("bounds", "clickboxBounds", "convexHullBounds", "pixelBox", "boundingBox"))
+    if field_group == "hull":
+        return any(nested_payload_value(ref, key) is not None for key in ("clickableHull", "clickboxPolygon", "convexHull", "convexHullPolygon", "canvasTilePolygon", "tilePolygon"))
+    return False
+
+
+def projection_payload_diagnostics(projection: dict | None) -> dict:
+    raw_projection = unwrap_packet_payload(projection)
+    top_keys = sorted(raw_projection.keys()) if isinstance(raw_projection, dict) else []
+    refs, ref_path = find_projection_ref_list(raw_projection if isinstance(raw_projection, dict) else None)
+    refs_list = refs if isinstance(refs, list) else []
+    first_refs = [ref for ref in refs_list if isinstance(ref, dict)][:5]
+    field_groups = (
+        "objectKey",
+        "id",
+        "hash",
+        "name",
+        "actions",
+        "targetType",
+        "worldLocation",
+        "sceneLocation",
+        "onScreen",
+        "geometryAvailable",
+        "aimPoint",
+        "bounds",
+        "hull",
+    )
+    present_counts = {field: 0 for field in field_groups}
+    missing_counts = {field: 0 for field in field_groups}
+    for ref in refs_list:
+        if not isinstance(ref, dict):
+            continue
+        for field in field_groups:
+            if projection_field_present(ref, field):
+                present_counts[field] += 1
+            else:
+                missing_counts[field] += 1
+    converted = [
+        normalize_compact_scene_object(ref)
+        for ref in refs_list
+        if isinstance(ref, dict)
+    ]
+    conversion_warnings = []
+    if not isinstance(raw_projection, dict):
+        conversion_warnings.append("projection payload was not a JSON object")
+    elif ref_path is None:
+        conversion_warnings.append("projection payload did not contain a recognized ref list")
+    elif not refs_list:
+        conversion_warnings.append("projection ref list was empty")
+    elif present_counts["name"] <= 0:
+        conversion_warnings.append("projection refs have no name/objectName fields; profile matching may fail")
+    elif present_counts["worldLocation"] <= 0:
+        conversion_warnings.append("projection refs have no world location fields; distance/reachability may fail")
+    elif present_counts["aimPoint"] <= 0 and present_counts["bounds"] <= 0 and present_counts["hull"] <= 0:
+        conversion_warnings.append("projection refs have no aim/bounds/hull geometry fields; geometry filters may reject them")
+    return {
+        "topLevelKeys": top_keys,
+        "refListPath": ref_path,
+        "refListFound": ref_path is not None,
+        "refCount": len(refs_list) if refs is not None else None,
+        "refsConverted": len(converted),
+        "firstRefKeys": [sorted(ref.keys()) for ref in first_refs],
+        "fieldPresentCounts": present_counts,
+        "fieldMissingCounts": missing_counts,
+        "conversionWarnings": conversion_warnings,
+    }
+
+
+def normalize_projection_payload(projection: dict | None) -> tuple[dict, dict]:
+    raw_projection = unwrap_packet_payload(projection)
+    if not isinstance(raw_projection, dict):
+        return {}, projection_payload_diagnostics(raw_projection)
+    normalized = dict(raw_projection)
+    refs, ref_path = find_projection_ref_list(raw_projection)
+    if isinstance(refs, list):
+        normalized["visibleObjectRefs"] = [
+            normalize_compact_scene_object(item)
+            for item in refs
+            if isinstance(item, dict)
+        ]
+    diagnostics = projection_payload_diagnostics(normalized)
+    diagnostics["refListPath"] = ref_path
+    diagnostics["refListFound"] = ref_path is not None
+    diagnostics["refsConverted"] = len(normalized.get("visibleObjectRefs") or [])
+    return normalized, diagnostics
 
 
 def compact_inventory_container(container) -> dict | list:
@@ -768,12 +1309,14 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
     baseline = by_type.get(COMPACT_PACKET_TYPES["baseline"], {}).get("payload") or {}
     scene_delta = by_type.get(COMPACT_PACKET_TYPES["sceneDelta"], {}).get("payload") or {}
     projection = by_type.get(COMPACT_PACKET_TYPES["projection"], {}).get("payload") or {}
+    projection, projection_diagnostics = normalize_projection_payload(projection if isinstance(projection, dict) else {})
     inventory = by_type.get(COMPACT_PACKET_TYPES["inventory"], {}).get("payload") or {}
     inventory_delta_packet = by_type.get(COMPACT_PACKET_TYPES["inventoryDelta"], {}).get("payload") or {}
     activity = by_type.get(COMPACT_PACKET_TYPES["activity"], {}).get("payload") or {}
     navigation = by_type.get(COMPACT_PACKET_TYPES["navigation"], {}).get("payload") or {}
     collision_window = by_type.get(COMPACT_PACKET_TYPES["collisionWindow"], {}).get("payload") or {}
     collision_grid = by_type.get(COMPACT_PACKET_TYPES["collisionGrid"], {}).get("payload") or {}
+    watch_values = by_type.get(COMPACT_PACKET_TYPES["watchValues"], {}).get("payload") or {}
     writer_health = by_type.get(COMPACT_PACKET_TYPES["writerHealth"], {}).get("payload") or {}
 
     timestamp = next((packet.get("timestampUtc") for packet in reversed(packets) if isinstance(packet.get("timestampUtc"), str)), None)
@@ -787,6 +1330,7 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
         "_inputSource": COMPACT_PACKET_SOURCE,
         "_compactPacketSequence": packet_sequence(latest),
         "_compactPacketTypes": sorted(by_type.keys()),
+        "_projectionDiagnostics": projection_diagnostics,
     }
 
     merge_player_status(tick, baseline.get("player"))
@@ -854,6 +1398,8 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
         tick["_collisionWindow"] = collision_window
     if isinstance(collision_grid, dict) and collision_grid:
         tick["_collisionGrid"] = collision_grid
+    if isinstance(watch_values, dict) and watch_values:
+        tick["_watchValues"] = watch_values
 
     if isinstance(writer_health, dict):
         tick["writerQueueSize"] = writer_health.get("rawWriterQueueDepth")
@@ -863,6 +1409,193 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
     tick.setdefault("npcs", [])
     tick.setdefault("players", [])
     tick.setdefault("groundItems", [])
+    return tick
+
+
+def normalized_plugin_snapshot_tier(value) -> str:
+    tier = str(value or PLUGIN_SNAPSHOT_DEFAULT_TIER).strip().lower()
+    return tier if tier in PLUGIN_SNAPSHOT_TIERS else PLUGIN_SNAPSHOT_DEFAULT_TIER
+
+
+def plugin_snapshot_tier_default_max_refs(tier: str) -> int:
+    return PLUGIN_SNAPSHOT_TIER_DEFAULT_MAX_REFS.get(normalized_plugin_snapshot_tier(tier), PLUGIN_SNAPSHOT_DEFAULT_MAX_PROJECTION_REFS)
+
+
+def effective_plugin_snapshot_max_projection_refs(args) -> int:
+    value = getattr(args, "plugin_snapshot_max_projection_refs", None)
+    if value is None:
+        return plugin_snapshot_tier_default_max_refs(getattr(args, "plugin_snapshot_tier", PLUGIN_SNAPSHOT_DEFAULT_TIER))
+    return max(0, int(value))
+
+
+def plugin_snapshot_profile_class_hint(profile: str | None) -> str | None:
+    normalized = str(profile or "").strip().lower()
+    if normalized == "woodcutting":
+        return "tree"
+    if normalized == "mining":
+        return "rock"
+    return None
+
+
+def plugin_snapshot_target_type_hint(args, class_hint: str | None) -> str | None:
+    target_type = getattr(args, "target_type", None)
+    if isinstance(target_type, str) and target_type not in {"", "all"}:
+        return target_type
+    if class_hint:
+        return "sceneObject"
+    return None
+
+
+def plugin_snapshot_request_hints(args) -> dict:
+    profile = getattr(args, "profile", None)
+    class_hint = plugin_snapshot_profile_class_hint(profile)
+    target_type_hint = plugin_snapshot_target_type_hint(args, class_hint)
+    desired_classes = [class_hint] if class_hint else []
+    hints = {
+        "profileHint": profile,
+        "taskHint": profile,
+        "classHint": class_hint,
+        "targetTypeHint": target_type_hint,
+        "requireOnScreen": True,
+        "requireGeometryAvailable": True,
+        "desiredClasses": desired_classes,
+        "maxCandidatesHint": int(getattr(args, "limit", 0) or 0),
+    }
+    return {key: value for key, value in hints.items() if value not in (None, "", [])}
+
+
+def plugin_snapshot_request_body(args) -> dict:
+    projection_field_mode = getattr(args, "plugin_snapshot_projection_field_mode", "compact") or "compact"
+    if projection_field_mode not in PLUGIN_SNAPSHOT_PROJECTION_FIELD_MODES:
+        projection_field_mode = "compact"
+    tier = normalized_plugin_snapshot_tier(getattr(args, "plugin_snapshot_tier", PLUGIN_SNAPSHOT_DEFAULT_TIER))
+    body = {
+        "schema": "plugin_snapshot_request.v1",
+        "needs": list(PLUGIN_SNAPSHOT_DEFAULT_NEEDS),
+        "maxAgeTicks": int(getattr(args, "plugin_snapshot_max_age_ticks", 5)),
+        "maxProjectionRefs": effective_plugin_snapshot_max_projection_refs(args),
+        "includeGeometry": bool(getattr(args, "plugin_snapshot_include_geometry", False)),
+        "includeCollisionWindow": True,
+        "includeWatchValues": True,
+        "responseMode": getattr(args, "plugin_snapshot_response_mode", "compact") or "compact",
+        "projectionFieldMode": projection_field_mode,
+        "snapshotTier": tier,
+    }
+    body.update(plugin_snapshot_request_hints(args))
+    return body
+
+
+def plugin_snapshot_payload_types(response: dict | None) -> list[str]:
+    payloads = response.get("payloads") if isinstance(response, dict) else {}
+    if not isinstance(payloads, dict):
+        return []
+    return sorted(str(key) for key in payloads.keys())
+
+
+def plugin_snapshot_missing_required_needs(response: dict | None) -> list[str]:
+    payloads = response.get("payloads") if isinstance(response, dict) else {}
+    if not isinstance(payloads, dict):
+        payloads = {}
+    missing = set(PLUGIN_SNAPSHOT_REQUIRED_NEEDS)
+    missing -= {key for key, value in payloads.items() if isinstance(key, str) and isinstance(value, dict)}
+    response_missing = response.get("missingCapabilities") if isinstance(response, dict) else []
+    if isinstance(response_missing, list):
+        for item in response_missing:
+            if isinstance(item, str) and item in PLUGIN_SNAPSHOT_REQUIRED_NEEDS:
+                missing.add(item)
+    return sorted(missing)
+
+
+def plugin_snapshot_projection_ref_count(response: dict | None) -> int | None:
+    payloads = response.get("payloads") if isinstance(response, dict) else {}
+    projection = payloads.get("projection") if isinstance(payloads, dict) and isinstance(payloads.get("projection"), dict) else {}
+    diagnostics = projection_payload_diagnostics(projection)
+    count = diagnostics.get("refCount")
+    return count if isinstance(count, int) else None
+
+
+def plugin_snapshot_projection_diagnostics(response: dict | None) -> dict:
+    payloads = response.get("payloads") if isinstance(response, dict) else {}
+    projection = payloads.get("projection") if isinstance(payloads, dict) and isinstance(payloads.get("projection"), dict) else {}
+    diagnostics = projection_payload_diagnostics(projection)
+    warnings = response.get("warnings") if isinstance(response, dict) else []
+    if isinstance(warnings, list) and any("projection refs capped" in str(warning).lower() for warning in warnings):
+        diagnostics.setdefault("conversionWarnings", []).append("projection refs capped; increase maxProjectionRefs if candidate refs are missing")
+    return diagnostics
+
+
+def plugin_snapshot_is_projection_capped(response: dict | None) -> bool:
+    warnings = response.get("warnings") if isinstance(response, dict) else []
+    if not isinstance(warnings, list):
+        return False
+    return any("projection refs capped" in str(warning).lower() for warning in warnings)
+
+
+def plugin_snapshot_to_tick(response: dict) -> dict | None:
+    if not isinstance(response, dict) or response.get("schema") != "plugin_snapshot_response.v1":
+        return None
+    if plugin_snapshot_missing_required_needs(response):
+        return None
+    payloads = response.get("payloads")
+    if not isinstance(payloads, dict):
+        return None
+
+    latest_tick = response.get("latestTick")
+    if not isinstance(latest_tick, int):
+        latest_tick = None
+    generated_at = response.get("generatedAtUtc") if isinstance(response.get("generatedAtUtc"), str) else utc_now()
+    cache_health = response.get("cacheHealth") if isinstance(response.get("cacheHealth"), dict) else {}
+    sequence_by_type = cache_health.get("liveCacheLatestSequenceByType") if isinstance(cache_health.get("liveCacheLatestSequenceByType"), dict) else {}
+    tick_by_type = cache_health.get("liveCacheLatestTickByType") if isinstance(cache_health.get("liveCacheLatestTickByType"), dict) else {}
+
+    packets = []
+    fallback_sequence = 0
+    for need in PLUGIN_SNAPSHOT_DEFAULT_NEEDS:
+        payload = unwrap_packet_payload(payloads.get(need))
+        packet_type = PLUGIN_SNAPSHOT_NEED_TO_PACKET_TYPE.get(need)
+        if not isinstance(payload, dict) or not packet_type:
+            continue
+        if need == "projection":
+            payload, _projection_diagnostics = normalize_projection_payload(payload)
+        fallback_sequence += 1
+        tick = payload.get("tick")
+        if not isinstance(tick, int):
+            tick = tick_by_type.get(packet_type)
+        if not isinstance(tick, int):
+            tick = latest_tick
+        if not isinstance(tick, int):
+            continue
+        sequence = sequence_by_type.get(packet_type)
+        if not isinstance(sequence, int):
+            sequence = fallback_sequence
+        packets.append(
+            {
+                "schema": live_packet_reader.PACKET_SCHEMA,
+                "packetType": packet_type,
+                "sessionId": response.get("sessionId"),
+                "tick": tick,
+                "sequence": sequence,
+                "timestampUtc": generated_at,
+                "payload": payload,
+            }
+        )
+
+    tick = compact_packets_to_tick(packets)
+    if not tick:
+        return None
+    tick["_inputSource"] = PLUGIN_SNAPSHOT_SOURCE
+    tick["_pluginSnapshotTier"] = response.get("snapshotTier")
+    tick["_pluginSnapshotStatus"] = response.get("status")
+    tick["_pluginSnapshotWarnings"] = list(response.get("warnings") or []) if isinstance(response.get("warnings"), list) else []
+    tick["_pluginSnapshotMissingCapabilities"] = (
+        list(response.get("missingCapabilities") or []) if isinstance(response.get("missingCapabilities"), list) else []
+    )
+    tick["_pluginSnapshotPayloadTypes"] = plugin_snapshot_payload_types(response)
+    tick["_pluginSnapshotProjectionRefs"] = plugin_snapshot_projection_ref_count(response)
+    tick["_pluginSnapshotProjectionCapped"] = plugin_snapshot_is_projection_capped(response)
+    tick["_pluginSnapshotProjectionDiagnostics"] = plugin_snapshot_projection_diagnostics(response)
+    tick["_pluginSnapshotServiceTimingMillis"] = response.get("serviceTimingMillis")
+    tick["_pluginSnapshotFreshness"] = response.get("freshness") if isinstance(response.get("freshness"), dict) else {}
     return tick
 
 
@@ -1090,6 +1823,637 @@ class CompactPacketTailer:
         return self._records_from_packet_groups(packet_groups, packet_sources, realtime=realtime, max_records=max_records)
 
 
+class CompactStreamTailer:
+    def __init__(self, host: str = "127.0.0.1", port: int = 8891, timeout: float = 0.1):
+        self.host = host or "127.0.0.1"
+        self.port = int(port or 8891)
+        self.timeout = max(0.001, float(timeout))
+        self.source_label = f"tcp://{self.host}:{self.port}"
+        self.socket: socket.socket | None = None
+        self.pending = ""
+        self.line_number = 0
+        self.malformed_counts: Counter[str] = Counter()
+        self.malformed_total = 0
+        self.read_errors: list[str] = []
+        self.last_file_discover_millis = 0.0
+        self.last_tail_read_millis = 0.0
+        self.last_line_split_millis = 0.0
+        self.last_json_parse_millis = 0.0
+        self.last_raw_records_seen = 0
+        self.last_raw_records_fully_parsed = 0
+        self.last_raw_records_skipped_before_parse = 0
+        self.last_raw_records_light_parsed = 0
+        self.last_coalesced_before_parse = 0
+        self.last_newest_tick_selected = None
+        self.last_file_offsets_advanced_past_skipped_records = False
+        self.last_compact_packets_seen = 0
+        self.last_compact_packets_processed = 0
+        self.last_compact_packets_coalesced = 0
+        self.last_compact_packet_last_sequence = None
+        self.last_compact_packet_latest_segment = self.source_label
+        self.last_compact_packet_rollover_count = 0
+        self.last_compact_packet_read_errors = 0
+        self.stream_connected = False
+        self.stream_reconnects = 0
+        self.stream_packets_seen_total = 0
+        self.stream_packets_processed_total = 0
+        self.stream_dropped_packets = None
+        self.stream_packets_by_type: Counter[str] = Counter()
+        self.stream_latest_tick_by_type: dict[str, int] = {}
+        self.packet_buffer_by_tick: dict[int, list[dict]] = {}
+        self.packet_source_by_tick: dict[int, tuple[str, int]] = {}
+        self.last_compact_packets_by_type: dict[str, int] = {}
+        self.last_compact_latest_tick_by_type: dict[str, int] = {}
+        self.last_missing_required_types_for_latest_tick: list[str] = []
+        self.last_stream_wait_millis = 0.0
+        self.last_stream_reconnect_millis = 0.0
+        self.last_stream_socket_timeouts = 0
+        self.stream_socket_timeouts = 0
+        self.stream_disconnected_since = time.monotonic()
+        self.stream_connected_since = None
+        self.first_packet_seen_at = None
+        self.first_projection_seen_at = None
+        self.last_stream_disconnected_duration_millis = 0.0
+        self.last_stream_tick_buffer_size = 0
+        self.last_stream_ticks_waiting_for_projection = 0
+        self.last_stream_processed_complete_ticks = 0
+        self.last_stream_skipped_incomplete_ticks = 0
+        self.last_stream_incomplete_tick_reason = None
+
+    def reset_poll_stats(self) -> None:
+        self.last_file_discover_millis = 0.0
+        self.last_tail_read_millis = 0.0
+        self.last_line_split_millis = 0.0
+        self.last_json_parse_millis = 0.0
+        self.last_raw_records_seen = 0
+        self.last_raw_records_fully_parsed = 0
+        self.last_raw_records_skipped_before_parse = 0
+        self.last_raw_records_light_parsed = 0
+        self.last_coalesced_before_parse = 0
+        self.last_newest_tick_selected = None
+        self.last_file_offsets_advanced_past_skipped_records = False
+        self.last_compact_packets_seen = 0
+        self.last_compact_packets_processed = 0
+        self.last_compact_packets_coalesced = 0
+        self.last_compact_packet_read_errors = 0
+        self.last_compact_packets_by_type = {}
+        self.last_compact_latest_tick_by_type = {}
+        self.last_missing_required_types_for_latest_tick = []
+        self.last_stream_wait_millis = 0.0
+        self.last_stream_reconnect_millis = 0.0
+        self.last_stream_socket_timeouts = 0
+        self.last_stream_disconnected_duration_millis = 0.0
+        self.last_stream_processed_complete_ticks = 0
+        self.last_stream_skipped_incomplete_ticks = 0
+        self.last_stream_incomplete_tick_reason = None
+
+    def files(self) -> list[str]:
+        return [self.source_label]
+
+    def partial_line_files(self) -> list[str]:
+        return [self.source_label] if self.pending else []
+
+    def seek_to_end(self) -> None:
+        return None
+
+    def read_existing_records(self, _limit: int) -> list[tuple[str, int, dict]]:
+        return []
+
+    def close(self) -> None:
+        sock = self.socket
+        self.socket = None
+        self.stream_connected = False
+        self.stream_disconnected_since = time.monotonic()
+        self.stream_connected_since = None
+        if sock is None:
+            return
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _ensure_connected(self) -> bool:
+        if self.socket is not None:
+            self.last_stream_disconnected_duration_millis = 0.0
+            return True
+        started = time.perf_counter()
+        try:
+            sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+            sock.setblocking(False)
+        except OSError as error:
+            self.last_stream_reconnect_millis += (time.perf_counter() - started) * 1000.0
+            self.stream_connected = False
+            if self.stream_disconnected_since is None:
+                self.stream_disconnected_since = time.monotonic()
+            self.last_stream_disconnected_duration_millis = (time.monotonic() - self.stream_disconnected_since) * 1000.0
+            self.last_compact_packet_read_errors += 1
+            self.read_errors.append(f"compact stream connect failed {self.source_label}: {error}")
+            return False
+        self.last_stream_reconnect_millis += (time.perf_counter() - started) * 1000.0
+        self.socket = sock
+        self.stream_connected = True
+        self.stream_disconnected_since = None
+        self.stream_connected_since = time.monotonic()
+        self.last_stream_disconnected_duration_millis = 0.0
+        self.stream_reconnects += 1
+        return True
+
+    def _read_available_text(self) -> str:
+        if not self._ensure_connected() or self.socket is None:
+            return ""
+        chunks: list[bytes] = []
+        wait_started = time.perf_counter()
+        try:
+            readable, _writable, _errors = select.select([self.socket], [], [], min(self.timeout, 0.05))
+        except OSError as error:
+            self.read_errors.append(f"compact stream select failed {self.source_label}: {error}")
+            self.last_compact_packet_read_errors += 1
+            self.close()
+            return ""
+        self.last_stream_wait_millis += (time.perf_counter() - wait_started) * 1000.0
+        if not readable:
+            return ""
+
+        started = time.perf_counter()
+        while True:
+            try:
+                chunk = self.socket.recv(65536)
+            except (BlockingIOError, InterruptedError):
+                break
+            except socket.timeout:
+                self.last_stream_socket_timeouts += 1
+                self.stream_socket_timeouts += 1
+                break
+            except OSError as error:
+                self.read_errors.append(f"compact stream read failed {self.source_label}: {error}")
+                self.last_compact_packet_read_errors += 1
+                self.close()
+                break
+            if not chunk:
+                self.close()
+                break
+            chunks.append(chunk)
+        self.last_tail_read_millis += (time.perf_counter() - started) * 1000.0
+        return b"".join(chunks).decode("utf-8", errors="replace") if chunks else ""
+
+    def _packet_types_for(self, packets: list[dict]) -> set[str]:
+        return {
+            packet_type
+            for packet in packets
+            if isinstance((packet_type := packet.get("packetType")), str)
+        }
+
+    def _missing_required_types(self, packets: list[dict]) -> list[str]:
+        present = self._packet_types_for(packets)
+        return sorted(COMPACT_STREAM_REQUIRED_PACKET_TYPES - present)
+
+    def _note_valid_packet(self, packet: dict, source: str, line_number: int) -> None:
+        tick = packet_tick(packet)
+        packet_type = packet.get("packetType")
+        if self.first_packet_seen_at is None:
+            self.first_packet_seen_at = time.monotonic()
+        if isinstance(packet_type, str):
+            self.stream_packets_by_type[packet_type] += 1
+            self.last_compact_packets_by_type[packet_type] = self.last_compact_packets_by_type.get(packet_type, 0) + 1
+            if packet_type == COMPACT_PACKET_TYPES["projection"] and self.first_projection_seen_at is None:
+                self.first_projection_seen_at = time.monotonic()
+            if tick is not None:
+                latest = self.stream_latest_tick_by_type.get(packet_type)
+                if latest is None or tick >= latest:
+                    self.stream_latest_tick_by_type[packet_type] = tick
+                last_latest = self.last_compact_latest_tick_by_type.get(packet_type)
+                if last_latest is None or tick >= last_latest:
+                    self.last_compact_latest_tick_by_type[packet_type] = tick
+        if tick is None:
+            return
+        self.packet_buffer_by_tick.setdefault(tick, []).append(packet)
+        self.packet_source_by_tick[tick] = (source, line_number)
+
+    def _refresh_stream_buffer_stats(self) -> None:
+        self.last_stream_tick_buffer_size = len(self.packet_buffer_by_tick)
+        waiting_for_projection = 0
+        latest_tick = max(self.packet_buffer_by_tick) if self.packet_buffer_by_tick else None
+        latest_missing: list[str] = []
+
+        for packets in self.packet_buffer_by_tick.values():
+            missing = self._missing_required_types(packets)
+            if COMPACT_PACKET_TYPES["projection"] in missing:
+                waiting_for_projection += 1
+
+        if latest_tick is not None:
+            latest_missing = self._missing_required_types(self.packet_buffer_by_tick.get(latest_tick) or [])
+
+        self.last_stream_ticks_waiting_for_projection = waiting_for_projection
+        self.last_missing_required_types_for_latest_tick = latest_missing
+        if latest_tick is not None and latest_missing:
+            self.last_stream_incomplete_tick_reason = (
+                f"stream tick {latest_tick} missing required packet(s): {', '.join(latest_missing)}; "
+                "retaining previous candidates"
+            )
+        elif self.last_stream_skipped_incomplete_ticks <= 0:
+            self.last_stream_incomplete_tick_reason = None
+
+    def _prune_packet_buffer(self) -> None:
+        while len(self.packet_buffer_by_tick) > COMPACT_STREAM_TICK_BUFFER_LIMIT:
+            oldest_tick = min(self.packet_buffer_by_tick)
+            packets = self.packet_buffer_by_tick.pop(oldest_tick, [])
+            self.packet_source_by_tick.pop(oldest_tick, None)
+            missing = self._missing_required_types(packets)
+            if missing:
+                self.last_stream_skipped_incomplete_ticks += 1
+                self.last_stream_incomplete_tick_reason = (
+                    f"stream tick {oldest_tick} pruned before required packet(s) arrived: {', '.join(missing)}"
+                )
+
+    def _records_from_complete_buffer(
+        self,
+        *,
+        realtime: bool = False,
+        max_records: int | None = None,
+    ) -> list[tuple[str, int, dict]]:
+        records = []
+        self._prune_packet_buffer()
+        complete_ids = [
+            tick_id
+            for tick_id, packets in self.packet_buffer_by_tick.items()
+            if not self._missing_required_types(packets)
+        ]
+        tick_ids = sorted(complete_ids)
+        self.last_raw_records_seen = len(tick_ids)
+        keep_ids = tick_ids
+        if realtime and max_records and max_records > 0 and len(tick_ids) > max_records:
+            skipped_ids = tick_ids[:-max_records]
+            keep_ids = tick_ids[-max_records:]
+            self.last_raw_records_skipped_before_parse = len(skipped_ids)
+            self.last_coalesced_before_parse = len(skipped_ids)
+            self.last_compact_packets_coalesced = sum(len(self.packet_buffer_by_tick.get(tick_id) or []) for tick_id in skipped_ids)
+            self.last_file_offsets_advanced_past_skipped_records = True
+            for tick_id in skipped_ids:
+                self.packet_buffer_by_tick.pop(tick_id, None)
+                self.packet_source_by_tick.pop(tick_id, None)
+        processed_packet_count = 0
+        for tick_id in keep_ids:
+            packets = self.packet_buffer_by_tick.get(tick_id) or []
+            tick = compact_packets_to_tick(packets)
+            if not tick:
+                continue
+            processed_packet_count += len(packets)
+            source, line_number = self.packet_source_by_tick.get(tick_id, (self.source_label, 0))
+            tick["_inputSource"] = COMPACT_STREAM_SOURCE
+            records.append((source, line_number, tick))
+            self.packet_buffer_by_tick.pop(tick_id, None)
+            self.packet_source_by_tick.pop(tick_id, None)
+        self.last_raw_records_fully_parsed = len(records)
+        self.last_stream_processed_complete_ticks = len(records)
+        self.last_compact_packets_processed = processed_packet_count
+        self.stream_packets_processed_total += self.last_compact_packets_processed
+        selected_ids = [tick_id_for(record) for _source, _line_number, record in records]
+        selected_ids = [tick_id for tick_id in selected_ids if tick_id is not None]
+        self.last_newest_tick_selected = max(selected_ids) if selected_ids else None
+        self._refresh_stream_buffer_stats()
+        return records
+
+    def read_new_records(self, *, realtime: bool = False, max_records: int | None = None) -> list[tuple[str, int, dict]]:
+        self.reset_poll_stats()
+        text = self._read_available_text()
+        complete_lines = []
+        if text:
+            split_started = time.perf_counter()
+            text = self.pending + text
+            last_newline = max(text.rfind("\n"), text.rfind("\r"))
+            if last_newline < 0:
+                self.pending = text
+                self.last_line_split_millis += (time.perf_counter() - split_started) * 1000.0
+                self._refresh_stream_buffer_stats()
+                return self._records_from_complete_buffer(realtime=realtime, max_records=max_records)
+            complete = text[: last_newline + 1]
+            self.pending = text[last_newline + 1 :]
+            for raw_line in complete.splitlines():
+                self.line_number += 1
+                line = raw_line.strip()
+                if line:
+                    complete_lines.append((self.source_label, self.line_number, line))
+            self.last_line_split_millis += (time.perf_counter() - split_started) * 1000.0
+        self.last_compact_packets_seen = len(complete_lines)
+        self.stream_packets_seen_total += len(complete_lines)
+
+        for source, line_number, line in complete_lines:
+            parse_started = time.perf_counter()
+            try:
+                packet = json.loads(line)
+            except json.JSONDecodeError:
+                self.last_json_parse_millis += (time.perf_counter() - parse_started) * 1000.0
+                self.malformed_counts[source] += 1
+                self.malformed_total += 1
+                continue
+            self.last_json_parse_millis += (time.perf_counter() - parse_started) * 1000.0
+            if not isinstance(packet, dict) or packet.get("schema") != live_packet_reader.PACKET_SCHEMA:
+                self.malformed_counts[source] += 1
+                self.malformed_total += 1
+                continue
+            tick = packet_tick(packet)
+            if tick is None:
+                self.malformed_counts[source] += 1
+                self.malformed_total += 1
+                continue
+            self._note_valid_packet(packet, source, line_number)
+            sequence = packet.get("sequence")
+            if isinstance(sequence, int):
+                self.last_compact_packet_last_sequence = sequence
+
+        self._refresh_stream_buffer_stats()
+        return self._records_from_complete_buffer(realtime=realtime, max_records=max_records)
+
+
+class PluginSnapshotTailer:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8893,
+        token: str | None = None,
+        timeout: float = 0.5,
+        *,
+        snapshot_tier: str = PLUGIN_SNAPSHOT_DEFAULT_TIER,
+        max_projection_refs: int | None = None,
+        max_age_ticks: int = 5,
+        include_geometry: bool = False,
+        response_mode: str = "compact",
+        projection_field_mode: str = "compact",
+        profile: str | None = None,
+        target_type: str = "all",
+        max_candidates_hint: int = 0,
+    ):
+        self.host = host or "127.0.0.1"
+        self.port = int(port or 8893)
+        self.token = token or ""
+        self.timeout = max(0.001, float(timeout))
+        self.snapshot_tier = normalized_plugin_snapshot_tier(snapshot_tier)
+        self.manual_max_projection_refs = max_projection_refs is not None
+        self.max_projection_refs = (
+            max(0, int(max_projection_refs))
+            if max_projection_refs is not None
+            else plugin_snapshot_tier_default_max_refs(self.snapshot_tier)
+        )
+        self.max_age_ticks = max(0, int(max_age_ticks))
+        self.include_geometry = bool(include_geometry)
+        self.response_mode = response_mode if response_mode in {"compact", "normal", "full"} else "compact"
+        self.projection_field_mode = projection_field_mode if projection_field_mode in PLUGIN_SNAPSHOT_PROJECTION_FIELD_MODES else "compact"
+        self.profile = profile
+        self.target_type = target_type
+        self.max_candidates_hint = max(0, int(max_candidates_hint or 0))
+        self.source_label = plugin_snapshot_url(self.host, self.port, "/snapshot")
+        self.line_number = 0
+        self.malformed_counts: Counter[str] = Counter()
+        self.malformed_total = 0
+        self.read_errors: list[str] = []
+        self.last_file_discover_millis = 0.0
+        self.last_tail_read_millis = 0.0
+        self.last_line_split_millis = 0.0
+        self.last_json_parse_millis = 0.0
+        self.last_raw_records_seen = 0
+        self.last_raw_records_fully_parsed = 0
+        self.last_raw_records_skipped_before_parse = 0
+        self.last_raw_records_light_parsed = 0
+        self.last_coalesced_before_parse = 0
+        self.last_newest_tick_selected = None
+        self.last_file_offsets_advanced_past_skipped_records = False
+        self.last_compact_packets_seen = 0
+        self.last_compact_packets_processed = 0
+        self.last_compact_packets_coalesced = 0
+        self.last_compact_packet_last_sequence = None
+        self.last_compact_packet_latest_segment = self.source_label
+        self.last_compact_packet_rollover_count = 0
+        self.last_compact_packet_read_errors = 0
+        self.snapshot_available = False
+        self.snapshot_latest_tick = None
+        self.snapshot_status = None
+        self.snapshot_warnings: list[str] = []
+        self.snapshot_missing_capabilities: list[str] = []
+        self.snapshot_payload_types: list[str] = []
+        self.snapshot_projection_refs = None
+        self.snapshot_projection_capped = False
+        self.snapshot_projection_diagnostics: dict = {}
+        self.snapshot_response_sizing: dict = {}
+        self.snapshot_error_code = None
+        self.snapshot_request_millis = 0.0
+        self.snapshot_http_request_millis = 0.0
+        self.snapshot_response_read_millis = 0.0
+        self.snapshot_parse_millis = 0.0
+        self.snapshot_endpoint_service_millis = 0.0
+        self.snapshot_convert_millis = 0.0
+        self.snapshot_response_bytes = 0
+        self.snapshot_endpoint_errors = 0
+        self.snapshot_timeouts = 0
+        self.snapshot_no_change_polls = 0
+        self.snapshot_ticks_skipped_unchanged = 0
+        self.snapshot_http_connection_reused = False
+        self.snapshot_http_reconnects = 0
+        self.last_snapshot_unchanged_this_poll = False
+        self.last_snapshot_error = None
+        self.last_snapshot_incomplete_reason = None
+        self.last_emitted_tick = None
+
+    def reset_poll_stats(self) -> None:
+        self.last_file_discover_millis = 0.0
+        self.last_tail_read_millis = 0.0
+        self.last_line_split_millis = 0.0
+        self.last_json_parse_millis = 0.0
+        self.last_raw_records_seen = 0
+        self.last_raw_records_fully_parsed = 0
+        self.last_raw_records_skipped_before_parse = 0
+        self.last_raw_records_light_parsed = 0
+        self.last_coalesced_before_parse = 0
+        self.last_newest_tick_selected = None
+        self.last_file_offsets_advanced_past_skipped_records = False
+        self.last_compact_packets_seen = 0
+        self.last_compact_packets_processed = 0
+        self.last_compact_packets_coalesced = 0
+        self.last_compact_packet_read_errors = 0
+        self.snapshot_request_millis = 0.0
+        self.snapshot_http_request_millis = 0.0
+        self.snapshot_response_read_millis = 0.0
+        self.snapshot_parse_millis = 0.0
+        self.snapshot_endpoint_service_millis = 0.0
+        self.snapshot_convert_millis = 0.0
+        self.snapshot_response_bytes = 0
+        self.snapshot_response_sizing = {}
+        self.snapshot_error_code = None
+        self.snapshot_http_connection_reused = False
+        self.last_snapshot_unchanged_this_poll = False
+        self.last_snapshot_error = None
+        self.last_snapshot_incomplete_reason = None
+
+    def files(self) -> list[str]:
+        return [self.source_label]
+
+    def partial_line_files(self) -> list[str]:
+        return []
+
+    def seek_to_end(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def request_body(self) -> dict:
+        return plugin_snapshot_request_body(
+            SimpleNamespace(
+                profile=self.profile,
+                target_type=self.target_type,
+                limit=self.max_candidates_hint,
+                plugin_snapshot_tier=self.snapshot_tier,
+                plugin_snapshot_max_age_ticks=self.max_age_ticks,
+                plugin_snapshot_max_projection_refs=self.max_projection_refs if self.manual_max_projection_refs else None,
+                plugin_snapshot_include_geometry=self.include_geometry,
+                plugin_snapshot_response_mode=self.response_mode,
+                plugin_snapshot_projection_field_mode=self.projection_field_mode,
+            )
+        )
+
+    def escalate_to_tier(self, tier: str) -> None:
+        tier = normalized_plugin_snapshot_tier(tier)
+        self.snapshot_tier = tier
+        if not self.manual_max_projection_refs:
+            self.max_projection_refs = plugin_snapshot_tier_default_max_refs(tier)
+        self.last_emitted_tick = None
+
+    def read_existing_records(self, limit: int) -> list[tuple[str, int, dict]]:
+        if limit <= 0:
+            return []
+        return self.read_new_records(realtime=True, max_records=1)
+
+    def _request_snapshot(self) -> tuple[dict | None, int]:
+        body = json.dumps(self.request_body(), separators=(",", ":")).encode("utf-8")
+        request = urllib.request.Request(
+            self.source_label,
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        if self.token:
+            request.add_header("X-Plugin-Snapshot-Token", self.token)
+        started = time.perf_counter()
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                opened_at = time.perf_counter()
+                self.snapshot_http_request_millis = (opened_at - started) * 1000.0
+                read_started = time.perf_counter()
+                raw_body = response.read()
+                self.snapshot_response_read_millis = (time.perf_counter() - read_started) * 1000.0
+        except urllib.error.HTTPError as error:
+            opened_at = time.perf_counter()
+            raw_body = error.read()
+            self.snapshot_http_request_millis = (opened_at - started) * 1000.0
+            self.snapshot_response_read_millis = (time.perf_counter() - opened_at) * 1000.0
+            self.snapshot_request_millis = self.snapshot_http_request_millis + self.snapshot_response_read_millis
+            self.last_tail_read_millis = self.snapshot_request_millis
+            response_bytes = len(raw_body)
+            parse_started = time.perf_counter()
+            payload = json.loads(raw_body.decode("utf-8", errors="replace"))
+            self.snapshot_parse_millis = (time.perf_counter() - parse_started) * 1000.0
+            self.last_json_parse_millis = self.snapshot_parse_millis
+            return payload if isinstance(payload, dict) else None, response_bytes
+        self.snapshot_request_millis = self.snapshot_http_request_millis + self.snapshot_response_read_millis
+        self.last_tail_read_millis = self.snapshot_request_millis
+        response_bytes = len(raw_body)
+        parse_started = time.perf_counter()
+        payload = json.loads(raw_body.decode("utf-8", errors="replace"))
+        self.snapshot_parse_millis = (time.perf_counter() - parse_started) * 1000.0
+        self.last_json_parse_millis = self.snapshot_parse_millis
+        return payload if isinstance(payload, dict) else None, response_bytes
+
+    def _record_request_error(self, error: BaseException) -> None:
+        self.snapshot_available = False
+        self.snapshot_endpoint_errors += 1
+        self.last_compact_packet_read_errors += 1
+        self.last_snapshot_error = f"{type(error).__name__}: {error}"
+        self.read_errors.append(f"plugin snapshot request failed {self.source_label}: {self.last_snapshot_error}")
+        if isinstance(error, (TimeoutError, socket.timeout)):
+            self.snapshot_timeouts += 1
+        elif isinstance(error, urllib.error.URLError) and isinstance(getattr(error, "reason", None), TimeoutError):
+            self.snapshot_timeouts += 1
+
+    def read_new_records(self, *, realtime: bool = False, max_records: int | None = None) -> list[tuple[str, int, dict]]:
+        self.reset_poll_stats()
+        try:
+            response, response_bytes = self._request_snapshot()
+        except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as error:
+            self._record_request_error(error)
+            return []
+
+        self.snapshot_response_bytes = response_bytes
+        if not isinstance(response, dict) or response.get("schema") != "plugin_snapshot_response.v1":
+            self.snapshot_available = False
+            self.malformed_counts[self.source_label] += 1
+            self.malformed_total += 1
+            self.last_snapshot_error = "snapshot response schema was missing or invalid"
+            return []
+
+        self.snapshot_available = True
+        if isinstance(response.get("snapshotTier"), str):
+            self.snapshot_tier = normalized_plugin_snapshot_tier(response.get("snapshotTier"))
+        self.snapshot_latest_tick = response.get("latestTick")
+        self.snapshot_status = response.get("status")
+        self.snapshot_warnings = list(response.get("warnings") or []) if isinstance(response.get("warnings"), list) else []
+        self.snapshot_error_code = response.get("errorCode") if isinstance(response.get("errorCode"), str) else None
+        self.snapshot_response_sizing = response.get("responseSizing") if isinstance(response.get("responseSizing"), dict) else {}
+        service_timing = response.get("serviceTimingMillis")
+        self.snapshot_endpoint_service_millis = float(service_timing) if isinstance(service_timing, (int, float)) and not isinstance(service_timing, bool) else 0.0
+        self.snapshot_missing_capabilities = (
+            list(response.get("missingCapabilities") or []) if isinstance(response.get("missingCapabilities"), list) else []
+        )
+        self.snapshot_payload_types = plugin_snapshot_payload_types(response)
+        self.snapshot_projection_refs = plugin_snapshot_projection_ref_count(response)
+        self.snapshot_projection_capped = plugin_snapshot_is_projection_capped(response)
+        self.snapshot_projection_diagnostics = plugin_snapshot_projection_diagnostics(response)
+        cache_health = response.get("cacheHealth") if isinstance(response.get("cacheHealth"), dict) else {}
+        latest_sequence = cache_health.get("liveCacheLatestSequence")
+        if isinstance(latest_sequence, int):
+            self.last_compact_packet_last_sequence = latest_sequence
+        self.last_compact_packets_seen = len(self.snapshot_payload_types)
+        self.last_raw_records_seen = 1
+
+        missing_required = plugin_snapshot_missing_required_needs(response)
+        if missing_required:
+            if self.snapshot_error_code == "response_too_large":
+                self.last_snapshot_incomplete_reason = "plugin snapshot response exceeded configured size limit"
+            else:
+                self.last_snapshot_incomplete_reason = (
+                    "plugin snapshot missing required payload(s): "
+                    + ", ".join(missing_required)
+                    + "; retaining previous candidates"
+                )
+            return []
+
+        latest_tick = response.get("latestTick")
+        if isinstance(latest_tick, int) and latest_tick == self.last_emitted_tick:
+            self.snapshot_no_change_polls += 1
+            self.snapshot_ticks_skipped_unchanged += 1
+            self.last_snapshot_unchanged_this_poll = True
+            return []
+
+        convert_started = time.perf_counter()
+        tick = plugin_snapshot_to_tick(response)
+        self.snapshot_convert_millis = (time.perf_counter() - convert_started) * 1000.0
+        if not tick:
+            self.last_snapshot_incomplete_reason = "plugin snapshot could not be converted to a compact synthetic tick"
+            return []
+        projection_diag = tick.get("_pluginSnapshotProjectionDiagnostics") if isinstance(tick.get("_pluginSnapshotProjectionDiagnostics"), dict) else self.snapshot_projection_diagnostics
+        self.snapshot_projection_diagnostics = dict(projection_diag or {})
+        if projection_diag and projection_diag.get("refListFound") is False:
+            self.last_snapshot_incomplete_reason = (
+                "plugin snapshot projection payload shape did not contain a usable ref list; retaining previous candidates"
+            )
+            return []
+
+        self.line_number += 1
+        self.last_emitted_tick = tick_id_for(tick)
+        self.last_newest_tick_selected = self.last_emitted_tick
+        self.last_raw_records_fully_parsed = 1
+        self.last_compact_packets_processed = len(self.snapshot_payload_types)
+        return [(self.source_label, self.line_number, tick)]
+
+
 def parse_tick_line(path: Path, line: str, malformed: Counter[str]) -> dict | None:
     text = line.strip()
     if not text:
@@ -1143,6 +2507,138 @@ def raw_counts_for_tick(tick: dict) -> dict:
         "sceneObjectDeltasNew": raw_count(deltas.get("newObjects")),
         "sceneObjectDeltasUpdated": raw_count(deltas.get("updatedObjects")),
         "sceneObjectDeltasDespawned": raw_count(deltas.get("despawnedObjects")),
+    }
+
+
+def point_like(value) -> bool:
+    return normalize_compact_point(value if isinstance(value, dict) else None) is not None
+
+
+def ref_has_aim_or_bounds(ref: dict) -> bool:
+    return any(
+        nested_payload_value(ref, key) is not None
+        for key in (
+            "aimPoint",
+            "canvasPoint",
+            "canvasLocation",
+            "canvasCenter",
+            "center",
+            "screenPoint",
+            "bounds",
+            "clickboxBounds",
+            "convexHullBounds",
+            "clickableHull",
+            "clickboxPolygon",
+            "convexHull",
+            "convexHullPolygon",
+            "canvasTilePolygon",
+            "tilePolygon",
+        )
+    )
+
+
+def ref_has_world_or_scene_location(ref: dict) -> bool:
+    return (
+        (ref.get("worldX") is not None and ref.get("worldY") is not None and ref.get("plane") is not None)
+        or (ref.get("sceneX") is not None and ref.get("sceneY") is not None)
+        or isinstance(ref.get("world"), dict)
+        or isinstance(ref.get("scene"), dict)
+        or isinstance((ref.get("target") if isinstance(ref.get("target"), dict) else {}).get("world"), dict)
+        or isinstance((ref.get("target") if isinstance(ref.get("target"), dict) else {}).get("scene"), dict)
+    )
+
+
+def refs_at_tick_path(tick: dict, path: str) -> list:
+    value = tick
+    for part in path.split("."):
+        if not isinstance(value, dict):
+            return []
+        value = value.get(part)
+    return value if isinstance(value, list) else []
+
+
+def synthetic_tick_ref_path_counts(tick: dict | None) -> dict[str, int]:
+    if not isinstance(tick, dict):
+        return {}
+    paths = [
+        "sceneObjects",
+        "visibleSceneObjectRefs",
+        "projectedSceneObjects",
+        "visibleObjectRefs",
+        "projectedRefs",
+        "refs",
+        "targets",
+        "projection.visibleObjectRefs",
+        "projection.visibleSceneObjectRefs",
+        "projection.projectedRefs",
+        "sceneProjection.visibleObjectRefs",
+    ]
+    return {path: len(refs_at_tick_path(tick, path)) for path in paths}
+
+
+def synthetic_tick_ref_diagnostics(tick: dict | None) -> dict:
+    if not isinstance(tick, dict):
+        return {
+            "syntheticTickKeys": [],
+            "pathCounts": {},
+            "visibleRefsExpectedPathCount": 0,
+            "sceneObjectRefsAtExpectedPath": 0,
+            "projectionRefsAtExpectedPath": 0,
+            "refsIgnoredWrongPath": 0,
+            "refsAcceptedForWorldTargets": 0,
+            "refsIgnoredReasons": {},
+        }
+
+    expected_refs = [
+        ref
+        for path in world_builder.SCENE_OBJECT_COLLECTIONS
+        for ref in refs_at_tick_path(tick, path)
+        if isinstance(ref, dict)
+    ]
+    path_counts = synthetic_tick_ref_path_counts(tick)
+    unused_paths = [
+        path
+        for path in path_counts
+        if path not in world_builder.SCENE_OBJECT_COLLECTIONS and path_counts.get(path, 0) > 0
+    ]
+    source_records = world_builder.scene_object_sources_for_tick(tick)
+    reasons = Counter()
+    for ref in expected_refs:
+        target_type = str(ref.get("targetType") or "sceneObject")
+        if target_type != "sceneObject":
+            reasons["targetTypeNotSceneObject"] += 1
+        if ref.get("targetType") is None:
+            reasons["missingTargetType"] += 1
+        if not ref_has_world_or_scene_location(ref):
+            reasons["missingLocation"] += 1
+        if not ref_has_aim_or_bounds(ref):
+            reasons["missingAimPointOrBounds"] += 1
+        if ref.get("onScreen") is not True:
+            reasons["missingOnScreenTrue"] += 1
+        if ref.get("geometryAvailable") is not True:
+            reasons["missingGeometryAvailableTrue"] += 1
+    return {
+        "syntheticTickKeys": sorted(tick.keys()),
+        "pathCounts": path_counts,
+        "visibleRefsExpectedPathCount": len(refs_at_tick_path(tick, "visibleSceneObjectRefs")),
+        "sceneObjectRefsAtExpectedPath": sum(len(refs_at_tick_path(tick, path)) for path in world_builder.SCENE_OBJECT_COLLECTIONS),
+        "projectionRefsAtExpectedPath": len(refs_at_tick_path(tick, "visibleSceneObjectRefs")) + len(refs_at_tick_path(tick, "projectedSceneObjects")),
+        "refsIgnoredWrongPath": sum(path_counts.get(path, 0) for path in unused_paths),
+        "refsIgnoredWrongPathCounts": {path: path_counts[path] for path in unused_paths},
+        "refsAcceptedForWorldTargets": len(source_records),
+        "refsIgnoredReasons": dict(reasons.most_common()),
+        "refsWithOnScreenTrue": sum(1 for ref in expected_refs if ref.get("onScreen") is True),
+        "refsWithGeometryAvailableTrue": sum(1 for ref in expected_refs if ref.get("geometryAvailable") is True),
+        "refsWithTargetTypeSceneObject": sum(1 for ref in expected_refs if str(ref.get("targetType") or "sceneObject") == "sceneObject"),
+        "refsWithIdHashWorldSceneAim": sum(
+            1
+            for ref in expected_refs
+            if ref.get("id") is not None
+            and ref.get("hash") is not None
+            and ref_has_world_or_scene_location(ref)
+            and ref_has_aim_or_bounds(ref)
+        ),
+        "firstNormalizedRef": normalize_compact_scene_object(expected_refs[0]) if expected_refs else None,
     }
 
 
@@ -1565,6 +3061,7 @@ def build_world_records_for_tick(
     stats = {
         "sourceRecordsConsidered": 0,
         "sourceRecordsPrefilteredOut": 0,
+        "prefilterMillis": 0.0,
         "buildScope": "full",
     }
 
@@ -1583,7 +3080,10 @@ def build_world_records_for_tick(
                 if not isinstance(source, dict):
                     continue
                 stats["sourceRecordsConsidered"] += 1
-                if not scene_object_filter(tick, source):
+                filter_started = time.perf_counter()
+                accepted = scene_object_filter(tick, source)
+                stats["prefilterMillis"] += (time.perf_counter() - filter_started) * 1000.0
+                if not accepted:
                     stats["sourceRecordsPrefilteredOut"] += 1
                     continue
                 records.append(build_scene_object_record(session_id, tick, frame, source, overrides))
@@ -1955,6 +3455,35 @@ def counts_for_candidates(candidates: list[dict]) -> dict:
         "category": dict(categories.most_common()),
         "targetType": dict(target_types.most_common()),
     }
+
+
+def candidate_output_signature(candidates: list[dict]) -> str:
+    parts = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        aim = candidate.get("aimPoint") if isinstance(candidate.get("aimPoint"), dict) else {}
+        parts.append(
+            "|".join(
+                str(value)
+                for value in (
+                    candidate.get("rank"),
+                    candidate.get("objectKey"),
+                    candidate.get("id"),
+                    candidate.get("rawId"),
+                    candidate.get("hash"),
+                    candidate.get("worldX"),
+                    candidate.get("worldY"),
+                    candidate.get("plane"),
+                    candidate.get("classId"),
+                    candidate.get("targetLiveState"),
+                    candidate.get("directReachability"),
+                    aim.get("x", aim.get("canvasX")),
+                    aim.get("y", aim.get("canvasY")),
+                )
+            )
+        )
+    return "\n".join(parts)
 
 
 def best_candidate_summary(candidate: dict | None) -> dict | None:
@@ -2363,6 +3892,131 @@ def overlay_hull_rank_buckets(targets: list[dict]) -> dict:
     return buckets
 
 
+def live_watch_values_state(
+    latest_tick: dict | None,
+    inventory_state: dict,
+    activity: dict,
+    status: dict,
+    processed_at: str,
+) -> dict:
+    latest_tick = latest_tick or {}
+    packet_watch_values = latest_tick.get("_watchValues") if isinstance(latest_tick.get("_watchValues"), dict) else {}
+    packet_values = packet_watch_values.get("values") if isinstance(packet_watch_values.get("values"), list) else []
+    values_by_alias: dict[str, dict] = {}
+    changed_aliases: list[str] = []
+    unavailable: list[dict] = []
+    warnings: list[str] = []
+
+    def put_value(alias: str, watch_type: str, value, *, source: str, changed: bool | None = None, unavailable_reason: str | None = None) -> None:
+        record = {
+            "alias": alias,
+            "type": watch_type,
+            "value": value,
+            "changed": bool(changed) if changed is not None else None,
+            "source": source,
+            "latestTick": tick_id_for(latest_tick),
+            "unavailableReason": unavailable_reason,
+        }
+        values_by_alias[alias] = record
+        if record["changed"]:
+            changed_aliases.append(alias)
+        if unavailable_reason:
+            unavailable.append({"alias": alias, "reason": unavailable_reason})
+
+    inventory_summary = {
+        "known": inventory_state.get("known"),
+        "slotCount": inventory_state.get("slotCount"),
+        "filledSlots": inventory_state.get("filledSlots"),
+        "freeSlots": inventory_state.get("freeSlots"),
+        "inventoryFull": inventory_state.get("inventoryFull"),
+        "signature": inventory_state.get("signature"),
+        "totalItemQuantity": inventory_state.get("totalItemQuantity", inventory_state.get("itemCount")),
+    }
+    put_value(
+        "inventory_summary",
+        "builtin",
+        inventory_summary,
+        source="live_activity_state.inventoryState",
+        changed=inventory_state.get("changedThisTick") or inventory_state.get("changedRecently"),
+        unavailable_reason=None if inventory_summary.get("known") is not False else "inventory summary unknown",
+    )
+
+    equipment = latest_tick.get("equipment") if isinstance(latest_tick.get("equipment"), dict) else {}
+    put_value(
+        "equipment_summary",
+        "builtin",
+        {
+            "known": bool(equipment),
+            "signature": equipment.get("signature"),
+            "itemCount": equipment.get("itemCount"),
+            "filledSlots": equipment.get("filledSlots"),
+        },
+        source="live_inventory_packet.equipment",
+        changed=False,
+        unavailable_reason=None if equipment else "equipment summary not present in latest tick",
+    )
+
+    player = latest_tick.get("localPlayer") if isinstance(latest_tick.get("localPlayer"), dict) else {}
+    tick_status = latest_tick.get("status") if isinstance(latest_tick.get("status"), dict) else {}
+    run_energy = tick_status.get("runEnergyPercent", tick_status.get("runEnergyRaw"))
+    put_value(
+        "run_energy",
+        "builtin",
+        run_energy,
+        source="baseline.status",
+        changed=False,
+        unavailable_reason=None if run_energy is not None else "run energy not present in compact baseline",
+    )
+
+    activity_state = activity.get("activityState") if isinstance(activity.get("activityState"), dict) else {}
+    woodcutting_state = activity.get("woodcuttingState") if isinstance(activity.get("woodcuttingState"), dict) else {}
+    put_value(
+        "activity_animation",
+        "builtin",
+        {
+            "animation": player.get("animation"),
+            "poseAnimation": player.get("poseAnimation"),
+            "apparentState": activity_state.get("apparentState"),
+            "woodcuttingState": woodcutting_state.get("woodcuttingState"),
+            "interacting": player.get("interacting"),
+        },
+        source="live_activity_packet",
+        changed=activity_state.get("changedThisTick") or bool(activity.get("recentActivityEvents")),
+        unavailable_reason=None if activity_state else "activity state unavailable",
+    )
+
+    for item in packet_values:
+        if not isinstance(item, dict):
+            continue
+        alias = str(item.get("alias") or "")
+        if not alias:
+            continue
+        values_by_alias[alias] = item
+        if item.get("changed"):
+            changed_aliases.append(alias)
+        if item.get("unavailableReason"):
+            unavailable.append({"alias": alias, "reason": item.get("unavailableReason")})
+
+    if packet_watch_values.get("warnings"):
+        warnings.extend(str(warning) for warning in packet_watch_values.get("warnings") or [] if warning)
+    if status.get("watchBudgetExceeded") or packet_watch_values.get("watchBudgetExceeded"):
+        warnings.append("watch value budget exceeded; values may be stale or skipped for this tick")
+
+    return {
+        "schema": LIVE_WATCH_VALUES_SCHEMA,
+        "generatedAtUtc": processed_at,
+        "latestTick": tick_id_for(latest_tick),
+        "activeWatchCount": packet_watch_values.get("activeWatchCount", len(values_by_alias)),
+        "rejectedWatchCount": packet_watch_values.get("rejectedWatchCount", 0),
+        "watchBudgetExceeded": bool(packet_watch_values.get("watchBudgetExceeded") or status.get("watchBudgetExceeded")),
+        "valuesByAlias": values_by_alias,
+        "changedAliases": sorted(set(changed_aliases)),
+        "unavailableWatches": unavailable,
+        "warnings": sorted(set(warnings)),
+        "source": "live_target_processor",
+    }
+
+
 def overlay_liveness_interpretation(candidate: dict | None, status: dict) -> str:
     live_state = candidate.get("targetLiveState") if isinstance(candidate, dict) else None
     if status.get("livenessDegraded") or status.get("livenessBudgetExceeded"):
@@ -2439,6 +4093,15 @@ def overlay_label_for(candidate: dict, label_parts: dict) -> str:
     return " ".join(parts)
 
 
+def effective_overlay_draw_limits(args) -> tuple[int, int]:
+    target_limit = max(0, int(getattr(args, "overlay_debug_target_limit", MAX_DRAW_LIMIT) or 0))
+    hull_limit = max(0, int(getattr(args, "overlay_debug_hull_limit", MAX_DRAW_HULL_LIMIT) or 0))
+    if ENABLE_MAX_DRAW:
+        target_limit = min(target_limit, MAX_DRAW_LIMIT)
+        hull_limit = min(hull_limit, MAX_DRAW_HULL_LIMIT)
+    return target_limit, min(hull_limit, target_limit)
+
+
 def overlay_debug_state_for(
     session: Path,
     args,
@@ -2451,9 +4114,7 @@ def overlay_debug_state_for(
 ) -> dict:
     latest_tick = latest_tick or {}
     player = local_player_for(latest_tick)
-    limit = max(0, int(getattr(args, "overlay_debug_target_limit", 50) or 0))
-    hull_limit = max(0, int(getattr(args, "overlay_debug_hull_limit", 10) or 0))
-    hull_limit = min(hull_limit, limit)
+    limit, hull_limit = effective_overlay_draw_limits(args)
     nearest = nearest_timeline_candidate(candidates)
     marked_candidates = []
     for index, candidate in enumerate(candidates):
@@ -2501,6 +4162,8 @@ def overlay_debug_state_for(
             "candidateCount": len(candidates),
             "targetLimit": limit,
             "hullLimit": hull_limit,
+            "maxDrawEnabled": bool(ENABLE_MAX_DRAW),
+            "maxDrawLimit": MAX_DRAW_LIMIT if ENABLE_MAX_DRAW else None,
             "targetsWritten": len(capped_candidates),
             "targetsSuppressedByCap": max(0, len(candidates) - len(capped_candidates)),
             "polygonTargetsSuppressedByHullCap": sum(
@@ -2809,6 +4472,107 @@ def item_quantity_counter(items: list[dict]) -> Counter:
     return counter
 
 
+def coerce_int(value) -> int | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def inventory_resource_count_record(items: list[dict], item_ids: list[int], display_name: str) -> dict:
+    target_ids = {int(item_id) for item_id in item_ids}
+    by_item_id: Counter = Counter()
+    matched_slots: list[int] = []
+    matched_items: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = coerce_int(item.get("itemId"))
+        if item_id not in target_ids:
+            continue
+        quantity = coerce_int(item.get("quantity"))
+        if quantity is None or quantity <= 0:
+            quantity = 1
+        by_item_id[str(item_id)] += quantity
+        slot = coerce_int(item.get("slot"))
+        if slot is not None:
+            matched_slots.append(slot)
+        matched_items.append({"slot": slot, "itemId": item_id, "quantity": quantity})
+    return {
+        "displayName": display_name,
+        "itemIds": sorted(target_ids),
+        "count": sum(by_item_id.values()),
+        "matchedItemIds": sorted(int(item_id) for item_id in by_item_id),
+        "byItemId": dict(sorted(by_item_id.items(), key=lambda item: int(item[0]))),
+        "matchedSlots": sorted(slot for slot in matched_slots if slot is not None),
+        "matchedItems": matched_items,
+    }
+
+
+def inventory_resource_counts(items: list[dict]) -> dict:
+    counts = OrderedDict()
+    for resource_id, definition in WOODCUTTING_RESOURCE_DEFINITIONS.items():
+        counts[resource_id] = inventory_resource_count_record(items, definition["itemIds"], definition["displayName"])
+    for group_id, definition in WOODCUTTING_RESOURCE_GROUPS.items():
+        counts[group_id] = {
+            **inventory_resource_count_record(items, definition["itemIds"], definition["displayName"]),
+            "resources": list(definition.get("resources") or []),
+        }
+    return counts
+
+
+def inventory_slot_diagnostics(items: list[dict], summary: dict) -> dict:
+    slot_count = coerce_int(summary.get("inventorySlotCount"))
+    if slot_count is None:
+        slot_count = coerce_int(summary.get("slotCount"))
+    filled_slots = coerce_int(summary.get("filledSlots"))
+    free_slots = coerce_int(summary.get("freeSlots"))
+    seen: dict[int, dict] = {}
+    duplicate_slots: list[int] = []
+    invalid_slots: list[dict] = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        slot = coerce_int(item.get("slot"))
+        item_id = coerce_int(item.get("itemId"))
+        if slot is None:
+            invalid_slots.append({"slot": item.get("slot"), "itemId": item_id, "reason": "missing or non-integer slot"})
+            continue
+        if slot_count is not None and (slot < 0 or slot >= slot_count):
+            invalid_slots.append({"slot": slot, "itemId": item_id, "reason": f"slot outside 0..{slot_count - 1}"})
+            continue
+        if slot in seen:
+            duplicate_slots.append(slot)
+        seen[slot] = item
+
+    missing_slots = list(range(slot_count)) if slot_count is not None and 0 <= slot_count <= 128 else []
+    if missing_slots:
+        missing_slots = [slot for slot in missing_slots if slot not in seen]
+
+    warnings: list[str] = []
+    if invalid_slots:
+        warnings.append("inventory contains invalid slot indexes")
+    if duplicate_slots:
+        warnings.append("inventory contains duplicate filled slot entries")
+    if slot_count is not None and filled_slots is not None and free_slots is not None and filled_slots + free_slots != slot_count:
+        warnings.append("inventory filledSlots + freeSlots does not equal inventorySlotCount")
+    if filled_slots is not None and filled_slots != len(items):
+        warnings.append("inventory filledSlots does not match emitted filled item entries")
+
+    return {
+        "inventorySlotCount": slot_count,
+        "filledItemSlots": sorted(seen),
+        "emptyOrMissingSlots": missing_slots,
+        "duplicateSlots": sorted(set(duplicate_slots)),
+        "invalidSlots": invalid_slots,
+        "consistent": not warnings,
+        "warnings": warnings,
+    }
+
+
 def inventory_delta(previous_tick: dict | None, current_tick: dict | None) -> dict | None:
     if not previous_tick or not current_tick:
         return None
@@ -2885,9 +4649,13 @@ def explicit_inventory_delta_for_tick(tick: dict | None) -> dict | None:
 
 def inventory_state_for_ticks(ticks: list[dict], latest_tick: dict | None) -> dict:
     latest_tick = latest_tick or {}
+    raw_inventory = latest_tick.get("inventory")
+    item_list_available = isinstance(raw_inventory, list) or (
+        isinstance(raw_inventory, dict) and isinstance(raw_inventory.get("items"), list)
+    )
     items = normalized_inventory_items(latest_tick)
     summary = inventory_summary(latest_tick)
-    known = isinstance(latest_tick.get("inventory"), (list, dict))
+    known = isinstance(raw_inventory, (list, dict))
     deltas = []
     ordered = [tick for tick in ticks if tick_id_for(tick) is not None]
     ordered.sort(key=lambda tick: tick_id_for(tick) or -1)
@@ -2906,15 +4674,22 @@ def inventory_state_for_ticks(ticks: list[dict], latest_tick: dict | None) -> di
         or any(isinstance(tick.get("_inventoryDelta"), dict) for tick in ordered)
         or bool(latest_tick.get("_inventoryDeltaTrackingAvailable"))
     )
+    slot_diagnostics = inventory_slot_diagnostics(items, summary) if known else {}
+    warnings = [] if delta_tracking_known else ["inventory deltas unavailable in the current live window"]
+    warnings.extend(slot_diagnostics.get("warnings") or [])
     return {
         "known": known,
+        "itemsKnown": item_list_available,
+        "itemListAvailable": item_list_available,
         "inventorySlotCount": summary.get("inventorySlotCount") if known else None,
         "slotCount": summary.get("slotCount") if known else None,
         "freeSlots": summary.get("freeSlots") if known else None,
         "filledSlots": summary.get("filledSlots") if known else None,
         "itemCount": summary.get("itemCount") if known else None,
         "totalItemQuantity": summary.get("totalItemQuantity") if known else None,
-        "items": items if known else [],
+        "items": items if item_list_available else [],
+        "resourceCounts": inventory_resource_counts(items) if item_list_available else {},
+        "slotDiagnostics": slot_diagnostics,
         "inventoryHash": summary.get("signature"),
         "signature": summary.get("signature"),
         "changedThisTick": bool(latest_delta and latest_delta.get("toTick") == tick_id_for(latest_tick)),
@@ -2922,7 +4697,7 @@ def inventory_state_for_ticks(ticks: list[dict], latest_tick: dict | None) -> di
         "recentItemDeltas": deltas[-10:],
         "inventoryDeltaTrackingKnown": delta_tracking_known,
         "inventoryDeltasAvailable": delta_tracking_known,
-        "warnings": [] if delta_tracking_known else ["inventory deltas unavailable in the current live window"],
+        "warnings": dedupe_preserve_order(warnings),
         "inventoryFull": summary.get("freeSlots") == 0 if known and summary.get("freeSlots") is not None else None,
     }
 
@@ -3511,6 +5286,44 @@ class LiveTargetProcessor:
         self.args = args
         if not hasattr(self.args, "input_source"):
             self.args.input_source = "auto"
+        if not hasattr(self.args, "compact_stream_host"):
+            self.args.compact_stream_host = "127.0.0.1"
+        if not hasattr(self.args, "compact_stream_port"):
+            self.args.compact_stream_port = 8891
+        if not hasattr(self.args, "compact_stream_timeout"):
+            self.args.compact_stream_timeout = 0.1
+        if not hasattr(self.args, "stream_fallback_to_compact_packets"):
+            self.args.stream_fallback_to_compact_packets = False
+        if not hasattr(self.args, "stream_required_types_timeout"):
+            self.args.stream_required_types_timeout = 2.0
+        if not hasattr(self.args, "plugin_snapshot_host"):
+            self.args.plugin_snapshot_host = "127.0.0.1"
+        if not hasattr(self.args, "plugin_snapshot_port"):
+            self.args.plugin_snapshot_port = 8893
+        if not hasattr(self.args, "plugin_snapshot_token"):
+            self.args.plugin_snapshot_token = ""
+        if not hasattr(self.args, "plugin_snapshot_timeout"):
+            self.args.plugin_snapshot_timeout = 0.5
+        if not hasattr(self.args, "plugin_snapshot_tier"):
+            self.args.plugin_snapshot_tier = PLUGIN_SNAPSHOT_DEFAULT_TIER
+        if not hasattr(self.args, "plugin_snapshot_max_projection_refs"):
+            self.args.plugin_snapshot_max_projection_refs = None
+        if not hasattr(self.args, "plugin_snapshot_max_age_ticks"):
+            self.args.plugin_snapshot_max_age_ticks = 5
+        if not hasattr(self.args, "plugin_snapshot_include_geometry"):
+            self.args.plugin_snapshot_include_geometry = False
+        if not hasattr(self.args, "plugin_snapshot_response_mode"):
+            self.args.plugin_snapshot_response_mode = "compact"
+        if not hasattr(self.args, "plugin_snapshot_projection_field_mode"):
+            self.args.plugin_snapshot_projection_field_mode = "compact"
+        if not hasattr(self.args, "plugin_snapshot_fallback"):
+            self.args.plugin_snapshot_fallback = "none"
+        if not hasattr(self.args, "auto_prefer_plugin_snapshot"):
+            self.args.auto_prefer_plugin_snapshot = False
+        if not hasattr(self.args, "plugin_snapshot_auto_escalate"):
+            self.args.plugin_snapshot_auto_escalate = False
+        if not hasattr(self.args, "plugin_snapshot_min_candidates"):
+            self.args.plugin_snapshot_min_candidates = 1
         if not hasattr(self.args, "event_timeline_limit"):
             self.args.event_timeline_limit = getattr(self.args, "event_limit", 200)
         if not hasattr(self.args, "event_limit"):
@@ -3518,14 +5331,68 @@ class LiveTargetProcessor:
         if not hasattr(self.args, "disable_event_timeline"):
             self.args.disable_event_timeline = False
         self.compact_packet_state = compact_packet_state(session)
+        self.compact_stream_state = compact_stream_state(
+            self.args.compact_stream_host,
+            self.args.compact_stream_port,
+            self.args.compact_stream_timeout,
+            probe=self.args.input_source == "auto",
+        )
+        self.plugin_snapshot_state = plugin_snapshot_state(
+            self.args.plugin_snapshot_host,
+            self.args.plugin_snapshot_port,
+            self.args.plugin_snapshot_token,
+            self.args.plugin_snapshot_timeout,
+            probe=self.args.input_source == "auto" and bool(self.args.auto_prefer_plugin_snapshot),
+        )
         (
             self.input_source_active,
             self.compact_packets_available,
             self.raw_ticks_available,
             self.input_fallback_reason,
-        ) = choose_input_source(session, args.input_source)
+        ) = choose_input_source(
+            session,
+            args.input_source,
+            self.compact_stream_state,
+            self.plugin_snapshot_state,
+            auto_prefer_plugin_snapshot=bool(self.args.auto_prefer_plugin_snapshot),
+        )
         self.compact_packets_recent = bool(self.compact_packet_state.get("recent"))
-        self.tailer = CompactPacketTailer(session) if self.input_source_active == COMPACT_PACKET_SOURCE else TickJsonlTailer(session)
+        self.stream_fallback_to_file = False
+        self.stream_fallback_reason = None
+        self.last_stream_diagnostics: dict = {}
+        self.plugin_snapshot_fallback_to_file = False
+        self.plugin_snapshot_fallback_reason = None
+        self.last_plugin_snapshot_diagnostics: dict = {}
+        self.plugin_snapshot_escalated = False
+        self.plugin_snapshot_escalation_reason = None
+        self.plugin_snapshot_initial_refs = None
+        self.plugin_snapshot_final_refs = None
+        self.plugin_snapshot_last_candidate_signature: str | None = None
+        self.plugin_snapshot_candidate_output_skipped_unchanged = False
+        self.plugin_snapshot_output_bytes_skipped = 0
+        self.last_result: dict | None = None
+        if self.input_source_active == COMPACT_STREAM_SOURCE:
+            self.tailer = CompactStreamTailer(self.args.compact_stream_host, self.args.compact_stream_port, self.args.compact_stream_timeout)
+        elif self.input_source_active == PLUGIN_SNAPSHOT_SOURCE:
+            self.tailer = PluginSnapshotTailer(
+                self.args.plugin_snapshot_host,
+                self.args.plugin_snapshot_port,
+                self.args.plugin_snapshot_token,
+                self.args.plugin_snapshot_timeout,
+                snapshot_tier=self.args.plugin_snapshot_tier,
+                max_projection_refs=self.args.plugin_snapshot_max_projection_refs,
+                max_age_ticks=self.args.plugin_snapshot_max_age_ticks,
+                include_geometry=self.args.plugin_snapshot_include_geometry,
+                response_mode=self.args.plugin_snapshot_response_mode,
+                projection_field_mode=self.args.plugin_snapshot_projection_field_mode,
+                profile=self.args.profile,
+                target_type=self.args.target_type,
+                max_candidates_hint=self.args.limit,
+            )
+        elif self.input_source_active == COMPACT_PACKET_SOURCE:
+            self.tailer = CompactPacketTailer(session)
+        else:
+            self.tailer = TickJsonlTailer(session)
         self.write_options = write_options_from(args)
         self.tick_window: OrderedDict[int, dict] = OrderedDict()
         self.processed_ticks: OrderedDict[int, ProcessedTick] = OrderedDict()
@@ -3557,6 +5424,7 @@ class LiveTargetProcessor:
         self.last_liveness_cache_misses = 0
         self.last_source_records_considered = 0
         self.last_source_records_prefiltered_out = 0
+        self.last_prefilter_reject_reasons: Counter[str] = Counter()
         self.last_classification_cache_hits = 0
         self.last_classification_cache_misses = 0
         self.last_classification_cache_invalidations = 0
@@ -3627,8 +5495,281 @@ class LiveTargetProcessor:
         self.processed_ticks.clear()
         self.last_classification_cache_invalidations += invalidated
 
+    def compact_stream_diagnostics(self) -> dict:
+        tailer = self.tailer if isinstance(self.tailer, CompactStreamTailer) else None
+        if tailer is None:
+            return dict(self.last_stream_diagnostics or {})
+        connected_for = None
+        if tailer.stream_connected_since is not None:
+            connected_for = (time.monotonic() - tailer.stream_connected_since) * 1000.0
+        first_packet_for = None
+        if tailer.first_packet_seen_at is not None:
+            first_packet_for = (time.monotonic() - tailer.first_packet_seen_at) * 1000.0
+        projection_seen = int(tailer.stream_packets_by_type.get(COMPACT_PACKET_TYPES["projection"], 0) or 0)
+        baseline_seen = int(tailer.stream_packets_by_type.get(COMPACT_PACKET_TYPES["baseline"], 0) or 0)
+        missing_known_types = []
+        if baseline_seen <= 0:
+            missing_known_types.append(COMPACT_PACKET_TYPES["baseline"])
+        if projection_seen <= 0:
+            missing_known_types.append(COMPACT_PACKET_TYPES["projection"])
+        return {
+            "connected": bool(tailer.stream_connected),
+            "reconnects": int(tailer.stream_reconnects or 0),
+            "packetsSeen": int(tailer.stream_packets_seen_total or 0),
+            "packetsProcessed": int(tailer.stream_packets_processed_total or 0),
+            "droppedPackets": tailer.stream_dropped_packets,
+            "packetsByType": dict(tailer.stream_packets_by_type or {}),
+            "latestTickByType": dict(tailer.stream_latest_tick_by_type or {}),
+            "packetsByTypeThisPoll": dict(tailer.last_compact_packets_by_type or {}),
+            "latestTickByTypeThisPoll": dict(tailer.last_compact_latest_tick_by_type or {}),
+            "missingRequiredTypesForLatestTick": list(tailer.last_missing_required_types_for_latest_tick or []),
+            "readMillis": round(float(tailer.last_tail_read_millis or 0.0), 3),
+            "parseMillis": round(float(tailer.last_json_parse_millis or 0.0), 3),
+            "waitMillis": round(float(tailer.last_stream_wait_millis or 0.0), 3),
+            "reconnectMillis": round(float(tailer.last_stream_reconnect_millis or 0.0), 3),
+            "socketTimeouts": int(tailer.stream_socket_timeouts or 0),
+            "socketTimeoutsThisPoll": int(tailer.last_stream_socket_timeouts or 0),
+            "disconnectedDurationMillis": round(float(tailer.last_stream_disconnected_duration_millis or 0.0), 3),
+            "tickBufferSize": int(tailer.last_stream_tick_buffer_size or 0),
+            "ticksWaitingForProjection": int(tailer.last_stream_ticks_waiting_for_projection or 0),
+            "processedCompleteTicks": int(tailer.last_stream_processed_complete_ticks or 0),
+            "skippedIncompleteTicks": int(tailer.last_stream_skipped_incomplete_ticks or 0),
+            "lastIncompleteTickReason": tailer.last_stream_incomplete_tick_reason,
+            "projectionPacketsSeen": projection_seen,
+            "requiredTypesSatisfied": projection_seen > 0 and baseline_seen > 0,
+            "canBuildCandidates": projection_seen > 0,
+            "connectedForMillis": round(connected_for, 3) if connected_for is not None else None,
+            "firstPacketAgeMillis": round(first_packet_for, 3) if first_packet_for is not None else None,
+            "missingKnownTypes": missing_known_types,
+        }
+
+    def plugin_snapshot_diagnostics(self) -> dict:
+        tailer = self.tailer if isinstance(self.tailer, PluginSnapshotTailer) else None
+        if tailer is None:
+            return dict(self.last_plugin_snapshot_diagnostics or {})
+        return {
+            "available": bool(tailer.snapshot_available),
+            "tier": tailer.snapshot_tier,
+            "maxProjectionRefs": tailer.max_projection_refs,
+            "manualMaxProjectionRefs": bool(tailer.manual_max_projection_refs),
+            "latestTick": tailer.snapshot_latest_tick,
+            "status": tailer.snapshot_status,
+            "warnings": list(tailer.snapshot_warnings or []),
+            "missingCapabilities": list(tailer.snapshot_missing_capabilities or []),
+            "requestMillis": round(float(tailer.snapshot_request_millis or 0.0), 3),
+            "httpRequestMillis": round(float(tailer.snapshot_http_request_millis or 0.0), 3),
+            "responseReadMillis": round(float(tailer.snapshot_response_read_millis or 0.0), 3),
+            "parseMillis": round(float(tailer.snapshot_parse_millis or 0.0), 3),
+            "endpointServiceMillis": round(float(tailer.snapshot_endpoint_service_millis or 0.0), 3),
+            "convertMillis": round(float(tailer.snapshot_convert_millis or 0.0), 3),
+            "responseBytes": int(tailer.snapshot_response_bytes or 0),
+            "httpConnectionReused": bool(tailer.snapshot_http_connection_reused),
+            "httpReconnects": int(tailer.snapshot_http_reconnects or 0),
+            "payloadTypes": list(tailer.snapshot_payload_types or []),
+            "projectionRefs": tailer.snapshot_projection_refs,
+            "projectionCapped": bool(tailer.snapshot_projection_capped),
+            "projectionDiagnostics": dict(tailer.snapshot_projection_diagnostics or {}),
+            "responseSizing": dict(tailer.snapshot_response_sizing or {}),
+            "errorCode": tailer.snapshot_error_code,
+            "endpointErrors": int(tailer.snapshot_endpoint_errors or 0),
+            "timeouts": int(tailer.snapshot_timeouts or 0),
+            "noChangePolls": int(tailer.snapshot_no_change_polls or 0),
+            "ticksSkippedAsUnchanged": int(tailer.snapshot_ticks_skipped_unchanged or 0),
+            "lastError": tailer.last_snapshot_error,
+            "lastIncompleteReason": tailer.last_snapshot_incomplete_reason,
+        }
+
+    def should_fallback_stream_to_compact_packets(self) -> str | None:
+        if self.input_source_active != COMPACT_STREAM_SOURCE:
+            return None
+        if self.args.input_source != "auto" and not self.args.stream_fallback_to_compact_packets:
+            return None
+        current_compact_state = compact_packet_state(self.session)
+        if not current_compact_state.get("available"):
+            return None
+        diag = self.compact_stream_diagnostics()
+        if int(diag.get("projectionPacketsSeen") or 0) > 0:
+            return None
+        if int(diag.get("packetsSeen") or 0) <= 0:
+            return None
+        if int(getattr(self.tailer, "last_compact_packets_seen", 0) or 0) > 0:
+            return None
+        age_ms = diag.get("firstPacketAgeMillis")
+        if age_ms is None or age_ms < float(self.args.stream_required_types_timeout) * 1000.0:
+            return None
+        return (
+            "compact stream did not deliver live_projection_packet.v1 within "
+            f"{self.args.stream_required_types_timeout:g}s; falling back to compact packet files"
+        )
+
+    def activate_compact_packet_fallback(self, reason: str) -> None:
+        self.last_stream_diagnostics = self.compact_stream_diagnostics()
+        if hasattr(self.tailer, "close"):
+            self.tailer.close()
+        self.tailer = CompactPacketTailer(self.session)
+        self.input_source_active = COMPACT_PACKET_SOURCE
+        self.stream_fallback_to_file = True
+        self.stream_fallback_reason = reason
+        self.input_fallback_reason = reason
+        self.compact_packet_state = compact_packet_state(self.session)
+        self.compact_packets_available = bool(self.compact_packet_state.get("available"))
+        self.compact_packets_recent = bool(self.compact_packet_state.get("recent"))
+
+    def should_fallback_plugin_snapshot_to_compact_packets(self) -> str | None:
+        if self.input_source_active != PLUGIN_SNAPSHOT_SOURCE:
+            return None
+        if self.args.plugin_snapshot_fallback != COMPACT_PACKET_SOURCE:
+            return None
+        current_compact_state = compact_packet_state(self.session)
+        if not current_compact_state.get("available"):
+            return None
+        diag = self.plugin_snapshot_diagnostics()
+        if diag.get("available") and not diag.get("lastIncompleteReason"):
+            return None
+        reason = diag.get("lastIncompleteReason") or diag.get("lastError") or "plugin snapshot endpoint unavailable"
+        return f"{reason}; falling back to compact packet files"
+
+    def activate_plugin_snapshot_compact_packet_fallback(self, reason: str) -> None:
+        self.last_plugin_snapshot_diagnostics = self.plugin_snapshot_diagnostics()
+        if hasattr(self.tailer, "close"):
+            self.tailer.close()
+        self.tailer = CompactPacketTailer(self.session)
+        self.input_source_active = COMPACT_PACKET_SOURCE
+        self.plugin_snapshot_fallback_to_file = True
+        self.plugin_snapshot_fallback_reason = reason
+        self.input_fallback_reason = reason
+        self.compact_packet_state = compact_packet_state(self.session)
+        self.compact_packets_available = bool(self.compact_packet_state.get("available"))
+        self.compact_packets_recent = bool(self.compact_packet_state.get("recent"))
+
+    def plugin_snapshot_no_change_result(self) -> tuple[int, dict] | None:
+        if self.input_source_active != PLUGIN_SNAPSHOT_SOURCE:
+            return None
+        if not isinstance(self.tailer, PluginSnapshotTailer):
+            return None
+        if not self.tailer.last_snapshot_unchanged_this_poll:
+            return None
+        if not isinstance(self.last_result, dict) or not isinstance(self.last_result.get("status"), dict):
+            return None
+
+        result = dict(self.last_result)
+        status = dict(self.last_result["status"])
+        status["generatedAtUtc"] = utc_now()
+        status["processedNewTicks"] = 0
+        status["rawRecordsSeenThisPoll"] = self.tailer.last_raw_records_seen
+        status["rawRecordsFullyParsedThisPoll"] = self.tailer.last_raw_records_fully_parsed
+        status["rawRecordsFullyProcessed"] = 0
+        status["pluginSnapshotAvailable"] = bool(self.tailer.snapshot_available)
+        status["pluginSnapshotLatestTick"] = self.tailer.snapshot_latest_tick
+        status["pluginSnapshotStatus"] = self.tailer.snapshot_status
+        status["pluginSnapshotWarnings"] = list(self.tailer.snapshot_warnings or [])
+        status["pluginSnapshotMissingCapabilities"] = list(self.tailer.snapshot_missing_capabilities or [])
+        status["pluginSnapshotRequestMillis"] = round(float(self.tailer.snapshot_request_millis or 0.0), 3)
+        status["pluginSnapshotHttpRequestMillis"] = round(float(self.tailer.snapshot_http_request_millis or 0.0), 3)
+        status["pluginSnapshotResponseReadMillis"] = round(float(self.tailer.snapshot_response_read_millis or 0.0), 3)
+        status["pluginSnapshotJsonParseMillis"] = round(float(self.tailer.snapshot_parse_millis or 0.0), 3)
+        status["pluginSnapshotParseMillis"] = status["pluginSnapshotJsonParseMillis"]
+        status["pluginSnapshotEndpointServiceMillis"] = round(float(self.tailer.snapshot_endpoint_service_millis or 0.0), 3)
+        status["pluginSnapshotConvertMillis"] = 0.0
+        status["pluginSnapshotResponseBytes"] = int(self.tailer.snapshot_response_bytes or 0)
+        status["pluginSnapshotPayloadTypes"] = list(self.tailer.snapshot_payload_types or [])
+        status["pluginSnapshotProjectionRefs"] = self.tailer.snapshot_projection_refs
+        status["pluginSnapshotProjectionCapped"] = bool(self.tailer.snapshot_projection_capped)
+        status["pluginSnapshotNoChangePolls"] = int(self.tailer.snapshot_no_change_polls or 0)
+        status["pluginSnapshotTicksSkippedAsUnchanged"] = int(self.tailer.snapshot_ticks_skipped_unchanged or 0)
+        status["pluginSnapshotCandidateOutputSkippedUnchanged"] = True
+
+        skipped_bytes = 0
+        paths = live_output_paths(self.session)
+        for skipped_path in (paths["candidates"], paths["worldTargets"], paths["overlayDebug"]):
+            try:
+                skipped_bytes += skipped_path.stat().st_size
+            except OSError:
+                pass
+        self.plugin_snapshot_output_bytes_skipped = skipped_bytes
+        status["pluginSnapshotOutputBytesSkipped"] = skipped_bytes
+
+        timing = Timing()
+        serialize_started = time.perf_counter()
+        status_text = json.dumps(status, indent=2, sort_keys=False) + "\n"
+        timing.set("pluginSnapshotOutputSerializeMillis", (time.perf_counter() - serialize_started) * 1000.0)
+        suppress_output_writes = bool(getattr(self.args, "suppress_output_writes", False))
+        if suppress_output_writes:
+            status_size = len(status_text)
+        else:
+            write_started = time.perf_counter()
+            status_size = atomic_write_text(paths["status"], status_text, options=self.write_options, stats=WriteStats())
+            timing.set("pluginSnapshotStatusWriteMillis", (time.perf_counter() - write_started) * 1000.0)
+        active_ms = (
+            float(self.tailer.snapshot_request_millis or 0.0)
+            + float(self.tailer.snapshot_parse_millis or 0.0)
+            + float(timing.values.get("pluginSnapshotOutputSerializeMillis") or 0.0)
+            + float(timing.values.get("pluginSnapshotStatusWriteMillis") or 0.0)
+        )
+        status["processingDurationMillis"] = round(active_ms, 3)
+        status["realtimeDurationMillis"] = round(active_ms, 3) if self.args.latency_mode == "realtime" else None
+        status["budgetExceeded"] = self.args.latency_mode == "realtime" and active_ms > self.args.target_update_ms
+        status["warningUpdateExceeded"] = self.args.latency_mode == "realtime" and active_ms > self.args.warn_update_ms
+        status["timingBreakdownMillis"] = timing_payload(timing, active_ms, self.tailer, raw_tick_ingest_millis=0.0)
+        status["pluginSnapshotOutputSerializeMillis"] = status["timingBreakdownMillis"].get("pluginSnapshotOutputSerializeMillis", 0.0)
+        status["pluginSnapshotOutputWriteMillis"] = status["timingBreakdownMillis"].get("pluginSnapshotOutputWriteMillis", 0.0)
+        status["pluginSnapshotStatusWriteMillis"] = status["timingBreakdownMillis"].get("pluginSnapshotStatusWriteMillis", 0.0)
+        status["pluginSnapshotTotalActiveMillis"] = status["timingBreakdownMillis"].get("pluginSnapshotTotalActiveMillis", active_ms)
+        status["pluginSnapshotBottleneck"] = plugin_snapshot_bottleneck(status["timingBreakdownMillis"])
+        status.setdefault("outputBytes", {})["outputBytesStatus"] = status_size
+
+        if not suppress_output_writes:
+            status_text = json.dumps(status, indent=2, sort_keys=False) + "\n"
+            atomic_write_text(paths["status"], status_text, options=self.write_options, stats=WriteStats())
+
+        result["status"] = status
+        self.last_result = result
+        self.previous_update_overran = bool(status.get("budgetExceeded") or status.get("warningUpdateExceeded"))
+        return 0, result
+
+    def plugin_snapshot_escalation_reason_for(self, result: dict) -> str | None:
+        if self.input_source_active != PLUGIN_SNAPSHOT_SOURCE:
+            return None
+        if not bool(getattr(self.args, "plugin_snapshot_auto_escalate", False)):
+            return None
+        if not isinstance(self.tailer, PluginSnapshotTailer):
+            return None
+        if normalized_plugin_snapshot_tier(self.tailer.snapshot_tier) != "hot":
+            return None
+        status = result.get("status") if isinstance(result.get("status"), dict) else {}
+        if status.get("pluginSnapshotStatus") == "FAIL":
+            return "hot snapshot tier failed; retrying expanded tier"
+        min_candidates = max(0, int(getattr(self.args, "plugin_snapshot_min_candidates", 1) or 0))
+        candidate_count = int(status.get("candidateCount") or len(result.get("candidates") or []))
+        if candidate_count < min_candidates:
+            return f"hot snapshot tier returned {candidate_count} candidates below minimum {min_candidates}; retrying expanded tier"
+        class_hint = plugin_snapshot_profile_class_hint(getattr(self.args, "profile", None))
+        if class_hint:
+            class_counts = status.get("candidateCountsByClassId") if isinstance(status.get("candidateCountsByClassId"), dict) else {}
+            if int(class_counts.get(class_hint) or 0) <= 0:
+                return f"hot snapshot tier returned no {class_hint} candidates; retrying expanded tier"
+        return None
+
+    def retry_plugin_snapshot_expanded(self, reason: str, max_records: int | None) -> tuple[int, dict] | None:
+        if not isinstance(self.tailer, PluginSnapshotTailer):
+            return None
+        self.plugin_snapshot_escalated = True
+        self.plugin_snapshot_escalation_reason = reason
+        self.plugin_snapshot_initial_refs = self.tailer.snapshot_projection_refs
+        self.tailer.escalate_to_tier("expanded")
+        records = self.tailer.read_new_records(realtime=True, max_records=max_records)
+        added, dropped = self.add_ticks(records)
+        result = self.process_window(force_rebuild=True, rebuild_reason="plugin-snapshot-expanded-tier")
+        result["status"]["droppedOldTicks"] = dropped
+        self.plugin_snapshot_final_refs = result["status"].get("pluginSnapshotProjectionRefs")
+        result["status"]["pluginSnapshotEscalated"] = True
+        result["status"]["pluginSnapshotEscalationReason"] = reason
+        result["status"]["pluginSnapshotInitialRefs"] = self.plugin_snapshot_initial_refs
+        result["status"]["pluginSnapshotFinalRefs"] = self.plugin_snapshot_final_refs
+        return added, result
+
     def compact_input_warnings(self) -> list[str]:
-        if self.input_source_active != COMPACT_PACKET_SOURCE:
+        if self.input_source_active not in COMPACT_INPUT_SOURCES and self.input_source_active != PLUGIN_SNAPSHOT_SOURCE:
             return []
 
         warnings = []
@@ -3636,9 +5777,42 @@ class LiveTargetProcessor:
         unsupported = sorted(target_types - {"sceneObject"})
         if unsupported:
             warnings.append(
-                "compact packet input currently builds live candidates from scene projection/delta packets; "
+                "compact input currently builds live candidates from scene projection/delta packets; "
                 f"these target types may be missing until compact packets include them: {', '.join(unsupported)}"
             )
+        if self.stream_fallback_to_file and self.stream_fallback_reason:
+            warnings.append(self.stream_fallback_reason)
+        if self.plugin_snapshot_fallback_to_file and self.plugin_snapshot_fallback_reason:
+            warnings.append(self.plugin_snapshot_fallback_reason)
+        if self.input_source_active == COMPACT_STREAM_SOURCE:
+            if self.input_fallback_reason:
+                warnings.append(self.input_fallback_reason)
+            diag = self.compact_stream_diagnostics()
+            if int(diag.get("packetsSeen") or 0) > 0 and int(diag.get("projectionPacketsSeen") or 0) <= 0:
+                warnings.append("compact stream has not delivered projection packets; candidates cannot be built from stream yet")
+            incomplete_reason = getattr(self.tailer, "last_stream_incomplete_tick_reason", None)
+            if incomplete_reason:
+                warnings.append(incomplete_reason)
+            return warnings
+        if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE:
+            if self.input_fallback_reason:
+                warnings.append(self.input_fallback_reason)
+            diag = self.plugin_snapshot_diagnostics()
+            warnings.extend(str(warning) for warning in (diag.get("warnings") or []))
+            projection_diag = diag.get("projectionDiagnostics") if isinstance(diag.get("projectionDiagnostics"), dict) else {}
+            warnings.extend(str(warning) for warning in (projection_diag.get("conversionWarnings") or []))
+            missing = diag.get("missingCapabilities") or []
+            if missing:
+                warnings.append("plugin snapshot missing capabilities: " + ", ".join(str(item) for item in missing))
+            if diag.get("tier") == "hot" and diag.get("projectionCapped"):
+                warnings.append("hot snapshot tier is capped; request expanded tier if broader awareness is needed")
+            if diag.get("lastIncompleteReason"):
+                warnings.append(str(diag.get("lastIncompleteReason")))
+            if diag.get("lastError"):
+                warnings.append("plugin snapshot request failed: " + str(diag.get("lastError")))
+            if self.plugin_snapshot_fallback_to_file and self.plugin_snapshot_fallback_reason:
+                warnings.append(self.plugin_snapshot_fallback_reason)
+            return warnings
         if not self.compact_packets_available:
             warnings.append("compact packet input selected but no compact live packet files are currently available")
         elif not self.compact_packets_recent:
@@ -3667,7 +5841,7 @@ class LiveTargetProcessor:
 
     def initialize_from_existing(self) -> int:
         limit = self.startup_backfill_limit()
-        if isinstance(self.tailer, CompactPacketTailer):
+        if isinstance(self.tailer, (CompactPacketTailer, CompactStreamTailer, PluginSnapshotTailer)):
             records = self.tailer.read_existing_records(limit)
             added, _dropped = self.add_ticks(records)
             self.tailer.seek_to_end()
@@ -3725,6 +5899,7 @@ class LiveTargetProcessor:
     def scene_source_matches_profile(self, tick: dict, source: dict) -> bool:
         reject = dynamic_profile_reject(source, self.profile)
         if reject:
+            self.last_prefilter_reject_reasons[reject] += 1
             return False
 
         key = object_cache_key(tick, source, "sceneObject")
@@ -3732,15 +5907,70 @@ class LiveTargetProcessor:
         cached = self.classification_cache.get(key)
         if cached and cached.get("fingerprint") == fingerprint:
             self.last_classification_cache_hits += 1
-            return bool(cached.get("profileMatch"))
+            profile_match = bool(cached.get("profileMatch"))
+            if not profile_match:
+                reason = cached.get("rejectReason") if isinstance(cached.get("rejectReason"), str) else "profileMismatch"
+                self.last_prefilter_reject_reasons[reason] += 1
+            return profile_match
 
         self.last_classification_cache_misses += 1
         preview = preview_scene_object_record(tick, source, self.target_overrides)
         class_info = candidate_builder.classify_record(preview, self.library)
+        class_ids = class_info.get("targetClassIds") if isinstance(class_info.get("targetClassIds"), list) else []
+        desired_class = plugin_snapshot_profile_class_hint(self.args.profile) if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else None
+        if desired_class and class_info.get("knownTargetClass") and desired_class not in {str(value).lower() for value in class_ids}:
+            self.classification_cache[key] = {
+                "fingerprint": fingerprint,
+                "profileMatch": False,
+                "rejectReason": "classHintMismatch",
+                "classId": class_info.get("classId"),
+                "targetClassIds": class_ids,
+                "id": source.get("id"),
+                "hash": source.get("hash"),
+                "kind": source.get("kind"),
+                "name": geometry.target_name_for(preview),
+                "category": geometry.target_category_for(preview),
+                "role": geometry.target_role_for(preview),
+                "objectKey": source.get("objectKey"),
+                "worldX": source.get("worldX"),
+                "worldY": source.get("worldY"),
+                "plane": source.get("plane"),
+                "sceneX": source.get("sceneX"),
+                "sceneY": source.get("sceneY"),
+            }
+            self.last_prefilter_reject_reasons["classHintMismatch"] += 1
+            return False
+        snapshot_unknown_class = self.input_source_active == PLUGIN_SNAPSHOT_SOURCE and (
+            (not class_info.get("classId") and not class_ids)
+            or bool({"unknown_scene_object", "unclassified_scene_object"} & {str(value) for value in ([class_info.get("classId")] + class_ids) if value})
+        )
+        if snapshot_unknown_class:
+            self.classification_cache[key] = {
+                "fingerprint": fingerprint,
+                "profileMatch": True,
+                "rejectReason": None,
+                "classId": None,
+                "targetClassIds": [],
+                "id": source.get("id"),
+                "hash": source.get("hash"),
+                "kind": source.get("kind"),
+                "name": geometry.target_name_for(preview),
+                "category": geometry.target_category_for(preview),
+                "role": geometry.target_role_for(preview),
+                "objectKey": source.get("objectKey"),
+                "worldX": source.get("worldX"),
+                "worldY": source.get("worldY"),
+                "plane": source.get("plane"),
+                "sceneX": source.get("sceneX"),
+                "sceneY": source.get("sceneY"),
+            }
+            return True
         profile_match = profile_stable_match(preview, class_info, self.profile)
+        reject_reason = None if profile_match else "profileMismatch"
         self.classification_cache[key] = {
             "fingerprint": fingerprint,
             "profileMatch": profile_match,
+            "rejectReason": reject_reason,
             "classId": class_info.get("classId"),
             "targetClassIds": class_info.get("targetClassIds") or [],
             "id": source.get("id"),
@@ -3756,6 +5986,8 @@ class LiveTargetProcessor:
             "sceneX": source.get("sceneX"),
             "sceneY": source.get("sceneY"),
         }
+        if reject_reason:
+            self.last_prefilter_reject_reasons[reject_reason] += 1
         return profile_match
 
     def processing_ticks_for(self, selected_ticks: list[dict], force: bool) -> list[dict]:
@@ -3824,9 +6056,15 @@ class LiveTargetProcessor:
             )
             built = filter_target_type(built, self.args)
         build_ms = (time.perf_counter() - started) * 1000.0
+        if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE:
+            prefilter_ms = float(build_stats.get("prefilterMillis") or 0.0)
+            timing.set("pluginSnapshotPrefilterMillis", prefilter_ms)
+            timing.set("pluginSnapshotWorldBuildMillis", max(0.0, build_ms - prefilter_ms))
 
         with timing.measure("worldTargetFilterMillis"):
             if self.use_early_profile_prefilter():
+                profile_records = built
+            elif self.input_source_active == PLUGIN_SNAPSHOT_SOURCE:
                 profile_records = built
             else:
                 profile_records = [record for record in built if profile_source_record(record, self.library, self.profile)]
@@ -3854,6 +6092,7 @@ class LiveTargetProcessor:
         self.last_classification_cache_misses = 0
         self.last_source_records_considered = 0
         self.last_source_records_prefiltered_out = 0
+        self.last_prefilter_reject_reasons = Counter()
         for tick in selected_ticks:
             tick_id = tick_id_for(tick)
             if tick_id is None:
@@ -4850,7 +7089,7 @@ class LiveTargetProcessor:
             "avgRawSeen": average([sample["rawSeen"] for sample in samples]),
             "avgProcessed": average([sample["processed"] for sample in samples]),
             "avgCoalesced": average([sample["coalesced"] for sample in samples]),
-            "avgCompactPacketReadMs": average([sample.get("tailReadMs", 0.0) for sample in samples if sample.get("inputSourceActive") == COMPACT_PACKET_SOURCE]),
+            "avgCompactPacketReadMs": average([sample.get("tailReadMs", 0.0) for sample in samples if sample.get("inputSourceActive") in COMPACT_INPUT_SOURCES]),
             "avgRawTickReadMs": average([sample.get("tailReadMs", 0.0) for sample in samples if sample.get("inputSourceActive") == RAW_TICK_SOURCE]),
             "avgParseMs": average([sample.get("parseMs", 0.0) for sample in samples]),
             "avgActiveMs": average(totals),
@@ -4959,6 +7198,15 @@ class LiveTargetProcessor:
         latest_tick_record = output_ticks[-1] if output_ticks else (selected_ticks[-1] if selected_ticks else (next(reversed(self.tick_window.values())) if self.tick_window else None))
         navigation = navigation_summary_for(latest_tick_record, processed_at)
         candidates = apply_navigation_to_candidates(candidates, navigation)
+        candidate_signature = candidate_output_signature(candidates)
+        skip_plugin_candidate_outputs = (
+            self.input_source_active == PLUGIN_SNAPSHOT_SOURCE
+            and bool(candidate_signature)
+            and candidate_signature == self.plugin_snapshot_last_candidate_signature
+            and not force_rebuild
+        )
+        self.plugin_snapshot_candidate_output_skipped_unchanged = skip_plugin_candidate_outputs
+        self.plugin_snapshot_output_bytes_skipped = 0
 
         total_duration_ms = (time.perf_counter() - total_started) * 1000.0
         budget_exceeded = total_duration_ms > self.args.target_update_ms
@@ -5011,6 +7259,13 @@ class LiveTargetProcessor:
             new_count,
             selected_tick_ids,
         )
+        if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE:
+            status["pluginSnapshotCandidateSignature"] = candidate_signature
+            status["pluginSnapshotCandidateOutputSkippedUnchanged"] = skip_plugin_candidate_outputs
+        watch_values = live_watch_values_state(latest_tick_record, inventory_state, activity, status, processed_at)
+        status["watchValuesPath"] = str(paths["watchValues"])
+        status["watchValueCount"] = len(watch_values.get("valuesByAlias") or {})
+        status["watchBudgetExceeded"] = bool(watch_values.get("watchBudgetExceeded"))
         index = self.index_payload(output_ticks, world_output_records, ui_records, candidates, candidate_stats, processed_at, frame_ticks)
 
         output_bytes = {}
@@ -5018,17 +7273,17 @@ class LiveTargetProcessor:
         with timing.measure("outputSerializeMillis"):
             serialized_outputs = {
                 "uiTargets": "".join(json_dump_compact(record) + "\n" for record in ui_records),
-                "candidates": "".join(json_dump_compact(record) + "\n" for record in candidates),
+                "candidates": "" if skip_plugin_candidate_outputs else "".join(json_dump_compact(record) + "\n" for record in candidates),
                 "tickSummary": "".join(json_dump_compact(record) + "\n" for record in tick_summaries),
                 "baseline": json.dumps(baseline, indent=2, sort_keys=False) + "\n",
                 "activity": json.dumps(activity, indent=2, sort_keys=False) + "\n",
+                "watchValues": json.dumps(watch_values, indent=2, sort_keys=False) + "\n",
                 "contextIndex": json.dumps(context_index, indent=2, sort_keys=False) + "\n",
                 "navigation": json.dumps(navigation, indent=2, sort_keys=False) + "\n",
                 "index": json.dumps(index, indent=2, sort_keys=False) + "\n",
-                "status": json.dumps(status, indent=2, sort_keys=False) + "\n",
             }
             if self.args.emit_world_targets != "none":
-                serialized_outputs["worldTargets"] = "".join(json_dump_compact(record) + "\n" for record in world_output_records)
+                serialized_outputs["worldTargets"] = "" if skip_plugin_candidate_outputs else "".join(json_dump_compact(record) + "\n" for record in world_output_records)
         suppress_output_writes = bool(getattr(self.args, "suppress_output_writes", False))
         with timing.measure("outputWriteMillis"):
             if suppress_output_writes:
@@ -5038,24 +7293,35 @@ class LiveTargetProcessor:
                 output_bytes["tickSummary"] = len(serialized_outputs["tickSummary"])
                 output_bytes["baseline"] = len(serialized_outputs["baseline"])
                 output_bytes["activity"] = len(serialized_outputs["activity"])
+                output_bytes["watchValues"] = len(serialized_outputs["watchValues"])
                 output_bytes["contextIndex"] = len(serialized_outputs["contextIndex"])
                 output_bytes["navigation"] = len(serialized_outputs["navigation"])
                 output_bytes["index"] = len(serialized_outputs["index"])
-                output_bytes["status"] = len(serialized_outputs["status"])
             else:
-                if self.args.emit_world_targets == "none":
+                if skip_plugin_candidate_outputs:
+                    skipped_bytes = 0
+                    for skipped_path in (paths["candidates"], paths["worldTargets"]):
+                        try:
+                            skipped_bytes += skipped_path.stat().st_size
+                        except OSError:
+                            pass
+                    self.plugin_snapshot_output_bytes_skipped = skipped_bytes
+                    output_bytes["worldTargets"] = 0
+                    output_bytes["candidates"] = 0
+                elif self.args.emit_world_targets == "none":
                     output_bytes["worldTargets"] = remove_file_if_exists(paths["worldTargets"])
+                    output_bytes["candidates"] = atomic_write_text(paths["candidates"], serialized_outputs["candidates"], options=self.write_options, stats=write_stats)
                 else:
                     output_bytes["worldTargets"] = atomic_write_text(paths["worldTargets"], serialized_outputs["worldTargets"], options=self.write_options, stats=write_stats)
+                    output_bytes["candidates"] = atomic_write_text(paths["candidates"], serialized_outputs["candidates"], options=self.write_options, stats=write_stats)
                 output_bytes["uiTargets"] = atomic_write_text(paths["uiTargets"], serialized_outputs["uiTargets"], options=self.write_options, stats=write_stats)
-                output_bytes["candidates"] = atomic_write_text(paths["candidates"], serialized_outputs["candidates"], options=self.write_options, stats=write_stats)
                 output_bytes["tickSummary"] = atomic_write_text(paths["tickSummary"], serialized_outputs["tickSummary"], options=self.write_options, stats=write_stats)
                 output_bytes["baseline"] = atomic_write_text(paths["baseline"], serialized_outputs["baseline"], options=self.write_options, stats=write_stats)
                 output_bytes["activity"] = atomic_write_text(paths["activity"], serialized_outputs["activity"], options=self.write_options, stats=write_stats)
+                output_bytes["watchValues"] = atomic_write_text(paths["watchValues"], serialized_outputs["watchValues"], options=self.write_options, stats=write_stats)
                 output_bytes["contextIndex"] = atomic_write_text(paths["contextIndex"], serialized_outputs["contextIndex"], options=self.write_options, stats=write_stats)
                 output_bytes["navigation"] = atomic_write_text(paths["navigation"], serialized_outputs["navigation"], options=self.write_options, stats=write_stats)
                 output_bytes["index"] = atomic_write_text(paths["index"], serialized_outputs["index"], options=self.write_options, stats=write_stats)
-                output_bytes["status"] = atomic_write_text(paths["status"], serialized_outputs["status"], options=self.write_options, stats=write_stats)
 
         process_window_ms = (time.perf_counter() - total_started) * 1000.0
         pre_window_ms = (
@@ -5078,6 +7344,7 @@ class LiveTargetProcessor:
             "outputBytesCandidates": output_bytes.get("candidates", 0),
             "outputBytesBaseline": output_bytes.get("baseline", 0),
             "outputBytesActivity": output_bytes.get("activity", 0),
+            "outputBytesWatchValues": output_bytes.get("watchValues", 0),
             "outputBytesOverlayDebug": output_bytes.get("overlayDebug", 0),
             "outputBytesStatus": output_bytes.get("status", 0),
             "outputBytesIndex": output_bytes.get("contextIndex", 0),
@@ -5149,10 +7416,22 @@ class LiveTargetProcessor:
                 events_size = len(events_text)
                 overlay_debug_size = len(overlay_debug_text)
             else:
+                status_write_started = time.perf_counter()
                 status_size = atomic_write_text(paths["status"], final_status_text, options=self.write_options, stats=write_stats)
+                timing.set("pluginSnapshotStatusWriteMillis", (time.perf_counter() - status_write_started) * 1000.0 if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else 0.0)
                 performance_size = atomic_write_text(paths["performance"], performance_text, options=self.write_options, stats=write_stats)
                 events_size = atomic_write_text(paths["events"], events_text, options=self.write_options, stats=write_stats)
-                overlay_debug_size = atomic_write_text(paths["overlayDebug"], overlay_debug_text, options=self.write_options, stats=write_stats)
+                if skip_plugin_candidate_outputs:
+                    try:
+                        self.plugin_snapshot_output_bytes_skipped += paths["overlayDebug"].stat().st_size
+                    except OSError:
+                        pass
+                    overlay_debug_size = 0
+                else:
+                    overlay_write_started = time.perf_counter()
+                    overlay_debug_size = atomic_write_text(paths["overlayDebug"], overlay_debug_text, options=self.write_options, stats=write_stats)
+                    if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE:
+                        timing.set("pluginSnapshotOverlayStateWriteMillis", (time.perf_counter() - overlay_write_started) * 1000.0)
         if status_size:
             output_bytes["status"] = status_size
         output_bytes["performance"] = performance_size
@@ -5163,15 +7442,34 @@ class LiveTargetProcessor:
             self.total_write_failures += write_stats.failure_count - status.get("writeFailureCount", 0)
         if write_stats.failure_count > before_status_failures:
             print(f"Warning: could not refresh live_status.json after retries: {write_stats.last_error}")
+        if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE:
+            final_timing = timing_payload(timing, final_duration_ms, self.tailer, raw_tick_ingest_millis=self.last_raw_tick_add_millis)
+            status["timingBreakdownMillis"] = final_timing
+            status["pluginSnapshotOutputSerializeMillis"] = final_timing.get("pluginSnapshotOutputSerializeMillis", 0.0)
+            status["pluginSnapshotOutputWriteMillis"] = final_timing.get("pluginSnapshotOutputWriteMillis", 0.0)
+            status["pluginSnapshotOverlayStateWriteMillis"] = final_timing.get("pluginSnapshotOverlayStateWriteMillis", 0.0)
+            status["pluginSnapshotStatusWriteMillis"] = final_timing.get("pluginSnapshotStatusWriteMillis", 0.0)
+            status["pluginSnapshotTotalActiveMillis"] = final_timing.get("pluginSnapshotTotalActiveMillis", final_duration_ms)
+            status["pluginSnapshotBottleneck"] = plugin_snapshot_bottleneck(final_timing)
+            status["pluginSnapshotCandidateOutputSkippedUnchanged"] = skip_plugin_candidate_outputs
+            status["pluginSnapshotOutputBytesSkipped"] = self.plugin_snapshot_output_bytes_skipped
+            if candidate_signature:
+                self.plugin_snapshot_last_candidate_signature = candidate_signature
+            if not suppress_output_writes:
+                refreshed_status_text = json.dumps(status, indent=2, sort_keys=False) + "\n"
+                refreshed_status_size = atomic_write_text(paths["status"], refreshed_status_text, options=self.write_options, stats=write_stats)
+                if refreshed_status_size:
+                    output_bytes["status"] = refreshed_status_size
+                    status.setdefault("outputBytes", {})["outputBytesStatus"] = refreshed_status_size
         self.previous_update_overran = bool(status.get("budgetExceeded") or status.get("warningUpdateExceeded"))
-
-        return {
+        self.last_result = {
             "worldRecords": world_output_records,
             "uiRecords": ui_records,
             "candidates": candidates,
             "tickSummaries": tick_summaries,
             "baseline": baseline,
             "activity": activity,
+            "watchValues": watch_values,
             "events": list(self.event_timeline),
             "overlayDebug": overlay_debug,
             "performance": performance,
@@ -5180,6 +7478,8 @@ class LiveTargetProcessor:
             "status": status,
             "index": index,
         }
+
+        return self.last_result
 
     def status_payload(
         self,
@@ -5216,6 +7516,29 @@ class LiveTargetProcessor:
         raw_records_fully_processed = len(self.last_processed_tick_ids)
         latest_tick_record = selected_ticks[-1] if selected_ticks else {}
         writer_health = latest_tick_record.get("_writerHealth") if isinstance(latest_tick_record.get("_writerHealth"), dict) else {}
+        stream_diag = self.compact_stream_diagnostics()
+        plugin_snapshot_diag = self.plugin_snapshot_diagnostics()
+        plugin_projection_diag = plugin_snapshot_diag.get("projectionDiagnostics") if isinstance(plugin_snapshot_diag.get("projectionDiagnostics"), dict) else {}
+        tick_ref_diag = synthetic_tick_ref_diagnostics(latest_tick_record)
+        plugin_tick_diag = tick_ref_diag if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else {}
+        latest_candidate_tick = max(output_ids) if output_ids else None
+        latest_stream_baseline_tick = (stream_diag.get("latestTickByType") or {}).get(COMPACT_PACKET_TYPES["baseline"])
+        candidates_retained_from_tick = None
+        if (
+            latest_stream_baseline_tick is not None
+            and latest_candidate_tick is not None
+            and latest_stream_baseline_tick > latest_candidate_tick
+            and candidates
+        ):
+            candidates_retained_from_tick = latest_candidate_tick
+        plugin_snapshot_latest_tick = plugin_snapshot_diag.get("latestTick")
+        if (
+            plugin_snapshot_latest_tick is not None
+            and latest_candidate_tick is not None
+            and plugin_snapshot_latest_tick > latest_candidate_tick
+            and candidates
+        ):
+            candidates_retained_from_tick = latest_candidate_tick
         if self.args.latency_mode == "realtime" and self.last_full_window_rebuild and not self.args.force_window_rebuild:
             warnings.append("Realtime mode performed a full window rebuild without --force-window-rebuild.")
         if (
@@ -5239,6 +7562,131 @@ class LiveTargetProcessor:
             "targetType": self.args.target_type,
             "inputSourceRequested": self.args.input_source,
             "inputSourceActive": self.input_source_active,
+            "compactStreamHost": self.args.compact_stream_host,
+            "compactStreamPort": self.args.compact_stream_port,
+            "compactStreamAvailableAtStartup": bool(self.compact_stream_state.get("available")),
+            "compactStreamConnected": bool(stream_diag.get("connected")),
+            "compactStreamReconnects": int(stream_diag.get("reconnects") or 0),
+            "compactStreamPacketsSeen": int(stream_diag.get("packetsSeen") or 0),
+            "compactStreamPacketsProcessed": int(stream_diag.get("packetsProcessed") or 0),
+            "compactStreamDroppedPackets": stream_diag.get("droppedPackets"),
+            "compactStreamPacketsByType": dict(stream_diag.get("packetsByType") or {}),
+            "compactStreamLatestTickByType": dict(stream_diag.get("latestTickByType") or {}),
+            "compactStreamPacketsByTypeThisPoll": dict(stream_diag.get("packetsByTypeThisPoll") or {}),
+            "compactStreamLatestTickByTypeThisPoll": dict(stream_diag.get("latestTickByTypeThisPoll") or {}),
+            "compactStreamMissingRequiredTypesForLatestTick": list(stream_diag.get("missingRequiredTypesForLatestTick") or []),
+            "compactStreamReadMillis": stream_diag.get("readMillis"),
+            "compactStreamParseMillis": stream_diag.get("parseMillis"),
+            "compactStreamWaitMillis": stream_diag.get("waitMillis"),
+            "compactStreamReconnectMillis": stream_diag.get("reconnectMillis"),
+            "compactStreamSocketTimeouts": stream_diag.get("socketTimeouts"),
+            "compactStreamSocketTimeoutsThisPoll": stream_diag.get("socketTimeoutsThisPoll"),
+            "compactStreamDisconnectedDurationMillis": stream_diag.get("disconnectedDurationMillis"),
+            "compactStreamTickBufferSize": stream_diag.get("tickBufferSize"),
+            "compactStreamTicksWaitingForProjection": stream_diag.get("ticksWaitingForProjection"),
+            "compactStreamProcessedCompleteTicks": stream_diag.get("processedCompleteTicks"),
+            "compactStreamSkippedIncompleteTicks": stream_diag.get("skippedIncompleteTicks"),
+            "compactStreamLastIncompleteTickReason": stream_diag.get("lastIncompleteTickReason"),
+            "compactStreamProjectionPacketsSeen": int(stream_diag.get("projectionPacketsSeen") or 0),
+            "compactStreamRequiredTypesSatisfied": bool(stream_diag.get("requiredTypesSatisfied")),
+            "compactStreamCanBuildCandidates": bool(stream_diag.get("canBuildCandidates")),
+            "compactStreamKnownMissingTypes": list(stream_diag.get("missingKnownTypes") or []),
+            "streamFallbackToFile": bool(self.stream_fallback_to_file),
+            "streamFallbackReason": self.stream_fallback_reason,
+            "pluginSnapshotHost": self.args.plugin_snapshot_host,
+            "pluginSnapshotPort": self.args.plugin_snapshot_port,
+            "pluginSnapshotTier": plugin_snapshot_diag.get("tier"),
+            "pluginSnapshotMaxProjectionRefs": plugin_snapshot_diag.get("maxProjectionRefs"),
+            "pluginSnapshotEscalated": bool(self.plugin_snapshot_escalated),
+            "pluginSnapshotEscalationReason": self.plugin_snapshot_escalation_reason,
+            "pluginSnapshotInitialRefs": self.plugin_snapshot_initial_refs,
+            "pluginSnapshotFinalRefs": self.plugin_snapshot_final_refs,
+            "pluginSnapshotAvailableAtStartup": bool(self.plugin_snapshot_state.get("available")),
+            "pluginSnapshotAvailable": bool(plugin_snapshot_diag.get("available")),
+            "pluginSnapshotLatestTick": plugin_snapshot_diag.get("latestTick"),
+            "pluginSnapshotStatus": plugin_snapshot_diag.get("status"),
+            "pluginSnapshotWarnings": list(plugin_snapshot_diag.get("warnings") or []),
+            "pluginSnapshotMissingCapabilities": list(plugin_snapshot_diag.get("missingCapabilities") or []),
+            "pluginSnapshotRequestMillis": plugin_snapshot_diag.get("requestMillis"),
+            "pluginSnapshotHttpRequestMillis": plugin_snapshot_diag.get("httpRequestMillis"),
+            "pluginSnapshotResponseReadMillis": plugin_snapshot_diag.get("responseReadMillis"),
+            "pluginSnapshotParseMillis": plugin_snapshot_diag.get("parseMillis"),
+            "pluginSnapshotJsonParseMillis": plugin_snapshot_diag.get("parseMillis"),
+            "pluginSnapshotEndpointServiceMillis": plugin_snapshot_diag.get("endpointServiceMillis"),
+            "pluginSnapshotConvertMillis": plugin_snapshot_diag.get("convertMillis"),
+            "pluginSnapshotResponseBytes": plugin_snapshot_diag.get("responseBytes"),
+            "pluginSnapshotHttpConnectionReused": bool(plugin_snapshot_diag.get("httpConnectionReused")),
+            "pluginSnapshotHttpReconnects": int(plugin_snapshot_diag.get("httpReconnects") or 0),
+            "pluginSnapshotPayloadTypes": list(plugin_snapshot_diag.get("payloadTypes") or []),
+            "pluginSnapshotProjectionRefs": plugin_snapshot_diag.get("projectionRefs"),
+            "pluginSnapshotProjectionCapped": bool(plugin_snapshot_diag.get("projectionCapped")),
+            "pluginSnapshotErrorCode": plugin_snapshot_diag.get("errorCode"),
+            "pluginSnapshotResponseSizing": plugin_snapshot_diag.get("responseSizing") or {},
+            "pluginSnapshotProjectionRefListPath": plugin_projection_diag.get("refListPath"),
+            "pluginSnapshotRefsConverted": plugin_projection_diag.get("refsConverted"),
+            "pluginSnapshotSyntheticTickKeys": plugin_tick_diag.get("syntheticTickKeys") or [],
+            "pluginSnapshotRefPathCounts": plugin_tick_diag.get("pathCounts") or {},
+            "pluginSnapshotVisibleRefsExpectedPathCount": plugin_tick_diag.get("visibleRefsExpectedPathCount"),
+            "pluginSnapshotSceneObjectRefsAtExpectedPath": plugin_tick_diag.get("sceneObjectRefsAtExpectedPath"),
+            "pluginSnapshotProjectionRefsAtExpectedPath": plugin_tick_diag.get("projectionRefsAtExpectedPath"),
+            "pluginSnapshotRefsAcceptedForWorldTargets": plugin_tick_diag.get("refsAcceptedForWorldTargets"),
+            "pluginSnapshotRefsIgnoredWrongPath": plugin_tick_diag.get("refsIgnoredWrongPath"),
+            "pluginSnapshotRefsIgnoredWrongPathCounts": plugin_tick_diag.get("refsIgnoredWrongPathCounts") or {},
+            "pluginSnapshotRefsIgnoredReasons": plugin_tick_diag.get("refsIgnoredReasons") or {},
+            "pluginSnapshotFirstRefKeys": plugin_projection_diag.get("firstRefKeys") or [],
+            "pluginSnapshotFieldMissingCounts": plugin_projection_diag.get("fieldMissingCounts") or {},
+            "pluginSnapshotFieldPresentCounts": plugin_projection_diag.get("fieldPresentCounts") or {},
+            "pluginSnapshotConversionWarnings": plugin_projection_diag.get("conversionWarnings") or [],
+            "pluginSnapshotWorldTargetsBuilt": len(full_records) if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else None,
+            "pluginSnapshotCandidatesBeforeFilters": (
+                candidate_stats.get("matchingTargetsBeforeFilters")
+                if isinstance(candidate_stats, dict) and self.input_source_active == PLUGIN_SNAPSHOT_SOURCE
+                else None
+            ),
+            "pluginSnapshotRefsBeforePrefilter": (
+                self.last_source_records_considered if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else None
+            ),
+            "pluginSnapshotRefsAfterPrefilter": (
+                max(0, self.last_source_records_considered - self.last_source_records_prefiltered_out)
+                if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE
+                else None
+            ),
+            "pluginSnapshotPrefilterRejectReasons": (
+                dict(self.last_prefilter_reject_reasons) if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else {}
+            ),
+            "pluginSnapshotPrefilterMillis": (
+                round(float(timing.values.get("pluginSnapshotPrefilterMillis") or 0.0), 3)
+                if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE
+                else 0.0
+            ),
+            "pluginSnapshotWorldBuildMillis": (
+                round(float(timing.values.get("pluginSnapshotWorldBuildMillis") or 0.0), 3)
+                if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE
+                else 0.0
+            ),
+            "pluginSnapshotCandidateSelectMillis": (
+                round(float(timing.values.get("candidateSelectMillis") or 0.0), 3)
+                if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE
+                else 0.0
+            ),
+            "pluginSnapshotCandidateRejectReasons": (
+                candidate_stats.get("rejectReasons")
+                if isinstance(candidate_stats, dict) and self.input_source_active == PLUGIN_SNAPSHOT_SOURCE
+                else {}
+            ),
+            "pluginSnapshotTicksSkippedAsUnchanged": int(plugin_snapshot_diag.get("ticksSkippedAsUnchanged") or 0),
+            "pluginSnapshotNoChangePolls": int(plugin_snapshot_diag.get("noChangePolls") or 0),
+            "pluginSnapshotEndpointErrors": int(plugin_snapshot_diag.get("endpointErrors") or 0),
+            "pluginSnapshotTimeouts": int(plugin_snapshot_diag.get("timeouts") or 0),
+            "pluginSnapshotLastError": plugin_snapshot_diag.get("lastError"),
+            "pluginSnapshotLastIncompleteReason": plugin_snapshot_diag.get("lastIncompleteReason"),
+            "pluginSnapshotFallbackToFile": bool(self.plugin_snapshot_fallback_to_file),
+            "pluginSnapshotFallbackReason": self.plugin_snapshot_fallback_reason,
+            "pluginSnapshotClassificationCacheSize": len(self.classification_cache) if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else None,
+            "pluginSnapshotClassificationCacheHits": self.last_classification_cache_hits if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else None,
+            "pluginSnapshotClassificationCacheMisses": self.last_classification_cache_misses if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else None,
+            "latestCandidateTick": latest_candidate_tick,
+            "candidatesRetainedFromTick": candidates_retained_from_tick,
             "compactPacketsAvailable": bool(current_compact_state.get("available")),
             "compactPacketsRecent": bool(current_compact_state.get("recent")),
             "compactPacketIndexPath": current_compact_state.get("indexPath"),
@@ -5253,6 +7701,36 @@ class LiveTargetProcessor:
             "rawEventRecordingEnabled": writer_health.get("rawEventRecordingEnabled"),
             "frameRecordingEnabled": writer_health.get("frameRecordingEnabled"),
             "compactPacketRecordingEnabled": writer_health.get("compactPacketRecordingEnabled") or writer_health.get("compactLiveEnabled"),
+            "compactLivePacketFilesEnabled": writer_health.get("compactLivePacketFilesEnabled"),
+            "compactLiveStreamEnabled": writer_health.get("compactLiveStreamEnabled"),
+            "compactLiveStreamHost": writer_health.get("compactLiveStreamHost"),
+            "compactLiveStreamPort": writer_health.get("compactLiveStreamPort"),
+            "compactLiveStreamQueueSize": writer_health.get("compactLiveStreamQueueSize"),
+            "compactLiveStreamAlsoWriteFiles": writer_health.get("compactLiveStreamAlsoWriteFiles"),
+            "compactLiveStreamCircuitBreakerEnabled": writer_health.get("compactLiveStreamCircuitBreakerEnabled"),
+            "compactLiveStreamMaxWriteMillisConfigured": writer_health.get("compactLiveStreamMaxWriteMillisConfigured"),
+            "compactLiveStreamQueueDepth": writer_health.get("compactLiveStreamQueueDepth"),
+            "compactLiveStreamClientCount": writer_health.get("compactLiveStreamClientCount"),
+            "compactLiveStreamPacketsOffered": writer_health.get("compactLiveStreamPacketsOffered"),
+            "compactLiveStreamPacketsWritten": writer_health.get("compactLiveStreamPacketsWritten"),
+            "compactLiveStreamPacketsDropped": writer_health.get("compactLiveStreamPacketsDropped"),
+            "compactLiveStreamPacketsDroppedNoClients": writer_health.get("compactLiveStreamPacketsDroppedNoClients"),
+            "compactLiveStreamPacketsDroppedByCircuitBreaker": writer_health.get("compactLiveStreamPacketsDroppedByCircuitBreaker"),
+            "compactLiveStreamWriteErrors": writer_health.get("compactLiveStreamWriteErrors"),
+            "compactLiveStreamAcceptedClients": writer_health.get("compactLiveStreamAcceptedClients"),
+            "compactLiveStreamDisconnectedClients": writer_health.get("compactLiveStreamDisconnectedClients"),
+            "compactLiveStreamLastWriteMillis": writer_health.get("compactLiveStreamLastWriteMillis"),
+            "compactLiveStreamMaxWriteMillisObserved": writer_health.get("compactLiveStreamMaxWriteMillisObserved"),
+            "compactLiveStreamCircuitBreakerTripped": writer_health.get("compactLiveStreamCircuitBreakerTripped"),
+            "compactLiveStreamCircuitBreakerReason": writer_health.get("compactLiveStreamCircuitBreakerReason"),
+            "compactLiveStreamDisabledUntilUtc": writer_health.get("compactLiveStreamDisabledUntilUtc"),
+            "compactLiveStreamCircuitBreakerTrips": writer_health.get("compactLiveStreamCircuitBreakerTrips"),
+            "compactLiveStreamPacketsByType": writer_health.get("compactLiveStreamPacketsByType"),
+            "compactLiveStreamPacketsOfferedByType": writer_health.get("compactLiveStreamPacketsOfferedByType"),
+            "compactLiveStreamPacketsSentByType": writer_health.get("compactLiveStreamPacketsSentByType"),
+            "compactLiveStreamPacketsDroppedByType": writer_health.get("compactLiveStreamPacketsDroppedByType"),
+            "compactLiveStreamLatestOfferedTickByType": writer_health.get("compactLiveStreamLatestOfferedTickByType"),
+            "compactLiveStreamLatestTickByType": writer_health.get("compactLiveStreamLatestTickByType"),
             "compactLiveIncludeHeavyGeometry": writer_health.get("compactLiveIncludeHeavyGeometry"),
             "compactLiveIncludeClickableHull": writer_health.get("compactLiveIncludeClickableHull"),
             "compactLiveIncludeCanvasTilePolygon": writer_health.get("compactLiveIncludeCanvasTilePolygon"),
@@ -5296,6 +7774,12 @@ class LiveTargetProcessor:
             "worldTargetBuildScope": "profilePrefiltered" if self.last_source_records_prefiltered_out else "full",
             "worldTargetSourceRecordsConsidered": self.last_source_records_considered,
             "worldTargetsPrefilteredOut": self.last_source_records_prefiltered_out,
+            "syntheticTickKeys": tick_ref_diag.get("syntheticTickKeys") or [],
+            "syntheticRefPathCounts": tick_ref_diag.get("pathCounts") or {},
+            "syntheticVisibleRefsExpectedPathCount": tick_ref_diag.get("visibleRefsExpectedPathCount"),
+            "syntheticSceneObjectRefsAtExpectedPath": tick_ref_diag.get("sceneObjectRefsAtExpectedPath"),
+            "syntheticRefsAcceptedForWorldTargets": tick_ref_diag.get("refsAcceptedForWorldTargets"),
+            "syntheticRefsIgnoredReasons": tick_ref_diag.get("refsIgnoredReasons") or {},
             "fullWorldTargetOutputEnabled": self.args.emit_world_targets == "full",
             **source_summary,
             "windowTicks": self.args.window_ticks,
@@ -5469,15 +7953,36 @@ class LiveTargetProcessor:
             self.last_backlog_drain_reason = "previous update exceeded realtime budget"
 
         records = self.tailer.read_new_records(realtime=realtime_tail, max_records=max_records)
+        fallback_reason = self.should_fallback_stream_to_compact_packets()
+        if fallback_reason:
+            self.activate_compact_packet_fallback(fallback_reason)
+            backfill_limit = max_records if max_records and max_records > 0 else self.memory_limit()
+            records = self.tailer.read_existing_records(backfill_limit)
+            self.tailer.seek_to_end()
+        plugin_snapshot_fallback_reason = self.should_fallback_plugin_snapshot_to_compact_packets()
+        if plugin_snapshot_fallback_reason:
+            self.activate_plugin_snapshot_compact_packet_fallback(plugin_snapshot_fallback_reason)
+            backfill_limit = max_records if max_records and max_records > 0 else self.memory_limit()
+            records = self.tailer.read_existing_records(backfill_limit)
+            self.tailer.seek_to_end()
         if drain_this_poll and self.tailer.last_coalesced_before_parse:
             self.backlog_drain_count += self.tailer.last_coalesced_before_parse
             self.last_backlog_drain_tick = self.tailer.last_newest_tick_selected
+
+        no_change_result = self.plugin_snapshot_no_change_result() if not records else None
+        if no_change_result is not None:
+            return no_change_result
 
         started = time.perf_counter()
         added, dropped = self.add_ticks(records)
         self.last_raw_tick_add_millis = (time.perf_counter() - started) * 1000.0
         result = self.process_window(force_rebuild=force_rebuild, rebuild_reason="force-window-rebuild" if force_rebuild else "incremental")
         result["status"]["droppedOldTicks"] = dropped
+        escalation_reason = self.plugin_snapshot_escalation_reason_for(result)
+        if escalation_reason:
+            escalated = self.retry_plugin_snapshot_expanded(escalation_reason, max_records)
+            if escalated is not None:
+                return escalated
         return added, result
 
     def poll_once(self) -> tuple[int, dict]:
@@ -5495,12 +8000,16 @@ def print_startup(session: Path, args, processor: LiveTargetProcessor | None = N
     print(f"mode: {'follow' if args.follow else 'once'}")
     print(f"latency mode: {args.latency_mode}")
     active_input = getattr(processor, "input_source_active", args.input_source)
-    if active_input == COMPACT_PACKET_SOURCE:
+    if active_input == COMPACT_STREAM_SOURCE:
+        print(f"Live input: compact stream ({args.compact_stream_host}:{args.compact_stream_port})")
+    elif active_input == PLUGIN_SNAPSHOT_SOURCE:
+        print(f"Live input: plugin snapshot EXPERIMENTAL ({args.plugin_snapshot_host}:{args.plugin_snapshot_port})")
+    elif active_input == COMPACT_PACKET_SOURCE:
         print("Live input: compact packets")
     elif args.input_source == RAW_TICK_SOURCE:
         print("Live input: raw ticks explicitly requested")
     else:
-        print("Live input: raw ticks fallback because compact packets were unavailable")
+        print("Live input: raw ticks fallback because compact inputs were unavailable")
     print(f"input source: {active_input} (requested {args.input_source})")
     if processor and processor.input_fallback_reason:
         print(f"input fallback: {processor.input_fallback_reason}")
@@ -5526,6 +8035,43 @@ def print_result_summary(result: dict, tailer: TickJsonlTailer) -> None:
     print(f"input source: {status.get('inputSourceActive')} (requested {status.get('inputSourceRequested')})")
     if status.get("inputFallbackReason"):
         print(f"input fallback: {status.get('inputFallbackReason')}")
+    if status.get("inputSourceActive") == COMPACT_STREAM_SOURCE:
+        print(f"compact stream connected: {str(bool(status.get('compactStreamConnected'))).lower()}")
+        print(f"compact stream packets seen: {status.get('compactStreamPacketsSeen', 0)}")
+        print(f"compact stream packets by type: {status.get('compactStreamPacketsByType') or {}}")
+        print(f"compact stream latest tick by type: {status.get('compactStreamLatestTickByType') or {}}")
+        if status.get("compactStreamMissingRequiredTypesForLatestTick"):
+            print(f"compact stream missing latest tick types: {status.get('compactStreamMissingRequiredTypesForLatestTick')}")
+        print(
+            "compact stream buffer: "
+            f"{status.get('compactStreamTickBufferSize', 0)} ticks, "
+            f"waitingForProjection={status.get('compactStreamTicksWaitingForProjection', 0)}"
+        )
+    if status.get("inputSourceActive") == PLUGIN_SNAPSHOT_SOURCE:
+        print(f"plugin snapshot available: {str(bool(status.get('pluginSnapshotAvailable'))).lower()}")
+        print(f"plugin snapshot status: {status.get('pluginSnapshotStatus')}")
+        print(f"plugin snapshot latest tick: {status.get('pluginSnapshotLatestTick')}")
+        print(f"plugin snapshot payloads: {status.get('pluginSnapshotPayloadTypes') or []}")
+        print(
+            "plugin snapshot projection refs: "
+            f"{status.get('pluginSnapshotProjectionRefs')} converted={status.get('pluginSnapshotRefsConverted')}"
+        )
+        print(
+            "plugin snapshot synthetic refs: "
+            f"visiblePath={status.get('pluginSnapshotVisibleRefsExpectedPathCount')} "
+            f"accepted={status.get('pluginSnapshotRefsAcceptedForWorldTargets')} "
+            f"wrongPath={status.get('pluginSnapshotRefsIgnoredWrongPath')}"
+        )
+        if status.get("pluginSnapshotProjectionRefListPath"):
+            print(f"plugin snapshot projection ref list: {status.get('pluginSnapshotProjectionRefListPath')}")
+        if status.get("pluginSnapshotMissingCapabilities"):
+            print(f"plugin snapshot missing capabilities: {status.get('pluginSnapshotMissingCapabilities')}")
+        if status.get("pluginSnapshotConversionWarnings"):
+            print(f"plugin snapshot conversion warnings: {status.get('pluginSnapshotConversionWarnings')}")
+        if status.get("pluginSnapshotWarnings"):
+            print(f"plugin snapshot warnings: {status.get('pluginSnapshotWarnings')}")
+        if status.get("pluginSnapshotBottleneck"):
+            print(f"plugin snapshot bottleneck: {status.get('pluginSnapshotBottleneck')}")
     print(f"latest raw tick seen: {status.get('latestRawTickSeen')}")
     print(f"coalesced backlog ticks: {status.get('coalescedBacklogTicks', 0)}")
     print(f"world targets built: {status['worldTargetsBuilt']}")
@@ -5555,6 +8101,30 @@ def print_follow_update(added: int, result: dict) -> None:
     processed = status.get("rawRecordsFullyProcessed", status.get("processedNewTicks", added))
     coalesced = status.get("coalescedBacklogTicks", 0)
     performance = result.get("performance") or {}
+    stream_suffix = ""
+    if status.get("inputSourceActive") == COMPACT_STREAM_SOURCE:
+        missing = status.get("compactStreamMissingRequiredTypesForLatestTick") or []
+        stream_suffix = (
+            f" streamConnected={str(bool(status.get('compactStreamConnected'))).lower()}"
+            f" streamBuf={status.get('compactStreamTickBufferSize', 0)}"
+            f" waitProj={status.get('compactStreamTicksWaitingForProjection', 0)}"
+            f" missingTypes={','.join(missing) if missing else '-'}"
+        )
+    elif status.get("streamFallbackToFile"):
+        stream_suffix = " streamFallback=compact-packets"
+    elif status.get("inputSourceActive") == PLUGIN_SNAPSHOT_SOURCE:
+        missing = status.get("pluginSnapshotMissingCapabilities") or []
+        bottleneck = status.get("pluginSnapshotBottleneck")
+        stream_suffix = (
+            f" snapshotStatus={status.get('pluginSnapshotStatus') or '-'}"
+            f" snapshotTick={status.get('pluginSnapshotLatestTick')}"
+            f" snapshotRefs={status.get('pluginSnapshotProjectionRefs')}"
+            f" convertedRefs={status.get('pluginSnapshotRefsConverted')}"
+            f" missingCaps={','.join(missing) if missing else '-'}"
+            f" bottleneck={bottleneck or '-'}"
+        )
+    elif status.get("pluginSnapshotFallbackToFile"):
+        stream_suffix = " snapshotFallback=compact-packets"
     print(
         f"latestTick={status['lastProcessedTick']} "
         f"input={status.get('inputSourceActive')} "
@@ -5574,6 +8144,7 @@ def print_follow_update(added: int, result: dict) -> None:
         f"budgetExceeded={str(bool(status.get('budgetExceeded'))).lower()} "
         f"writeRetries={status.get('writeRetryCount', 0)} "
         f"writeFailures={status.get('writeFailureCount', 0)}"
+        f"{stream_suffix}"
     )
 
 
@@ -5681,9 +8252,58 @@ def compare_result_summary(result: dict | None) -> dict:
     best_tree = tree_candidates[0] if tree_candidates else None
     nearest_tree = min(tree_candidates, key=lambda candidate: compare_distance(candidate) if compare_distance(candidate) is not None else 999999) if tree_candidates else None
     return {
-        "available": True,
+        "available": bool(
+            status.get("lastProcessedTick") is not None
+            or status.get("compactPacketsSeen")
+            or status.get("compactStreamConnected")
+            or status.get("pluginSnapshotAvailable")
+        ),
         "inputSourceActive": status.get("inputSourceActive"),
         "latestTick": status.get("lastProcessedTick"),
+        "pluginSnapshotAvailable": status.get("pluginSnapshotAvailable"),
+        "pluginSnapshotTier": status.get("pluginSnapshotTier"),
+        "pluginSnapshotMaxProjectionRefs": status.get("pluginSnapshotMaxProjectionRefs"),
+        "pluginSnapshotEscalated": status.get("pluginSnapshotEscalated"),
+        "pluginSnapshotEscalationReason": status.get("pluginSnapshotEscalationReason"),
+        "pluginSnapshotInitialRefs": status.get("pluginSnapshotInitialRefs"),
+        "pluginSnapshotFinalRefs": status.get("pluginSnapshotFinalRefs"),
+        "pluginSnapshotStatus": status.get("pluginSnapshotStatus"),
+        "pluginSnapshotLatestTick": status.get("pluginSnapshotLatestTick"),
+        "pluginSnapshotWarnings": status.get("pluginSnapshotWarnings") or [],
+        "pluginSnapshotMissingCapabilities": status.get("pluginSnapshotMissingCapabilities") or [],
+        "pluginSnapshotErrorCode": status.get("pluginSnapshotErrorCode"),
+        "pluginSnapshotResponseSizing": status.get("pluginSnapshotResponseSizing") or {},
+        "pluginSnapshotPayloadTypes": status.get("pluginSnapshotPayloadTypes") or [],
+        "pluginSnapshotProjectionRefs": status.get("pluginSnapshotProjectionRefs"),
+        "pluginSnapshotProjectionCapped": status.get("pluginSnapshotProjectionCapped"),
+        "pluginSnapshotProjectionRefListPath": status.get("pluginSnapshotProjectionRefListPath"),
+        "pluginSnapshotRefsConverted": status.get("pluginSnapshotRefsConverted"),
+        "pluginSnapshotSyntheticTickKeys": status.get("pluginSnapshotSyntheticTickKeys") or [],
+        "pluginSnapshotRefPathCounts": status.get("pluginSnapshotRefPathCounts") or {},
+        "pluginSnapshotVisibleRefsExpectedPathCount": status.get("pluginSnapshotVisibleRefsExpectedPathCount"),
+        "pluginSnapshotSceneObjectRefsAtExpectedPath": status.get("pluginSnapshotSceneObjectRefsAtExpectedPath"),
+        "pluginSnapshotProjectionRefsAtExpectedPath": status.get("pluginSnapshotProjectionRefsAtExpectedPath"),
+        "pluginSnapshotRefsAcceptedForWorldTargets": status.get("pluginSnapshotRefsAcceptedForWorldTargets"),
+        "pluginSnapshotRefsIgnoredWrongPath": status.get("pluginSnapshotRefsIgnoredWrongPath"),
+        "pluginSnapshotRefsIgnoredWrongPathCounts": status.get("pluginSnapshotRefsIgnoredWrongPathCounts") or {},
+        "pluginSnapshotRefsIgnoredReasons": status.get("pluginSnapshotRefsIgnoredReasons") or {},
+        "pluginSnapshotFieldMissingCounts": status.get("pluginSnapshotFieldMissingCounts") or {},
+        "pluginSnapshotFieldPresentCounts": status.get("pluginSnapshotFieldPresentCounts") or {},
+        "pluginSnapshotConversionWarnings": status.get("pluginSnapshotConversionWarnings") or [],
+        "pluginSnapshotWorldTargetsBuilt": status.get("pluginSnapshotWorldTargetsBuilt"),
+        "pluginSnapshotCandidatesBeforeFilters": status.get("pluginSnapshotCandidatesBeforeFilters"),
+        "pluginSnapshotCandidateRejectReasons": status.get("pluginSnapshotCandidateRejectReasons") or {},
+        "pluginSnapshotLastIncompleteReason": status.get("pluginSnapshotLastIncompleteReason"),
+        "compactStreamConnected": status.get("compactStreamConnected"),
+        "compactStreamPacketsByType": status.get("compactStreamPacketsByType") or {},
+        "compactStreamLatestTickByType": status.get("compactStreamLatestTickByType") or {},
+        "compactStreamMissingRequiredTypesForLatestTick": status.get("compactStreamMissingRequiredTypesForLatestTick") or [],
+        "compactStreamTickBufferSize": status.get("compactStreamTickBufferSize"),
+        "compactStreamTicksWaitingForProjection": status.get("compactStreamTicksWaitingForProjection"),
+        "compactLiveStreamPacketsOfferedByType": status.get("compactLiveStreamPacketsOfferedByType") or {},
+        "compactLiveStreamPacketsSentByType": status.get("compactLiveStreamPacketsSentByType") or status.get("compactLiveStreamPacketsByType") or {},
+        "compactLiveStreamPacketsDroppedByType": status.get("compactLiveStreamPacketsDroppedByType") or {},
+        "compactLiveStreamCircuitBreakerTripped": status.get("compactLiveStreamCircuitBreakerTripped"),
         "player": compare_player_summary(result),
         "candidateCount": len(candidates),
         "candidateCountsByClassId": status.get("candidateCountsByClassId") or {},
@@ -5693,6 +8313,11 @@ def compare_result_summary(result: dict | None) -> dict:
         "liveness": compare_liveness_summary(result),
         "sourceSceneKnowledgeComplete": status.get("sourceSceneKnowledgeComplete"),
         "sourceCapHit": status.get("sourceCapHit"),
+        "syntheticVisibleRefsExpectedPathCount": status.get("syntheticVisibleRefsExpectedPathCount"),
+        "syntheticSceneObjectRefsAtExpectedPath": status.get("syntheticSceneObjectRefsAtExpectedPath"),
+        "syntheticRefsAcceptedForWorldTargets": status.get("syntheticRefsAcceptedForWorldTargets"),
+        "syntheticRefPathCounts": status.get("syntheticRefPathCounts") or {},
+        "worldTargetsBuilt": status.get("worldTargetsBuilt"),
         "missingFieldWarnings": [
             warning
             for warning in status.get("warnings") or []
@@ -5717,56 +8342,193 @@ def run_compare_source(session: Path, args, input_source: str) -> dict | None:
         return None
     if input_source == RAW_TICK_SOURCE and not processor.raw_ticks_available:
         return None
+    if input_source in {COMPACT_STREAM_SOURCE, PLUGIN_SNAPSHOT_SOURCE}:
+        try:
+            _added, result = processor.poll_once()
+            return result
+        finally:
+            if hasattr(processor.tailer, "close"):
+                processor.tailer.close()
     processor.initialize_from_existing()
     return processor.process_window(force_rebuild=args.force_window_rebuild, rebuild_reason=f"compare-{input_source}")
 
 
+def tier_compare_summary(summary: dict, compact_summary: dict) -> dict:
+    best_match = bool(summary.get("bestTree")) and summary.get("bestTree") == compact_summary.get("bestTree")
+    nearest_match = bool(summary.get("nearestTree")) and summary.get("nearestTree") == compact_summary.get("nearestTree")
+    compact_count = int(compact_summary.get("candidateCount") or 0)
+    candidate_count = int(summary.get("candidateCount") or 0)
+    breadth_ratio = (candidate_count / compact_count) if compact_count > 0 else None
+    return {
+        "tier": summary.get("pluginSnapshotTier"),
+        "available": bool(summary.get("available")),
+        "status": summary.get("pluginSnapshotStatus"),
+        "candidateCount": candidate_count,
+        "compactCandidateCount": compact_count,
+        "candidateBreadthRatio": round(breadth_ratio, 3) if breadth_ratio is not None else None,
+        "bestTreeMatches": best_match,
+        "nearestTreeMatches": nearest_match,
+        "viableForBestNearest": best_match and nearest_match,
+        "projectionRefs": summary.get("pluginSnapshotProjectionRefs"),
+        "projectionCapped": summary.get("pluginSnapshotProjectionCapped"),
+        "responseBytes": summary.get("pluginSnapshotResponseBytes"),
+        "responseSizing": summary.get("pluginSnapshotResponseSizing") or {},
+        "warnings": summary.get("pluginSnapshotWarnings") or [],
+        "missingCapabilities": summary.get("pluginSnapshotMissingCapabilities") or [],
+    }
+
+
+def plugin_snapshot_tier_result(session: Path, args, tier: str) -> dict | None:
+    tier_args = args_copy(
+        args,
+        input_source=PLUGIN_SNAPSHOT_SOURCE,
+        plugin_snapshot_tier=tier,
+        plugin_snapshot_max_projection_refs=None,
+        plugin_snapshot_auto_escalate=False,
+    )
+    return run_compare_source(session, tier_args, PLUGIN_SNAPSHOT_SOURCE)
+
+
+def recommended_plugin_snapshot_tier(tier_summaries: dict) -> str:
+    hot = tier_summaries.get("hot") or {}
+    expanded = tier_summaries.get("expanded") or {}
+    if hot.get("viableForBestNearest"):
+        return "hot"
+    if expanded.get("viableForBestNearest") or int(expanded.get("candidateCount") or 0) > int(hot.get("candidateCount") or 0):
+        return "expanded"
+    return "compact-packets"
+
+
 def compare_input_sources(session: Path, args) -> int:
-    raw_result = run_compare_source(session, args, RAW_TICK_SOURCE)
-    compact_result = run_compare_source(session, args, COMPACT_PACKET_SOURCE)
-    raw_summary = compare_result_summary(raw_result)
-    compact_summary = compare_result_summary(compact_result)
+    mode = args.compare_input_sources
+    if mode is True:
+        mode = "raw-vs-file"
+    if not mode:
+        mode = "raw-vs-file"
+
+    left_source = (
+        COMPACT_STREAM_SOURCE
+        if mode == "stream-vs-file"
+        else PLUGIN_SNAPSHOT_SOURCE
+        if mode == "plugin-snapshot-vs-file"
+        else RAW_TICK_SOURCE
+    )
+    right_source = COMPACT_PACKET_SOURCE
+    left_result = run_compare_source(session, args, left_source)
+    right_result = run_compare_source(session, args, right_source)
+    left_summary = compare_result_summary(left_result)
+    right_summary = compare_result_summary(right_result)
+    tier_summaries = {}
+    if mode == "plugin-snapshot-vs-file":
+        for tier in ("hot", "expanded"):
+            tier_result = plugin_snapshot_tier_result(session, args, tier)
+            tier_summaries[tier] = tier_compare_summary(compare_result_summary(tier_result), right_summary)
 
     warnings = []
     failures = []
-    if not raw_summary.get("available"):
-        failures.append("raw tick source unavailable")
-    if not compact_summary.get("available"):
+    if not left_summary.get("available"):
+        failures.append(f"{left_source} source unavailable")
+    if not right_summary.get("available"):
         failures.append("compact packet source unavailable")
 
     status = "FAIL" if failures else "PASS"
     if status == "PASS":
-        if raw_summary.get("latestTick") != compact_summary.get("latestTick"):
+        if mode == "stream-vs-file":
+            stream_types = left_summary.get("compactStreamPacketsByType") or {}
+            stream_offered_types = left_summary.get("compactLiveStreamPacketsOfferedByType") or {}
+            stream_sent_types = left_summary.get("compactLiveStreamPacketsSentByType") or {}
+            stream_dropped_types = left_summary.get("compactLiveStreamPacketsDroppedByType") or {}
+            file_candidate_count = int(right_summary.get("candidateCount") or 0)
+            if COMPACT_PACKET_TYPES["projection"] not in stream_types and file_candidate_count > 0:
+                failures.append("stream has no projection packets while compact packet file mode has candidates")
+            if stream_offered_types and COMPACT_PACKET_TYPES["projection"] not in stream_offered_types and file_candidate_count > 0:
+                failures.append("Java stream publisher has not offered projection packets")
+            if stream_offered_types.get(COMPACT_PACKET_TYPES["projection"]) and not stream_sent_types.get(COMPACT_PACKET_TYPES["projection"]):
+                warnings.append("Java stream publisher offered projection packets but has not sent them to the stream client")
+            if stream_dropped_types.get(COMPACT_PACKET_TYPES["projection"]):
+                warnings.append("Java stream publisher dropped projection packets")
+            if left_summary.get("compactLiveStreamCircuitBreakerTripped"):
+                warnings.append("Java stream circuit breaker is tripped")
+            if left_summary.get("compactStreamMissingRequiredTypesForLatestTick"):
+                warnings.append(
+                    "stream latest buffered tick is incomplete: "
+                    + ", ".join(left_summary.get("compactStreamMissingRequiredTypesForLatestTick") or [])
+                )
+            if not left_summary.get("compactStreamConnected"):
+                warnings.append("stream is not currently connected")
+        if mode == "plugin-snapshot-vs-file":
+            file_candidate_count = int(right_summary.get("candidateCount") or 0)
+            snapshot_payload_types = set(left_summary.get("pluginSnapshotPayloadTypes") or [])
+            if "projection" not in snapshot_payload_types and file_candidate_count > 0:
+                failures.append("plugin snapshot has no projection payload while compact packet file mode has candidates")
+            if left_summary.get("pluginSnapshotProjectionRefListPath") is None and file_candidate_count > 0:
+                failures.append("plugin snapshot projection payload shape mismatch: no recognized projection ref list")
+            if int(left_summary.get("pluginSnapshotRefsConverted") or 0) <= 0 and file_candidate_count > 0:
+                failures.append("plugin snapshot converted no projection refs while compact packet file mode has candidates")
+            if int(left_summary.get("pluginSnapshotVisibleRefsExpectedPathCount") or 0) <= 0 and int(left_summary.get("pluginSnapshotRefsConverted") or 0) > 0:
+                failures.append("plugin snapshot converted refs but did not place them at visibleSceneObjectRefs")
+            if int(left_summary.get("pluginSnapshotRefsAcceptedForWorldTargets") or 0) <= 0 and int(left_summary.get("pluginSnapshotVisibleRefsExpectedPathCount") or 0) > 0:
+                failures.append("plugin snapshot visible refs were not accepted by the world-target source reader")
+            if int(left_summary.get("pluginSnapshotWorldTargetsBuilt") or 0) <= 0 and file_candidate_count > 0:
+                failures.append("plugin snapshot built no world targets while compact packet file mode has candidates")
+            if not left_summary.get("pluginSnapshotAvailable"):
+                failures.append("plugin snapshot endpoint unavailable")
+            if left_summary.get("pluginSnapshotStatus") == "FAIL":
+                failures.append("plugin snapshot endpoint returned FAIL")
+                if left_summary.get("pluginSnapshotErrorCode") == "response_too_large":
+                    sizing = left_summary.get("pluginSnapshotResponseSizing") or {}
+                    warnings.append(
+                        "plugin snapshot endpoint is available but response exceeded size limit"
+                        + (f": {json.dumps(sizing, sort_keys=True)}" if sizing else "")
+                    )
+            if left_summary.get("pluginSnapshotProjectionCapped"):
+                warnings.append("plugin snapshot projection refs were capped")
+                if file_candidate_count > 0 and int(left_summary.get("candidateCount") or 0) <= 0:
+                    warnings.append("projection cap may exclude candidate refs; raise --plugin-snapshot-max-projection-refs and the plugin endpoint cap carefully if response sizing allows")
+            hot_tier = tier_summaries.get("hot") or {}
+            if hot_tier.get("viableForBestNearest") and hot_tier.get("candidateBreadthRatio") is not None and hot_tier.get("candidateBreadthRatio") < 1.0:
+                warnings.append("hot tier found correct best/nearest but has reduced candidate breadth")
+            if left_summary.get("pluginSnapshotMissingCapabilities"):
+                warnings.append("plugin snapshot missing capabilities: " + ", ".join(left_summary.get("pluginSnapshotMissingCapabilities") or []))
+            if left_summary.get("pluginSnapshotConversionWarnings"):
+                warnings.extend(str(item) for item in left_summary.get("pluginSnapshotConversionWarnings") or [])
+            if left_summary.get("pluginSnapshotCandidateRejectReasons"):
+                warnings.append("plugin snapshot candidate reject reasons: " + json.dumps(left_summary.get("pluginSnapshotCandidateRejectReasons"), sort_keys=True))
+            if left_summary.get("pluginSnapshotRefsIgnoredReasons"):
+                warnings.append("plugin snapshot synthetic ref ignored reasons: " + json.dumps(left_summary.get("pluginSnapshotRefsIgnoredReasons"), sort_keys=True))
+            if left_summary.get("pluginSnapshotLastIncompleteReason"):
+                warnings.append(str(left_summary.get("pluginSnapshotLastIncompleteReason")))
+        if left_summary.get("latestTick") != right_summary.get("latestTick"):
             warnings.append("latest tick differs")
-        if raw_summary.get("player") != compact_summary.get("player"):
+        if left_summary.get("player") != right_summary.get("player"):
             warnings.append("player baseline differs")
-        if raw_summary.get("candidateCount") != compact_summary.get("candidateCount"):
+        if left_summary.get("candidateCount") != right_summary.get("candidateCount"):
             warnings.append("candidate counts differ")
-        if raw_summary.get("bestTree") != compact_summary.get("bestTree"):
+        if left_summary.get("bestTree") != right_summary.get("bestTree"):
             failures.append("best tree candidate differs")
-        if raw_summary.get("nearestTree") != compact_summary.get("nearestTree"):
+        if left_summary.get("nearestTree") != right_summary.get("nearestTree"):
             failures.append("nearest tree candidate differs")
-        raw_inventory = raw_summary.get("inventory") or {}
-        compact_inventory = compact_summary.get("inventory") or {}
-        if raw_inventory.get("known") and compact_inventory.get("known") and not compare_inventory_core_matches(raw_inventory, compact_inventory):
+        left_inventory = left_summary.get("inventory") or {}
+        right_inventory = right_summary.get("inventory") or {}
+        if left_inventory.get("known") and right_inventory.get("known") and not compare_inventory_core_matches(left_inventory, right_inventory):
             failures.append("inventory slot/quantity summary differs")
-        elif raw_inventory != compact_inventory:
+        elif left_inventory != right_inventory:
             warnings.append("inventory summary differs or is missing optional fields")
-        if raw_inventory.get("signature") and compact_inventory.get("signature") and raw_inventory.get("signature") != compact_inventory.get("signature"):
+        if left_inventory.get("signature") and right_inventory.get("signature") and left_inventory.get("signature") != right_inventory.get("signature"):
             warnings.append("inventory signatures differ or use different formats")
-        raw_complete = raw_summary.get("sourceSceneKnowledgeComplete")
-        compact_complete = compact_summary.get("sourceSceneKnowledgeComplete")
-        if raw_complete is not None and compact_complete is not None and raw_complete != compact_complete:
+        left_complete = left_summary.get("sourceSceneKnowledgeComplete")
+        right_complete = right_summary.get("sourceSceneKnowledgeComplete")
+        if left_complete is not None and right_complete is not None and left_complete != right_complete:
             failures.append("sourceSceneKnowledgeComplete differs")
-        elif raw_complete != compact_complete:
+        elif left_complete != right_complete:
             warnings.append("sourceSceneKnowledgeComplete is missing from one source")
-        raw_cap_hit = raw_summary.get("sourceCapHit")
-        compact_cap_hit = compact_summary.get("sourceCapHit")
-        if raw_cap_hit is not None and compact_cap_hit is not None and raw_cap_hit != compact_cap_hit:
+        left_cap_hit = left_summary.get("sourceCapHit")
+        right_cap_hit = right_summary.get("sourceCapHit")
+        if left_cap_hit is not None and right_cap_hit is not None and left_cap_hit != right_cap_hit:
             failures.append("sourceCapHit differs")
-        elif raw_cap_hit != compact_cap_hit:
+        elif left_cap_hit != right_cap_hit:
             warnings.append("sourceCapHit is missing from one source")
-        if raw_summary.get("liveness") != compact_summary.get("liveness"):
+        if left_summary.get("liveness") != right_summary.get("liveness"):
             warnings.append("liveness summary differs")
 
     if failures:
@@ -5779,8 +8541,29 @@ def compare_input_sources(session: Path, args) -> int:
         "status": status,
         "sessionPath": str(session),
         "profile": args.profile,
-        "rawTicks": raw_summary,
-        "compactPackets": compact_summary,
+        "mode": mode,
+        "leftSource": left_source,
+        "rightSource": right_source,
+        "pluginSnapshotTiers": tier_summaries if mode == "plugin-snapshot-vs-file" else None,
+        "recommendedPluginSnapshotTier": recommended_plugin_snapshot_tier(tier_summaries) if mode == "plugin-snapshot-vs-file" else None,
+        "conversionParity": {
+            "pluginSyntheticVisibleRefsExpectedPathCount": left_summary.get("pluginSnapshotVisibleRefsExpectedPathCount") if left_source == PLUGIN_SNAPSHOT_SOURCE else None,
+            "compactSyntheticVisibleRefsExpectedPathCount": right_summary.get("syntheticVisibleRefsExpectedPathCount"),
+            "pluginRefsAcceptedForWorldTargets": left_summary.get("pluginSnapshotRefsAcceptedForWorldTargets") if left_source == PLUGIN_SNAPSHOT_SOURCE else None,
+            "compactRefsAcceptedForWorldTargets": right_summary.get("syntheticRefsAcceptedForWorldTargets"),
+            "pluginWorldTargetsBuilt": left_summary.get("pluginSnapshotWorldTargetsBuilt") if left_source == PLUGIN_SNAPSHOT_SOURCE else None,
+            "compactWorldTargetsBuilt": right_summary.get("worldTargetsBuilt"),
+            "refPathMismatch": (
+                bool(left_summary.get("pluginSnapshotRefsConverted"))
+                and int(left_summary.get("pluginSnapshotVisibleRefsExpectedPathCount") or 0) <= 0
+            ) if left_source == PLUGIN_SNAPSHOT_SOURCE else None,
+            "pluginRefPathCounts": left_summary.get("pluginSnapshotRefPathCounts") if left_source == PLUGIN_SNAPSHOT_SOURCE else {},
+            "compactRefPathCounts": right_summary.get("syntheticRefPathCounts") or {},
+        } if mode == "plugin-snapshot-vs-file" else None,
+        "rawTicks": left_summary if left_source == RAW_TICK_SOURCE else None,
+        "compactStream": left_summary if left_source == COMPACT_STREAM_SOURCE else None,
+        "pluginSnapshot": left_summary if left_source == PLUGIN_SNAPSHOT_SOURCE else None,
+        "compactPackets": right_summary,
         "warnings": warnings,
         "failures": failures,
     }
@@ -5790,9 +8573,9 @@ def compare_input_sources(session: Path, args) -> int:
 
 def compact_required_error() -> str:
     return (
-        "Compact live packets are required but unavailable. Enable compact live packets in the RuneLite telemetry "
-        "config, collect a fresh session, then verify with "
-        "inspect_live_packets.py --latest-session --summary."
+        "A compact live input is required but unavailable. Enable compact live stream or compact live packet files "
+        "in the RuneLite telemetry config, collect fresh telemetry, then verify stream mode or run "
+        "inspect_live_packets.py --latest-session --summary for the file bridge."
     )
 
 
@@ -5806,8 +8589,37 @@ def parse_args():
     parser.add_argument("--session", help="Explicit telemetry session directory.")
     parser.add_argument("--sessions-dir", help="Override telemetry sessions directory when --latest-session is used.")
     parser.add_argument("--latest-session", action="store_true", help="Use the newest available session when --session is omitted.")
-    parser.add_argument("--input-source", choices=sorted(INPUT_SOURCES), default="auto", help="Read source for live processing. Auto prefers compact live packets when available. Default: auto.")
-    parser.add_argument("--compare-input-sources", action="store_true", help="Compare compact-packet and raw-tick candidate output for the selected/latest window, then exit.")
+    parser.add_argument("--input-source", choices=sorted(INPUT_SOURCES), default="auto", help="Read source for live processing. Auto prefers compact packet files, then experimental compact stream, then raw ticks. plugin-snapshot is experimental and only used when explicitly selected or --auto-prefer-plugin-snapshot is passed. Default: auto.")
+    parser.add_argument("--compact-stream-host", default="127.0.0.1", help="Local compact stream host. Default: 127.0.0.1.")
+    parser.add_argument("--compact-stream-port", type=int, default=8891, help="Local compact stream TCP port. Default: 8891.")
+    parser.add_argument("--compact-stream-timeout", type=positive_float, default=0.1, help="Compact stream connect/read timeout in seconds. Default: 0.1.")
+    parser.add_argument("--stream-fallback-to-compact-packets", action="store_true", help="Allow explicit compact-stream mode to fall back to compact packet files when required stream packet types do not arrive.")
+    parser.add_argument("--stream-required-types-timeout", type=positive_float, default=2.0, help="Seconds to wait after first stream packet before fallback/warning when required stream packet types are missing. Default: 2.")
+    parser.add_argument("--plugin-snapshot-host", default="127.0.0.1", help="Experimental plugin snapshot endpoint host. Default: 127.0.0.1.")
+    parser.add_argument("--plugin-snapshot-port", type=int, default=8893, help="Experimental plugin snapshot endpoint port. Default: 8893.")
+    parser.add_argument("--plugin-snapshot-token", default="", help="Optional X-Plugin-Snapshot-Token header value.")
+    parser.add_argument("--plugin-snapshot-timeout", type=positive_float, default=0.5, help="Plugin snapshot request timeout in seconds. Default: 0.5.")
+    parser.add_argument("--plugin-snapshot-tier", choices=sorted(PLUGIN_SNAPSHOT_TIERS), default=PLUGIN_SNAPSHOT_DEFAULT_TIER, help="Experimental snapshot working-set tier: hot is small/fast, expanded is broader, audit asks for a large bounded debug set. Default: hot.")
+    parser.add_argument(
+        "--plugin-snapshot-max-projection-refs",
+        type=non_negative_int,
+        help="Override the projection ref cap requested from the plugin snapshot endpoint. Default comes from --plugin-snapshot-tier.",
+    )
+    parser.add_argument("--plugin-snapshot-max-age-ticks", type=non_negative_int, default=5, help="Maximum accepted cached payload age in ticks for plugin snapshot requests. Default: 5.")
+    parser.add_argument("--plugin-snapshot-include-geometry", action="store_true", help="Ask the experimental plugin snapshot endpoint to include debug geometry when available.")
+    parser.add_argument("--plugin-snapshot-response-mode", choices=["compact", "normal", "full"], default="compact", help="Plugin snapshot response mode. Default: compact.")
+    parser.add_argument("--plugin-snapshot-projection-field-mode", choices=sorted(PLUGIN_SNAPSHOT_PROJECTION_FIELD_MODES), default="compact", help="Projection ref field set requested from the experimental plugin snapshot endpoint. Default: compact.")
+    parser.add_argument("--plugin-snapshot-fallback", choices=["none", COMPACT_PACKET_SOURCE], default="none", help="Fallback for explicit plugin-snapshot mode when the endpoint is unavailable or incomplete. Default: none.")
+    parser.add_argument("--plugin-snapshot-auto-escalate", action="store_true", help="Retry one plugin-snapshot poll at expanded tier when hot tier returns too few candidates. Experimental; default off.")
+    parser.add_argument("--plugin-snapshot-min-candidates", type=non_negative_int, default=1, help="Candidate count threshold used by --plugin-snapshot-auto-escalate. Default: 1.")
+    parser.add_argument("--auto-prefer-plugin-snapshot", action="store_true", help="Experimental: allow --input-source auto to prefer plugin-snapshot when its endpoint probes healthy.")
+    parser.add_argument(
+        "--compare-input-sources",
+        nargs="?",
+        const="raw-vs-file",
+        choices=sorted(COMPARE_INPUT_SOURCE_MODES),
+        help="Compare input sources for the selected/latest window, then exit. Modes: raw-vs-file (default flag behavior), stream-vs-file, or plugin-snapshot-vs-file.",
+    )
     parser.add_argument("--require-compact-packets", action="store_true", help="Fail fast unless compact live packets are available and recent; do not fall back to raw ticks.")
     parser.add_argument(
         "--profile",
@@ -5869,6 +8681,10 @@ def parse_args():
 
     if args.require_compact_packets and args.input_source == RAW_TICK_SOURCE:
         parser.error("--require-compact-packets cannot be combined with --input-source raw-ticks")
+    if args.compact_stream_port < 1 or args.compact_stream_port > 65535:
+        parser.error("--compact-stream-port must be between 1 and 65535")
+    if args.plugin_snapshot_port < 1 or args.plugin_snapshot_port > 65535:
+        parser.error("--plugin-snapshot-port must be between 1 and 65535")
 
     if not args.once and not args.follow:
         args.once = True
@@ -5919,12 +8735,16 @@ def main() -> int:
 
     processor = LiveTargetProcessor(session, args)
     if args.require_compact_packets and (
-        not processor.compact_packets_available
-        or not processor.compact_packets_recent
-        or processor.input_source_active != COMPACT_PACKET_SOURCE
+        processor.input_source_active not in COMPACT_INPUT_SOURCES
+        or (
+            processor.input_source_active == COMPACT_PACKET_SOURCE
+            and (not processor.compact_packets_available or not processor.compact_packets_recent)
+        )
     ):
         print(compact_required_error())
         print(f"session: {session}")
+        print(f"compactStream: {args.compact_stream_host}:{args.compact_stream_port}")
+        print(f"compactStreamAvailable: {str(bool(processor.compact_stream_state.get('available'))).lower()}")
         print(f"compactPacketIndexPath: {processor.compact_packet_state.get('indexPath')}")
         print(f"compactPacketLatestSegment: {processor.compact_packet_state.get('latestSegment')}")
         print(f"compactPacketsRecent: {str(bool(processor.compact_packets_recent)).lower()}")

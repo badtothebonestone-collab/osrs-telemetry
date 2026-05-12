@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+COMMANDS = [
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\resource_progress.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\brain_core.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\live_core_daemon.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\diagnose_brain_progress.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\live_control_panel.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\live_config_doctor.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\run_daily_gauntlet.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\run_stabilization_suite.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_resource_progress.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_brain_core.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_live_core_daemon.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_live_config_doctor.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_live_control_panel.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_diagnose_brain_progress.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_run_daily_gauntlet.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_context_service.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_live_target_processor.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_live_packet_reader.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_inspect_live_packets.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_telemetry_paths.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_diagnose_target_coverage.py"],
+]
+
+
+def command_text(command: list[str]) -> str:
+    return subprocess.list2cmdline(command)
+
+
+def tail_lines(text: str, limit: int = 40) -> str:
+    lines = text.splitlines()
+    return "\n".join(lines[-limit:])
+
+
+def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=str(PROJECT_ROOT), capture_output=True, text=True, check=False)
+
+
+def main() -> int:
+    for index, command in enumerate(COMMANDS, start=1):
+        print(f"[{index}/{len(COMMANDS)}] {command_text(command)}")
+        completed = run_command(command)
+        output = (completed.stdout or "") + (completed.stderr or "")
+        if completed.returncode != 0:
+            print("")
+            print("FAIL")
+            print(f"failed command: {command_text(command)}")
+            print("")
+            print("last 40 lines:")
+            print(tail_lines(output) or "(no output)")
+            print("")
+            print(f"recommended next command: {command_text(command)}")
+            return completed.returncode or 1
+    print("")
+    print("PASS")
+    print("stabilization suite completed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

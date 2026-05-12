@@ -9,8 +9,8 @@ optional debug/audit output rather than the live substrate.
 
 | Mode | Normal files written | Raw/debug files |
 | --- | --- | --- |
-| `LIVE_COMPACT_ONLY` | `live_packets\live-*.ndjson`, `live_packet_index.json`, rolling `interaction_geometry\live` files | Raw ticks/events/frames disabled |
-| `LIVE_COMPACT_WITH_FRAMES` | Compact packets plus rolling live files | Frames enabled at configured interval; raw ticks/events disabled |
+| `LIVE_COMPACT_ONLY` | `live_packets\live-*.ndjson` by default; daily daemon keeps context in memory and writes only optional overlay state | Raw ticks/events/frames disabled |
+| `LIVE_COMPACT_WITH_FRAMES` | Compact packets plus optional visual QA frames; rolling live files only if legacy/debug tools are explicitly started | Frames enabled at configured interval; raw ticks/events disabled |
 | `DEBUG_RECORDING` | Compact packets when enabled | Full raw tick/event/frame recording for replay, audit, batch geometry, and training |
 | `HYBRID_DEBUG` | Compact packets | Reserved for sampled or warning-triggered raw snapshots |
 
@@ -121,8 +121,10 @@ client-state mutation.
 
 ## Compact Live Packets
 
-Compact live packets are the default staged bridge for live sidecars. In
-normal live mode they are written without raw tick/event/frame recording under:
+Compact live packets are the default staged bridge for live sidecars. Normal
+live mode uses the compact packet file bridge; the local TCP stream is
+experimental and optional. The file bridge writes without raw tick/event/frame recording
+under:
 
 ```text
 live_packets\live-*.ndjson
@@ -149,6 +151,375 @@ input hooks, clicking, menu invocation, automation, action routing, or
 client-state mutation. Python sidecars still own target libraries, profiles,
 candidate scoring, task interpretation, context responses, QA tooling, and any
 future vision/model work.
+
+## Live Config Doctor
+
+`live_config_doctor.py` emits `live_config_doctor.v1`. It is a read-only
+workflow diagnostic that inspects the current session files and optional local
+health endpoints.
+
+Top-level fields:
+
+- `schema`
+- `generatedAtUtc`
+- `mode`: `daily`, `visual_qa`, `debug_audit`, or
+  `plugin_snapshot_experimental`
+- `status`: `PASS`, `WARN`, or `FAIL`
+- `sessionPath`
+- `summary`
+- `compactPackets`
+- `stream`
+- `pluginSnapshot`
+- `contextService`
+- `processes`
+- `issues`
+- `warnings`
+- `failures`
+- `fixSuggestions`
+- `topWarnings`
+
+The `summary` object normalizes the fields that most often cause live-stack
+confusion: active input source, recording mode, raw tick/event/frame flags,
+compact packet availability and recency, compact stream state, plugin-snapshot
+state, `windowTicks`, `candidateOutputWindow`, `livenessMode`, overlay target
+count/limit, overlay geometry mode, collision-window status, budget status, and
+write failures.
+
+Each issue has:
+
+- `severity`: `WARN` or `FAIL`
+- `code`: stable machine-readable diagnosis code
+- `message`: human-readable finding
+- `suggestion`: optional copy/paste fix suggestion
+
+The doctor does not edit RuneLite config. Preset modes only classify the current
+configuration and explain what to change manually.
+
+## Workflow Presets
+
+The plugin exposes fixed telemetry workflow presets through RuneLite config and,
+when the plugin snapshot endpoint is enabled, through localhost preset
+endpoints. Presets mutate telemetry plugin configuration only; they do not call
+RuneLite Client APIs, click, type, invoke menus, execute in-game commands, or
+mutate game state.
+
+Preset config keys:
+
+- `workflowPreset`: `DAILY_LIVE`, `VISUAL_QA`, `DEBUG_AUDIT`,
+  `PLUGIN_SNAPSHOT_EXPERIMENTAL`, or `CUSTOM`
+- `presetPreviewOnly`: preview selected preset without saving changes
+- `applyWorkflowPreset`: toggle trigger that applies the selected preset and
+  resets to false
+
+Preset endpoints:
+
+- `GET /presets`
+- `POST /preset/preview`
+- `POST /preset/apply`
+
+`telemetry_preset_request.v1`:
+
+```json
+{
+  "schema": "telemetry_preset_request.v1",
+  "preset": "DAILY_LIVE"
+}
+```
+
+`telemetry_preset_response.v1`:
+
+```json
+{
+  "schema": "telemetry_preset_response.v1",
+  "preset": "DAILY_LIVE",
+  "status": "PASS",
+  "preview": false,
+  "changes": [
+    {
+      "key": "emitCompactLiveStream",
+      "oldValue": "true",
+      "newValue": "false",
+      "changed": true
+    }
+  ],
+  "warnings": [],
+  "readOnlyGameState": true
+}
+```
+
+The preset endpoint does not accept arbitrary config keys. The only accepted
+input is a fixed preset name, and only whitelisted `osrs-telemetry` keys are
+changed.
+
+## Plugin Snapshot Bridge
+
+The plugin snapshot bridge is the next read-only bridge shape. It is disabled
+by default and is not the normal live path yet; compact packet files remain the
+stable bridge until `plugin-snapshot-vs-file` comparison passes in the local
+setup.
+
+Java now keeps a small in-memory `PluginLiveCache` of the latest compact packet
+payload by packet type. The cache is updated from the same compact enqueue path
+that feeds the file bridge and experimental stream. Payloads are copied into
+serialized JSON strings, so request handlers never hold mutable capture maps and
+never call RuneLite APIs.
+
+Opt-in config:
+
+- `enablePluginSnapshotEndpoint`: start the local cached snapshot endpoint.
+  Default: false.
+- `pluginSnapshotHost`: default `127.0.0.1`.
+- `pluginSnapshotPort`: default `8893`.
+- `pluginSnapshotAuthToken`: optional `X-Plugin-Snapshot-Token` value.
+- `pluginSnapshotMaxProjectionRefs`: cap for projection refs in responses.
+- `pluginSnapshotMaxResponseBytes`: maximum response size.
+- `pluginSnapshotAllowNonLocalHost`: default false.
+- `pluginSnapshotEnabledInNormalLive`: experimental opt-in only; normal live
+  still uses compact packet files.
+
+Endpoints:
+
+- `GET /health` returns `plugin_snapshot_health.v1` with cache packet types,
+  latest tick/sequence, cache age by type, and cache health counters.
+- `GET /schema` returns supported request/response schemas, needs, and limits.
+- `POST /snapshot` accepts `plugin_snapshot_request.v1` and returns
+  `plugin_snapshot_response.v1` from cached compact payloads only.
+
+Supported snapshot `needs` are `baseline`, `scene_delta`, `projection`,
+`inventory`, `inventory_delta`, `activity`, `navigation`, `collision_window`,
+`writer_health`, and `watch_values`.
+
+Example request:
+
+```json
+{
+  "schema": "plugin_snapshot_request.v1",
+  "requestId": "example",
+  "needs": ["baseline", "projection", "inventory", "navigation", "collision_window", "writer_health"],
+  "snapshotTier": "hot",
+  "profileHint": "woodcutting",
+  "classHint": "tree",
+  "targetTypeHint": "sceneObject",
+  "requireOnScreen": true,
+  "requireGeometryAvailable": true,
+  "desiredClasses": ["tree"],
+  "maxCandidatesHint": 100,
+  "maxAgeTicks": 5,
+  "maxProjectionRefs": 100,
+  "includeGeometry": false,
+  "includeCollisionWindow": true,
+  "includeWatchValues": false,
+  "responseMode": "compact",
+  "projectionFieldMode": "compact"
+}
+```
+
+Snapshot responses include `schema`, `requestId`, `generatedAtUtc`,
+`latestTick`, `snapshotTier`, `status`, `freshness`, `payloads`, `missingCapabilities`,
+`warnings`, `serviceTimingMillis`, `responseSizing`, and `cacheHealth`.
+
+Projection refs are prioritized before capping by generic usefulness:
+on-screen scene objects with geometry, stable IDs/locations, and player-near
+scene coordinates come first. `projectionFieldMode=compact` keeps only
+candidate-building fields and omits heavy geometry/debug metadata. Geometry is
+omitted unless requested, and response payloads are sanitized to remove fields
+that look like input, command, menu, or click-command surfaces. The endpoint has
+no arbitrary file serving and no command routes. If a capped response still
+exceeds `pluginSnapshotMaxResponseBytes`, the endpoint returns
+`errorCode=response_too_large` with `responseSizing` diagnostics; this means the
+endpoint is available but the requested response was too large.
+
+`snapshotTier` gives the endpoint a working-set size target without making the
+cap architectural:
+
+- `hot`: default small working set, currently 100 refs from Python.
+- `expanded`: broader working set, currently 500 refs from Python.
+- `audit`: large bounded debug working set, currently 2000 refs from Python and
+  still limited by endpoint config and `pluginSnapshotMaxResponseBytes`.
+
+Task/profile hints are optional and advisory. Python sends `profileHint`,
+`taskHint`, `classHint`, `targetTypeHint`, `requireOnScreen`,
+`requireGeometryAvailable`, `desiredClasses`, and `maxCandidatesHint` so the
+Java endpoint can prioritize cached refs before capping. The endpoint uses only
+cached projection fields such as name/id/objectKey/targetType/onScreen/geometry;
+request handlers still do not call RuneLite APIs, scan the scene, or execute
+actions.
+
+Python Phase C adds experimental `live_target_processor.py --input-source
+plugin-snapshot`. The processor posts `plugin_snapshot_request.v1` to
+`/snapshot`, asks for cached baseline, scene delta, projection, inventory,
+inventory delta, activity, navigation, collision window, writer health, and
+watch values, then converts the response payloads into the same synthetic tick
+shape used by compact packet files. Context service and brain clients continue
+reading the rolling live output files written by the processor.
+
+Projection conversion accepts both raw payloads and packet-envelope payloads.
+The recognized ref lists are `visibleObjectRefs`, `visibleSceneObjectRefs`,
+`projectedRefs`, `refs`, `targets`, `sceneObjects`, and
+`projectedSceneObjects`. Each ref is normalized into the compact scene-object
+shape used by file input: id/hash/name/kind, world/scene/local coordinates,
+`onScreen`, `geometryAvailable`, aim point, bounds, and optional hull/tile
+geometry. If only sanitized `bounds` are present, Python uses them as compact
+geometry for candidate scoring.
+
+Plugin snapshot processor status fields include:
+
+- `inputSourceActive=plugin-snapshot`
+- `pluginSnapshotAvailable`
+- `pluginSnapshotLatestTick`
+- `pluginSnapshotStatus`
+- `pluginSnapshotWarnings`
+- `pluginSnapshotMissingCapabilities`
+- `pluginSnapshotRequestMillis`
+- `pluginSnapshotHttpRequestMillis`
+- `pluginSnapshotResponseReadMillis`
+- `pluginSnapshotParseMillis`
+- `pluginSnapshotJsonParseMillis`
+- `pluginSnapshotEndpointServiceMillis`
+- `pluginSnapshotConvertMillis`
+- `pluginSnapshotPrefilterMillis`
+- `pluginSnapshotWorldBuildMillis`
+- `pluginSnapshotCandidateSelectMillis`
+- `pluginSnapshotOutputSerializeMillis`
+- `pluginSnapshotOutputWriteMillis`
+- `pluginSnapshotOverlayStateWriteMillis`
+- `pluginSnapshotStatusWriteMillis`
+- `pluginSnapshotTotalActiveMillis`
+- `pluginSnapshotBottleneck`
+- `pluginSnapshotResponseBytes`
+- `pluginSnapshotPayloadTypes`
+- `pluginSnapshotProjectionRefs`
+- `pluginSnapshotProjectionCapped`
+- `pluginSnapshotTier`
+- `pluginSnapshotMaxProjectionRefs`
+- `pluginSnapshotEscalated`
+- `pluginSnapshotEscalationReason`
+- `pluginSnapshotInitialRefs`
+- `pluginSnapshotFinalRefs`
+- `pluginSnapshotProjectionRefListPath`
+- `pluginSnapshotRefsConverted`
+- `pluginSnapshotFieldPresentCounts`
+- `pluginSnapshotFieldMissingCounts`
+- `pluginSnapshotConversionWarnings`
+- `pluginSnapshotWorldTargetsBuilt`
+- `pluginSnapshotCandidatesBeforeFilters`
+- `pluginSnapshotCandidateRejectReasons`
+- `pluginSnapshotTicksSkippedAsUnchanged`
+- `pluginSnapshotNoChangePolls`
+- `pluginSnapshotCandidateSignature`
+- `pluginSnapshotCandidateOutputSkippedUnchanged`
+- `pluginSnapshotOutputBytesSkipped`
+- `pluginSnapshotRefsBeforePrefilter`
+- `pluginSnapshotRefsAfterPrefilter`
+- `pluginSnapshotPrefilterRejectReasons`
+- `pluginSnapshotClassificationCacheSize`
+- `pluginSnapshotClassificationCacheHits`
+- `pluginSnapshotClassificationCacheMisses`
+- `pluginSnapshotHttpConnectionReused`
+- `pluginSnapshotHttpReconnects`
+- `pluginSnapshotEndpointErrors`
+- `pluginSnapshotTimeouts`
+
+The plugin-snapshot timing fields are exclusive where practical and do not
+include follow-mode sleep time. `pluginSnapshotBottleneck` is derived from the
+largest plugin-snapshot bucket and can be one of `endpoint_service`,
+`http_request`, `response_read`, `json_parse`, `conversion`, `prefilter`,
+`world_build`, `candidate_select`, `output_serialize`, `output_write`, or
+`unknown`. Unchanged snapshot ticks skip candidate rebuilding. Unchanged
+candidate signatures skip heavy candidate/world-target output rewrites while
+continuing to refresh lightweight status.
+
+The processor does not make plugin-snapshot the default. `--input-source auto`
+continues to prefer compact packet files unless
+`--auto-prefer-plugin-snapshot` is explicitly supplied. Use
+`--compare-input-sources plugin-snapshot-vs-file` before considering it for a
+normal workflow.
+
+Manual local check after enabling the config:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8893/health
+Invoke-RestMethod http://127.0.0.1:8893/schema
+
+$request = @{
+  schema = "plugin_snapshot_request.v1"
+  needs = @("baseline", "projection", "inventory", "navigation", "collision_window", "writer_health")
+  maxAgeTicks = 5
+  maxProjectionRefs = 100
+  responseMode = "compact"
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8893/snapshot" -Body $request -ContentType "application/json"
+```
+
+Experimental processor commands:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --input-source plugin-snapshot --plugin-snapshot-tier hot --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source plugin-snapshot --plugin-snapshot-tier expanded --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+```
+
+Comparison:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --compare-input-sources plugin-snapshot-vs-file --profile woodcutting --latest 5
+```
+
+Snapshot conversion diagnostic:
+
+```text
+python telemetry-viewer\diagnose_plugin_snapshot.py --latest-session --profile woodcutting --max-projection-refs 500 --dump-synthetic-shape
+python telemetry-viewer\diagnose_plugin_snapshot.py --latest-session --profile woodcutting --tier-sweep
+```
+
+If comparison reports `projection refs capped` and snapshot candidates are zero
+while compact packet files have candidates, the likely cause is cap/order
+coverage rather than missing endpoint health. Increase the request cap and, if
+needed, the RuneLite snapshot endpoint cap while keeping
+`pluginSnapshotMaxResponseBytes` bounded.
+
+If `/snapshot` returns `response_too_large`, the endpoint is reachable but the
+requested capped response exceeded `pluginSnapshotMaxResponseBytes`. Compact
+mode applies `projectionFieldMode=compact`, prioritizes useful refs before the
+cap, and omits heavy geometry/debug fields by default. Tune
+`--plugin-snapshot-max-projection-refs`, `pluginSnapshotMaxProjectionRefs`, and
+`pluginSnapshotMaxResponseBytes` together.
+
+`--dump-synthetic-shape` reports where refs are placed in the internal tick,
+which paths the world-target builder reads (`sceneObjects`,
+`visibleSceneObjectRefs`, and `projectedSceneObjects`), and how many refs are
+accepted before profile/candidate filters. A nonzero converted-ref count with
+zero accepted refs indicates a conversion path mismatch; nonzero accepted refs
+with zero candidates indicates profile/classification or cap coverage.
+
+The first direct stream transport is a localhost TCP NDJSON server inside the
+plugin. It is disabled by default until opted in through RuneLite config:
+
+- `emitCompactLiveStream`: start the loopback stream publisher.
+- `compactLiveStreamHost`: default `127.0.0.1`; non-loopback addresses are
+  rejected by the publisher.
+- `compactLiveStreamPort`: default `8891`.
+- `compactLiveStreamQueueSize`: bounded pending stream packet queue.
+- `compactLiveStreamCircuitBreakerEnabled`: pause stream publishing when stream
+  writes or queue pressure look unsafe.
+- `compactLiveStreamMaxWriteMillis`: stream worker write-time budget before the
+  circuit breaker trips.
+- `compactLiveStreamDisableSeconds`: temporary stream pause after a circuit
+  breaker trip.
+- `compactLiveStreamAlsoWriteFiles`: keep the compact packet file bridge as a
+  debug mirror while the stream is enabled.
+
+The stream sends the same `osrs_telemetry_live_packet.v1` envelope, one JSON
+packet per line. It drops stream packets instead of blocking RuneLite when the
+queue is full or no local consumer is connected. It does not expose remote
+network access by default and does not add input, click, menu, or action fields.
+
+The Python stream consumer buffers packets by tick. A tick is promoted for
+candidate/context generation only after the required baseline and projection
+packets have arrived. Incomplete ticks are retained in a bounded buffer and
+reported through live status instead of clearing the previous good candidate
+context. Stream socket wait/reconnect timing is reported separately from active
+processing time.
 
 Packet types:
 
@@ -192,8 +563,42 @@ Packet types:
 - `live_collision_grid_packet.v1`: optional debug-only full collision flag grid
   packet. Disabled by default; normal live mode emits the summary/hash packet
   instead.
-- `live_writer_health_packet.v1`: raw writer and compact live packet queue,
-  drop, write-error, and frame-drop diagnostics.
+- `live_watch_values_packet.v1`: optional/future compact packet for bounded
+  read-only watch values requested through the context service. Values are
+  keyed by alias and may include `changed`, `unavailableReason`, and budget
+  state. The first implementation exposes builtin watch values from Python and
+  keeps Java dynamic watch polling marked as future.
+- `live_writer_health_packet.v1`: raw writer, compact file bridge, compact
+  stream queue/client/drop/write-error, packet-count-by-type, latest-tick-by-
+  type, and frame-drop diagnostics.
+
+Compact stream status fields written by `live_target_processor.py` include:
+
+- `compactStreamConnected`
+- `compactStreamPacketsSeen`
+- `compactStreamPacketsProcessed`
+- `compactStreamPacketsByType`
+- `compactStreamLatestTickByType`
+- `compactStreamMissingRequiredTypesForLatestTick`
+- `compactStreamTickBufferSize`
+- `compactStreamTicksWaitingForProjection`
+- `compactStreamProcessedCompleteTicks`
+- `compactStreamSkippedIncompleteTicks`
+- `compactStreamReadMillis`
+- `compactStreamParseMillis`
+- `compactStreamWaitMillis`
+- `compactStreamReconnectMillis`
+- `compactStreamDisconnectedDurationMillis`
+- `compactStreamSocketTimeouts`
+- `compactStreamProjectionPacketsSeen`
+- `compactStreamRequiredTypesSatisfied`
+- `compactStreamCanBuildCandidates`
+- `streamFallbackToFile`
+- `streamFallbackReason`
+- `compactLiveStreamPacketsOfferedByType`
+- `compactLiveStreamPacketsSentByType`
+- `compactLiveStreamPacketsDroppedByType`
+- `compactLiveStreamCircuitBreakerTripped`
 
 The defaults preserve existing raw recording behavior and also enable compact
 live packets for normal live mode. Compact packets are bounded by retention:
@@ -202,20 +607,36 @@ the default retained segment count is 16. Older saved RuneLite profiles may
 still have the `emitCompactLivePackets` setting disabled; enable it for normal
 live mode.
 
-Python Phase 2 consumption is source-selectable. The live processor
-supports `--input-source raw-ticks`, `--input-source compact-packets`, and
-`--input-source auto`. Auto mode prefers compact live packets when
-`live_packet_index.json` and a recent latest segment are present, otherwise it
-falls back to raw tick JSONL with a visible warning for backward compatibility
-and audit/debug sessions. `--require-compact-packets` fails fast when compact
-packets are missing or stale, which is useful for proving that live mode is not
-using raw tick fallback.
+Python consumption is source-selectable. The live processor supports
+`--input-source compact-stream`, `--input-source compact-packets`,
+`--input-source raw-ticks`, and `--input-source auto`. Auto mode prefers compact
+packet files when `live_packet_index` and a recent latest segment are present.
+It only tries the experimental stream when packet files are unavailable or
+stale, otherwise it falls back to raw tick JSONL with a visible warning for
+backward compatibility and audit/debug sessions. `--require-compact-packets`
+means a compact transport is required: stream mode satisfies it, and file mode
+still fails fast when packet files are missing or stale.
+
+Daily launcher flows use `--input-source compact-packets --require-compact-packets`.
+If `live_status.json` shows `inputSourceActive=compact-stream`, zero
+candidates, and missing `live_baseline_packet.v1` or
+`live_projection_packet.v1`, the stream transport is incomplete; switch the
+launcher/input source back to compact packet files.
 
 Compact packet mode converts baseline, scene-delta, projection, inventory,
 inventory-delta, activity, navigation, local collision-window, optional debug
-collision-grid, and writer-health packets into the same rolling live candidate files under
+collision-grid, watch-values, and writer-health packets into the same rolling live candidate files under
 `interaction_geometry\live`, so context-service consumers do not need a new
 response schema.
+
+Stream status fields in `live_status.json` include `compactStreamConnected`,
+`compactStreamReconnects`, `compactStreamPacketsSeen`,
+`compactStreamPacketsProcessed`, `compactStreamReadMillis`, and
+`compactStreamParseMillis`. Writer-health packets can additionally report
+`compactLiveStreamClientCount`, `compactLiveStreamPacketsWritten`,
+`compactLiveStreamPacketsDropped`, `compactLiveStreamPacketsDroppedNoClients`,
+`compactLiveStreamWriteErrors`, per-type offered/sent/dropped packet counts,
+and circuit-breaker state.
 
 Compact packet mode is field-tolerant. If a packet omits a value needed by a
 profile, Python marks the capability as missing or warns rather than inventing
@@ -228,6 +649,13 @@ Inventory fields use explicit meanings:
 - `inventorySlotCount` / `slotCount`: known inventory capacity for the packet.
 - `filledSlots`: occupied inventory slots.
 - `freeSlots`: empty inventory slots.
+- `items`: filled item entries. Each entry preserves the real inventory `slot`;
+  consumers must not infer the slot from list position.
+- `items[].slot`: zero-based inventory slot index, normally `0..27` for the
+  backpack.
+- `items[].itemId`: observed item ID.
+- `items[].quantity`: observed item quantity. Missing quantity is interpreted
+  as `1` by progress counters.
 - `itemCount`: compatibility alias for total item quantity across occupied
   slots.
 - `totalItemQuantity`: explicit total quantity sum.
@@ -235,6 +663,16 @@ Inventory fields use explicit meanings:
 - `inventoryDeltaTrackingKnown`: true when the live processor has enough
   rolling tick state or compact delta capability to distinguish "no recent
   change observed" from "delta tracking unavailable."
+- `resourceCounts`: optional compact task resource summaries. For woodcutting,
+  `woodcutting_logs` counts item IDs `1511`, `1521`, `1519`, `1517`, `1515`,
+  and `1513` and includes `byItemId`, `matchedItemIds`, and `matchedSlots`.
+- `slotDiagnostics`: consistency checks for duplicate filled slots, invalid
+  slot indexes, and `filledSlots + freeSlots == inventorySlotCount`.
+
+Compact inventory may omit empty slots, but it must never re-index filled slots
+based on list order. Slot `0`, middle slots, and slot `27` are all valid filled
+positions. Use `diagnose_inventory_slots.py` to inspect the live slot table and
+resource counts when progress appears to miss a specific backpack position.
 
 Activity fields are observed facts. `live_activity_packet.v1` may include
 `previousAnimation`, `previousPoseAnimation`, `previousInteractingSignature`,
@@ -283,6 +721,150 @@ recorded event detail objects.
 The live processor keeps this file bounded by `--event-timeline-limit`
 (default 200) and can skip timeline output with `--disable-event-timeline`.
 
+## Capability Registry and Watch Requests
+
+`telemetry-viewer\capability_registry.json` uses schema
+`capability_registry.v1`. Each capability entry includes:
+
+- `id`
+- `description`
+- `status`: `available`, `watchable`, `unavailable`, `debug_only`, or `future`
+- `source`: compact packet type, live file, context endpoint, or future Java API
+- `updateFrequency`
+- `latencyClass`
+- `normalLiveAllowed`
+- `debugAuditOnly`
+- `missingReason`
+- `relatedTasks`
+
+The context service adds runtime status through `GET /capabilities`, including
+whether a capability is available now, missing/stale, watchable, or unsupported
+for the current live session.
+
+`telemetry-viewer\watch_library.json` uses schema `watch_library.v1`. Watch
+definitions are conservative and bounded:
+
+- `alias`
+- `type`: `varbit`, `varp`, `varclient_int`, `varclient_str`,
+  `item_container`, `widget_summary`, or `builtin`
+- `id`, `group`, `child`, or `containerId` when applicable
+- `sampleMode`: `on_change`, `every_tick`, or `interval`
+- `intervalTicks`
+- `ttlTicks`
+- `maxEmitPerTick`
+- `normalLiveAllowed`
+- `debugAuditOnly`
+
+`POST /watch-request` accepts schema `context_watch_request.v1` and returns
+`context_watch_response.v1`. Requests are rejected if they contain wildcard or
+unbounded identifiers, unsupported types, action/input/menu fields, unsafe
+normal-live settings, or limit violations. Accepted requests are written to the
+small bounded request file:
+
+```text
+<session>\live_requests\watch_requests.json
+```
+
+The first implementation writes and validates the request file and exposes
+builtin watch values in:
+
+```text
+<session>\interaction_geometry\live\live_watch_values.json
+```
+
+Java-side dynamic watch polling and `live_watch_values_packet.v1` emission are
+marked as a future capability unless explicitly implemented later. Watch values
+are read-only observations and never contain click, input, movement, menu, or
+action commands.
+
+## Brain Core Resource Progress
+
+`telemetry-viewer\task_resources.json` uses schema `task_resources.v1`. It
+maps task resource groups to item IDs so external read-only clients can count
+task resources from compact inventory snapshots. The initial `woodcutting`
+resource group is `woodcutting_logs` and includes log item IDs:
+
+- `1511` logs
+- `1521` oak logs
+- `1519` willow logs
+- `1517` maple logs
+- `1515` yew logs
+- `1513` magic logs
+
+`brain_core.py` can persist `brain_state.v1`. Daily resource progress is
+computed by `telemetry-viewer\resource_progress.py` and uses
+`resource_progress_state.v1` inside `brain_state.v1.resourceProgress`.
+The daily policy is monotonic held-vs-baseline for the current baseline:
+
+```text
+displayedGoalProgress = max(previousDisplayedGoalProgress, currentHeldCount - baselineHeldCount, 0)
+```
+
+Old cumulative fields are ignored in daily mode.
+
+Resource progress fields include:
+
+- `resourceBaselineCounts`
+- `resourceCurrentCounts`
+- `resourceProgress`
+- `goalResourceGroup`
+- `progressSource`: `inventory_snapshot_held_vs_baseline`,
+  `baseline_initialized`, `baseline_pending`, `inventory_snapshot_invalid`,
+  `observe_only`, or `unknown`
+- `lastInventorySignature`
+- `lastSeenTick`
+
+`brain_decision.v1.progress` reports current held resources, baseline count,
+net change from baseline, matched slots, source, reason, and any resource-count
+warnings. `brain_decision.v1.goalProgress` includes `resourceGroup`,
+`goalCount`, `baselineHeldCount`,
+`baselineEstablished`, `currentHeldCount`, `previousResourceCount`,
+`netChangeFromBaseline`, `displayedGoalProgress`, `gainedSinceStart`,
+`complete`, `source`, `matchedSlots`, `matchedItemIds`,
+`lastProcessedInventorySignature`, `lastProcessedInventoryTick`,
+`duplicateSnapshot`, `progressUpdateApplied`, `progressUpdateReason`, and
+warnings. Deprecated fields such as `observedGained`, `observedRemoved`,
+`cumulativeGained`, and `cumulativeLostOrRemoved` may appear as `null` for
+compatibility and must not be used for daily progress.
+
+The first snapshot after `--reset-brain-state` initializes the baseline and does
+not count currently held logs as newly gained. Later snapshots are idempotent:
+the same inventory signature does not change progress. A lower held count does
+not reduce `gained since start` during the current session/state; this prevents
+stale, skipped, filtered, or budget-limited polls from flashing `0 / goal`.
+Reset brain state or start a new session/state to start a new baseline. Moving a
+log between slots does not count as gaining another log because the total
+resource quantity is unchanged. This is read-only progress interpretation only;
+it does not emit action, click, movement, input, or menu commands.
+
+A valid progress snapshot requires session identity, latest tick, inventory
+signature, known current held count, and either real inventory item slots or
+sufficient task resource counts. If `inventory.items` exists it wins over
+`inventory.resourceCounts`; `itemId=null` is never counted and can never appear
+with `counted=true`. If only `resourceCounts` are available, held count may be
+summary-derived, but matched slots are not fabricated. If the current signature
+is missing, the source is `inventory_snapshot_invalid` or `baseline_pending` and
+no baseline is established.
+
+If an old state file contains nonzero cumulative fields, progress history is
+ignored with:
+
+```text
+old cumulative progress history ignored; daily progress uses held-vs-baseline snapshot count
+```
+
+When `live_core_daemon.py` runs with default writes off, progress diagnostics
+should query daemon memory instead of old rolling files:
+
+```text
+python telemetry-viewer\diagnose_brain_progress.py --from-daemon --daemon-url http://127.0.0.1:8890 --task woodcutting --goal-count 5
+```
+
+In PowerShell, pass persistent state files via a variable such as
+`$brainState = Join-Path $env:USERPROFILE ".osrs-telemetry\brain_state_woodcutting.json"`;
+literal `%USERPROFILE%` paths are a cmd.exe convention and may create confusing
+workspace folders if used directly.
+
 `interaction_geometry\live\overlay_debug_state.json` is a tiny read-only file
 for the optional RuneLite debug overlay. It uses schema
 `telemetry_overlay_debug_state.v1` and is rewritten atomically by the live
@@ -295,10 +877,16 @@ Top-level fields:
 - `profile`
 - `status`
 - `player`: world and scene tile fields.
-- `summary`: candidate count, cap, budget, and write-failure summary.
+- `summary`: candidate count, overlay mode, intent marker count, cap, budget,
+  and write-failure summary.
 - `latestEventSummary`, `latestEventTick`, `warningEventCount`, and legacy
   `lastEventTick`: compact timeline status for the overlay panel.
-- `targets`: capped candidate summaries only.
+- `intentState`: optional `overlay_intent_state.v1` marker payload for daily
+  brain intent overlay mode.
+- `markers`: optional top-level mirror of intent markers for RuneLite overlay
+  compatibility.
+- `targets`: capped candidate summaries in visual/debug mode, or a small
+  drawable view of intent markers in daily mode.
 - `collisionWindow`: availability, bounds, radius, and player scene tile.
 - `safety`: read-only/draw-only flags.
 
@@ -638,6 +1226,118 @@ point-in-time tool-derived values. `export_session.py` writes
 `exports\frame_index_summary.jsonl`, adds frame-index counts and timing
 statistics to `session_index.json`, and joins frame timing into
 `tick_summary.jsonl` by `tickId` when available.
+
+## Streamlined Live Daemon Schemas
+
+`telemetry-viewer\live_core_daemon.py` is the daily in-memory sidecar. Daily
+mode reads compact packet files; cached plugin snapshots are still experimental
+and must be explicitly selected. The daemon builds the same candidate and
+context state as the legacy live processor and serves context-service-compatible
+HTTP responses from memory. It is read-only and does not expose click, mouse,
+keyboard, menu, invoke, execute, or command endpoints.
+
+Health and status endpoints keep the existing schemas:
+
+- `GET /health` returns `context_health.v1` with `service=live_core_daemon`,
+  `liveCoreDaemonActive=true`, `inputSourceActive`, `candidateCount`,
+  `writeDebugLiveFiles`, and `overlayStateWritten`.
+- `GET /status` returns `context_status.v1` with the same daemon markers plus
+  the latest live processor status fields.
+- `POST /context` and `POST /context/batch` return `context_response.v1` from
+  the in-memory live state.
+
+Daily mode does not write rolling live files by default. `--write-overlay-state`
+writes only the capped `telemetry_overlay_debug_state.v1` file for the RuneLite
+debug overlay. `--write-debug-live-files` intentionally re-enables the legacy
+rolling files for debugging:
+
+```text
+interaction_geometry\live\live_status.json
+interaction_geometry\live\live_candidates.jsonl
+interaction_geometry\live\live_context_index.json
+interaction_geometry\live\live_activity_state.json
+interaction_geometry\live\live_navigation_summary.json
+interaction_geometry\live\live_performance_summary.json
+interaction_geometry\live\live_event_timeline.jsonl
+```
+
+Daily overlay mode writes brain intent markers by default:
+
+- `--overlay-mode intent`: write `overlay_intent_state.v1` markers and draw only
+  the selected brain target plus a small backup set.
+- `--overlay-mode candidates`: visual QA path that draws capped candidate
+  markers.
+- `--overlay-mode debug`: broad diagnostic overlay mode.
+
+`overlay_intent_state.v1` appears inside `telemetry_overlay_debug_state.v1` as
+`intentState` and uses:
+
+- `schema`
+- `generatedAtUtc`
+- `latestTick`
+- `activeTask`
+- `activeIntent`
+- `status`
+- `markers[]`
+
+Intent marker fields are generic so future brain tasks can show bankers,
+booths, destination tiles, waypoints, UI targets, warnings, or diagnostics
+without hardcoding woodcutting in the plugin. Supported fields include
+`markerType`, `label`, `reason`, `confidence`, `source`, `targetType`,
+`classId`, `id`, `hash`, `objectKey`, `worldX`, `worldY`, `plane`, `sceneX`,
+`sceneY`, `aimPoint`, `reachability`, `liveness`, and `qualityTier`. Intent
+markers are read-only observations; they do not contain action, click, input,
+keyboard, mouse, menu, invoke, or execute fields.
+
+Daily daemon status may include `overlayMode`, `intentMarkerCount`,
+`candidateMarkersSuppressed`, and `overlayStateBytes`.
+
+When `--brain-task woodcutting` is used, `--goal-count N` enables read-only
+resource progress tracking for `brain_decision.v1`. Without a goal count, the
+daemon treats the brain as observe-only: it may report held log counts, but it
+does not accumulate gained/lost progress or mark a goal complete. File-backed
+brain state is scoped to session path, task, goal count, and resource group;
+`--reset-brain-state` clears the baseline before the next inventory snapshot.
+Normal daily compact mode keeps frame recording off, so missing frame-path
+messages are not considered daily warnings.
+
+Resource progress state uses the `resource_progress_state.v1` schema inside
+`brain_state.v1.resourceProgress`. The tracker stores baseline signature/count,
+last inventory signature/tick, current held count, displayed held-vs-baseline
+goal progress, goal completion, and repair warnings. Daily progress does not use
+observed gained/removed counters. Old state without this schema is not trusted
+for cumulative history.
+`matchedSlotDetails` with `summaryDerived=true` are diagnostic summaries from
+`resourceCounts`; they are not treated as real item slots, and `itemId=null` is
+never counted as a real resource item.
+
+Transient incomplete inventory polls retain the last valid progress result
+instead of recomputing progress as zero. `brain_decision.v1.goalProgress` may
+report:
+
+- `progressRetainedFromPrevious`
+- `retainedReason`
+- `retainedAgeTicks`
+- `progressDropReason`
+- `progressHeldReason`
+- `progressInvalidSnapshotCount`
+- `progressRetainedPreviousCount`
+- `progressFlickerPreventedCount`
+- `lastProgressInvalidReason`
+- `lastProgressRetainedTick`
+- `lastValidProgressTick`
+- `lastValidInventorySignature`
+
+`progressHeldReason=valid_inventory_count_decreased_retained_monotonic_progress`
+means a lower valid held count was observed, but the visible `gained since
+start` value stayed monotonic for the current baseline.
+`progressRetainedFromPrevious=true` means the daemon protected the daily display
+from an invalid, stale, or incomplete poll.
+
+`run_daily_gauntlet.py` is a read-only daily health check. It can query daemon
+health/status and warn about duplicate `live_core_daemon.py` processes, a
+simultaneous legacy `live_target_processor.py`, or a separate `context_service.py`
+while the daemon is already serving context.
 
 ## Recording Modes
 

@@ -1,0 +1,41 @@
+{
+  "schema": "task_resources.v1",
+  "tasks": {
+    "woodcutting": {
+      "defaultResourceGroup": "woodcutting_logs",
+      "resources": {
+        "normal_logs": {
+          "displayName": "Logs",
+          "itemIds": [1511]
+        },
+        "oak_logs": {
+          "displayName": "Oak logs",
+          "itemIds": [1521]
+        },
+        "willow_logs": {
+          "displayName": "Willow logs",
+          "itemIds": [1519]
+        },
+        "maple_logs": {
+          "displayName": "Maple logs",
+          "itemIds": [1517]
+        },
+        "yew_logs": {
+          "displayName": "Yew logs",
+          "itemIds": [1515]
+        },
+        "magic_logs": {
+          "displayName": "Magic logs",
+          "itemIds": [1513]
+        }
+      },
+      "resourceGroups": {
+        "woodcutting_logs": {
+          "displayName": "Woodcutting logs",
+          "itemIds": [1511, 1521, 1519, 1517, 1515, 1513],
+          "resources": ["normal_logs", "oak_logs", "willow_logs", "maple_logs", "yew_logs", "magic_logs"]
+        }
+      }
+    }
+  }
+}

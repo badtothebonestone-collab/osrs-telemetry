@@ -173,6 +173,39 @@ def make_session(root: Path, *, candidates: list[dict] | None = None, stale: boo
         },
     )
     write_json(
+        live_dir / "live_watch_values.json",
+        {
+            "schema": "live_watch_values.v1",
+            "generatedAtUtc": generated,
+            "latestTick": 10,
+            "activeWatchCount": 4,
+            "rejectedWatchCount": 0,
+            "watchBudgetExceeded": False,
+            "valuesByAlias": {
+                "inventory_summary": {
+                    "alias": "inventory_summary",
+                    "type": "builtin",
+                    "value": {"known": True, "freeSlots": 24, "filledSlots": 4, "inventoryFull": False},
+                    "changed": False,
+                    "latestTick": 10,
+                    "source": "live_activity_state.inventoryState",
+                },
+                "activity_animation": {
+                    "alias": "activity_animation",
+                    "type": "builtin",
+                    "value": {"animation": -1, "apparentState": "idle"},
+                    "changed": False,
+                    "latestTick": 10,
+                    "source": "live_activity_packet",
+                },
+            },
+            "changedAliases": [],
+            "unavailableWatches": [],
+            "warnings": [],
+            "source": "live_target_processor",
+        },
+    )
+    write_json(
         live_dir / "live_navigation_summary.json",
         {
             "schema": "live_navigation_summary.v1",
@@ -418,6 +451,31 @@ class ContextServiceTest(unittest.TestCase):
             )
             self.assertTrue(response["inventory"]["changedRecently"])
             self.assertEqual(response["recentInventoryDeltas"][0]["changes"][0]["itemId"], 1511)
+
+    def test_compact_context_inventory_preserves_item_list_for_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            activity_path = session / "interaction_geometry" / "live" / "live_activity_state.json"
+            activity = json.loads(activity_path.read_text(encoding="utf-8"))
+            items = [{"slot": 0, "itemId": 1511, "quantity": 1}, {"slot": 1, "itemId": 1521, "quantity": 1}]
+            activity["inventoryState"]["items"] = items
+            activity["inventoryState"]["filledSlots"] = 2
+            activity["inventoryState"]["freeSlots"] = 26
+            activity["inventoryState"]["resourceCounts"] = {
+                "woodcutting_logs": {
+                    "count": 2,
+                    "matchedItemIds": [1511, 1521],
+                    "byItemId": {"1511": 1, "1521": 1},
+                    "matchedSlots": [0, 1],
+                }
+            }
+            write_json(activity_path, activity)
+            response = service.build_context_response(
+                service.LiveContextCache(session, reload_interval=0).load(force=True),
+                {"schema": "context_request.v1", "task": "woodcutting", "needs": ["inventory"], "responseMode": "compact"},
+            )
+            self.assertEqual([item["itemId"] for item in response["inventory"]["items"]], [1511, 1521])
+            self.assertEqual(response["inventory"]["resourceCounts"]["woodcutting_logs"]["matchedSlots"], [0, 1])
 
     def test_context_diagnostics_include_input_source_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -733,6 +791,92 @@ class ContextServiceTest(unittest.TestCase):
                 self.assertEqual(code, 200)
                 self.assertEqual(response["schema"], "context_response.v1")
                 self.assertEqual(response["bestCandidates"]["tree"]["targetName"], "Tree")
+
+    def test_capability_and_watch_endpoints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            with ServerFixture(session) as server:
+                code, capabilities = server.get("/capabilities")
+                self.assertEqual(code, 200)
+                self.assertEqual(capabilities["schema"], "capability_registry.v1")
+                by_id = {item["id"]: item for item in capabilities["capabilities"]}
+                self.assertEqual(by_id["compact_packets.input"]["runtimeStatus"], "available")
+                self.assertIn("runtimeSummary", capabilities)
+
+                code, watches = server.get("/watches")
+                self.assertEqual(code, 200)
+                self.assertEqual(watches["schema"], "watch_library.v1")
+                self.assertTrue(any(item["alias"] == "inventory_summary" for item in watches["watches"]))
+                self.assertIn("inventory_summary", watches["currentValues"]["valuesByAlias"])
+
+    def test_watch_request_accepts_bounded_builtin_and_writes_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            with ServerFixture(session) as server:
+                code, response = server.post(
+                    "/watch-request",
+                    {
+                        "schema": "context_watch_request.v1",
+                        "requestId": "watch-test",
+                        "task": "woodcutting",
+                        "watches": [
+                            {
+                                "alias": "example_state",
+                                "type": "builtin",
+                                "id": "inventory.summary",
+                                "sampleMode": "on_change",
+                                "ttlTicks": 500,
+                            }
+                        ],
+                    },
+                )
+                self.assertEqual(code, 200)
+                self.assertEqual(response["schema"], "context_watch_response.v1")
+                self.assertTrue(response["requestWritten"])
+                self.assertEqual(response["accepted"][0]["alias"], "example_state")
+                self.assertTrue(response["noActionEmitted"])
+                request_path = session / "live_requests" / "watch_requests.json"
+                self.assertTrue(request_path.exists())
+                written = json.loads(request_path.read_text(encoding="utf-8"))
+                self.assertEqual(written["activeWatches"][0]["alias"], "example_state")
+
+    def test_watch_request_rejects_unbounded_and_action_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            with ServerFixture(session) as server:
+                code, response = server.post(
+                    "/watch-request",
+                    {
+                        "schema": "context_watch_request.v1",
+                        "watches": [
+                            {"alias": "*", "type": "varbit", "id": 123, "sampleMode": "on_change"},
+                            {"alias": "unsafe", "type": "builtin", "id": "inventory.summary", "clickCommand": "nope"},
+                        ],
+                    },
+                )
+                self.assertEqual(code, 200)
+                self.assertEqual(response["accepted"], [])
+                reasons = " ".join(item["reason"] for item in response["rejected"])
+                self.assertIn("wildcard", reasons)
+                self.assertIn("disallowed", reasons)
+
+    def test_context_response_includes_watch_values_and_suggestions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            context = service.LiveContextCache(session, reload_interval=0).load(force=True)
+            response = service.build_context_response(
+                context,
+                {
+                    "schema": "context_request.v1",
+                    "needs": ["watches", "watch:inventory_summary", "watch:example_state", "capability:watch_values.java_runtime"],
+                    "responseMode": "compact",
+                },
+            )
+            self.assertIn("inventory_summary", response["watchValues"]["valuesByAlias"])
+            self.assertIn("watch:example_state", response["missingCapabilities"])
+            self.assertIn("capability:watch_values.java_runtime", response["missingCapabilities"])
+            self.assertTrue(any(item["alias"] == "example_state" for item in response["suggestedWatchRequests"]))
+            self.assertEqual(response["capabilityStatus"]["watch_values.java_runtime"]["runtimeStatus"], "unsupported")
 
     def test_summary_endpoint_returns_text_plain(self):
         with tempfile.TemporaryDirectory() as tmp:

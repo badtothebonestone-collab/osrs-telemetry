@@ -22,6 +22,7 @@ DEFAULT_NEEDS = [
     "liveness",
     "navigation_readiness",
     "events",
+    "watches",
     "diagnostics",
 ]
 LIVE_STATES_AVAILABLE = {"live", "live_assumed"}
@@ -180,6 +181,18 @@ def fetch_context(host: str, port: int, payload: dict[str, Any], timeout: float)
     value = json.loads(raw)
     if not isinstance(value, dict):
         raise ValueError("context service returned non-object JSON")
+    return value
+
+
+def post_watch_request(host: str, port: int, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+    url = f"http://{host}:{port}/watch-request"
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read().decode("utf-8")
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("watch request endpoint returned non-object JSON")
     return value
 
 
@@ -438,6 +451,13 @@ def missing_capabilities(response: dict[str, Any]) -> list[str]:
     return sorted(set(values))
 
 
+def suggested_watch_requests(response: dict[str, Any]) -> list[dict[str, Any]]:
+    suggestions = response.get("suggestedWatchRequests")
+    if not isinstance(suggestions, list):
+        return []
+    return [item for item in suggestions if isinstance(item, dict) and item.get("alias")]
+
+
 def response_warnings(response: dict[str, Any]) -> list[str]:
     values: list[str] = []
     items = response.get("warnings")
@@ -566,6 +586,7 @@ def context_failure(task: str, goal_count: int | None, message: str) -> dict[str
         "observations": [],
         "blockingConditions": ["context service unavailable or returned no valid response"],
         "missingCapabilities": ["context_response.v1"],
+        "watchableMissingCapabilities": [],
         "warnings": [message],
         "currentTargetState": {"present": False, "summary": "no current target"},
         "recentTaskSignals": [],
@@ -603,6 +624,7 @@ def evaluate_response(
     context_status = str(response.get("status") or "WARN")
     missing = missing_capabilities(response)
     warnings = [warning for warning in response_warnings(response) if warning not in set(missing)]
+    suggested_watches = suggested_watch_requests(response)
     observations: list[str] = []
     blocking: list[str] = []
 
@@ -726,6 +748,16 @@ def evaluate_response(
         "observations": observations,
         "blockingConditions": blocking,
         "missingCapabilities": sorted(set(str(item) for item in missing if item)),
+        "watchableMissingCapabilities": [
+            {
+                "alias": item.get("alias"),
+                "type": item.get("type"),
+                "id": item.get("id"),
+                "sampleMode": item.get("sampleMode"),
+                "ttlTicks": item.get("ttlTicks"),
+            }
+            for item in suggested_watches
+        ],
         "warnings": warnings,
         "currentTargetState": current_state,
         "recentTaskSignals": task_signal_items,
@@ -848,6 +880,13 @@ def format_human(result: dict[str, Any]) -> str:
     else:
         lines.append("  none")
 
+    watchable_missing = result.get("watchableMissingCapabilities") or []
+    if watchable_missing:
+        lines.append("")
+        lines.append("Watchable missing fields:")
+        for item in watchable_missing[:5]:
+            lines.append(f"  {text(item.get('alias'))}: {text(item.get('id'))} ({text(item.get('type'))})")
+
     warnings = result.get("warnings") or []
     if warnings:
         lines.append("")
@@ -880,7 +919,19 @@ def rehearsal_once(args: argparse.Namespace) -> dict[str, Any]:
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
         return context_failure(args.task, args.goal_count, str(exc))
     event_priority = "all" if args.show_system_events or args.event_priority == "all" else "task"
-    return evaluate_response(context, task=args.task, goal_count=args.goal_count, max_events=args.max_events, event_priority=event_priority)
+    result = evaluate_response(context, task=args.task, goal_count=args.goal_count, max_events=args.max_events, event_priority=event_priority)
+    if args.request_missing_watches and result.get("watchableMissingCapabilities"):
+        watch_request = {
+            "schema": "context_watch_request.v1",
+            "requestId": f"mock-brain-{int(time.time() * 1000)}",
+            "task": args.task,
+            "watches": result["watchableMissingCapabilities"],
+        }
+        try:
+            result["watchRequest"] = post_watch_request(args.host, args.port, watch_request, args.timeout)
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+            result.setdefault("warnings", []).append(f"watch request failed: {exc}")
+    return result
 
 
 def print_result(result: dict[str, Any], *, json_output: bool) -> None:
@@ -928,6 +979,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=3.0, help="Context service request timeout in seconds.")
     parser.add_argument("--show-system-events", action="store_true", help="Show recent system/health events in addition to task events.")
     parser.add_argument("--event-priority", choices=("task", "all"), default="task", help="Which event groups to include in output.")
+    parser.add_argument("--request-missing-watches", action="store_true", help="Request suggested bounded read-only watches for missing watchable fields.")
     return parser.parse_args(argv)
 
 

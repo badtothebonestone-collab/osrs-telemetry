@@ -8,10 +8,10 @@ For everyday live testing, use the control panel:
 python telemetry-viewer\live_control_panel.py
 ```
 
-Then click **Start Normal Live Stack**. The panel starts the read-only helper
-stack, waits for recent compact packets, checks live setup, starts the live
-processor, starts the context service, and opens the human dashboard. It does
-not click, type, invoke menus, or execute actions.
+Then click **Start Streamlined Live Daemon**. The panel starts one read-only
+Python daemon that keeps live context in memory, serves the context API on
+localhost, and writes only the tiny overlay state when requested. It does not
+click, type, invoke menus, or execute actions.
 
 One-click Windows entrypoints are also available from the repository root:
 
@@ -22,32 +22,164 @@ start_normal_live_stack.bat
 Start-NormalLiveStack.ps1
 ```
 
-Daily normal live mode writes compact packets and small rolling live files:
+Daily normal live mode should use the streamlined daemon with
+`--input-source compact-packets`. The legacy compact-packet file stack remains
+available under the control panel's Advanced buttons. Plugin-snapshot and direct
+compact stream are experimental and should be tested explicitly before relying
+on them.
+
+By default, the daemon does not write these rolling legacy live files:
+
+```text
+interaction_geometry\live\*.json
+interaction_geometry\live\live_event_timeline.jsonl
+```
+
+If `--write-overlay-state` is enabled, it writes only:
+
+```text
+interaction_geometry\live\overlay_debug_state.json
+```
+
+Stable normal live RuneLite config:
+
+- **Emit compact live packets**: ON.
+- **Stream also writes files**: ON if compact stream is enabled.
+- Normal processor input: `--input-source compact-packets --require-compact-packets`.
+- `compact-stream`: experimental transport testing only.
+
+When the compact packet file mirror is enabled, Java also writes:
 
 ```text
 live_packets\live-*.ndjson
 live_packets\live_packet_index.json
-interaction_geometry\live\*.json
-interaction_geometry\live\live_event_timeline.jsonl
 ```
 
 Normal live mode does not require raw tick JSONL, raw event JSONL, or frames.
 Use DEBUG_RECORDING mode when you want full raw data for replay, audit, batch
 geometry, or training datasets.
+Screenshot, crop, and perception image tooling is also advanced/debug-only; it
+does not run in the Daily Live daemon unless you intentionally start those
+batch tools from Advanced.
+
+## Live Config Doctor And Presets
+
+`live_config_doctor.py` checks the current live workflow against a named preset.
+It reads existing rolling files and localhost health endpoints only; it does not
+change RuneLite config, click, type, invoke menus, or mutate game/client state.
+
+Daily preset:
+
+- `inputSourceActive=compact-packets`
+- `recordingMode=LIVE_COMPACT_ONLY`
+- raw ticks, raw events, and frames disabled
+- screenshot, crop, and perception capture disabled
+- compact packets available and recent
+- compact stream not active
+- plugin-snapshot not the daily input
+- `windowTicks` around `10`
+- `candidateOutputWindow=latest`
+- `livenessMode=delta`
+- overlay target limit `10` or lower if overlay is enabled
+- `budgetExceeded=false`
+- `writeFailures=0`
+
+Visual QA preset:
+
+- compact-packets remains the preferred stable input
+- overlay is allowed
+- overlay target limit should stay around `25` or lower
+- clickable hull and collision-window visualization are okay
+- frames are optional when intentionally enabled
+- DEBUG_RECORDING gets a warning if it appears accidental
+
+Debug Audit preset:
+
+- raw ticks and frames may be enabled
+- compact packets can still be written
+- live performance warnings are less important than capture fidelity
+- disk growth is expected, so stop recording when the audit capture is complete
+
+Plugin Snapshot Experimental preset:
+
+- plugin snapshot endpoint health should be `PASS`
+- running input should be `plugin-snapshot`
+- hot tier is recommended for realtime testing
+- projection field mode should be `compact`
+- `maxProjectionRefs` should stay around `100` for hot tier
+- compact-packets should remain available as the fallback
+- expanded/audit tiers in realtime get warnings
+- active time above 100 ms gets a warning
+
+Run the doctor:
+
+```text
+python telemetry-viewer\live_config_doctor.py --latest-session --mode daily --fix-suggestions
+python telemetry-viewer\live_config_doctor.py --latest-session --mode visual_qa --fix-suggestions
+python telemetry-viewer\live_config_doctor.py --latest-session --mode debug_audit --fix-suggestions
+python telemetry-viewer\live_config_doctor.py --latest-session --mode plugin_snapshot_experimental --fix-suggestions
+python telemetry-viewer\live_config_doctor.py --latest-session --mode daily --json
+```
+
+The Live Control Panel includes a **Config Doctor** button and a small
+PASS/WARN/FAIL badge for the selected preset. The top warnings are shown in the
+session header so common misconfigurations are visible before they break the
+live stack.
+
+Workflow preset application is available two ways:
+
+- RuneLite config: select **Workflow preset**, then toggle **Apply workflow
+  preset**. If **Preview preset only** is enabled, the plugin logs the preview
+  and does not save the preset changes.
+- Live Control Panel: click **Apply Daily Live Preset**, **Apply Visual QA
+  Preset**, **Apply Debug Audit Preset**, or **Apply Plugin Snapshot Preset**.
+  The panel applies its own command defaults immediately. If the local preset
+  endpoint is enabled, it previews the whitelisted Java config changes, asks for
+  confirmation, applies them, then runs the doctor.
+
+Presets change telemetry/plugin/tool settings only. They do not click, type,
+invoke menus, execute commands in-game, or mutate RuneLite client/game state.
+The Java applier only writes fixed values for whitelisted `osrs-telemetry`
+config keys; it has no arbitrary key/value edit route.
+
+Preset endpoint commands:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8893/presets
+
+$request = @{
+  schema = "telemetry_preset_request.v1"
+  preset = "DAILY_LIVE"
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8893/preset/preview" -Body $request -ContentType "application/json"
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8893/preset/apply" -Body $request -ContentType "application/json"
+```
+
+Preset names:
+
+- `DAILY_LIVE`: compact packet file bridge, `LIVE_COMPACT_ONLY`, raw/debug
+  capture off, compact-stream off, plugin-snapshot off, small overlay cap.
+- `VISUAL_QA`: compact packet file bridge, overlay enabled, clickable hull
+  geometry allowed and capped, compact-stream off.
+- `DEBUG_AUDIT`: `DEBUG_RECORDING`, raw ticks/events and frames enabled, compact
+  packets still enabled, disk-growth warning expected.
+- `PLUGIN_SNAPSHOT_EXPERIMENTAL`: `LIVE_COMPACT_ONLY`, compact packets enabled
+  as fallback, plugin snapshot endpoint enabled on `127.0.0.1:8893`,
+  compact-stream off.
 
 Recommended order if you run the pieces manually:
 
 1. Start RuneLite dev.
 2. Check live setup.
-3. Start the live processor.
-4. Start the context service.
-5. Start the human dashboard or visual inspector.
+3. Start the streamlined live daemon.
+4. Open the human dashboard, brain, or visual inspector against the daemon's
+   context API.
 
 ```text
 python telemetry-viewer\check_live_setup.py --latest-session --require-compact-packets
 python telemetry-viewer\inspect_live_packets.py --latest-session --summary
-python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --require-compact-packets --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
-python telemetry-viewer\context_service.py --latest-session --port 8890
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark
 python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --watch-human --interval 1 --events 5
 ```
 
@@ -60,20 +192,163 @@ processes it started.
 
 Key buttons:
 
-- **Start Normal Live Stack** starts RuneLite dev if needed, waits for compact
-  packets, then starts setup check, live processor, context service, and human
-  dashboard.
-- **Restart Live Stack** restarts the live processor, context service, and
-  dashboard sidecars.
-- **Inspect Compact Packets** summarizes `live_packets`.
+- **Apply Daily Live Preset** applies the compact-packet daily defaults.
+- **Start RuneLite Dev** launches the dev client.
+- **Start Streamlined Live Daemon** starts the daily in-memory daemon. It serves
+  `/health`, `/status`, `/context`, `/summary`, and `/brain` from memory and
+  avoids rolling live file writes by default. Daily overlay output uses brain
+  intent markers, not the full candidate list.
+- **Stop All** stops panel-started helper processes.
+- **Config Doctor** runs the selected preset check and prints copy/paste fix
+  suggestions.
+- **Daily Gauntlet** runs strict daily invariants, duplicate process checks, and
+  no-action-field checks.
+- **Open Latest Session Folder** opens the latest telemetry session.
+
+Legacy live processor, legacy context service, plugin-snapshot testing,
+compact-stream testing, debug audit, inspectors, and batch builders are under
+Advanced.
+
+## Streamlined Live Daemon
+
+`live_core_daemon.py` is the daily-mode replacement for the separate
+`live_target_processor.py` + `context_service.py` + rolling live-file chain. It
+reuses the existing snapshot/compact-packet conversion, candidate ranking,
+liveness, navigation, context response, and brain evaluation helpers, but keeps
+the current state in memory.
+
+It exposes context-service-compatible endpoints directly:
+
+- `GET /health`
+- `GET /schema`
+- `GET /status`
+- `GET /summary?task=woodcutting`
+- `GET /brain?task=woodcutting`
+- `POST /context`
+- `POST /context/batch`
+- `POST /brain`
+
+Daily command:
+
+```text
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark
+```
+
+If `--goal-count` is omitted, the brain runs in observe-only mode. It will show
+the current held log count when inventory items are available, but it will not
+accumulate `gained since start` or print `gained / unknown`.
+
+Reset the in-process or file-backed brain baseline with:
+
+```text
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --reset-brain-state --summary --benchmark
+```
+
+Use a state file only when you intentionally want progress to survive daemon
+restarts. In PowerShell, prefer:
+
+```powershell
+$brainState = Join-Path $env:USERPROFILE ".osrs-telemetry\brain_state_woodcutting.json"
+```
+
+Then pass `--brain-state-file "$brainState"`. The daemon scopes that file to the
+session path, task, goal count, and resource group, and resets the baseline if
+those change. Avoid literal `%USERPROFILE%` in PowerShell; that syntax is not
+expanded there.
+
+Plugin snapshot only:
+
+```text
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --summary --benchmark
+```
+
+Compact packet fallback only:
+
+```text
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --summary --benchmark
+```
+
+Debug file writes are off by default. Add `--write-debug-live-files` only when
+you intentionally need the old rolling files such as `live_status.json`,
+`live_candidates.jsonl`, `live_context_index.json`,
+`live_navigation_summary.json`, and `live_event_timeline.jsonl`.
+Daily compact mode intentionally has frame recording off, so missing frame-path
+warnings are hidden from compact human output unless you switch to visual
+QA/debug workflows.
+
+## Brain Progress Idempotency
+
+Daily woodcutting progress is intentionally simple. `held logs` is the current
+inventory snapshot, and `gained since start` is the best valid held-vs-baseline
+increase seen since the current baseline was established:
+
+```text
+max(previous gained since start, current held logs - baseline held logs, 0)
+```
+
+The daily brain does not use cumulative gained/removed counters or slot-diff
+history. Those fields are ignored from old state until a reliable inventory
+delta event source is proven safe.
+
+When you pass `--reset-brain-state`, the first valid inventory snapshot only
+establishes the baseline:
+
+```text
+held logs: 5
+baseline held logs: 5
+gained since start: 0 / 5
+source: baseline initialized
+```
+
+The same inventory signature is idempotent: repeatedly reading the same
+snapshot cannot produce `0/5 -> 5/5 -> 10/5`. Moving logs between slots is not a
+gain because the held count is unchanged. If a transient stale, skipped, or
+partial poll reports fewer logs, daily progress keeps the previous valid
+`gained since start` value instead of flickering to `0 / goal`. To start a new
+goal, reset the brain state or start a new session/state.
+
+Existing held logs are inventory context, not goal progress. They only become
+progress if a later snapshot shows more held logs than the reset baseline.
+
+A progress snapshot is considered valid only when the daemon/brain has a
+session identity, latest tick, inventory signature, known held count, and either
+real inventory items or sufficient task resource counts. Resource counts without
+an inventory signature can still describe `held logs`, but they cannot establish
+a baseline.
+
+If an old state file contains `observedGained`, `observedRemoved`,
+`cumulativeGained`, or `cumulativeLostOrRemoved`, those values are discarded and
+the brain reports:
+
+```text
+old cumulative progress history ignored; daily progress uses held-vs-baseline snapshot count
+```
+
+When the streamlined daemon is running with writes off, use the daemon-backed
+diagnostic:
+
+```text
+python telemetry-viewer\diagnose_brain_progress.py --from-daemon --daemon-url http://127.0.0.1:8890 --task woodcutting --goal-count 5
+```
+
+Use the file-backed diagnostic only when `--write-debug-live-files` is enabled
+or when you intentionally want to inspect old rolling live files:
+
+```text
+python telemetry-viewer\diagnose_brain_progress.py --latest-session --task woodcutting --goal-count 5 --state-file "%USERPROFILE%\.osrs-telemetry\brain_state_woodcutting.json"
+```
 - **Start Mock Brain Rehearsal** runs the read-only future-brain rehearsal
   client.
 - **Debug Audit Tools** launches the batch pipeline for DEBUG_RECORDING
   sessions and warns that normal live sessions intentionally omit raw ticks.
 
+The mode dropdown selects the doctor preset: Daily, Visual QA, Debug Audit, or
+Plugin Snapshot Experimental. Start Normal Live Stack always applies Daily
+compact-packet defaults.
+
 The tool registry at `docs\tool_registry.md` and
-`telemetry-viewer\tool_registry.json` maps each script to normal live, visual
-QA, debug/audit, or legacy compatibility.
+`telemetry-viewer\tool_registry.json` maps scripts to daily, advanced debug,
+legacy file pipeline, batch audit, experimental, or deprecated lanes.
 
 ## Recording Modes
 
@@ -130,8 +405,8 @@ python telemetry-viewer\replay_viewer.py --port 8765
 ## Compact Live NDJSON Bridge
 
 Compact live packets are the default live bridge between the RuneLite read-only
-sensor/cache adapter and Python sidecars. In normal live mode Java writes small
-append-only packets under:
+sensor/cache adapter and Python sidecars. The original file bridge remains
+available and Java can write small append-only packets under:
 
 ```text
 live_packets\live-*.ndjson
@@ -143,8 +418,249 @@ The packet stream contains observed facts only: baseline state, scene deltas,
 projection summaries, inventory/equipment summaries, activity facts, and writer
 health. Python still owns target libraries, profiles, scoring, task
 interpretation, context responses, QA tooling, and future vision/model work.
-The compact bridge does not add overlays, input hooks, clicking, menu
-invocation, automation, or Java HTTP/WebSocket endpoints.
+The compact file bridge does not add overlays, input hooks, clicking, menu
+invocation, automation, or direct network requirements.
+
+## Plugin Snapshot Bridge
+
+The plugin snapshot bridge is an experimental read-only pull bridge for future
+sidecars. It is disabled by default and normal live still uses
+`--input-source compact-packets --require-compact-packets`.
+
+The RuneLite plugin keeps a `PluginLiveCache` of copied compact payloads for
+baseline, scene delta, projection, inventory, inventory delta, activity,
+navigation, collision window, writer health, and future watch values. The
+optional endpoint serves only those cached copies; request handlers do not call
+RuneLite `Client` APIs, scene scans, projection methods, widget traversal, or
+`clientThread.invoke`.
+
+RuneLite config:
+
+- **Enable plugin snapshot endpoint**: OFF by default.
+- **Snapshot host**: `127.0.0.1`.
+- **Snapshot port**: `8893`.
+- **Snapshot auth token**: optional local header token.
+- **Snapshot max projection refs**: caps projection payload size.
+- **Snapshot max response bytes**: rejects oversized responses.
+- **Allow non-local snapshot host**: leave OFF.
+- **Snapshot endpoint in normal live**: experimental opt-in only.
+
+The bridge has `/health`, `/schema`, and `/snapshot` endpoints. `/snapshot`
+uses `plugin_snapshot_request.v1` and returns `plugin_snapshot_response.v1` from
+cached compact payloads. It is still a telemetry bridge only: no file serving,
+commands, input, menu routes, or game-state mutation.
+
+Manual checks after enabling the endpoint:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8893/health
+Invoke-RestMethod http://127.0.0.1:8893/schema
+
+$request = @{
+  schema = "plugin_snapshot_request.v1"
+  needs = @("baseline", "projection", "inventory", "navigation", "collision_window", "writer_health")
+  maxAgeTicks = 5
+  maxProjectionRefs = 100
+  includeGeometry = $false
+  responseMode = "compact"
+  projectionFieldMode = "compact"
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8893/snapshot" -Body $request -ContentType "application/json"
+```
+
+Python can now test this bridge with the experimental
+`--input-source plugin-snapshot` mode. It requests cached payloads over
+localhost, converts them into the same synthetic compact tick shape used by the
+compact packet file reader, and then runs the normal candidate/context pipeline.
+It is not the default live path yet. Until `plugin-snapshot-vs-file` comparison
+passes in your setup, the compact packet file bridge remains the stable daily
+path and compact-stream remains experimental.
+
+Snapshot projection conversion is intentionally schema-tolerant. Python accepts
+cached projection refs from `visibleObjectRefs`, `visibleSceneObjectRefs`,
+`projectedRefs`, `refs`, `targets`, and packet-envelope payloads, then normalizes
+the fields into the same synthetic tick shape used by compact packet files.
+`projection refs capped` means the endpoint returned a bounded, prioritized
+slice of projected refs. Compact snapshot responses minimize projection refs to
+candidate-building fields by default and omit heavy hull/debug geometry unless
+explicitly requested. If `/snapshot` returns `response_too_large`, the endpoint
+is available, but the requested bounded response still exceeded
+`pluginSnapshotMaxResponseBytes`; lower `--plugin-snapshot-max-projection-refs`
+or raise the RuneLite endpoint byte cap carefully.
+
+Snapshot requests now have working-set tiers rather than one architectural cap:
+
+- `hot`: small, fast working set. Default request cap is 100 refs and the goal
+  is current best/nearest target awareness.
+- `expanded`: broader working set. Default request cap is 500 refs and it is
+  useful when hot has too few candidates or a brain needs wider context.
+- `audit`: large bounded debug working set. Default request cap is 2000 refs,
+  still limited by endpoint config and response byte limits.
+
+The live processor sends optional request hints such as `profileHint`,
+`classHint`, `targetTypeHint`, `requireOnScreen`, `requireGeometryAvailable`,
+`desiredClasses`, and `maxCandidatesHint`. Java uses only cached projection
+fields for generic prioritization before capping; it does not call RuneLite APIs
+from the request handler and it does not move Python scoring into the plugin.
+Future brain clients should ask for the smallest sufficient tier, then escalate
+to `expanded` when the hot working set is not enough. Compact packet files and
+debug/audit recordings remain the broad fallback paths.
+
+Plugin snapshot input source:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --input-source plugin-snapshot --plugin-snapshot-tier hot --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --latest-session --input-source plugin-snapshot --plugin-snapshot-tier expanded --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+```
+
+Compare snapshot output to the stable compact packet file bridge:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --compare-input-sources plugin-snapshot-vs-file --profile woodcutting --latest 5
+```
+
+Diagnose snapshot conversion if comparison fails:
+
+```text
+python telemetry-viewer\diagnose_plugin_snapshot.py --latest-session --profile woodcutting --max-projection-refs 500
+python telemetry-viewer\diagnose_plugin_snapshot.py --latest-session --profile woodcutting --max-projection-refs 500 --dump-synthetic-shape
+python telemetry-viewer\diagnose_plugin_snapshot.py --latest-session --profile woodcutting --tier-sweep
+python telemetry-viewer\diagnose_plugin_snapshot.py --latest-session --profile woodcutting --max-projection-refs 500 --json
+```
+
+The diagnostic prints the projection payload keys, ref-list path, first ref
+keys, missing field counts, number of refs converted to world targets, profile
+matches, reject reasons, and whether compact packet files have projection refs
+that the snapshot response did not provide.
+`--dump-synthetic-shape` compares the internal plugin-snapshot synthetic tick
+against the compact-packet synthetic tick before candidate building. This helps
+separate a wrong-path conversion bug from a projection cap/order issue.
+`--tier-sweep` checks hot, expanded, and audit tiers, then recommends the
+smallest tier that keeps best/nearest awareness with useful candidate breadth.
+
+Plugin-snapshot performance remains experimental. The hot tier is intended to
+provide a fast best/nearest working set, not full scene awareness. Compact
+packet files remain the default normal-live bridge until repeated hot-tier runs
+stay under the live budget in the local setup.
+
+When `--benchmark` is enabled, `live_status.json` and the console summary break
+plugin-snapshot active time into exclusive buckets where practical:
+
+- `pluginSnapshotHttpRequestMillis`
+- `pluginSnapshotResponseReadMillis`
+- `pluginSnapshotJsonParseMillis`
+- `pluginSnapshotEndpointServiceMillis`
+- `pluginSnapshotConvertMillis`
+- `pluginSnapshotPrefilterMillis`
+- `pluginSnapshotWorldBuildMillis`
+- `pluginSnapshotCandidateSelectMillis`
+- `pluginSnapshotOutputSerializeMillis`
+- `pluginSnapshotOutputWriteMillis`
+- `pluginSnapshotOverlayStateWriteMillis`
+- `pluginSnapshotStatusWriteMillis`
+- `pluginSnapshotTotalActiveMillis`
+- `pluginSnapshotBottleneck`
+
+`pluginSnapshotBottleneck` names the largest bucket, such as
+`endpoint_service`, `http_request`, `json_parse`, `world_build`,
+`candidate_select`, or `output_write`. If a snapshot tick is unchanged, the live
+processor skips candidate rebuilding and heavy output rewrites, then increments
+`pluginSnapshotTicksSkippedAsUnchanged`. If the candidate set signature is
+unchanged, it keeps the previous candidate/world-target output and reports
+`pluginSnapshotCandidateOutputSkippedUnchanged=true` plus the estimated skipped
+bytes.
+
+## Compact Live TCP Stream
+
+The first direct compact stream is a local TCP NDJSON server in the RuneLite
+plugin. It publishes the same compact packet envelope as the file bridge, one
+JSON packet per line. It binds to `127.0.0.1` by default, rejects non-loopback
+hosts, uses a bounded queue, and drops stream packets rather than blocking
+RuneLite.
+
+RuneLite config:
+
+- **Emit compact live stream**: enable the local stream publisher.
+- **Compact stream host**: default `127.0.0.1`.
+- **Compact stream port**: default `8891`.
+- **Compact stream queue size**: bounded pending stream packet queue.
+- **Compact stream circuit breaker**: pauses stream publishing if stream writes
+  or queue pressure look unsafe.
+- **Compact stream max write ms**: stream worker write time budget before the
+  circuit breaker trips.
+- **Compact stream pause seconds**: temporary stream disable period after a
+  circuit breaker trip.
+- **Stream also writes files**: keep `live_packets` as a debug mirror while
+  streaming.
+
+Stream mode is read-only. It does not click, type, invoke menus, execute
+actions, or mutate client/game state.
+If **Stream also writes files** is off, the stable `compact-packets` file bridge
+will have no latest segment and strict normal live will fail until the file
+mirror is re-enabled or you explicitly choose experimental stream mode.
+
+The stream consumer groups packets by tick and waits until each stream tick has
+the minimum candidate-building packet set, currently baseline plus projection.
+If a baseline-only tick arrives first, the live processor keeps the previous
+good candidates and reports the missing packet type instead of flickering to an
+empty target list. Stream socket wait/reconnect time is reported separately from
+active processing time, so `activeMs` reflects context work rather than
+connection waiting.
+
+Stream mode should be treated as experimental until stream-vs-file comparison
+passes for your current setup. The compact packet file bridge remains the
+stable fallback/debug mirror.
+
+If overlay targets disappear, candidate count drops to zero, or status reports
+missing `live_baseline_packet.v1` / `live_projection_packet.v1` while
+`inputSourceActive=compact-stream`, switch back to `compact-packets`.
+
+Experimental stream command. Keep fallback enabled while testing:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-stream --stream-fallback-to-compact-packets --compact-stream-host 127.0.0.1 --compact-stream-port 8891 --require-compact-packets --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+```
+
+Compare stream output to the compact packet file mirror:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --compare-input-sources stream-vs-file --profile woodcutting --latest 5
+```
+
+Useful stream diagnostics in `live_status.json` include:
+
+- `compactStreamPacketsByType`
+- `compactStreamLatestTickByType`
+- `compactStreamMissingRequiredTypesForLatestTick`
+- `compactStreamTickBufferSize`
+- `compactStreamTicksWaitingForProjection`
+- `compactStreamReadMillis`
+- `compactStreamParseMillis`
+- `compactStreamWaitMillis`
+- `compactStreamReconnectMillis`
+- `compactStreamSocketTimeouts`
+- `compactStreamProjectionPacketsSeen`
+- `compactStreamCanBuildCandidates`
+- `streamFallbackToFile`
+- `streamFallbackReason`
+- `compactLiveStreamPacketsOfferedByType`
+- `compactLiveStreamPacketsSentByType`
+- `compactLiveStreamPacketsDroppedByType`
+- `compactLiveStreamCircuitBreakerTripped`
+
+Auto mode now prefers recent compact packet files, then the experimental stream
+only when the file bridge is unavailable or stale, then raw tick JSONL:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --compact-stream-port 8891 --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+```
+
+Use the file bridge command as a fallback/debug mirror:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --require-compact-packets --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+```
 
 The RuneLite config option **Emit compact live packets** defaults on for new
 configurations. If an older saved profile has it disabled, turn it back on for
@@ -176,9 +692,11 @@ python telemetry-viewer\inspect_live_packets.py --latest-session --tail --packet
 python telemetry-viewer\inspect_live_packets.py --latest-session --since-sequence 1000 --max-lines 50
 ```
 
-`live_target_processor.py` consumes these compact packets by default through
-`--input-source auto`. Raw ticks/screenshots remain the authoritative
-debug/audit path and are still available with `--input-source raw-ticks`.
+`live_target_processor.py` consumes compact packet files by default through
+`--input-source auto`; the direct compact stream is experimental and must pass
+stream-vs-file comparison before daily use. Raw ticks/screenshots remain the
+authoritative debug/audit path and are still available with
+`--input-source raw-ticks`.
 
 Compact packet live processor commands:
 
@@ -189,10 +707,12 @@ python telemetry-viewer\live_target_processor.py --latest-session --input-source
 python telemetry-viewer\live_target_processor.py --latest-session --compare-input-sources --profile woodcutting --latest 5
 ```
 
-`--input-source auto` prefers compact packets when `live_packet_index.json` and
-recent packet segments are present, otherwise it falls back to raw tick JSONL
-with a clear warning. Use `--require-compact-packets` when you want the live
-processor to fail fast instead of using raw fallback.
+`--input-source auto` prefers compact packet files when `live_packet_index.json`
+and recent packet segments are present. It only tries the experimental compact
+stream when packet files are unavailable or stale, otherwise it falls back to raw
+tick JSONL with a clear warning. Use
+`--require-compact-packets` when you want a compact transport rather than raw
+fallback.
 The rolling live output schema stays the same, so `context_service.py`,
 `live_context_query.py`, and the live inspector continue reading
 `interaction_geometry\live`.
@@ -1473,6 +1993,40 @@ $request = @{
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
 ```
 
+## Brain Resource Progress Idempotency
+
+Woodcutting progress is computed by `telemetry-viewer\resource_progress.py`.
+That module is the single source of truth for resource item counting, baseline
+initialization, daily held-vs-baseline progress, and old-state repair.
+
+Daily rules:
+
+- Inventory items win over `inventory.resourceCounts` when both are present.
+- `itemId = null` never counts as a real log item.
+- The first valid inventory snapshot after reset establishes the baseline and
+  counts as `0 / goal`.
+- The same inventory signature is idempotent: it does not add gained or removed
+  progress on repeated polls.
+- Moving a log between slots is not a gain.
+- Daily gained logs are `max(0, currentHeldCount - baselineHeldCount)`.
+- Daily mode does not use cumulative gained/removed counters.
+- Old or partial brain state without the current progress schema is treated as
+  untrusted; unsafe gained/removed counters are cleared.
+
+With daemon writes off, use the daemon API for diagnostics instead of stale
+rolling live files:
+
+```text
+python telemetry-viewer\diagnose_brain_progress.py --from-daemon --daemon-url http://127.0.0.1:8890 --task woodcutting --goal-count 5
+```
+
+Daily daemon reset:
+
+```powershell
+$brainState = Join-Path $env:USERPROFILE ".osrs-telemetry\brain_state_woodcutting.json"
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --reset-brain-state --brain-state-file "$brainState" --summary --benchmark
+```
+
 ## Recording modes
 
 Compact packets are now the normal live substrate. Raw tick/event JSONL and
@@ -1737,6 +2291,224 @@ python telemetry-viewer\mock_brain_rehearsal.py --task woodcutting --goal-count 
 python telemetry-viewer\mock_brain_rehearsal.py --task woodcutting --goal-count 5 --json --event-priority all
 ```
 
+Request suggested missing read-only watches explicitly:
+
+```text
+python telemetry-viewer\mock_brain_rehearsal.py --task woodcutting --goal-count 5 --request-missing-watches
+```
+
+## Brain Core MVP
+
+`brain_core.py` is the first real external brain core. It behaves like a
+future out-of-process brain client: it talks to `context_service.py` over
+localhost, keeps lightweight task memory, classifies the current woodcutting
+phase, decides which observations are still needed, and emits no action
+commands.
+
+The brain core is read-only. It does not click, type, move, invoke menus,
+manipulate RuneLite, or call any hands/input layer. Its output is internal
+state only: `internalNextState`, `observationNeeds`, `blockingConditions`, and
+optional bounded `suggestedWatchRequests`.
+
+One-shot:
+
+```text
+python telemetry-viewer\brain_core.py --task woodcutting --goal-count 5 --human
+```
+
+Watch:
+
+```text
+python telemetry-viewer\brain_core.py --task woodcutting --goal-count 5 --watch --interval 1
+```
+
+Machine-readable decision:
+
+```text
+python telemetry-viewer\brain_core.py --task woodcutting --goal-count 5 --json
+```
+
+Persist brain memory:
+
+```text
+python telemetry-viewer\brain_core.py --task woodcutting --goal-count 5 --watch --state-file "%USERPROFILE%\.osrs-telemetry\brain_state_woodcutting.json"
+```
+
+Allow it to request suggested bounded read-only watches:
+
+```text
+python telemetry-viewer\brain_core.py --task woodcutting --goal-count 5 --request-missing-watches
+```
+
+Current phases:
+
+- `no_context`
+- `stale_context`
+- `setup_observing`
+- `target_available`
+- `likely_busy`
+- `monitoring_progress`
+- `goal_complete`
+- `target_depleted`
+- `waiting_for_respawn`
+- `inventory_changed`
+- `inventory_full`
+- `no_target_observed`
+- `blocked_or_unreachable`
+- `missing_capability`
+- `unknown`
+
+`likely_busy` requires positive current evidence such as an explicit
+interacting target, active animation, or a woodcutting-like activity state.
+Unknown interaction or missing animation data does not make the brain busy.
+Recent depletion with a valid replacement stays a substate rather than
+becoming the current phase.
+
+## Brain Goal Completion
+
+`goal_complete` is a read-only interpretation that means observed resource
+progress reached or exceeded `--goal-count`. It does not click, move, type,
+invoke menus, or execute any action. It only changes the brain's internal
+reported state.
+
+When the goal is complete, `brain_decision.v1` includes:
+
+- `goalComplete: true`
+- `goalProgress.complete: true`
+- `goalProgress.gainedSinceStart`
+- `internalNextState: hold_goal_complete_state`
+
+`goal_complete` overrides ordinary live states such as `target_available`,
+`likely_busy`, and `monitoring_progress`, but stale or unavailable context is
+reported first. Daily woodcutting completion is based on the held-vs-baseline
+inventory snapshot count and is labeled with
+`progressSource=inventory_snapshot_held_vs_baseline`.
+
+Example:
+
+```text
+python telemetry-viewer\brain_core.py --task woodcutting --goal-count 5 --watch --interval 1
+```
+
+## Brain Resource Progress Tracking
+
+Woodcutting progress is tracked by read-only inventory resource counts. The
+brain counts known log item IDs from `inventory.items`, stores the starting
+count in `brain_state.v1`, and reports daily goal progress as current held logs
+minus baseline held logs. It does not use `freeSlots`, `totalItemQuantity`, old
+cumulative counters, or slot-diff history as daily goal progress.
+
+Tracked woodcutting resource IDs live in:
+
+```text
+telemetry-viewer\task_resources.json
+```
+
+The default `woodcutting_logs` group includes:
+
+- Logs: `1511`
+- Oak logs: `1521`
+- Willow logs: `1519`
+- Maple logs: `1517`
+- Yew logs: `1515`
+- Magic logs: `1513`
+
+Daily progress uses:
+
+```text
+progressSource=inventory_snapshot_held_vs_baseline
+```
+
+If inventory items are missing, progress remains unknown and the brain reports
+that `inventory.items` is needed. Dropping or depositing logs can reduce the
+daily held-vs-baseline progress because the goal means "hold N more logs than
+the reset baseline." Moving a log between slots does not count as gaining
+another log because the total resource quantity is unchanged.
+
+Use the progress diagnostic when a slot appears in `matchedSlots` but the brain
+does not increase progress:
+
+```text
+python telemetry-viewer\diagnose_brain_progress.py --latest-session --task woodcutting --goal-count 5 --state-file "%USERPROFILE%\.osrs-telemetry\brain_state_woodcutting.json"
+```
+
+Watch woodcutting progress:
+
+```text
+python telemetry-viewer\brain_core.py --task woodcutting --goal-count 5 --watch --interval 1
+```
+
+Watch with persisted state:
+
+```text
+python telemetry-viewer\brain_core.py --task woodcutting --goal-count 5 --watch --interval 1 --state-file "%USERPROFILE%\.osrs-telemetry\brain_state_woodcutting.json"
+```
+
+Reset the persisted progress baseline:
+
+```text
+python telemetry-viewer\brain_core.py --task woodcutting --goal-count 5 --reset-state --state-file "%USERPROFILE%\.osrs-telemetry\brain_state_woodcutting.json"
+```
+
+## Capability Registry and Watch Requests
+
+The context service exposes a read-only capability registry and a bounded watch
+request lane for future brain-style clients. A client can ask what observations
+are available now, what is missing, and whether a missing field has a safe
+watch definition.
+
+Capability registry:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8890/capabilities
+```
+
+Watch library and active watch requests:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8890/watches
+```
+
+Bounded read-only watch request:
+
+```powershell
+$request = @{
+  schema = "context_watch_request.v1"
+  task = "woodcutting"
+  watches = @(
+    @{
+      alias = "example_state"
+      type = "builtin"
+      id = "inventory.summary"
+      sampleMode = "on_change"
+      ttlTicks = 500
+    }
+  )
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/watch-request" -Body $request -ContentType "application/json"
+```
+
+Context request with watches/capabilities:
+
+```powershell
+$request = @{
+  schema = "context_request.v1"
+  task = "woodcutting"
+  needs = @("watches", "watch:inventory_summary", "capability:watch_values.java_runtime")
+  responseMode = "compact"
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
+```
+
+Watch requests are typed, TTL-limited, capped, and observation-only. The first
+implementation writes the bounded request file for future Java-side support and
+exposes builtin watch values derived from existing compact packets in
+`interaction_geometry\live\live_watch_values.json`. Java dynamic varbit/varp
+watch polling is intentionally reported as a future capability until the plugin
+implements that read-only poller.
+
 ## Live Control Panel
 
 The live control panel is a small Windows-friendly Tkinter launcher for the
@@ -1788,13 +2560,16 @@ is disabled by default and only draws read-only observations from:
 interaction_geometry\live\overlay_debug_state.json
 ```
 
-The live processor writes this tiny file from already-selected candidates. It
-is capped by `--overlay-debug-target-limit` and does not include full candidate
-arrays, full collision grids, or broad scene dumps.
+Daily `live_core_daemon.py` writes this tiny file from brain intent markers by
+default. It draws the selected target plus a small backup set, while candidate
+context remains internal. Visual QA can switch to candidate markers with
+`--overlay-mode candidates`; debug/audit can use `--overlay-mode debug`.
 
 The overlay can draw:
 
-- candidate aim points
+- selected brain intent markers
+- backup candidate markers
+- candidate aim points in visual/debug modes
 - compact bounds or clickable hull/small polygons when available
 - labels with class, distance, reachability, and liveness
 - a small read-only status panel
@@ -1808,13 +2583,19 @@ Usage:
 
 1. Start RuneLite dev.
 2. Enable `Telemetry debug overlay` in the plugin config.
-3. Start the live processor so `overlay_debug_state.json` is refreshed.
+3. Start the streamlined live daemon so `overlay_debug_state.json` is refreshed.
 4. Compare the overlay with the human dashboard and live inspector.
 
-Start live processor with overlay state output:
+Start the daily daemon with intent overlay output:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --input-source auto --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --overlay-debug-target-limit 25 --summary --benchmark
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark
+```
+
+Advanced visual QA candidate overlay:
+
+```text
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode candidates --overlay-debug-target-limit 25 --human-dashboard --brain-task woodcutting --summary --benchmark
 ```
 
 If the overlay needs a specific state file, set `Debug overlay state path` to
@@ -2052,6 +2833,79 @@ python telemetry-viewer\live_context_query.py --latest-session --task woodcuttin
 python telemetry-viewer\live_context_query.py --latest-session --self-test
 ```
 
+### Inventory Slot Correctness
+
+RuneLite inventory is slot-based. Normal live mode preserves filled backpack
+slot indexes as `slot` values, usually `0..27`. Empty slots may be omitted from
+compact item lists, but filled item entries must keep their original slot
+number. Resource progress never uses list position as the slot number; it sums
+matching item IDs across all emitted filled slots.
+
+Woodcutting progress tracks these read-only resource IDs:
+
+- Logs: `1511`
+- Oak logs: `1521`
+- Willow logs: `1519`
+- Maple logs: `1517`
+- Yew logs: `1515`
+- Magic logs: `1513`
+- Combined `woodcutting_logs`: all of the above
+
+The live processor also writes `inventory.resourceCounts` when inventory is
+known. For `woodcutting_logs`, the compact state includes `count`, `byItemId`,
+`matchedItemIds`, and `matchedSlots`, so a future brain does not need to infer
+progress from array position. If a slot-specific issue appears, use:
+
+```text
+python telemetry-viewer\diagnose_inventory_slots.py --latest-session --resource woodcutting_logs
+python telemetry-viewer\diagnose_inventory_slots.py --latest-session --resource woodcutting_logs --json
+```
+
+The diagnostic prints a slot table for `0..27`, resource counts, duplicate slot
+entries, invalid slot indexes, and inventory summary consistency warnings. It is
+read-only and does not execute any game action.
+
+For brain progress while `live_core_daemon.py` is running with writes off, use:
+
+```text
+python telemetry-viewer\diagnose_brain_progress.py --from-daemon --daemon-url http://127.0.0.1:8890 --task woodcutting --goal-count 5
+```
+
+For old file-backed diagnostics, first run with `--write-debug-live-files`, then
+use:
+
+```text
+python telemetry-viewer\diagnose_brain_progress.py --latest-session --task woodcutting --goal-count 5 --state-file "%USERPROFILE%\.osrs-telemetry\brain_state_woodcutting.json"
+```
+
+That report compares current inventory items, `resourceCounts`, matched slots,
+the persisted brain baseline, held-vs-baseline progress, invalid matched slots,
+and whether old cumulative fields were ignored. It is useful when a slot is
+matched but `gainedSinceStart` does not move.
+
+Strict daemon diagnostics:
+
+```text
+python telemetry-viewer\diagnose_brain_progress.py --from-daemon --daemon-url http://127.0.0.1:8890 --task woodcutting --goal-count 5 --strict
+```
+
+Daily progress retains the last valid held-vs-baseline result when a poll has an
+invalid or incomplete inventory snapshot. Missing inventory items, missing
+signatures, and impossible counted slots such as `itemId=null` must not drop
+progress to `0/N`. A real valid inventory snapshot with fewer held logs can
+still reduce progress because the daily goal means "hold N more logs than
+baseline."
+
+Run the daily gauntlet when output flickers or looks stale:
+
+```text
+python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --strict --check-processes
+```
+
+The gauntlet is read-only. It checks daemon health and warns if duplicate daily
+daemons, the legacy live processor, or a separate context service appear to be
+running at the same time.
+
 For short experiments where trees may be chopped/depleted, run the processor
 with the default suppression window or tune it explicitly:
 
@@ -2126,22 +2980,32 @@ static scene index limit.
 
 ## Compact packet input mode
 
-`live_target_processor.py` supports three input sources:
+`live_target_processor.py` supports five input sources:
 
 - `--input-source raw-ticks`: current raw tick JSONL tailing path. Use it for
   offline complete audits, old sessions, and schema debugging.
+- `--input-source compact-stream`: read compact packets from the local
+  `127.0.0.1:<port>` TCP NDJSON stream. This is experimental until
+  stream-vs-file comparison passes in your setup.
 - `--input-source compact-packets`: read `live_packets\live-*.ndjson` through
   the compact packet reader. This builds candidates from compact baseline,
   scene-delta, projection, inventory, activity, and writer-health packets
   without requiring a full raw `TickSnapshot`.
-- `--input-source auto`: default. Prefer compact packets when a live packet
-  index/latest segment exists and is recent, otherwise fall back to raw ticks
-  with an explicit warning.
+- `--input-source plugin-snapshot`: experimental pull mode. It asks the
+  opt-in RuneLite snapshot endpoint for cached compact payloads over localhost,
+  converts them to a synthetic compact tick, and reuses the normal candidate
+  pipeline. It does not call RuneLite APIs from Python and does not execute
+  actions.
+- `--input-source auto`: default. Prefer compact packet files when a live packet
+  index/latest segment exists and is recent. Try the experimental stream only
+  when packet files are unavailable or stale, otherwise fall back to raw ticks
+  with an explicit warning. It does not prefer plugin-snapshot unless
+  `--auto-prefer-plugin-snapshot` is explicitly passed.
 
-For normal live QA, use compact packets. Raw ticks remain useful for offline
-audits, replay/debug work, and old sessions. `--require-compact-packets` is the
-strict check: it fails fast if compact packets are missing or stale, proving the
-live path is not using raw tick fallback.
+For normal live QA, use compact packet files. Raw ticks remain useful for
+offline audits, replay/debug work, and old sessions.
+`--require-compact-packets` is the strict check: it requires a compact transport
+and prevents raw tick fallback.
 
 Compact mode consumes these packet types:
 
@@ -2165,6 +3029,12 @@ Useful status fields:
 
 - `inputSourceRequested`
 - `inputSourceActive`
+- `compactStreamHost`
+- `compactStreamPort`
+- `compactStreamConnected`
+- `compactStreamReconnects`
+- `compactStreamPacketsSeen`
+- `compactStreamPacketsProcessed`
 - `compactPacketsAvailable`
 - `compactPacketsRecent`
 - `compactPacketIndexPath`
@@ -2178,6 +3048,29 @@ Useful status fields:
 - `compactPacketLatestSegment`
 - `compactPacketRolloverCount`
 - `compactPacketReadErrors`
+- `pluginSnapshotAvailable`
+- `pluginSnapshotStatus`
+- `pluginSnapshotLatestTick`
+- `pluginSnapshotWarnings`
+- `pluginSnapshotMissingCapabilities`
+- `pluginSnapshotRequestMillis`
+- `pluginSnapshotParseMillis`
+- `pluginSnapshotConvertMillis`
+- `pluginSnapshotResponseBytes`
+- `pluginSnapshotPayloadTypes`
+- `pluginSnapshotProjectionRefs`
+- `pluginSnapshotProjectionCapped`
+- `pluginSnapshotProjectionRefListPath`
+- `pluginSnapshotRefsConverted`
+- `pluginSnapshotFieldPresentCounts`
+- `pluginSnapshotFieldMissingCounts`
+- `pluginSnapshotConversionWarnings`
+- `pluginSnapshotWorldTargetsBuilt`
+- `pluginSnapshotCandidatesBeforeFilters`
+- `pluginSnapshotCandidateRejectReasons`
+- `pluginSnapshotTicksSkippedAsUnchanged`
+- `pluginSnapshotEndpointErrors`
+- `pluginSnapshotTimeouts`
 
 Compact realtime woodcutting:
 
@@ -2203,12 +3096,27 @@ Compare compact-packet and raw-tick candidate output:
 python telemetry-viewer\live_target_processor.py --latest-session --compare-input-sources --profile woodcutting --latest 5
 ```
 
+Compare plugin snapshot and compact packet file output:
+
+```text
+python telemetry-viewer\live_target_processor.py --latest-session --compare-input-sources plugin-snapshot-vs-file --profile woodcutting --latest 5
+```
+
+Diagnose plugin snapshot conversion:
+
+```text
+python telemetry-viewer\diagnose_plugin_snapshot.py --latest-session --profile woodcutting --max-projection-refs 500 --dump-synthetic-shape
+```
+
 The live status timing buckets are exclusive where practical and do not include
 poll sleep time. Useful fields include `fileDiscoverMillis`, `tailReadMillis`,
 `lineSplitMillis`, `jsonParseMillis`, `rawTickIngestMillis`,
 `livenessUpdateMillis`, `inventoryDeltaMillis`, `classificationCacheMillis`,
 `candidateSelectMillis`, `outputSerializeMillis`, `outputWriteMillis`,
 `consolePrintMillis`, `totalExclusiveMillis`, and `totalWallMillis`.
+For plugin-snapshot runs, also inspect `pluginSnapshotBottleneck` and the
+plugin-snapshot-specific request, parse, conversion, prefilter, build, select,
+and output-write buckets listed in the Plugin Snapshot Bridge section.
 
 Use `--quiet` to suppress routine console output, `--verbose` for expanded
 startup/summary information, and `--log-every N` to print only every Nth follow

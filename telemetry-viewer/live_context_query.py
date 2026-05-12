@@ -67,6 +67,8 @@ def live_paths(session: Path) -> dict[str, Path]:
         "activity": live_dir / "live_activity_state.json",
         "events": live_dir / "live_event_timeline.jsonl",
         "navigation": live_dir / "live_navigation_summary.json",
+        "watchValues": live_dir / "live_watch_values.json",
+        "overlayDebug": live_dir / "overlay_debug_state.json",
     }
 
 
@@ -158,6 +160,7 @@ def load_live_context(session: Path, timing: dict | None = None) -> dict:
     activity = read_json(paths["activity"], warnings, missing_fields, "live_activity_state", timing) if paths["activity"].exists() else {}
     events = read_jsonl(paths["events"], warnings, missing_fields, "live_event_timeline", timing) if paths["events"].exists() else []
     navigation = read_json(paths["navigation"], warnings, missing_fields, "live_navigation_summary", timing) if paths["navigation"].exists() else {}
+    watch_values = read_json(paths["watchValues"], warnings, missing_fields, "live_watch_values", timing) if paths["watchValues"].exists() else {}
     candidates = read_jsonl(paths["candidates"], warnings, missing_fields, "live_candidates", timing)
     if paths["candidates"].exists() and not candidates:
         warnings.append("live_candidates is present but empty.")
@@ -170,6 +173,7 @@ def load_live_context(session: Path, timing: dict | None = None) -> dict:
         "activity": activity,
         "events": events,
         "navigation": navigation,
+        "watchValues": watch_values,
         "candidates": candidates,
         "warnings": warnings,
         "missingFields": missing_fields,

@@ -1,11 +1,10 @@
 # Tool Registry
 
-This project now has two clear lanes:
+The daily workflow has one main lane now:
 
-- **Normal live** uses compact live packets, rolling live files, the context
-  service, the human dashboard, and optional visual QA.
-- **Debug/audit** uses full raw tick/event/frame recordings for batch builders,
-  replay, dataset generation, and deep inspection.
+```text
+RuneLite plugin -> compact-packets -> live_core_daemon.py -> in-memory context -> brain intent overlay
+```
 
 The machine-readable registry lives at:
 
@@ -13,38 +12,99 @@ The machine-readable registry lives at:
 telemetry-viewer\tool_registry.json
 ```
 
-## Normal Live
+It classifies tools into the same groups used by the Live Control Panel. Daily
+mode should show only the daily tools. Everything else stays available under
+Advanced or as command-line debug/audit tooling.
 
-| Tool | Purpose | Example |
+## Daily
+
+These are the only tools that belong in the main daily view.
+
+| Tool | Purpose | Command |
 | --- | --- | --- |
-| `live_control_panel.py` | Main everyday launcher and process monitor. | `python telemetry-viewer\live_control_panel.py` |
-| `check_live_setup.py` | Verifies compact packets, recording mode, and rolling live readiness. | `python telemetry-viewer\check_live_setup.py --latest-session --require-compact-packets` |
-| `inspect_live_packets.py` | Summarizes compact packet segments without scanning raw ticks. | `python telemetry-viewer\inspect_live_packets.py --latest-session --summary` |
-| `live_target_processor.py` | Consumes compact packets and writes rolling live context files. | `python telemetry-viewer\live_target_processor.py --latest-session --input-source compact-packets --require-compact-packets --profile woodcutting --follow` |
-| `context_service.py` | Local read-only context_request.v1 API. | `python telemetry-viewer\context_service.py --latest-session --port 8890` |
-| `live_context_query.py` | Human dashboard, event timeline, and context query helper. | `python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --human --events 10` |
-| `mock_brain_rehearsal.py` | Read-only future-brain rehearsal client. | `python telemetry-viewer\mock_brain_rehearsal.py --task woodcutting --goal-count 5 --human` |
+| `live_control_panel.py` | Simple launcher and monitor. | `python telemetry-viewer\live_control_panel.py` |
+| `live_core_daemon.py` | Streamlined daily daemon: compact-packets input, in-memory context, writes off by default, optional brain intent overlay state. | `python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark` |
+| `live_config_doctor.py` | Preset-aware PASS/WARN/FAIL check for daily settings. | `python telemetry-viewer\live_config_doctor.py --latest-session --mode daily --fix-suggestions` |
+| `run_daily_gauntlet.py` | Strict daily sanity check for daemon health, process conflicts, progress invariants, and unsafe fields. | `python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --strict --check-processes` |
 
-## Visual QA
+Daily support modules are hidden from the UI but remain part of the daily lane:
 
-| Tool | Purpose |
+- `resource_progress.py`: single source of truth for woodcutting progress.
+- `brain_core.py`: read-only brain interpretation.
+- `live_context_format.py`: human output formatting.
+- `live_packet_reader.py`, `telemetry_paths.py`, and
+  `navigation_reachability.py`: compact-packet/session/reachability helpers.
+
+## Advanced Debug
+
+Diagnostics and inspectors that are useful when daily output looks wrong:
+
+- `check_live_setup.py`
+- `inspect_live_packets.py`
+- `diagnose_brain_progress.py`
+- `diagnose_inventory_slots.py`
+- `diagnose_overlay_state.py`
+- `diagnose_overlay_geometry.py`
+- `diagnose_target_coverage.py`
+- `run_stabilization_suite.py`
+- visual/perception/tab inspection helpers
+
+These tools are safe to hide from the daily view because they are not required
+to start or watch the daily daemon.
+
+## Legacy File Pipeline
+
+The old three-process chain is retained for compatibility and debugging, but it
+is not the daily workflow:
+
+| Tool | Role |
 | --- | --- |
-| RuneLite Telemetry Debug Overlay | Optional read-only overlay for candidates, aim points, reachability, and status. |
-| `target_geometry_inspector.py` | Browser-based live or recorded target geometry inspection. |
-| `diagnose_overlay_state.py` | Compares overlay state against live candidates/context. |
+| `live_target_processor.py` | Reads compact packets and writes rolling live JSON files. |
+| `context_service.py` | Serves context from those rolling files. |
+| `live_context_query.py` | Human query/dashboard helper over rolling files or context service. |
+| `mock_brain_rehearsal.py` | Legacy context-service rehearsal client. |
 
-## Debug / Audit
+Use these only when you intentionally need rolling files such as
+`live_status.json`, `live_candidates.jsonl`, or `live_context_index.json`.
 
-| Tool | Purpose |
-| --- | --- |
-| `run_target_geometry_pipeline.py` | Full batch target geometry pipeline for DEBUG_RECORDING sessions. |
-| `build_world_target_geometry.py` | Builds world target geometry from raw/debug session data. |
-| `build_ui_target_geometry.py` | Builds UI target geometry from raw/debug session data. |
-| `select_target_candidates.py` | Selects target candidates from batch geometry outputs. |
-| `diagnose_target_coverage.py` | Audits target/profile coverage from recorded sessions. |
-| Dataset builders and inspectors | `build_*dataset.py`, `prepare_visual_perception.py`, and inspector scripts remain debug/training tools. |
+## Batch Audit
 
-## Legacy Compatibility
+Batch/debug tools remain in place for DEBUG_RECORDING sessions, replay, visual
+QA, geometry building, and dataset work:
 
-`telemetry_launcher.py` is retained for compatibility. New daily work should use
-`live_control_panel.py`.
+- `run_target_geometry_pipeline.py`
+- `build_world_target_geometry.py`
+- `build_ui_target_geometry.py`
+- `select_target_candidates.py`
+- `target_geometry_inspector.py`
+- `inspect_target_geometry.py`
+- dataset builders and inspectors
+- replay/viewer/export/validation tools
+
+These are disk-heavy or offline tools and should not be part of the daily
+button set.
+
+## Experimental
+
+These paths are intentionally hidden from daily mode and must be labelled
+`EXPERIMENTAL` in the UI:
+
+- plugin-snapshot input mode and `diagnose_plugin_snapshot.py`
+- compact-stream transport testing
+
+`compact-packets` remains the daily stable source/fallback. Plugin-snapshot and
+compact-stream should only be selected explicitly for transport or comparison
+testing.
+
+## Deprecated
+
+Compatibility tools and uncertain scripts are not deleted automatically. They
+stay out of the daily UI until a reference check proves they can be moved or
+removed.
+
+- `telemetry_launcher.py`
+- top-level `test_telemetry_paths.py`
+
+See `docs\cleanup_report.md` for what was kept, moved, or left alone.
+See `docs\runtime_cleanup_report.md` for the Daily Live runtime audit and
+guardrail summary.

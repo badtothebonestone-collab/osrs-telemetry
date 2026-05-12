@@ -90,6 +90,7 @@ import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.WallObjectDespawned;
 import net.runelite.api.events.WallObjectSpawned;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
@@ -145,6 +146,9 @@ public class TelemetryPlugin extends Plugin
 	private TelemetryConfig config;
 
 	@Inject
+	private ConfigManager configManager;
+
+	@Inject
 	private DrawManager drawManager;
 
 	@Inject
@@ -157,6 +161,8 @@ public class TelemetryPlugin extends Plugin
 	private ImageCapture imageCapture;
 
 	private TelemetryWriter writer;
+	private PluginLiveCache liveCache;
+	private PluginSnapshotEndpoint pluginSnapshotEndpoint;
 	private long tickId = 0;
 	private long eventSeq = 0;
 	private final Set<Integer> knownItemIds = new HashSet<>();
@@ -213,6 +219,7 @@ public class TelemetryPlugin extends Plugin
 		lastActivityAnimation = Integer.MIN_VALUE;
 		lastActivityPoseAnimation = Integer.MIN_VALUE;
 		lastActivityInteractingSignature = null;
+		liveCache = new PluginLiveCache(gson);
 
 		writer = new TelemetryWriter(
 				config.outputDirectory(),
@@ -236,13 +243,22 @@ public class TelemetryPlugin extends Plugin
 				config.maxFrameQueueSize(),
 				config.frameCaptureMode(),
 				config.allowScreenRectangleFallback(),
-				compactPacketsEnabled(recordingMode),
+				compactPacketFileMirrorEnabled(recordingMode),
 				config.compactLiveSegmentMb(),
 				config.compactLiveRetentionTicks(),
 				Math.max(0L, config.compactLiveRetentionMb()) * 1024L * 1024L,
 				config.compactLiveRetentionSegments(),
-				config.compactLiveQueueSize());
+				config.compactLiveQueueSize(),
+				config.emitCompactLiveStream(),
+				config.compactLiveStreamHost(),
+				config.compactLiveStreamPort(),
+				config.compactLiveStreamQueueSize(),
+				config.compactLiveStreamCircuitBreakerEnabled(),
+				config.compactLiveStreamMaxWriteMillis(),
+				config.compactLiveStreamDisableSeconds(),
+				liveCache);
 		writer.start();
+		startPluginSnapshotEndpoint(recordingMode);
 		if (!debugOverlayRegistered)
 		{
 			overlayManager.add(debugOverlay);
@@ -258,16 +274,17 @@ public class TelemetryPlugin extends Plugin
 		return mode == null ? TelemetryRecordingMode.LIVE_COMPACT_ONLY : mode;
 	}
 
-	private boolean compactPacketsEnabled(TelemetryRecordingMode mode)
+	private boolean compactPacketFileMirrorEnabled(TelemetryRecordingMode mode)
 	{
-		if (mode == TelemetryRecordingMode.LIVE_COMPACT_ONLY
+		if (!config.emitCompactLivePackets() && !(config.compactLivePacketsRequiredForLive()
+				&& (mode == TelemetryRecordingMode.LIVE_COMPACT_ONLY
 				|| mode == TelemetryRecordingMode.LIVE_COMPACT_WITH_FRAMES
-				|| mode == TelemetryRecordingMode.HYBRID_DEBUG)
+				|| mode == TelemetryRecordingMode.HYBRID_DEBUG)))
 		{
-			return config.compactLivePacketsRequiredForLive() || config.emitCompactLivePackets();
+			return false;
 		}
 
-		return config.emitCompactLivePackets();
+		return !config.emitCompactLiveStream() || config.compactLiveStreamAlsoWriteFiles();
 	}
 
 	private boolean rawTickRecordingEnabled(TelemetryRecordingMode mode)
@@ -310,14 +327,64 @@ public class TelemetryPlugin extends Plugin
 			overlayManager.remove(debugOverlay);
 			debugOverlayRegistered = false;
 		}
+		stopPluginSnapshotEndpoint();
 		if (writer != null)
 		{
 			writer.close();
 			writer = null;
 		}
+		liveCache = null;
 		clearSceneIndex("shutdown");
 
 		log.info("Telemetry Collector stopped");
+	}
+
+	private void startPluginSnapshotEndpoint(TelemetryRecordingMode recordingMode)
+	{
+		if (!pluginSnapshotEndpointEnabled(recordingMode) || pluginSnapshotEndpoint != null || liveCache == null)
+		{
+			return;
+		}
+
+		pluginSnapshotEndpoint = new PluginSnapshotEndpoint(
+				liveCache,
+				gson,
+				config.pluginSnapshotHost(),
+				config.pluginSnapshotPort(),
+				config.pluginSnapshotAuthToken(),
+				config.pluginSnapshotMaxProjectionRefs(),
+				config.pluginSnapshotMaxResponseBytes(),
+				config.pluginSnapshotAllowNonLocalHost(),
+				new TelemetryPresetApplier(configManager));
+		try
+		{
+			pluginSnapshotEndpoint.start();
+		}
+		catch (Exception e)
+		{
+			log.warn("Plugin snapshot endpoint failed to start; continuing with compact packet files", e);
+			stopPluginSnapshotEndpoint();
+		}
+	}
+
+	private boolean pluginSnapshotEndpointEnabled(TelemetryRecordingMode recordingMode)
+	{
+		if (config.enablePluginSnapshotEndpoint())
+		{
+			return true;
+		}
+		return config.pluginSnapshotEnabledInNormalLive() && recordingMode == TelemetryRecordingMode.LIVE_COMPACT_ONLY;
+	}
+
+	private void stopPluginSnapshotEndpoint()
+	{
+		if (pluginSnapshotEndpoint == null)
+		{
+			return;
+		}
+
+		pluginSnapshotEndpoint.close();
+		pluginSnapshotEndpoint = null;
 	}
 
 	Path currentOverlayDebugStatePath()
@@ -328,6 +395,65 @@ public class TelemetryPlugin extends Plugin
 			return null;
 		}
 		return currentWriter.getSessionDir().resolve("interaction_geometry").resolve("live").resolve("overlay_debug_state.json");
+	}
+
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		if (event == null || !TelemetryPresetApplier.CONFIG_GROUP.equals(event.getGroup()))
+		{
+			return;
+		}
+
+		String key = event.getKey();
+		if ("applyWorkflowPreset".equals(key) && config.applyWorkflowPreset())
+		{
+			applySelectedWorkflowPreset();
+			return;
+		}
+
+		if (isSnapshotEndpointConfigKey(key))
+		{
+			restartPluginSnapshotEndpoint();
+		}
+	}
+
+	private void applySelectedWorkflowPreset()
+	{
+		TelemetryWorkflowPreset preset = config.workflowPreset();
+		if (preset == null)
+		{
+			preset = TelemetryWorkflowPreset.DAILY_LIVE;
+		}
+		boolean preview = config.presetPreviewOnly();
+		TelemetryPresetApplier applier = new TelemetryPresetApplier(configManager);
+		Map<String, Object> result = applier.apply(preset.name(), preview);
+		log.info("Telemetry workflow preset {} {}: {}", preset.name(), preview ? "preview" : "apply", result.get("status"));
+		configManager.setConfiguration(TelemetryPresetApplier.CONFIG_GROUP, "applyWorkflowPreset", false);
+		if (!preview)
+		{
+			restartPluginSnapshotEndpoint();
+		}
+	}
+
+	private boolean isSnapshotEndpointConfigKey(String key)
+	{
+		return Set.of(
+				"enablePluginSnapshotEndpoint",
+				"pluginSnapshotHost",
+				"pluginSnapshotPort",
+				"pluginSnapshotAuthToken",
+				"pluginSnapshotMaxProjectionRefs",
+				"pluginSnapshotMaxResponseBytes",
+				"pluginSnapshotAllowNonLocalHost",
+				"pluginSnapshotEnabledInNormalLive",
+				"telemetryRecordingMode").contains(key);
+	}
+
+	private void restartPluginSnapshotEndpoint()
+	{
+		stopPluginSnapshotEndpoint();
+		startPluginSnapshotEndpoint(recordingMode());
 	}
 
 	@Subscribe
@@ -2307,6 +2433,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("droppedRawRecords", currentWriter.getDroppedRecords());
 		payload.put("droppedFrameCount", currentWriter.getDroppedFrameCount());
 		payload.put("compactLiveEnabled", currentWriter.isCompactLivePacketsEnabled());
+		payload.put("compactLivePacketFilesEnabled", currentWriter.isCompactLivePacketFilesEnabled());
 		payload.put("compactLiveQueueDepth", currentWriter.getLivePacketQueueDepth());
 		payload.put("livePacketsWritten", currentWriter.getLivePacketsWritten());
 		payload.put("livePacketsDropped", currentWriter.getLivePacketsDropped());
@@ -2318,6 +2445,43 @@ public class TelemetryPlugin extends Plugin
 		payload.put("livePacketRetentionBytes", Math.max(0L, config.compactLiveRetentionMb()) * 1024L * 1024L);
 		payload.put("livePacketRetentionSegments", config.compactLiveRetentionSegments());
 		payload.put("livePacketActiveSegment", currentWriter.getLivePacketActiveSegment());
+		payload.put("liveCacheEnabled", currentWriter.isLiveCacheEnabled());
+		payload.put("liveCacheUpdates", currentWriter.getLiveCacheUpdates());
+		payload.put("liveCacheUpdateErrors", currentWriter.getLiveCacheUpdateErrors());
+		payload.put("liveCachePayloadTypes", currentWriter.getLiveCachePayloadTypes());
+		payload.put("liveCacheLatestTick", currentWriter.getLiveCacheLatestTick());
+		payload.put("liveCacheLatestSequence", currentWriter.getLiveCacheLatestSequence());
+		payload.put("liveCacheEstimatedBytes", currentWriter.getLiveCacheEstimatedBytes());
+		payload.put("liveCacheHealth", currentWriter.getLiveCacheHealth());
+		payload.put("compactLiveStreamEnabled", currentWriter.isCompactLiveStreamEnabled());
+		payload.put("compactLiveStreamHost", config.compactLiveStreamHost());
+		payload.put("compactLiveStreamPort", config.compactLiveStreamPort());
+		payload.put("compactLiveStreamQueueSize", config.compactLiveStreamQueueSize());
+		payload.put("compactLiveStreamAlsoWriteFiles", config.compactLiveStreamAlsoWriteFiles());
+		payload.put("compactLiveStreamCircuitBreakerEnabled", config.compactLiveStreamCircuitBreakerEnabled());
+		payload.put("compactLiveStreamMaxWriteMillisConfigured", config.compactLiveStreamMaxWriteMillis());
+		payload.put("compactLiveStreamQueueDepth", currentWriter.getCompactLiveStreamQueueDepth());
+		payload.put("compactLiveStreamClientCount", currentWriter.getCompactLiveStreamClientCount());
+		payload.put("compactLiveStreamPacketsOffered", currentWriter.getCompactLiveStreamPacketsOffered());
+		payload.put("compactLiveStreamPacketsWritten", currentWriter.getCompactLiveStreamPacketsWritten());
+		payload.put("compactLiveStreamPacketsDropped", currentWriter.getCompactLiveStreamPacketsDropped());
+		payload.put("compactLiveStreamPacketsDroppedNoClients", currentWriter.getCompactLiveStreamPacketsDroppedNoClients());
+		payload.put("compactLiveStreamPacketsDroppedByCircuitBreaker", currentWriter.getCompactLiveStreamPacketsDroppedByCircuitBreaker());
+		payload.put("compactLiveStreamWriteErrors", currentWriter.getCompactLiveStreamWriteErrors());
+		payload.put("compactLiveStreamAcceptedClients", currentWriter.getCompactLiveStreamAcceptedClients());
+		payload.put("compactLiveStreamDisconnectedClients", currentWriter.getCompactLiveStreamDisconnectedClients());
+		payload.put("compactLiveStreamLastWriteMillis", currentWriter.getCompactLiveStreamLastWriteMillis());
+		payload.put("compactLiveStreamMaxWriteMillisObserved", currentWriter.getCompactLiveStreamMaxWriteMillisObserved());
+		payload.put("compactLiveStreamCircuitBreakerTripped", currentWriter.isCompactLiveStreamCircuitBreakerTripped());
+		payload.put("compactLiveStreamCircuitBreakerReason", currentWriter.getCompactLiveStreamCircuitBreakerReason());
+		payload.put("compactLiveStreamDisabledUntilUtc", currentWriter.getCompactLiveStreamDisabledUntilUtc());
+		payload.put("compactLiveStreamCircuitBreakerTrips", currentWriter.getCompactLiveStreamCircuitBreakerTrips());
+		payload.put("compactLiveStreamPacketsByType", currentWriter.getCompactLiveStreamPacketsByType());
+		payload.put("compactLiveStreamPacketsOfferedByType", currentWriter.getCompactLiveStreamPacketsOfferedByType());
+		payload.put("compactLiveStreamPacketsSentByType", currentWriter.getCompactLiveStreamPacketsSentByType());
+		payload.put("compactLiveStreamPacketsDroppedByType", currentWriter.getCompactLiveStreamPacketsDroppedByType());
+		payload.put("compactLiveStreamLatestOfferedTickByType", currentWriter.getCompactLiveStreamLatestOfferedTickByType());
+		payload.put("compactLiveStreamLatestTickByType", currentWriter.getCompactLiveStreamLatestTickByType());
 		payload.put("compactLiveIncludeHeavyGeometry", config.compactLiveIncludeHeavyGeometry());
 		payload.put("compactLiveIncludeClickableHull", lastCompactLiveIncludeClickableHull);
 		payload.put("compactLiveIncludeCanvasTilePolygon", lastCompactLiveIncludeCanvasTilePolygon);

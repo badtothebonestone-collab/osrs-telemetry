@@ -11,6 +11,7 @@ VIEWER_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(VIEWER_DIR))
 
 import live_control_panel as panel
+import check_live_setup as setup
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -32,23 +33,91 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
             os.utime(second / "manifest.json", (newest, newest))
             self.assertEqual(panel.latest_session_path(str(root)), second)
 
-    def test_build_live_processor_command_defaults_to_auto(self):
-        options = panel.LivePanelOptions(profile="woodcutting", input_source="auto", window_ticks=10, limit=100)
+    def test_build_live_processor_command_defaults_to_strict_compact_packets(self):
+        options = panel.LivePanelOptions(profile="woodcutting", window_ticks=10, limit=100)
         command = panel.build_live_processor_command(options, supports_liveness=True)
         self.assertEqual(command[0], sys.executable)
         self.assertIn("telemetry-viewer\\live_target_processor.py", command)
         self.assertIn("--input-source", command)
-        self.assertEqual(command[command.index("--input-source") + 1], "auto")
+        self.assertEqual(command[command.index("--input-source") + 1], "compact-packets")
+        self.assertIn("--require-compact-packets", command)
         self.assertIn("--liveness-mode", command)
         self.assertEqual(command[command.index("--profile") + 1], "woodcutting")
         self.assertEqual(command[command.index("--window-ticks") + 1], "10")
         self.assertEqual(command[command.index("--limit") + 1], "100")
+        self.assertEqual(command[command.index("--overlay-debug-target-limit") + 1], "10")
 
     def test_build_live_processor_strict_compact_command(self):
         options = panel.LivePanelOptions(require_compact_packets=True, input_source="auto")
         command = panel.build_live_processor_command(options, supports_liveness=True)
         self.assertEqual(command[command.index("--input-source") + 1], "compact-packets")
         self.assertIn("--require-compact-packets", command)
+
+    def test_compact_stream_label_and_warning(self):
+        self.assertIn(panel.COMPACT_STREAM_EXPERIMENTAL_LABEL, panel.INPUT_SOURCES)
+        self.assertEqual(panel.normalize_input_source(panel.COMPACT_STREAM_EXPERIMENTAL_LABEL), "compact-stream")
+        self.assertIn("experimental", panel.stream_mode_warning(panel.COMPACT_STREAM_EXPERIMENTAL_LABEL).lower())
+
+    def test_config_doctor_command(self):
+        command = panel.build_config_doctor_command("daily", fix_suggestions=True, check_processes=True)
+        self.assertEqual(command[:2], [sys.executable, "telemetry-viewer\\live_config_doctor.py"])
+        self.assertIn("--latest-session", command)
+        self.assertEqual(command[command.index("--mode") + 1], "daily")
+        self.assertIn("--fix-suggestions", command)
+        self.assertIn("--check-processes", command)
+        self.assertEqual(panel.doctor_mode_key("Plugin Snapshot Experimental"), "plugin_snapshot_experimental")
+
+    def test_daily_gauntlet_command(self):
+        command = panel.build_daily_gauntlet_command(daemon_url="http://127.0.0.1:8890")
+        self.assertEqual(command[:2], [sys.executable, "telemetry-viewer\\run_daily_gauntlet.py"])
+        self.assertIn("--latest-session", command)
+        self.assertIn("--daemon-url", command)
+        self.assertEqual(command[command.index("--daemon-url") + 1], "http://127.0.0.1:8890")
+        self.assertIn("--strict", command)
+        self.assertIn("--check-processes", command)
+
+    def test_daily_and_advanced_button_labels_are_separated(self):
+        self.assertEqual(
+            panel.DAILY_ACTION_LABELS,
+            (
+                "Apply Daily Live Preset",
+                "Start RuneLite Dev",
+                "Start Streamlined Live Daemon",
+                "Stop All",
+                "Config Doctor",
+                "Daily Gauntlet",
+                "Open Latest Session Folder",
+            ),
+        )
+        self.assertFalse(any("Legacy" in label or "EXPERIMENTAL" in label for label in panel.DAILY_ACTION_LABELS))
+        self.assertTrue(any(label.endswith("Legacy Live Processor") for label in panel.ADVANCED_ACTION_LABELS))
+        self.assertTrue(any(label.endswith("Legacy Context Service") for label in panel.ADVANCED_ACTION_LABELS))
+        self.assertTrue(any(label.endswith("Legacy Human Dashboard") for label in panel.ADVANCED_ACTION_LABELS))
+        self.assertTrue(any("plugin-snapshot" in label.lower() and "EXPERIMENTAL" in label for label in panel.ADVANCED_ACTION_LABELS))
+        self.assertTrue(any("compact-stream" in label.lower() and "EXPERIMENTAL" in label for label in panel.ADVANCED_ACTION_LABELS))
+        self.assertTrue(any("Debug Audit" in label for label in panel.ADVANCED_ACTION_LABELS))
+        self.assertTrue(any("Inspector" in label for label in panel.ADVANCED_ACTION_LABELS))
+        self.assertTrue(any("Batch Builders" in label for label in panel.ADVANCED_ACTION_LABELS))
+
+    def test_preset_request_body_and_endpoint_url(self):
+        self.assertEqual(panel.preset_request_body("DAILY_LIVE")["preset"], "DAILY_LIVE")
+        self.assertEqual(panel.preset_endpoint_url("/presets"), "http://127.0.0.1:8893/presets")
+
+    def test_plugin_snapshot_preset_command_is_experimental(self):
+        options = panel.LivePanelOptions(input_source="plugin-snapshot", require_compact_packets=False)
+        command = panel.build_live_processor_command(options, supports_liveness=True)
+        self.assertEqual(command[command.index("--input-source") + 1], "plugin-snapshot")
+        self.assertIn("--plugin-snapshot-tier", command)
+        self.assertEqual(command[command.index("--plugin-snapshot-tier") + 1], "hot")
+        self.assertIn("--plugin-snapshot-fallback", command)
+        self.assertIn("experimental", panel.stream_mode_warning(panel.PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL).lower())
+
+    def test_daily_preset_command_remains_compact_packets(self):
+        options = panel.normal_live_options("woodcutting")
+        command = panel.build_live_processor_command(options, supports_liveness=True)
+        self.assertEqual(command[command.index("--input-source") + 1], "compact-packets")
+        self.assertIn("--require-compact-packets", command)
+        self.assertNotIn("--plugin-snapshot-tier", command)
 
     def test_live_processor_command_can_omit_liveness_flags(self):
         options = panel.LivePanelOptions()
@@ -65,6 +134,48 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertEqual(dashboard_command[:2], [sys.executable, "telemetry-viewer\\live_context_query.py"])
         self.assertIn("--watch-human", dashboard_command)
         self.assertIn("--events", dashboard_command)
+
+    def test_live_core_daemon_command_uses_streamlined_daily_defaults(self):
+        command = panel.build_live_core_daemon_command(panel.normal_live_options("woodcutting"))
+        self.assertEqual(command[:2], [sys.executable, "telemetry-viewer\\live_core_daemon.py"])
+        self.assertIn("--input-source", command)
+        self.assertEqual(command[command.index("--input-source") + 1], "compact-packets")
+        self.assertNotIn("telemetry-viewer\\live_target_processor.py", command)
+        self.assertNotIn("plugin-snapshot", command)
+        self.assertNotIn("compact-stream", command)
+        self.assertNotIn("--write-debug-live-files", command)
+        self.assertIn("--write-overlay-state", command)
+        self.assertIn("--overlay-mode", command)
+        self.assertEqual(command[command.index("--overlay-mode") + 1], "intent")
+        self.assertIn("--overlay-backup-candidates", command)
+        self.assertEqual(command[command.index("--overlay-backup-candidates") + 1], "2")
+        self.assertIn("--overlay-debug-target-limit", command)
+        self.assertEqual(command[command.index("--overlay-debug-target-limit") + 1], "10")
+        self.assertIn("--human-dashboard", command)
+        self.assertIn("--brain-task", command)
+        self.assertEqual(command[command.index("--brain-task") + 1], "woodcutting")
+        self.assertIn("--goal-count", command)
+        self.assertEqual(command[command.index("--goal-count") + 1], "5")
+        self.assertNotIn("--poll-interval", command)
+        self.assertNotIn("compact-stream", command)
+
+    def test_live_core_daemon_overlay_state_is_optional(self):
+        options = panel.normal_live_options("woodcutting")
+        options.write_overlay_state = False
+        command = panel.build_live_core_daemon_command(options)
+        self.assertNotIn("--write-overlay-state", command)
+        self.assertNotIn("--overlay-debug-target-limit", command)
+
+    def test_stream_missing_projection_warning_logic(self):
+        warning = panel.stream_incomplete_warning(
+            {
+                "inputSourceActive": "compact-stream",
+                "candidateCount": 0,
+                "compactStreamMissingRequiredTypesForLatestTick": ["live_projection_packet.v1"],
+            }
+        )
+        self.assertEqual(warning, "Stream incomplete. Switch to compact-packets.")
+        self.assertEqual(panel.stream_incomplete_warning({"inputSourceActive": "compact-packets", "candidateCount": 0}), "")
 
     def test_normal_live_stack_commands_are_strict_compact(self):
         options = panel.normal_live_options("woodcutting")
@@ -121,6 +232,8 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                 },
             )
             write_json(session / "live_packets" / "live_packet_index.json", {"latestTick": 12, "activeSegment": "live-000001.ndjson"})
+            (session / "live_packets" / "latest_segment.txt").write_text("live-000001.ndjson", encoding="utf-8")
+            (session / "live_packets" / "live-000001.ndjson").write_text('{"packetType":"live_baseline_packet.v1"}\n', encoding="utf-8")
             write_json(
                 session / "manifest.json",
                 {
@@ -142,6 +255,66 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
             self.assertFalse(snapshot["rawTickRecordingEnabled"])
             self.assertEqual(snapshot["latestEventSummary"], "Inventory changed: +1 item 1511")
             self.assertEqual(snapshot["latestEventTick"], 13)
+
+    def test_status_snapshot_reports_incomplete_stream(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            write_json(
+                session / "interaction_geometry" / "live" / "live_status.json",
+                {
+                    "latestTickProcessed": 12,
+                    "inputSourceActive": "compact-stream",
+                    "candidateCount": 0,
+                    "compactStreamMissingRequiredTypesForLatestTick": ["live_baseline_packet.v1", "live_projection_packet.v1"],
+                },
+            )
+            snapshot = panel.status_snapshot(session)
+            self.assertEqual(snapshot["streamIncompleteWarning"], "Stream incomplete. Switch to compact-packets.")
+
+    def test_status_snapshot_warns_when_stream_file_mirror_is_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            write_json(
+                session / "manifest.json",
+                {
+                    "recordingMode": "LIVE_COMPACT_ONLY",
+                    "compactPacketRecordingEnabled": True,
+                    "compactLiveStreamEnabled": True,
+                    "compactLiveStreamAlsoWriteFiles": False,
+                    "compactLivePacketFilesEnabled": False,
+                },
+            )
+            snapshot = panel.status_snapshot(session)
+            self.assertFalse(snapshot["compactPacketsAvailable"])
+            self.assertIn("Stream also writes files", snapshot["compactFileBridgeWarning"])
+            self.assertEqual(snapshot["compactChecklist"]["Emit compact live packets"], "yes")
+            self.assertEqual(snapshot["compactChecklist"]["Stream also writes files"], "no")
+            self.assertEqual(snapshot["compactChecklist"]["Latest segment exists"], "no")
+
+    def test_check_live_setup_reports_missing_segment_with_stream_mirror_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            session.mkdir(parents=True, exist_ok=True)
+            write_json(
+                session / "manifest.json",
+                {
+                    "recordingMode": "LIVE_COMPACT_ONLY",
+                    "compactPacketRecordingEnabled": True,
+                    "compactLiveStreamEnabled": True,
+                    "compactLiveStreamAlsoWriteFiles": False,
+                    "compactLivePacketFilesEnabled": False,
+                },
+            )
+            payload = setup.check_live_setup(session, require_compact_packets=True)
+            text = " ".join(
+                list(payload.get("warnings") or [])
+                + list(payload.get("failures") or [])
+                + [str(check.get("message")) for check in payload.get("checks") or []]
+            )
+            self.assertIn("Stream also writes files", text)
+            self.assertIn("compact-stream experimental", text)
+            self.assertEqual(payload["compactLiveStreamEnabled"], True)
+            self.assertEqual(payload["compactLiveStreamAlsoWriteFiles"], False)
 
     def test_compact_packet_status_and_stale_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -180,7 +353,13 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertEqual(registry["schema"], "osrs_telemetry_tool_registry.v1")
         tools = registry["tools"]
         self.assertTrue(any(tool["name"] == "live_control_panel.py" for tool in tools))
-        self.assertTrue(any(tool["category"] == "debug_audit" for tool in tools))
+        self.assertTrue(any(tool["name"] == "live_core_daemon.py" and tool["category"] == "daily" for tool in tools))
+        self.assertTrue(any(tool["name"] == "live_target_processor.py" and tool["category"] == "legacy_file_pipeline" for tool in tools))
+        self.assertTrue(any(tool["category"] == "experimental" and "EXPERIMENTAL" in tool["purpose"] for tool in tools))
+        for tool in tools:
+            self.assertIn("dailyRequired", tool)
+            self.assertIn("normalCommand", tool)
+            self.assertIn("safeToHideInUi", tool)
 
 
 if __name__ == "__main__":

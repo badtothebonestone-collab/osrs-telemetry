@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -21,6 +22,7 @@ from tkinter import messagebox, ttk
 
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
+import live_config_doctor
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -28,25 +30,64 @@ VIEWER_DIR = PROJECT_ROOT / "telemetry-viewer"
 MAX_LOG_LINES = 1000
 SAFETY_TEXT = "Read-only telemetry launcher. Starts local tools only. Does not click, type, invoke menus, or execute actions."
 PROFILES = ("woodcutting", "broad_qa", "navigation_qa", "npc_qa", "ground_item_qa", "ui_qa")
-INPUT_SOURCES = ("auto", "compact-packets", "raw-ticks")
+COMPACT_STREAM_EXPERIMENTAL_LABEL = "compact-stream EXPERIMENTAL"
+PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL = "plugin-snapshot EXPERIMENTAL"
+INPUT_SOURCES = ("compact-packets", "auto", "raw-ticks", COMPACT_STREAM_EXPERIMENTAL_LABEL, PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL)
 LIVENESS_MODES = ("off", "basic", "delta", "full")
-WORKFLOW_MODES = ("Normal Live", "Visual QA", "Debug Audit")
+WORKFLOW_MODES = ("Daily", "Visual QA", "Debug Audit", "Plugin Snapshot Experimental")
+DAILY_ACTION_LABELS = (
+    "Apply Daily Live Preset",
+    "Start RuneLite Dev",
+    "Start Streamlined Live Daemon",
+    "Stop All",
+    "Config Doctor",
+    "Daily Gauntlet",
+    "Open Latest Session Folder",
+)
+ADVANCED_ACTION_LABELS = (
+    "Advanced: Legacy File Stack",
+    "Advanced: Legacy Live Processor",
+    "Advanced: Legacy Context Service",
+    "Advanced: Legacy Human Dashboard",
+    "Advanced: Plugin-Snapshot Testing EXPERIMENTAL",
+    "Advanced: Compact-Stream Testing EXPERIMENTAL",
+    "Advanced: Debug Audit Tools",
+    "Advanced: Inspectors",
+    "Advanced: Batch Builders",
+    "Advanced: Human Dashboard Events",
+    "Advanced: Event Timeline",
+    "Advanced: Mock Brain Rehearsal",
+    "Advanced: Request Context Once",
+    "Advanced: Health Check",
+    "Advanced: Stop Selected",
+    "Advanced: Clear Log",
+)
+WORKFLOW_PRESETS = {
+    "DAILY_LIVE": ("Daily Live", "daily"),
+    "VISUAL_QA": ("Visual QA", "visual_qa"),
+    "DEBUG_AUDIT": ("Debug Audit", "debug_audit"),
+    "PLUGIN_SNAPSHOT_EXPERIMENTAL": ("Plugin Snapshot Experimental", "plugin_snapshot_experimental"),
+}
 SESSION_STALE_SECONDS = 15 * 60
 COMPACT_PACKET_STALE_SECONDS = 2 * 60
+REQUIRED_STREAM_PACKET_TYPES = {"live_baseline_packet.v1", "live_projection_packet.v1"}
 
 
 @dataclass
 class LivePanelOptions:
     profile: str = "woodcutting"
-    mode: str = "Normal Live"
-    input_source: str = "auto"
+    mode: str = "Daily"
+    input_source: str = "compact-packets"
     liveness_mode: str = "delta"
     window_ticks: int = 10
     limit: int = 100
+    overlay_debug_target_limit: int = 10
     port: int = 8890
     interval: float = 1.0
-    require_compact_packets: bool = False
+    goal_count: int | None = 5
+    require_compact_packets: bool = True
     no_ui_targets: bool = True
+    write_overlay_state: bool = True
     benchmark: bool = True
     summary: bool = True
 
@@ -57,6 +98,23 @@ def python_command(script: str, *args: str) -> list[str]:
 
 def command_preview(command: list[str]) -> str:
     return subprocess.list2cmdline([str(part) for part in command])
+
+
+def normalize_input_source(value: str) -> str:
+    if value == COMPACT_STREAM_EXPERIMENTAL_LABEL:
+        return "compact-stream"
+    if value == PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL:
+        return "plugin-snapshot"
+    return value or "compact-packets"
+
+
+def stream_mode_warning(input_source: str) -> str:
+    normalized = normalize_input_source(input_source)
+    if normalized == "compact-stream":
+        return "Stream mode is experimental. If candidates go to zero, use compact-packets."
+    if normalized == "plugin-snapshot":
+        return "Plugin-snapshot is experimental. Keep compact-packets as the stable fallback."
+    return ""
 
 
 def script_supports_flag(script: Path, flag: str) -> bool:
@@ -83,8 +141,63 @@ def build_inspect_packets_command() -> list[str]:
     return python_command("telemetry-viewer\\inspect_live_packets.py", "--latest-session", "--summary")
 
 
+def doctor_mode_key(label: str) -> str:
+    mapping = {
+        "Daily": "daily",
+        "Normal Live": "daily",
+        "Visual QA": "visual_qa",
+        "Debug Audit": "debug_audit",
+        "Plugin Snapshot Experimental": "plugin_snapshot_experimental",
+    }
+    return mapping.get(label, "daily")
+
+
+def build_config_doctor_command(
+    mode: str = "daily",
+    *,
+    fix_suggestions: bool = True,
+    check_processes: bool = False,
+) -> list[str]:
+    command = python_command("telemetry-viewer\\live_config_doctor.py", "--latest-session", "--mode", mode)
+    if fix_suggestions:
+        command.append("--fix-suggestions")
+    if check_processes:
+        command.append("--check-processes")
+    return command
+
+
+def build_daily_gauntlet_command(*, strict: bool = True, check_processes: bool = True, daemon_url: str = "http://127.0.0.1:8890") -> list[str]:
+    command = python_command("telemetry-viewer\\run_daily_gauntlet.py", "--latest-session", "--daemon-url", daemon_url)
+    if strict:
+        command.append("--strict")
+    if check_processes:
+        command.append("--check-processes")
+    return command
+
+
+def preset_request_body(preset: str) -> dict:
+    return {"schema": "telemetry_preset_request.v1", "preset": preset}
+
+
+def preset_endpoint_url(path: str, *, host: str = "127.0.0.1", port: int = 8893) -> str:
+    return f"http://{host}:{int(port)}{path}"
+
+
+def request_preset_endpoint(path: str, preset: str, *, timeout: float = 1.0) -> dict:
+    body = json.dumps(preset_request_body(preset), separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        preset_endpoint_url(path),
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=max(0.001, timeout)) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    return payload if isinstance(payload, dict) else {}
+
+
 def build_live_processor_command(options: LivePanelOptions, *, supports_liveness: bool = True) -> list[str]:
-    input_source = "compact-packets" if options.require_compact_packets else options.input_source
+    input_source = "compact-packets" if options.require_compact_packets else normalize_input_source(options.input_source)
     command = python_command(
         "telemetry-viewer\\live_target_processor.py",
         "--latest-session",
@@ -115,6 +228,8 @@ def build_live_processor_command(options: LivePanelOptions, *, supports_liveness
             str(options.window_ticks),
             "--limit",
             str(options.limit),
+            "--overlay-debug-target-limit",
+            str(options.overlay_debug_target_limit),
         ]
     )
     if options.no_ui_targets:
@@ -124,11 +239,59 @@ def build_live_processor_command(options: LivePanelOptions, *, supports_liveness
         command.append("--summary")
     if options.benchmark:
         command.append("--benchmark")
+    if input_source == "plugin-snapshot":
+        command.extend([
+            "--plugin-snapshot-tier",
+            "hot",
+            "--plugin-snapshot-projection-field-mode",
+            "compact",
+            "--plugin-snapshot-fallback",
+            "compact-packets",
+        ])
     return command
 
 
 def build_context_service_command(port: int) -> list[str]:
     return python_command("telemetry-viewer\\context_service.py", "--latest-session", "--port", str(port))
+
+
+def build_live_core_daemon_command(options: LivePanelOptions) -> list[str]:
+    command = python_command(
+        "telemetry-viewer\\live_core_daemon.py",
+        "--latest-session",
+        "--profile",
+        options.profile,
+        "--input-source",
+        "compact-packets",
+        "--context-port",
+        str(options.port),
+    )
+    if options.write_overlay_state:
+        command.extend([
+            "--write-overlay-state",
+            "--overlay-mode",
+            "intent",
+            "--overlay-backup-candidates",
+            "2",
+            "--overlay-debug-target-limit",
+            str(min(options.overlay_debug_target_limit, 10)),
+        ])
+    command.extend(["--human-dashboard", "--brain-task", "woodcutting"])
+    if options.goal_count is not None:
+        command.extend(["--goal-count", str(options.goal_count)])
+    if options.summary:
+        command.append("--summary")
+    if options.benchmark:
+        command.append("--benchmark")
+    return command
+
+
+def localhost_port_is_listening(port: int, timeout: float = 0.2) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def build_dashboard_command(interval: float) -> list[str]:
@@ -232,15 +395,18 @@ def build_context_request_body(max_candidates: int = 1) -> dict:
 def normal_live_options(profile: str = "woodcutting") -> LivePanelOptions:
     return LivePanelOptions(
         profile=profile,
-        mode="Normal Live",
+        mode="Daily",
         input_source="compact-packets",
         liveness_mode="delta",
         window_ticks=10,
         limit=100,
+        overlay_debug_target_limit=10,
         port=8890,
         interval=1.0,
+        goal_count=5,
         require_compact_packets=True,
         no_ui_targets=True,
+        write_overlay_state=True,
         benchmark=True,
         summary=True,
     )
@@ -249,15 +415,18 @@ def normal_live_options(profile: str = "woodcutting") -> LivePanelOptions:
 def build_normal_live_stack_commands(options: LivePanelOptions, *, supports_liveness: bool = True) -> list[tuple[str, list[str], str]]:
     stack_options = LivePanelOptions(
         profile=options.profile,
-        mode="Normal Live",
+        mode="Daily",
         input_source="compact-packets",
         liveness_mode=options.liveness_mode or "delta",
         window_ticks=options.window_ticks,
         limit=options.limit,
+        overlay_debug_target_limit=min(options.overlay_debug_target_limit, 10),
         port=options.port,
         interval=options.interval,
+        goal_count=options.goal_count,
         require_compact_packets=True,
         no_ui_targets=options.no_ui_targets,
+        write_overlay_state=options.write_overlay_state,
         benchmark=options.benchmark,
         summary=options.summary,
     )
@@ -364,6 +533,44 @@ def stale_session_warning(
     return ""
 
 
+def stream_incomplete_warning(status: dict) -> str:
+    if status.get("inputSourceActive") != "compact-stream":
+        return ""
+    candidate_count = status.get("candidateCount")
+    missing = status.get("compactStreamMissingRequiredTypesForLatestTick") or status.get("compactStreamKnownMissingTypes") or []
+    missing_required = sorted(REQUIRED_STREAM_PACKET_TYPES.intersection(str(item) for item in missing))
+    if candidate_count == 0 and missing_required:
+        return "Stream incomplete. Switch to compact-packets."
+    return ""
+
+
+def first_present(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def yes_no_unknown(value: Any) -> str:
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return "unknown"
+
+
+def compact_file_bridge_warning(snapshot: dict) -> str:
+    if snapshot.get("compactPacketsAvailable") is True:
+        return ""
+    if (
+        snapshot.get("compactLiveStreamEnabled") is True
+        or snapshot.get("compactLiveStreamAlsoWriteFiles") is False
+        or snapshot.get("compactLivePacketFilesEnabled") is False
+    ):
+        return "No compact packet file segment. Check 'Stream also writes files' or use compact-packets stable mode."
+    return ""
+
+
 def status_snapshot(session: Path | None, previous: dict | None = None) -> dict:
     if session is None:
         return previous or {}
@@ -390,26 +597,68 @@ def status_snapshot(session: Path | None, previous: dict | None = None) -> dict:
         session / "manifest.json",
         previous.get("manifest") if isinstance(previous.get("manifest"), dict) else None,
     )
-    return {
+    packet_status = compact_packet_status(session)
+    latest_segment = (
+        packet_status.get("latestSegment")
+        or status.get("compactPacketLatestSegment")
+        or packet_index.get("activeSegment")
+        or packet_index.get("latestSegment")
+    )
+    compact_packets_available = bool(packet_status.get("available"))
+    compact_packet_recording_enabled = first_present(
+        status.get("compactPacketRecordingEnabled"),
+        status.get("compactLiveEnabled"),
+        manifest.get("compactPacketRecordingEnabled"),
+        manifest.get("compactLivePacketsEnabled"),
+    )
+    compact_live_packet_files_enabled = first_present(
+        status.get("compactLivePacketFilesEnabled"),
+        manifest.get("compactLivePacketFilesEnabled"),
+    )
+    compact_live_stream_enabled = first_present(
+        status.get("compactLiveStreamEnabled"),
+        manifest.get("compactLiveStreamEnabled"),
+    )
+    compact_live_stream_also_write_files = first_present(
+        status.get("compactLiveStreamAlsoWriteFiles"),
+        manifest.get("compactLiveStreamAlsoWriteFiles"),
+    )
+    snapshot = {
         "status": status,
         "performance": performance,
         "context": context,
         "packetIndex": packet_index,
         "overlayDebug": overlay,
         "manifest": manifest,
-        "latestTick": status.get("latestTickProcessed") or status.get("latestTick") or context.get("latestTick") or packet_index.get("latestTick"),
+        "latestTick": status.get("latestTickProcessed") or status.get("lastProcessedTick") or status.get("latestTick") or context.get("latestTick") or packet_index.get("latestTick"),
         "inputSourceActive": status.get("inputSourceActive"),
         "candidateCount": status.get("candidateCount"),
         "budgetExceeded": status.get("budgetExceeded"),
         "writeFailures": status.get("writeFailureCount"),
-        "compactPacketsAvailable": status.get("compactPacketsAvailable") or bool(packet_index),
-        "latestSegment": status.get("compactPacketLatestSegment") or packet_index.get("activeSegment") or packet_index.get("latestSegment"),
+        "compactPacketsAvailable": compact_packets_available,
+        "compactPacketsRecent": packet_status.get("recent"),
+        "latestSegment": latest_segment,
+        "latestSegmentExists": bool(packet_status.get("available")),
         "recordingMode": status.get("recordingMode") or manifest.get("recordingMode"),
+        "compactPacketRecordingEnabled": compact_packet_recording_enabled,
+        "compactLivePacketFilesEnabled": compact_live_packet_files_enabled,
+        "compactLiveStreamEnabled": compact_live_stream_enabled,
+        "compactLiveStreamAlsoWriteFiles": compact_live_stream_also_write_files,
         "rawTickRecordingEnabled": status.get("rawTickRecordingEnabled") if status.get("rawTickRecordingEnabled") is not None else manifest.get("rawTickRecordingEnabled"),
         "frameRecordingEnabled": status.get("frameRecordingEnabled") if status.get("frameRecordingEnabled") is not None else manifest.get("frameRecordingEnabled"),
         "latestEventSummary": overlay.get("latestEventSummary"),
         "latestEventTick": overlay.get("latestEventTick"),
+        "compactStreamMissingRequiredTypesForLatestTick": status.get("compactStreamMissingRequiredTypesForLatestTick") or [],
+        "streamIncompleteWarning": stream_incomplete_warning(status),
     }
+    snapshot["compactFileBridgeWarning"] = compact_file_bridge_warning(snapshot)
+    snapshot["compactChecklist"] = {
+        "Emit compact live packets": yes_no_unknown(compact_packet_recording_enabled),
+        "Stream also writes files": yes_no_unknown(compact_live_stream_also_write_files),
+        "Latest segment exists": yes_no_unknown(snapshot.get("latestSegmentExists")),
+        "Compact packets recent": yes_no_unknown(packet_status.get("recent")),
+    }
+    return snapshot
 
 
 class ManagedProcess:
@@ -445,22 +694,26 @@ class LiveControlPanel:
         self.context_poll_inflight = False
         self.log_widgets: dict[str, tk.Text] = {}
         self.context_status_var = tk.StringVar(value="context: unknown")
+        self.doctor_status_var = tk.StringVar(value="config doctor: unknown")
+        self.doctor_warnings_var = tk.StringVar(value="")
         self.session_var = tk.StringVar(value=str(self.latest_session) if self.latest_session else "No session found")
         self.packet_status_var = tk.StringVar(value="compact packets: unknown")
         self.latest_tick_var = tk.StringVar(value="latest tick: unknown")
-        self.mode_var = tk.StringVar(value="Normal Live")
+        self.mode_var = tk.StringVar(value="Daily")
         self.profile_var = tk.StringVar(value="woodcutting")
-        self.input_source_var = tk.StringVar(value="auto")
+        self.input_source_var = tk.StringVar(value="compact-packets")
         self.liveness_var = tk.StringVar(value="delta")
         self.window_ticks_var = tk.StringVar(value="10")
         self.limit_var = tk.StringVar(value="100")
         self.port_var = tk.StringVar(value="8890")
         self.interval_var = tk.StringVar(value="1")
-        self.require_compact_var = tk.BooleanVar(value=False)
+        self.require_compact_var = tk.BooleanVar(value=True)
         self.no_ui_targets_var = tk.BooleanVar(value=True)
+        self.write_overlay_state_var = tk.BooleanVar(value=True)
         self.benchmark_var = tk.BooleanVar(value=True)
         self.summary_var = tk.BooleanVar(value=True)
         self.open_inspector_var = tk.BooleanVar(value=False)
+        self.stream_warning_var = tk.StringVar(value="")
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.refresh_latest_session(log=False)
@@ -479,17 +732,20 @@ class LiveControlPanel:
         session_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
         ttk.Label(session_frame, textvariable=self.session_var, wraplength=760).grid(row=0, column=0, columnspan=4, sticky=tk.W)
         ttk.Button(session_frame, text="Refresh latest session", command=self.refresh_latest_session).grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
-        ttk.Button(session_frame, text="Open session folder", command=self.open_session_folder).grid(row=1, column=1, sticky=tk.W, pady=(6, 0), padx=(6, 0))
+        ttk.Button(session_frame, text="Open Session Folder", command=self.open_session_folder).grid(row=1, column=1, sticky=tk.W, pady=(6, 0), padx=(6, 0))
         ttk.Label(session_frame, textvariable=self.packet_status_var).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(6, 0))
         ttk.Label(session_frame, textvariable=self.latest_tick_var).grid(row=3, column=0, columnspan=2, sticky=tk.W)
         ttk.Label(session_frame, textvariable=self.context_status_var).grid(row=3, column=2, columnspan=2, sticky=tk.W)
+        ttk.Label(session_frame, textvariable=self.doctor_status_var).grid(row=4, column=0, columnspan=2, sticky=tk.W)
+        ttk.Label(session_frame, textvariable=self.doctor_warnings_var, foreground="#b45309", wraplength=760).grid(row=5, column=0, columnspan=4, sticky=tk.W)
         session_frame.columnconfigure(3, weight=1)
 
-        options = ttk.LabelFrame(top, text="Options", padding=8)
-        options.pack(side=tk.RIGHT, fill=tk.X)
+        options = ttk.LabelFrame(outer, text="Advanced Defaults", padding=8)
         self._option_row(options, 0, "Mode", ttk.Combobox(options, textvariable=self.mode_var, values=WORKFLOW_MODES, width=18, state="readonly"))
         self._option_row(options, 1, "Profile", ttk.Combobox(options, textvariable=self.profile_var, values=PROFILES, width=18, state="readonly"))
-        self._option_row(options, 2, "Input source", ttk.Combobox(options, textvariable=self.input_source_var, values=INPUT_SOURCES, width=18, state="readonly"))
+        input_source_box = ttk.Combobox(options, textvariable=self.input_source_var, values=INPUT_SOURCES, width=24, state="readonly")
+        input_source_box.bind("<<ComboboxSelected>>", lambda _event: self.update_stream_warning())
+        self._option_row(options, 2, "Input source", input_source_box)
         self._option_row(options, 3, "Liveness", ttk.Combobox(options, textvariable=self.liveness_var, values=LIVENESS_MODES, width=18, state="readonly"))
         self._entry_row(options, 4, "Window ticks", self.window_ticks_var)
         self._entry_row(options, 5, "Limit", self.limit_var)
@@ -497,36 +753,54 @@ class LiveControlPanel:
         self._entry_row(options, 7, "Dashboard interval", self.interval_var)
         ttk.Checkbutton(options, text="Require compact packets", variable=self.require_compact_var).grid(row=8, column=0, columnspan=2, sticky=tk.W)
         ttk.Checkbutton(options, text="No UI targets", variable=self.no_ui_targets_var).grid(row=9, column=0, columnspan=2, sticky=tk.W)
-        ttk.Checkbutton(options, text="Summary", variable=self.summary_var).grid(row=10, column=0, sticky=tk.W)
-        ttk.Checkbutton(options, text="Benchmark", variable=self.benchmark_var).grid(row=10, column=1, sticky=tk.W)
-        ttk.Checkbutton(options, text="Open inspector URL", variable=self.open_inspector_var).grid(row=11, column=0, columnspan=2, sticky=tk.W)
+        ttk.Checkbutton(options, text="Overlay state", variable=self.write_overlay_state_var).grid(row=10, column=0, sticky=tk.W)
+        ttk.Checkbutton(options, text="Summary", variable=self.summary_var).grid(row=10, column=1, sticky=tk.W)
+        ttk.Checkbutton(options, text="Benchmark", variable=self.benchmark_var).grid(row=11, column=0, sticky=tk.W)
+        ttk.Checkbutton(options, text="Open inspector URL", variable=self.open_inspector_var).grid(row=11, column=1, sticky=tk.W)
+        ttk.Label(options, textvariable=self.stream_warning_var, foreground="#b45309", wraplength=260).grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
 
-        button_frame = ttk.LabelFrame(outer, text="Start / Stop", padding=8)
-        button_frame.pack(fill=tk.X, pady=8)
-        buttons = [
-            ("Start Normal Live Stack", self.start_normal_live_stack),
-            ("Restart Live Stack", self.restart_live_stack),
-            ("Start RuneLite Dev", self.start_runelite),
-            ("Check Live Setup", self.check_live_setup),
-            ("Inspect Compact Packets", self.inspect_packets),
-            ("Start Live Processor", self.start_live_processor),
-            ("Start Context Service", self.start_context_service),
-            ("Start Human Dashboard", self.start_dashboard),
-            ("Human Dashboard with Events", self.start_dashboard_events),
-            ("Event Timeline", self.start_event_timeline),
-            ("Start Mock Brain Rehearsal", self.start_mock_brain),
-            ("Start Live Inspector", self.start_inspector),
-            ("Debug Audit Tools", self.start_debug_audit_tools),
-            ("Request Context Once", self.context_once),
-            ("Health Check", self.health_check),
-            ("Stop Selected", self.stop_selected),
-            ("Stop All", self.stop_all),
-            ("Clear Log", self.clear_current_log),
+        daily_frame = ttk.LabelFrame(outer, text="Daily Mode", padding=8)
+        daily_frame.pack(fill=tk.X, pady=(8, 4))
+        daily_buttons = [
+            (DAILY_ACTION_LABELS[0], lambda: self.apply_workflow_preset("DAILY_LIVE")),
+            (DAILY_ACTION_LABELS[1], self.start_runelite),
+            (DAILY_ACTION_LABELS[2], self.start_live_core_daemon),
+            (DAILY_ACTION_LABELS[3], self.stop_all),
+            (DAILY_ACTION_LABELS[4], self.config_doctor),
+            (DAILY_ACTION_LABELS[5], self.daily_gauntlet),
+            (DAILY_ACTION_LABELS[6], self.open_session_folder),
         ]
-        for index, (label, command) in enumerate(buttons):
-            ttk.Button(button_frame, text=label, command=command).grid(row=index // 6, column=index % 6, sticky=tk.EW, padx=3, pady=3)
-        for column in range(6):
-            button_frame.columnconfigure(column, weight=1)
+        for index, (label, command) in enumerate(daily_buttons):
+            ttk.Button(daily_frame, text=label, command=command).grid(row=index // 4, column=index % 4, sticky=tk.EW, padx=3, pady=3)
+        for column in range(4):
+            daily_frame.columnconfigure(column, weight=1)
+
+        advanced_frame = ttk.LabelFrame(outer, text="Advanced / Legacy / Experimental", padding=8)
+        advanced_frame.pack(fill=tk.X, pady=(4, 8))
+        advanced_buttons = [
+            (ADVANCED_ACTION_LABELS[0], self.start_normal_live_stack),
+            (ADVANCED_ACTION_LABELS[1], self.start_live_processor),
+            (ADVANCED_ACTION_LABELS[2], self.start_context_service),
+            (ADVANCED_ACTION_LABELS[3], self.start_dashboard),
+            (ADVANCED_ACTION_LABELS[4], self.start_plugin_snapshot_testing),
+            (ADVANCED_ACTION_LABELS[5], self.start_compact_stream_testing),
+            (ADVANCED_ACTION_LABELS[6], self.start_debug_audit_tools),
+            (ADVANCED_ACTION_LABELS[7], self.start_inspector),
+            (ADVANCED_ACTION_LABELS[8], self.start_debug_audit_tools),
+            (ADVANCED_ACTION_LABELS[9], self.start_dashboard_events),
+            (ADVANCED_ACTION_LABELS[10], self.start_event_timeline),
+            (ADVANCED_ACTION_LABELS[11], self.start_mock_brain),
+            (ADVANCED_ACTION_LABELS[12], self.context_once),
+            (ADVANCED_ACTION_LABELS[13], self.health_check),
+            (ADVANCED_ACTION_LABELS[14], self.stop_selected),
+            (ADVANCED_ACTION_LABELS[15], self.clear_current_log),
+        ]
+        for index, (label, command) in enumerate(advanced_buttons):
+            ttk.Button(advanced_frame, text=label, command=command).grid(row=index // 5, column=index % 5, sticky=tk.EW, padx=3, pady=3)
+        for column in range(5):
+            advanced_frame.columnconfigure(column, weight=1)
+
+        options.pack(fill=tk.X, pady=(0, 8))
 
         middle = ttk.PanedWindow(outer, orient=tk.VERTICAL)
         middle.pack(fill=tk.BOTH, expand=True)
@@ -544,7 +818,7 @@ class LiveControlPanel:
         log_frame = ttk.LabelFrame(middle, text="Logs", padding=6)
         self.notebook = ttk.Notebook(log_frame)
         self.notebook.pack(fill=tk.BOTH, expand=True)
-        for name in ("Live Processor", "Context Service", "Dashboard", "Inspector", "Setup/Packet tools", "RuneLite"):
+        for name in ("Live Daemon", "Live Processor", "Context Service", "Dashboard", "Inspector", "Setup/Packet tools", "RuneLite"):
             self._add_log_tab(name)
         middle.add(log_frame, weight=4)
 
@@ -555,6 +829,9 @@ class LiveControlPanel:
     def _entry_row(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, padx=(0, 6), pady=2)
         ttk.Entry(parent, textvariable=variable, width=20).grid(row=row, column=1, sticky=tk.EW, pady=2)
+
+    def update_stream_warning(self) -> None:
+        self.stream_warning_var.set(stream_mode_warning(self.input_source_var.get()))
 
     def _add_log_tab(self, name: str) -> None:
         frame = ttk.Frame(self.notebook)
@@ -570,14 +847,16 @@ class LiveControlPanel:
         return LivePanelOptions(
             profile=self.profile_var.get(),
             mode=self.mode_var.get(),
-            input_source=self.input_source_var.get(),
+            input_source=normalize_input_source(self.input_source_var.get()),
             liveness_mode=self.liveness_var.get(),
             window_ticks=self._int_var(self.window_ticks_var, 10),
             limit=self._int_var(self.limit_var, 100),
             port=self._int_var(self.port_var, 8890),
             interval=self._float_var(self.interval_var, 1.0),
+            goal_count=5,
             require_compact_packets=bool(self.require_compact_var.get()),
             no_ui_targets=bool(self.no_ui_targets_var.get()),
+            write_overlay_state=bool(self.write_overlay_state_var.get()),
             benchmark=bool(self.benchmark_var.get()),
             summary=bool(self.summary_var.get()),
         )
@@ -624,8 +903,106 @@ class LiveControlPanel:
         self.interval_var.set(str(options.interval))
         self.require_compact_var.set(options.require_compact_packets)
         self.no_ui_targets_var.set(options.no_ui_targets)
+        self.write_overlay_state_var.set(options.write_overlay_state)
         self.summary_var.set(options.summary)
         self.benchmark_var.set(options.benchmark)
+        self.update_stream_warning()
+
+    def apply_control_panel_preset_defaults(self, preset: str) -> None:
+        profile = self.profile_var.get() or "woodcutting"
+        if preset == "DAILY_LIVE":
+            self.apply_normal_live_defaults()
+            self.profile_var.set(profile)
+            return
+        if preset == "VISUAL_QA":
+            self.mode_var.set("Visual QA")
+            self.input_source_var.set("compact-packets")
+            self.liveness_var.set("delta")
+            self.window_ticks_var.set("10")
+            self.limit_var.set("100")
+            self.port_var.set("8890")
+            self.interval_var.set("1.0")
+            self.require_compact_var.set(True)
+            self.no_ui_targets_var.set(True)
+            self.write_overlay_state_var.set(True)
+            self.summary_var.set(True)
+            self.benchmark_var.set(True)
+            self.open_inspector_var.set(True)
+            self.update_stream_warning()
+            return
+        if preset == "DEBUG_AUDIT":
+            self.mode_var.set("Debug Audit")
+            self.input_source_var.set("compact-packets")
+            self.liveness_var.set("full")
+            self.window_ticks_var.set("25")
+            self.limit_var.set("500")
+            self.require_compact_var.set(False)
+            self.write_overlay_state_var.set(True)
+            self.summary_var.set(True)
+            self.benchmark_var.set(True)
+            self.open_inspector_var.set(True)
+            self.update_stream_warning()
+            self.log("Setup/Packet tools", "Debug Audit preset is disk-heavy and should not be used as the realtime daily stack.")
+            return
+        if preset == "PLUGIN_SNAPSHOT_EXPERIMENTAL":
+            self.mode_var.set("Plugin Snapshot Experimental")
+            self.input_source_var.set(PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL)
+            self.liveness_var.set("delta")
+            self.window_ticks_var.set("10")
+            self.limit_var.set("100")
+            self.require_compact_var.set(False)
+            self.no_ui_targets_var.set(True)
+            self.write_overlay_state_var.set(True)
+            self.summary_var.set(True)
+            self.benchmark_var.set(True)
+            self.update_stream_warning()
+
+    def apply_workflow_preset(self, preset: str) -> None:
+        self.apply_control_panel_preset_defaults(preset)
+        label = WORKFLOW_PRESETS.get(preset, (preset, "daily"))[0]
+        self.log("Setup/Packet tools", f"Applied control-panel defaults for {label}.")
+        threading.Thread(target=self._preset_preview_worker, args=(preset,), daemon=True).start()
+
+    def _preset_preview_worker(self, preset: str) -> None:
+        try:
+            preview = request_preset_endpoint("/preset/preview", preset)
+        except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            self.log_queue.put(("Setup/Packet tools", f"Preset endpoint unavailable: {exc}"))
+            self.log_queue.put(("Setup/Packet tools", "Enable the Plugin Snapshot Bridge / Preset Endpoint in RuneLite config, or apply the preset from RuneLite's Workflow Presets section."))
+            self.root.after(0, self.config_doctor)
+            return
+        self.root.after(0, lambda: self._confirm_and_apply_preset(preset, preview))
+
+    def _confirm_and_apply_preset(self, preset: str, preview: dict) -> None:
+        changes = [change for change in preview.get("changes", []) if isinstance(change, dict) and change.get("changed")]
+        label = WORKFLOW_PRESETS.get(preset, (preset, "daily"))[0]
+        if not changes:
+            self.log("Setup/Packet tools", f"{label} preset already matches whitelisted telemetry config.")
+            self.config_doctor()
+            return
+        preview_lines = [
+            f"{change.get('key')}: {change.get('oldValue')} -> {change.get('newValue')}"
+            for change in changes[:12]
+        ]
+        if len(changes) > 12:
+            preview_lines.append(f"...and {len(changes) - 12} more")
+        message = "Apply telemetry preset changes?\n\n" + "\n".join(preview_lines)
+        if not messagebox.askyesno(f"Apply {label} Preset", message):
+            self.log("Setup/Packet tools", f"{label} preset apply cancelled after preview.")
+            return
+        threading.Thread(target=self._preset_apply_worker, args=(preset,), daemon=True).start()
+
+    def _preset_apply_worker(self, preset: str) -> None:
+        try:
+            response = request_preset_endpoint("/preset/apply", preset)
+        except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            self.log_queue.put(("Setup/Packet tools", f"Preset apply failed: {exc}"))
+            return
+        status = response.get("status", "unknown")
+        changed = sum(1 for change in response.get("changes", []) if isinstance(change, dict) and change.get("changed"))
+        label = WORKFLOW_PRESETS.get(preset, (preset, "daily"))[0]
+        self.log_queue.put(("Setup/Packet tools", f"{label} preset apply: {status}; changed {changed} whitelisted telemetry settings."))
+        self.root.after(0, self.config_doctor)
 
     def start_normal_live_stack(self) -> None:
         self.apply_normal_live_defaults()
@@ -655,15 +1032,37 @@ class LiveControlPanel:
     def _start_normal_live_sidecars(self) -> None:
         supports_liveness = script_supports_flag(VIEWER_DIR / "live_target_processor.py", "--liveness-mode")
         for name, command, log_name in build_normal_live_stack_commands(self.options(), supports_liveness=supports_liveness):
+            if name == "Context Service" and localhost_port_is_listening(self.options().port):
+                self.log("Context Service", f"Port {self.options().port} is already in use on 127.0.0.1. Reusing the existing listener; use Health Check to verify it.")
+                continue
             self.start_process(name, command, log_name)
 
     def restart_live_stack(self) -> None:
-        for name in ("Live Processor", "Context Service", "Human Dashboard", "Human Dashboard Events", "Event Timeline", "Mock Brain Rehearsal"):
+        for name in ("Live Core Daemon", "Live Processor", "Context Service", "Human Dashboard", "Human Dashboard Events", "Event Timeline", "Mock Brain Rehearsal"):
             self.stop_process(name)
         self.root.after(1000, self.start_normal_live_stack)
 
+    def start_live_core_daemon(self) -> None:
+        self.apply_normal_live_defaults()
+        port = self.options().port
+        if localhost_port_is_listening(port) and not self.is_process_running("Live Core Daemon"):
+            self.log("Live Daemon", f"Port {port} is already in use on 127.0.0.1. Stop the existing context service/daemon or choose another port.")
+            return
+        self.start_process("Live Core Daemon", build_live_core_daemon_command(self.options()), "Live Daemon")
+
+    def stop_live_core_daemon(self) -> None:
+        self.stop_process("Live Core Daemon")
+
     def check_live_setup(self) -> None:
         self.start_process("Check Live Setup", build_check_live_setup_command(self.require_compact_var.get()), "Setup/Packet tools")
+
+    def config_doctor(self) -> None:
+        command = build_config_doctor_command(doctor_mode_key(self.mode_var.get()), fix_suggestions=True, check_processes=True)
+        self.start_process("Config Doctor", command, "Setup/Packet tools")
+
+    def daily_gauntlet(self) -> None:
+        command = build_daily_gauntlet_command(daemon_url=f"http://127.0.0.1:{self.options().port}")
+        self.start_process("Daily Gauntlet", command, "Setup/Packet tools")
 
     def inspect_packets(self) -> None:
         self.start_process("Inspect Compact Packets", build_inspect_packets_command(), "Setup/Packet tools")
@@ -673,8 +1072,27 @@ class LiveControlPanel:
         command = build_live_processor_command(self.options(), supports_liveness=supports_liveness)
         self.start_process("Live Processor", command, "Live Processor")
 
+    def start_plugin_snapshot_testing(self) -> None:
+        self.mode_var.set("Plugin Snapshot Experimental")
+        self.input_source_var.set(PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL)
+        self.require_compact_var.set(False)
+        self.update_stream_warning()
+        self.log("Live Processor", "Plugin-snapshot testing is EXPERIMENTAL. Daily mode remains live_core_daemon + compact-packets.")
+        self.start_live_processor()
+
+    def start_compact_stream_testing(self) -> None:
+        self.input_source_var.set(COMPACT_STREAM_EXPERIMENTAL_LABEL)
+        self.require_compact_var.set(False)
+        self.update_stream_warning()
+        self.log("Live Processor", "Compact-stream testing is EXPERIMENTAL. If candidates go to zero, return to compact-packets.")
+        self.start_live_processor()
+
     def start_context_service(self) -> None:
-        self.start_process("Context Service", build_context_service_command(self.options().port), "Context Service")
+        port = self.options().port
+        if localhost_port_is_listening(port):
+            self.log("Context Service", f"Port {port} is already in use on 127.0.0.1. If context is unavailable, stop the existing process or choose another port.")
+            return
+        self.start_process("Context Service", build_context_service_command(port), "Context Service")
 
     def start_dashboard(self) -> None:
         self.start_process("Human Dashboard", build_dashboard_command(self.options().interval), "Dashboard")
@@ -844,6 +1262,10 @@ class LiveControlPanel:
         self.previous_snapshot = status_snapshot(self.latest_session, self.previous_snapshot)
         snapshot = self.previous_snapshot
         stale_warning = stale_session_warning(self.latest_session)
+        stream_warning = snapshot.get("streamIncompleteWarning") or ""
+        file_bridge_warning = snapshot.get("compactFileBridgeWarning") or ""
+        checklist = snapshot.get("compactChecklist") or {}
+        checklist_text = "; ".join(f"{name}={value}" for name, value in checklist.items())
         self.latest_tick_var.set(f"latest tick: {snapshot.get('latestTick') or 'unknown'}")
         self.packet_status_var.set(
             "compact packets: "
@@ -857,14 +1279,26 @@ class LiveControlPanel:
             f"rawTicks={snapshot.get('rawTickRecordingEnabled')}; "
             f"frames={snapshot.get('frameRecordingEnabled')}; "
             f"event={snapshot.get('latestEventSummary') or 'none'}"
+            + (f"; checks: {checklist_text}" if checklist_text else "")
+            + (f"; warning={file_bridge_warning}" if file_bridge_warning else "")
+            + (f"; warning={stream_warning}" if stream_warning else "")
             + (f"; warning={stale_warning}" if stale_warning else "")
         )
-        if self.is_process_running("Context Service"):
+        if self.is_process_running("Context Service") or self.is_process_running("Live Core Daemon"):
             if not self.context_poll_inflight:
                 self.context_poll_inflight = True
                 threading.Thread(target=self._context_status_worker, daemon=True).start()
         else:
             self.context_status_var.set("context: service stopped")
+        doctor = live_config_doctor.evaluate_live_config(
+            self.latest_session,
+            mode=doctor_mode_key(self.mode_var.get()),
+            context_port=self.options().port,
+            check_context_service=True,
+        )
+        self.doctor_status_var.set(f"config doctor: {doctor.get('status', 'unknown')}")
+        top_warnings = doctor.get("topWarnings") or []
+        self.doctor_warnings_var.set(" | ".join(str(item) for item in top_warnings[:3]))
         self.update_process_tree()
         self.root.after(2000, self.poll_status)
 
@@ -899,19 +1333,26 @@ class LiveControlPanel:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Read-only OSRS telemetry live control panel.")
-    parser.add_argument("--auto-start-normal-live", action="store_true", help="Open the panel and start the normal compact live stack.")
+    parser.add_argument("--auto-start-normal-live", action="store_true", help="Open the panel and start the daily streamlined live daemon.")
     parser.add_argument("--profile", default="woodcutting", choices=PROFILES, help="Default target profile.")
-    parser.add_argument("--mode", default="normal-live", choices=("normal-live", "visual-qa", "debug-audit"), help="Initial workflow mode.")
+    parser.add_argument(
+        "--mode",
+        default="normal-live",
+        choices=("normal-live", "daily", "visual-qa", "debug-audit", "plugin-snapshot-experimental"),
+        help="Initial workflow mode.",
+    )
     return parser.parse_args(argv)
 
 
 def _mode_label(value: str) -> str:
     mapping = {
-        "normal-live": "Normal Live",
+        "normal-live": "Daily",
+        "daily": "Daily",
         "visual-qa": "Visual QA",
         "debug-audit": "Debug Audit",
+        "plugin-snapshot-experimental": "Plugin Snapshot Experimental",
     }
-    return mapping.get(value, "Normal Live")
+    return mapping.get(value, "Daily")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -920,11 +1361,11 @@ def main(argv: list[str] | None = None) -> int:
     panel = LiveControlPanel(root)
     panel.profile_var.set(args.profile)
     panel.mode_var.set(_mode_label(args.mode))
-    if args.mode == "normal-live":
+    if args.mode in {"normal-live", "daily"}:
         panel.apply_normal_live_defaults()
         panel.profile_var.set(args.profile)
     if args.auto_start_normal_live:
-        root.after(500, panel.start_normal_live_stack)
+        root.after(500, panel.start_live_core_daemon)
     root.mainloop()
     return 0
 
