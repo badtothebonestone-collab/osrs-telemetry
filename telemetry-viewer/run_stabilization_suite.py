@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 COMMANDS = [
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\capabilities.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\runtime_control.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\task_policy.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\task_state.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\analyzers\\__init__.py"],
@@ -27,6 +28,7 @@ COMMANDS = [
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\brain_core.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\intent_stabilizer.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\live_core_daemon.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\control_live_daemon.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\diagnose_task_policy.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\diagnose_task_transition.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\diagnose_navigation_intent.py"],
@@ -37,6 +39,7 @@ COMMANDS = [
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\run_stabilization_suite.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_resource_progress.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_task_policy.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_runtime_control.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_diagnose_task_policy.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_task_transitions.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_task_state.py"],

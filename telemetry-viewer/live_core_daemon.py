@@ -17,6 +17,7 @@ import brain_core
 import context_service
 import intent_stabilizer
 import live_target_processor as live
+import runtime_control
 import task_policy as task_policy_module
 from analyzers import activity_analyzer
 from analyzers import brain_context_analyzer
@@ -177,6 +178,19 @@ def persist_daemon_brain_state(path: str | None, state: dict, session: Path, arg
 
 def brain_status_fields(state: dict, reset_applied: bool) -> dict:
     return brain_context_analyzer.brain_status_fields(state, reset_applied)
+
+
+def runtime_control_from_args(args: argparse.Namespace) -> runtime_control.RuntimeControlState:
+    return runtime_control.RuntimeControlState(
+        activeTask=str(args.brain_task or args.profile or "woodcutting"),
+        taskPolicy=str(args.task_policy or task_policy_module.default_policy_name(args.brain_task, args.profile)),
+        goalCount=args.goal_count,
+        observeOnly=False,
+        brainEnabled=bool(args.human_dashboard or args.goal_count is not None),
+        overlayEnabled=bool(args.write_overlay_state),
+        overlayMode=str(args.overlay_mode or "intent"),
+        overlayBackupCandidates=int(args.overlay_backup_candidates),
+    )
 
 
 def one_shot_brain_warning(warning: str | None) -> bool:
@@ -609,6 +623,12 @@ class LiveCoreState:
             "navigationIntentReachability",
             "navigationIntentDistanceTiles",
             "navigationIntentCollisionWindowAvailable",
+            "runtimeControl",
+            "runtimeControlLastUpdatedUtc",
+            "brainTaskPolicy",
+            "brainGoalCount",
+            "observeOnly",
+            "brainEnabled",
         )
         for key in passthrough_status_keys:
             if key in self.source_status:
@@ -625,6 +645,7 @@ class LiveCoreState:
                 "brainPhase": brain.get("phase"),
                 "brainProgress": progress or None,
                 "brainBestTree": target if isinstance(target, dict) and target else None,
+                "runtimeControl": self.source_status.get("runtimeControl"),
             }
         )
         return payload
@@ -634,6 +655,7 @@ class LiveCoreDaemon:
     def __init__(self, session: Path, args: argparse.Namespace):
         self.session = session
         self.args = args
+        self.runtime_control = runtime_control_from_args(args)
         brain_state, brain_state_warning = load_daemon_brain_state(session, args)
         self.brain_state_warning = brain_state_warning
         self.state = LiveCoreState(
@@ -655,6 +677,84 @@ class LiveCoreDaemon:
         self.server: ThreadingHTTPServer | None = None
         self.server_thread: threading.Thread | None = None
         self.stop_event = threading.Event()
+        self.publish_runtime_control_status()
+
+    def effective_brain_task(self) -> str:
+        return str(self.runtime_control.activeTask or self.args.brain_task or self.args.profile or "woodcutting")
+
+    def effective_task_policy(self) -> str:
+        if self.runtime_control.observeOnly:
+            return "observe_only"
+        return str(self.runtime_control.taskPolicy or self.args.task_policy or "woodcutting_bank")
+
+    def effective_goal_count(self) -> int | None:
+        if self.runtime_control.observeOnly:
+            return None
+        return self.runtime_control.goalCount
+
+    def effective_overlay_args(self) -> argparse.Namespace:
+        values = vars(self.args).copy()
+        values["overlay_mode"] = self.runtime_control.overlayMode
+        values["overlay_backup_candidates"] = self.runtime_control.overlayBackupCandidates
+        return argparse.Namespace(**values)
+
+    def publish_runtime_control_status(self) -> None:
+        control_state = self.runtime_control.to_dict()
+        fields = {
+            "runtimeControl": control_state,
+            "runtimeControlLastUpdatedUtc": control_state.get("lastUpdatedUtc"),
+            "brainTaskPolicy": self.effective_task_policy(),
+            "brainGoalCount": self.effective_goal_count(),
+            "observeOnly": bool(self.runtime_control.observeOnly),
+            "brainEnabled": bool(self.runtime_control.brainEnabled),
+        }
+        self.state.source_status.update(fields)
+        if isinstance(self.state.latest_context.get("status"), dict):
+            self.state.latest_context["status"].update(fields)
+
+    def runtime_control_payload(self) -> dict:
+        self.publish_runtime_control_status()
+        return {
+            "schema": runtime_control.CONTROL_RESULT_SCHEMA,
+            "status": "PASS",
+            "state": self.runtime_control.to_dict(),
+            "acceptedFields": [],
+            "rejectedFields": [],
+            "warnings": list(self.runtime_control.warnings),
+            "resetBrainState": False,
+            "noActionEmitted": True,
+        }
+
+    def apply_runtime_control_payload(self, payload: dict) -> tuple[dict, int]:
+        previous_policy = self.runtime_control.taskPolicy
+        previous_observe_only = self.runtime_control.observeOnly
+        result = runtime_control.apply_control_command(self.runtime_control, payload)
+        if result.status != "PASS":
+            return result.to_dict(), 400
+        if "taskPolicy" in result.acceptedFields and self.runtime_control.taskPolicy != previous_policy:
+            task_policy_module.clear_task_policy_cache()
+        self.args.task_policy = self.runtime_control.taskPolicy
+        self.args.goal_count = self.effective_goal_count()
+        self.args.brain_task = self.effective_brain_task()
+        if (
+            result.resetBrainState
+            or self.runtime_control.taskPolicy != previous_policy
+            or self.runtime_control.observeOnly != previous_observe_only
+        ):
+            self.intent_stabilizer = intent_stabilizer.IntentStabilizer()
+            self.latest_intent_result = None
+        if result.resetBrainState:
+            task = self.effective_brain_task()
+            goal_count = self.effective_goal_count()
+            self.state.brain_state = brain_core.default_state(task, goal_count)
+            self.state.brain_state["sessionPath"] = str(self.session.resolve())
+            self.state.brain_state["brainStateScope"] = brain_state_scope(self.session, task, goal_count)
+            self.state.brain_state["goalResourceGroup"] = self.state.brain_state["brainStateScope"].get("resourceGroup")
+            self.state.brain_decision = {}
+            self.brain_reset_applied = True
+            self.runtime_control.resetBaselineRequested = False
+        self.publish_runtime_control_status()
+        return result.to_dict(), 200
 
     def make_processor(self, input_source: str) -> live.LiveTargetProcessor:
         existing = self.processors.get(input_source)
@@ -755,7 +855,7 @@ class LiveCoreDaemon:
             candidates = []
         if not isinstance(raw_best, dict) or not raw_best:
             raw_best = candidates[0] if decision and candidates else {}
-        task = str(decision.get("task") or self.args.brain_task or self.args.profile or "")
+        task = str(decision.get("task") or self.effective_brain_task() or self.args.profile or "")
         priority = intent_stabilizer.PRIORITY_SELECTED_TARGET
         if phase in {"goal_complete", "inventory_full", "none", "needs_service", "process_inventory", "banking_needed", "navigate_to_service", "service_available", "service_interaction_pending"}:
             priority = intent_stabilizer.PRIORITY_TASK_TRANSITION
@@ -886,14 +986,14 @@ class LiveCoreDaemon:
         overlay_fields = {
             "overlayStateWritten": bool(overlay_written),
             "overlayWriteError": overlay_error,
-            "overlayMode": self.args.overlay_mode,
+            "overlayMode": self.runtime_control.overlayMode,
             "intentMarkerCount": 0,
             "candidateMarkersSuppressed": 0,
             "overlayStateBytes": overlay_bytes,
         }
         if isinstance(result.get("overlayDebug"), dict):
             summary = result["overlayDebug"].get("summary") if isinstance(result["overlayDebug"].get("summary"), dict) else {}
-            overlay_fields["overlayMode"] = summary.get("overlayMode", self.args.overlay_mode)
+            overlay_fields["overlayMode"] = summary.get("overlayMode", self.runtime_control.overlayMode)
             overlay_fields["intentMarkerCount"] = summary.get("intentMarkerCount", 0)
             overlay_fields["candidateMarkersSuppressed"] = summary.get("candidateMarkersSuppressed", 0)
         self.state.overlay_state_written = bool(overlay_written)
@@ -907,16 +1007,18 @@ class LiveCoreDaemon:
             warning = f"overlay state write failed: {overlay_error}"
             if warning not in self.state.warnings:
                 self.state.warnings.append(warning)
+        self.publish_runtime_control_status()
         self.brain_state_warning = None
         return result
 
     def write_overlay_state_if_enabled(self, result: dict) -> tuple[bool, str | None, int]:
-        if not self.args.write_overlay_state:
+        if not self.args.write_overlay_state or not self.runtime_control.overlayEnabled:
             return False, None, 0
         generated_at = utc_now()
+        overlay_args = self.effective_overlay_args()
         overlay_context = intent_overlay_analyzer.analyze_intent_overlay(
             session=self.session,
-            args=self.args,
+            args=overlay_args,
             result=result,
             context=self.state.context(),
             brain_decision=self.state.brain_decision if isinstance(self.state.brain_decision, dict) else {},
@@ -949,7 +1051,7 @@ class LiveCoreDaemon:
     def default_context_request(self) -> dict:
         return {
             "schema": context_service.REQUEST_SCHEMA,
-            "task": self.args.brain_task,
+            "task": self.effective_brain_task(),
             "needs": list(DEFAULT_CONTEXT_NEEDS),
             "maxCandidates": max(1, int(self.args.max_candidates)),
             "maxEvents": max(0, int(self.args.max_events)),
@@ -970,22 +1072,25 @@ class LiveCoreDaemon:
         )
 
     def evaluate_brain_if_enabled(self, result: dict) -> dict | None:
-        if not self.args.human_dashboard and not self.args.goal_count:
+        if not self.runtime_control.brainEnabled:
             return None
+        task = self.effective_brain_task()
+        goal_count = self.effective_goal_count()
+        policy_name = self.effective_task_policy()
         response = self.build_context_response(self.default_context_request())
         brain_context = brain_context_analyzer.evaluate_brain_context(
             response,
             self.state.brain_state,
-            task=self.args.brain_task,
-            goal_count=self.args.goal_count,
+            task=task,
+            goal_count=goal_count,
             max_events=self.args.max_events,
             reset_applied=self.brain_reset_applied,
-            task_policy=self.args.task_policy,
+            task_policy=policy_name,
         )
         self.state.brain_state = brain_context.updated_state
         if self.state.analysis_result:
             self.state.analysis_result.brain = brain_context
-            policy = task_policy_module.resolve_task_policy(self.args.task_policy, task=self.args.brain_task, profile=self.args.profile)
+            policy = task_policy_module.resolve_task_policy(policy_name, task=task, profile=self.args.profile)
             context = self.state.context()
             candidates = context.get("candidates") if isinstance(context.get("candidates"), list) else []
             progress = brain_context.decision.get("progress") if isinstance(brain_context.decision.get("progress"), dict) else {}
@@ -1030,7 +1135,10 @@ class LiveCoreDaemon:
             )
             brain_context.decision["navigationIntentContext"] = self.state.analysis_result.navigation_intent.to_dict()
         fields = brain_context.status_fields
-        fields["brainTaskPolicy"] = self.args.task_policy
+        fields["brainTaskPolicy"] = policy_name
+        fields["brainGoalCount"] = goal_count
+        fields["observeOnly"] = bool(self.runtime_control.observeOnly)
+        fields["brainEnabled"] = bool(self.runtime_control.brainEnabled)
         if self.state.analysis_result and self.state.analysis_result.service:
             fields["serviceNeeded"] = self.state.analysis_result.service.service_required
             fields["serviceTypeNeeded"] = self.state.analysis_result.service.service_type_needed
@@ -1050,6 +1158,7 @@ class LiveCoreDaemon:
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)
         persist_daemon_brain_state(self.args.brain_state_file, self.state.brain_state, self.session, self.args)
+        self.publish_runtime_control_status()
         return brain_context.decision
 
     def start_context_server(self) -> None:
@@ -1087,9 +1196,13 @@ class LiveCoreDaemon:
             print(f"  mode={self.args.daily_mode}")
             print(f"  source={self.args.input_source}")
             print(f"  writes={'on' if self.args.write_debug_live_files else 'off'}")
-            print(f"  overlay={'on' if self.args.write_overlay_state else 'off'} ({self.args.overlay_mode})")
-            print(f"  brain={'on' if (self.args.human_dashboard or self.args.goal_count) else 'off'}")
-            print(f"  task policy={self.args.task_policy}")
+            print(
+                "  overlay="
+                f"{'on' if (self.args.write_overlay_state and self.runtime_control.overlayEnabled) else 'off'} "
+                f"({self.runtime_control.overlayMode})"
+            )
+            print(f"  brain={'on' if self.runtime_control.brainEnabled else 'off'}")
+            print(f"  task policy={self.effective_task_policy()}")
             print(f"  debug files={'on' if self.args.write_debug_live_files else 'off'}")
             print(
                 "  compact packet files required="
@@ -1132,7 +1245,7 @@ class LiveCoreDaemon:
                 context_ms=round(float(timing.get("contextIndexMillis") or 0.0), 3),
                 brain=(self.state.brain_decision or {}).get("phase") or "off",
                 progress=brain_progress_label(self.state.brain_decision or {}),
-                overlay="on" if self.args.write_overlay_state else "off",
+                overlay="on" if (self.args.write_overlay_state and self.runtime_control.overlayEnabled) else "off",
                 writes="on" if self.args.write_debug_live_files else "off",
                 budget="exceeded" if status.get("budgetExceeded") else "ok",
                 bottleneck=status.get("activeBottleneck") or "unknown",
@@ -1182,12 +1295,14 @@ class LiveCoreRequestHandler(BaseHTTPRequestHandler):
             payload["service"] = "live_core_daemon"
             payload["notes"] = list(dict.fromkeys((payload.get("notes") or []) + READ_ONLY_NOTES))
             payload["endpoints"] = {
-                "GET": ["/health", "/schema", "/status", "/summary", "/brain", "/capabilities", "/watches"],
-                "POST": ["/context", "/context/batch", "/brain", "/watch-request"],
+                "GET": ["/health", "/schema", "/status", "/summary", "/brain", "/capabilities", "/watches", "/control"],
+                "POST": ["/context", "/context/batch", "/brain", "/watch-request", "/control"],
             }
             self.send_json(payload)
         elif path == "/status":
             self.send_json(self.daemon.state.status())
+        elif path == "/control":
+            self.send_json(self.daemon.runtime_control_payload())
         elif path == "/summary":
             self.handle_summary(params)
         elif path == "/brain":
@@ -1200,7 +1315,7 @@ class LiveCoreRequestHandler(BaseHTTPRequestHandler):
             self.send_json(context_service.error_payload(f"unknown endpoint: {self.path}"), status_code=404)
 
     def do_POST(self):  # noqa: N802
-        if self.path not in {"/context", "/context/batch", "/brain", "/watch-request"}:
+        if self.path not in {"/context", "/context/batch", "/brain", "/watch-request", "/control"}:
             self.send_json(context_service.error_payload(f"unknown endpoint: {self.path}"), status_code=404)
             return
         try:
@@ -1213,7 +1328,10 @@ class LiveCoreRequestHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             self.send_json(context_service.error_payload(f"invalid JSON request: {error}"), status_code=400)
             return
-        if self.path == "/context/batch":
+        if self.path == "/control":
+            result, status_code = self.daemon.apply_runtime_control_payload(payload if isinstance(payload, dict) else {})
+            self.send_json(result, status_code=status_code)
+        elif self.path == "/context/batch":
             if not isinstance(payload, list):
                 self.send_json(context_service.error_payload("/context/batch expects a JSON list"), status_code=400)
                 return
@@ -1226,7 +1344,8 @@ class LiveCoreRequestHandler(BaseHTTPRequestHandler):
             self.send_json(self.daemon.build_context_response(payload if isinstance(payload, dict) else {}))
 
     def handle_summary(self, params: dict[str, list[str]]) -> None:
-        task = (params.get("task") or [self.daemon.args.brain_task])[0] or self.daemon.args.brain_task
+        default_task = self.daemon.effective_brain_task()
+        task = (params.get("task") or [default_task])[0] or default_task
         try:
             top = max(1, int((params.get("top") or [str(self.daemon.args.max_candidates)])[0]))
         except ValueError:
@@ -1243,10 +1362,11 @@ class LiveCoreRequestHandler(BaseHTTPRequestHandler):
 
     def handle_brain(self, params: dict[str, list[str]], payload: dict) -> None:
         task = payload.get("task") if isinstance(payload, dict) else None
-        task = task or ((params.get("task") or [self.daemon.args.brain_task])[0] if params else self.daemon.args.brain_task)
+        default_task = self.daemon.effective_brain_task()
+        task = task or ((params.get("task") or [default_task])[0] if params else default_task)
         goal_count = payload.get("goalCount") if isinstance(payload, dict) else None
         if goal_count is None:
-            goal_count = self.daemon.args.goal_count
+            goal_count = self.daemon.effective_goal_count()
         request = dict(self.daemon.default_context_request())
         request["task"] = task
         response = self.daemon.build_context_response(request)
@@ -1257,6 +1377,7 @@ class LiveCoreRequestHandler(BaseHTTPRequestHandler):
             goal_count=goal_count,
             max_events=self.daemon.args.max_events,
             reset_applied=self.daemon.brain_reset_applied,
+            task_policy=self.daemon.effective_task_policy(),
         )
         self.daemon.state.brain_state = brain_context.updated_state
         if self.daemon.state.analysis_result:

@@ -23,6 +23,7 @@ from tkinter import messagebox, ttk
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
 import live_config_doctor
+import task_policy
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +89,8 @@ class LivePanelOptions:
     port: int = 8890
     interval: float = 1.0
     goal_count: int | None = 5
+    task_policy: str = "woodcutting_bank"
+    observe_only: bool = False
     require_compact_packets: bool = True
     no_ui_targets: bool = True
     write_overlay_state: bool = True
@@ -194,6 +197,51 @@ def preset_endpoint_url(path: str, *, host: str = "127.0.0.1", port: int = 8893)
     return f"http://{host}:{int(port)}{path}"
 
 
+def runtime_control_endpoint_url(port: int, *, host: str = "127.0.0.1") -> str:
+    return f"http://{host}:{int(port)}/control"
+
+
+def build_runtime_control_payload(
+    *,
+    task_policy: str,
+    goal_count: int | str | None,
+    observe_only: bool,
+    reset_brain_state: bool = False,
+    brain_enabled: bool = True,
+    overlay_mode: str = "intent",
+    overlay_backup_candidates: int | str = 2,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "taskPolicy": str(task_policy or "woodcutting_bank"),
+        "observeOnly": bool(observe_only),
+        "brainEnabled": bool(brain_enabled),
+        "overlayMode": str(overlay_mode or "intent"),
+    }
+    if goal_count not in (None, ""):
+        payload["goalCount"] = max(0, int(goal_count))
+    if reset_brain_state:
+        payload["resetBrainState"] = True
+    payload["overlayBackupCandidates"] = max(0, int(overlay_backup_candidates))
+    return payload
+
+
+def request_runtime_control(port: int, payload: dict[str, Any] | None = None, *, timeout: float = 1.5) -> dict:
+    url = runtime_control_endpoint_url(port)
+    if payload is None:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            decoded = json.loads(response.read().decode("utf-8", errors="replace"))
+    else:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            decoded = json.loads(response.read().decode("utf-8", errors="replace"))
+    return decoded if isinstance(decoded, dict) else {}
+
+
 def request_preset_endpoint(path: str, preset: str, *, timeout: float = 1.0) -> dict:
     body = json.dumps(preset_request_body(preset), separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(
@@ -292,6 +340,7 @@ def build_live_core_daemon_command(options: LivePanelOptions) -> list[str]:
             str(min(options.overlay_debug_target_limit, 10)),
         ])
     command.extend(["--human-dashboard", "--brain-task", "woodcutting"])
+    command.extend(["--task-policy", options.task_policy])
     if options.goal_count is not None:
         command.extend(["--goal-count", str(options.goal_count)])
     if options.summary:
@@ -422,6 +471,7 @@ def normal_live_options(profile: str = "woodcutting") -> LivePanelOptions:
         port=8890,
         interval=1.0,
         goal_count=5,
+        task_policy="woodcutting_bank",
         require_compact_packets=True,
         no_ui_targets=True,
         write_overlay_state=True,
@@ -443,6 +493,7 @@ def snapshot_no_file_options(profile: str = "woodcutting") -> LivePanelOptions:
         port=8890,
         interval=1.0,
         goal_count=5,
+        task_policy="woodcutting_bank",
         require_compact_packets=False,
         no_ui_targets=True,
         write_overlay_state=True,
@@ -463,6 +514,8 @@ def build_normal_live_stack_commands(options: LivePanelOptions, *, supports_live
         port=options.port,
         interval=options.interval,
         goal_count=options.goal_count,
+        task_policy=options.task_policy,
+        observe_only=options.observe_only,
         require_compact_packets=True,
         no_ui_targets=options.no_ui_targets,
         write_overlay_state=options.write_overlay_state,
@@ -746,6 +799,9 @@ class LiveControlPanel:
         self.limit_var = tk.StringVar(value="100")
         self.port_var = tk.StringVar(value="8890")
         self.interval_var = tk.StringVar(value="1")
+        self.goal_count_var = tk.StringVar(value="5")
+        self.task_policy_var = tk.StringVar(value="woodcutting_bank")
+        self.observe_only_var = tk.BooleanVar(value=False)
         self.require_compact_var = tk.BooleanVar(value=True)
         self.no_ui_targets_var = tk.BooleanVar(value=True)
         self.write_overlay_state_var = tk.BooleanVar(value=True)
@@ -753,6 +809,7 @@ class LiveControlPanel:
         self.summary_var = tk.BooleanVar(value=True)
         self.open_inspector_var = tk.BooleanVar(value=False)
         self.stream_warning_var = tk.StringVar(value="")
+        self.runtime_control_status_var = tk.StringVar(value="runtime control: unknown")
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.refresh_latest_session(log=False)
@@ -814,6 +871,23 @@ class LiveControlPanel:
             ttk.Button(daily_frame, text=label, command=command).grid(row=index // 4, column=index % 4, sticky=tk.EW, padx=3, pady=3)
         for column in range(4):
             daily_frame.columnconfigure(column, weight=1)
+        runtime_frame = ttk.LabelFrame(daily_frame, text="Runtime Brain Control", padding=6)
+        runtime_frame.grid(row=2, column=0, columnspan=4, sticky=tk.EW, pady=(8, 0))
+        ttk.Label(runtime_frame, text="Task policy").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
+        ttk.Combobox(
+            runtime_frame,
+            textvariable=self.task_policy_var,
+            values=tuple(task_policy.policy_names()),
+            width=22,
+            state="readonly",
+        ).grid(row=0, column=1, sticky=tk.W, padx=(0, 8))
+        ttk.Label(runtime_frame, text="Goal").grid(row=0, column=2, sticky=tk.W, padx=(0, 4))
+        ttk.Entry(runtime_frame, textvariable=self.goal_count_var, width=8).grid(row=0, column=3, sticky=tk.W, padx=(0, 8))
+        ttk.Checkbutton(runtime_frame, text="Observe only", variable=self.observe_only_var).grid(row=0, column=4, sticky=tk.W, padx=(0, 8))
+        ttk.Button(runtime_frame, text="Apply Runtime Control", command=self.apply_runtime_control).grid(row=0, column=5, sticky=tk.EW, padx=3)
+        ttk.Button(runtime_frame, text="Reset Brain Baseline", command=self.reset_brain_baseline).grid(row=0, column=6, sticky=tk.EW, padx=3)
+        ttk.Label(runtime_frame, textvariable=self.runtime_control_status_var).grid(row=1, column=0, columnspan=7, sticky=tk.W, pady=(4, 0))
+        runtime_frame.columnconfigure(6, weight=1)
 
         advanced_frame = ttk.LabelFrame(outer, text="Advanced / Legacy / Experimental", padding=8)
         advanced_frame.pack(fill=tk.X, pady=(4, 8))
@@ -895,7 +969,9 @@ class LiveControlPanel:
             limit=self._int_var(self.limit_var, 100),
             port=self._int_var(self.port_var, 8890),
             interval=self._float_var(self.interval_var, 1.0),
-            goal_count=5,
+            goal_count=None if self.observe_only_var.get() else self._int_var(self.goal_count_var, 5),
+            task_policy=self.task_policy_var.get() or "woodcutting_bank",
+            observe_only=bool(self.observe_only_var.get()),
             require_compact_packets=bool(self.require_compact_var.get()),
             no_ui_targets=bool(self.no_ui_targets_var.get()),
             write_overlay_state=bool(self.write_overlay_state_var.get()),
@@ -943,6 +1019,9 @@ class LiveControlPanel:
         self.limit_var.set(str(options.limit))
         self.port_var.set(str(options.port))
         self.interval_var.set(str(options.interval))
+        self.goal_count_var.set("" if options.goal_count is None else str(options.goal_count))
+        self.task_policy_var.set(options.task_policy)
+        self.observe_only_var.set(options.observe_only)
         self.require_compact_var.set(options.require_compact_packets)
         self.no_ui_targets_var.set(options.no_ui_targets)
         self.write_overlay_state_var.set(options.write_overlay_state)
@@ -959,6 +1038,9 @@ class LiveControlPanel:
         self.limit_var.set(str(options.limit))
         self.port_var.set(str(options.port))
         self.interval_var.set(str(options.interval))
+        self.goal_count_var.set("" if options.goal_count is None else str(options.goal_count))
+        self.task_policy_var.set(options.task_policy)
+        self.observe_only_var.set(options.observe_only)
         self.require_compact_var.set(options.require_compact_packets)
         self.no_ui_targets_var.set(options.no_ui_targets)
         self.write_overlay_state_var.set(options.write_overlay_state)
@@ -1137,6 +1219,47 @@ class LiveControlPanel:
         command = build_daily_gauntlet_command(daemon_url=f"http://127.0.0.1:{options.port}", daily_mode=options.daily_mode)
         self.start_process("Daily Gauntlet", command, "Setup/Packet tools")
 
+    def build_runtime_control_payload_from_ui(self, *, reset_brain_state: bool = False) -> dict[str, Any]:
+        return build_runtime_control_payload(
+            task_policy=self.task_policy_var.get() or "woodcutting_bank",
+            goal_count=self.goal_count_var.get(),
+            observe_only=bool(self.observe_only_var.get()),
+            reset_brain_state=reset_brain_state,
+            brain_enabled=True,
+            overlay_mode="intent",
+            overlay_backup_candidates=2,
+        )
+
+    def apply_runtime_control(self) -> None:
+        try:
+            payload = self.build_runtime_control_payload_from_ui(reset_brain_state=False)
+        except ValueError as exc:
+            self.runtime_control_status_var.set(f"runtime control: invalid input ({exc})")
+            return
+        threading.Thread(target=self._runtime_control_worker, args=(payload,), daemon=True).start()
+
+    def reset_brain_baseline(self) -> None:
+        try:
+            payload = self.build_runtime_control_payload_from_ui(reset_brain_state=True)
+        except ValueError as exc:
+            self.runtime_control_status_var.set(f"runtime control: invalid input ({exc})")
+            return
+        threading.Thread(target=self._runtime_control_worker, args=(payload,), daemon=True).start()
+
+    def _runtime_control_worker(self, payload: dict[str, Any]) -> None:
+        port = self.options().port
+        try:
+            response = request_runtime_control(port, payload, timeout=2.0)
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            self.log_queue.put(("__runtime_control__", f"runtime control: unavailable ({exc})"))
+            return
+        state = response.get("state") if isinstance(response.get("state"), dict) else {}
+        status = response.get("status", "unknown")
+        policy = state.get("taskPolicy", "unknown")
+        goal = state.get("goalCount")
+        observe = state.get("observeOnly")
+        self.log_queue.put(("__runtime_control__", f"runtime control: {status}; policy={policy} goal={goal} observe={observe}"))
+
     def inspect_packets(self) -> None:
         self.start_process("Inspect Compact Packets", build_inspect_packets_command(), "Setup/Packet tools")
 
@@ -1309,6 +1432,9 @@ class LiveControlPanel:
                 self.update_process_tree()
             elif log_name == "__context_status__":
                 self.context_status_var.set(message)
+            elif log_name == "__runtime_control__":
+                self.runtime_control_status_var.set(message)
+                self.log("Live Daemon", message)
             else:
                 self.log(log_name, message)
         self.root.after(100, self.process_log_queue)
@@ -1388,6 +1514,13 @@ class LiveControlPanel:
             with urllib.request.urlopen(request, timeout=0.75) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             self.log_queue.put(("__context_status__", f"context: {payload.get('status', 'unknown')} tick={payload.get('latestTick', 'unknown')}"))
+            try:
+                control = request_runtime_control(port, None, timeout=0.75)
+                state = control.get("state") if isinstance(control.get("state"), dict) else {}
+                if state:
+                    self.log_queue.put(("__runtime_control__", f"runtime control: policy={state.get('taskPolicy')} goal={state.get('goalCount')} observe={state.get('observeOnly')}"))
+            except (OSError, urllib.error.URLError, json.JSONDecodeError):
+                pass
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             self.log_queue.put(("__context_status__", f"context: unavailable ({exc})"))
         finally:

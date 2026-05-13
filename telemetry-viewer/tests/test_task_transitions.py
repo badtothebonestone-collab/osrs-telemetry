@@ -87,6 +87,17 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
         self.assertEqual(payload["processContextSummary"]["tinderboxStatus"], "missing")
         self.assertTrue(payload["processInventoryAnalyzerRuns"])
 
+    def test_firemake_no_tree_candidates_still_reports_process_inventory(self):
+        payload = transitions.evaluate_transition_scenario("woodcutting_firemake", "firemake_no_tree_candidates")
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["actualPhase"], "inventory_full")
+        self.assertEqual(payload["actualActiveIntent"], "process_inventory")
+        self.assertEqual(payload["inventoryFreshness"], "fresh")
+        self.assertEqual(payload["processInventoryFreshness"], "fresh")
+        self.assertIn(payload["targetCandidateFreshness"], {"stale", "unknown"})
+        self.assertIsNone(payload["overlaySelectedMarker"])
+
     def test_drop_ready_reports_drop_context(self):
         payload = transitions.evaluate_transition_scenario("woodcutting_drop", "drop_ready")
 
@@ -94,6 +105,16 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
         self.assertEqual(payload["actualActiveIntent"], "process_inventory")
         self.assertEqual(payload["processContextSummary"]["processTypeNeeded"], "drop")
         self.assertFalse(payload["serviceAnalyzerRuns"])
+        self.assertIsNone(payload["overlaySelectedMarker"])
+
+    def test_drop_no_tree_candidates_still_reports_process_inventory(self):
+        payload = transitions.evaluate_transition_scenario("woodcutting_drop", "drop_no_tree_candidates")
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["actualPhase"], "inventory_full")
+        self.assertEqual(payload["actualActiveIntent"], "process_inventory")
+        self.assertEqual(payload["processContextSummary"]["processTypeNeeded"], "drop")
+        self.assertEqual(payload["inventoryFreshness"], "fresh")
         self.assertIsNone(payload["overlaySelectedMarker"])
 
     def test_combat_full_inventory_keeps_active_target(self):

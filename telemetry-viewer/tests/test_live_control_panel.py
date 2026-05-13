@@ -102,6 +102,27 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertTrue(any("Inspector" in label for label in panel.ADVANCED_ACTION_LABELS))
         self.assertTrue(any("Batch Builders" in label for label in panel.ADVANCED_ACTION_LABELS))
 
+    def test_runtime_control_payload_is_safe_and_policy_driven(self):
+        payload = panel.build_runtime_control_payload(
+            task_policy="woodcutting_firemake",
+            goal_count="5",
+            observe_only=False,
+            reset_brain_state=True,
+            overlay_mode="intent",
+            overlay_backup_candidates=2,
+        )
+
+        self.assertEqual(payload["taskPolicy"], "woodcutting_firemake")
+        self.assertEqual(payload["goalCount"], 5)
+        self.assertFalse(payload["observeOnly"])
+        self.assertTrue(payload["resetBrainState"])
+        self.assertEqual(payload["overlayMode"], "intent")
+        for forbidden in ("click", "mouse", "keyboard", "menu", "invoke", "execute", "walk", "interact"):
+            self.assertFalse(any(forbidden in key.lower() for key in payload))
+
+    def test_runtime_control_endpoint_url_uses_daemon_port(self):
+        self.assertEqual(panel.runtime_control_endpoint_url(8890), "http://127.0.0.1:8890/control")
+
     def test_preset_request_body_and_endpoint_url(self):
         self.assertEqual(panel.preset_request_body("DAILY_LIVE")["preset"], "DAILY_LIVE")
         self.assertEqual(panel.preset_request_body("DAILY_SNAPSHOT_NO_FILE")["preset"], "DAILY_SNAPSHOT_NO_FILE")

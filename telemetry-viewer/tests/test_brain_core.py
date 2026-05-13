@@ -306,6 +306,72 @@ class BrainCoreTest(unittest.TestCase):
         self.assertEqual(decision["genericTaskState"]["resourceDisposition"], "drop")
         self.assertIsNone(decision["genericTaskState"]["activeIntentTarget"])
 
+    def test_firemake_full_inventory_with_stale_missing_tree_candidates_processes_inventory(self):
+        items = [log_item(slot) for slot in range(27)] + [{"slot": 27, "itemId": 590, "quantity": 1}]
+        response = context_response(
+            best=None,
+            nearest=None,
+            inventory=inventory_with_items(items),
+            freshness={"freshByTicks": False, "freshByMillis": True},
+            reachability_summary={"tree": {"candidateCount": 0, "reachableCount": 0, "blockedCount": 0, "unknownCount": 0}},
+        )
+
+        decision, _state = evaluate(response, task_policy="woodcutting_firemake")
+
+        self.assertEqual(decision["phase"], "inventory_full")
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "process_inventory")
+        self.assertEqual(decision["genericTaskState"]["processTypeNeeded"], "firemaking")
+        self.assertNotIn("context freshness failed", decision["blockingConditions"])
+        self.assertIn("no tree candidates currently observed", decision["warnings"])
+        self.assertEqual(decision["freshnessDomains"]["inventoryFreshness"], "fresh")
+        self.assertIn(decision["freshnessDomains"]["targetCandidateFreshness"], {"stale", "unknown"})
+
+    def test_drop_full_inventory_with_stale_missing_tree_candidates_processes_inventory(self):
+        response = context_response(
+            best=None,
+            nearest=None,
+            inventory=inventory_with_items([log_item(slot) for slot in range(28)]),
+            freshness={"freshByTicks": False, "freshByMillis": True},
+            reachability_summary={"tree": {"candidateCount": 0, "reachableCount": 0, "blockedCount": 0, "unknownCount": 0}},
+        )
+
+        decision, _state = evaluate(response, task_policy="woodcutting_drop")
+
+        self.assertEqual(decision["phase"], "inventory_full")
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "process_inventory")
+        self.assertEqual(decision["genericTaskState"]["processTypeNeeded"], "drop")
+        self.assertNotIn("context freshness failed", decision["blockingConditions"])
+
+    def test_bank_full_inventory_with_stale_missing_tree_candidates_still_needs_service(self):
+        response = context_response(
+            best=None,
+            nearest=None,
+            inventory=inventory_with_items([log_item(slot) for slot in range(28)]),
+            freshness={"freshByTicks": False, "freshByMillis": True},
+            reachability_summary={"tree": {"candidateCount": 0, "reachableCount": 0, "blockedCount": 0, "unknownCount": 0}},
+        )
+
+        decision, _state = evaluate(response, task_policy="woodcutting_bank")
+
+        self.assertEqual(decision["phase"], "inventory_full")
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "needs_service")
+        self.assertIsNone(decision["genericTaskState"]["activeIntentTarget"])
+        self.assertNotIn("context freshness failed", decision["blockingConditions"])
+
+    def test_process_inventory_policy_needs_inventory_when_inventory_unknown(self):
+        response = context_response(
+            best=None,
+            nearest=None,
+            inventory={"known": False},
+            freshness={"freshByTicks": False, "freshByMillis": True},
+            reachability_summary={"tree": {"candidateCount": 0, "reachableCount": 0}},
+        )
+
+        decision, _state = evaluate(response, task_policy="woodcutting_firemake")
+
+        self.assertEqual(decision["phase"], "stale_context")
+        self.assertNotEqual(decision["genericTaskState"]["activeIntent"], "process_inventory")
+
     def test_inventory_full_combat_policy_continues_task(self):
         response = context_response(inventory={"known": True, "freeSlots": 0, "filledSlots": 28, "inventoryFull": True})
         state = brain.default_state("combat", None)

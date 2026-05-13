@@ -25,7 +25,9 @@ SCENARIOS = (
     "service_visible",
     "service_missing",
     "firemake_ready",
+    "firemake_no_tree_candidates",
     "drop_ready",
+    "drop_no_tree_candidates",
     "combat_full_inventory",
 )
 
@@ -115,7 +117,7 @@ def inventory_from_items(items: list[dict[str, Any]]) -> dict[str, Any]:
 def inventory_for_scenario(scenario: str, *, tinderbox_present: bool = True) -> dict[str, Any]:
     if scenario == "woodcutting_not_full":
         return inventory_from_items([log_item(slot) for slot in range(5)])
-    if scenario == "firemake_ready":
+    if scenario in {"firemake_ready", "firemake_no_tree_candidates"}:
         items = [log_item(slot) for slot in range(27)]
         if tinderbox_present:
             items.append(tinderbox_item(27))
@@ -126,6 +128,8 @@ def inventory_for_scenario(scenario: str, *, tinderbox_present: bool = True) -> 
 
 
 def candidates_for_scenario(scenario: str) -> list[dict[str, Any]]:
+    if scenario in {"firemake_no_tree_candidates", "drop_no_tree_candidates"}:
+        return []
     candidates = [tree_candidate()]
     if scenario == "service_visible":
         candidates.append(bank_booth_candidate())
@@ -133,13 +137,13 @@ def candidates_for_scenario(scenario: str) -> list[dict[str, Any]]:
 
 
 def context_response_for_scenario(scenario: str, *, tinderbox_present: bool = True) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    tree = tree_candidate()
     candidates = candidates_for_scenario(scenario)
+    tree = candidates[0] if candidates and candidates[0].get("classId") == "tree" else None
     response = {
         "schema": "context_response.v1",
         "status": "PASS",
         "latestTick": 42,
-        "freshness": {"freshByTicks": True, "freshByMillis": True},
+        "freshness": {"freshByTicks": scenario not in {"firemake_no_tree_candidates", "drop_no_tree_candidates"}, "freshByMillis": True},
         "baseline": {"player": {"worldX": 3155, "worldY": 3236, "plane": 0, "sceneX": 51, "sceneY": 52}},
         "inventory": inventory_for_scenario(scenario, tinderbox_present=tinderbox_present),
         "activity": {"apparentState": "idle", "animation": -1, "interacting": None},
@@ -150,14 +154,15 @@ def context_response_for_scenario(scenario: str, *, tinderbox_present: bool = Tr
             "reachabilityComputed": True,
         },
         "navigation": {"collisionWindowAvailable": True, "collisionKnown": True},
-        "bestCandidates": {"tree": tree},
-        "nearestCandidates": {"tree": tree},
-        "reachabilitySummary": {"tree": {"candidateCount": 1, "reachableCount": 1, "blockedCount": 0, "unknownCount": 0}},
+        "reachabilitySummary": {"tree": {"candidateCount": 1 if tree else 0, "reachableCount": 1 if tree else 0, "blockedCount": 0, "unknownCount": 0}},
         "liveness": {"livenessMode": "delta", "suppressedCandidateCount": 0, "livenessDegraded": False},
         "warnings": [],
         "missingCapabilities": ["navigation.full_pathfinding"],
         "recentEvents": [],
     }
+    if tree:
+        response["bestCandidates"] = {"tree": tree}
+        response["nearestCandidates"] = {"tree": tree}
     return response, candidates
 
 
@@ -176,9 +181,9 @@ def expected_for(policy_name: str, scenario: str, *, tinderbox_present: bool = T
         return {"phase": "target_selected", "activeIntent": "continue_task", "overlay": "selected_tree"}
     if policy_name == "observe_only":
         return {"phase": "observe", "activeIntent": "observe", "overlay": "none"}
-    if policy_name == "woodcutting_firemake" or scenario == "firemake_ready":
+    if policy_name == "woodcutting_firemake" or scenario in {"firemake_ready", "firemake_no_tree_candidates"}:
         return {"phase": "inventory_full", "activeIntent": "process_inventory", "overlay": "none"}
-    if policy_name == "woodcutting_drop" or scenario == "drop_ready":
+    if policy_name == "woodcutting_drop" or scenario in {"drop_ready", "drop_no_tree_candidates"}:
         return {"phase": "inventory_full", "activeIntent": "process_inventory", "overlay": "none"}
     if scenario == "service_visible":
         return {"phase": "inventory_full", "activeIntent": "needs_service", "overlay": "selected_service"}
@@ -388,6 +393,10 @@ def evaluate_transition_scenario(
         "serviceContextSummary": compact_service_summary(service_context),
         "processContextSummary": compact_process_summary(process_context),
         "navigationContextSummary": compact_navigation_summary(navigation_context.to_dict()),
+        "freshnessDomains": decision.get("freshnessDomains") if isinstance(decision.get("freshnessDomains"), dict) else {},
+        "inventoryFreshness": (decision.get("freshnessDomains") or {}).get("inventoryFreshness") if isinstance(decision.get("freshnessDomains"), dict) else None,
+        "targetCandidateFreshness": (decision.get("freshnessDomains") or {}).get("targetCandidateFreshness") if isinstance(decision.get("freshnessDomains"), dict) else None,
+        "processInventoryFreshness": (decision.get("freshnessDomains") or {}).get("processInventoryFreshness") if isinstance(decision.get("freshnessDomains"), dict) else None,
         "overlaySelectedMarkerExpectation": overlay_expectation,
         "overlaySelectedMarker": selected_marker,
         "noActionEmitted": bool(decision.get("noActionEmitted") and generic.get("noActionEmitted", True)),
@@ -413,6 +422,7 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
     service_context = brain.get("serviceContext") if isinstance(brain.get("serviceContext"), dict) else {}
     process_context = brain.get("processInventoryContext") if isinstance(brain.get("processInventoryContext"), dict) else {}
     navigation_context = brain.get("navigationIntentContext") if isinstance(brain.get("navigationIntentContext"), dict) else {}
+    freshness_domains = brain.get("freshnessDomains") if isinstance(brain.get("freshnessDomains"), dict) else {}
     overlay_selected_type = None
     active_target = generic.get("activeIntentTarget") if isinstance(generic.get("activeIntentTarget"), dict) else None
     if active_target:
@@ -436,6 +446,10 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
             "tinderboxStatus": process_context.get("tinderboxStatus"),
         },
         "navigationContextSummary": compact_navigation_summary(navigation_context),
+        "freshnessDomains": freshness_domains,
+        "inventoryFreshness": freshness_domains.get("inventoryFreshness"),
+        "targetCandidateFreshness": freshness_domains.get("targetCandidateFreshness"),
+        "processInventoryFreshness": freshness_domains.get("processInventoryFreshness"),
         "overlaySelectedMarkerType": overlay_selected_type,
         "noActionEmitted": bool(brain.get("noActionEmitted")),
         "status": "PASS",
@@ -462,6 +476,9 @@ def format_human(payload: dict[str, Any]) -> str:
         f"Service analyzer: {'yes' if payload.get('serviceAnalyzerRuns') else 'no'}",
         f"Process inventory analyzer: {'yes' if payload.get('processInventoryAnalyzerRuns') else 'no'}",
         f"Navigation needed: {'yes' if (payload.get('navigationContextSummary') or {}).get('navigationNeeded') else 'no'}",
+        f"Inventory freshness: {payload.get('inventoryFreshness') or (payload.get('freshnessDomains') or {}).get('inventoryFreshness') or 'unknown'}",
+        f"Target candidate freshness: {payload.get('targetCandidateFreshness') or (payload.get('freshnessDomains') or {}).get('targetCandidateFreshness') or 'unknown'}",
+        f"Process inventory freshness: {payload.get('processInventoryFreshness') or (payload.get('freshnessDomains') or {}).get('processInventoryFreshness') or 'unknown'}",
         f"Overlay selected: {target_label(payload.get('overlaySelectedMarker')) or payload.get('overlaySelectedMarkerType') or 'none'}",
         f"noActionEmitted: {str(payload.get('noActionEmitted')).lower()}",
     ]

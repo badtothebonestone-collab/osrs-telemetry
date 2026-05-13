@@ -26,6 +26,7 @@ These are the only tools that belong in the main daily view.
 | --- | --- | --- |
 | `live_control_panel.py` | Simple launcher and monitor. | `python telemetry-viewer\live_control_panel.py` |
 | `live_core_daemon.py` | Streamlined daily daemon: stable compact-packets input or explicit experimental snapshot no-file input, in-memory context, writes off by default, optional brain intent overlay state. | `python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark` |
+| `control_live_daemon.py` | Local read-only runtime control for daemon task policy, goal count, observe-only mode, and baseline reset. Prints JSON to stdout only when requested. | `python telemetry-viewer\control_live_daemon.py --get` |
 | `live_config_doctor.py` | Preset-aware PASS/WARN/FAIL check for daily settings. | `python telemetry-viewer\live_config_doctor.py --latest-session --mode daily --fix-suggestions` or `--mode snapshot_no_file` |
 | `run_daily_gauntlet.py` | Strict daily sanity check for daemon health, process conflicts, progress invariants, and unsafe fields. | `python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode compact-packets --strict --check-processes` |
 
@@ -35,6 +36,8 @@ Daily support modules are hidden from the UI but remain part of the daily lane:
 - `brain_core.py`: read-only brain interpretation.
 - `task_policy.py` and `task_policies.json`: read-only task policy model for
   interpreting conditions such as a full inventory.
+- `runtime_control.py`: in-memory model and validation for safe daemon
+  `/control` updates.
 - `capabilities.py`: capability status/alias registry for analyzer and output
   consistency.
 - `analyzers\*.py`: in-memory daemon analyzers for inventory, targets,

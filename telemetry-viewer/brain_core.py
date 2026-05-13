@@ -446,6 +446,138 @@ def freshness_failed(response: dict) -> bool:
     return freshness.get("freshByTicks") is False or freshness.get("freshByMillis") is False
 
 
+def freshness_status_from_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"fresh", "stale", "unknown", "missing", "unavailable"}:
+            return lowered
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status") or value.get("freshness")
+    if isinstance(status, str):
+        lowered = status.strip().lower()
+        if lowered in {"fresh", "stale", "unknown", "missing", "unavailable"}:
+            return lowered
+    if value.get("freshByTicks") is False or value.get("freshByMillis") is False:
+        return "stale"
+    if value.get("fresh") is False:
+        return "stale"
+    if value.get("freshByTicks") is True or value.get("freshByMillis") is True or value.get("fresh") is True:
+        return "fresh"
+    return None
+
+
+def domain_freshness_value(response: dict, *names: str) -> str | None:
+    containers = [
+        response.get("freshnessDomains"),
+        response.get("domainFreshness"),
+        safe_get(response, "taskSummary.freshnessDomains"),
+        safe_get(response, "taskSummary.domainFreshness"),
+    ]
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for name in names:
+            value = container.get(name)
+            status = freshness_status_from_value(value)
+            if status:
+                return status
+    return None
+
+
+def inventory_snapshot_usable(inventory: dict) -> bool:
+    if not isinstance(inventory, dict) or not inventory:
+        return False
+    known = as_bool(inventory.get("known"))
+    if known is False:
+        return False
+    if isinstance(inventory.get("items"), list):
+        return True
+    if isinstance(inventory.get("resourceCounts"), dict):
+        return True
+    return any(key in inventory for key in ("inventoryFull", "freeSlots", "filledSlots", "inventorySignature", "signature"))
+
+
+def candidate_count(response: dict, class_id: str = "tree") -> int | None:
+    summary = safe_get(response, ["reachabilitySummary", class_id], {})
+    count = as_int(summary.get("candidateCount")) if isinstance(summary, dict) else None
+    if count is not None:
+        return count
+    candidates = response.get("candidates")
+    if isinstance(candidates, list):
+        return len(candidates)
+    return None
+
+
+def build_freshness_domains(
+    response: dict,
+    inventory: dict,
+    *,
+    stale: bool,
+    best: dict,
+    nearest: dict,
+    policy: task_policy_module.TaskPolicy,
+) -> dict[str, str]:
+    inventory_status = domain_freshness_value(response, "inventory", "inventoryFreshness")
+    if inventory_status is None:
+        inventory_status = freshness_status_from_value(inventory.get("freshness") if isinstance(inventory, dict) else None)
+    if inventory_status is None:
+        inventory_status = "fresh" if inventory_snapshot_usable(inventory) else "unknown"
+
+    target_status = domain_freshness_value(
+        response,
+        "target",
+        "targets",
+        "target.candidates",
+        "targetCandidateFreshness",
+    )
+    if target_status is None:
+        count = candidate_count(response)
+        if stale:
+            target_status = "stale"
+        elif best or nearest or (count is not None and count > 0):
+            target_status = "fresh"
+        else:
+            target_status = "unknown"
+
+    service_status = domain_freshness_value(response, "service", "serviceFreshness")
+    if service_status is None:
+        service_status = target_status if policy.fullInventoryStrategy == task_policy_module.InventoryFullStrategy.NEEDS_SERVICE else "not_required"
+
+    navigation_status = domain_freshness_value(response, "navigation", "navigationFreshness")
+    if navigation_status is None:
+        navigation = response.get("navigationReadiness") if isinstance(response.get("navigationReadiness"), dict) else {}
+        navigation_status = "fresh" if navigation.get("collisionWindowAvailable") is True or navigation.get("collisionKnown") is True else "unknown"
+
+    process_status = domain_freshness_value(response, "processInventory", "processInventoryFreshness")
+    if process_status is None:
+        process_status = inventory_status if policy.fullInventoryStrategy == task_policy_module.InventoryFullStrategy.PROCESS_INVENTORY else "not_required"
+
+    return {
+        "targetCandidateFreshness": target_status,
+        "inventoryFreshness": inventory_status,
+        "serviceFreshness": service_status,
+        "navigationFreshness": navigation_status,
+        "processInventoryFreshness": process_status,
+    }
+
+
+def inventory_policy_can_proceed_with_stale_targets(
+    *,
+    policy: task_policy_module.TaskPolicy,
+    full_inventory: bool,
+    freshness_domains: dict[str, str],
+) -> bool:
+    if not full_inventory:
+        return False
+    if freshness_domains.get("inventoryFreshness") != "fresh":
+        return False
+    return policy.fullInventoryStrategy in {
+        task_policy_module.InventoryFullStrategy.NEEDS_SERVICE,
+        task_policy_module.InventoryFullStrategy.PROCESS_INVENTORY,
+    }
+
+
 def inventory_is_full(inventory: dict) -> bool:
     full = as_bool(inventory.get("inventoryFull"))
     if full is not None:
@@ -1326,6 +1458,19 @@ def evaluate_brain(
 
     stale = freshness_failed(response)
     full_inventory = inventory_is_full(inventory)
+    freshness_domains = build_freshness_domains(
+        response,
+        inventory,
+        stale=stale,
+        best=best,
+        nearest=nearest,
+        policy=resolved_policy,
+    )
+    inventory_policy_can_proceed = inventory_policy_can_proceed_with_stale_targets(
+        policy=resolved_policy,
+        full_inventory=full_inventory,
+        freshness_domains=freshness_domains,
+    )
     busy, busy_evidence, activity_substates = activity_busy_analysis(activity)
     substates.extend(activity_substates)
     current_depleted = current_target_depleted(best) or current_target_depleted(nearest)
@@ -1381,7 +1526,11 @@ def evaluate_brain(
 
     phase = "unknown"
     confidence = 0.35
-    if stale:
+    if inventory_policy_can_proceed and freshness_domains.get("targetCandidateFreshness") != "fresh":
+        if not best and not nearest:
+            warnings.append("no tree candidates currently observed")
+        warnings.append(f"target candidate freshness {freshness_domains.get('targetCandidateFreshness')}")
+    if stale and not inventory_policy_can_proceed:
         phase = "stale_context"
         confidence = 0.9
         blocking.append("context freshness failed")
@@ -1522,6 +1671,7 @@ def evaluate_brain(
             "progressDisabled": bool(progress.get("progressDisabled")),
         },
         "currentContextSummary": current_context,
+        "freshnessDomains": freshness_domains,
         "progress": progress,
         "observationNeeds": observation_needs,
         "suggestedWatchRequests": suggestions,
@@ -2113,6 +2263,11 @@ def format_human(decision: dict) -> str:
             lines.append(f"  {text(need.get('capability'))}: {text(need.get('status'))} - {text(need.get('reason'), '')}".rstrip())
     else:
         lines.append("  none")
+    decision_warnings = decision.get("warnings") if isinstance(decision.get("warnings"), list) else []
+    if decision_warnings:
+        lines.extend(["", "Warnings:"])
+        for warning in decision_warnings[:8]:
+            lines.append(f"  {warning}")
     blocking = generic_state.get("blockingConditions") if isinstance(generic_state.get("blockingConditions"), list) else decision.get("blockingConditions") if isinstance(decision.get("blockingConditions"), list) else []
     lines.extend(["", "Blocking conditions:"])
     if blocking:

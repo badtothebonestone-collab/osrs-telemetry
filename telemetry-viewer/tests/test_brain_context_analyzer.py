@@ -66,6 +66,43 @@ class BrainContextAnalyzerTest(unittest.TestCase):
         self.assertEqual(context.decision["genericTaskState"]["processTypeNeeded"], "drop")
         self.assertEqual(context.decision["genericTaskState"]["resourceDisposition"], "drop")
 
+    def test_process_inventory_policy_ignores_stale_target_domain_when_inventory_is_fresh(self):
+        response = {
+            "schema": "context_response.v1",
+            "status": "PASS",
+            "latestTick": 1,
+            "freshness": {"freshByTicks": False, "freshByMillis": True},
+            "baseline": {"player": {"worldX": 3220, "worldY": 3241, "plane": 0, "sceneX": 48, "sceneY": 47}},
+            "reachabilitySummary": {"tree": {"candidateCount": 0, "reachableCount": 0, "blockedCount": 0, "unknownCount": 0}},
+            "inventory": {
+                "known": True,
+                "freeSlots": 0,
+                "filledSlots": 28,
+                "inventoryFull": True,
+                "inventorySignature": "full-logs",
+                "items": [{"slot": slot, "itemId": 1511, "quantity": 1} for slot in range(28)],
+            },
+            "activity": {"apparentState": "idle"},
+            "warnings": [],
+            "missingCapabilities": [],
+        }
+        state = brain_core.default_state("woodcutting", 5)
+
+        context = brain_context_analyzer.evaluate_brain_context(
+            response,
+            state,
+            task="woodcutting",
+            goal_count=5,
+            max_events=3,
+            task_policy="woodcutting_drop",
+        )
+
+        self.assertIn(context.status, {"PASS", "WARN"})
+        self.assertEqual(context.decision["phase"], "inventory_full")
+        self.assertEqual(context.decision["genericTaskState"]["activeIntent"], "process_inventory")
+        self.assertEqual(context.decision["freshnessDomains"]["processInventoryFreshness"], "fresh")
+        self.assertNotIn("context freshness failed", context.decision["blockingConditions"])
+
 
 if __name__ == "__main__":
     unittest.main()

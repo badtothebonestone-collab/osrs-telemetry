@@ -35,6 +35,18 @@
       "safeToHideInUi": false
     },
     {
+      "name": "control_live_daemon.py",
+      "category": "daily",
+      "purpose": "Local read-only runtime control CLI for live_core_daemon task policy, goal count, observe-only mode, and baseline reset.",
+      "dailyRequired": false,
+      "normalCommand": "python telemetry-viewer\\control_live_daemon.py --get",
+      "alternateCommand": "python telemetry-viewer\\control_live_daemon.py --set-policy woodcutting_firemake --goal-count 5 --reset-brain-state",
+      "input": "live_core_daemon localhost /control endpoint",
+      "output": "stdout status or JSON; no file writes",
+      "status": "daily",
+      "safeToHideInUi": true
+    },
+    {
       "name": "live_config_doctor.py",
       "category": "daily",
       "purpose": "Preset-aware daily PASS/WARN/FAIL configuration doctor.",
@@ -66,6 +78,17 @@
       "normalCommand": "imported by brain_core.py and live_core_daemon.py",
       "input": "inventory snapshots and woodcutting resource definitions",
       "output": "ResourceProgressResult with valid matched slots and progress fields",
+      "status": "daily",
+      "safeToHideInUi": true
+    },
+    {
+      "name": "runtime_control.py",
+      "category": "daily",
+      "purpose": "In-memory validation and state model for safe live_core_daemon runtime control updates.",
+      "dailyRequired": true,
+      "normalCommand": "imported by live_core_daemon.py and control_live_daemon.py",
+      "input": "safe control payload fields",
+      "output": "RuntimeControlResult with accepted/rejected fields and noActionEmitted=true",
       "status": "daily",
       "safeToHideInUi": true
     },

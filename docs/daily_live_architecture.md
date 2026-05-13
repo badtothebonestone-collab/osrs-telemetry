@@ -65,6 +65,42 @@ python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutti
 Debug file writes remain off unless `--write-debug-live-files` is explicitly
 supplied.
 
+## Runtime Control
+
+The daily daemon exposes local-only read-only control endpoints:
+
+- `GET /control`
+- `POST /control`
+
+These endpoints change only sidecar brain/context configuration in memory. They
+can switch `taskPolicy`, adjust `goalCount`, toggle `observeOnly`, reset the
+resource-progress baseline, and tune overlay mode/backups without restarting
+the daemon. They do not persist config, write live JSON/NDJSON, click, walk,
+bank, burn, drop, use items, invoke menus, or mutate game/client state.
+
+Action-like control fields are rejected. The accepted fields are:
+
+```text
+taskPolicy
+goalCount
+observeOnly
+resetBrainState
+brainEnabled
+overlayEnabled
+overlayMode
+overlayBackupCandidates
+```
+
+CLI examples:
+
+```text
+python telemetry-viewer\control_live_daemon.py --get
+python telemetry-viewer\control_live_daemon.py --set-policy woodcutting_firemake --goal-count 5 --reset-brain-state
+python telemetry-viewer\control_live_daemon.py --set-policy woodcutting_bank
+```
+
+`--json` prints to stdout only.
+
 ## Internal Analyzer Architecture
 
 `live_core_daemon.py` is the single daily sidecar process. Inside that process,

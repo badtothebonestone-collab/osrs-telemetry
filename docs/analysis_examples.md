@@ -39,6 +39,23 @@ The legacy compact-packet file stack remains available under the control
 panel's Advanced buttons. Direct compact stream is experimental and should be
 tested explicitly before relying on it.
 
+### Runtime Control
+
+Once `live_core_daemon.py` is running, you can change read-only brain/context
+settings without restarting the daemon:
+
+```text
+python telemetry-viewer\control_live_daemon.py --get
+python telemetry-viewer\control_live_daemon.py --set-policy woodcutting_firemake --goal-count 5 --reset-brain-state
+python telemetry-viewer\control_live_daemon.py --set-policy woodcutting_bank
+```
+
+The Live Control Panel exposes the same local `/control` endpoint with a task
+policy dropdown, goal-count field, observe-only toggle, runtime apply button,
+and reset-baseline button. These controls mutate only daemon memory. They do
+not click, walk, bank, burn, drop, use items, invoke menus, persist config, or
+write live JSON/NDJSON files. JSON mode prints to stdout only.
+
 By default, the daemon does not write these rolling legacy live files:
 
 ```text
