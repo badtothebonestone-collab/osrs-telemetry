@@ -17,9 +17,9 @@ sys.path.insert(0, str(TESTS_DIR))
 import live_core_daemon as daemon
 import live_context_format
 import live_target_processor as live
-import diagnose_brain_progress
 import test_live_target_processor as fixtures
-from analyzers.live_state import ServiceContext
+import diagnose_brain_progress
+from analyzers.live_state import PathingContext, ServiceContext
 
 
 def make_args(session: Path, *extra: str):
@@ -252,6 +252,63 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(nav["targetKind"], "service")
         self.assertEqual(nav["destinationTarget"]["classId"], "bank_booth")
         self.assertEqual(core.state.source_status["navigationIntentReason"], "service_target_available")
+
+    def test_status_exposes_pathing_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service = ServiceContext(
+                service_required=True,
+                service_type_needed="bank",
+                best_service_candidate={
+                    "targetType": "sceneObject",
+                    "classId": "bank_booth",
+                    "targetName": "Bank booth",
+                    "id": 10355,
+                    "worldX": 3208,
+                    "worldY": 3219,
+                    "plane": 0,
+                    "sceneX": 20,
+                    "sceneY": 21,
+                    "distanceTiles": 4,
+                    "navigation": {"directReachability": "reachable"},
+                },
+                candidate_count=1,
+                source_tick=1,
+            )
+            pathing = PathingContext(
+                pathing_needed=True,
+                local_reachability="reachable",
+                path_length_tiles=4,
+                destination_tile={"worldX": 3208, "worldY": 3219, "plane": 0},
+                next_waypoint_tile={"worldX": 3201, "worldY": 3200, "plane": 0},
+                pathing_millis=0.1,
+                path_nodes_expanded=5,
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
+                    with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", return_value=pathing):
+                        core = daemon.LiveCoreDaemon(session, args)
+                        core.poll_once()
+
+        status = core.state.status()
+        brain = core.state.brain_decision
+        self.assertIn("pathingContext", brain)
+        self.assertTrue(brain["pathingContext"]["pathingNeeded"])
+        self.assertTrue(status["pathingNeeded"])
+        self.assertEqual(status["pathingLocalReachability"], "reachable")
+        self.assertEqual(status["pathingPathLengthTiles"], 4)
+        self.assertEqual(status["pathingDestinationTile"]["worldX"], 3208)
+        self.assertEqual(status["pathingNextWaypointTile"]["worldX"], 3201)
 
     def test_daily_daemon_does_not_write_policy_task_or_analyzer_runtime_files(self):
         with tempfile.TemporaryDirectory() as tmp:

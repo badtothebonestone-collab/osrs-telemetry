@@ -174,6 +174,67 @@ class NavigationIntentContext(AnalyzerContractFields):
 
 
 @dataclass
+class PathingContext(AnalyzerContractFields):
+    status: str = "PASS"
+    warnings: list[str] = field(default_factory=list)
+    missing_capabilities: list[str] = field(default_factory=list)
+    source_tick: int | None = None
+    retained_from_previous: bool = False
+    timing_millis: float | None = None
+    pathing_needed: bool = False
+    destination: dict[str, Any] | None = None
+    destination_tile: dict[str, Any] | None = None
+    destination_world_x: int | None = None
+    destination_world_y: int | None = None
+    destination_plane: int | None = None
+    destination_scene_x: int | None = None
+    destination_scene_y: int | None = None
+    destination_tile_source: str | None = None
+    local_reachability: str = "unknown"
+    path_length_tiles: int | None = None
+    next_waypoint_tile: dict[str, Any] | None = None
+    final_approach_tile: dict[str, Any] | str | None = None
+    predicted_path_tiles: list[dict[str, Any]] = field(default_factory=list)
+    predicted_step_count: int | None = None
+    predicted_run_segments: list[dict[str, Any]] = field(default_factory=list)
+    predicted_movement_model: str = "cardinal_only"
+    predicted_movement_notes: list[str] = field(default_factory=lambda: ["Predicted local path; exact server movement may differ."])
+    prediction_confidence: float | None = None
+    reason: str = "not_needed"
+    pathing_millis: float | None = None
+    path_nodes_expanded: int = 0
+    pathing_budget_exceeded: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.contract_payload(),
+            "pathingNeeded": self.pathing_needed,
+            "destination": self.destination,
+            "destinationTile": self.destination_tile,
+            "destinationWorldX": self.destination_world_x,
+            "destinationWorldY": self.destination_world_y,
+            "destinationPlane": self.destination_plane,
+            "destinationSceneX": self.destination_scene_x,
+            "destinationSceneY": self.destination_scene_y,
+            "destinationTileSource": self.destination_tile_source,
+            "localReachability": self.local_reachability,
+            "pathLengthTiles": self.path_length_tiles,
+            "nextWaypointTile": self.next_waypoint_tile,
+            "finalApproachTile": self.final_approach_tile,
+            "predictedPathTiles": list(self.predicted_path_tiles),
+            "predictedStepCount": self.predicted_step_count,
+            "predictedRunSegments": list(self.predicted_run_segments),
+            "predictedMovementModel": self.predicted_movement_model,
+            "predictedMovementNotes": list(self.predicted_movement_notes),
+            "predictionConfidence": self.prediction_confidence,
+            "reason": self.reason,
+            "pathingMillis": self.pathing_millis,
+            "pathNodesExpanded": self.path_nodes_expanded,
+            "pathingBudgetExceeded": self.pathing_budget_exceeded,
+        }
+
+
+@dataclass
 class ActivityContext(AnalyzerContractFields):
     status: str = "PASS"
     warnings: list[str] = field(default_factory=list)
@@ -298,6 +359,7 @@ class LiveAnalysisResult:
     targets: TargetContext | None = None
     navigation: NavigationContext | None = None
     navigation_intent: NavigationIntentContext | None = None
+    pathing: PathingContext | None = None
     activity: ActivityContext | None = None
     service: ServiceContext | None = None
     process_inventory: ProcessInventoryContext | None = None

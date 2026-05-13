@@ -86,6 +86,19 @@ service/process/navigation needs, overlay selection, warning count, and
 `noActionEmitted`. Quick policy buttons such as Woodcut Firemake or Observe
 Only post `missionPreset` payloads; they do not operate the game.
 
+One-shot Mission Snapshot for bug reports or before/after comparisons:
+
+```text
+python telemetry-viewer\mission_snapshot.py --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\mission_snapshot.py --daemon-url http://127.0.0.1:8890 --json
+python telemetry-viewer\mission_snapshot.py --daemon-url http://127.0.0.1:8890 --output .\debug\mission_snapshot.json
+```
+
+This fetches `/health`, `/status`, and `/control` once, then exits. Default
+output is stdout only. `--json` prints one JSON object to stdout only. `--output`
+writes exactly one JSON file to the explicit path; it does not create NDJSON or
+reintroduce continuous runtime JSON files.
+
 `diagnose_task_transition.py` uses policy names such as `woodcutting_bank`, not
 mission preset names such as `woodcut_bank`.
 
@@ -203,6 +216,17 @@ Navigation intent context is policy-gated read-only context too:
   unreachable selected target is reported as unreachable, without generating a
   route, waypoint, movement command, click, or interaction.
 
+Pathing Context v1 is the next read-only layer. It uses the destination from
+navigation intent and the local collision window already in daemon memory to
+summarize destination tile, local reachability, path length, next waypoint, and
+a capped predicted local path preview. The preview is labeled predicted and is
+for visualization/debug context only. It is not a walk command, click target,
+route execution, or guaranteed OSRS movement.
+
+Daily overlay shows only destination and next waypoint markers by default when
+pathing is relevant. Debug overlay mode can show capped `predicted_path_tile`
+markers for visual QA.
+
 Service matching is conservative. It accepts service class/type IDs
 `bank_service`, `banker`, `bank_booth`, `bank_chest`, `deposit_box`, and
 `deposit_chest`, or equivalent visible names such as `Bank booth`, `Banker`,
@@ -226,6 +250,8 @@ Policy diagnostic:
 python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_bank --task woodcutting --inventory-full true --resource-count 28 --goal-count 5
 python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_firemake --task woodcutting --inventory-full true --resource-count 28 --goal-count 5 --json
 python telemetry-viewer\diagnose_navigation_intent.py --from-daemon --daemon-url http://127.0.0.1:8890 --task woodcutting --policy woodcutting_bank
+python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
 ```
 
 Task transition QA uses synthetic in-memory fixtures, so it does not require

@@ -328,6 +328,65 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "selected_target"])
         self.assertTrue(any(marker["markerType"] in {"warning", "diagnostic"} and "firemaking" in marker["label"] for marker in result["markers"]))
 
+    def test_daily_overlay_emits_destination_and_waypoint_without_path_spam(self):
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 4}, "candidates": []},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "pathingContext": {
+                    "pathingNeeded": True,
+                    "destinationTile": {"worldX": 3208, "worldY": 3219, "plane": 0},
+                    "nextWaypointTile": {"worldX": 3201, "worldY": 3200, "plane": 0},
+                    "predictedPathTiles": [
+                        {"worldX": 3201, "worldY": 3200, "plane": 0},
+                        {"worldX": 3202, "worldY": 3200, "plane": 0},
+                    ],
+                    "localReachability": "reachable",
+                },
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent"),
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        marker_types = [marker["markerType"] for marker in result["markers"]]
+        self.assertIn("destination_tile", marker_types)
+        self.assertIn("waypoint", marker_types)
+        self.assertNotIn("predicted_path_tile", marker_types)
+
+    def test_debug_overlay_mode_can_emit_predicted_path_tiles(self):
+        state = overlay.build_overlay_state_for_mode(
+            Path("."),
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="debug", overlay_path_tile_limit=2),
+            {
+                "overlayDebug": {
+                    "summary": {},
+                    "targets": [],
+                    "markers": [],
+                }
+            },
+            {"status": {"lastProcessedTick": 4}, "candidates": []},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "pathingContext": {
+                    "pathingNeeded": True,
+                    "predictedPathTiles": [
+                        {"worldX": 3201, "worldY": 3200, "plane": 0},
+                        {"worldX": 3202, "worldY": 3200, "plane": 0},
+                        {"worldX": 3203, "worldY": 3200, "plane": 0},
+                    ],
+                },
+            },
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        path_markers = [marker for marker in state["markers"] if marker.get("markerType") == "predicted_path_tile"]
+        self.assertEqual(len(path_markers), 2)
+        self.assertTrue(all(marker.get("source") == "pathing_context" for marker in path_markers))
+
 
 if __name__ == "__main__":
     unittest.main()

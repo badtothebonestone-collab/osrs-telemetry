@@ -2219,6 +2219,7 @@ def format_human(decision: dict) -> str:
     service_context = decision.get("serviceContext") if isinstance(decision.get("serviceContext"), dict) else {}
     process_context = decision.get("processInventoryContext") if isinstance(decision.get("processInventoryContext"), dict) else {}
     navigation_intent_context = decision.get("navigationIntentContext") if isinstance(decision.get("navigationIntentContext"), dict) else {}
+    pathing_context = decision.get("pathingContext") if isinstance(decision.get("pathingContext"), dict) else {}
     active_intent = str(generic_state.get("activeIntent") or "")
     active_target = generic_state.get("activeIntentTarget") if isinstance(generic_state.get("activeIntentTarget"), dict) else None
     available_target = generic_state.get("availableTarget") if isinstance(generic_state.get("availableTarget"), dict) else None
@@ -2291,6 +2292,36 @@ def format_human(decision: dict) -> str:
             nav_missing = navigation_intent_context.get("missingCapabilities") if isinstance(navigation_intent_context.get("missingCapabilities"), list) else []
             if nav_missing:
                 lines.append(f"  Missing: {', '.join(str(item) for item in nav_missing)}")
+    if pathing_context:
+        lines.extend(["", "Pathing:"])
+        if not pathing_context.get("pathingNeeded"):
+            lines.append("  not needed for current phase")
+        else:
+            destination = pathing_context.get("destination") if isinstance(pathing_context.get("destination"), dict) else {}
+            destination_label = target_context_label(destination) if destination else "none"
+            lines.append("  Needed: yes")
+            lines.append(f"  Destination: {destination_label}")
+            destination_tile = pathing_context.get("destinationTile") if isinstance(pathing_context.get("destinationTile"), dict) else None
+            if destination_tile:
+                lines.append(f"  Destination tile: {text(destination_tile.get('worldX'))},{text(destination_tile.get('worldY'))},{text(destination_tile.get('plane'))}")
+            lines.append(f"  Local reachability: {text(pathing_context.get('localReachability'))}")
+            if pathing_context.get("pathLengthTiles") is not None:
+                lines.append(f"  Path length: {text(pathing_context.get('pathLengthTiles'))} tiles")
+            waypoint = pathing_context.get("nextWaypointTile") if isinstance(pathing_context.get("nextWaypointTile"), dict) else None
+            if waypoint:
+                lines.append(f"  Next waypoint: {text(waypoint.get('worldX'))},{text(waypoint.get('worldY'))},{text(waypoint.get('plane'))}")
+            predicted = pathing_context.get("predictedPathTiles") if isinstance(pathing_context.get("predictedPathTiles"), list) else []
+            if predicted:
+                preview = []
+                for tile in predicted[:5]:
+                    if isinstance(tile, dict):
+                        preview.append(f"{text(tile.get('worldX'))},{text(tile.get('worldY'))},{text(tile.get('plane'))}")
+                if preview:
+                    lines.append(f"  Predicted path: {' -> '.join(preview)}")
+            lines.append(f"  Movement model: {text(pathing_context.get('predictedMovementModel'))}")
+            notes = pathing_context.get("predictedMovementNotes") if isinstance(pathing_context.get("predictedMovementNotes"), list) else []
+            if notes:
+                lines.append(f"  Note: {text(notes[0])}")
     if active_target:
         lines.append(f"  Current target: {target_context_label(active_target)}, aim {aim_label(active_target)}")
     elif best and not active_intent:

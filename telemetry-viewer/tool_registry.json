@@ -47,6 +47,18 @@
       "safeToHideInUi": true
     },
     {
+      "name": "mission_snapshot.py",
+      "category": "daily",
+      "purpose": "One-shot Mission Snapshot diagnostic for bug reports and before/after comparisons. Reads daemon /health, /status, and /control once; stdout by default; optional single JSON file only with --output.",
+      "dailyRequired": false,
+      "normalCommand": "python telemetry-viewer\\mission_snapshot.py --daemon-url http://127.0.0.1:8890",
+      "alternateCommand": "python telemetry-viewer\\mission_snapshot.py --daemon-url http://127.0.0.1:8890 --json",
+      "input": "live_core_daemon localhost /health, /status, and /control endpoints",
+      "output": "concise human summary or one JSON object; no continuous logging or NDJSON; optional single explicit JSON file with --output",
+      "status": "daily",
+      "safeToHideInUi": true
+    },
+    {
       "name": "live_config_doctor.py",
       "category": "daily",
       "purpose": "Preset-aware daily PASS/WARN/FAIL configuration doctor.",
@@ -128,7 +140,7 @@
     {
       "name": "analyzers\\*.py",
       "category": "daily",
-      "purpose": "Pure in-memory analyzers used inside live_core_daemon.py for inventory, targets, navigation, activity, brain context, and intent overlay markers.",
+      "purpose": "Pure in-memory analyzers used inside live_core_daemon.py for inventory, targets, navigation intent, read-only pathing context, activity, brain context, and intent overlay markers.",
       "dailyRequired": true,
       "normalCommand": "imported by live_core_daemon.py",
       "input": "already-polled daemon snapshot/context data",
@@ -276,6 +288,18 @@
       "normalCommand": "python telemetry-viewer\\diagnose_overlay_geometry.py --latest-session",
       "input": "overlay/debug geometry files",
       "output": "geometry diagnosis",
+      "status": "advanced_debug",
+      "safeToHideInUi": true
+    },
+    {
+      "name": "diagnose_pathing_context.py",
+      "category": "advanced_debug",
+      "purpose": "One-shot read-only diagnostic for daemon Pathing Context v1. Reads /status only and prints to stdout; JSON mode is stdout-only.",
+      "dailyRequired": false,
+      "normalCommand": "python telemetry-viewer\\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890",
+      "alternateCommand": "python telemetry-viewer\\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json",
+      "input": "live_core_daemon localhost /status endpoint",
+      "output": "destination tile, next waypoint, predicted path preview, local reachability, and missing capabilities; no file writes",
       "status": "advanced_debug",
       "safeToHideInUi": true
     },

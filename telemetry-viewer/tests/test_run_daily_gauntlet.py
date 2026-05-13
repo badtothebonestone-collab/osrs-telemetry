@@ -166,6 +166,60 @@ class RunDailyGauntletTest(unittest.TestCase):
         self.assertFalse(any("daily context endpoint returned FAIL" in failure for failure in result["failures"]))
         self.assertTrue(any("optional" in warning and "context endpoint returned FAIL" in warning for warning in result["warnings"]))
 
+    def test_transition_summary_includes_pathing_context(self):
+        brain = {
+            "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+            "navigationIntentContext": {"navigationNeeded": True},
+            "pathingContext": {
+                "pathingNeeded": True,
+                "localReachability": "reachable",
+                "pathLengthTiles": 4,
+                "destinationTile": {"worldX": 3208, "worldY": 3219, "plane": 0},
+                "nextWaypointTile": {"worldX": 3201, "worldY": 3200, "plane": 0},
+            },
+            "noActionEmitted": True,
+        }
+
+        summary = gauntlet.transition_summary_from({}, brain)
+
+        self.assertTrue(summary["pathingNeeded"])
+        self.assertEqual(summary["pathingReachability"], "reachable")
+        self.assertEqual(summary["pathingPathLengthTiles"], 4)
+        self.assertEqual(summary["pathingDestinationTile"]["worldX"], 3208)
+        self.assertEqual(summary["pathingNextWaypointTile"]["worldX"], 3201)
+
+    def test_fails_if_pathing_required_but_context_missing(self):
+        result = gauntlet.evaluate_daemon_payloads(
+            {"status": "PASS"},
+            {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_bank"},
+            {"status": "PASS"},
+            {
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "navigationIntentContext": {"navigationNeeded": True},
+                "pathingNeeded": True,
+                "goalProgress": {},
+                "noActionEmitted": True,
+            },
+        )
+
+        self.assertTrue(any("pathing context" in failure for failure in result["failures"]))
+
+    def test_process_inventory_does_not_fail_when_pathing_not_needed(self):
+        result = gauntlet.evaluate_daemon_payloads(
+            {"status": "PASS"},
+            {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_firemake"},
+            {"status": "PASS"},
+            {
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "process_inventory"},
+                "processInventoryContext": {"processRequired": True, "processTypeNeeded": "firemaking"},
+                "pathingContext": {"pathingNeeded": False, "reason": "not_needed_for_process_inventory"},
+                "goalProgress": {},
+                "noActionEmitted": True,
+            },
+        )
+
+        self.assertFalse(any("pathing context" in failure for failure in result["failures"]))
+
     def test_fails_when_brain_does_not_report_no_action_emitted(self):
         result = gauntlet.evaluate_daemon_payloads(
             {"status": "PASS"},

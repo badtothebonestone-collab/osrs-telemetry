@@ -84,6 +84,26 @@ explicit startup `--goal-count` overrides the preset goal, and an explicit
 `diagnose_task_transition.py` still uses task policy names such as
 `woodcutting_bank` and `woodcutting_firemake`, not mission preset names.
 
+## Mission Snapshot Diagnostic
+
+`mission_snapshot.py` is a one-shot read-only diagnostic for bug reports and
+before/after comparisons. It fetches the local daemon's `/health`, `/status`,
+and `/control` endpoints once, then exits. It does not run in the daemon loop,
+does not append logs, and does not create JSON/NDJSON files unless `--output`
+is explicitly provided.
+
+```text
+python telemetry-viewer\mission_snapshot.py --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\mission_snapshot.py --daemon-url http://127.0.0.1:8890 --json
+python telemetry-viewer\mission_snapshot.py --daemon-url http://127.0.0.1:8890 --output .\debug\mission_snapshot.json
+```
+
+The snapshot summarizes mission preset, task policy, goal count, generic phase,
+active intent, progress, inventory-full state, service/process/navigation
+needs, required/missing context domains, selected overlay marker, warnings, and
+`noActionEmitted`. `--json` prints one JSON object to stdout only. `--output`
+writes exactly one JSON file to the explicit path.
+
 The daily daemon exposes local-only read-only control endpoints:
 
 - `GET /control`
@@ -175,6 +195,9 @@ small in-memory analyzers now keep the responsibilities separated:
   reachability fields without doing new pathfinding.
 - `analyzers\navigation_intent_analyzer.py` describes read-only destination
   and reachability context for service/process/resource transitions.
+- `analyzers\pathing_analyzer.py` describes read-only Pathing Context v1:
+  destination tile, local reachability, local path length, next waypoint, and a
+  capped predicted local path preview.
 - `analyzers\activity_analyzer.py` keeps current activity separate from recent
   task signals such as target depletion.
 - `analyzers\intent_overlay_analyzer.py` builds selected/backup intent markers,
@@ -274,6 +297,31 @@ not request service navigation; their next context remains local
 `process_inventory`. A selected resource target that is reachable does not need
 navigation context; an unreachable target is reported as unreachable, but no
 movement, route, waypoint, click, or interaction command is produced.
+
+Pathing Context v1 builds on navigation intent. It uses only the local
+collision window already present in daemon memory and runs a bounded
+`cardinal_only` local search. It answers:
+
+- destination target and destination tile
+- local reachability: `reachable`, `blocked`, or `unknown`
+- local path length in tiles when known
+- first few predicted path tiles, capped for display
+- next waypoint tile for visualization
+- final approach tile when the model can infer one
+- why pathing is unknown or blocked
+
+The path preview is labeled predicted. It is not a click tile, walk command,
+route execution, or guaranteed OSRS movement. Exact server movement can differ
+because of run energy, diagonals, obstacles, collision flags, interaction rules,
+server ticks, and the player's current movement state. If the destination is
+outside the local collision window, the daemon reports
+`navigation.global_pathfinding` as missing; it does not request global data or
+start another pathing service.
+
+Daily intent overlay may draw a destination tile and next waypoint when
+Pathing Context says pathing is needed. Debug/visual QA overlay may draw the
+capped predicted path tile preview. Daily intent mode does not spam every path
+tile by default.
 
 Task transition QA verifies these policy flows with synthetic in-memory
 fixtures:

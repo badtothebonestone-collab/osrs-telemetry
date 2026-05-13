@@ -25,6 +25,7 @@ from analyzers import brain_context_analyzer
 from analyzers import intent_overlay_analyzer
 from analyzers import navigation_analyzer
 from analyzers import navigation_intent_analyzer
+from analyzers import pathing_analyzer
 from analyzers import process_inventory_analyzer
 from analyzers import service_analyzer
 from analyzers import target_analyzer
@@ -633,6 +634,15 @@ class LiveCoreState:
             "navigationIntentReachability",
             "navigationIntentDistanceTiles",
             "navigationIntentCollisionWindowAvailable",
+            "pathingNeeded",
+            "pathingReason",
+            "pathingLocalReachability",
+            "pathingPathLengthTiles",
+            "pathingDestinationTile",
+            "pathingNextWaypointTile",
+            "pathingMillis",
+            "pathNodesExpanded",
+            "pathingBudgetExceeded",
             "requiredContextDomains",
             "missingRequiredContextDomains",
             "optionalMissingContextDomains",
@@ -1179,6 +1189,16 @@ class LiveCoreDaemon:
                 source_tick=source_tick,
             )
             brain_context.decision["navigationIntentContext"] = self.state.analysis_result.navigation_intent.to_dict()
+            self.state.analysis_result.pathing = pathing_analyzer.analyze_pathing_context(
+                player_context=self.state.analysis_result.player,
+                navigation_context=self.state.analysis_result.navigation,
+                navigation_intent_context=self.state.analysis_result.navigation_intent,
+                service_context=service_context,
+                process_inventory_context=process_context,
+                target_context=self.state.analysis_result.targets,
+                source_tick=source_tick,
+            )
+            brain_context.decision["pathingContext"] = self.state.analysis_result.pathing.to_dict()
             brain_context.decision.update(
                 brain_core.context_domain_summary(
                     brain_context.decision,
@@ -1214,6 +1234,17 @@ class LiveCoreDaemon:
             fields["navigationIntentReachability"] = navigation_intent.direct_reachability
             fields["navigationIntentDistanceTiles"] = navigation_intent.distance_tiles
             fields["navigationIntentCollisionWindowAvailable"] = navigation_intent.collision_window_available
+        if self.state.analysis_result and self.state.analysis_result.pathing:
+            pathing = self.state.analysis_result.pathing
+            fields["pathingNeeded"] = pathing.pathing_needed
+            fields["pathingReason"] = pathing.reason
+            fields["pathingLocalReachability"] = pathing.local_reachability
+            fields["pathingPathLengthTiles"] = pathing.path_length_tiles
+            fields["pathingDestinationTile"] = pathing.destination_tile
+            fields["pathingNextWaypointTile"] = pathing.next_waypoint_tile
+            fields["pathingMillis"] = pathing.pathing_millis
+            fields["pathNodesExpanded"] = pathing.path_nodes_expanded
+            fields["pathingBudgetExceeded"] = pathing.pathing_budget_exceeded
         self.state.source_status.update(fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)

@@ -42,6 +42,7 @@ class AnalyzerContractsTest(unittest.TestCase):
             live_state.BrainContext,
             live_state.ServiceContext,
             live_state.ProcessInventoryContext,
+            live_state.PathingContext,
         ]
         for context_class in context_classes:
             with self.subTest(context=context_class.__name__):
@@ -142,6 +143,7 @@ class AnalyzerContractsTest(unittest.TestCase):
             live_state.BrainContext(),
             live_state.ServiceContext(),
             live_state.ProcessInventoryContext(),
+            live_state.PathingContext(),
         ]
 
         for context in contexts:

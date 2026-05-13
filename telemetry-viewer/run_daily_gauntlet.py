@@ -144,6 +144,7 @@ def transition_summary_from(status: dict[str, Any], brain_payload: dict[str, Any
     service = brain.get("serviceContext") if isinstance(brain.get("serviceContext"), dict) else {}
     process = brain.get("processInventoryContext") if isinstance(brain.get("processInventoryContext"), dict) else {}
     navigation = brain.get("navigationIntentContext") if isinstance(brain.get("navigationIntentContext"), dict) else {}
+    pathing = brain.get("pathingContext") if isinstance(brain.get("pathingContext"), dict) else {}
     return {
         "taskPolicy": status.get("brainTaskPolicy") or status.get("taskPolicy"),
         "genericPhase": generic.get("phase") or status.get("genericPhase"),
@@ -152,6 +153,11 @@ def transition_summary_from(status: dict[str, Any], brain_payload: dict[str, Any
         "processNeeded": process.get("processRequired", status.get("processInventoryNeeded")),
         "processTypeNeeded": process.get("processTypeNeeded", status.get("processTypeNeeded")),
         "navigationNeeded": navigation.get("navigationNeeded", status.get("navigationIntentNeeded")),
+        "pathingNeeded": pathing.get("pathingNeeded", status.get("pathingNeeded")),
+        "pathingReachability": pathing.get("localReachability", status.get("pathingLocalReachability")),
+        "pathingPathLengthTiles": pathing.get("pathLengthTiles", status.get("pathingPathLengthTiles")),
+        "pathingDestinationTile": pathing.get("destinationTile", status.get("pathingDestinationTile")),
+        "pathingNextWaypointTile": pathing.get("nextWaypointTile", status.get("pathingNextWaypointTile")),
         "requiredContextDomains": brain.get("requiredContextDomains", status.get("requiredContextDomains", [])),
         "missingRequiredContextDomains": brain.get("missingRequiredContextDomains", status.get("missingRequiredContextDomains", [])),
         "optionalMissingContextDomains": brain.get("optionalMissingContextDomains", status.get("optionalMissingContextDomains", [])),
@@ -225,6 +231,10 @@ def evaluate_daemon_payloads(
             failures.append("overlay state is enabled but not fresh")
         if daemon_status.get("overlayStateWritten") and daemon_status.get("overlayMode") not in (None, "intent"):
             warnings.append("daily overlay is not in intent mode; use --overlay-mode intent to avoid candidate clutter")
+        status_brain = daemon_status.get("brain") if isinstance(daemon_status.get("brain"), dict) else {}
+        status_pathing = status_brain.get("pathingContext") if isinstance(status_brain.get("pathingContext"), dict) else {}
+        if daemon_status.get("pathingNeeded") is True and not status_pathing and not brain_payload:
+            failures.append("pathing context is required but missing from daemon status")
         if daemon_status.get("contextRetainedPrevious"):
             warnings.append("context retained previous good state this poll; check source freshness if this persists")
         if daemon_status.get("progressRetainedFromPrevious") or daemon_status.get("progressRetainedPreviousThisPoll"):
@@ -270,6 +280,10 @@ def evaluate_daemon_payloads(
             failures.append("brain output contains action/input/menu-shaped fields: " + ", ".join(dangerous[:5]))
         if brain_payload.get("noActionEmitted") is False:
             failures.append("brain output does not report noActionEmitted=true")
+        pathing = brain_payload.get("pathingContext") if isinstance(brain_payload.get("pathingContext"), dict) else {}
+        pathing_needed = pathing.get("pathingNeeded", brain_payload.get("pathingNeeded"))
+        if pathing_needed is True and not pathing:
+            failures.append("pathing context is required but missing from brain output")
     if daemon_health and daemon_health.get("status") == "FAIL":
         failures.append("daemon health returned FAIL")
     return {"warnings": warnings, "failures": failures}
@@ -440,6 +454,11 @@ def build_report(args: argparse.Namespace, processes: list[dict[str, Any]] | Non
         "processNeeded": transition_summary.get("processNeeded"),
         "processTypeNeeded": transition_summary.get("processTypeNeeded"),
         "navigationNeeded": transition_summary.get("navigationNeeded"),
+        "pathingNeeded": transition_summary.get("pathingNeeded"),
+        "pathingReachability": transition_summary.get("pathingReachability"),
+        "pathingPathLengthTiles": transition_summary.get("pathingPathLengthTiles"),
+        "pathingDestinationTile": transition_summary.get("pathingDestinationTile"),
+        "pathingNextWaypointTile": transition_summary.get("pathingNextWaypointTile"),
         "requiredContextDomains": transition_summary.get("requiredContextDomains") or daemon_status.get("requiredContextDomains") or [],
         "missingRequiredContextDomains": transition_summary.get("missingRequiredContextDomains") or daemon_status.get("missingRequiredContextDomains") or [],
         "optionalMissingContextDomains": transition_summary.get("optionalMissingContextDomains") or daemon_status.get("optionalMissingContextDomains") or [],
@@ -490,6 +509,9 @@ def format_human(report: dict) -> str:
         f"Process needed: {str(report.get('processNeeded')).lower()}",
         f"Process type: {report.get('processTypeNeeded') or 'none'}",
         f"Navigation needed: {str(report.get('navigationNeeded')).lower()}",
+        f"Pathing needed: {str(report.get('pathingNeeded')).lower()}",
+        f"Pathing reachability: {report.get('pathingReachability') or 'unknown'}",
+        f"Path length: {report.get('pathingPathLengthTiles') if report.get('pathingPathLengthTiles') is not None else 'unknown'}",
         f"Required context domains: {', '.join(report.get('requiredContextDomains') or []) or 'none'}",
         f"Missing required domains: {', '.join(report.get('missingRequiredContextDomains') or []) or 'none'}",
         f"Optional missing domains: {', '.join(report.get('optionalMissingContextDomains') or []) or 'none'}",

@@ -14,7 +14,7 @@ Analyzers must not:
 - start services or subprocesses
 - write JSON, NDJSON, logs, history, or per-tick files
 - execute actions
-- emit click, input, menu, movement, or action fields
+- emit click, input, menu, movement-command, or action fields
 - mutate RuneLite client or game state
 
 Analyzers may:
@@ -53,12 +53,15 @@ Canonical names include:
 - `target.intent`
 - `navigation.local_collision_window`
 - `navigation.full_pathfinding`
+- `navigation.global_pathfinding`
+- `navigation.interaction_tile`
 - `activity.animation`
 - `activity.animation_frame`
 - `activity.explicit_movement_state`
 - `overlay.intent_markers`
 - `plugin_snapshot.watch_values`
 - `service.actions` (optional read-only context only, never emitted as commands)
+- `movement.run_state` (optional read-only observation only, never emitted as a command)
 
 Legacy aliases such as `inventoryDeltas`, `animationFrame`,
 `explicitMovementState`, `fullPathfinding`, and `watch_values` should be
@@ -293,6 +296,42 @@ available.
 
 Performance expectation: constant time over already-selected context objects;
 it must not rescan candidates or request more data.
+
+## `pathing_analyzer.py`
+
+Purpose: report Pathing Context v1 for the destination already selected by
+`navigation_intent_analyzer.py`.
+
+Inputs: current player context, navigation context, navigation intent context,
+service/process/target context when relevant, and the local collision window
+already present in daemon memory.
+
+Outputs: `PathingContext` with whether pathing is relevant, destination target,
+destination tile, local reachability, local path length, next waypoint tile,
+final approach tile when known, capped predicted path tiles, prediction model,
+prediction confidence, missing capabilities, warnings, `pathingMillis`,
+`pathNodesExpanded`, and `pathingBudgetExceeded`.
+
+The path preview is explicitly a prediction/model for visualization only. It is
+not a movement command and is not guaranteed to match server movement. The
+current model is conservative local collision-window BFS with
+`cardinal_only` movement. If the destination is outside the local window,
+global pathfinding is reported missing rather than requested.
+
+Forbidden side effects: no file reads/writes, no endpoint calls, no new
+context requests, no services, no movement commands, no route execution, and no
+action/click/input/menu fields.
+
+Allowed warnings: missing local collision window, destination outside the local
+window, blocked local path, incomplete player/destination tile, or pathing
+budget exceeded.
+
+Performance expectation: bounded local search only, with conservative node and
+time budgets. Daily output caps predicted path tiles to avoid overlay clutter.
+
+Future expansion: add richer movement models and interaction-tile capability
+only as read-only context. Do not add walking, clicking, route execution, or
+game interaction.
 
 ## `activity_analyzer.py`
 
