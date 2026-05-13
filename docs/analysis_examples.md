@@ -56,6 +56,14 @@ and reset-baseline button. These controls mutate only daemon memory. They do
 not click, walk, bank, burn, drop, use items, invoke menus, persist config, or
 write live JSON/NDJSON files. JSON mode prints to stdout only.
 
+The panel's Mission Control section also polls `/health`, `/status`, and
+`/control` so the daily state is visible without opening separate terminals. It
+shows daemon health, mode/source, current policy, generic phase, active intent,
+progress, inventory-full state, service/process/navigation needs, overlay
+selection, warning count, and `noActionEmitted`. Quick policy buttons such as
+Woodcut Firemake or Observe Only only post safe `/control` payloads; they do
+not operate the game.
+
 By default, the daemon does not write these rolling legacy live files:
 
 ```text

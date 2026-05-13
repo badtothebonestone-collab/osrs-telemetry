@@ -101,6 +101,35 @@ python telemetry-viewer\control_live_daemon.py --set-policy woodcutting_bank
 
 `--json` prints to stdout only.
 
+## Mission Control View
+
+`live_control_panel.py` includes a Mission Control section for the daily daemon.
+It polls the existing local daemon endpoints:
+
+- `GET /health`
+- `GET /status`
+- `GET /control`
+
+The panel shows daemon health, daily mode, input source, active task policy,
+goal count, generic phase, active intent, progress, inventory-full state,
+service/process/navigation needs, selected overlay marker, warning count,
+no-file status, overlay status, and `noActionEmitted` safety status.
+
+Mission Control can post safe runtime-control updates for task policy, goal
+count, observe-only mode, overlay mode/backups, and one-shot baseline reset.
+The quick policy buttons only switch read-only daemon policy:
+
+- Woodcut Bank
+- Woodcut Firemake
+- Woodcut Drop
+- Combat Default
+- Observe Only
+
+These controls affect sidecar brain/context interpretation only. They do not
+click, walk, bank, burn, drop, use items, interact, invoke menus, persist
+config, or write live JSON/NDJSON. If the daemon is unavailable, the panel shows
+`daemon not reachable` and points the user at Snapshot No-File startup.
+
 ## Internal Analyzer Architecture
 
 `live_core_daemon.py` is the single daily sidecar process. Inside that process,

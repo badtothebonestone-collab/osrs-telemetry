@@ -178,7 +178,7 @@ def build_daily_gauntlet_command(
     strict: bool = True,
     check_processes: bool = True,
     daemon_url: str = "http://127.0.0.1:8890",
-    daily_mode: str = "compact-packets",
+    daily_mode: str = "snapshot-no-files",
 ) -> list[str]:
     command = python_command("telemetry-viewer\\run_daily_gauntlet.py", "--latest-session", "--daemon-url", daemon_url)
     command.extend(["--daily-mode", daily_mode])
@@ -199,6 +199,11 @@ def preset_endpoint_url(path: str, *, host: str = "127.0.0.1", port: int = 8893)
 
 def runtime_control_endpoint_url(port: int, *, host: str = "127.0.0.1") -> str:
     return f"http://{host}:{int(port)}/control"
+
+
+def daemon_endpoint_url(port: int, path: str, *, host: str = "127.0.0.1") -> str:
+    suffix = path if path.startswith("/") else f"/{path}"
+    return f"http://{host}:{int(port)}{suffix}"
 
 
 def build_runtime_control_payload(
@@ -225,6 +230,37 @@ def build_runtime_control_payload(
     return payload
 
 
+def build_reset_baseline_payload() -> dict[str, bool]:
+    return {"resetBrainState": True}
+
+
+QUICK_POLICY_PAYLOADS = {
+    "bank": ("woodcutting_bank", False),
+    "woodcut_bank": ("woodcutting_bank", False),
+    "firemake": ("woodcutting_firemake", False),
+    "woodcut_firemake": ("woodcutting_firemake", False),
+    "drop": ("woodcutting_drop", False),
+    "woodcut_drop": ("woodcutting_drop", False),
+    "combat": ("combat_default", False),
+    "combat_default": ("combat_default", False),
+    "observe": ("observe_only", True),
+    "observe_only": ("observe_only", True),
+}
+
+
+def build_quick_policy_payload(name: str, *, goal_count: int | str | None = 5) -> dict[str, Any]:
+    key = str(name or "").strip().lower().replace(" ", "_").replace("-", "_")
+    policy_name, observe_only = QUICK_POLICY_PAYLOADS.get(key, ("observe_only", True))
+    return build_runtime_control_payload(
+        task_policy=policy_name,
+        goal_count=goal_count,
+        observe_only=observe_only,
+        brain_enabled=True,
+        overlay_mode="intent",
+        overlay_backup_candidates=2,
+    )
+
+
 def request_runtime_control(port: int, payload: dict[str, Any] | None = None, *, timeout: float = 1.5) -> dict:
     url = runtime_control_endpoint_url(port)
     if payload is None:
@@ -240,6 +276,145 @@ def request_runtime_control(port: int, payload: dict[str, Any] | None = None, *,
         with urllib.request.urlopen(request, timeout=timeout) as response:
             decoded = json.loads(response.read().decode("utf-8", errors="replace"))
     return decoded if isinstance(decoded, dict) else {}
+
+
+def request_daemon_get(port: int, path: str, *, timeout: float = 1.0) -> dict:
+    with urllib.request.urlopen(daemon_endpoint_url(port, path), timeout=timeout) as response:
+        decoded = json.loads(response.read().decode("utf-8", errors="replace"))
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _bool_label(value: Any) -> str:
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return "unknown"
+
+
+def _compact_target_label(target: dict | None) -> str | None:
+    if not isinstance(target, dict) or not target:
+        return None
+    name = target.get("targetName") or target.get("name") or target.get("classId") or target.get("targetType") or "target"
+    target_id = target.get("id")
+    return f"{name} {target_id}" if target_id is not None else str(name)
+
+
+def _progress_label(brain: dict, status: dict, control_state: dict) -> str:
+    progress = brain.get("goalProgress") if isinstance(brain.get("goalProgress"), dict) else {}
+    if not progress:
+        progress = status.get("brainProgress") if isinstance(status.get("brainProgress"), dict) else {}
+    value = (
+        progress.get("displayedGoalProgress")
+        if progress.get("displayedGoalProgress") is not None
+        else progress.get("gainedSinceStart")
+    )
+    goal = progress.get("goalCount") if progress.get("goalCount") is not None else control_state.get("goalCount")
+    if value is None and progress.get("currentHeldCount") is not None:
+        value = progress.get("currentHeldCount")
+    if value is None and goal is None:
+        return "unknown"
+    if goal is None:
+        return str(value)
+    return f"{value}/{goal}"
+
+
+def build_mission_control_status(
+    *,
+    health: dict | None,
+    status: dict | None,
+    control: dict | None,
+    error: str | None = None,
+    gauntlet_status: str | None = None,
+) -> dict[str, Any]:
+    if error:
+        return {
+            "daemonHealth": "FAIL",
+            "daemonStatus": "daemon not reachable",
+            "dailyMode": "unknown",
+            "inputSource": "unknown",
+            "activeTask": "unknown",
+            "taskPolicy": "unknown",
+            "goalCount": "unknown",
+            "genericPhase": "unknown",
+            "activeIntent": "unknown",
+            "noActionEmitted": "unknown",
+            "progress": "unknown",
+            "inventoryFull": "unknown",
+            "serviceNeeded": "unknown",
+            "processNeeded": "unknown",
+            "navigationNeeded": "unknown",
+            "selectedOverlayMarker": "none",
+            "latestWarningCount": 0,
+            "noFileStatus": "WARN",
+            "actionSafety": "WARN",
+            "policyStatus": "WARN",
+            "overlayStatus": "unknown",
+            "gauntletStatus": gauntlet_status or "unknown",
+            "suggestedNextStep": "daemon not reachable; start Snapshot No-File",
+        }
+    health = health if isinstance(health, dict) else {}
+    status = status if isinstance(status, dict) else {}
+    control = control if isinstance(control, dict) else {}
+    control_state = control.get("state") if isinstance(control.get("state"), dict) else {}
+    brain = status.get("brain") if isinstance(status.get("brain"), dict) else {}
+    generic = brain.get("genericTaskState") if isinstance(brain.get("genericTaskState"), dict) else {}
+    context = brain.get("currentContextSummary") if isinstance(brain.get("currentContextSummary"), dict) else {}
+    inventory = context.get("inventory") if isinstance(context.get("inventory"), dict) else {}
+    service = brain.get("serviceContext") if isinstance(brain.get("serviceContext"), dict) else {}
+    process = brain.get("processInventoryContext") if isinstance(brain.get("processInventoryContext"), dict) else {}
+    navigation = brain.get("navigationIntentContext") if isinstance(brain.get("navigationIntentContext"), dict) else {}
+    active_target = generic.get("activeIntentTarget") if isinstance(generic.get("activeIntentTarget"), dict) else None
+    selected_marker = status.get("stabilizedIntentTargetLabel") or _compact_target_label(active_target) or status.get("stabilizedIntentTarget") or "none"
+    warnings = []
+    for source in (status.get("warnings"), brain.get("warnings")):
+        if isinstance(source, list):
+            warnings.extend(source)
+    daily_mode = status.get("dailyMode") or health.get("dailyMode") or "unknown"
+    input_source = status.get("inputSourceActive") or health.get("inputSourceActive") or "unknown"
+    no_file_ok = daily_mode == "snapshot-no-files" and input_source == "plugin-snapshot" and status.get("noFileDaily") is not False
+    no_action = brain.get("noActionEmitted")
+    policy_name = control_state.get("taskPolicy") or status.get("brainTaskPolicy") or "unknown"
+    return {
+        "daemonHealth": "PASS" if health.get("liveCoreDaemonActive") else "WARN",
+        "daemonStatus": "running" if health.get("liveCoreDaemonActive") else "stopped",
+        "dailyMode": daily_mode,
+        "inputSource": input_source,
+        "activeTask": control_state.get("activeTask") or brain.get("task") or "unknown",
+        "taskPolicy": policy_name,
+        "goalCount": control_state.get("goalCount") if control_state.get("goalCount") is not None else "observe",
+        "genericPhase": generic.get("phase") or status.get("brainPhase") or "unknown",
+        "activeIntent": generic.get("activeIntent") or "unknown",
+        "noActionEmitted": _bool_label(no_action),
+        "progress": _progress_label(brain, status, control_state),
+        "inventoryFull": _bool_label(inventory.get("inventoryFull")),
+        "serviceNeeded": _bool_label(service.get("serviceNeeded") if "serviceNeeded" in service else status.get("serviceNeeded")),
+        "processNeeded": _bool_label(process.get("processRequired") if "processRequired" in process else status.get("processInventoryNeeded")),
+        "navigationNeeded": _bool_label(navigation.get("navigationNeeded") if "navigationNeeded" in navigation else status.get("navigationIntentNeeded")),
+        "selectedOverlayMarker": selected_marker,
+        "latestWarningCount": len(warnings),
+        "noFileStatus": "PASS" if no_file_ok else ("WARN" if daily_mode == "snapshot-no-files" else "n/a"),
+        "actionSafety": "PASS" if no_action is True else "FAIL" if no_action is False else "WARN",
+        "policyStatus": "PASS" if policy_name in task_policy.policy_names() else "WARN",
+        "overlayStatus": "PASS" if health.get("overlayStateWritten") or status.get("overlayStateWritten") else "off",
+        "gauntletStatus": gauntlet_status or "unknown",
+        "suggestedNextStep": "",
+    }
+
+
+def format_mission_control_status(mission: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"Daemon: {mission.get('daemonHealth')} - {mission.get('daemonStatus')}",
+            f"Daily mode: {mission.get('dailyMode')} | input: {mission.get('inputSource')} | no-file: {mission.get('noFileStatus')}",
+            f"Task: {mission.get('activeTask')} | policy: {mission.get('taskPolicy')} | goal: {mission.get('goalCount')}",
+            f"Phase: {mission.get('genericPhase')} | intent: {mission.get('activeIntent')} | progress: {mission.get('progress')}",
+            f"Inventory full: {mission.get('inventoryFull')} | service: {mission.get('serviceNeeded')} | process: {mission.get('processNeeded')} | navigation: {mission.get('navigationNeeded')}",
+            f"Overlay: {mission.get('overlayStatus')} | selected: {mission.get('selectedOverlayMarker')} | warnings: {mission.get('latestWarningCount')}",
+            f"Action safety: {mission.get('actionSafety')} | noActionEmitted: {mission.get('noActionEmitted')} | gauntlet: {mission.get('gauntletStatus')}",
+            mission.get("suggestedNextStep") or "",
+        ]
+    ).strip()
 
 
 def request_preset_endpoint(path: str, preset: str, *, timeout: float = 1.0) -> dict:
@@ -810,6 +985,8 @@ class LiveControlPanel:
         self.open_inspector_var = tk.BooleanVar(value=False)
         self.stream_warning_var = tk.StringVar(value="")
         self.runtime_control_status_var = tk.StringVar(value="runtime control: unknown")
+        self.mission_status_var = tk.StringVar(value="Daemon: WARN - daemon not reachable\nstart Snapshot No-File")
+        self.gauntlet_status_var = tk.StringVar(value="gauntlet: unknown")
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.refresh_latest_session(log=False)
@@ -855,8 +1032,9 @@ class LiveControlPanel:
         ttk.Checkbutton(options, text="Open inspector URL", variable=self.open_inspector_var).grid(row=11, column=1, sticky=tk.W)
         ttk.Label(options, textvariable=self.stream_warning_var, foreground="#b45309", wraplength=260).grid(row=12, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
 
-        daily_frame = ttk.LabelFrame(outer, text="Daily Mode", padding=8)
+        daily_frame = ttk.LabelFrame(outer, text="Mission Control", padding=8)
         daily_frame.pack(fill=tk.X, pady=(8, 4))
+        ttk.Label(daily_frame, textvariable=self.mission_status_var, justify=tk.LEFT, wraplength=1080).grid(row=0, column=0, columnspan=4, sticky=tk.W, padx=3, pady=(0, 6))
         daily_buttons = [
             (DAILY_ACTION_LABELS[0], lambda: self.apply_workflow_preset("DAILY_LIVE")),
             (DAILY_ACTION_LABELS[1], self.start_runelite),
@@ -868,11 +1046,11 @@ class LiveControlPanel:
             (DAILY_ACTION_LABELS[7], self.open_session_folder),
         ]
         for index, (label, command) in enumerate(daily_buttons):
-            ttk.Button(daily_frame, text=label, command=command).grid(row=index // 4, column=index % 4, sticky=tk.EW, padx=3, pady=3)
+            ttk.Button(daily_frame, text=label, command=command).grid(row=1 + index // 4, column=index % 4, sticky=tk.EW, padx=3, pady=3)
         for column in range(4):
             daily_frame.columnconfigure(column, weight=1)
         runtime_frame = ttk.LabelFrame(daily_frame, text="Runtime Brain Control", padding=6)
-        runtime_frame.grid(row=2, column=0, columnspan=4, sticky=tk.EW, pady=(8, 0))
+        runtime_frame.grid(row=3, column=0, columnspan=4, sticky=tk.EW, pady=(8, 0))
         ttk.Label(runtime_frame, text="Task policy").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
         ttk.Combobox(
             runtime_frame,
@@ -886,7 +1064,17 @@ class LiveControlPanel:
         ttk.Checkbutton(runtime_frame, text="Observe only", variable=self.observe_only_var).grid(row=0, column=4, sticky=tk.W, padx=(0, 8))
         ttk.Button(runtime_frame, text="Apply Runtime Control", command=self.apply_runtime_control).grid(row=0, column=5, sticky=tk.EW, padx=3)
         ttk.Button(runtime_frame, text="Reset Brain Baseline", command=self.reset_brain_baseline).grid(row=0, column=6, sticky=tk.EW, padx=3)
-        ttk.Label(runtime_frame, textvariable=self.runtime_control_status_var).grid(row=1, column=0, columnspan=7, sticky=tk.W, pady=(4, 0))
+        quick_buttons = [
+            ("Woodcut Bank", lambda: self.apply_quick_policy("bank")),
+            ("Woodcut Firemake", lambda: self.apply_quick_policy("firemake")),
+            ("Woodcut Drop", lambda: self.apply_quick_policy("drop")),
+            ("Combat Default", lambda: self.apply_quick_policy("combat")),
+            ("Observe Only", lambda: self.apply_quick_policy("observe")),
+        ]
+        for index, (label, command) in enumerate(quick_buttons):
+            ttk.Button(runtime_frame, text=label, command=command).grid(row=1, column=index, sticky=tk.EW, padx=3, pady=(6, 0))
+        ttk.Label(runtime_frame, textvariable=self.runtime_control_status_var).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(4, 0))
+        ttk.Label(runtime_frame, textvariable=self.gauntlet_status_var).grid(row=2, column=4, columnspan=3, sticky=tk.W, pady=(4, 0))
         runtime_frame.columnconfigure(6, weight=1)
 
         advanced_frame = ttk.LabelFrame(outer, text="Advanced / Legacy / Experimental", padding=8)
@@ -1216,7 +1404,8 @@ class LiveControlPanel:
 
     def daily_gauntlet(self) -> None:
         options = self.options()
-        command = build_daily_gauntlet_command(daemon_url=f"http://127.0.0.1:{options.port}", daily_mode=options.daily_mode)
+        command = build_daily_gauntlet_command(daemon_url=f"http://127.0.0.1:{options.port}", daily_mode="snapshot-no-files")
+        self.gauntlet_status_var.set("gauntlet: running")
         self.start_process("Daily Gauntlet", command, "Setup/Packet tools")
 
     def build_runtime_control_payload_from_ui(self, *, reset_brain_state: bool = False) -> dict[str, Any]:
@@ -1239,11 +1428,18 @@ class LiveControlPanel:
         threading.Thread(target=self._runtime_control_worker, args=(payload,), daemon=True).start()
 
     def reset_brain_baseline(self) -> None:
+        threading.Thread(target=self._runtime_control_worker, args=(build_reset_baseline_payload(),), daemon=True).start()
+
+    def apply_quick_policy(self, quick_name: str) -> None:
         try:
-            payload = self.build_runtime_control_payload_from_ui(reset_brain_state=True)
+            payload = build_quick_policy_payload(quick_name, goal_count=self.goal_count_var.get())
         except ValueError as exc:
             self.runtime_control_status_var.set(f"runtime control: invalid input ({exc})")
             return
+        policy_name = payload.get("taskPolicy")
+        if policy_name:
+            self.task_policy_var.set(str(policy_name))
+        self.observe_only_var.set(bool(payload.get("observeOnly")))
         threading.Thread(target=self._runtime_control_worker, args=(payload,), daemon=True).start()
 
     def _runtime_control_worker(self, payload: dict[str, Any]) -> None:
@@ -1373,8 +1569,18 @@ class LiveControlPanel:
         if entry.process.stdout is not None:
             for line in entry.process.stdout:
                 self.log_queue.put((entry.log_name, line.rstrip()))
+                if entry.name == "Daily Gauntlet":
+                    upper = line.upper()
+                    if "FAIL" in upper:
+                        self.log_queue.put(("__gauntlet_status__", "gauntlet: FAIL"))
+                    elif "WARN" in upper:
+                        self.log_queue.put(("__gauntlet_status__", "gauntlet: WARN"))
+                    elif "PASS" in upper:
+                        self.log_queue.put(("__gauntlet_status__", "gauntlet: PASS"))
         code = entry.process.wait()
         entry.exit_code = code
+        if entry.name == "Daily Gauntlet" and code != 0:
+            self.log_queue.put(("__gauntlet_status__", f"gauntlet: FAIL exit={code}"))
         self.log_queue.put((entry.log_name, f"{entry.name} exited with code {code}"))
         self.log_queue.put(("__process__", "update"))
 
@@ -1435,6 +1641,10 @@ class LiveControlPanel:
             elif log_name == "__runtime_control__":
                 self.runtime_control_status_var.set(message)
                 self.log("Live Daemon", message)
+            elif log_name == "__mission_status__":
+                self.mission_status_var.set(message)
+            elif log_name == "__gauntlet_status__":
+                self.gauntlet_status_var.set(message)
             else:
                 self.log(log_name, message)
         self.root.after(100, self.process_log_queue)
@@ -1511,18 +1721,26 @@ class LiveControlPanel:
         body = json.dumps(build_context_request_body()).encode("utf-8")
         request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
         try:
+            health = request_daemon_get(port, "/health", timeout=0.75)
+            status_payload = request_daemon_get(port, "/status", timeout=0.75)
+            control = request_runtime_control(port, None, timeout=0.75)
+            mission = build_mission_control_status(
+                health=health,
+                status=status_payload,
+                control=control,
+                gauntlet_status=self.gauntlet_status_var.get().replace("gauntlet: ", "", 1),
+            )
+            self.log_queue.put(("__mission_status__", format_mission_control_status(mission)))
             with urllib.request.urlopen(request, timeout=0.75) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             self.log_queue.put(("__context_status__", f"context: {payload.get('status', 'unknown')} tick={payload.get('latestTick', 'unknown')}"))
-            try:
-                control = request_runtime_control(port, None, timeout=0.75)
-                state = control.get("state") if isinstance(control.get("state"), dict) else {}
-                if state:
-                    self.log_queue.put(("__runtime_control__", f"runtime control: policy={state.get('taskPolicy')} goal={state.get('goalCount')} observe={state.get('observeOnly')}"))
-            except (OSError, urllib.error.URLError, json.JSONDecodeError):
-                pass
+            state = control.get("state") if isinstance(control.get("state"), dict) else {}
+            if state:
+                self.log_queue.put(("__runtime_control__", f"runtime control: policy={state.get('taskPolicy')} goal={state.get('goalCount')} observe={state.get('observeOnly')}"))
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             self.log_queue.put(("__context_status__", f"context: unavailable ({exc})"))
+            mission = build_mission_control_status(health=None, status=None, control=None, error=str(exc))
+            self.log_queue.put(("__mission_status__", format_mission_control_status(mission)))
         finally:
             self.context_poll_inflight = False
 

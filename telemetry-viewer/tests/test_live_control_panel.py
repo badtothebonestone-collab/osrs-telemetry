@@ -74,6 +74,7 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertIn("--latest-session", command)
         self.assertIn("--daemon-url", command)
         self.assertEqual(command[command.index("--daemon-url") + 1], "http://127.0.0.1:8890")
+        self.assertEqual(command[command.index("--daily-mode") + 1], "snapshot-no-files")
         self.assertIn("--strict", command)
         self.assertIn("--check-processes", command)
 
@@ -122,6 +123,69 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
 
     def test_runtime_control_endpoint_url_uses_daemon_port(self):
         self.assertEqual(panel.runtime_control_endpoint_url(8890), "http://127.0.0.1:8890/control")
+
+    def test_mission_status_parses_health_status_control_payloads(self):
+        mission = panel.build_mission_control_status(
+            health={"liveCoreDaemonActive": True, "overlayStateWritten": True},
+            status={
+                "dailyMode": "snapshot-no-files",
+                "inputSourceActive": "plugin-snapshot",
+                "noFileDaily": True,
+                "brain": {
+                    "task": "woodcutting",
+                    "genericTaskState": {"phase": "inventory_full", "activeIntent": "process_inventory"},
+                    "goalProgress": {"displayedGoalProgress": 3, "goalCount": 5},
+                    "currentContextSummary": {"inventory": {"inventoryFull": True}},
+                    "serviceContext": {"serviceNeeded": False},
+                    "processInventoryContext": {"processRequired": True},
+                    "navigationIntentContext": {"navigationNeeded": False},
+                    "warnings": ["no tree candidates currently observed"],
+                    "noActionEmitted": True,
+                },
+                "stabilizedIntentTargetLabel": "none",
+            },
+            control={"state": {"activeTask": "woodcutting", "taskPolicy": "woodcutting_firemake", "goalCount": 5}},
+        )
+
+        self.assertEqual(mission["daemonHealth"], "PASS")
+        self.assertEqual(mission["dailyMode"], "snapshot-no-files")
+        self.assertEqual(mission["inputSource"], "plugin-snapshot")
+        self.assertEqual(mission["activeTask"], "woodcutting")
+        self.assertEqual(mission["taskPolicy"], "woodcutting_firemake")
+        self.assertEqual(mission["genericPhase"], "inventory_full")
+        self.assertEqual(mission["activeIntent"], "process_inventory")
+        self.assertEqual(mission["progress"], "3/5")
+        self.assertEqual(mission["inventoryFull"], "yes")
+        self.assertEqual(mission["processNeeded"], "yes")
+        self.assertEqual(mission["actionSafety"], "PASS")
+        self.assertEqual(mission["latestWarningCount"], 1)
+
+    def test_mission_status_handles_daemon_unavailable(self):
+        mission = panel.build_mission_control_status(health=None, status=None, control=None, error="connection refused")
+
+        self.assertEqual(mission["daemonHealth"], "FAIL")
+        self.assertEqual(mission["daemonStatus"], "daemon not reachable")
+        self.assertIn("start Snapshot No-File", mission["suggestedNextStep"])
+
+    def test_quick_policy_payloads_are_safe(self):
+        cases = {
+            "bank": ("woodcutting_bank", False),
+            "firemake": ("woodcutting_firemake", False),
+            "drop": ("woodcutting_drop", False),
+            "combat": ("combat_default", False),
+            "observe": ("observe_only", True),
+        }
+        for quick_name, (policy_name, observe_only) in cases.items():
+            with self.subTest(quick_name=quick_name):
+                payload = panel.build_quick_policy_payload(quick_name, goal_count="5")
+                self.assertEqual(payload["taskPolicy"], policy_name)
+                self.assertEqual(payload["observeOnly"], observe_only)
+                self.assertNotIn("resetBrainState", payload)
+                for forbidden in ("click", "mouse", "keyboard", "menu", "invoke", "execute", "walk", "interact"):
+                    self.assertFalse(any(forbidden in key.lower() for key in payload))
+
+    def test_reset_baseline_payload_is_reset_only(self):
+        self.assertEqual(panel.build_reset_baseline_payload(), {"resetBrainState": True})
 
     def test_preset_request_body_and_endpoint_url(self):
         self.assertEqual(panel.preset_request_body("DAILY_LIVE")["preset"], "DAILY_LIVE")

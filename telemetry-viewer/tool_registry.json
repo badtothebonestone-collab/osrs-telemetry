@@ -14,7 +14,7 @@
     {
       "name": "live_control_panel.py",
       "category": "daily",
-      "purpose": "Simple daily launcher and process monitor.",
+      "purpose": "Simple daily launcher, Mission Control status view, and safe runtime-control surface for the daily daemon.",
       "dailyRequired": true,
       "normalCommand": "python telemetry-viewer\\live_control_panel.py",
       "input": "latest session and local helper process state",
