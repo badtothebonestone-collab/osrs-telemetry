@@ -57,6 +57,38 @@ python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutti
 Debug file writes remain off unless `--write-debug-live-files` is explicitly
 supplied.
 
+## Internal Analyzer Architecture
+
+`live_core_daemon.py` is the single daily sidecar process. Inside that process,
+small in-memory analyzers now keep the responsibilities separated:
+
+- `analyzers\live_state.py` defines the shared `LiveAnalysisResult` and context
+  containers.
+- `analyzers\target_analyzer.py` summarizes already-built candidates and keeps
+  raw best/nearest target interpretation generic.
+- `analyzers\navigation_analyzer.py` summarizes existing collision and
+  reachability fields without doing new pathfinding.
+- `analyzers\activity_analyzer.py` keeps current activity separate from recent
+  task signals such as target depletion.
+- `analyzers\intent_overlay_analyzer.py` builds selected/backup intent markers,
+  deduplicates targets, and merges the best available geometry into the
+  selected marker.
+- `analyzers\brain_context_analyzer.py` wraps daemon-specific brain evaluation
+  and status fields.
+- `analyzers\inventory_analyzer.py` normalizes inventory snapshots and delegates
+  progress math to `resource_progress.py`.
+- `capabilities.py` normalizes capability names and status values so daily
+  warnings do not duplicate old aliases such as `inventoryDeltas` and
+  `inventory.deltas`.
+
+These analyzers do not poll inputs, call RuneLite, read compact packet files,
+write JSON/NDJSON, or start services. They consume the snapshot/context already
+built by the daemon and return in-memory data. The only daily file write remains
+the optional `overlay_debug_state.json` when `--write-overlay-state` is enabled.
+Analyzer contracts are documented in `docs\analyzer_contracts.md`; future task
+support should add capabilities and analyzer output fields there instead of
+adding ad-hoc daemon logic.
+
 ## Daily Source Modes
 
 1. Daily Stable Compact uses `live_packets\live-*.ndjson`. It is the stable

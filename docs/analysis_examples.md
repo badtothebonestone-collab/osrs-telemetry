@@ -82,6 +82,22 @@ Screenshot, crop, and perception image tooling is also advanced/debug-only; it
 does not run in the Daily Live daemon unless you intentionally start those
 batch tools from Advanced.
 
+## Internal Analyzer Architecture
+
+Daily Live still runs one sidecar process: `live_core_daemon.py`. The daemon now
+delegates interpretation to small in-memory analyzers under
+`telemetry-viewer\analyzers\`:
+
+- inventory/progress preparation delegates to `resource_progress.py`
+- target, navigation, and activity summaries consume the current daemon context
+- brain context evaluation wraps `brain_core.py`
+- intent overlay construction emits selected/backup markers without writing
+  extra files
+
+Analyzer modules do not poll the plugin, read compact packet files, start
+services, or write JSON/NDJSON. They return one shared in-memory analysis result
+for the daemon to serve through the existing context/status endpoints.
+
 ## Live Config Doctor And Presets
 
 `live_config_doctor.py` checks the current live workflow against a named preset.

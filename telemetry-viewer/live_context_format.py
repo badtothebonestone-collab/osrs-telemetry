@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import capabilities
+
 
 def safe_get(value: Any, path: str | list[str], default: Any = None) -> Any:
     parts = path.split(".") if isinstance(path, str) else path
@@ -63,12 +65,13 @@ def liveness_label(value: Any) -> str:
 
 
 def missing_capability_label(value: Any) -> str:
+    value = capabilities.normalize_capability_name(value)
     return {
-        "fullPathfinding": "full pathfinding is not implemented yet",
-        "inventoryDeltas": "inventory change tracking is not available yet",
+        "navigation.full_pathfinding": "full pathfinding is not implemented yet",
         "inventory.deltas": "inventory change tracking is not available yet",
-        "animationFrame": "animation frame detail is unavailable",
-        "explicitMovementState": "explicit movement state is unavailable",
+        "activity.animation_frame": "animation frame detail is unavailable",
+        "activity.explicit_movement_state": "explicit movement state is unavailable",
+        "navigation.local_collision_window": "local collision window is unavailable",
         "collisionGridPathing": "collision grid pathing is not available yet",
         "collisionSummary": "collision summary is unavailable",
         "collisionWindow": "local collision window is unavailable",
@@ -279,22 +282,26 @@ def inventory_delta_label(delta: dict) -> str:
 
 def all_warnings(response: dict, compact: bool = False) -> list[str]:
     values: list[str] = []
-    for key in ("warnings", "missingCapabilities"):
-        for item in response.get(key) or []:
-            values.append(missing_capability_label(item) if key == "missingCapabilities" else str(item))
+    missing_values: list[Any] = []
+    for item in response.get("missingCapabilities") or []:
+        missing_values.append(item)
+    for item in response.get("warnings") or []:
+        values.append(str(item))
     task = response.get("taskSummary")
     if isinstance(task, dict):
         for item in task.get("missingCapabilities") or []:
-            values.append(missing_capability_label(item))
+            missing_values.append(item)
         for item in task.get("warnings") or []:
             values.append(str(item))
+    for item in capabilities.normalize_capability_names(missing_values):
+        values.append(missing_capability_label(item))
     seen = set()
     result = []
     for value in values:
         lowered = str(value).lower()
         if compact and ("no frame path" in lowered or ("frame path" in lowered and "baseline" in lowered)):
             continue
-        if compact and value == missing_capability_label("animationFrame"):
+        if compact and value == missing_capability_label("activity.animation_frame"):
             continue
         if value and value not in seen:
             seen.add(value)

@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import resource_progress as rp
+import capabilities
+from analyzers import inventory_analyzer
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,17 +44,12 @@ DEFAULT_NEEDS = [
     "watches",
 ]
 OPTIONAL_CAPABILITIES = {
-    "animationFrame",
-    "explicitMovementState",
-    "fullPathfinding",
+    "activity.animation_frame",
+    "activity.explicit_movement_state",
+    "navigation.full_pathfinding",
     "collisionGridPathing",
-    "inventoryDeltas",
     "inventory.deltas",
-    "watch_values.java_runtime",
-}
-CAPABILITY_ALIASES = {
-    "inventoryDeltas": "inventory.deltas",
-    "inventory_delta": "inventory.deltas",
+    "plugin_snapshot.watch_values",
 }
 SAFETY_FORBIDDEN_KEYS = {
     "action",
@@ -156,8 +153,7 @@ def dedupe_strings(values: list[str]) -> list[str]:
 
 
 def canonical_capability(value: Any) -> str:
-    text_value = str(value)
-    return CAPABILITY_ALIASES.get(text_value, text_value)
+    return capabilities.normalize_capability_name(value)
 
 
 def load_task_resources() -> dict:
@@ -929,7 +925,19 @@ def estimate_progress_with_resource_tracker(state: dict, response: dict, invento
             "missingReason": count_result.get("missingReason") if not count_result.get("known") else None,
         }
 
-    result = rp.update_resource_progress(progress_state, snapshot, definition, goal_count)
+    analyzer_inventory = dict(inventory)
+    analyzer_inventory["items"] = list(current_items) if current_items is not None else raw_inventory_items
+    analyzer_inventory["resourceCounts"] = snapshot.resource_counts
+    analyzer_inventory["inventorySignature"] = current_signature
+    analyzer_inventory["inventorySlotCount"] = snapshot.inventory_slot_count
+    inventory_context = inventory_analyzer.analyze_inventory(
+        response=response,
+        inventory=analyzer_inventory,
+        progress_state=progress_state,
+        resource_definition=definition,
+        goal_count=goal_count,
+    )
+    result = inventory_context.progress_result
     new_state = result.state
     result_warnings = list(result.warnings)
     progress_state_repaired = bool(result.progress_state_repaired)
@@ -1343,7 +1351,6 @@ def evaluate_brain(
         for item in missing
         if item not in OPTIONAL_CAPABILITIES
         and not item.startswith("watch:")
-        and not item.startswith("capability:watch_values.java_runtime")
     ]
 
     progress_warning_set = set(progress.get("warnings") or [])
@@ -1869,7 +1876,7 @@ def important_observation_needs(needs: list[dict], progress: dict) -> list[dict]
             "inventory_snapshot_items",
         }:
             continue
-        if capability == "animationFrame" and status == "optional":
+        if capability == "activity.animation_frame" and status == "optional":
             continue
         item = dict(need)
         item["capability"] = capability

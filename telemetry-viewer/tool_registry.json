@@ -81,6 +81,28 @@
       "safeToHideInUi": true
     },
     {
+      "name": "capabilities.py",
+      "category": "daily",
+      "purpose": "Capability status and alias normalization for analyzer contracts and concise daily output.",
+      "dailyRequired": true,
+      "normalCommand": "imported by analyzers, brain_core.py, and live_context_format.py",
+      "input": "static capability names and legacy aliases",
+      "output": "normalized capability IDs and capability status records",
+      "status": "daily",
+      "safeToHideInUi": true
+    },
+    {
+      "name": "analyzers\\*.py",
+      "category": "daily",
+      "purpose": "Pure in-memory analyzers used inside live_core_daemon.py for inventory, targets, navigation, activity, brain context, and intent overlay markers.",
+      "dailyRequired": true,
+      "normalCommand": "imported by live_core_daemon.py",
+      "input": "already-polled daemon snapshot/context data",
+      "output": "LiveAnalysisResult context objects; no files or services",
+      "status": "daily",
+      "safeToHideInUi": true
+    },
+    {
       "name": "live_context_format.py",
       "category": "daily",
       "purpose": "Human formatting for context and brain output.",

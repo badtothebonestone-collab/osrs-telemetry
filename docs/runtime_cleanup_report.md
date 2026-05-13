@@ -89,3 +89,19 @@ No files were moved in this pass.
 ## Notes
 
 The repository currently contains generated/untracked local state in `%USERPROFILE%\`. It was not moved or deleted because it may contain user-created state from an earlier path-expansion mistake. It should be inspected manually before cleanup.
+
+## Analyzer Refactor Note
+
+`live_core_daemon.py` now acts more like an orchestrator. Candidate, navigation,
+activity, brain-status, and intent-overlay interpretation live in pure
+in-memory modules under `telemetry-viewer\analyzers\`. The refactor did not add
+new processes, network requests, rolling JSON/NDJSON files, or daily writes.
+Daily Snapshot No-File still uses the plugin snapshot endpoint directly, and
+Stable Compact remains the file-bridge fallback/debug path.
+
+The analyzer contracts are now explicit in `docs\analyzer_contracts.md`.
+Analyzer outputs share `status`, `warnings`, `missing_capabilities`,
+`source_tick`, `retained_from_previous`, and `timing_millis` fields. Capability
+names are normalized by `telemetry-viewer\capabilities.py`, so legacy names such
+as `inventoryDeltas`, `animationFrame`, `explicitMovementState`,
+`fullPathfinding`, and `watch_values` do not produce duplicate daily warnings.
