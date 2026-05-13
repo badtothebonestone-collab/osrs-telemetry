@@ -136,6 +136,25 @@ def policy_warnings_from(status: dict[str, Any]) -> list[str]:
     return []
 
 
+def transition_summary_from(status: dict[str, Any], brain_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    brain = brain_payload if isinstance(brain_payload, dict) else {}
+    if not brain and isinstance(status.get("brain"), dict):
+        brain = status["brain"]
+    generic = brain.get("genericTaskState") if isinstance(brain.get("genericTaskState"), dict) else {}
+    service = brain.get("serviceContext") if isinstance(brain.get("serviceContext"), dict) else {}
+    process = brain.get("processInventoryContext") if isinstance(brain.get("processInventoryContext"), dict) else {}
+    navigation = brain.get("navigationIntentContext") if isinstance(brain.get("navigationIntentContext"), dict) else {}
+    return {
+        "taskPolicy": status.get("brainTaskPolicy") or status.get("taskPolicy"),
+        "genericPhase": generic.get("phase") or status.get("genericPhase"),
+        "activeIntent": generic.get("activeIntent") or status.get("activeIntent"),
+        "serviceNeeded": service.get("serviceNeeded", status.get("serviceNeeded")),
+        "processNeeded": process.get("processRequired", status.get("processInventoryNeeded")),
+        "navigationNeeded": navigation.get("navigationNeeded", status.get("navigationIntentNeeded")),
+        "noActionEmitted": brain.get("noActionEmitted") if brain else None,
+    }
+
+
 def evaluate_daemon_payloads(
     daemon_health: dict[str, Any],
     daemon_status: dict[str, Any],
@@ -208,6 +227,8 @@ def evaluate_daemon_payloads(
         dangerous = [path for path in forbidden if not path.endswith("noActionEmitted")]
         if dangerous:
             failures.append("brain output contains action/input/menu-shaped fields: " + ", ".join(dangerous[:5]))
+        if brain_payload.get("noActionEmitted") is False:
+            failures.append("brain output does not report noActionEmitted=true")
     if daemon_health and daemon_health.get("status") == "FAIL":
         failures.append("daemon health returned FAIL")
     return {"warnings": warnings, "failures": failures}
@@ -363,6 +384,7 @@ def build_report(args: argparse.Namespace, processes: list[dict[str, Any]] | Non
             failures.append(growth_failure)
 
     status = "FAIL" if failures else "WARN" if warnings else "PASS"
+    transition_summary = transition_summary_from(daemon_status, brain_payload)
     return {
         "schema": SCHEMA,
         "status": status,
@@ -371,6 +393,13 @@ def build_report(args: argparse.Namespace, processes: list[dict[str, Any]] | Non
         "daemonUrl": args.daemon_url,
         "dailyMode": args.daily_mode,
         "activeTaskPolicy": daemon_status.get("brainTaskPolicy") or daemon_status.get("taskPolicy"),
+        "genericPhase": transition_summary.get("genericPhase"),
+        "activeIntent": transition_summary.get("activeIntent"),
+        "serviceNeeded": transition_summary.get("serviceNeeded"),
+        "processNeeded": transition_summary.get("processNeeded"),
+        "navigationNeeded": transition_summary.get("navigationNeeded"),
+        "noActionEmitted": transition_summary.get("noActionEmitted"),
+        "transitionSummary": transition_summary,
         "livePacketGrowth": packet_growth,
         "runtimePolicyFiles": runtime_file_report,
         "daemonHealth": daemon_health,
@@ -410,6 +439,12 @@ def format_human(report: dict) -> str:
         f"Session: {report.get('sessionPath') or 'not resolved'}",
         f"Daemon: {report.get('daemonUrl')}",
         f"Task policy: {report.get('activeTaskPolicy') or 'unknown'}",
+        f"Generic phase: {report.get('genericPhase') or 'unknown'}",
+        f"Active intent: {report.get('activeIntent') or 'unknown'}",
+        f"Service needed: {str(report.get('serviceNeeded')).lower()}",
+        f"Process needed: {str(report.get('processNeeded')).lower()}",
+        f"Navigation needed: {str(report.get('navigationNeeded')).lower()}",
+        f"noActionEmitted: {str(report.get('noActionEmitted')).lower()}",
         "",
         "Processes:",
     ]

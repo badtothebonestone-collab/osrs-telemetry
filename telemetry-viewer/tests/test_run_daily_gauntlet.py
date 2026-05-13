@@ -97,19 +97,43 @@ class RunDailyGauntletTest(unittest.TestCase):
 
     def test_report_includes_active_task_policy(self):
         args = gauntlet.parse_args(["--daily-mode", "compact-packets"])
+        brain = {
+            "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+            "serviceContext": {"serviceNeeded": True},
+            "processInventoryContext": {"processRequired": False},
+            "navigationIntentContext": {"navigationNeeded": True},
+            "goalProgress": {},
+            "noActionEmitted": True,
+        }
         with mock.patch.object(
             gauntlet,
             "fetch_json",
             side_effect=[
                 {"status": "PASS"},
                 {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_drop"},
-                {"goalProgress": {}, "noActionEmitted": True},
+                brain,
             ],
         ):
             with mock.patch.object(gauntlet, "post_json", return_value={"status": "PASS"}):
                 report = gauntlet.build_report(args, processes=[])
 
         self.assertEqual(report["activeTaskPolicy"], "woodcutting_drop")
+        self.assertEqual(report["genericPhase"], "inventory_full")
+        self.assertEqual(report["activeIntent"], "needs_service")
+        self.assertTrue(report["serviceNeeded"])
+        self.assertFalse(report["processNeeded"])
+        self.assertTrue(report["navigationNeeded"])
+        self.assertTrue(report["noActionEmitted"])
+
+    def test_fails_when_brain_does_not_report_no_action_emitted(self):
+        result = gauntlet.evaluate_daemon_payloads(
+            {"status": "PASS"},
+            {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_bank"},
+            {"status": "PASS"},
+            {"goalProgress": {}, "noActionEmitted": False},
+        )
+
+        self.assertTrue(any("noActionEmitted" in failure for failure in result["failures"]))
 
     def test_detects_policy_task_analyzer_runtime_json_files(self):
         with tempfile.TemporaryDirectory() as tmp:

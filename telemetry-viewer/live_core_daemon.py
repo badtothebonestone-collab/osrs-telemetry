@@ -22,6 +22,7 @@ from analyzers import activity_analyzer
 from analyzers import brain_context_analyzer
 from analyzers import intent_overlay_analyzer
 from analyzers import navigation_analyzer
+from analyzers import navigation_intent_analyzer
 from analyzers import process_inventory_analyzer
 from analyzers import service_analyzer
 from analyzers import target_analyzer
@@ -602,6 +603,12 @@ class LiveCoreState:
             "compactPacketFilesRecent",
             "compactPacketFileCount",
             "debugMirrorEnabled",
+            "navigationIntentNeeded",
+            "navigationIntentReason",
+            "navigationIntentTargetKind",
+            "navigationIntentReachability",
+            "navigationIntentDistanceTiles",
+            "navigationIntentCollisionWindowAvailable",
         )
         for key in passthrough_status_keys:
             if key in self.source_status:
@@ -1011,6 +1018,17 @@ class LiveCoreDaemon:
                 generic_state["activeIntentTarget"] = active_target
                 generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(active_target, str(target_type))
                 brain_context.decision["genericTaskState"] = generic_state
+            self.state.analysis_result.navigation_intent = navigation_intent_analyzer.analyze_navigation_intent(
+                policy,
+                player_context=self.state.analysis_result.player,
+                target_context=self.state.analysis_result.targets,
+                service_context=service_context,
+                process_inventory_context=process_context,
+                navigation_context=self.state.analysis_result.navigation,
+                generic_task_state=generic_state,
+                source_tick=source_tick,
+            )
+            brain_context.decision["navigationIntentContext"] = self.state.analysis_result.navigation_intent.to_dict()
         fields = brain_context.status_fields
         fields["brainTaskPolicy"] = self.args.task_policy
         if self.state.analysis_result and self.state.analysis_result.service:
@@ -1020,6 +1038,14 @@ class LiveCoreDaemon:
         if self.state.analysis_result and self.state.analysis_result.process_inventory:
             fields["processInventoryNeeded"] = self.state.analysis_result.process_inventory.process_required
             fields["processTypeNeeded"] = self.state.analysis_result.process_inventory.process_type_needed
+        if self.state.analysis_result and self.state.analysis_result.navigation_intent:
+            navigation_intent = self.state.analysis_result.navigation_intent
+            fields["navigationIntentNeeded"] = navigation_intent.navigation_needed
+            fields["navigationIntentReason"] = navigation_intent.navigation_reason
+            fields["navigationIntentTargetKind"] = navigation_intent.target_kind
+            fields["navigationIntentReachability"] = navigation_intent.direct_reachability
+            fields["navigationIntentDistanceTiles"] = navigation_intent.distance_tiles
+            fields["navigationIntentCollisionWindowAvailable"] = navigation_intent.collision_window_available
         self.state.source_status.update(fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)

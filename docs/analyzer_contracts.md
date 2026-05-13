@@ -153,6 +153,29 @@ state stays in memory. Diagnostics may print JSON to stdout when `--json` is
 passed, but they must not create policy history JSONL, per-tick task state JSON,
 analyzer output JSON files, or other rolling live files.
 
+## Task Transition QA
+
+`telemetry-viewer\diagnose_task_transition.py` verifies policy-driven task
+state flows with synthetic in-memory fixtures. It does not need RuneLite,
+session files, compact packets, or daemon debug files. The diagnostic reports
+expected versus actual generic phase, active intent, relevant analyzer context,
+navigation context, overlay selected-marker expectation, and
+`noActionEmitted`.
+
+Covered scenarios include:
+
+- woodcutting bank policy with inventory not full and tree target available
+- woodcutting bank policy with full inventory and service missing
+- woodcutting bank policy with full inventory and reachable bank booth visible
+- firemaking policy with logs plus tinderbox present or missing
+- drop policy with logs held
+- combat policy with full inventory and an active target
+- observe-only with full inventory
+
+`--from-daemon` reads the current daemon `/status` only and summarizes the live
+phase, active intent, service/process/navigation contexts, and active target
+state. `--json` prints to stdout only.
+
 ## `analyzers\live_state.py`
 
 Purpose: shared dataclasses for in-memory analyzer inputs/outputs.
@@ -160,7 +183,7 @@ Purpose: shared dataclasses for in-memory analyzer inputs/outputs.
 Inputs: none at runtime beyond constructor values.
 
 Outputs: `LiveInputSnapshot`, `LiveSourceStatus`, `InventoryContext`,
-`TargetContext`, `NavigationContext`, `ActivityContext`,
+`TargetContext`, `NavigationContext`, `NavigationIntentContext`, `ActivityContext`,
 `IntentOverlayContext`, `BrainContext`, `LiveAnalysisResult`, and common
 contract helpers.
 
@@ -232,6 +255,44 @@ Performance expectation: linear in current candidates.
 
 Future expansion: new navigation capabilities should be exposed as
 capabilities, not ad-hoc warnings.
+
+## `navigation_intent_analyzer.py`
+
+Purpose: describe read-only navigation intent context for current service,
+process, or resource transitions.
+
+Inputs: current player context, target context, service context, process
+inventory context, existing navigation/reachability context, and generic task
+state. The analyzer consumes only in-memory data that the daemon has already
+built.
+
+Outputs: `NavigationIntentContext` with whether navigation context is relevant,
+why, target kind, destination target, distance, direct reachability, path
+length if already available, collision-window availability, warnings, and
+missing capabilities.
+
+Policy behavior:
+
+- `woodcutting_bank` with full inventory and an observed service candidate
+  reports that service target as the destination context.
+- `woodcutting_bank` with no observed service candidate reports
+  `service_target_missing` and waits for service target context.
+- `woodcutting_firemake` and `woodcutting_drop` remain local
+  `process_inventory` context and do not request service navigation.
+- A reachable selected resource target does not need navigation context.
+- An unreachable selected target reports `target_unreachable`, but still emits
+  no route, movement, click, or interaction command.
+
+Forbidden side effects: no file reads/writes, endpoint calls, pathfinding
+expansion, route generation, movement commands, or action/click/input/menu
+fields.
+
+Allowed warnings: service destination missing, local context says target is
+blocked, local collision window missing, or full pathfinding context is not
+available.
+
+Performance expectation: constant time over already-selected context objects;
+it must not rescan candidates or request more data.
 
 ## `activity_analyzer.py`
 

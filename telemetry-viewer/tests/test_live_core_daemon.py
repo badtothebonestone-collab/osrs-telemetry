@@ -19,6 +19,7 @@ import live_context_format
 import live_target_processor as live
 import diagnose_brain_progress
 import test_live_target_processor as fixtures
+from analyzers.live_state import ServiceContext
 
 
 def make_args(session: Path, *extra: str):
@@ -137,6 +138,46 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertTrue(decision["processInventoryContext"]["processRequired"])
         self.assertFalse(decision["processInventoryContext"].get("serviceTypeNeeded"))
         self.assertEqual(core.state.source_status["brainTaskPolicy"], "woodcutting_firemake")
+
+    def test_bank_policy_service_candidate_adds_navigation_intent_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--human-dashboard",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service = ServiceContext(
+                service_required=True,
+                service_type_needed="bank",
+                best_service_candidate={
+                    "targetType": "sceneObject",
+                    "classId": "bank_booth",
+                    "targetName": "Bank booth",
+                    "id": 10355,
+                    "distanceTiles": 4,
+                    "navigation": {"directReachability": "reachable"},
+                },
+                candidate_count=1,
+                source_tick=1,
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
+                    core = daemon.LiveCoreDaemon(session, args)
+                    core.poll_once()
+
+        nav = core.state.brain_decision["navigationIntentContext"]
+        self.assertTrue(nav["navigationNeeded"])
+        self.assertEqual(nav["navigationReason"], "service_target_available")
+        self.assertEqual(nav["targetKind"], "service")
+        self.assertEqual(nav["destinationTarget"]["classId"], "bank_booth")
+        self.assertEqual(core.state.source_status["navigationIntentReason"], "service_target_available")
 
     def test_daily_daemon_does_not_write_policy_task_or_analyzer_runtime_files(self):
         with tempfile.TemporaryDirectory() as tmp:

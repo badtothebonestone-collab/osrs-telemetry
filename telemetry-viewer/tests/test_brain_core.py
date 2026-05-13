@@ -256,11 +256,29 @@ class BrainCoreTest(unittest.TestCase):
                 "directReachability": "reachable",
             },
         }
+        decision["navigationIntentContext"] = {
+            "navigationNeeded": True,
+            "navigationReason": "service_target_available",
+            "targetKind": "service",
+            "destinationTarget": {
+                "name": "Bank booth",
+                "id": 10355,
+                "directReachability": "reachable",
+            },
+            "distanceTiles": 4,
+            "directReachability": "reachable",
+            "collisionWindowAvailable": True,
+            "missingCapabilities": [],
+        }
 
         output = brain.format_human(decision)
 
         self.assertIn("Best service candidate: Bank booth 10355, reachable", output)
+        self.assertIn("Navigation context:", output)
+        self.assertIn("Destination: Bank booth 10355, reachable", output)
+        self.assertIn("Distance: 4 tiles", output)
         self.assertIn("Reachability: reachable", output)
+        self.assertIn("Collision window: available", output)
 
     def test_inventory_full_firemaking_policy_processes_inventory_context_only(self):
         response = context_response(inventory={"known": True, "freeSlots": 0, "filledSlots": 28, "inventoryFull": True})

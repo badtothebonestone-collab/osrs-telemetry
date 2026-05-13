@@ -340,6 +340,9 @@ def overlay_target_from_intent_marker(marker: dict) -> dict:
         "projectionMode": marker.get("projectionMode"),
         "projectionStale": marker.get("projectionStale"),
         "projectionFallbackReason": marker.get("projectionFallbackReason"),
+        "navigationNeeded": marker.get("navigationNeeded"),
+        "navigationReason": marker.get("navigationReason"),
+        "navigationStatus": marker.get("navigationStatus"),
         "tick": marker.get("tick"),
         "targetLiveState": marker.get("liveness"),
         "directReachability": marker.get("reachability"),
@@ -462,6 +465,7 @@ def build_intent_overlay_state(
     generic_state = brain_decision.get("genericTaskState") if isinstance(brain_decision.get("genericTaskState"), dict) else {}
     active_intent = str(generic_state.get("activeIntent") or generic_state.get("phase") or brain_decision.get("phase") or "observe")
     service_context = brain_decision.get("serviceContext") if isinstance(brain_decision.get("serviceContext"), dict) else {}
+    navigation_intent_context = brain_decision.get("navigationIntentContext") if isinstance(brain_decision.get("navigationIntentContext"), dict) else {}
     service_candidates = service_context.get("serviceCandidates") if isinstance(service_context.get("serviceCandidates"), list) else []
     markers: list[dict] = []
     selected = None
@@ -506,6 +510,10 @@ def build_intent_overlay_state(
         if stable_intent and active_intent != "needs_service":
             marker["stableForTicks"] = stable_intent.stableForTicks
             marker["switchReason"] = stable_intent.switchReason
+        if navigation_intent_context:
+            marker["navigationNeeded"] = navigation_intent_context.get("navigationNeeded")
+            marker["navigationReason"] = navigation_intent_context.get("navigationReason")
+            marker["navigationStatus"] = navigation_intent_context.get("directReachability") or "unknown"
         merge_candidates = service_candidates if active_intent == "needs_service" and service_candidates else candidates
         for candidate in merge_candidates:
             if not isinstance(candidate, dict):

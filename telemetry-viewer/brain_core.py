@@ -1957,6 +1957,7 @@ def format_human(decision: dict) -> str:
     generic_state = decision.get("genericTaskState") if isinstance(decision.get("genericTaskState"), dict) else {}
     service_context = decision.get("serviceContext") if isinstance(decision.get("serviceContext"), dict) else {}
     process_context = decision.get("processInventoryContext") if isinstance(decision.get("processInventoryContext"), dict) else {}
+    navigation_intent_context = decision.get("navigationIntentContext") if isinstance(decision.get("navigationIntentContext"), dict) else {}
     active_intent = str(generic_state.get("activeIntent") or "")
     active_target = generic_state.get("activeIntentTarget") if isinstance(generic_state.get("activeIntentTarget"), dict) else None
     available_target = generic_state.get("availableTarget") if isinstance(generic_state.get("availableTarget"), dict) else None
@@ -2002,6 +2003,33 @@ def format_human(decision: dict) -> str:
         lines.append("  No service target required")
     if inventory_is_full(inventory) and str(generic_state.get("fullInventoryStrategy") or "") == "continue_task":
         lines.append("  Inventory full: expected/allowed")
+    if navigation_intent_context:
+        navigation_reason = str(navigation_intent_context.get("navigationReason") or "")
+        should_show_navigation = bool(navigation_intent_context.get("navigationNeeded")) or navigation_reason in {
+            "service_target_available",
+            "service_target_missing",
+            "target_unreachable",
+            "full_pathfinding_missing",
+        }
+        if should_show_navigation:
+            destination = navigation_intent_context.get("destinationTarget") if isinstance(navigation_intent_context.get("destinationTarget"), dict) else None
+            lines.extend(["", "Navigation context:"])
+            if destination:
+                lines.append(f"  Destination: {target_context_label(destination)}")
+            elif navigation_reason == "service_target_missing":
+                lines.append("  waiting for service target context")
+            else:
+                lines.append("  Destination: none")
+            if navigation_intent_context.get("distanceTiles") is not None:
+                lines.append(f"  Distance: {text(navigation_intent_context.get('distanceTiles'))} tiles")
+            if navigation_intent_context.get("directReachability") is not None:
+                lines.append(f"  Reachability: {text(navigation_intent_context.get('directReachability'))}")
+            collision_available = navigation_intent_context.get("collisionWindowAvailable")
+            if collision_available is not None:
+                lines.append(f"  Collision window: {'available' if collision_available else 'missing'}")
+            nav_missing = navigation_intent_context.get("missingCapabilities") if isinstance(navigation_intent_context.get("missingCapabilities"), list) else []
+            if nav_missing:
+                lines.append(f"  Missing: {', '.join(str(item) for item in nav_missing)}")
     if active_target:
         lines.append(f"  Current target: {target_context_label(active_target)}, aim {aim_label(active_target)}")
     elif best and not active_intent:

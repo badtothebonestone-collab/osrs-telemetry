@@ -197,6 +197,12 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
                     "serviceTypeNeeded": "bank",
                 },
                 "serviceContext": {"serviceNeeded": True, "bestServiceCandidate": service_target},
+                "navigationIntentContext": {
+                    "navigationNeeded": True,
+                    "navigationReason": "service_target_available",
+                    "targetKind": "service",
+                    "directReachability": "reachable",
+                },
                 "confidence": 0.95,
             },
             SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2),
@@ -208,6 +214,8 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0]["classId"], "bank_booth")
         self.assertEqual(selected[0]["label"], "Service: Bank booth")
+        self.assertTrue(selected[0]["navigationNeeded"])
+        self.assertEqual(selected[0]["navigationStatus"], "reachable")
         self.assertFalse([marker for marker in result["markers"] if marker.get("classId") == "tree" and marker.get("markerType") == "selected_target"])
 
     def test_bank_policy_overlay_uses_alternate_service_backups(self):

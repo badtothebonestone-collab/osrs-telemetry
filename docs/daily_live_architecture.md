@@ -76,6 +76,8 @@ small in-memory analyzers now keep the responsibilities separated:
   raw best/nearest target interpretation generic.
 - `analyzers\navigation_analyzer.py` summarizes existing collision and
   reachability fields without doing new pathfinding.
+- `analyzers\navigation_intent_analyzer.py` describes read-only destination
+  and reachability context for service/process/resource transitions.
 - `analyzers\activity_analyzer.py` keeps current activity separate from recent
   task signals such as target depletion.
 - `analyzers\intent_overlay_analyzer.py` builds selected/backup intent markers,
@@ -163,6 +165,32 @@ Service/process context is policy-gated:
 
 These summaries are context, not commands. They do not include click/input/menu
 fields and they do not interact with the game.
+
+Navigation intent context is also read-only. When `woodcutting_bank` reaches a
+full-inventory `needs_service` phase and a bank-service candidate is already
+visible in the current context, the daemon reports that candidate as the
+destination context with distance, direct reachability, collision-window
+availability, and any missing navigation capability such as
+`navigation.full_pathfinding`. If no service candidate is visible, it reports
+that it is waiting for service target context. Firemaking and drop policies do
+not request service navigation; their next context remains local
+`process_inventory`. A selected resource target that is reachable does not need
+navigation context; an unreachable target is reported as unreachable, but no
+movement, route, waypoint, click, or interaction command is produced.
+
+Task transition QA verifies these policy flows with synthetic in-memory
+fixtures:
+
+```text
+python telemetry-viewer\diagnose_task_transition.py --policy woodcutting_bank --scenario service_visible
+python telemetry-viewer\diagnose_task_transition.py --policy woodcutting_firemake --scenario firemake_ready
+python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
+```
+
+It reports expected versus actual generic phase, active intent,
+service/process/navigation context, overlay selected-marker expectation, and
+`noActionEmitted`. Synthetic mode does not read sessions or require RuneLite;
+daemon observer mode reads `/status` only. JSON output is stdout-only.
 
 Service target matching is conservative and read-only. The service analyzer
 recognizes already-built candidates with class IDs or inferred types

@@ -143,6 +143,37 @@ class NavigationContext(AnalyzerContractFields):
 
 
 @dataclass
+class NavigationIntentContext(AnalyzerContractFields):
+    status: str = "PASS"
+    warnings: list[str] = field(default_factory=list)
+    missing_capabilities: list[str] = field(default_factory=list)
+    source_tick: int | None = None
+    retained_from_previous: bool = False
+    timing_millis: float | None = None
+    navigation_needed: bool = False
+    navigation_reason: str = "local_navigation_only"
+    target_kind: str = "none"
+    destination_target: dict[str, Any] | None = None
+    distance_tiles: int | float | None = None
+    direct_reachability: str | None = None
+    path_length_tiles: int | float | None = None
+    collision_window_available: bool | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.contract_payload(),
+            "navigationNeeded": self.navigation_needed,
+            "navigationReason": self.navigation_reason,
+            "targetKind": self.target_kind,
+            "destinationTarget": self.destination_target,
+            "distanceTiles": self.distance_tiles,
+            "directReachability": self.direct_reachability,
+            "pathLengthTiles": self.path_length_tiles,
+            "collisionWindowAvailable": self.collision_window_available,
+        }
+
+
+@dataclass
 class ActivityContext(AnalyzerContractFields):
     status: str = "PASS"
     warnings: list[str] = field(default_factory=list)
@@ -266,6 +297,7 @@ class LiveAnalysisResult:
     inventory: InventoryContext | None = None
     targets: TargetContext | None = None
     navigation: NavigationContext | None = None
+    navigation_intent: NavigationIntentContext | None = None
     activity: ActivityContext | None = None
     service: ServiceContext | None = None
     process_inventory: ProcessInventoryContext | None = None

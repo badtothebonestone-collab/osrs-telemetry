@@ -140,6 +140,19 @@ Service/process context is also policy-gated and read-only:
 
 These summaries do not include action, click, input, or menu fields.
 
+Navigation intent context is policy-gated read-only context too:
+
+- `woodcutting_bank` with a visible service candidate reports destination,
+  distance, reachability, collision-window availability, and missing navigation
+  capabilities if any.
+- `woodcutting_bank` with no visible service candidate reports that it is
+  waiting for service target context.
+- `woodcutting_firemake` and `woodcutting_drop` do not request service
+  navigation; they remain local `process_inventory` context.
+- A reachable selected resource target does not need navigation context. An
+  unreachable selected target is reported as unreachable, without generating a
+  route, waypoint, movement command, click, or interaction.
+
 Service matching is conservative. It accepts service class/type IDs
 `bank_service`, `banker`, `bank_booth`, `bank_chest`, `deposit_box`, and
 `deposit_chest`, or equivalent visible names such as `Bank booth`, `Banker`,
@@ -162,7 +175,22 @@ Policy diagnostic:
 ```text
 python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_bank --task woodcutting --inventory-full true --resource-count 28 --goal-count 5
 python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_firemake --task woodcutting --inventory-full true --resource-count 28 --goal-count 5 --json
+python telemetry-viewer\diagnose_navigation_intent.py --from-daemon --daemon-url http://127.0.0.1:8890 --task woodcutting --policy woodcutting_bank
 ```
+
+Task transition QA uses synthetic in-memory fixtures, so it does not require
+RuneLite, sessions, compact packets, or live files:
+
+```text
+python telemetry-viewer\diagnose_task_transition.py --policy woodcutting_bank --scenario service_visible
+python telemetry-viewer\diagnose_task_transition.py --policy woodcutting_firemake --scenario firemake_ready
+python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
+```
+
+The matrix covers not-full woodcutting target selection, full-inventory bank
+policy with service visible/missing, firemaking ready/missing tinderbox, drop
+context, combat with full inventory, and observe-only full inventory. JSON mode
+prints to stdout only.
 
 `task_policies.json` is static config. The live daemon must not write it or
 create per-tick policy, task-state, analyzer, JSONL, or rolling live output
