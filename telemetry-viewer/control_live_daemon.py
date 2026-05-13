@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+import mission_presets
 import task_policy
 
 
@@ -41,6 +42,8 @@ def request_json(url: str, *, payload: dict[str, Any] | None = None, timeout: fl
 
 def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     payload: dict[str, Any] = {}
+    if args.preset:
+        payload["missionPreset"] = args.preset
     if args.set_policy:
         payload["taskPolicy"] = args.set_policy
     if args.goal_count is not None:
@@ -55,6 +58,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
 def print_human(payload: dict[str, Any]) -> None:
     state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
     print(f"status: {payload.get('status', 'unknown')}")
+    print(f"mission preset: {state.get('activeMissionPreset', 'none')}")
     print(f"task policy: {state.get('taskPolicy', 'unknown')}")
     print(f"goal count: {state.get('goalCount')}")
     print(f"observe only: {state.get('observeOnly')}")
@@ -69,6 +73,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Read-only runtime control for live_core_daemon.")
     parser.add_argument("--daemon-url", default="http://127.0.0.1:8890")
     parser.add_argument("--get", action="store_true", help="Read current runtime control state.")
+    parser.add_argument("--preset", choices=mission_presets.preset_names(), help="Apply a named read-only mission preset.")
     parser.add_argument("--set-policy", choices=task_policy.policy_names())
     parser.add_argument("--goal-count", type=int)
     parser.add_argument("--observe-only", type=parse_bool)

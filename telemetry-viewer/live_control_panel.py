@@ -23,6 +23,7 @@ from tkinter import messagebox, ttk
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
 import live_config_doctor
+import mission_presets
 import task_policy
 
 
@@ -71,6 +72,7 @@ WORKFLOW_PRESETS = {
     "DEBUG_AUDIT": ("Debug Audit", "debug_audit"),
     "PLUGIN_SNAPSHOT_EXPERIMENTAL": ("Plugin Snapshot Experimental", "plugin_snapshot_experimental"),
 }
+MISSION_PRESETS = tuple(mission_presets.preset_names())
 SESSION_STALE_SECONDS = 15 * 60
 COMPACT_PACKET_STALE_SECONDS = 2 * 60
 REQUIRED_STREAM_PACKET_TYPES = {"live_baseline_packet.v1", "live_projection_packet.v1"}
@@ -230,31 +232,52 @@ def build_runtime_control_payload(
     return payload
 
 
+def build_mission_preset_payload(
+    mission_preset: str,
+    *,
+    goal_count: int | str | None = 5,
+    reset_brain_state: bool = False,
+    brain_enabled: bool = True,
+    overlay_mode: str = "intent",
+    overlay_backup_candidates: int | str = 2,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "missionPreset": str(mission_preset or "observe_only"),
+        "brainEnabled": bool(brain_enabled),
+        "overlayMode": str(overlay_mode or "intent"),
+        "overlayBackupCandidates": max(0, int(overlay_backup_candidates)),
+    }
+    if goal_count not in (None, ""):
+        payload["goalCount"] = max(0, int(goal_count))
+    if reset_brain_state:
+        payload["resetBrainState"] = True
+    return payload
+
+
 def build_reset_baseline_payload() -> dict[str, bool]:
     return {"resetBrainState": True}
 
 
-QUICK_POLICY_PAYLOADS = {
-    "bank": ("woodcutting_bank", False),
-    "woodcut_bank": ("woodcutting_bank", False),
-    "firemake": ("woodcutting_firemake", False),
-    "woodcut_firemake": ("woodcutting_firemake", False),
-    "drop": ("woodcutting_drop", False),
-    "woodcut_drop": ("woodcutting_drop", False),
-    "combat": ("combat_default", False),
-    "combat_default": ("combat_default", False),
-    "observe": ("observe_only", True),
-    "observe_only": ("observe_only", True),
+QUICK_MISSION_PRESETS = {
+    "bank": "woodcut_bank",
+    "woodcut_bank": "woodcut_bank",
+    "firemake": "woodcut_firemake",
+    "woodcut_firemake": "woodcut_firemake",
+    "drop": "woodcut_drop",
+    "woodcut_drop": "woodcut_drop",
+    "combat": "combat_default",
+    "combat_default": "combat_default",
+    "observe": "observe_only",
+    "observe_only": "observe_only",
 }
 
 
 def build_quick_policy_payload(name: str, *, goal_count: int | str | None = 5) -> dict[str, Any]:
     key = str(name or "").strip().lower().replace(" ", "_").replace("-", "_")
-    policy_name, observe_only = QUICK_POLICY_PAYLOADS.get(key, ("observe_only", True))
-    return build_runtime_control_payload(
-        task_policy=policy_name,
+    preset_name = QUICK_MISSION_PRESETS.get(key, "observe_only")
+    return build_mission_preset_payload(
+        preset_name,
         goal_count=goal_count,
-        observe_only=observe_only,
         brain_enabled=True,
         overlay_mode="intent",
         overlay_backup_candidates=2,
@@ -334,6 +357,7 @@ def build_mission_control_status(
             "dailyMode": "unknown",
             "inputSource": "unknown",
             "activeTask": "unknown",
+            "activeMissionPreset": "unknown",
             "taskPolicy": "unknown",
             "goalCount": "unknown",
             "genericPhase": "unknown",
@@ -381,6 +405,7 @@ def build_mission_control_status(
         "dailyMode": daily_mode,
         "inputSource": input_source,
         "activeTask": control_state.get("activeTask") or brain.get("task") or "unknown",
+        "activeMissionPreset": control_state.get("activeMissionPreset") or "unknown",
         "taskPolicy": policy_name,
         "goalCount": control_state.get("goalCount") if control_state.get("goalCount") is not None else "observe",
         "genericPhase": generic.get("phase") or status.get("brainPhase") or "unknown",
@@ -407,7 +432,7 @@ def format_mission_control_status(mission: dict[str, Any]) -> str:
         [
             f"Daemon: {mission.get('daemonHealth')} - {mission.get('daemonStatus')}",
             f"Daily mode: {mission.get('dailyMode')} | input: {mission.get('inputSource')} | no-file: {mission.get('noFileStatus')}",
-            f"Task: {mission.get('activeTask')} | policy: {mission.get('taskPolicy')} | goal: {mission.get('goalCount')}",
+            f"Task: {mission.get('activeTask')} | preset: {mission.get('activeMissionPreset')} | policy: {mission.get('taskPolicy')} | goal: {mission.get('goalCount')}",
             f"Phase: {mission.get('genericPhase')} | intent: {mission.get('activeIntent')} | progress: {mission.get('progress')}",
             f"Inventory full: {mission.get('inventoryFull')} | service: {mission.get('serviceNeeded')} | process: {mission.get('processNeeded')} | navigation: {mission.get('navigationNeeded')}",
             f"Overlay: {mission.get('overlayStatus')} | selected: {mission.get('selectedOverlayMarker')} | warnings: {mission.get('latestWarningCount')}",
@@ -975,6 +1000,7 @@ class LiveControlPanel:
         self.port_var = tk.StringVar(value="8890")
         self.interval_var = tk.StringVar(value="1")
         self.goal_count_var = tk.StringVar(value="5")
+        self.mission_preset_var = tk.StringVar(value="woodcut_bank")
         self.task_policy_var = tk.StringVar(value="woodcutting_bank")
         self.observe_only_var = tk.BooleanVar(value=False)
         self.require_compact_var = tk.BooleanVar(value=True)
@@ -1051,19 +1077,28 @@ class LiveControlPanel:
             daily_frame.columnconfigure(column, weight=1)
         runtime_frame = ttk.LabelFrame(daily_frame, text="Runtime Brain Control", padding=6)
         runtime_frame.grid(row=3, column=0, columnspan=4, sticky=tk.EW, pady=(8, 0))
-        ttk.Label(runtime_frame, text="Task policy").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
+        ttk.Label(runtime_frame, text="Mission preset").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
+        ttk.Combobox(
+            runtime_frame,
+            textvariable=self.mission_preset_var,
+            values=MISSION_PRESETS,
+            width=20,
+            state="readonly",
+        ).grid(row=0, column=1, sticky=tk.W, padx=(0, 8))
+        ttk.Button(runtime_frame, text="Apply Mission Preset", command=self.apply_mission_preset).grid(row=0, column=2, sticky=tk.EW, padx=3)
+        ttk.Label(runtime_frame, text="Goal").grid(row=0, column=3, sticky=tk.W, padx=(0, 4))
+        ttk.Entry(runtime_frame, textvariable=self.goal_count_var, width=8).grid(row=0, column=4, sticky=tk.W, padx=(0, 8))
+        ttk.Checkbutton(runtime_frame, text="Observe only", variable=self.observe_only_var).grid(row=0, column=5, sticky=tk.W, padx=(0, 8))
+        ttk.Button(runtime_frame, text="Reset Brain Baseline", command=self.reset_brain_baseline).grid(row=0, column=6, sticky=tk.EW, padx=3)
+        ttk.Label(runtime_frame, text="Task policy").grid(row=1, column=0, sticky=tk.W, padx=(0, 4), pady=(6, 0))
         ttk.Combobox(
             runtime_frame,
             textvariable=self.task_policy_var,
             values=tuple(task_policy.policy_names()),
             width=22,
             state="readonly",
-        ).grid(row=0, column=1, sticky=tk.W, padx=(0, 8))
-        ttk.Label(runtime_frame, text="Goal").grid(row=0, column=2, sticky=tk.W, padx=(0, 4))
-        ttk.Entry(runtime_frame, textvariable=self.goal_count_var, width=8).grid(row=0, column=3, sticky=tk.W, padx=(0, 8))
-        ttk.Checkbutton(runtime_frame, text="Observe only", variable=self.observe_only_var).grid(row=0, column=4, sticky=tk.W, padx=(0, 8))
-        ttk.Button(runtime_frame, text="Apply Runtime Control", command=self.apply_runtime_control).grid(row=0, column=5, sticky=tk.EW, padx=3)
-        ttk.Button(runtime_frame, text="Reset Brain Baseline", command=self.reset_brain_baseline).grid(row=0, column=6, sticky=tk.EW, padx=3)
+        ).grid(row=1, column=1, sticky=tk.W, padx=(0, 8), pady=(6, 0))
+        ttk.Button(runtime_frame, text="Apply Runtime Control", command=self.apply_runtime_control).grid(row=1, column=2, sticky=tk.EW, padx=3, pady=(6, 0))
         quick_buttons = [
             ("Woodcut Bank", lambda: self.apply_quick_policy("bank")),
             ("Woodcut Firemake", lambda: self.apply_quick_policy("firemake")),
@@ -1072,9 +1107,9 @@ class LiveControlPanel:
             ("Observe Only", lambda: self.apply_quick_policy("observe")),
         ]
         for index, (label, command) in enumerate(quick_buttons):
-            ttk.Button(runtime_frame, text=label, command=command).grid(row=1, column=index, sticky=tk.EW, padx=3, pady=(6, 0))
-        ttk.Label(runtime_frame, textvariable=self.runtime_control_status_var).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(4, 0))
-        ttk.Label(runtime_frame, textvariable=self.gauntlet_status_var).grid(row=2, column=4, columnspan=3, sticky=tk.W, pady=(4, 0))
+            ttk.Button(runtime_frame, text=label, command=command).grid(row=2, column=index, sticky=tk.EW, padx=3, pady=(6, 0))
+        ttk.Label(runtime_frame, textvariable=self.runtime_control_status_var).grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(4, 0))
+        ttk.Label(runtime_frame, textvariable=self.gauntlet_status_var).grid(row=3, column=4, columnspan=3, sticky=tk.W, pady=(4, 0))
         runtime_frame.columnconfigure(6, weight=1)
 
         advanced_frame = ttk.LabelFrame(outer, text="Advanced / Legacy / Experimental", padding=8)
@@ -1208,6 +1243,7 @@ class LiveControlPanel:
         self.port_var.set(str(options.port))
         self.interval_var.set(str(options.interval))
         self.goal_count_var.set("" if options.goal_count is None else str(options.goal_count))
+        self.mission_preset_var.set("woodcut_bank")
         self.task_policy_var.set(options.task_policy)
         self.observe_only_var.set(options.observe_only)
         self.require_compact_var.set(options.require_compact_packets)
@@ -1227,6 +1263,7 @@ class LiveControlPanel:
         self.port_var.set(str(options.port))
         self.interval_var.set(str(options.interval))
         self.goal_count_var.set("" if options.goal_count is None else str(options.goal_count))
+        self.mission_preset_var.set("woodcut_bank")
         self.task_policy_var.set(options.task_policy)
         self.observe_only_var.set(options.observe_only)
         self.require_compact_var.set(options.require_compact_packets)
@@ -1427,6 +1464,32 @@ class LiveControlPanel:
             return
         threading.Thread(target=self._runtime_control_worker, args=(payload,), daemon=True).start()
 
+    def build_mission_preset_payload_from_ui(self, *, reset_brain_state: bool = False) -> dict[str, Any]:
+        return build_mission_preset_payload(
+            self.mission_preset_var.get() or "observe_only",
+            goal_count=self.goal_count_var.get(),
+            reset_brain_state=reset_brain_state,
+            brain_enabled=True,
+            overlay_mode="intent",
+            overlay_backup_candidates=2,
+        )
+
+    def apply_mission_preset(self) -> None:
+        try:
+            payload = self.build_mission_preset_payload_from_ui(reset_brain_state=False)
+        except ValueError as exc:
+            self.runtime_control_status_var.set(f"runtime control: invalid input ({exc})")
+            return
+        preset_name = payload.get("missionPreset")
+        try:
+            fields = mission_presets.runtime_control_fields_for_preset(str(preset_name), goal_count=payload.get("goalCount"))
+        except (KeyError, TypeError, ValueError):
+            fields = {}
+        if fields:
+            self.task_policy_var.set(str(fields.get("taskPolicy") or self.task_policy_var.get()))
+            self.observe_only_var.set(bool(fields.get("observeOnly")))
+        threading.Thread(target=self._runtime_control_worker, args=(payload,), daemon=True).start()
+
     def reset_brain_baseline(self) -> None:
         threading.Thread(target=self._runtime_control_worker, args=(build_reset_baseline_payload(),), daemon=True).start()
 
@@ -1436,10 +1499,15 @@ class LiveControlPanel:
         except ValueError as exc:
             self.runtime_control_status_var.set(f"runtime control: invalid input ({exc})")
             return
-        policy_name = payload.get("taskPolicy")
-        if policy_name:
-            self.task_policy_var.set(str(policy_name))
-        self.observe_only_var.set(bool(payload.get("observeOnly")))
+        preset_name = str(payload.get("missionPreset") or "observe_only")
+        self.mission_preset_var.set(preset_name)
+        try:
+            fields = mission_presets.runtime_control_fields_for_preset(preset_name, goal_count=payload.get("goalCount"))
+        except (KeyError, TypeError, ValueError):
+            fields = {}
+        if fields:
+            self.task_policy_var.set(str(fields.get("taskPolicy") or self.task_policy_var.get()))
+            self.observe_only_var.set(bool(fields.get("observeOnly")))
         threading.Thread(target=self._runtime_control_worker, args=(payload,), daemon=True).start()
 
     def _runtime_control_worker(self, payload: dict[str, Any]) -> None:
@@ -1451,10 +1519,11 @@ class LiveControlPanel:
             return
         state = response.get("state") if isinstance(response.get("state"), dict) else {}
         status = response.get("status", "unknown")
+        preset = state.get("activeMissionPreset") or "none"
         policy = state.get("taskPolicy", "unknown")
         goal = state.get("goalCount")
         observe = state.get("observeOnly")
-        self.log_queue.put(("__runtime_control__", f"runtime control: {status}; policy={policy} goal={goal} observe={observe}"))
+        self.log_queue.put(("__runtime_control__", f"runtime control: {status}; preset={preset} policy={policy} goal={goal} observe={observe}"))
 
     def inspect_packets(self) -> None:
         self.start_process("Inspect Compact Packets", build_inspect_packets_command(), "Setup/Packet tools")
@@ -1736,7 +1805,12 @@ class LiveControlPanel:
             self.log_queue.put(("__context_status__", f"context: {payload.get('status', 'unknown')} tick={payload.get('latestTick', 'unknown')}"))
             state = control.get("state") if isinstance(control.get("state"), dict) else {}
             if state:
-                self.log_queue.put(("__runtime_control__", f"runtime control: policy={state.get('taskPolicy')} goal={state.get('goalCount')} observe={state.get('observeOnly')}"))
+                self.log_queue.put(
+                    (
+                        "__runtime_control__",
+                        f"runtime control: preset={state.get('activeMissionPreset') or 'none'} policy={state.get('taskPolicy')} goal={state.get('goalCount')} observe={state.get('observeOnly')}",
+                    )
+                )
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             self.log_queue.put(("__context_status__", f"context: unavailable ({exc})"))
             mission = build_mission_control_status(health=None, status=None, control=None, error=str(exc))

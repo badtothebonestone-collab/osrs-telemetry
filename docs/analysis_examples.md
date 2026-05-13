@@ -46,23 +46,35 @@ settings without restarting the daemon:
 
 ```text
 python telemetry-viewer\control_live_daemon.py --get
+python telemetry-viewer\control_live_daemon.py --preset woodcut_bank --goal-count 5 --reset-brain-state
+python telemetry-viewer\control_live_daemon.py --preset woodcut_firemake
+python telemetry-viewer\control_live_daemon.py --preset observe_only
 python telemetry-viewer\control_live_daemon.py --set-policy woodcutting_firemake --goal-count 5 --reset-brain-state
 python telemetry-viewer\control_live_daemon.py --set-policy woodcutting_bank
 ```
 
 The Live Control Panel exposes the same local `/control` endpoint with a task
-policy dropdown, goal-count field, observe-only toggle, runtime apply button,
-and reset-baseline button. These controls mutate only daemon memory. They do
-not click, walk, bank, burn, drop, use items, invoke menus, persist config, or
-write live JSON/NDJSON files. JSON mode prints to stdout only.
+mission preset dropdown, task policy dropdown, goal-count field, observe-only
+toggle, runtime apply button, and reset-baseline button. Mission presets are
+sidecar brain/context presets only:
+
+- `woodcut_bank`
+- `woodcut_firemake`
+- `woodcut_drop`
+- `observe_only`
+- `combat_default`
+
+These controls mutate only daemon memory. They do not click, walk, bank, burn,
+drop, use items, invoke menus, persist config, or write live JSON/NDJSON files.
+JSON mode prints to stdout only.
 
 The panel's Mission Control section also polls `/health`, `/status`, and
 `/control` so the daily state is visible without opening separate terminals. It
-shows daemon health, mode/source, current policy, generic phase, active intent,
-progress, inventory-full state, service/process/navigation needs, overlay
-selection, warning count, and `noActionEmitted`. Quick policy buttons such as
-Woodcut Firemake or Observe Only only post safe `/control` payloads; they do
-not operate the game.
+shows daemon health, mode/source, current mission preset, current policy,
+generic phase, active intent, progress, inventory-full state,
+service/process/navigation needs, overlay selection, warning count, and
+`noActionEmitted`. Quick policy buttons such as Woodcut Firemake or Observe
+Only post `missionPreset` payloads; they do not operate the game.
 
 By default, the daemon does not write these rolling legacy live files:
 

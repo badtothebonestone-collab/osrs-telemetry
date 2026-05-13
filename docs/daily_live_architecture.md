@@ -73,14 +73,16 @@ The daily daemon exposes local-only read-only control endpoints:
 - `POST /control`
 
 These endpoints change only sidecar brain/context configuration in memory. They
-can switch `taskPolicy`, adjust `goalCount`, toggle `observeOnly`, reset the
-resource-progress baseline, and tune overlay mode/backups without restarting
-the daemon. They do not persist config, write live JSON/NDJSON, click, walk,
-bank, burn, drop, use items, invoke menus, or mutate game/client state.
+can apply named mission presets, switch `taskPolicy`, adjust `goalCount`,
+toggle `observeOnly`, reset the resource-progress baseline, and tune overlay
+mode/backups without restarting the daemon. They do not persist config, write
+live JSON/NDJSON, click, walk, bank, burn, drop, use items, invoke menus, or
+mutate game/client state.
 
 Action-like control fields are rejected. The accepted fields are:
 
 ```text
+missionPreset
 taskPolicy
 goalCount
 observeOnly
@@ -95,6 +97,9 @@ CLI examples:
 
 ```text
 python telemetry-viewer\control_live_daemon.py --get
+python telemetry-viewer\control_live_daemon.py --preset woodcut_bank --goal-count 5 --reset-brain-state
+python telemetry-viewer\control_live_daemon.py --preset woodcut_firemake
+python telemetry-viewer\control_live_daemon.py --preset observe_only
 python telemetry-viewer\control_live_daemon.py --set-policy woodcutting_firemake --goal-count 5 --reset-brain-state
 python telemetry-viewer\control_live_daemon.py --set-policy woodcutting_bank
 ```
@@ -110,14 +115,24 @@ It polls the existing local daemon endpoints:
 - `GET /status`
 - `GET /control`
 
-The panel shows daemon health, daily mode, input source, active task policy,
-goal count, generic phase, active intent, progress, inventory-full state,
-service/process/navigation needs, selected overlay marker, warning count,
-no-file status, overlay status, and `noActionEmitted` safety status.
+The panel shows daemon health, daily mode, input source, active mission preset,
+active task policy, goal count, generic phase, active intent, progress,
+inventory-full state, service/process/navigation needs, selected overlay
+marker, warning count, no-file status, overlay status, and `noActionEmitted`
+safety status.
 
-Mission Control can post safe runtime-control updates for task policy, goal
-count, observe-only mode, overlay mode/backups, and one-shot baseline reset.
-The quick policy buttons only switch read-only daemon policy:
+Mission Control can post safe runtime-control updates for named mission
+presets, task policy, goal count, observe-only mode, overlay mode/backups, and
+one-shot baseline reset. The mission presets are sidecar brain/context presets
+only:
+
+- `woodcut_bank`
+- `woodcut_firemake`
+- `woodcut_drop`
+- `observe_only`
+- `combat_default`
+
+The quick buttons route through those mission presets:
 
 - Woodcut Bank
 - Woodcut Firemake

@@ -47,6 +47,24 @@ class RuntimeControlModelTest(unittest.TestCase):
         self.assertEqual(state.overlayBackupCandidates, 1)
         self.assertTrue(result.noActionEmitted)
 
+    def test_mission_preset_applies_safe_runtime_fields(self):
+        state = runtime_control.RuntimeControlState(activeTask="woodcutting", taskPolicy="woodcutting_bank", goalCount=5)
+
+        result = runtime_control.apply_control_command(
+            state,
+            {"missionPreset": "woodcut_firemake", "goalCount": 8},
+        )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertIn("missionPreset", result.acceptedFields)
+        self.assertIn("taskPolicy", result.acceptedFields)
+        self.assertEqual(state.activeMissionPreset, "woodcut_firemake")
+        self.assertEqual(state.activeTask, "woodcutting")
+        self.assertEqual(state.taskPolicy, "woodcutting_firemake")
+        self.assertEqual(state.goalCount, 8)
+        self.assertFalse(state.observeOnly)
+        self.assertTrue(result.noActionEmitted)
+
     def test_rejects_unknown_policy_and_action_like_fields(self):
         state = runtime_control.RuntimeControlState(activeTask="woodcutting", taskPolicy="woodcutting_bank", goalCount=5)
 
@@ -57,6 +75,15 @@ class RuntimeControlModelTest(unittest.TestCase):
         self.assertIn("taskPolicy", unknown.rejectedFields)
         self.assertEqual(unsafe.status, "FAIL")
         self.assertIn("clickTarget", unsafe.rejectedFields)
+        self.assertEqual(state.taskPolicy, "woodcutting_bank")
+
+    def test_rejects_unknown_mission_preset(self):
+        state = runtime_control.RuntimeControlState(activeTask="woodcutting", taskPolicy="woodcutting_bank", goalCount=5)
+
+        result = runtime_control.apply_control_command(state, {"missionPreset": "not_a_preset"})
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("missionPreset", result.rejectedFields)
         self.assertEqual(state.taskPolicy, "woodcutting_bank")
 
     def test_reset_request_is_marked_without_persistence(self):
@@ -91,6 +118,23 @@ class RuntimeControlDaemonEndpointTest(unittest.TestCase):
         self.assertEqual(changed["status"], "PASS")
         self.assertEqual(changed["state"]["taskPolicy"], "woodcutting_firemake")
         self.assertEqual(after["state"]["goalCount"], 9)
+
+    def test_post_control_mission_preset_updates_daemon_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            args = make_args(session, "--input-source", "plugin-snapshot", "--human-dashboard", "--goal-count", "5")
+            core = daemon.LiveCoreDaemon(session, args)
+            core.start_context_server()
+            try:
+                base = f"http://127.0.0.1:{args.context_port}"
+                changed = post_json(f"{base}/control", {"missionPreset": "woodcut_drop", "goalCount": 12})
+            finally:
+                core.stop_context_server()
+
+        self.assertEqual(changed["status"], "PASS")
+        self.assertEqual(changed["state"]["activeMissionPreset"], "woodcut_drop")
+        self.assertEqual(changed["state"]["taskPolicy"], "woodcutting_drop")
+        self.assertEqual(changed["state"]["goalCount"], 12)
 
     def test_action_like_control_payload_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -144,8 +188,8 @@ class RuntimeControlDaemonEndpointTest(unittest.TestCase):
                         str(SCRIPT),
                         "--daemon-url",
                         f"http://127.0.0.1:{args.context_port}",
-                        "--set-policy",
-                        "woodcutting_firemake",
+                        "--preset",
+                        "woodcut_firemake",
                         "--goal-count",
                         "5",
                         "--reset-brain-state",
@@ -163,6 +207,7 @@ class RuntimeControlDaemonEndpointTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["state"]["activeMissionPreset"], "woodcut_firemake")
         self.assertEqual(payload["state"]["taskPolicy"], "woodcutting_firemake")
         self.assertEqual(before, after)
 

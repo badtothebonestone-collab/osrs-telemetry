@@ -726,6 +726,8 @@ class LiveCoreDaemon:
         }
 
     def apply_runtime_control_payload(self, payload: dict) -> tuple[dict, int]:
+        previous_task = self.runtime_control.activeTask
+        previous_preset = self.runtime_control.activeMissionPreset
         previous_policy = self.runtime_control.taskPolicy
         previous_observe_only = self.runtime_control.observeOnly
         result = runtime_control.apply_control_command(self.runtime_control, payload)
@@ -738,6 +740,8 @@ class LiveCoreDaemon:
         self.args.brain_task = self.effective_brain_task()
         if (
             result.resetBrainState
+            or self.runtime_control.activeTask != previous_task
+            or self.runtime_control.activeMissionPreset != previous_preset
             or self.runtime_control.taskPolicy != previous_policy
             or self.runtime_control.observeOnly != previous_observe_only
         ):

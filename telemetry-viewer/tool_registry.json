@@ -37,10 +37,10 @@
     {
       "name": "control_live_daemon.py",
       "category": "daily",
-      "purpose": "Local read-only runtime control CLI for live_core_daemon task policy, goal count, observe-only mode, and baseline reset.",
+      "purpose": "Local read-only runtime control CLI for live_core_daemon mission presets, task policy, goal count, observe-only mode, and baseline reset.",
       "dailyRequired": false,
       "normalCommand": "python telemetry-viewer\\control_live_daemon.py --get",
-      "alternateCommand": "python telemetry-viewer\\control_live_daemon.py --set-policy woodcutting_firemake --goal-count 5 --reset-brain-state",
+      "alternateCommand": "python telemetry-viewer\\control_live_daemon.py --preset woodcut_firemake --goal-count 5 --reset-brain-state",
       "input": "live_core_daemon localhost /control endpoint",
       "output": "stdout status or JSON; no file writes",
       "status": "daily",
@@ -89,6 +89,17 @@
       "normalCommand": "imported by live_core_daemon.py and control_live_daemon.py",
       "input": "safe control payload fields",
       "output": "RuntimeControlResult with accepted/rejected fields and noActionEmitted=true",
+      "status": "daily",
+      "safeToHideInUi": true
+    },
+    {
+      "name": "mission_presets.py",
+      "category": "daily",
+      "purpose": "Static named mission presets for safe in-memory sidecar brain/context runtime control; no game actions.",
+      "dailyRequired": true,
+      "normalCommand": "imported by runtime_control.py, control_live_daemon.py, and live_control_panel.py",
+      "input": "preset name such as woodcut_bank, woodcut_firemake, woodcut_drop, observe_only, or combat_default",
+      "output": "safe runtime control fields with noActionEmitted=true",
       "status": "daily",
       "safeToHideInUi": true
     },

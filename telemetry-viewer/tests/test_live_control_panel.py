@@ -121,6 +121,18 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         for forbidden in ("click", "mouse", "keyboard", "menu", "invoke", "execute", "walk", "interact"):
             self.assertFalse(any(forbidden in key.lower() for key in payload))
 
+    def test_mission_preset_payload_is_safe(self):
+        payload = panel.build_mission_preset_payload("woodcut_firemake", goal_count="5", reset_brain_state=True)
+
+        self.assertEqual(payload["missionPreset"], "woodcut_firemake")
+        self.assertEqual(payload["goalCount"], 5)
+        self.assertTrue(payload["resetBrainState"])
+        self.assertTrue(payload["brainEnabled"])
+        self.assertEqual(payload["overlayMode"], "intent")
+        self.assertEqual(payload["overlayBackupCandidates"], 2)
+        for forbidden in ("click", "mouse", "keyboard", "menu", "invoke", "execute", "walk", "interact"):
+            self.assertFalse(any(forbidden in key.lower() for key in payload))
+
     def test_runtime_control_endpoint_url_uses_daemon_port(self):
         self.assertEqual(panel.runtime_control_endpoint_url(8890), "http://127.0.0.1:8890/control")
 
@@ -144,7 +156,14 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                 },
                 "stabilizedIntentTargetLabel": "none",
             },
-            control={"state": {"activeTask": "woodcutting", "taskPolicy": "woodcutting_firemake", "goalCount": 5}},
+            control={
+                "state": {
+                    "activeTask": "woodcutting",
+                    "taskPolicy": "woodcutting_firemake",
+                    "activeMissionPreset": "woodcut_firemake",
+                    "goalCount": 5,
+                }
+            },
         )
 
         self.assertEqual(mission["daemonHealth"], "PASS")
@@ -152,6 +171,7 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertEqual(mission["inputSource"], "plugin-snapshot")
         self.assertEqual(mission["activeTask"], "woodcutting")
         self.assertEqual(mission["taskPolicy"], "woodcutting_firemake")
+        self.assertEqual(mission["activeMissionPreset"], "woodcut_firemake")
         self.assertEqual(mission["genericPhase"], "inventory_full")
         self.assertEqual(mission["activeIntent"], "process_inventory")
         self.assertEqual(mission["progress"], "3/5")
@@ -169,17 +189,17 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
 
     def test_quick_policy_payloads_are_safe(self):
         cases = {
-            "bank": ("woodcutting_bank", False),
-            "firemake": ("woodcutting_firemake", False),
-            "drop": ("woodcutting_drop", False),
-            "combat": ("combat_default", False),
-            "observe": ("observe_only", True),
+            "bank": "woodcut_bank",
+            "firemake": "woodcut_firemake",
+            "drop": "woodcut_drop",
+            "combat": "combat_default",
+            "observe": "observe_only",
         }
-        for quick_name, (policy_name, observe_only) in cases.items():
+        for quick_name, preset_name in cases.items():
             with self.subTest(quick_name=quick_name):
                 payload = panel.build_quick_policy_payload(quick_name, goal_count="5")
-                self.assertEqual(payload["taskPolicy"], policy_name)
-                self.assertEqual(payload["observeOnly"], observe_only)
+                self.assertEqual(payload["missionPreset"], preset_name)
+                self.assertEqual(payload["goalCount"], 5)
                 self.assertNotIn("resetBrainState", payload)
                 for forbidden in ("click", "mouse", "keyboard", "menu", "invoke", "execute", "walk", "interact"):
                     self.assertFalse(any(forbidden in key.lower() for key in payload))

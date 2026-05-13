@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import mission_presets
 import task_policy
 
 
@@ -11,6 +12,7 @@ CONTROL_SCHEMA = "runtime_control.v1"
 CONTROL_RESULT_SCHEMA = "runtime_control_result.v1"
 
 ALLOWED_FIELDS = {
+    "missionPreset",
     "taskPolicy",
     "goalCount",
     "observeOnly",
@@ -47,6 +49,7 @@ def utc_now() -> str:
 @dataclass
 class RuntimeControlState:
     activeTask: str = "woodcutting"
+    activeMissionPreset: str | None = None
     taskPolicy: str = "woodcutting_bank"
     goalCount: int | None = 5
     observeOnly: bool = False
@@ -62,6 +65,7 @@ class RuntimeControlState:
         return {
             "schema": CONTROL_SCHEMA,
             "activeTask": self.activeTask,
+            "activeMissionPreset": self.activeMissionPreset,
             "taskPolicy": self.taskPolicy,
             "goalCount": self.goalCount,
             "observeOnly": self.observeOnly,
@@ -157,7 +161,20 @@ def validate_control_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
     rejected: list[str] = []
     warnings: list[str] = []
 
+    if "missionPreset" in payload:
+        preset_name = str(payload.get("missionPreset") or "").strip()
+        try:
+            preset_fields = mission_presets.runtime_control_fields_for_preset(preset_name)
+        except (KeyError, TypeError, ValueError):
+            rejected.append("missionPreset")
+        else:
+            accepted["missionPreset"] = preset_name
+            accepted["activeMissionPreset"] = preset_name
+            accepted.update(preset_fields)
+
     for field_name, value in payload.items():
+        if field_name == "missionPreset":
+            continue
         if field_name not in ALLOWED_FIELDS:
             rejected.append(str(field_name))
             continue
@@ -217,10 +234,16 @@ def apply_control_command(state: RuntimeControlState, payload: dict[str, Any] | 
             state=state,
         )
 
+    direct_control_fields = {"taskPolicy", "observeOnly", "brainEnabled", "overlayEnabled", "overlayMode", "overlayBackupCandidates"}
+    if "missionPreset" not in accepted and any(field_name in accepted for field_name in direct_control_fields):
+        state.activeMissionPreset = None
+
     for field_name, value in accepted.items():
         if field_name == "resetBrainState":
             if value:
                 state.resetBaselineRequested = True
+        elif field_name == "missionPreset":
+            continue
         else:
             setattr(state, field_name, value)
 

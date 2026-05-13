@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 COMMANDS = [
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\capabilities.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\mission_presets.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\runtime_control.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\task_policy.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\task_state.py"],
@@ -39,6 +40,7 @@ COMMANDS = [
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\run_stabilization_suite.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_resource_progress.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_task_policy.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_mission_presets.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_runtime_control.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_diagnose_task_policy.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_task_transitions.py"],
