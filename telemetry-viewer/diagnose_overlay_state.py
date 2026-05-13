@@ -109,6 +109,36 @@ def target_key(record: dict | None) -> tuple | None:
     )
 
 
+def target_type_for_record(record: dict) -> str:
+    return str(record.get("targetType") or ("sceneObject" if record.get("worldX") is not None and record.get("worldY") is not None else "tile"))
+
+
+def target_identity_keys(record: dict | None) -> set[tuple]:
+    if not isinstance(record, dict):
+        return set()
+    keys: set[tuple] = set()
+    object_key = record.get("objectKey")
+    if object_key:
+        keys.add(("objectKey", str(object_key)))
+    target_hash = record.get("hash")
+    if target_hash is not None:
+        keys.add(("hash", str(target_hash)))
+    item_id = candidate_id(record)
+    target_type = target_type_for_record(record)
+    if item_id is not None and record.get("worldX") is not None and record.get("worldY") is not None and record.get("plane") is not None:
+        keys.add(("world", str(item_id), str(record.get("worldX")), str(record.get("worldY")), str(record.get("plane")), target_type, str(record.get("kind") or record.get("layer") or "")))
+        keys.add(("world", str(item_id), str(record.get("worldX")), str(record.get("worldY")), str(record.get("plane")), target_type))
+    if item_id is not None and record.get("sceneX") is not None and record.get("sceneY") is not None and record.get("plane") is not None:
+        keys.add(("scene", str(item_id), str(record.get("sceneX")), str(record.get("sceneY")), str(record.get("plane")), target_type))
+    return keys
+
+
+def identity_overlap(left: dict | None, right: dict | None) -> bool:
+    left_keys = target_identity_keys(left)
+    right_keys = target_identity_keys(right)
+    return bool(left_keys and right_keys and left_keys.intersection(right_keys))
+
+
 def tree_like(record: dict) -> bool:
     class_id = str(record.get("classId") or "").lower()
     category = str(record.get("category") or record.get("targetCategory") or "").lower()
@@ -247,6 +277,74 @@ def geometry_counts(records: list[dict]) -> dict:
     }
 
 
+def intent_markers(overlay: dict) -> list[dict]:
+    intent = overlay.get("intentState") if isinstance(overlay.get("intentState"), dict) else {}
+    markers = intent.get("markers") if isinstance(intent.get("markers"), list) else overlay.get("markers")
+    return [marker for marker in markers or [] if isinstance(marker, dict)]
+
+
+def intent_flicker_detected(audit: list[dict]) -> bool:
+    rows = [entry for entry in audit if isinstance(entry, dict)]
+    for index in range(2, len(rows)):
+        before = rows[index - 2]
+        middle = rows[index - 1]
+        after = rows[index]
+        before_key = before.get("selectedTargetKey")
+        middle_key = middle.get("selectedTargetKey")
+        after_key = after.get("selectedTargetKey")
+        before_tick = before.get("tick")
+        after_tick = after.get("tick")
+        if not before_key or not middle_key or not after_key:
+            continue
+        if before_key == after_key and middle_key != before_key:
+            if isinstance(before_tick, (int, float)) and isinstance(after_tick, (int, float)):
+                if after_tick - before_tick <= 2:
+                    return True
+            else:
+                return True
+    return False
+
+
+def intent_summary(markers: list[dict], overlay: dict) -> dict:
+    intent = overlay.get("intentState") if isinstance(overlay.get("intentState"), dict) else {}
+    selected = [marker for marker in markers if marker.get("markerType") == "selected_target"]
+    backups = [marker for marker in markers if marker.get("markerType") == "backup_candidate"]
+    first = selected[0] if selected else {}
+    summary = overlay.get("summary") if isinstance(overlay.get("summary"), dict) else {}
+    audit_tail = intent.get("switchAuditTail") if isinstance(intent.get("switchAuditTail"), list) else []
+    duplicate_backups = [marker for marker in backups if identity_overlap(first, marker)]
+    selected_geometry_source = geometry_source_for(first)
+    duplicate_geometry_sources = [geometry_source_for(marker) for marker in duplicate_backups]
+    duplicate_has_better_geometry = selected_geometry_source in {"none", "aimPoint"} and any(source in {"clickableHull", "clickboxPolygon", "convexHull", "convexHullPolygon", "canvasTilePolygon", "bounds"} for source in duplicate_geometry_sources)
+    return {
+        "selectedTargetCount": len(selected),
+        "backupCount": len(backups),
+        "selectedMarkerKey": first.get("targetKey") or first.get("markerId") or first.get("objectKey"),
+        "selectedObjectKey": first.get("objectKey"),
+        "selectedId": first_value(first.get("rawId"), first.get("id")),
+        "selectedWorld": [first.get("worldX"), first.get("worldY"), first.get("plane")] if first else None,
+        "selectedScene": [first.get("sceneX"), first.get("sceneY")] if first else None,
+        "selectedGeometrySource": selected_geometry_source,
+        "selectedHasClickableHull": selected_geometry_source in {"clickableHull", "clickboxPolygon"},
+        "selectedProjectionMode": first.get("projectionMode"),
+        "selectedClickboxAvailable": selected_geometry_source in {"clickableHull", "clickboxPolygon"},
+        "selectedClickboxResolved": first.get("projectionMode") == "live_object_clickbox",
+        "selectedFallbackReason": first.get("projectionFallbackReason"),
+        "duplicateSelectedInBackups": bool(duplicate_backups),
+        "selectedBackupDuplicateIdentities": [sorted([":".join(str(part) for part in key) for key in target_identity_keys(marker)]) for marker in duplicate_backups],
+        "selectedGeometryMissingButDuplicateHasGeometry": bool(duplicate_has_better_geometry),
+        "backupKeys": [marker.get("targetKey") or marker.get("markerId") or marker.get("objectKey") for marker in backups],
+        "rawBestTarget": intent.get("rawBestTargetKey") or summary.get("rawBestTarget"),
+        "stabilizedTarget": intent.get("selectedTargetKey") or summary.get("stabilizedIntentTarget"),
+        "selectedStableForTicks": intent.get("stableForTicks") if intent.get("stableForTicks") is not None else summary.get("intentStableForTicks"),
+        "selectedMissingForTicks": intent.get("missingForTicks") if intent.get("missingForTicks") is not None else summary.get("intentCurrentMissingTicks"),
+        "selectedRetainedDueToGrace": intent.get("retainedDueToGrace") if intent.get("retainedDueToGrace") is not None else summary.get("intentRetainedDueToGrace"),
+        "switchReason": intent.get("switchReason") or summary.get("intentSwitchReason"),
+        "switchAuditTail": audit_tail[-5:],
+        "intentFlickerDetected": intent_flicker_detected(audit_tail),
+    }
+
+
 def compact_geometry_config(overlay: dict, status: dict) -> dict:
     summary = overlay.get("summary") if isinstance(overlay.get("summary"), dict) else {}
     return {
@@ -293,12 +391,14 @@ def build_report(session: Path, args) -> dict:
     warnings: list[str] = []
     paths = live_paths(session)
     overlay = read_json(paths["overlay"], warnings, "overlay_debug_state")
-    candidates = read_jsonl(paths["candidates"], warnings, "live_candidates")
-    context = read_json(paths["context"], warnings, "live_context_index")
-    navigation = read_json(paths["navigation"], warnings, "live_navigation_summary")
-    status = read_json(paths["status"], warnings, "live_status")
+    intent_mode = bool(getattr(args, "intent", False))
+    candidates = [] if intent_mode else read_jsonl(paths["candidates"], warnings, "live_candidates")
+    context = {} if intent_mode else read_json(paths["context"], warnings, "live_context_index")
+    navigation = {} if intent_mode else read_json(paths["navigation"], warnings, "live_navigation_summary")
+    status = {} if intent_mode else read_json(paths["status"], warnings, "live_status")
 
-    overlay_targets = overlay.get("targets") if isinstance(overlay.get("targets"), list) else []
+    overlay_targets = intent_markers(overlay) if intent_mode else (overlay.get("targets") if isinstance(overlay.get("targets"), list) else [])
+    intent_diag = intent_summary(intent_markers(overlay), overlay)
     overlay_geometry = geometry_counts([target for target in overlay_targets if isinstance(target, dict)])
     geometry_config = compact_geometry_config(overlay, status)
     overlay_by_key = {target_key(target): target for target in overlay_targets if target_key(target) is not None}
@@ -315,7 +415,40 @@ def build_report(session: Path, args) -> dict:
     mismatch_count = 0
     blocked_count = 0
     missing_overlay_count = 0
-    for candidate in filtered_candidates[: max(1, args.top)]:
+    if intent_mode:
+        for index, marker in enumerate(overlay_targets[: max(1, args.top)], start=1):
+            rows.append(
+                {
+                    "rank": index,
+                    "name": marker.get("name") or marker.get("label"),
+                    "id": candidate_id(marker),
+                    "classId": marker.get("classId"),
+                    "worldX": marker.get("worldX"),
+                    "worldY": marker.get("worldY"),
+                    "plane": marker.get("plane"),
+                    "sceneX": marker.get("sceneX"),
+                    "sceneY": marker.get("sceneY"),
+                    "distanceTiles": marker.get("distanceTiles"),
+                    "candidateDirectReachability": None,
+                    "overlayDirectReachability": reachability_value(marker),
+                    "targetLiveState": marker.get("targetLiveState") or marker.get("liveness"),
+                    "overlayLabel": label_for(marker),
+                    "overlayColor": color_for(marker),
+                    "overlayGeometrySource": geometry_source_for(marker),
+                    "clickableHullAvailable": geometry_source_for(marker) in {"clickableHull", "clickboxPolygon"},
+                    "clickableHullMissingReason": marker.get("clickableHullMissingReason"),
+                    "pathLengthTiles": None,
+                    "interactionRadiusTiles": None,
+                    "targetInCollisionWindow": None,
+                    "missingNavigationFields": [],
+                    "overlayPresent": True,
+                    "markerType": marker.get("markerType"),
+                    "selected": marker.get("selected"),
+                    "projectionMode": marker.get("projectionMode"),
+                    "projectionFallbackReason": marker.get("projectionFallbackReason"),
+                }
+            )
+    for candidate in ([] if intent_mode else filtered_candidates[: max(1, args.top)]):
         overlay_target = overlay_by_key.get(target_key(candidate))
         candidate_nav = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
         overlay_direct = reachability_value(overlay_target or {})
@@ -374,7 +507,21 @@ def build_report(session: Path, args) -> dict:
         else:
             conclusions.append("hull geometry was requested, but overlay_debug_state has no clickbox polygons for inspected targets")
     if not filtered_candidates:
-        conclusions.append("classification/profile mismatch or no matching candidates for the requested filters")
+        if intent_mode:
+            if intent_diag.get("selectedTargetCount") == 1:
+                conclusions.append("intent overlay has one selected target marker")
+            elif intent_diag.get("selectedTargetCount", 0) > 1:
+                conclusions.append("intent overlay has multiple selected target markers")
+            else:
+                conclusions.append("intent overlay has no selected target marker")
+        else:
+            conclusions.append("classification/profile mismatch or no matching candidates for the requested filters")
+    if intent_mode and intent_diag.get("duplicateSelectedInBackups"):
+        conclusions.append("intent overlay duplicate: selected target also appears as backup")
+    if intent_mode and intent_diag.get("selectedGeometryMissingButDuplicateHasGeometry"):
+        conclusions.append("selected marker missing geometry that exists on duplicate backup; marker merge failed")
+    if intent_mode and intent_diag.get("intentFlickerDetected"):
+        conclusions.append("intent flicker detected: selected target changed briefly and reverted")
     if not conclusions:
         conclusions.append("overlay and live candidate reachability are consistent for the inspected rows")
     if overlay_geometry.get("clickableHullAvailableCount", 0) > 0:
@@ -393,6 +540,7 @@ def build_report(session: Path, args) -> dict:
         "candidateCount": len(candidates),
         "filteredCandidateCount": len(filtered_candidates),
         "overlayGeometrySummary": overlay_geometry,
+        "intentSummary": intent_diag,
         "compactGeometryConfig": geometry_config,
         "navigationSummary": {
             "status": navigation.get("status"),
@@ -439,6 +587,40 @@ def print_report(report: dict) -> None:
         print(f"geometry sources: {source_text}")
     if geom.get("firstMissingHullReason"):
         print(f"first missing hull reason: {geom.get('firstMissingHullReason')}")
+    intent = report.get("intentSummary") or {}
+    if intent:
+        print(
+            "intent: "
+            f"selected={intent.get('selectedTargetCount')} backups={intent.get('backupCount')} "
+            f"key={intent.get('selectedMarkerKey')} objectKey={intent.get('selectedObjectKey')} "
+            f"geometry={intent.get('selectedGeometrySource')} "
+            f"projection={intent.get('selectedProjectionMode')} "
+            f"clickbox={intent.get('selectedClickboxAvailable')} "
+            f"resolved={intent.get('selectedClickboxResolved')} "
+            f"duplicateBackup={intent.get('duplicateSelectedInBackups')} "
+            f"rawBest={intent.get('rawBestTarget')} "
+            f"stable={intent.get('stabilizedTarget')} "
+            f"stableFor={intent.get('selectedStableForTicks')} "
+            f"missingFor={intent.get('selectedMissingForTicks')} "
+            f"grace={intent.get('selectedRetainedDueToGrace')} "
+            f"switch={intent.get('switchReason')}"
+        )
+        if intent.get("selectedFallbackReason"):
+            print(f"selected fallback reason: {intent.get('selectedFallbackReason')}")
+        if intent.get("backupKeys"):
+            print("backup keys: " + ", ".join(str(key) for key in intent.get("backupKeys")))
+        if intent.get("switchAuditTail"):
+            print("switch audit tail:")
+            for entry in intent.get("switchAuditTail"):
+                print(
+                    "  "
+                    f"tick={entry.get('tick')} prev={entry.get('previousTargetKey')} "
+                    f"raw={entry.get('rawBestTargetKey')} selected={entry.get('selectedTargetKey')} "
+                    f"reason={entry.get('switchReason')} hard={entry.get('hardSwitch')} "
+                    f"grace={entry.get('retainedDueToGrace')} missing={entry.get('currentTargetMissingThisTick')}"
+                )
+        if intent.get("intentFlickerDetected"):
+            print("intent flicker detected: selected target changed briefly and reverted")
     config = report.get("compactGeometryConfig") or {}
     print(
         "geometry config: "
@@ -498,6 +680,7 @@ def parse_args():
     parser.add_argument("--show-blocked", action="store_true", help="Show only candidates with blocked reachability.")
     parser.add_argument("--show-reachable", action="store_true", help="Show only candidates with reachable reachability.")
     parser.add_argument("--show-unknown", action="store_true", help="Show only candidates with unknown reachability.")
+    parser.add_argument("--intent", action="store_true", help="Inspect intent markers directly without requiring legacy rolling live files.")
     parser.add_argument("--top", type=int, default=10, help="Number of candidates to inspect. Default: 10.")
     parser.add_argument("--json", action="store_true", help="Print JSON only.")
     return parser.parse_args()

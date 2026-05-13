@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -128,6 +129,8 @@ def evaluate_daemon_payloads(
     daemon_status: dict[str, Any],
     context_payload: dict[str, Any] | None = None,
     brain_payload: dict[str, Any] | None = None,
+    *,
+    daily_mode: str = "compact-packets",
 ) -> dict:
     warnings: list[str] = []
     failures: list[str] = []
@@ -137,10 +140,26 @@ def evaluate_daemon_payloads(
         if daemon_status.get("writeDebugLiveFiles"):
             warnings.append("debug live files are enabled; daily daemon should keep rolling writes off")
         source = daemon_status.get("inputSourceActive")
-        if source and source != "compact-packets":
-            failures.append(f"{source} is active; daily daemon should use compact-packets")
-        if source == "compact-packets" and daemon_status.get("compactPacketsRecent") is False:
-            failures.append("compact-packets input is active but compact packets are not recent")
+        if daily_mode == "snapshot-no-files":
+            if source and source != "plugin-snapshot":
+                failures.append(f"{source} is active; snapshot no-file daily should use plugin-snapshot")
+            if boolish_true(daemon_status.get("compactPacketFilesRequired")):
+                failures.append("compact packet files are still required in snapshot no-file daily")
+            if boolish_true(daemon_status.get("compactPacketFilesWriting")):
+                failures.append("compact packet files appear to be writing in snapshot no-file daily")
+            if daemon_status.get("noFileDaily") is False:
+                failures.append("daemon status does not report noFileDaily=true")
+            candidate_count = daemon_status.get("candidateCount")
+            if isinstance(candidate_count, (int, float)) and candidate_count <= 0:
+                warnings.append("snapshot no-file daemon has no candidates; use stable compact if this persists")
+            active_ms = daemon_status.get("activeMs") or daemon_status.get("liveCoreActiveMillis")
+            if isinstance(active_ms, (int, float)) and active_ms > 100:
+                warnings.append(f"snapshot no-file active time is {active_ms:.1f} ms; stable compact remains the safe fallback")
+        else:
+            if source and source != "compact-packets":
+                failures.append(f"{source} is active; daily daemon should use compact-packets")
+            if source == "compact-packets" and daemon_status.get("compactPacketsRecent") is False:
+                failures.append("compact-packets input is active but compact packets are not recent")
         if boolish_true(daemon_status.get("rawTickRecordingEnabled")):
             failures.append("raw tick recording appears enabled; daily mode should keep raw ticks off")
         if boolish_true(daemon_status.get("rawEventRecordingEnabled")):
@@ -226,6 +245,37 @@ def resolve_session(args: argparse.Namespace) -> str | None:
     return None
 
 
+def live_packet_dir_stats(session_path: str | None) -> dict[str, Any]:
+    if not session_path:
+        return {"available": False, "count": 0, "bytes": 0}
+    packet_dir = Path(session_path) / "live_packets"
+    if not packet_dir.exists():
+        return {"available": False, "count": 0, "bytes": 0}
+    count = 0
+    total = 0
+    for path in packet_dir.glob("live-*.ndjson"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        count += 1
+        total += int(stat.st_size)
+    return {"available": True, "count": count, "bytes": total}
+
+
+def live_packet_growth_failure(before: dict[str, Any], after: dict[str, Any]) -> str | None:
+    try:
+        before_count = int(before.get("count") or 0)
+        after_count = int(after.get("count") or 0)
+        before_bytes = int(before.get("bytes") or 0)
+        after_bytes = int(after.get("bytes") or 0)
+    except (TypeError, ValueError):
+        return None
+    if after_count > before_count or after_bytes > before_bytes:
+        return "compact packet files are growing in snapshot no-file daily"
+    return None
+
+
 def build_report(args: argparse.Namespace, processes: list[dict[str, Any]] | None = None) -> dict:
     warnings: list[str] = []
     failures: list[str] = []
@@ -247,17 +297,30 @@ def build_report(args: argparse.Namespace, processes: list[dict[str, Any]] | Non
         else:
             warnings.append(f"live_core_daemon health/status unavailable: {type(error).__name__}")
 
-    daemon_eval = evaluate_daemon_payloads(daemon_health, daemon_status, context_payload, brain_payload)
+    daemon_eval = evaluate_daemon_payloads(daemon_health, daemon_status, context_payload, brain_payload, daily_mode=args.daily_mode)
     warnings.extend(daemon_eval.get("warnings") or [])
     failures.extend(daemon_eval.get("failures") or [])
+    session_path = resolve_session(args)
+    packet_growth: dict[str, Any] | None = None
+    if args.daily_mode == "snapshot-no-files":
+        before = live_packet_dir_stats(session_path)
+        if float(args.packet_growth_delay) > 0:
+            time.sleep(float(args.packet_growth_delay))
+        after = live_packet_dir_stats(session_path)
+        packet_growth = {"before": before, "after": after}
+        growth_failure = live_packet_growth_failure(before, after)
+        if growth_failure:
+            failures.append(growth_failure)
 
     status = "FAIL" if failures else "WARN" if warnings else "PASS"
     return {
         "schema": SCHEMA,
         "status": status,
         "strict": bool(args.strict),
-        "sessionPath": resolve_session(args),
+        "sessionPath": session_path,
         "daemonUrl": args.daemon_url,
+        "dailyMode": args.daily_mode,
+        "livePacketGrowth": packet_growth,
         "daemonHealth": daemon_health,
         "daemonStatus": daemon_status,
         "context": context_payload,
@@ -327,6 +390,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--latest-session", action="store_true", help="Use newest telemetry session.")
     parser.add_argument("--sessions-dir", help="Override sessions directory when using --latest-session.")
     parser.add_argument("--daemon-url", default="http://127.0.0.1:8890", help="live_core_daemon URL.")
+    parser.add_argument("--daily-mode", choices=("compact-packets", "snapshot-no-files"), default="compact-packets", help="Daily source mode to validate.")
+    parser.add_argument("--packet-growth-delay", type=float, default=0.25, help="Seconds to observe live_packets growth in snapshot no-file mode.")
     parser.add_argument("--check-processes", action="store_true", help="Check for duplicate/conflicting live processes.")
     parser.add_argument("--strict", action="store_true", help="Treat missing daemon status as failure.")
     parser.add_argument("--json", action="store_true", help="Print JSON.")

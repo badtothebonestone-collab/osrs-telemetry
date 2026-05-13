@@ -59,6 +59,66 @@ public class TelemetryDebugOverlayTest
 	}
 
 	@Test
+	public void projectionIdentityAllowsDrawableMarkerWithoutStaleCanvasPoint()
+	{
+		TelemetryDebugOverlay.OverlayTarget target = new TelemetryDebugOverlay.OverlayTarget();
+		target.markerType = "selected_target";
+		target.targetType = "sceneObject";
+		target.objectKey = "oak-1";
+		target.id = 1278.0;
+		target.worldX = 3201.0;
+		target.worldY = 3202.0;
+		target.plane = 0.0;
+
+		Assert.assertTrue(TelemetryDebugOverlay.hasProjectionIdentity(target));
+		Assert.assertEquals("live_tile_fallback", TelemetryDebugOverlay.drawableGeometrySource(target));
+	}
+
+	@Test
+	public void drawableGeometryPrefersStoredClickableHullBeforeTileFallback()
+	{
+		TelemetryDebugOverlay.OverlayTarget target = new TelemetryDebugOverlay.OverlayTarget();
+		target.markerType = "selected_target";
+		target.targetType = "sceneObject";
+		target.objectKey = "oak-1";
+		target.id = 1278.0;
+		target.worldX = 3201.0;
+		target.worldY = 3202.0;
+		target.plane = 0.0;
+		target.clickableHull = polygon();
+
+		Assert.assertTrue(TelemetryDebugOverlay.hasProjectionIdentity(target));
+		Assert.assertEquals("clickableHull", TelemetryDebugOverlay.drawableGeometrySource(target));
+	}
+
+	@Test
+	public void genericMarkerIdentityFieldsAreParsed()
+	{
+		TelemetryDebugOverlay.OverlayTarget target = new TelemetryDebugOverlay.OverlayTarget();
+		target.markerType = "selected_target";
+		target.markerId = "oak-1";
+		target.markerVersion = "overlay_intent_marker.v1";
+		target.objectKey = "oak-1";
+		target.targetType = "sceneObject";
+		target.classId = "tree";
+		target.id = 1278.0;
+		target.hash = 123456.0;
+		target.localX = 6400.0;
+		target.localY = 6408.0;
+		target.worldX = 3201.0;
+		target.worldY = 3202.0;
+		target.plane = 0.0;
+		target.sceneX = 10.0;
+		target.sceneY = 11.0;
+
+		Assert.assertEquals("oak-1", target.markerId);
+		Assert.assertEquals("overlay_intent_marker.v1", target.markerVersion);
+		Assert.assertEquals("oak-1", target.objectKey);
+		Assert.assertEquals(Double.valueOf(6400.0), target.localX);
+		Assert.assertEquals(Double.valueOf(123456.0), target.hash);
+	}
+
+	@Test
 	public void malformedPolygonIsIgnored()
 	{
 		TelemetryDebugOverlay.OverlayTarget target = new TelemetryDebugOverlay.OverlayTarget();
@@ -121,6 +181,38 @@ public class TelemetryDebugOverlayTest
 		Assert.assertEquals(1, targets.size());
 		Assert.assertEquals("Target: Oak tree", targets.get(0).label);
 		Assert.assertEquals("selected_target", targets.get(0).markerType);
+	}
+
+	@Test
+	public void statusLineReportsIntentSelectedSeparatelyFromLegacyBestNearest()
+	{
+		TelemetryDebugOverlay.OverlayDebugState state = new TelemetryDebugOverlay.OverlayDebugState();
+		state.latestTick = 344.0;
+		state.profile = "woodcutting";
+		state.summary = new TelemetryDebugOverlay.OverlaySummary();
+		state.summary.targetsWritten = 3.0;
+		state.summary.clickableHullTargets = 1.0;
+		state.summary.hullLimit = 10.0;
+		state.summary.compactLiveGeometryMaxRefs = 100.0;
+		state.summary.bestHullAvailable = false;
+		state.summary.nearestHullAvailable = false;
+		state.intentState = new TelemetryDebugOverlay.OverlayIntentState();
+		TelemetryDebugOverlay.OverlayTarget selected = new TelemetryDebugOverlay.OverlayTarget();
+		selected.markerType = "selected_target";
+		selected.selected = true;
+		TelemetryDebugOverlay.OverlayTarget backupA = new TelemetryDebugOverlay.OverlayTarget();
+		backupA.markerType = "backup_candidate";
+		TelemetryDebugOverlay.OverlayTarget backupB = new TelemetryDebugOverlay.OverlayTarget();
+		backupB.markerType = "backup_candidate";
+		state.intentState.markers = List.of(selected, backupA, backupB);
+
+		String line = TelemetryDebugOverlay.statusLine(state, TelemetryDebugOverlayGeometryMode.CLICKABLE_HULL);
+
+		Assert.assertTrue(line.contains("selected yes"));
+		Assert.assertTrue(line.contains("backups 2"));
+		Assert.assertTrue(line.contains("legacy best no"));
+		Assert.assertTrue(line.contains("legacy nearest no"));
+		Assert.assertFalse(line.contains("| best no nearest no"));
 	}
 
 	private static java.util.List<java.util.List<Double>> polygon()

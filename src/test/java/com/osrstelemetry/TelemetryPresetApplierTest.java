@@ -91,6 +91,28 @@ public class TelemetryPresetApplierTest
 	}
 
 	@Test
+	public void dailySnapshotNoFilePresetEnablesEndpointAndDisablesCompactFileMirror()
+	{
+		FakeConfigStore store = new FakeConfigStore();
+		TelemetryPresetApplier applier = new TelemetryPresetApplier(store);
+
+		applier.apply("DAILY_SNAPSHOT_NO_FILE");
+
+		assertEquals("LIVE_COMPACT_ONLY", store.values.get("telemetryRecordingMode"));
+		assertEquals("false", store.values.get("emitCompactLivePackets"));
+		assertEquals("false", store.values.get("compactLivePacketsRequiredForLive"));
+		assertEquals("false", store.values.get("emitCompactLiveStream"));
+		assertEquals("true", store.values.get("enablePluginSnapshotEndpoint"));
+		assertEquals("true", store.values.get("pluginSnapshotEnabledInNormalLive"));
+		assertEquals("127.0.0.1", store.values.get("pluginSnapshotHost"));
+		assertEquals("8893", store.values.get("pluginSnapshotPort"));
+		assertEquals("false", store.values.get("debugRecordRawTicks"));
+		assertEquals("false", store.values.get("debugRecordRawEvents"));
+		assertEquals("false", store.values.get("debugRecordFrames"));
+		assertEquals("false", store.values.get("captureScreenshots"));
+	}
+
+	@Test
 	public void unknownPresetIsRejected()
 	{
 		TelemetryPresetApplier applier = new TelemetryPresetApplier(new FakeConfigStore());

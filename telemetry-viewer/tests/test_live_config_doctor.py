@@ -39,6 +39,8 @@ def make_session(
     budget_exceeded: bool = False,
     write_failures: int = 0,
     compact_stream_enabled: bool = False,
+    compact_packets: bool = True,
+    compact_live_packet_files_enabled: bool | None = None,
     plugin_tier: str | None = None,
     plugin_field_mode: str | None = None,
     plugin_refs: int | None = None,
@@ -57,6 +59,8 @@ def make_session(
             "cropCaptureEnabled": crops,
             "perceptionCaptureEnabled": perception,
             "compactLiveStreamEnabled": compact_stream_enabled,
+            "compactLivePacketFilesEnabled": compact_packets if compact_live_packet_files_enabled is None else compact_live_packet_files_enabled,
+            "compactPacketRecordingEnabled": True,
         },
     )
     status = {
@@ -76,6 +80,7 @@ def make_session(
         "writeFailureCount": write_failures,
         "latestTickProcessed": 10,
         "compactLiveStreamEnabled": compact_stream_enabled,
+        "compactLivePacketFilesEnabled": compact_packets if compact_live_packet_files_enabled is None else compact_live_packet_files_enabled,
     }
     if plugin_tier is not None:
         status["pluginSnapshotTier"] = plugin_tier
@@ -96,11 +101,12 @@ def make_session(
             "targets": [{"rank": 1}],
         },
     )
-    segment = packet_dir / "live-000001.ndjson"
-    segment.parent.mkdir(parents=True, exist_ok=True)
-    segment.write_text('{"packetType":"live_baseline_packet.v1","tick":10}\n', encoding="utf-8")
-    (packet_dir / "latest_segment.txt").write_text("live-000001.ndjson", encoding="utf-8")
-    write_json(packet_dir / "live_packet_index.json", {"latestTick": 10, "latestSequence": 20, "activeSegment": "live-000001.ndjson"})
+    if compact_packets:
+        segment = packet_dir / "live-000001.ndjson"
+        segment.parent.mkdir(parents=True, exist_ok=True)
+        segment.write_text('{"packetType":"live_baseline_packet.v1","tick":10}\n', encoding="utf-8")
+        (packet_dir / "latest_segment.txt").write_text("live-000001.ndjson", encoding="utf-8")
+        write_json(packet_dir / "live_packet_index.json", {"latestTick": 10, "latestSequence": 20, "activeSegment": "live-000001.ndjson"})
     now = time.time()
     for path in (
         session,
@@ -108,9 +114,15 @@ def make_session(
         live_dir / "live_status.json",
         live_dir / "live_context_index.json",
         live_dir / "overlay_debug_state.json",
-        packet_dir / "live_packet_index.json",
-        packet_dir / "latest_segment.txt",
-        segment,
+        *(
+            (
+                packet_dir / "live_packet_index.json",
+                packet_dir / "latest_segment.txt",
+                packet_dir / "live-000001.ndjson",
+            )
+            if compact_packets
+            else ()
+        ),
     ):
         os.utime(path, (now, now))
     return session
@@ -257,6 +269,74 @@ class LiveConfigDoctorTest(unittest.TestCase):
 
         self.assertEqual(report["status"], "PASS")
         self.assertEqual(report["pluginSnapshot"]["status"], "PASS")
+
+    def test_snapshot_no_file_mode_passes_without_compact_packet_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(
+                Path(tmp),
+                input_source="plugin-snapshot",
+                compact_packets=False,
+                compact_live_packet_files_enabled=False,
+                plugin_tier="hot",
+                plugin_field_mode="compact",
+                plugin_refs=100,
+            )
+            daemon_health = {
+                "available": True,
+                "status": "ok",
+                "service": "live_core_daemon",
+                "liveCoreDaemonActive": True,
+                "inputSourceActive": "plugin-snapshot",
+                "dailyMode": "snapshot-no-files",
+                "noFileDaily": True,
+                "compactPacketFilesRequired": False,
+                "compactPacketFilesWriting": False,
+                "writeDebugLiveFiles": False,
+                "candidateCount": 4,
+                "health": {
+                    "service": "live_core_daemon",
+                    "liveCoreDaemonActive": True,
+                    "inputSourceActive": "plugin-snapshot",
+                    "dailyMode": "snapshot-no-files",
+                    "noFileDaily": True,
+                    "compactPacketFilesRequired": False,
+                    "compactPacketFilesWriting": False,
+                    "latestTick": 10,
+                },
+            }
+            with mock.patch.object(doctor, "context_service_health", return_value=daemon_health):
+                with mock.patch.object(
+                    doctor,
+                    "plugin_snapshot_health",
+                    return_value={"available": True, "status": "PASS", "latestTick": 10},
+                ):
+                    report = doctor.evaluate_live_config(session, mode="snapshot_no_file", now=time.time())
+
+        self.assertEqual(report["status"], "PASS")
+        self.assertFalse(report["summary"]["compactPacketFilesRequired"])
+        self.assertFalse(report["summary"]["compactPacketFilesWriting"])
+        self.assertEqual(report["summary"]["inputSourceActive"], "plugin-snapshot")
+
+    def test_snapshot_no_file_mode_warns_if_compact_packet_files_are_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(
+                Path(tmp),
+                input_source="plugin-snapshot",
+                compact_packets=True,
+                compact_live_packet_files_enabled=True,
+                plugin_tier="hot",
+                plugin_field_mode="compact",
+                plugin_refs=100,
+            )
+            with mock.patch.object(doctor, "context_service_health", return_value={"available": False}):
+                with mock.patch.object(
+                    doctor,
+                    "plugin_snapshot_health",
+                    return_value={"available": True, "status": "PASS", "latestTick": 10},
+                ):
+                    report = doctor.evaluate_live_config(session, mode="snapshot_no_file", now=time.time())
+
+        self.assertIn("snapshot_no_file_compact_packet_files", [issue["code"] for issue in report["issues"]])
 
     def test_json_output_is_valid(self):
         with tempfile.TemporaryDirectory() as tmp:

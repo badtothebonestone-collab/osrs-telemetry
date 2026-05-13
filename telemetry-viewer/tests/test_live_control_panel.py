@@ -66,6 +66,7 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertIn("--fix-suggestions", command)
         self.assertIn("--check-processes", command)
         self.assertEqual(panel.doctor_mode_key("Plugin Snapshot Experimental"), "plugin_snapshot_experimental")
+        self.assertEqual(panel.doctor_mode_key("Daily Snapshot No-File"), "snapshot_no_file")
 
     def test_daily_gauntlet_command(self):
         command = panel.build_daily_gauntlet_command(daemon_url="http://127.0.0.1:8890")
@@ -82,14 +83,16 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
             (
                 "Apply Daily Live Preset",
                 "Start RuneLite Dev",
-                "Start Streamlined Live Daemon",
+                "Start Daily Live Stable Compact",
+                "Start Daily Live Snapshot No-File EXPERIMENTAL",
                 "Stop All",
                 "Config Doctor",
                 "Daily Gauntlet",
                 "Open Latest Session Folder",
             ),
         )
-        self.assertFalse(any("Legacy" in label or "EXPERIMENTAL" in label for label in panel.DAILY_ACTION_LABELS))
+        self.assertFalse(any("Legacy" in label for label in panel.DAILY_ACTION_LABELS))
+        self.assertTrue(any("Snapshot No-File" in label and "EXPERIMENTAL" in label for label in panel.DAILY_ACTION_LABELS))
         self.assertTrue(any(label.endswith("Legacy Live Processor") for label in panel.ADVANCED_ACTION_LABELS))
         self.assertTrue(any(label.endswith("Legacy Context Service") for label in panel.ADVANCED_ACTION_LABELS))
         self.assertTrue(any(label.endswith("Legacy Human Dashboard") for label in panel.ADVANCED_ACTION_LABELS))
@@ -101,6 +104,7 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
 
     def test_preset_request_body_and_endpoint_url(self):
         self.assertEqual(panel.preset_request_body("DAILY_LIVE")["preset"], "DAILY_LIVE")
+        self.assertEqual(panel.preset_request_body("DAILY_SNAPSHOT_NO_FILE")["preset"], "DAILY_SNAPSHOT_NO_FILE")
         self.assertEqual(panel.preset_endpoint_url("/presets"), "http://127.0.0.1:8893/presets")
 
     def test_plugin_snapshot_preset_command_is_experimental(self):
@@ -138,6 +142,8 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
     def test_live_core_daemon_command_uses_streamlined_daily_defaults(self):
         command = panel.build_live_core_daemon_command(panel.normal_live_options("woodcutting"))
         self.assertEqual(command[:2], [sys.executable, "telemetry-viewer\\live_core_daemon.py"])
+        self.assertIn("--daily-mode", command)
+        self.assertEqual(command[command.index("--daily-mode") + 1], "compact-packets")
         self.assertIn("--input-source", command)
         self.assertEqual(command[command.index("--input-source") + 1], "compact-packets")
         self.assertNotIn("telemetry-viewer\\live_target_processor.py", command)
@@ -158,6 +164,18 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertEqual(command[command.index("--goal-count") + 1], "5")
         self.assertNotIn("--poll-interval", command)
         self.assertNotIn("compact-stream", command)
+
+    def test_snapshot_no_file_daemon_command_uses_plugin_snapshot(self):
+        command = panel.build_live_core_daemon_command(panel.snapshot_no_file_options("woodcutting"))
+        self.assertEqual(command[:2], [sys.executable, "telemetry-viewer\\live_core_daemon.py"])
+        self.assertIn("--daily-mode", command)
+        self.assertEqual(command[command.index("--daily-mode") + 1], "snapshot-no-files")
+        self.assertEqual(command[command.index("--input-source") + 1], "plugin-snapshot")
+        self.assertIn("--plugin-snapshot-tier", command)
+        self.assertEqual(command[command.index("--plugin-snapshot-tier") + 1], "hot")
+        self.assertNotIn("--plugin-snapshot-fallback", command)
+        self.assertNotIn("--write-debug-live-files", command)
+        self.assertNotIn("--require-compact-packets", command)
 
     def test_live_core_daemon_overlay_state_is_optional(self):
         options = panel.normal_live_options("woodcutting")

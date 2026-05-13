@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS = [
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\resource_progress.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\brain_core.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\intent_stabilizer.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\live_core_daemon.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\diagnose_brain_progress.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\live_control_panel.py"],
@@ -18,6 +19,7 @@ COMMANDS = [
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\run_daily_gauntlet.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\run_stabilization_suite.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_resource_progress.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_intent_stabilizer.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_brain_core.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_live_core_daemon.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_live_config_doctor.py"],

@@ -18,9 +18,10 @@ from telemetry_paths import find_newest_session, get_sessions_dir, list_event_fi
 SCHEMA = "live_config_doctor.v1"
 RECENT_COMPACT_SECONDS = 120.0
 STALE_SESSION_SECONDS = 15 * 60
-MODES = ("daily", "visual_qa", "debug_audit", "plugin_snapshot_experimental")
+MODES = ("daily", "snapshot_no_file", "visual_qa", "debug_audit", "plugin_snapshot_experimental")
 MODE_PRESET_RECOMMENDATIONS = {
     "daily": ("DAILY_LIVE", "Click Apply Daily Live Preset."),
+    "snapshot_no_file": ("DAILY_SNAPSHOT_NO_FILE", "Click Apply Daily Snapshot No-File Preset."),
     "visual_qa": ("VISUAL_QA", "Click Apply Visual QA Preset."),
     "debug_audit": ("DEBUG_AUDIT", "Click Apply Debug Audit Preset."),
     "plugin_snapshot_experimental": ("PLUGIN_SNAPSHOT_EXPERIMENTAL", "Click Apply Plugin Snapshot Experimental Preset."),
@@ -160,6 +161,11 @@ def context_service_health(port: int, *, timeout: float = 0.25) -> dict:
         "service": payload.get("service") if isinstance(payload, dict) else None,
         "liveCoreDaemonActive": bool(payload.get("liveCoreDaemonActive")) if isinstance(payload, dict) else False,
         "inputSourceActive": payload.get("inputSourceActive") if isinstance(payload, dict) else None,
+        "dailyMode": payload.get("dailyMode") if isinstance(payload, dict) else None,
+        "noFileDaily": payload.get("noFileDaily") if isinstance(payload, dict) else None,
+        "compactPacketFilesRequired": payload.get("compactPacketFilesRequired") if isinstance(payload, dict) else None,
+        "compactPacketFilesWriting": payload.get("compactPacketFilesWriting") if isinstance(payload, dict) else None,
+        "debugMirrorEnabled": payload.get("debugMirrorEnabled") if isinstance(payload, dict) else None,
         "writeDebugLiveFiles": payload.get("writeDebugLiveFiles") if isinstance(payload, dict) else None,
         "overlayStateWritten": payload.get("overlayStateWritten") if isinstance(payload, dict) else None,
         "candidateCount": payload.get("candidateCount") if isinstance(payload, dict) else None,
@@ -260,6 +266,22 @@ def collect_live_snapshot(
     daemon_health = context_health.get("health") if isinstance(context_health.get("health"), dict) else {}
     daemon_status = daemon_health if live_core_active else {}
     active_input = first_present(daemon_status.get("inputSourceActive"), status.get("inputSourceActive"))
+    compact_file_manifest = first_present(
+        daemon_status.get("compactPacketFilesEnabledInManifest"),
+        status.get("compactLivePacketFilesEnabled"),
+        manifest.get("compactLivePacketFilesEnabled"),
+    )
+    compact_files_required = first_present(
+        daemon_status.get("compactPacketFilesRequired"),
+        status.get("compactPacketFilesRequired"),
+        active_input == "compact-packets" if active_input is not None else None,
+    )
+    compact_files_writing = first_present(
+        daemon_status.get("compactPacketFilesWriting"),
+        status.get("compactPacketFilesWriting"),
+        compact_file_manifest,
+        packet.get("available"),
+    )
     snapshot = {
         "sessionPath": str(session),
         "sessionExists": session.exists(),
@@ -272,6 +294,12 @@ def collect_live_snapshot(
         "liveCoreDaemonActive": live_core_active,
         "liveCoreWriteDebugLiveFiles": daemon_status.get("writeDebugLiveFiles"),
         "liveCoreOverlayStateWritten": daemon_status.get("overlayStateWritten"),
+        "dailyMode": first_present(daemon_status.get("dailyMode"), status.get("dailyMode")),
+        "noFileDaily": first_present(daemon_status.get("noFileDaily"), status.get("noFileDaily")),
+        "compactPacketFilesRequired": compact_files_required,
+        "compactPacketFilesWriting": compact_files_writing,
+        "compactPacketFilesEnabledInManifest": compact_file_manifest,
+        "debugMirrorEnabled": first_present(daemon_status.get("debugMirrorEnabled"), status.get("debugMirrorEnabled")),
         "inputSourceActive": active_input,
         "recordingMode": first_present(status.get("recordingMode"), manifest.get("recordingMode")),
         "rawTicksEnabled": first_present(status.get("rawTickRecordingEnabled"), manifest.get("rawTickRecordingEnabled")),
@@ -321,6 +349,8 @@ def collect_live_snapshot(
         "pluginSnapshotMaxProjectionRefs": status.get("pluginSnapshotMaxProjectionRefs"),
         "pluginSnapshotTotalActiveMillis": first_present(status.get("pluginSnapshotTotalActiveMillis"), status.get("totalActiveMillis"), status.get("totalWallMillis")),
         "pluginSnapshotBottleneck": status.get("pluginSnapshotBottleneck"),
+        "candidateCount": first_present(daemon_status.get("candidateCount"), status.get("candidateCount")),
+        "activeMs": first_present(daemon_status.get("activeMs"), status.get("activeMs"), status.get("liveCoreActiveMillis")),
         "windowTicks": status.get("windowTicks"),
         "candidateOutputWindow": status.get("candidateOutputWindow"),
         "livenessMode": status.get("livenessMode"),
@@ -359,7 +389,8 @@ def apply_common_rules(report: dict, snapshot: dict, mode: str) -> None:
             f"Latest session activity is about {int(session_age // 60)} minutes old.",
             "Confirm this is the intended session or start a fresh normal live run.",
         )
-    if not snapshot.get("compactPacketsAvailable"):
+    compact_packets_required_for_mode = mode not in {"snapshot_no_file"}
+    if compact_packets_required_for_mode and not snapshot.get("compactPacketsAvailable"):
         missing_compact_severity = "FAIL"
         if snapshot.get("liveCoreDaemonActive") or mode == "plugin_snapshot_experimental":
             missing_compact_severity = "WARN"
@@ -372,7 +403,7 @@ def apply_common_rules(report: dict, snapshot: dict, mode: str) -> None:
             "Compact packet files are not available.",
             "Use --input-source compact-packets --require-compact-packets only after compact packets are being written.",
         )
-    elif not snapshot.get("compactPacketsRecent"):
+    elif compact_packets_required_for_mode and not snapshot.get("compactPacketsRecent"):
         add_issue(
             report,
             "WARN",
@@ -454,7 +485,7 @@ def apply_debug_audit_rules(report: dict, snapshot: dict) -> None:
         add_issue(report, "WARN", "debug_audit_disk_growth", "Raw ticks or frames are enabled for debug audit.", "Watch disk usage and stop recording when the audit capture is complete.")
 
 
-def apply_plugin_snapshot_rules(report: dict, snapshot: dict) -> None:
+def apply_plugin_snapshot_rules(report: dict, snapshot: dict, *, require_compact_fallback: bool = True) -> None:
     health = snapshot.get("pluginSnapshotHealth") if isinstance(snapshot.get("pluginSnapshotHealth"), dict) else {}
     if health.get("status") != "PASS":
         add_issue(report, "FAIL", "plugin_snapshot_health", f"Plugin snapshot endpoint health is {health.get('status') or 'unavailable'}.", "Enable the plugin snapshot endpoint and verify GET http://127.0.0.1:8893/health.")
@@ -472,8 +503,86 @@ def apply_plugin_snapshot_rules(report: dict, snapshot: dict) -> None:
     active_ms = numeric(snapshot.get("pluginSnapshotTotalActiveMillis"))
     if active_ms is not None and active_ms > 100:
         add_issue(report, "WARN", "plugin_snapshot_active_ms", f"Plugin snapshot active time is {active_ms:.1f} ms.", "Inspect pluginSnapshotBottleneck and keep plugin-snapshot experimental until hot tier stays under 100 ms.")
-    if not snapshot.get("compactPacketsAvailable"):
+    if require_compact_fallback and not snapshot.get("compactPacketsAvailable"):
         add_issue(report, "WARN", "plugin_snapshot_no_file_fallback", "Compact packet files are unavailable.", "Keep compact-packets available as the stable fallback while testing plugin-snapshot.")
+
+
+def apply_snapshot_no_file_rules(report: dict, snapshot: dict) -> None:
+    recording_mode = snapshot.get("recordingMode")
+    if recording_mode and recording_mode != "LIVE_COMPACT_ONLY":
+        add_issue(report, "WARN", "snapshot_no_file_recording_mode", f"Recording mode is {recording_mode}.", "Use LIVE_COMPACT_ONLY for snapshot no-file live.")
+    for key, label in (
+        ("rawTicksEnabled", "raw ticks"),
+        ("rawEventsEnabled", "raw events"),
+        ("framesEnabled", "frames"),
+        ("screenshotsEnabled", "screenshots"),
+        ("cropCaptureEnabled", "crop/perception capture"),
+        ("perceptionCaptureEnabled", "perception capture"),
+    ):
+        if boolish(snapshot.get(key)) is True:
+            add_issue(report, "WARN", f"snapshot_no_file_{key}", f"{label} is enabled.", f"Disable {label} for snapshot no-file daily mode.")
+    if snapshot.get("compactStreamActive") or boolish(snapshot.get("compactStreamEnabled")) is True:
+        add_issue(report, "WARN", "snapshot_no_file_compact_stream", "Compact stream is enabled or active in snapshot no-file mode.", "Disable compact stream; snapshot no-file uses the plugin snapshot endpoint.")
+    health = snapshot.get("pluginSnapshotHealth") if isinstance(snapshot.get("pluginSnapshotHealth"), dict) else {}
+    if health.get("status") != "PASS":
+        add_issue(
+            report,
+            "FAIL",
+            "snapshot_no_file_health",
+            f"Plugin snapshot endpoint health is {health.get('status') or 'unavailable'}.",
+            "Enable the plugin snapshot endpoint or use Daily Stable Compact.",
+        )
+    if snapshot.get("inputSourceActive") and snapshot.get("inputSourceActive") != "plugin-snapshot":
+        add_issue(
+            report,
+            "FAIL",
+            "snapshot_no_file_input_source",
+            f"Input source is {snapshot.get('inputSourceActive')}.",
+            "Start live_core_daemon with --daily-mode snapshot-no-files --input-source plugin-snapshot.",
+        )
+    candidate_count = numeric(snapshot.get("candidateCount"))
+    if candidate_count is not None and candidate_count <= 0:
+        add_issue(
+            report,
+            "WARN",
+            "snapshot_no_file_no_candidates",
+            "Plugin snapshot daemon currently has no candidates.",
+            "Use Daily Stable Compact if snapshot no-file cannot build candidates in this area.",
+        )
+    active_ms = numeric(snapshot.get("activeMs")) or numeric(snapshot.get("pluginSnapshotTotalActiveMillis"))
+    if active_ms is not None and active_ms > 100:
+        add_issue(
+            report,
+            "WARN",
+            "snapshot_no_file_active_ms",
+            f"Snapshot no-file active time is {active_ms:.1f} ms.",
+            "Use Daily Stable Compact until snapshot no-file stays under budget.",
+        )
+    if boolish(snapshot.get("compactPacketFilesRequired")) is True:
+        add_issue(
+            report,
+            "FAIL",
+            "snapshot_no_file_compact_required",
+            "Compact packet files are still required in snapshot no-file mode.",
+            "Start live_core_daemon with --daily-mode snapshot-no-files.",
+        )
+    if boolish(snapshot.get("compactPacketFilesWriting")) is True:
+        add_issue(
+            report,
+            "WARN",
+            "snapshot_no_file_compact_packet_files",
+            "Compact NDJSON packet files appear to be enabled or growing in snapshot no-file mode.",
+            "Apply Daily Snapshot No-File Preset or set emitCompactLivePackets=false and compactLivePacketsRequiredForLive=false.",
+        )
+    if boolish(snapshot.get("debugMirrorEnabled")) is True:
+        add_issue(
+            report,
+            "WARN",
+            "snapshot_no_file_debug_mirror",
+            "Compact packet debug mirror is enabled in snapshot no-file mode.",
+            "Disable the compact packet file mirror unless intentionally debugging.",
+        )
+    apply_plugin_snapshot_rules(report, snapshot, require_compact_fallback=False)
 
 
 def evaluate_live_config(
@@ -494,7 +603,7 @@ def evaluate_live_config(
         plugin_snapshot_host=plugin_snapshot_host,
         plugin_snapshot_port=plugin_snapshot_port,
         check_context_service=check_context_service,
-        check_plugin_snapshot=mode == "plugin_snapshot_experimental",
+        check_plugin_snapshot=mode in {"plugin_snapshot_experimental", "snapshot_no_file"},
         check_processes=check_processes,
         now=now,
     )
@@ -511,6 +620,14 @@ def evaluate_live_config(
                 "liveCoreDaemonActive",
                 "liveCoreWriteDebugLiveFiles",
                 "liveCoreOverlayStateWritten",
+                "dailyMode",
+                "noFileDaily",
+                "compactPacketFilesRequired",
+                "compactPacketFilesWriting",
+                "compactPacketFilesEnabledInManifest",
+                "debugMirrorEnabled",
+                "candidateCount",
+                "activeMs",
                 "recordingMode",
                 "rawTicksEnabled",
                 "rawEventsEnabled",
@@ -561,6 +678,8 @@ def evaluate_live_config(
     if snapshot.get("sessionExists"):
         if mode == "daily":
             apply_daily_rules(report, snapshot)
+        elif mode == "snapshot_no_file":
+            apply_snapshot_no_file_rules(report, snapshot)
         elif mode == "visual_qa":
             apply_visual_qa_rules(report, snapshot)
         elif mode == "debug_audit":
@@ -601,6 +720,7 @@ def print_human(report: dict, *, fix_suggestions: bool = False) -> None:
     print(
         "compact packets: "
         f"available={summary.get('compactPacketsAvailable')} recent={summary.get('compactPacketsRecent')} "
+        f"required={summary.get('compactPacketFilesRequired')} writing={summary.get('compactPacketFilesWriting')} "
         f"segment={(report.get('compactPackets') or {}).get('latestSegment') or 'unknown'}"
     )
     print(

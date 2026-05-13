@@ -8,6 +8,7 @@ import java.awt.FontMetrics;
 import java.awt.Graphics2D;
 import java.awt.Polygon;
 import java.awt.Rectangle;
+import java.awt.Shape;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -18,6 +19,19 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import javax.inject.Inject;
+import net.runelite.api.Client;
+import net.runelite.api.DecorativeObject;
+import net.runelite.api.GameObject;
+import net.runelite.api.GroundObject;
+import net.runelite.api.Perspective;
+import net.runelite.api.Point;
+import net.runelite.api.Scene;
+import net.runelite.api.Tile;
+import net.runelite.api.TileObject;
+import net.runelite.api.WallObject;
+import net.runelite.api.WorldView;
+import net.runelite.api.coords.LocalPoint;
+import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPosition;
@@ -38,16 +52,18 @@ public class TelemetryDebugOverlay extends Overlay
 	private final TelemetryConfig config;
 	private final TelemetryPlugin plugin;
 	private final Gson gson;
+	private final Client client;
 	private OverlayDebugState cachedState;
 	private Path cachedPath;
 	private long lastReadMillis;
 
 	@Inject
-	TelemetryDebugOverlay(TelemetryConfig config, TelemetryPlugin plugin, Gson gson)
+	TelemetryDebugOverlay(TelemetryConfig config, TelemetryPlugin plugin, Gson gson, Client client)
 	{
 		this.config = config;
 		this.plugin = plugin;
 		this.gson = gson;
+		this.client = client;
 		setPosition(OverlayPosition.DYNAMIC);
 		setLayer(OverlayLayer.ABOVE_SCENE);
 		setPriority(OverlayPriority.LOW);
@@ -136,16 +152,7 @@ public class TelemetryDebugOverlay extends Overlay
 		}
 		else
 		{
-			int targetCount = state.summary == null ? 0 : safeInt(state.summary.targetsWritten, 0);
-			int hullCount = state.summary == null ? 0 : safeInt(state.summary.clickableHullTargets, 0);
-			int hullLimit = state.summary == null ? 0 : safeInt(state.summary.hullLimit, 0);
-			int geometryCap = state.summary == null ? 0 : safeInt(state.summary.compactLiveGeometryMaxRefs, 0);
-			line2 = "tick " + valueOrUnknown(state.latestTick) + " | " + valueOrUnknown(state.profile)
-					+ " | targets " + targetCount + " | hulls " + hullCount + "/" + targetCount
-					+ " | best " + boolToken(state.summary == null ? null : state.summary.bestHullAvailable)
-					+ " nearest " + boolToken(state.summary == null ? null : state.summary.nearestHullAvailable)
-					+ " cap " + geometryCap + "/" + hullLimit
-					+ " | " + config.telemetryDebugOverlayGeometryMode();
+			line2 = statusLine(state, config.telemetryDebugOverlayGeometryMode());
 		}
 		String line3 = null;
 		if (state != null && config.telemetryDebugOverlayShowCollisionWindow() && state.collisionWindow != null)
@@ -221,7 +228,7 @@ public class TelemetryDebugOverlay extends Overlay
 
 	private boolean shouldDrawTarget(OverlayTarget target, TelemetryDebugOverlayMode mode)
 	{
-		if (!Boolean.TRUE.equals(target.onScreen) && mode != TelemetryDebugOverlayMode.ALL)
+		if (!Boolean.TRUE.equals(target.onScreen) && mode != TelemetryDebugOverlayMode.ALL && !hasProjectionIdentity(target))
 		{
 			return false;
 		}
@@ -229,7 +236,7 @@ public class TelemetryDebugOverlay extends Overlay
 		{
 			return false;
 		}
-		if ("none".equals(fallbackGeometrySource(target)))
+		if ("none".equals(drawableGeometrySource(target)))
 		{
 			return false;
 		}
@@ -239,34 +246,44 @@ public class TelemetryDebugOverlay extends Overlay
 	private void drawTargetShape(Graphics2D graphics, OverlayTarget target, Color color)
 	{
 		TelemetryDebugOverlayGeometryMode geometryMode = config.telemetryDebugOverlayGeometryMode();
-		float strokeWidth = Boolean.TRUE.equals(target.isBest) || "selected_target".equals(target.markerType) ? 3.0f : 2.0f;
+		float strokeWidth = Boolean.TRUE.equals(target.isBest) || Boolean.TRUE.equals(target.selected) || "selected_target".equals(target.markerType) ? 3.0f : 2.0f;
 		graphics.setStroke(new BasicStroke(strokeWidth));
+		LiveProjection liveProjection = liveProjectionFor(target);
+		boolean liveShapeDrawn = false;
+		boolean storedGeometryDrawn = false;
+		boolean livePointDrawn = false;
 
-		if (geometryMode == TelemetryDebugOverlayGeometryMode.ALL_GEOMETRY_DEBUG)
+		if (liveProjection.shape != null)
+		{
+			drawShape(graphics, liveProjection.shape, color, true, strokeWidth);
+			liveShapeDrawn = true;
+		}
+
+		if (!liveShapeDrawn && geometryMode == TelemetryDebugOverlayGeometryMode.ALL_GEOMETRY_DEBUG)
 		{
 			if (config.telemetryDebugOverlayShowClickableHull())
 			{
-				drawPolygon(graphics, firstPolygon(target.clickableHull, target.clickboxPolygon), color, true, strokeWidth);
+				storedGeometryDrawn |= drawPolygon(graphics, firstPolygon(target.clickableHull, target.clickboxPolygon), color, true, strokeWidth);
 			}
-			drawPolygon(graphics, target.convexHull, color, false, 1.5f);
+			storedGeometryDrawn |= drawPolygon(graphics, target.convexHull, color, false, 1.5f);
 			if (config.telemetryDebugOverlayShowCanvasTilePolygon())
 			{
-				drawPolygon(graphics, target.canvasTilePolygon, color, false, 1.0f);
+				storedGeometryDrawn |= drawPolygon(graphics, target.canvasTilePolygon, color, false, 1.0f);
 			}
 		}
-		else
+		else if (!liveShapeDrawn)
 		{
-			drawPolygon(graphics, primaryPolygon(target, geometryMode), color, true, strokeWidth);
+			storedGeometryDrawn = drawPolygon(graphics, primaryPolygon(target, geometryMode), color, true, strokeWidth);
 		}
 
 		if (config.telemetryDebugOverlayShowCanvasTilePolygon()
 				&& geometryMode == TelemetryDebugOverlayGeometryMode.TILE_POLYGON
 				&& !hasPolygon(primaryPolygon(target, geometryMode)))
 		{
-			drawPolygon(graphics, target.canvasTilePolygon, color, false, 1.5f);
+			storedGeometryDrawn |= drawPolygon(graphics, target.canvasTilePolygon, color, false, 1.5f);
 		}
 
-		if (shouldDrawBounds(target, geometryMode))
+		if (!liveShapeDrawn && !storedGeometryDrawn && shouldDrawBounds(target, geometryMode))
 		{
 			graphics.setColor(color);
 			graphics.setStroke(new BasicStroke(strokeWidth));
@@ -275,15 +292,24 @@ public class TelemetryDebugOverlay extends Overlay
 					round(target.bounds.y),
 					Math.max(1, round(target.bounds.width)),
 					Math.max(1, round(target.bounds.height))));
+			storedGeometryDrawn = true;
 		}
-		if (config.telemetryDebugOverlayShowAimPoints() && target.aimPoint != null)
+		if (config.telemetryDebugOverlayShowAimPoints() && shouldPreferLiveProjectionPoint(target, liveProjection))
 		{
-			int x = round(target.aimPoint.canvasX);
-			int y = round(target.aimPoint.canvasY);
-			graphics.drawLine(x - 5, y, x + 5, y);
-			graphics.drawLine(x, y - 5, x, y + 5);
-			graphics.fillOval(x - 2, y - 2, 4, 4);
+			drawAimPoint(graphics, liveProjection.point.getX(), liveProjection.point.getY());
+			livePointDrawn = true;
 		}
+		if (config.telemetryDebugOverlayShowAimPoints() && !livePointDrawn && target.aimPoint != null)
+		{
+			drawAimPoint(graphics, round(target.aimPoint.canvasX), round(target.aimPoint.canvasY));
+		}
+	}
+
+	private void drawAimPoint(Graphics2D graphics, int x, int y)
+	{
+		graphics.drawLine(x - 5, y, x + 5, y);
+		graphics.drawLine(x, y - 5, x, y + 5);
+		graphics.fillOval(x - 2, y - 2, 4, 4);
 	}
 
 	private boolean shouldDrawBounds(OverlayTarget target, TelemetryDebugOverlayGeometryMode geometryMode)
@@ -368,6 +394,32 @@ public class TelemetryDebugOverlay extends Overlay
 			return "aimPoint";
 		}
 		return "none";
+	}
+
+	static String drawableGeometrySource(OverlayTarget target)
+	{
+		String fallback = fallbackGeometrySource(target);
+		if (!"none".equals(fallback))
+		{
+			return fallback;
+		}
+		if (hasProjectionIdentity(target))
+		{
+			return "live_tile_fallback";
+		}
+		return "none";
+	}
+
+	static boolean hasProjectionIdentity(OverlayTarget target)
+	{
+		if (target == null)
+		{
+			return false;
+		}
+		boolean hasWorld = target.worldX != null && target.worldY != null && target.plane != null;
+		boolean hasScene = target.sceneX != null && target.sceneY != null && target.plane != null;
+		boolean hasLocal = target.localX != null && target.localY != null && target.plane != null;
+		return hasWorld || hasScene || hasLocal;
 	}
 
 	private static boolean hasPolygon(Object value)
@@ -511,6 +563,23 @@ public class TelemetryDebugOverlay extends Overlay
 		return drawPolygon(graphics, polygonPoints(points), color, fill, strokeWidth);
 	}
 
+	private boolean drawShape(Graphics2D graphics, Shape shape, Color color, boolean fill, float strokeWidth)
+	{
+		if (shape == null)
+		{
+			return false;
+		}
+		if (fill)
+		{
+			graphics.setColor(withAlpha(color, 42));
+			graphics.fill(shape);
+		}
+		graphics.setStroke(new BasicStroke(strokeWidth));
+		graphics.setColor(color);
+		graphics.draw(shape);
+		return true;
+	}
+
 	private Color withAlpha(Color color, int alpha)
 	{
 		return new Color(color.getRed(), color.getGreen(), color.getBlue(), Math.max(0, Math.min(255, alpha)));
@@ -520,7 +589,13 @@ public class TelemetryDebugOverlay extends Overlay
 	{
 		int x = 0;
 		int y = 0;
-		if (target.aimPoint != null)
+		LiveProjection liveProjection = liveProjectionFor(target);
+		if (shouldPreferLiveProjectionPoint(target, liveProjection))
+		{
+			x = liveProjection.point.getX() + 7;
+			y = liveProjection.point.getY() - 7;
+		}
+		else if (target.aimPoint != null)
 		{
 			x = round(target.aimPoint.canvasX) + 7;
 			y = round(target.aimPoint.canvasY) - 7;
@@ -541,6 +616,336 @@ public class TelemetryDebugOverlay extends Overlay
 		graphics.fillRoundRect(x - 3, y - metrics.getAscent() - 3, metrics.stringWidth(label) + 8, metrics.getHeight() + 4, 5, 5);
 		graphics.setColor(color);
 		graphics.drawString(label, x, y);
+	}
+
+	private boolean shouldPreferLiveProjectionPoint(OverlayTarget target, LiveProjection liveProjection)
+	{
+		if (liveProjection == null || liveProjection.point == null)
+		{
+			return false;
+		}
+		if (liveProjection.shape != null)
+		{
+			return true;
+		}
+		if (liveProjection.projectionMode != null && liveProjection.projectionMode.startsWith("live_object"))
+		{
+			return true;
+		}
+		return "none".equals(fallbackGeometrySource(target)) && target.aimPoint == null && target.bounds == null;
+	}
+
+	private LiveProjection liveProjectionFor(OverlayTarget target)
+	{
+		LiveProjection objectProjection = liveObjectProjectionFor(target);
+		if (objectProjection != null)
+		{
+			return objectProjection;
+		}
+		Point tilePoint = liveTilePointForTarget(target);
+		if (tilePoint != null)
+		{
+			return new LiveProjection(tilePoint, null, "live_tile_fallback");
+		}
+		return new LiveProjection(null, null, target != null && target.aimPoint != null ? "last_known_aim" : "label_only");
+	}
+
+	private LiveProjection liveObjectProjectionFor(OverlayTarget target)
+	{
+		TileObject object = resolveTileObject(target);
+		if (object == null)
+		{
+			return null;
+		}
+
+		try
+		{
+			Shape clickbox = object.getClickbox();
+			if (clickbox != null)
+			{
+				return new LiveProjection(centerOf(clickbox), clickbox, "live_object_clickbox");
+			}
+		}
+		catch (RuntimeException ignored)
+		{
+			// Fall through to lighter geometry and stale-marker fallback.
+		}
+
+		try
+		{
+			Shape convexHull = tileObjectConvexHull(object);
+			if (convexHull != null)
+			{
+				return new LiveProjection(centerOf(convexHull), convexHull, "live_object_geometry");
+			}
+		}
+		catch (RuntimeException ignored)
+		{
+			// Fall through to object canvas location.
+		}
+
+		try
+		{
+			Point canvasLocation = object.getCanvasLocation();
+			if (canvasLocation != null)
+			{
+				return new LiveProjection(canvasLocation, null, "live_object_bounds");
+			}
+		}
+		catch (RuntimeException ignored)
+		{
+			// Fall through to tile projection.
+		}
+
+		return null;
+	}
+
+	private Point centerOf(Shape shape)
+	{
+		if (shape == null)
+		{
+			return null;
+		}
+		Rectangle bounds = shape.getBounds();
+		return new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+	}
+
+	private TileObject resolveTileObject(OverlayTarget target)
+	{
+		if (target == null || client == null || !"sceneObject".equals(target.targetType))
+		{
+			return null;
+		}
+		Tile tile = tileForTarget(target);
+		if (tile == null)
+		{
+			return null;
+		}
+
+		TileObject exact = firstMatchingObject(target, tile);
+		if (exact != null)
+		{
+			return exact;
+		}
+
+		return null;
+	}
+
+	private TileObject firstMatchingObject(OverlayTarget target, Tile tile)
+	{
+		TileObject wallObject = tile.getWallObject();
+		if (matchesTileObject(target, wallObject, "WALL_OBJECT"))
+		{
+			return wallObject;
+		}
+		TileObject groundObject = tile.getGroundObject();
+		if (matchesTileObject(target, groundObject, "GROUND_OBJECT"))
+		{
+			return groundObject;
+		}
+		TileObject decorativeObject = tile.getDecorativeObject();
+		if (matchesTileObject(target, decorativeObject, "DECORATIVE_OBJECT"))
+		{
+			return decorativeObject;
+		}
+		GameObject[] gameObjects = tile.getGameObjects();
+		if (gameObjects == null)
+		{
+			return null;
+		}
+		for (GameObject gameObject : gameObjects)
+		{
+			if (matchesTileObject(target, gameObject, "GAME_OBJECT"))
+			{
+				return gameObject;
+			}
+		}
+		return null;
+	}
+
+	private boolean matchesTileObject(OverlayTarget target, TileObject object, String kind)
+	{
+		if (object == null)
+		{
+			return false;
+		}
+		String key = sceneObjectKey(kind, object, orientationFor(kind, object));
+		if (target.objectKey != null && target.objectKey.equals(key))
+		{
+			return true;
+		}
+		if (target.id != null && object.getId() != round(target.id))
+		{
+			return false;
+		}
+		Long objectHash = objectHash(object);
+		if (target.hash != null && objectHash != null && objectHash.longValue() != Math.round(target.hash))
+		{
+			return false;
+		}
+		if (target.id != null || target.hash != null)
+		{
+			return true;
+		}
+		return target.objectKey == null || target.objectKey.isBlank();
+	}
+
+	private Tile tileForTarget(OverlayTarget target)
+	{
+		try
+		{
+			Scene scene = client.getScene();
+			if (scene == null || scene.getTiles() == null)
+			{
+				return null;
+			}
+			Tile[][][] tiles = scene.getTiles();
+			int plane = target.plane == null ? client.getPlane() : round(target.plane);
+			int sceneX;
+			int sceneY;
+			if (target.sceneX != null && target.sceneY != null)
+			{
+				sceneX = round(target.sceneX);
+				sceneY = round(target.sceneY);
+			}
+			else
+			{
+				LocalPoint localPoint = localPointForTarget(target);
+				if (localPoint == null)
+				{
+					return null;
+				}
+				sceneX = localPoint.getSceneX();
+				sceneY = localPoint.getSceneY();
+			}
+			if (plane < 0 || plane >= tiles.length || tiles[plane] == null || sceneX < 0 || sceneX >= tiles[plane].length)
+			{
+				return null;
+			}
+			Tile[] column = tiles[plane][sceneX];
+			if (column == null || sceneY < 0 || sceneY >= column.length)
+			{
+				return null;
+			}
+			return column[sceneY];
+		}
+		catch (RuntimeException ignored)
+		{
+			return null;
+		}
+	}
+
+	private Point liveTilePointForTarget(OverlayTarget target)
+	{
+		if (target == null || client == null)
+		{
+			return null;
+		}
+		try
+		{
+			LocalPoint localPoint = localPointForTarget(target);
+			if (localPoint == null)
+			{
+				return null;
+			}
+			int plane = target.plane == null ? client.getPlane() : round(target.plane);
+			return Perspective.localToCanvas(client, localPoint, plane);
+		}
+		catch (RuntimeException ignored)
+		{
+			return null;
+		}
+	}
+
+	private LocalPoint localPointForTarget(OverlayTarget target)
+	{
+		if (target == null || client == null)
+		{
+			return null;
+		}
+		if (target.worldX != null && target.worldY != null)
+		{
+			return LocalPoint.fromWorld(client, round(target.worldX), round(target.worldY));
+		}
+		if (target.localX != null && target.localY != null)
+		{
+			return new LocalPoint(round(target.localX), round(target.localY));
+		}
+		return null;
+	}
+
+	private Shape tileObjectConvexHull(TileObject object)
+	{
+		if (object instanceof GameObject)
+		{
+			return ((GameObject) object).getConvexHull();
+		}
+		if (object instanceof WallObject)
+		{
+			return ((WallObject) object).getConvexHull();
+		}
+		if (object instanceof DecorativeObject)
+		{
+			return ((DecorativeObject) object).getConvexHull();
+		}
+		if (object instanceof GroundObject)
+		{
+			return ((GroundObject) object).getConvexHull();
+		}
+		return null;
+	}
+
+	private int orientationFor(String kind, TileObject object)
+	{
+		if (object instanceof GameObject)
+		{
+			return ((GameObject) object).getOrientation();
+		}
+		if (object instanceof WallObject)
+		{
+			return ((WallObject) object).getOrientationA();
+		}
+		return -1;
+	}
+
+	private Long objectHash(TileObject object)
+	{
+		try
+		{
+			return object == null ? null : object.getHash();
+		}
+		catch (RuntimeException ignored)
+		{
+			return null;
+		}
+	}
+
+	private Point worldLocationToSceneLocation(TileObject object)
+	{
+		WorldPoint worldLocation = object.getWorldLocation();
+		WorldView worldView = object.getWorldView();
+		if (worldLocation == null || worldView == null)
+		{
+			return null;
+		}
+		return new Point(worldLocation.getX() - worldView.getBaseX(), worldLocation.getY() - worldView.getBaseY());
+	}
+
+	private String sceneObjectKey(String kind, TileObject object, int orientation)
+	{
+		if (object == null)
+		{
+			return kind + ":missing";
+		}
+		WorldPoint worldLocation = object.getWorldLocation();
+		Point sceneLocation = worldLocationToSceneLocation(object);
+		Long hash = objectHash(object);
+		int plane = worldLocation == null ? object.getPlane() : worldLocation.getPlane();
+		int worldX = worldLocation == null ? -1 : worldLocation.getX();
+		int worldY = worldLocation == null ? -1 : worldLocation.getY();
+		int sceneX = sceneLocation == null ? -1 : sceneLocation.getX();
+		int sceneY = sceneLocation == null ? -1 : sceneLocation.getY();
+		return plane + ":" + worldX + ":" + worldY + ":" + sceneX + ":" + sceneY + ":" + kind + ":" + object.getId() + ":" + (hash == null ? "nohash" : hash) + ":" + orientation;
 	}
 
 	private String formatLabel(OverlayTarget target)
@@ -578,6 +983,10 @@ public class TelemetryDebugOverlay extends Overlay
 		{
 			return RED;
 		}
+		if (Boolean.TRUE.equals(target.selected) || "selected_target".equals(target.markerType))
+		{
+			return GREEN;
+		}
 		if ("backup_candidate".equals(target.markerType))
 		{
 			return YELLOW;
@@ -601,6 +1010,89 @@ public class TelemetryDebugOverlay extends Overlay
 			return state.markers;
 		}
 		return state.targets == null ? Collections.emptyList() : state.targets;
+	}
+
+	static String statusLine(OverlayDebugState state, TelemetryDebugOverlayGeometryMode geometryMode)
+	{
+		if (state == null)
+		{
+			return "Waiting for overlay_debug_state.json";
+		}
+		List<OverlayTarget> intentMarkers = intentMarkers(state);
+		boolean intentActive = !intentMarkers.isEmpty();
+		int targetCount = state.summary == null ? (intentActive ? intentMarkers.size() : 0) : safeInt(state.summary.targetsWritten, intentActive ? intentMarkers.size() : 0);
+		int hullCount = state.summary == null ? countClickableHullTargets(intentMarkers) : safeInt(state.summary.clickableHullTargets, countClickableHullTargets(intentMarkers));
+		int hullLimit = state.summary == null ? 0 : safeInt(state.summary.hullLimit, 0);
+		int geometryCap = state.summary == null ? 0 : safeInt(state.summary.compactLiveGeometryMaxRefs, 0);
+		StringBuilder line = new StringBuilder();
+		line.append("tick ").append(valueOrUnknown(state.latestTick))
+				.append(" | ").append(valueOrUnknown(state.profile))
+				.append(" | targets ").append(targetCount);
+		if (intentActive)
+		{
+			line.append(" | selected ").append(boolToken(selectedMarkerCount(intentMarkers) > 0))
+					.append(" | backups ").append(backupMarkerCount(intentMarkers))
+					.append(" | hulls ").append(hullCount).append("/").append(targetCount)
+					.append(" | legacy best ").append(boolToken(state.summary == null ? null : state.summary.bestHullAvailable))
+					.append(" legacy nearest ").append(boolToken(state.summary == null ? null : state.summary.nearestHullAvailable));
+		}
+		else
+		{
+			line.append(" | hulls ").append(hullCount).append("/").append(targetCount)
+					.append(" | best ").append(boolToken(state.summary == null ? null : state.summary.bestHullAvailable))
+					.append(" nearest ").append(boolToken(state.summary == null ? null : state.summary.nearestHullAvailable));
+		}
+		line.append(" cap ").append(geometryCap).append("/").append(hullLimit)
+				.append(" | ").append(geometryMode);
+		return line.toString();
+	}
+
+	private static List<OverlayTarget> intentMarkers(OverlayDebugState state)
+	{
+		if (state == null || state.intentState == null || state.intentState.markers == null)
+		{
+			return Collections.emptyList();
+		}
+		return state.intentState.markers;
+	}
+
+	private static int selectedMarkerCount(List<OverlayTarget> markers)
+	{
+		int count = 0;
+		for (OverlayTarget marker : markers)
+		{
+			if (marker != null && ("selected_target".equals(marker.markerType) || Boolean.TRUE.equals(marker.selected)))
+			{
+				count++;
+			}
+		}
+		return count;
+	}
+
+	private static int backupMarkerCount(List<OverlayTarget> markers)
+	{
+		int count = 0;
+		for (OverlayTarget marker : markers)
+		{
+			if (marker != null && "backup_candidate".equals(marker.markerType))
+			{
+				count++;
+			}
+		}
+		return count;
+	}
+
+	private static int countClickableHullTargets(List<OverlayTarget> markers)
+	{
+		int count = 0;
+		for (OverlayTarget marker : markers)
+		{
+			if (marker != null && (hasPolygon(marker.clickableHull) || hasPolygon(marker.clickboxPolygon)))
+			{
+				count++;
+			}
+		}
+		return count;
 	}
 
 	static Color colorFor(String reachability, String live)
@@ -660,7 +1152,7 @@ public class TelemetryDebugOverlay extends Overlay
 		return value;
 	}
 
-	private int safeInt(Double value, int fallback)
+	private static int safeInt(Double value, int fallback)
 	{
 		return value == null ? fallback : value.intValue();
 	}
@@ -683,12 +1175,12 @@ public class TelemetryDebugOverlay extends Overlay
 		return String.format(Locale.ROOT, "%.1f", value);
 	}
 
-	private String valueOrUnknown(Object value)
+	private static String valueOrUnknown(Object value)
 	{
 		return value == null ? "unknown" : String.valueOf(value);
 	}
 
-	private String boolToken(Boolean value)
+	private static String boolToken(Boolean value)
 	{
 		if (value == null)
 		{
@@ -755,19 +1247,32 @@ public class TelemetryDebugOverlay extends Overlay
 
 	static class OverlayTarget
 	{
+		String markerId;
+		String markerVersion;
+		String targetKey;
 		String classId;
 		String markerType;
 		String label;
 		String reason;
 		String source;
 		String targetType;
+		Boolean selected;
+		String role;
+		Double priority;
 		String name;
 		Double id;
+		Double hash;
+		String objectKey;
+		String kind;
+		String layer;
 		Double worldX;
 		Double worldY;
 		Double plane;
 		Double sceneX;
 		Double sceneY;
+		Double localX;
+		Double localY;
+		Double tick;
 		Double distanceTiles;
 		Boolean onScreen;
 		Boolean geometryAvailable;
@@ -785,6 +1290,9 @@ public class TelemetryDebugOverlay extends Overlay
 		String overlayLabel;
 		String overlayColor;
 		String geometrySource;
+		String projectionMode;
+		Boolean projectionStale;
+		String projectionFallbackReason;
 		Boolean clickableHullAvailable;
 		String clickableHullMissingReason;
 		LabelParts labelParts;
@@ -794,6 +1302,20 @@ public class TelemetryDebugOverlay extends Overlay
 		Object clickboxPolygon;
 		Object convexHull;
 		Object canvasTilePolygon;
+	}
+
+	private static class LiveProjection
+	{
+		private final Point point;
+		private final Shape shape;
+		private final String projectionMode;
+
+		private LiveProjection(Point point, Shape shape, String projectionMode)
+		{
+			this.point = point;
+			this.shape = shape;
+			this.projectionMode = projectionMode;
+		}
 	}
 
 	static class AimPoint

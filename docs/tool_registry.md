@@ -1,9 +1,11 @@
 # Tool Registry
 
-The daily workflow has one main lane now:
+The daily workflow has one stable lane and one explicit experimental no-file
+lane:
 
 ```text
 RuneLite plugin -> compact-packets -> live_core_daemon.py -> in-memory context -> brain intent overlay
+RuneLite plugin -> PluginLiveCache / PluginSnapshotEndpoint -> live_core_daemon.py -> in-memory context -> brain intent overlay
 ```
 
 The machine-readable registry lives at:
@@ -23,9 +25,9 @@ These are the only tools that belong in the main daily view.
 | Tool | Purpose | Command |
 | --- | --- | --- |
 | `live_control_panel.py` | Simple launcher and monitor. | `python telemetry-viewer\live_control_panel.py` |
-| `live_core_daemon.py` | Streamlined daily daemon: compact-packets input, in-memory context, writes off by default, optional brain intent overlay state. | `python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark` |
-| `live_config_doctor.py` | Preset-aware PASS/WARN/FAIL check for daily settings. | `python telemetry-viewer\live_config_doctor.py --latest-session --mode daily --fix-suggestions` |
-| `run_daily_gauntlet.py` | Strict daily sanity check for daemon health, process conflicts, progress invariants, and unsafe fields. | `python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --strict --check-processes` |
+| `live_core_daemon.py` | Streamlined daily daemon: stable compact-packets input or explicit experimental snapshot no-file input, in-memory context, writes off by default, optional brain intent overlay state. | `python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark` |
+| `live_config_doctor.py` | Preset-aware PASS/WARN/FAIL check for daily settings. | `python telemetry-viewer\live_config_doctor.py --latest-session --mode daily --fix-suggestions` or `--mode snapshot_no_file` |
+| `run_daily_gauntlet.py` | Strict daily sanity check for daemon health, process conflicts, progress invariants, and unsafe fields. | `python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode compact-packets --strict --check-processes` |
 
 Daily support modules are hidden from the UI but remain part of the daily lane:
 
@@ -89,12 +91,15 @@ button set.
 These paths are intentionally hidden from daily mode and must be labelled
 `EXPERIMENTAL` in the UI:
 
-- plugin-snapshot input mode and `diagnose_plugin_snapshot.py`
+- Daily Snapshot No-File / plugin-snapshot input mode and
+  `diagnose_plugin_snapshot.py`
 - compact-stream transport testing
 
-`compact-packets` remains the daily stable source/fallback. Plugin-snapshot and
-compact-stream should only be selected explicitly for transport or comparison
-testing.
+`compact-packets` remains the daily stable source/fallback. Daily Snapshot
+No-File is experimental and must be selected explicitly; it expects the compact
+NDJSON file mirror to be disabled and the plugin snapshot endpoint to pass
+health checks. Compact-stream should only be selected explicitly for transport
+or comparison testing.
 
 ## Deprecated
 

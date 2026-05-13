@@ -111,6 +111,43 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertFalse(args.write_debug_live_files)
         self.assertEqual(args.overlay_mode, "intent")
 
+    def test_snapshot_no_file_mode_selects_plugin_snapshot_without_compact_file_requirement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            args = make_args(session, "--daily-mode", "snapshot-no-files")
+
+        self.assertEqual(args.daily_mode, "snapshot-no-files")
+        self.assertEqual(args.input_source, "plugin-snapshot")
+        self.assertEqual(args.plugin_snapshot_tier, "hot")
+        processor_options = daemon.processor_args(args, live.PLUGIN_SNAPSHOT_SOURCE, suppress_output_writes=True)
+        self.assertFalse(processor_options.require_compact_packets)
+        self.assertEqual(processor_options.input_source, "plugin-snapshot")
+
+    def test_snapshot_no_file_status_marks_compact_files_not_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = synthetic_snapshot(session)
+            args = make_args(session, "--daily-mode", "snapshot-no-files")
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                core = daemon.LiveCoreDaemon(session, args)
+                result = core.poll_once()
+
+        status = result["status"]
+        self.assertEqual(status["inputSourceActive"], "plugin-snapshot")
+        self.assertTrue(status["noFileDaily"])
+        self.assertFalse(status["compactPacketFilesRequired"])
+        self.assertFalse(status["debugMirrorEnabled"])
+        self.assertFalse((session / "live_packets").exists())
+
+    def test_snapshot_no_file_mode_does_not_silently_fallback_to_compact_packets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            args = make_args(session, "--daily-mode", "snapshot-no-files")
+            core = daemon.LiveCoreDaemon(session, args)
+
+        self.assertEqual(core.initial_source(), live.PLUGIN_SNAPSHOT_SOURCE)
+        self.assertEqual(args.plugin_snapshot_fallback, "none")
+
     def test_processor_args_centralizes_max_draw_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
@@ -194,6 +231,8 @@ class LiveCoreDaemonTest(unittest.TestCase):
             self.assertFalse((live_dir / "live_status.json").exists())
             self.assertFalse((live_dir / "live_candidates.jsonl").exists())
             self.assertFalse((live_dir / "overlay_debug_state.json").exists())
+            self.assertFalse((live_dir / "intent_stabilizer_state.json").exists())
+            self.assertFalse((live_dir / "intent_history.jsonl").exists())
 
     def test_overlay_state_is_written_only_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -208,6 +247,8 @@ class LiveCoreDaemonTest(unittest.TestCase):
             self.assertTrue(overlay_path.exists())
             overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
             self.assertEqual(overlay["schema"], "telemetry_overlay_debug_state.v1")
+            self.assertFalse((overlay_path.parent / "intent_stabilizer_state.json").exists())
+            self.assertFalse((overlay_path.parent / "intent_history.jsonl").exists())
 
     def test_intent_overlay_contains_selected_tree_and_limited_backups(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -237,10 +278,230 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(overlay["summary"]["overlayMode"], "intent")
         self.assertEqual(markers[0]["markerType"], "selected_target")
         self.assertEqual(markers[0]["label"], "Target: Oak tree")
+        self.assertTrue(markers[0]["selected"])
+        self.assertGreater(markers[0]["priority"], 30)
+        for marker in markers[1:]:
+            if marker["markerType"] == "backup_candidate":
+                self.assertFalse(marker["selected"])
+                self.assertLess(marker["priority"], markers[0]["priority"])
         self.assertEqual(len([marker for marker in markers if marker["markerType"] == "backup_candidate"]), 2)
         self.assertLess(len(markers), overlay["summary"]["candidateCount"])
         self.assertEqual(overlay["summary"]["intentMarkerCount"], len(markers))
         self.assertGreater(overlay["summary"]["candidateMarkersSuppressed"], 0)
+
+    def test_intent_overlay_uses_stabilized_target_not_raw_flicker(self):
+        def candidate(key: str, score: int, distance: int) -> dict:
+            return {
+                "objectKey": key,
+                "targetName": f"Tree {key}",
+                "targetType": "sceneObject",
+                "classId": "tree",
+                "id": 1278,
+                "hash": score,
+                "worldX": 3200 + distance,
+                "worldY": 3200,
+                "plane": 0,
+                "sceneX": 10 + distance,
+                "sceneY": 10,
+                "qualityScore": score,
+                "distanceTiles": distance,
+                "targetLiveState": "live_assumed",
+                "navigation": {"directReachability": "reachable"},
+                "aimPoint": {"canvasX": 120 + distance, "canvasY": 140},
+                "lastSeenTick": 1,
+                "present": True,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            args = make_args(session, "--brain-task", "woodcutting", "--overlay-backup-candidates", "1")
+            first = candidate("oak-a", 100, 3)
+            jitter = candidate("oak-b", 101, 2)
+            state = daemon.intent_stabilizer.IntentState()
+            daemon.intent_stabilizer.choose_stable_intent(
+                state,
+                [first, jitter],
+                {
+                    "activeTask": "woodcutting",
+                    "activeIntent": "target_available",
+                    "latestTick": 1,
+                    "rawBestTarget": first,
+                    "profile": "woodcutting",
+                },
+            )
+            stable = daemon.intent_stabilizer.choose_stable_intent(
+                state,
+                [jitter, first],
+                {
+                    "activeTask": "woodcutting",
+                    "activeIntent": "target_available",
+                    "latestTick": 2,
+                    "rawBestTarget": jitter,
+                    "profile": "woodcutting",
+                },
+            )
+            overlay = daemon.build_intent_overlay_state(
+                {"status": {"lastProcessedTick": 2}, "candidates": [jitter, first]},
+                {"task": "woodcutting", "phase": "target_available", "confidence": 0.8},
+                args,
+                daemon.utc_now(),
+                stable,
+            )
+
+        self.assertEqual(stable.rawBestTargetKey, "oak-b")
+        self.assertEqual(stable.selectedTargetKey, "oak-a")
+        self.assertEqual(overlay["markers"][0]["markerType"], "selected_target")
+        self.assertEqual(overlay["markers"][0]["objectKey"], "oak-a")
+        self.assertEqual(overlay["markers"][0]["switchReason"], "retained_current_target")
+
+    def test_selected_duplicate_backup_is_merged_into_selected_marker(self):
+        selected_raw = {
+            "targetName": "Tree",
+            "targetType": "sceneObject",
+            "classId": "tree",
+            "id": 1278,
+            "hash": 1340218036,
+            "worldX": 3156,
+            "worldY": 3237,
+            "plane": 0,
+            "sceneX": 52,
+            "sceneY": 53,
+            "qualityScore": 100,
+            "distanceTiles": 2,
+            "aimPoint": {"canvasX": 200, "canvasY": 220},
+            "navigation": {"directReachability": "reachable"},
+            "targetLiveState": "live_assumed",
+        }
+        richer_duplicate = dict(
+            selected_raw,
+            objectKey="0:3156:3237:52:53:GAME_OBJECT:1278:1340218036:0",
+            kind="GAME_OBJECT",
+            layer="ground",
+            clickableHull=[[10, 10], [20, 10], [20, 20]],
+            clickboxPolygon=[[10, 10], [20, 10], [20, 20]],
+            convexHull=[[9, 9], [21, 9], [21, 21]],
+            canvasTilePolygon=[[8, 8], [22, 8], [22, 22]],
+            geometrySource="clickbox",
+        )
+        backup = dict(
+            selected_raw,
+            objectKey="0:3154:3240:50:56:GAME_OBJECT:1278:234:0",
+            hash=234,
+            worldX=3154,
+            worldY=3240,
+            sceneX=50,
+            sceneY=56,
+            clickableHull=[[30, 30], [40, 30], [40, 40]],
+        )
+        state = daemon.intent_stabilizer.IntentState()
+        stable = daemon.intent_stabilizer.choose_stable_intent(
+            state,
+            [richer_duplicate, backup],
+            {
+                "activeTask": "woodcutting",
+                "activeIntent": "target_available",
+                "latestTick": 344,
+                "rawBestTarget": selected_raw,
+                "profile": "woodcutting",
+            },
+        )
+        args = make_args(Path("session"), "--brain-task", "woodcutting", "--overlay-backup-candidates", "2")
+        overlay = daemon.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 344}, "candidates": [richer_duplicate, backup]},
+            {"task": "woodcutting", "phase": "target_available", "confidence": 0.8},
+            args,
+            daemon.utc_now(),
+            stable,
+        )
+
+        selected = overlay["markers"][0]
+        backups = [marker for marker in overlay["markers"] if marker["markerType"] == "backup_candidate"]
+        self.assertEqual(selected["markerType"], "selected_target")
+        self.assertTrue(selected["selected"])
+        self.assertEqual(selected["role"], "selected")
+        self.assertTrue(selected["label"].startswith("Target:"))
+        self.assertEqual(selected["objectKey"], "0:3156:3237:52:53:GAME_OBJECT:1278:1340218036:0")
+        self.assertEqual(selected["kind"], "GAME_OBJECT")
+        self.assertIn("clickableHull", selected)
+        self.assertIn("clickboxPolygon", selected)
+        self.assertTrue(selected["clickableHullAvailable"])
+        self.assertEqual(selected["geometrySource"], "clickableHull")
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0]["role"], "backup")
+        self.assertFalse(backups[0]["selected"])
+        self.assertTrue(backups[0]["label"].startswith("Backup"))
+        self.assertNotEqual(backups[0].get("objectKey"), selected.get("objectKey"))
+
+    def test_intent_overlay_prefers_previous_backups_when_selected_is_stable(self):
+        def candidate(key: str, score: int, distance: int) -> dict:
+            return {
+                "objectKey": key,
+                "targetName": f"Tree {key}",
+                "targetType": "sceneObject",
+                "classId": "tree",
+                "id": 1278,
+                "hash": score,
+                "worldX": 3200 + distance,
+                "worldY": 3200,
+                "plane": 0,
+                "sceneX": 10 + distance,
+                "sceneY": 10,
+                "qualityScore": score,
+                "distanceTiles": distance,
+                "targetLiveState": "live_assumed",
+                "navigation": {"directReachability": "reachable"},
+                "aimPoint": {"canvasX": 120 + distance, "canvasY": 140},
+                "lastSeenTick": 1,
+                "present": True,
+            }
+
+        args = make_args(Path("session"), "--brain-task", "woodcutting", "--overlay-backup-candidates", "2")
+        state = daemon.intent_stabilizer.IntentState()
+        selected = candidate("oak-selected", 100, 2)
+        backup_a = candidate("oak-backup-a", 95, 3)
+        backup_b = candidate("oak-backup-b", 94, 4)
+        backup_c = candidate("oak-backup-c", 99, 1)
+
+        first = daemon.intent_stabilizer.choose_stable_intent(
+            state,
+            [selected, backup_a, backup_b],
+            {
+                "activeTask": "woodcutting",
+                "activeIntent": "target_available",
+                "latestTick": 1,
+                "rawBestTarget": selected,
+                "profile": "woodcutting",
+            },
+        )
+        daemon.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 1}, "candidates": [selected, backup_a, backup_b]},
+            {"task": "woodcutting", "phase": "target_available", "confidence": 0.8},
+            args,
+            daemon.utc_now(),
+            first,
+        )
+        second = daemon.intent_stabilizer.choose_stable_intent(
+            state,
+            [selected, backup_c, backup_a, backup_b],
+            {
+                "activeTask": "woodcutting",
+                "activeIntent": "target_available",
+                "latestTick": 2,
+                "rawBestTarget": selected,
+                "profile": "woodcutting",
+            },
+        )
+        overlay = daemon.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 2}, "candidates": [selected, backup_c, backup_a, backup_b]},
+            {"task": "woodcutting", "phase": "target_available", "confidence": 0.8},
+            args,
+            daemon.utc_now(),
+            second,
+        )
+
+        backups = [marker for marker in overlay["markers"] if marker["markerType"] == "backup_candidate"]
+        self.assertEqual([marker["objectKey"] for marker in backups], ["oak-backup-a", "oak-backup-b"])
+        self.assertNotIn("oak-selected", [marker["objectKey"] for marker in backups])
 
     def test_intent_overlay_omits_banned_action_input_menu_fields(self):
         banned = {"action", "click", "mouse", "keyboard", "menu", "invoke", "execute"}
@@ -296,12 +557,18 @@ class LiveCoreDaemonTest(unittest.TestCase):
             "classId": "banker",
             "targetType": "npc",
             "id": 123,
+            "hash": 456,
+            "objectKey": "banker-1",
             "worldX": 3200,
             "worldY": 3201,
             "plane": 0,
             "sceneX": 10,
             "sceneY": 11,
+            "localX": 6400,
+            "localY": 6408,
             "aimPoint": {"canvasX": 120, "canvasY": 130},
+            "geometrySource": "live_object",
+            "lastSeenTick": 42,
             "navigation": {"directReachability": "reachable"},
             "targetLiveState": "live_assumed",
             "qualityTier": "primary",
@@ -313,6 +580,17 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(marker["markerType"], "selected_target")
         self.assertEqual(marker["aimPoint"], {"canvasX": 120, "canvasY": 130})
         self.assertEqual(marker["reachability"], "reachable")
+        self.assertEqual(marker["objectKey"], "banker-1")
+        self.assertEqual(marker["hash"], 456)
+        self.assertEqual(marker["worldX"], 3200)
+        self.assertEqual(marker["sceneX"], 10)
+        self.assertEqual(marker["localX"], 6400)
+        self.assertEqual(marker["geometrySource"], "live_object")
+        self.assertEqual(marker["projectionMode"], "live_tile_fallback")
+        self.assertFalse(marker["projectionStale"])
+        self.assertEqual(marker["tick"], 42)
+        self.assertEqual(marker["markerVersion"], "overlay_intent_marker.v1")
+        self.assertTrue(marker["markerId"])
 
     def test_candidate_overlay_mode_keeps_debug_candidate_targets(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -467,6 +745,14 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(status["brainPhase"], core.state.brain_decision["phase"])
         self.assertIsInstance(status["brainProgress"], dict)
         self.assertIn("baselineEstablished", status["brainProgress"])
+        self.assertIn("intentStabilizerMillis", status)
+        self.assertIn("intentCandidatesConsidered", status)
+        self.assertIn("intentSwitchReason", status)
+        self.assertIn("intentCandidateWasRetained", status)
+        self.assertIn("intentCandidateWasSwitched", status)
+        self.assertIn("intentRetainedDueToGrace", status)
+        self.assertIn("intentCurrentMissingTicks", status)
+        self.assertIn("intentSwitchAuditTail", status)
 
     def test_missing_inventory_poll_retains_previous_progress(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -98,6 +98,47 @@ class RunDailyGauntletTest(unittest.TestCase):
 
         self.assertTrue(any("compact-packets" in failure for failure in result["failures"]))
 
+    def test_snapshot_no_file_allows_plugin_snapshot_and_no_compact_files(self):
+        result = gauntlet.evaluate_daemon_payloads(
+            {"status": "PASS"},
+            {
+                "liveCoreDaemonActive": True,
+                "inputSourceActive": "plugin-snapshot",
+                "dailyMode": "snapshot-no-files",
+                "noFileDaily": True,
+                "compactPacketFilesRequired": False,
+                "compactPacketFilesWriting": False,
+                "pluginSnapshotHealth": {"status": "PASS"},
+            },
+            daily_mode="snapshot-no-files",
+        )
+
+        self.assertEqual(result["failures"], [])
+
+    def test_snapshot_no_file_fails_if_compact_files_are_required_or_writing(self):
+        result = gauntlet.evaluate_daemon_payloads(
+            {"status": "PASS"},
+            {
+                "liveCoreDaemonActive": True,
+                "inputSourceActive": "plugin-snapshot",
+                "dailyMode": "snapshot-no-files",
+                "noFileDaily": True,
+                "compactPacketFilesRequired": True,
+                "compactPacketFilesWriting": True,
+            },
+            daily_mode="snapshot-no-files",
+        )
+
+        self.assertTrue(any("compact packet files" in failure for failure in result["failures"]))
+
+    def test_snapshot_no_file_detects_live_packet_growth(self):
+        message = gauntlet.live_packet_growth_failure(
+            {"count": 1, "bytes": 100},
+            {"count": 1, "bytes": 150},
+        )
+
+        self.assertEqual(message, "compact packet files are growing in snapshot no-file daily")
+
     def test_raw_recording_flags_fail_daily(self):
         result = gauntlet.evaluate_daemon_payloads(
             {"status": "PASS"},

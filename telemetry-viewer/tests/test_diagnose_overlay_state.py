@@ -30,6 +30,7 @@ def args(**overrides):
         "show_blocked": False,
         "show_reachable": False,
         "show_unknown": False,
+        "intent": False,
         "top": 10,
     }
     values.update(overrides)
@@ -144,6 +145,160 @@ class DiagnoseOverlayStateTest(unittest.TestCase):
             self.assertEqual(report["overlayGeometrySummary"]["firstMissingHullReason"], "clickbox polygon not present")
             self.assertEqual(report["rows"][0]["overlayGeometrySource"], "bounds")
             self.assertEqual(report["rows"][0]["clickableHullMissingReason"], "clickbox polygon not present")
+
+    def test_intent_mode_reports_selected_and_backups_without_legacy_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            live_dir = session / "interaction_geometry" / "live"
+            write_json(
+                live_dir / "overlay_debug_state.json",
+                {
+                    "schema": "telemetry_overlay_debug_state.v1",
+                    "latestTick": 10,
+                    "summary": {"rawBestTarget": "oak-b", "stabilizedIntentTarget": "oak-a"},
+                    "intentState": {
+                        "schema": "overlay_intent_state.v1",
+                        "markers": [
+                            {
+                                "markerType": "selected_target",
+                                "selected": True,
+                                "label": "Target: Oak tree",
+                                "objectKey": "oak-a",
+                                "targetKey": "oak-a",
+                                "id": 10820,
+                                "worldX": 3200,
+                                "worldY": 3201,
+                                "plane": 0,
+                                "sceneX": 10,
+                                "sceneY": 11,
+                                "projectionMode": "live_object_pending",
+                                "clickableHull": [[10, 10], [20, 10], [20, 20]],
+                            },
+                            {"markerType": "backup_candidate", "selected": False, "label": "Backup", "objectKey": "oak-b"},
+                        ],
+                    },
+                },
+            )
+
+            report = diagnose.build_report(session, args(intent=True))
+
+            self.assertEqual(report["warnings"], [])
+            self.assertEqual(report["intentSummary"]["selectedTargetCount"], 1)
+            self.assertEqual(report["intentSummary"]["backupCount"], 1)
+            self.assertEqual(report["intentSummary"]["selectedObjectKey"], "oak-a")
+            self.assertEqual(report["intentSummary"]["selectedProjectionMode"], "live_object_pending")
+            self.assertTrue(report["intentSummary"]["selectedClickboxAvailable"])
+            self.assertEqual(report["rows"][0]["markerType"], "selected_target")
+
+    def test_intent_mode_detects_duplicate_backup_with_missing_selected_geometry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            live_dir = session / "interaction_geometry" / "live"
+            write_json(
+                live_dir / "overlay_debug_state.json",
+                {
+                    "schema": "telemetry_overlay_debug_state.v1",
+                    "latestTick": 344,
+                    "intentState": {
+                        "schema": "overlay_intent_state.v1",
+                        "markers": [
+                            {
+                                "markerType": "selected_target",
+                                "selected": True,
+                                "label": "Target: Tree",
+                                "hash": 1340218036,
+                                "id": 1278,
+                                "worldX": 3156,
+                                "worldY": 3237,
+                                "plane": 0,
+                                "sceneX": 52,
+                                "sceneY": 53,
+                                "projectionMode": "live_object_pending",
+                                "aimPoint": {"canvasX": 200, "canvasY": 220},
+                            },
+                            {
+                                "markerType": "backup_candidate",
+                                "selected": False,
+                                "label": "Backup",
+                                "objectKey": "rich-tree",
+                                "hash": 1340218036,
+                                "id": 1278,
+                                "worldX": 3156,
+                                "worldY": 3237,
+                                "plane": 0,
+                                "sceneX": 52,
+                                "sceneY": 53,
+                                "clickableHull": [[10, 10], [20, 10], [20, 20]],
+                            },
+                        ],
+                    },
+                },
+            )
+
+            report = diagnose.build_report(session, args(intent=True))
+
+            self.assertTrue(report["intentSummary"]["duplicateSelectedInBackups"])
+            self.assertTrue(report["intentSummary"]["selectedGeometryMissingButDuplicateHasGeometry"])
+            self.assertIn("marker merge failed", " ".join(report["conclusions"]))
+
+    def test_intent_mode_reports_switch_audit_and_detects_short_flicker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            live_dir = session / "interaction_geometry" / "live"
+            write_json(
+                live_dir / "overlay_debug_state.json",
+                {
+                    "schema": "telemetry_overlay_debug_state.v1",
+                    "latestTick": 12,
+                    "summary": {
+                        "rawBestTarget": "oak-b",
+                        "stabilizedIntentTarget": "oak-a",
+                        "intentStableForTicks": 4,
+                        "intentCurrentMissingTicks": 1,
+                    },
+                    "intentState": {
+                        "schema": "overlay_intent_state.v1",
+                        "selectedTargetKey": "oak-a",
+                        "rawBestTargetKey": "oak-b",
+                        "stableForTicks": 4,
+                        "missingForTicks": 1,
+                        "retainedDueToGrace": True,
+                        "switchReason": "retained_current_target_transient_missing",
+                        "switchAuditTail": [
+                            {"tick": 10, "previousTargetKey": "oak-a", "rawBestTargetKey": "oak-a", "selectedTargetKey": "oak-a", "switchReason": "retained_current_target"},
+                            {"tick": 11, "previousTargetKey": "oak-a", "rawBestTargetKey": "oak-b", "selectedTargetKey": "oak-b", "switchReason": "better_candidate_persisted"},
+                            {"tick": 12, "previousTargetKey": "oak-b", "rawBestTargetKey": "oak-a", "selectedTargetKey": "oak-a", "switchReason": "better_candidate_persisted"},
+                        ],
+                        "markers": [
+                            {
+                                "markerType": "selected_target",
+                                "selected": True,
+                                "label": "Target: Oak tree",
+                                "objectKey": "oak-a",
+                                "targetKey": "oak-a",
+                                "id": 10820,
+                                "worldX": 3200,
+                                "worldY": 3201,
+                                "plane": 0,
+                                "sceneX": 10,
+                                "sceneY": 11,
+                                "projectionMode": "live_object_pending",
+                                "clickableHull": [[10, 10], [20, 10], [20, 20]],
+                            }
+                        ],
+                    },
+                },
+            )
+
+            report = diagnose.build_report(session, args(intent=True))
+
+            self.assertEqual(report["intentSummary"]["rawBestTarget"], "oak-b")
+            self.assertEqual(report["intentSummary"]["stabilizedTarget"], "oak-a")
+            self.assertEqual(report["intentSummary"]["selectedStableForTicks"], 4)
+            self.assertEqual(report["intentSummary"]["selectedMissingForTicks"], 1)
+            self.assertTrue(report["intentSummary"]["selectedRetainedDueToGrace"])
+            self.assertTrue(report["intentSummary"]["intentFlickerDetected"])
+            self.assertIn("intent flicker detected", " ".join(report["conclusions"]))
 
 
 if __name__ == "__main__":

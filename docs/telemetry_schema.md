@@ -205,8 +205,8 @@ mutate game state.
 
 Preset config keys:
 
-- `workflowPreset`: `DAILY_LIVE`, `VISUAL_QA`, `DEBUG_AUDIT`,
-  `PLUGIN_SNAPSHOT_EXPERIMENTAL`, or `CUSTOM`
+- `workflowPreset`: `DAILY_LIVE`, `DAILY_SNAPSHOT_NO_FILE`, `VISUAL_QA`,
+  `DEBUG_AUDIT`, `PLUGIN_SNAPSHOT_EXPERIMENTAL`, or `CUSTOM`
 - `presetPreviewOnly`: preview selected preset without saving changes
 - `applyWorkflowPreset`: toggle trigger that applies the selected preset and
   resets to false
@@ -254,9 +254,10 @@ changed.
 ## Plugin Snapshot Bridge
 
 The plugin snapshot bridge is the next read-only bridge shape. It is disabled
-by default and is not the normal live path yet; compact packet files remain the
-stable bridge until `plugin-snapshot-vs-file` comparison passes in the local
-setup.
+by default and is not the stable daily path; compact packet files remain the
+stable bridge. The explicit Daily Snapshot No-File path enables the endpoint and
+uses `live_core_daemon.py --daily-mode snapshot-no-files` while disabling the
+compact packet file mirror.
 
 Java now keeps a small in-memory `PluginLiveCache` of the latest compact packet
 payload by packet type. The cache is updated from the same compact enqueue path
@@ -1230,8 +1231,8 @@ statistics to `session_index.json`, and joins frame timing into
 ## Streamlined Live Daemon Schemas
 
 `telemetry-viewer\live_core_daemon.py` is the daily in-memory sidecar. Daily
-mode reads compact packet files; cached plugin snapshots are still experimental
-and must be explicitly selected. The daemon builds the same candidate and
+Stable Compact reads compact packet files; Daily Snapshot No-File uses cached
+plugin snapshots and remains experimental. The daemon builds the same candidate and
 context state as the legacy live processor and serves context-service-compatible
 HTTP responses from memory. It is read-only and does not expose click, mouse,
 keyboard, menu, invoke, execute, or command endpoints.
@@ -1239,8 +1240,9 @@ keyboard, menu, invoke, execute, or command endpoints.
 Health and status endpoints keep the existing schemas:
 
 - `GET /health` returns `context_health.v1` with `service=live_core_daemon`,
-  `liveCoreDaemonActive=true`, `inputSourceActive`, `candidateCount`,
-  `writeDebugLiveFiles`, and `overlayStateWritten`.
+  `liveCoreDaemonActive=true`, `inputSourceActive`, `dailyMode`,
+  `noFileDaily`, `compactPacketFilesRequired`, `compactPacketFilesWriting`,
+  `candidateCount`, `writeDebugLiveFiles`, and `overlayStateWritten`.
 - `GET /status` returns `context_status.v1` with the same daemon markers plus
   the latest live processor status fields.
 - `POST /context` and `POST /context/batch` return `context_response.v1` from
@@ -1278,19 +1280,66 @@ Daily overlay mode writes brain intent markers by default:
 - `activeTask`
 - `activeIntent`
 - `status`
+- `selectedTargetKey`
+- `rawBestTargetKey`
+- `stableForTicks`
+- `missingForTicks`
+- `retainedDueToGrace`
+- `switchReason`
+- `switchAuditTail`
+- `backupKeys`
 - `markers[]`
 
 Intent marker fields are generic so future brain tasks can show bankers,
 booths, destination tiles, waypoints, UI targets, warnings, or diagnostics
 without hardcoding woodcutting in the plugin. Supported fields include
 `markerType`, `label`, `reason`, `confidence`, `source`, `targetType`,
-`classId`, `id`, `hash`, `objectKey`, `worldX`, `worldY`, `plane`, `sceneX`,
-`sceneY`, `aimPoint`, `reachability`, `liveness`, and `qualityTier`. Intent
-markers are read-only observations; they do not contain action, click, input,
-keyboard, mouse, menu, invoke, or execute fields.
+`selected`, `role`, `priority`, `classId`, `id`, `hash`, `objectKey`,
+`markerId`, `markerVersion`, `kind`, `layer`, `worldX`, `worldY`, `plane`,
+`sceneX`, `sceneY`, `localX`, `localY`, `aimPoint`, `bounds`,
+`clickableHullAvailable`, `clickableHull`, `clickboxPolygon`, `convexHull`,
+`canvasTilePolygon`, `geometrySource`, `projectionMode`, `projectionStale`,
+`projectionFallbackReason`, `tick`, `reachability`, `liveness`, and
+`qualityTier`. Intent markers are read-only observations; they do not contain
+action, click, input, keyboard, mouse, menu, invoke, or execute fields.
+
+The daemon deduplicates intent markers by stable target identity before writing
+this payload. If the selected marker and a backup/candidate describe the same
+object, the selected marker keeps `markerType=selected_target`,
+`selected=true`, and `role=selected`, inherits the best available geometry from
+the duplicate, and the duplicate backup is suppressed.
 
 Daily daemon status may include `overlayMode`, `intentMarkerCount`,
-`candidateMarkersSuppressed`, and `overlayStateBytes`.
+`candidateMarkersSuppressed`, and `overlayStateBytes`. It may also include the
+in-memory intent stabilizer diagnostics `rawBestTarget`,
+`stabilizedIntentTarget`, `intentStableForTicks`, `intentSwitchReason`,
+`intentHardSwitch`, `intentSoftSwitch`, `intentPreviousTargetKey`,
+`intentCandidateWasRetained`, `intentCandidateWasSwitched`,
+`intentSwitchedThisTick`, `intentRetainedDueToGrace`,
+`intentCurrentMissingTicks`, `intentCurrentMissingThisTick`,
+`intentCurrentInvalidReason`, `intentSwitchAuditTail`,
+`intentInterruptReason`, `intentStabilizerMillis`, and
+`intentCandidatesConsidered`.
+
+The stabilizer is a jitter filter, not a decision blocker. It hard-switches on
+task/profile/intent changes, explicit stale/depleted/despawned/unreachable
+targets, forced switches, inventory/task transitions, or higher-priority
+interrupts. It only applies soft stickiness when the current target is still
+valid and a replacement is merely marginal, has not persisted yet, or the
+selected target is briefly absent from the current candidate slice. The default
+transient-missing grace is two ticks. Backup identities are stabilized too:
+selected identity is excluded from backups, previous backups are preferred while
+valid, and backup replacement waits for the normal candidate validity path. The
+stabilizer is in-memory only and writes no JSON or NDJSON files in daily mode.
+
+RuneLite overlay rendering treats last-known `aimPoint` and polygon payloads as
+fallbacks. When a marker has stable world/scene/local identity, the overlay
+first tries to resolve the current scene object and draw its live clickbox. If
+that cannot be resolved, it falls back to stored clickable hull/clickbox/convex
+geometry, compact bounds, live tile projection, last-known aim point, and
+finally label-only drawing. This keeps selected intent markers visually closer
+to the target while the camera moves between telemetry ticks without allowing
+the overlay to choose the task target.
 
 When `--brain-task woodcutting` is used, `--goal-count N` enables read-only
 resource progress tracking for `brain_decision.v1`. Without a goal count, the

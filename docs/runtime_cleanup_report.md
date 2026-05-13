@@ -4,45 +4,52 @@ Date: 2026-05-12
 
 ## Daily Live Runtime
 
-Daily Live now has one intended lane:
+Daily Live now has one stable lane and one experimental no-file lane:
 
 ```text
 RuneLite plugin
--> compact packet files
+-> Daily Stable Compact: compact packet files
+   OR Daily Snapshot No-File: PluginLiveCache / PluginSnapshotEndpoint
 -> telemetry-viewer\live_core_daemon.py
 -> in-memory context/brain state
 -> optional interaction_geometry\live\overlay_debug_state.json
 ```
 
-The daily daemon command is:
+Stable compact command:
 
 ```text
-python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark
+```
+
+Snapshot no-file command (experimental):
+
+```text
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark
 ```
 
 ## Audit Findings
 
 1. Daily Live runs the RuneLite plugin as a read-only compact telemetry sensor and `live_core_daemon.py` as the Python sidecar.
-2. Daily Live writes compact packet files from the plugin. The daemon writes no rolling live debug files by default.
+2. Daily Stable Compact writes compact packet files from the plugin. Daily Snapshot No-File disables the compact packet file mirror and uses the plugin snapshot endpoint/cache instead. The daemon writes no rolling live debug files by default in either mode.
 3. Raw ticks are not written in `LIVE_COMPACT_ONLY` unless debug raw tick override is explicitly enabled.
 4. Raw events are not written in `LIVE_COMPACT_ONLY` unless debug raw event override is explicitly enabled.
 5. Frames/screenshots are not captured in daily `LIVE_COMPACT_ONLY`; the Daily preset also sets `captureScreenshots=false` and `debugRecordFrames=false`.
 6. Crop/perception tools are Python batch/debug tooling only. They do not run in the daily daemon.
 7. Compact-stream defaults off and is labelled experimental.
-8. Plugin-snapshot defaults off for daily input and is labelled experimental.
+8. Plugin-snapshot is available only through the explicit Daily Snapshot No-File or experimental testing modes and remains labelled experimental.
 9. The old `live_target_processor.py` plus `context_service.py` chain is not required for Daily Live. It remains a legacy file pipeline.
 10. Daily woodcutting progress is owned by `resource_progress.py`. Other modules consume, display, persist, or diagnose `ResourceProgressResult` rather than maintaining daily cumulative counters.
 
 ## Daily Expected State
 
 - `recordingMode=LIVE_COMPACT_ONLY`
-- compact packet files enabled
+- compact packet files enabled for Daily Stable Compact; disabled for Daily Snapshot No-File
 - raw ticks disabled
 - raw events disabled
 - frames/screenshots disabled
 - crop/perception capture not active
 - compact-stream disabled/inactive
-- plugin-snapshot not daily input
+- plugin-snapshot not daily input except the explicit Daily Snapshot No-File mode
 - `live_core_daemon.py` active
 - daemon debug live file writes off
 - optional overlay state in `intent` mode
@@ -58,7 +65,8 @@ python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutti
 - crop capture
 - perception capture
 - compact-stream active/enabled
-- plugin-snapshot as daily input
+- plugin-snapshot as daily input in stable compact mode
+- compact packet files required or writing in snapshot no-file mode
 - legacy live processor or context service running alongside the daemon
 - rolling debug writes from the daemon
 - invalid resource progress invariants

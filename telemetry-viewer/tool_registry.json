@@ -1,7 +1,7 @@
 {
   "schema": "osrs_telemetry_tool_registry.v1",
   "generatedFor": "daily_live_stability_cleanup",
-  "dailyArchitecture": "RuneLite plugin -> compact-packets -> live_core_daemon.py -> in-memory context -> optional brain intent overlay_debug_state.json",
+  "dailyArchitecture": "RuneLite plugin -> Daily Stable Compact compact-packets OR experimental Daily Snapshot No-File PluginLiveCache/PluginSnapshotEndpoint -> live_core_daemon.py -> in-memory context -> optional brain intent overlay_debug_state.json",
   "categories": {
     "daily": "Shown in the main Live Control Panel daily view.",
     "advanced_debug": "Diagnostics and inspection tools; useful, but not required for daily live.",
@@ -25,10 +25,11 @@
     {
       "name": "live_core_daemon.py",
       "category": "daily",
-      "purpose": "Daily in-memory live daemon using compact-packets by default, with context/brain endpoints, writes off by default, and optional brain intent overlay.",
+      "purpose": "Daily in-memory live daemon. Stable mode uses compact-packets; experimental snapshot no-file mode uses PluginSnapshotEndpoint. Context/brain endpoints are in memory, writes are off by default, and overlay state is optional.",
       "dailyRequired": true,
-      "normalCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark",
-      "input": "compact packet files; plugin-snapshot only when explicitly experimental",
+      "normalCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark",
+      "alternateCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark",
+      "input": "compact packet files for stable mode; PluginSnapshotEndpoint for explicit experimental no-file mode",
       "output": "localhost context/brain/status endpoints and optional capped brain intent overlay_debug_state.json",
       "status": "daily",
       "safeToHideInUi": false
@@ -39,6 +40,7 @@
       "purpose": "Preset-aware daily PASS/WARN/FAIL configuration doctor.",
       "dailyRequired": false,
       "normalCommand": "python telemetry-viewer\\live_config_doctor.py --latest-session --mode daily --fix-suggestions",
+      "alternateCommand": "python telemetry-viewer\\live_config_doctor.py --latest-session --mode snapshot_no_file --fix-suggestions",
       "input": "session files, optional daemon/context/plugin health endpoints, optional process list",
       "output": "live_config_doctor.v1 report with fix suggestions",
       "status": "daily",
@@ -49,7 +51,8 @@
       "category": "daily",
       "purpose": "Daily daemon sanity check for context health, progress invariants, duplicate processes, and unsafe fields.",
       "dailyRequired": false,
-      "normalCommand": "python telemetry-viewer\\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --strict --check-processes",
+      "normalCommand": "python telemetry-viewer\\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode compact-packets --strict --check-processes",
+      "alternateCommand": "python telemetry-viewer\\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes",
       "input": "live_core_daemon endpoints, latest session, optional process list",
       "output": "daily_live_gauntlet.v1 PASS/WARN/FAIL report",
       "status": "daily",
@@ -597,9 +600,9 @@
     {
       "name": "plugin_snapshot_input_mode",
       "category": "experimental",
-      "purpose": "EXPERIMENTAL live input mode for cached plugin snapshots.",
+      "purpose": "EXPERIMENTAL live input mode for cached plugin snapshots, including Daily Snapshot No-File testing.",
       "dailyRequired": false,
-      "normalCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --input-source plugin-snapshot --plugin-snapshot-tier hot --profile woodcutting --summary --benchmark",
+      "normalCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --profile woodcutting --summary --benchmark",
       "input": "PluginSnapshotEndpoint on localhost",
       "output": "candidate/context state from cached plugin snapshot payloads",
       "status": "experimental",

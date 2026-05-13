@@ -8,10 +8,12 @@ For everyday live testing, use the control panel:
 python telemetry-viewer\live_control_panel.py
 ```
 
-Then click **Start Streamlined Live Daemon**. The panel starts one read-only
-Python daemon that keeps live context in memory, serves the context API on
-localhost, and writes only the tiny overlay state when requested. It does not
-click, type, invoke menus, or execute actions.
+Then click **Start Daily Live Stable Compact** for the stable file bridge, or
+**Start Daily Live Snapshot No-File EXPERIMENTAL** when intentionally testing
+the no-file snapshot path. Both start one read-only Python daemon that keeps
+live context in memory, serves the context API on localhost, and writes only the
+tiny overlay state when requested. It does not click, type, invoke menus, or
+execute actions.
 
 One-click Windows entrypoints are also available from the repository root:
 
@@ -22,11 +24,20 @@ start_normal_live_stack.bat
 Start-NormalLiveStack.ps1
 ```
 
-Daily normal live mode should use the streamlined daemon with
-`--input-source compact-packets`. The legacy compact-packet file stack remains
-available under the control panel's Advanced buttons. Plugin-snapshot and direct
-compact stream are experimental and should be tested explicitly before relying
-on them.
+Daily has two source modes:
+
+- **Daily Stable Compact** uses `--daily-mode compact-packets --input-source
+  compact-packets` and the compact NDJSON bridge. This remains the stable
+  fallback.
+- **Daily Snapshot No-File** uses `--daily-mode snapshot-no-files
+  --input-source plugin-snapshot --plugin-snapshot-tier hot`. It is
+  experimental, uses `PluginLiveCache`/`PluginSnapshotEndpoint`, and expects the
+  compact NDJSON file mirror to be disabled unless intentionally used as a debug
+  mirror.
+
+The legacy compact-packet file stack remains available under the control
+panel's Advanced buttons. Direct compact stream is experimental and should be
+tested explicitly before relying on it.
 
 By default, the daemon does not write these rolling legacy live files:
 
@@ -47,6 +58,15 @@ Stable normal live RuneLite config:
 - **Stream also writes files**: ON if compact stream is enabled.
 - Normal processor input: `--input-source compact-packets --require-compact-packets`.
 - `compact-stream`: experimental transport testing only.
+
+Daily Snapshot No-File RuneLite config:
+
+- **Recording mode**: `LIVE_COMPACT_ONLY`.
+- **Emit compact live packets**: OFF.
+- **Compact packets required for live**: OFF.
+- **Plugin snapshot endpoint**: ON at `127.0.0.1:8893`.
+- Raw ticks/events, frames, screenshots, crops, perception, and compact-stream:
+  OFF.
 
 When the compact packet file mirror is enabled, Java also writes:
 
@@ -115,6 +135,7 @@ Run the doctor:
 
 ```text
 python telemetry-viewer\live_config_doctor.py --latest-session --mode daily --fix-suggestions
+python telemetry-viewer\live_config_doctor.py --latest-session --mode snapshot_no_file --fix-suggestions
 python telemetry-viewer\live_config_doctor.py --latest-session --mode visual_qa --fix-suggestions
 python telemetry-viewer\live_config_doctor.py --latest-session --mode debug_audit --fix-suggestions
 python telemetry-viewer\live_config_doctor.py --latest-session --mode plugin_snapshot_experimental --fix-suggestions
@@ -160,6 +181,9 @@ Preset names:
 
 - `DAILY_LIVE`: compact packet file bridge, `LIVE_COMPACT_ONLY`, raw/debug
   capture off, compact-stream off, plugin-snapshot off, small overlay cap.
+- `DAILY_SNAPSHOT_NO_FILE`: `LIVE_COMPACT_ONLY`, compact packet file mirror off,
+  plugin snapshot endpoint enabled on `127.0.0.1:8893`, compact-stream off, raw
+  and frame capture off. Experimental no-file daily path.
 - `VISUAL_QA`: compact packet file bridge, overlay enabled, clickable hull
   geometry allowed and capped, compact-stream off.
 - `DEBUG_AUDIT`: `DEBUG_RECORDING`, raw ticks/events and frames enabled, compact
@@ -179,7 +203,8 @@ Recommended order if you run the pieces manually:
 ```text
 python telemetry-viewer\check_live_setup.py --latest-session --require-compact-packets
 python telemetry-viewer\inspect_live_packets.py --latest-session --summary
-python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark
 python telemetry-viewer\live_context_query.py --latest-session --task woodcutting --watch-human --interval 1 --events 5
 ```
 
@@ -194,10 +219,13 @@ Key buttons:
 
 - **Apply Daily Live Preset** applies the compact-packet daily defaults.
 - **Start RuneLite Dev** launches the dev client.
-- **Start Streamlined Live Daemon** starts the daily in-memory daemon. It serves
-  `/health`, `/status`, `/context`, `/summary`, and `/brain` from memory and
-  avoids rolling live file writes by default. Daily overlay output uses brain
-  intent markers, not the full candidate list.
+- **Start Daily Live Stable Compact** starts the daily in-memory daemon against
+  compact-packets. It serves `/health`, `/status`, `/context`, `/summary`, and
+  `/brain` from memory and avoids rolling live file writes by default. Daily
+  overlay output uses brain intent markers, not the full candidate list.
+- **Start Daily Live Snapshot No-File EXPERIMENTAL** starts the same daemon
+  against the plugin snapshot endpoint and expects compact NDJSON writing to be
+  disabled by the RuneLite preset.
 - **Stop All** stops panel-started helper processes.
 - **Config Doctor** runs the selected preset check and prints copy/paste fix
   suggestions.
@@ -2565,6 +2593,43 @@ default. It draws the selected target plus a small backup set, while candidate
 context remains internal. Visual QA can switch to candidate markers with
 `--overlay-mode candidates`; debug/audit can use `--overlay-mode debug`.
 
+The selected daily marker is stabilized in memory before the overlay state is
+written. Raw best-candidate ranking may jitter for a tick, but the visible
+intent marker stays on the current valid target unless a hard switch condition
+appears, such as a task/profile/intent change, explicit depleted/stale/despawned
+or unreachable state, forced switch, inventory/task transition, or
+higher-priority interrupt. If the selected target is simply absent from the
+current candidate slice for a short transient gap, the daemon keeps the
+last-known selected identity and marks `retainedDueToGrace=true`; the default
+grace is two ticks. The stabilizer reads only the daemon's current
+candidates/context and writes no history files.
+
+Intent markers include stable world/scene/local identity when available. The
+RuneLite overlay uses that identity to resolve the current scene object during
+render, so camera movement does not have to wait for the next telemetry tick to
+move the label/crosshair. For scene-object markers it prefers live object
+clickbox geometry, then stored hull/clickbox/bounds payloads, then tile
+projection, then last-known aim points.
+
+The daemon also deduplicates selected and backup markers before writing overlay
+state. If the selected marker is aim-point-only but a duplicate candidate has
+clickable hull or clickbox geometry, that geometry is merged into the selected
+marker and the duplicate backup is omitted. Backup candidates are stabilized
+separately: the selected target is excluded, and previous backup identities are
+preferred while they remain valid so the small overlay set does not reorder on
+minor score jitter.
+
+For intent flicker debugging:
+
+```text
+python telemetry-viewer\diagnose_overlay_state.py --latest-session --intent --top 10
+```
+
+The diagnostic prints the raw best target, stabilized target, stable tick count,
+missing tick count, grace-retention flag, switch reason, and the last few
+in-memory switch audit entries. It can report when a selected target changed
+briefly and reverted.
+
 The overlay can draw:
 
 - selected brain intent markers
@@ -2620,7 +2685,7 @@ Overlay geometry settings:
 Fallback order:
 
 ```text
-clickableHull -> clickboxPolygon -> convexHull -> canvasTilePolygon -> bounds -> aim point
+live object clickbox -> clickableHull -> clickboxPolygon -> convexHull -> canvasTilePolygon -> bounds -> live tile fallback -> aim point
 ```
 
 Normal compact packets stay lean. Polygon geometry is included only for capped
@@ -2647,6 +2712,7 @@ Diagnostic command:
 
 ```text
 python telemetry-viewer\diagnose_overlay_state.py --latest-session --class-id tree --top 10
+python telemetry-viewer\diagnose_overlay_state.py --latest-session --intent --top 10
 ```
 
 The diagnostic reports clickable hull count, clickbox polygon count,
@@ -2654,6 +2720,8 @@ convex-hull fallback count, bounds-only count, aim-only count, compact geometry
 config/cap counters, geometry source counts, and missing hull reasons for the
 inspected targets. The concrete Java -> compact packet -> Python candidate ->
 overlay state handoff is documented in `docs/clickable_hull_pipeline.md`.
+With `--intent`, it also reports selected/backups, duplicate selected-in-backup
+identities, selected geometry source, and whether marker merging failed.
 
 If hulls appear only on odd corner/edge objects, use the geometry diagnostic to
 compare the top candidates, overlay state, and latest compact projection refs:

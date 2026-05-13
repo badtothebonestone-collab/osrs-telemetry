@@ -34,11 +34,12 @@ COMPACT_STREAM_EXPERIMENTAL_LABEL = "compact-stream EXPERIMENTAL"
 PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL = "plugin-snapshot EXPERIMENTAL"
 INPUT_SOURCES = ("compact-packets", "auto", "raw-ticks", COMPACT_STREAM_EXPERIMENTAL_LABEL, PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL)
 LIVENESS_MODES = ("off", "basic", "delta", "full")
-WORKFLOW_MODES = ("Daily", "Visual QA", "Debug Audit", "Plugin Snapshot Experimental")
+WORKFLOW_MODES = ("Daily", "Daily Snapshot No-File", "Visual QA", "Debug Audit", "Plugin Snapshot Experimental")
 DAILY_ACTION_LABELS = (
     "Apply Daily Live Preset",
     "Start RuneLite Dev",
-    "Start Streamlined Live Daemon",
+    "Start Daily Live Stable Compact",
+    "Start Daily Live Snapshot No-File EXPERIMENTAL",
     "Stop All",
     "Config Doctor",
     "Daily Gauntlet",
@@ -64,6 +65,7 @@ ADVANCED_ACTION_LABELS = (
 )
 WORKFLOW_PRESETS = {
     "DAILY_LIVE": ("Daily Live", "daily"),
+    "DAILY_SNAPSHOT_NO_FILE": ("Daily Snapshot No-File", "snapshot_no_file"),
     "VISUAL_QA": ("Visual QA", "visual_qa"),
     "DEBUG_AUDIT": ("Debug Audit", "debug_audit"),
     "PLUGIN_SNAPSHOT_EXPERIMENTAL": ("Plugin Snapshot Experimental", "plugin_snapshot_experimental"),
@@ -77,6 +79,7 @@ REQUIRED_STREAM_PACKET_TYPES = {"live_baseline_packet.v1", "live_projection_pack
 class LivePanelOptions:
     profile: str = "woodcutting"
     mode: str = "Daily"
+    daily_mode: str = "compact-packets"
     input_source: str = "compact-packets"
     liveness_mode: str = "delta"
     window_ticks: int = 10
@@ -145,6 +148,7 @@ def doctor_mode_key(label: str) -> str:
     mapping = {
         "Daily": "daily",
         "Normal Live": "daily",
+        "Daily Snapshot No-File": "snapshot_no_file",
         "Visual QA": "visual_qa",
         "Debug Audit": "debug_audit",
         "Plugin Snapshot Experimental": "plugin_snapshot_experimental",
@@ -166,8 +170,15 @@ def build_config_doctor_command(
     return command
 
 
-def build_daily_gauntlet_command(*, strict: bool = True, check_processes: bool = True, daemon_url: str = "http://127.0.0.1:8890") -> list[str]:
+def build_daily_gauntlet_command(
+    *,
+    strict: bool = True,
+    check_processes: bool = True,
+    daemon_url: str = "http://127.0.0.1:8890",
+    daily_mode: str = "compact-packets",
+) -> list[str]:
     command = python_command("telemetry-viewer\\run_daily_gauntlet.py", "--latest-session", "--daemon-url", daemon_url)
+    command.extend(["--daily-mode", daily_mode])
     if strict:
         command.append("--strict")
     if check_processes:
@@ -256,13 +267,17 @@ def build_context_service_command(port: int) -> list[str]:
 
 
 def build_live_core_daemon_command(options: LivePanelOptions) -> list[str]:
+    daily_mode = options.daily_mode or ("snapshot-no-files" if options.input_source == "plugin-snapshot" else "compact-packets")
+    input_source = "plugin-snapshot" if daily_mode == "snapshot-no-files" else "compact-packets"
     command = python_command(
         "telemetry-viewer\\live_core_daemon.py",
         "--latest-session",
         "--profile",
         options.profile,
+        "--daily-mode",
+        daily_mode,
         "--input-source",
-        "compact-packets",
+        input_source,
         "--context-port",
         str(options.port),
     )
@@ -283,6 +298,8 @@ def build_live_core_daemon_command(options: LivePanelOptions) -> list[str]:
         command.append("--summary")
     if options.benchmark:
         command.append("--benchmark")
+    if daily_mode == "snapshot-no-files":
+        command.extend(["--plugin-snapshot-tier", "hot"])
     return command
 
 
@@ -396,6 +413,7 @@ def normal_live_options(profile: str = "woodcutting") -> LivePanelOptions:
     return LivePanelOptions(
         profile=profile,
         mode="Daily",
+        daily_mode="compact-packets",
         input_source="compact-packets",
         liveness_mode="delta",
         window_ticks=10,
@@ -405,6 +423,27 @@ def normal_live_options(profile: str = "woodcutting") -> LivePanelOptions:
         interval=1.0,
         goal_count=5,
         require_compact_packets=True,
+        no_ui_targets=True,
+        write_overlay_state=True,
+        benchmark=True,
+        summary=True,
+    )
+
+
+def snapshot_no_file_options(profile: str = "woodcutting") -> LivePanelOptions:
+    return LivePanelOptions(
+        profile=profile,
+        mode="Daily Snapshot No-File",
+        daily_mode="snapshot-no-files",
+        input_source="plugin-snapshot",
+        liveness_mode="delta",
+        window_ticks=10,
+        limit=100,
+        overlay_debug_target_limit=10,
+        port=8890,
+        interval=1.0,
+        goal_count=5,
+        require_compact_packets=False,
         no_ui_targets=True,
         write_overlay_state=True,
         benchmark=True,
@@ -765,10 +804,11 @@ class LiveControlPanel:
             (DAILY_ACTION_LABELS[0], lambda: self.apply_workflow_preset("DAILY_LIVE")),
             (DAILY_ACTION_LABELS[1], self.start_runelite),
             (DAILY_ACTION_LABELS[2], self.start_live_core_daemon),
-            (DAILY_ACTION_LABELS[3], self.stop_all),
-            (DAILY_ACTION_LABELS[4], self.config_doctor),
-            (DAILY_ACTION_LABELS[5], self.daily_gauntlet),
-            (DAILY_ACTION_LABELS[6], self.open_session_folder),
+            (DAILY_ACTION_LABELS[3], self.start_snapshot_no_file_daemon),
+            (DAILY_ACTION_LABELS[4], self.stop_all),
+            (DAILY_ACTION_LABELS[5], self.config_doctor),
+            (DAILY_ACTION_LABELS[6], self.daily_gauntlet),
+            (DAILY_ACTION_LABELS[7], self.open_session_folder),
         ]
         for index, (label, command) in enumerate(daily_buttons):
             ttk.Button(daily_frame, text=label, command=command).grid(row=index // 4, column=index % 4, sticky=tk.EW, padx=3, pady=3)
@@ -844,9 +884,11 @@ class LiveControlPanel:
         self.log_widgets[name] = text
 
     def options(self) -> LivePanelOptions:
+        mode = self.mode_var.get()
         return LivePanelOptions(
             profile=self.profile_var.get(),
-            mode=self.mode_var.get(),
+            mode=mode,
+            daily_mode="snapshot-no-files" if mode == "Daily Snapshot No-File" else "compact-packets",
             input_source=normalize_input_source(self.input_source_var.get()),
             liveness_mode=self.liveness_var.get(),
             window_ticks=self._int_var(self.window_ticks_var, 10),
@@ -908,11 +950,32 @@ class LiveControlPanel:
         self.benchmark_var.set(options.benchmark)
         self.update_stream_warning()
 
+    def apply_snapshot_no_file_defaults(self) -> None:
+        options = snapshot_no_file_options(self.profile_var.get())
+        self.mode_var.set(options.mode)
+        self.input_source_var.set(PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL)
+        self.liveness_var.set(options.liveness_mode)
+        self.window_ticks_var.set(str(options.window_ticks))
+        self.limit_var.set(str(options.limit))
+        self.port_var.set(str(options.port))
+        self.interval_var.set(str(options.interval))
+        self.require_compact_var.set(options.require_compact_packets)
+        self.no_ui_targets_var.set(options.no_ui_targets)
+        self.write_overlay_state_var.set(options.write_overlay_state)
+        self.summary_var.set(options.summary)
+        self.benchmark_var.set(options.benchmark)
+        self.update_stream_warning()
+
     def apply_control_panel_preset_defaults(self, preset: str) -> None:
         profile = self.profile_var.get() or "woodcutting"
         if preset == "DAILY_LIVE":
             self.apply_normal_live_defaults()
             self.profile_var.set(profile)
+            return
+        if preset == "DAILY_SNAPSHOT_NO_FILE":
+            self.apply_snapshot_no_file_defaults()
+            self.profile_var.set(profile)
+            self.log("Setup/Packet tools", "Daily Snapshot No-File is experimental and expects the plugin snapshot endpoint instead of compact NDJSON files.")
             return
         if preset == "VISUAL_QA":
             self.mode_var.set("Visual QA")
@@ -1050,6 +1113,15 @@ class LiveControlPanel:
             return
         self.start_process("Live Core Daemon", build_live_core_daemon_command(self.options()), "Live Daemon")
 
+    def start_snapshot_no_file_daemon(self) -> None:
+        self.apply_snapshot_no_file_defaults()
+        port = self.options().port
+        if localhost_port_is_listening(port) and not self.is_process_running("Live Core Daemon"):
+            self.log("Live Daemon", f"Port {port} is already in use on 127.0.0.1. Stop the existing context service/daemon or choose another port.")
+            return
+        self.log("Live Daemon", "Starting experimental Daily Snapshot No-File mode. It uses the plugin snapshot endpoint and should not require compact NDJSON files.")
+        self.start_process("Live Core Daemon", build_live_core_daemon_command(self.options()), "Live Daemon")
+
     def stop_live_core_daemon(self) -> None:
         self.stop_process("Live Core Daemon")
 
@@ -1061,7 +1133,8 @@ class LiveControlPanel:
         self.start_process("Config Doctor", command, "Setup/Packet tools")
 
     def daily_gauntlet(self) -> None:
-        command = build_daily_gauntlet_command(daemon_url=f"http://127.0.0.1:{self.options().port}")
+        options = self.options()
+        command = build_daily_gauntlet_command(daemon_url=f"http://127.0.0.1:{options.port}", daily_mode=options.daily_mode)
         self.start_process("Daily Gauntlet", command, "Setup/Packet tools")
 
     def inspect_packets(self) -> None:
@@ -1338,7 +1411,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         default="normal-live",
-        choices=("normal-live", "daily", "visual-qa", "debug-audit", "plugin-snapshot-experimental"),
+        choices=("normal-live", "daily", "daily-snapshot-no-file", "visual-qa", "debug-audit", "plugin-snapshot-experimental"),
         help="Initial workflow mode.",
     )
     return parser.parse_args(argv)
@@ -1348,6 +1421,7 @@ def _mode_label(value: str) -> str:
     mapping = {
         "normal-live": "Daily",
         "daily": "Daily",
+        "daily-snapshot-no-file": "Daily Snapshot No-File",
         "visual-qa": "Visual QA",
         "debug-audit": "Debug Audit",
         "plugin-snapshot-experimental": "Plugin Snapshot Experimental",
@@ -1363,6 +1437,9 @@ def main(argv: list[str] | None = None) -> int:
     panel.mode_var.set(_mode_label(args.mode))
     if args.mode in {"normal-live", "daily"}:
         panel.apply_normal_live_defaults()
+        panel.profile_var.set(args.profile)
+    elif args.mode == "daily-snapshot-no-file":
+        panel.apply_snapshot_no_file_defaults()
         panel.profile_var.set(args.profile)
     if args.auto_start_normal_live:
         root.after(500, panel.start_live_core_daemon)

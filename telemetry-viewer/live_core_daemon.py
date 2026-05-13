@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 import brain_core
 import context_service
+import intent_stabilizer
 import live_target_processor as live
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
@@ -43,6 +44,9 @@ DEFAULT_CONTEXT_NEEDS = [
     "task_summary",
 ]
 OVERLAY_MODES = {"intent", "candidates", "debug"}
+DAILY_MODE_COMPACT_PACKETS = "compact-packets"
+DAILY_MODE_SNAPSHOT_NO_FILES = "snapshot-no-files"
+DAILY_MODES = {DAILY_MODE_COMPACT_PACKETS, DAILY_MODE_SNAPSHOT_NO_FILES}
 
 
 def utc_now() -> str:
@@ -70,6 +74,48 @@ def resolve_session(args: argparse.Namespace) -> Path:
 def compact_packet_available(session: Path) -> bool:
     state = live.compact_packet_state(session)
     return bool(state.get("available") and state.get("recent"))
+
+
+def boolish(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+    return None
+
+
+def safe_json_dict(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def compact_packet_file_write_state(session: Path) -> dict:
+    manifest = safe_json_dict(session / "manifest.json")
+    packet_dir = session / "live_packets"
+    packet_state = live.compact_packet_state(session)
+    manifest_enabled = boolish(manifest.get("compactLivePacketFilesEnabled"))
+    if manifest_enabled is not None:
+        writing = manifest_enabled
+    else:
+        writing = False
+    return {
+        "compactPacketFilesWriting": writing,
+        "compactPacketFilesEnabledInManifest": manifest_enabled,
+        "compactPacketFilesAvailable": bool(packet_state.get("available")),
+        "compactPacketFilesRecent": bool(packet_state.get("recent")),
+        "compactPacketFileCount": len(list(packet_dir.glob("live-*.ndjson"))) if packet_dir.exists() else 0,
+    }
 
 
 def brain_state_scope(session: Path, task: str, goal_count: int | None) -> dict:
@@ -209,6 +255,160 @@ def candidate_identity(candidate: dict | None) -> tuple:
     )
 
 
+def candidate_id_value(candidate: dict) -> Any:
+    return candidate.get("rawId") if candidate.get("rawId") is not None else candidate.get("id")
+
+
+def target_identity_keys(candidate: dict | None) -> set[tuple]:
+    if not isinstance(candidate, dict):
+        return set()
+    target_type = target_type_for_candidate(candidate)
+    keys: set[tuple] = set()
+    object_key = candidate.get("objectKey")
+    if object_key:
+        keys.add(("objectKey", str(object_key)))
+    target_hash = candidate.get("hash")
+    if target_hash is not None:
+        keys.add(("hash", str(target_hash)))
+    item_id = candidate_id_value(candidate)
+    if item_id is not None and candidate.get("worldX") is not None and candidate.get("worldY") is not None and candidate.get("plane") is not None:
+        keys.add(("world", str(item_id), str(candidate.get("worldX")), str(candidate.get("worldY")), str(candidate.get("plane")), str(target_type), str(candidate.get("kind") or candidate.get("layer") or "")))
+        keys.add(("world", str(item_id), str(candidate.get("worldX")), str(candidate.get("worldY")), str(candidate.get("plane")), str(target_type)))
+    if item_id is not None and candidate.get("sceneX") is not None and candidate.get("sceneY") is not None and candidate.get("plane") is not None:
+        keys.add(("scene", str(item_id), str(candidate.get("sceneX")), str(candidate.get("sceneY")), str(candidate.get("plane")), str(target_type)))
+    return keys
+
+
+def same_target_identity(left: dict | None, right: dict | None) -> bool:
+    left_keys = target_identity_keys(left)
+    right_keys = target_identity_keys(right)
+    return bool(left_keys and right_keys and left_keys.intersection(right_keys))
+
+
+def polygon_points(value: Any) -> list | None:
+    if isinstance(value, dict):
+        value = value.get("points")
+    if isinstance(value, list) and len(value) >= 3:
+        return value
+    return None
+
+
+def marker_geometry_value(source: dict, key: str) -> Any:
+    value = source.get(key)
+    if value is not None:
+        return value
+    geometry = source.get("geometry") if isinstance(source.get("geometry"), dict) else {}
+    return geometry.get(key)
+
+
+def marker_bounds_value(source: dict) -> dict | None:
+    for key in ("bounds", "clickboxBounds", "convexHullBounds", "canvasLocation"):
+        value = source.get(key)
+        if value is None and isinstance(source.get("geometry"), dict):
+            value = source["geometry"].get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def best_marker_geometry_source(marker: dict) -> str:
+    if polygon_points(marker.get("clickableHull")):
+        return "clickableHull"
+    if polygon_points(marker.get("clickboxPolygon")):
+        return "clickboxPolygon"
+    if polygon_points(marker.get("convexHull")):
+        return "convexHull"
+    if polygon_points(marker.get("canvasTilePolygon")):
+        return "canvasTilePolygon"
+    if isinstance(marker.get("bounds"), dict):
+        return "bounds"
+    if isinstance(marker.get("aimPoint"), dict):
+        return "aimPoint"
+    return "none"
+
+
+def finalize_intent_marker(marker: dict) -> dict:
+    source = best_marker_geometry_source(marker)
+    if source != "none" and (source != "aimPoint" or not marker.get("geometrySource")):
+        marker["geometrySource"] = source
+    marker["clickableHullAvailable"] = source in {"clickableHull", "clickboxPolygon"}
+    has_projection_identity = any(marker.get(key) is not None for key in ("worldX", "worldY", "sceneX", "sceneY", "localX", "localY"))
+    target_type = marker.get("targetType")
+    if target_type == "sceneObject" and has_projection_identity:
+        marker["projectionMode"] = "live_object_pending"
+        marker["projectionStale"] = False
+        marker.pop("projectionFallbackReason", None)
+    elif source in {"clickableHull", "clickboxPolygon"}:
+        marker["projectionMode"] = "marker_clickable_hull"
+        marker["projectionStale"] = False
+        marker.pop("projectionFallbackReason", None)
+    elif has_projection_identity:
+        marker["projectionMode"] = "live_tile_fallback"
+        marker["projectionStale"] = False
+        marker.pop("projectionFallbackReason", None)
+    elif isinstance(marker.get("aimPoint"), dict):
+        marker["projectionMode"] = "last_known_aim"
+        marker["projectionStale"] = True
+        marker["projectionFallbackReason"] = "stable world/scene/local identity unavailable"
+    else:
+        marker["projectionMode"] = "label_only"
+        marker["projectionStale"] = True
+        marker["projectionFallbackReason"] = "stable world/scene/local identity unavailable"
+    if marker.get("objectKey"):
+        marker["markerId"] = marker.get("objectKey")
+    return marker
+
+
+def merge_marker_from_source(marker: dict, source: dict) -> dict:
+    for key in (
+        "objectKey",
+        "hash",
+        "id",
+        "rawId",
+        "name",
+        "targetName",
+        "classId",
+        "targetType",
+        "kind",
+        "layer",
+        "worldX",
+        "worldY",
+        "plane",
+        "sceneX",
+        "sceneY",
+        "localX",
+        "localY",
+        "onScreen",
+        "geometryAvailable",
+        "qualityTier",
+        "qualityScore",
+        "distanceTiles",
+        "tick",
+    ):
+        value = source.get(key)
+        if marker.get(key) is None and value is not None:
+            marker[key] = value
+    for source_key in ("lastSeenTick", "lastUpdatedTick"):
+        if marker.get("tick") is None and source.get(source_key) is not None:
+            marker["tick"] = source.get(source_key)
+    navigation = source.get("navigation") if isinstance(source.get("navigation"), dict) else {}
+    if marker.get("reachability") is None:
+        marker["reachability"] = navigation.get("directReachability") or source.get("directReachability")
+    if marker.get("liveness") is None:
+        marker["liveness"] = source.get("targetLiveState") or source.get("liveness")
+    if marker.get("aimPoint") is None and isinstance(source.get("aimPoint"), dict):
+        marker["aimPoint"] = source.get("aimPoint")
+    for geometry_key in ("clickableHull", "clickboxPolygon", "convexHull", "canvasTilePolygon"):
+        value = marker_geometry_value(source, geometry_key)
+        if marker.get(geometry_key) is None and value is not None:
+            marker[geometry_key] = value
+    if marker.get("bounds") is None:
+        bounds = marker_bounds_value(source)
+        if bounds is not None:
+            marker["bounds"] = bounds
+    return finalize_intent_marker(marker)
+
+
 def target_type_for_candidate(candidate: dict) -> str:
     target_type = candidate.get("targetType")
     if target_type:
@@ -236,34 +436,75 @@ def intent_marker_from_candidate(
 ) -> dict:
     navigation = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
     aim = candidate.get("aimPoint") if isinstance(candidate.get("aimPoint"), dict) else None
+    target_type = target_type_for_candidate(candidate)
+    marker_id = intent_stabilizer.build_target_key(candidate, target_type)
+    has_projection_identity = any(
+        candidate.get(key) is not None
+        for key in ("worldX", "worldY", "sceneX", "sceneY", "localX", "localY")
+    )
+    projection_mode = "live_object_pending" if target_type == "sceneObject" and has_projection_identity else ("live_tile_fallback" if has_projection_identity else ("last_known_aim" if aim else "label_only"))
+    projection_stale = projection_mode in {"last_known_aim", "label_only"}
+    selected = marker_type == "selected_target"
+    role = "selected" if selected else ("backup" if marker_type == "backup_candidate" else marker_type)
     marker = {
+        "markerVersion": "overlay_intent_marker.v1",
+        "markerId": marker_id,
         "markerType": marker_type,
         "label": label,
+        "selected": selected,
+        "role": role,
+        "priority": intent_stabilizer.PRIORITY_SELECTED_TARGET if selected else intent_stabilizer.PRIORITY_BACKUP,
         "reason": reason,
         "confidence": confidence,
         "source": source,
-        "targetType": target_type_for_candidate(candidate),
+        "targetType": target_type,
         "classId": candidate.get("classId"),
         "id": candidate.get("rawId") if candidate.get("rawId") is not None else candidate.get("id"),
         "hash": candidate.get("hash"),
         "objectKey": candidate.get("objectKey"),
+        "kind": candidate.get("kind"),
+        "layer": candidate.get("layer"),
         "worldX": candidate.get("worldX"),
         "worldY": candidate.get("worldY"),
         "plane": candidate.get("plane"),
         "sceneX": candidate.get("sceneX"),
         "sceneY": candidate.get("sceneY"),
+        "localX": candidate.get("localX"),
+        "localY": candidate.get("localY"),
         "aimPoint": aim,
         "reachability": navigation.get("directReachability") or candidate.get("directReachability"),
         "liveness": candidate.get("targetLiveState") or candidate.get("liveness"),
         "qualityTier": candidate.get("qualityTier"),
+        "qualityScore": candidate.get("qualityScore") or candidate.get("score") or candidate.get("candidateScore"),
+        "geometrySource": candidate.get("geometrySource"),
+        "projectionMode": projection_mode,
+        "projectionStale": projection_stale,
+        "projectionFallbackReason": "stable world/scene/local identity unavailable" if projection_stale else None,
         "name": candidate.get("targetName") or candidate.get("name"),
         "distanceTiles": candidate.get("distanceTiles"),
         "onScreen": candidate.get("onScreen"),
         "geometryAvailable": candidate.get("geometryAvailable"),
+        "tick": candidate.get("lastSeenTick") or candidate.get("lastUpdatedTick") or candidate.get("tick"),
     }
+    geometry = candidate.get("geometry") if isinstance(candidate.get("geometry"), dict) else {}
+    for geometry_key in ("clickableHull", "clickboxPolygon", "convexHull", "canvasTilePolygon"):
+        geometry_value = candidate.get(geometry_key)
+        if geometry_value is None:
+            geometry_value = geometry.get(geometry_key)
+        if geometry_value is not None:
+            marker[geometry_key] = geometry_value
     bounds = candidate.get("bounds") if isinstance(candidate.get("bounds"), dict) else None
+    if bounds is None:
+        for bounds_key in ("clickboxBounds", "convexHullBounds", "canvasLocation"):
+            candidate_bounds = candidate.get(bounds_key)
+            if candidate_bounds is None:
+                candidate_bounds = geometry.get(bounds_key)
+            if isinstance(candidate_bounds, dict):
+                bounds = candidate_bounds
+                break
     if bounds:
         marker["bounds"] = bounds
+    marker = finalize_intent_marker(marker)
     return {key: value for key, value in marker.items() if value is not None}
 
 
@@ -271,6 +512,9 @@ def warning_intent_marker(label: str, reason: str, *, source: str = "brain") -> 
     return {
         "markerType": "warning",
         "label": label,
+        "selected": False,
+        "role": "warning",
+        "priority": intent_stabilizer.PRIORITY_DIAGNOSTIC,
         "reason": reason,
         "confidence": 0.5,
         "source": source,
@@ -284,26 +528,47 @@ def overlay_target_from_intent_marker(marker: dict) -> dict:
         "source": marker.get("source"),
         "reason": marker.get("reason"),
         "targetType": marker.get("targetType"),
+        "markerId": marker.get("markerId"),
+        "markerVersion": marker.get("markerVersion"),
+        "targetKey": marker.get("targetKey"),
+        "selected": marker.get("selected"),
+        "role": marker.get("role"),
+        "priority": marker.get("priority"),
         "classId": marker.get("classId"),
         "name": marker.get("name") or marker.get("label"),
         "id": marker.get("id"),
         "hash": marker.get("hash"),
         "objectKey": marker.get("objectKey"),
+        "kind": marker.get("kind"),
+        "layer": marker.get("layer"),
         "worldX": marker.get("worldX"),
         "worldY": marker.get("worldY"),
         "plane": marker.get("plane"),
         "sceneX": marker.get("sceneX"),
         "sceneY": marker.get("sceneY"),
+        "localX": marker.get("localX"),
+        "localY": marker.get("localY"),
         "distanceTiles": marker.get("distanceTiles"),
         "onScreen": marker.get("onScreen", True),
         "geometryAvailable": marker.get("geometryAvailable"),
         "qualityTier": marker.get("qualityTier"),
+        "qualityScore": marker.get("qualityScore"),
+        "geometrySource": marker.get("geometrySource"),
+        "projectionMode": marker.get("projectionMode"),
+        "projectionStale": marker.get("projectionStale"),
+        "projectionFallbackReason": marker.get("projectionFallbackReason"),
+        "tick": marker.get("tick"),
         "targetLiveState": marker.get("liveness"),
         "directReachability": marker.get("reachability"),
         "isBest": marker.get("markerType") == "selected_target",
         "overlayLabel": marker.get("label"),
         "aimPoint": marker.get("aimPoint"),
         "bounds": marker.get("bounds"),
+        "clickableHullAvailable": marker.get("clickableHullAvailable"),
+        "clickableHull": marker.get("clickableHull"),
+        "clickboxPolygon": marker.get("clickboxPolygon"),
+        "convexHull": marker.get("convexHull"),
+        "canvasTilePolygon": marker.get("canvasTilePolygon"),
     }
     return {key: value for key, value in target.items() if value is not None}
 
@@ -314,51 +579,151 @@ def candidate_is_tree(candidate: dict) -> bool:
     return "tree" in class_id or "tree" in name
 
 
-def build_intent_overlay_state(context: dict, brain_decision: dict, args: argparse.Namespace, generated_at: str) -> dict:
+def marker_label_for_candidate(candidate: dict, prefix: str = "Target") -> str:
+    name = candidate.get("targetName") or candidate.get("name") or candidate.get("classId") or "target"
+    return f"{prefix}: {name}"
+
+
+def target_required_for_intent(active_intent: str) -> bool:
+    intent = str(active_intent or "").lower()
+    if intent in {"goal_complete", "inventory_full", "stale_context", "no_context", "observe"}:
+        return False
+    return True
+
+
+def candidate_key(candidate: dict) -> str:
+    return intent_stabilizer.build_target_key(candidate, target_type_for_candidate(candidate))
+
+
+def candidate_matches_key(candidate: dict, key: str) -> bool:
+    if candidate_key(candidate) == key:
+        return True
+    return any(":".join(str(part) for part in identity) == key for identity in target_identity_keys(candidate))
+
+
+def stable_backup_candidates(
+    candidates: list[dict],
+    selected_marker: dict,
+    *,
+    selected_key: str | None,
+    selected_target_type: str | None,
+    selected_class_id: Any,
+    limit: int,
+    stable_intent: intent_stabilizer.IntentResult | None,
+) -> list[dict]:
+    if limit <= 0:
+        if stable_intent:
+            stable_intent.state.backupTargetKeys = []
+        return []
+    eligible: list[dict] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_target_type = target_type_for_candidate(candidate)
+        candidate_class_id = candidate.get("classId")
+        key = candidate_key(candidate)
+        if key == selected_key or same_target_identity(selected_marker, candidate):
+            merge_marker_from_source(selected_marker, candidate)
+            continue
+        if selected_class_id and candidate_class_id != selected_class_id:
+            continue
+        if selected_target_type and candidate_target_type != selected_target_type:
+            continue
+        duplicate = next((existing for existing in eligible if same_target_identity(existing, candidate)), None)
+        if duplicate is not None:
+            merge_marker_from_source(duplicate, candidate)
+            continue
+        eligible.append(candidate)
+
+    selected_changed = bool(stable_intent and stable_intent.candidateWasSwitched)
+    previous_keys = [] if selected_changed or stable_intent is None else list(stable_intent.state.backupTargetKeys)
+    chosen: list[dict] = []
+    used_keys: set[str] = set()
+    for key in previous_keys:
+        match = next((candidate for candidate in eligible if candidate_matches_key(candidate, key)), None)
+        if match is not None:
+            chosen.append(match)
+            used_keys.add(candidate_key(match))
+        if len(chosen) >= limit:
+            break
+    for candidate in eligible:
+        if len(chosen) >= limit:
+            break
+        key = candidate_key(candidate)
+        if key in used_keys or any(same_target_identity(candidate, existing) for existing in chosen):
+            continue
+        chosen.append(candidate)
+        used_keys.add(key)
+    if stable_intent:
+        stable_intent.state.backupTargetKeys = [candidate_key(candidate) for candidate in chosen]
+    return chosen
+
+
+def build_intent_overlay_state(
+    context: dict,
+    brain_decision: dict,
+    args: argparse.Namespace,
+    generated_at: str,
+    stable_intent: intent_stabilizer.IntentResult | None = None,
+) -> dict:
     status = context.get("status") if isinstance(context.get("status"), dict) else {}
     candidates = context.get("candidates") if isinstance(context.get("candidates"), list) else []
     active_task = str(getattr(args, "brain_task", None) or brain_decision.get("task") or "")
     active_intent = str(brain_decision.get("phase") or "observe")
     markers: list[dict] = []
-
-    if active_task == "woodcutting":
-        selected = brain_core.safe_get(brain_decision, "currentContextSummary.bestTarget", {})
-        if isinstance(selected, dict) and selected and candidate_is_tree(selected):
-            name = selected.get("targetName") or selected.get("name") or "target"
+    selected = None
+    selected_key = None
+    selected_target_type = None
+    selected_class_id = None
+    if stable_intent and stable_intent.selectedTarget:
+        selected = stable_intent.selectedTarget.raw
+        selected_key = stable_intent.selectedTargetKey
+        selected_target_type = stable_intent.selectedTarget.targetType
+        selected_class_id = stable_intent.selectedTarget.classId
+    if isinstance(selected, dict) and selected:
+        marker = intent_marker_from_candidate(
+            selected,
+            "selected_target",
+            marker_label_for_candidate(selected),
+            f"stabilized brain intent: {stable_intent.switchReason if stable_intent else 'selected'}",
+            confidence=brain_decision.get("confidence"),
+            source="brain",
+        )
+        marker["targetKey"] = selected_key
+        if stable_intent:
+            marker["stableForTicks"] = stable_intent.stableForTicks
+            marker["switchReason"] = stable_intent.switchReason
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_target_type = target_type_for_candidate(candidate)
+            candidate_key = intent_stabilizer.build_target_key(candidate, candidate_target_type)
+            if candidate_key == selected_key or same_target_identity(marker, candidate):
+                marker = merge_marker_from_source(marker, candidate)
+        markers.append(marker)
+        backup_limit = max(0, int(getattr(args, "overlay_backup_candidates", 2) or 0))
+        backups = stable_backup_candidates(
+            candidates,
+            marker,
+            selected_key=selected_key,
+            selected_target_type=selected_target_type,
+            selected_class_id=selected_class_id,
+            limit=backup_limit,
+            stable_intent=stable_intent,
+        )
+        for candidate in backups:
             markers.append(
                 intent_marker_from_candidate(
-                    selected,
-                    "selected_target",
-                    f"Target: {name}",
-                    "brain selected best reachable tree",
-                    confidence=brain_decision.get("confidence"),
-                    source="brain",
+                    candidate,
+                    "backup_candidate",
+                    "Backup",
+                    "nearby backup candidate retained for context",
+                    confidence=None,
+                    source="context",
                 )
             )
-            selected_key = candidate_identity(selected)
-            backup_limit = max(0, int(getattr(args, "overlay_backup_candidates", 2) or 0))
-            backups = []
-            for candidate in candidates:
-                if not isinstance(candidate, dict) or not candidate_is_tree(candidate):
-                    continue
-                if candidate_identity(candidate) == selected_key:
-                    continue
-                backups.append(candidate)
-                if len(backups) >= backup_limit:
-                    break
-            for candidate in backups:
-                markers.append(
-                    intent_marker_from_candidate(
-                        candidate,
-                        "backup_candidate",
-                        "Backup",
-                        "nearby backup candidate retained for context",
-                        confidence=None,
-                        source="context",
-                    )
-                )
-        else:
-            markers.append(warning_intent_marker("No reachable tree", "brain did not select a reachable woodcutting target"))
+    elif active_task == "woodcutting" and target_required_for_intent(active_intent):
+        markers.append(warning_intent_marker("No reachable tree", "brain did not select a reachable woodcutting target"))
 
     return {
         "schema": OVERLAY_INTENT_SCHEMA,
@@ -367,6 +732,14 @@ def build_intent_overlay_state(context: dict, brain_decision: dict, args: argpar
         "activeTask": active_task or None,
         "activeIntent": active_intent,
         "status": "WARN" if any(marker.get("markerType") == "warning" for marker in markers) else "PASS",
+        "selectedTargetKey": stable_intent.selectedTargetKey if stable_intent else selected_key,
+        "rawBestTargetKey": stable_intent.rawBestTargetKey if stable_intent else None,
+        "stableForTicks": stable_intent.stableForTicks if stable_intent else None,
+        "missingForTicks": stable_intent.currentMissingTicks if stable_intent else 0,
+        "retainedDueToGrace": stable_intent.retainedDueToGrace if stable_intent else False,
+        "switchReason": stable_intent.switchReason if stable_intent else None,
+        "switchAuditTail": (stable_intent.switchAuditTail[-5:] if stable_intent else []),
+        "backupKeys": (stable_intent.state.backupTargetKeys if stable_intent else []),
         "markers": markers,
     }
 
@@ -378,6 +751,7 @@ def build_overlay_state_for_mode(
     context: dict,
     brain_decision: dict,
     generated_at: str,
+    stable_intent: intent_stabilizer.IntentResult | None = None,
 ) -> dict:
     overlay = dict(result.get("overlayDebug") or {})
     summary = dict(overlay.get("summary") or {})
@@ -393,10 +767,11 @@ def build_overlay_state_for_mode(
 
     status = context.get("status") if isinstance(context.get("status"), dict) else {}
     candidates = context.get("candidates") if isinstance(context.get("candidates"), list) else []
-    intent = build_intent_overlay_state(context, brain_decision if isinstance(brain_decision, dict) else {}, args, generated_at)
+    intent = build_intent_overlay_state(context, brain_decision if isinstance(brain_decision, dict) else {}, args, generated_at, stable_intent)
     markers = list(intent.get("markers") or [])
     targets = [overlay_target_from_intent_marker(marker) for marker in markers if marker.get("markerType") != "warning"]
     candidate_marker_count = sum(1 for marker in markers if marker.get("markerType") in {"selected_target", "backup_candidate"})
+    selected_marker = next((marker for marker in markers if marker.get("markerType") == "selected_target"), None)
     summary.update(
         {
             "overlayMode": "intent",
@@ -405,6 +780,21 @@ def build_overlay_state_for_mode(
             "targetLimit": 1 + max(0, int(getattr(args, "overlay_backup_candidates", 2) or 0)),
             "intentMarkerCount": len(markers),
             "candidateMarkersSuppressed": max(0, len(candidates) - candidate_marker_count),
+            "clickableHullTargets": sum(1 for marker in targets if best_marker_geometry_source(marker) in {"clickableHull", "clickboxPolygon"}),
+            "clickboxPolygonTargets": sum(1 for marker in targets if polygon_points(marker.get("clickboxPolygon"))),
+            "convexHullTargets": sum(1 for marker in targets if polygon_points(marker.get("convexHull"))),
+            "canvasTilePolygonTargets": sum(1 for marker in targets if polygon_points(marker.get("canvasTilePolygon"))),
+            "boundsOnlyTargets": sum(1 for marker in targets if best_marker_geometry_source(marker) == "bounds"),
+            "aimOnlyTargets": sum(1 for marker in targets if best_marker_geometry_source(marker) == "aimPoint"),
+            "selectedTargetAvailable": bool(selected_marker),
+            "selectedTargetHasClickableHull": bool(selected_marker and best_marker_geometry_source(selected_marker) in {"clickableHull", "clickboxPolygon"}),
+            "backupMarkerCount": sum(1 for marker in markers if marker.get("markerType") == "backup_candidate"),
+            "rawBestTarget": stable_intent.rawBestTargetKey if stable_intent else summary.get("rawBestTarget"),
+            "stabilizedIntentTarget": stable_intent.selectedTargetKey if stable_intent else summary.get("stabilizedIntentTarget"),
+            "intentStableForTicks": stable_intent.stableForTicks if stable_intent else None,
+            "intentSwitchReason": stable_intent.switchReason if stable_intent else None,
+            "intentRetainedDueToGrace": stable_intent.retainedDueToGrace if stable_intent else False,
+            "intentCurrentMissingTicks": stable_intent.currentMissingTicks if stable_intent else 0,
         }
     )
     if not overlay:
@@ -681,6 +1071,7 @@ class LiveCoreState:
                 "inputSourceActive": None,
                 "writeDebugLiveFiles": bool(self.write_debug_live_files),
                 "overlayStateWritten": bool(self.overlay_state_written),
+                "dailyMode": None,
             },
             "activity": {},
             "events": [],
@@ -697,6 +1088,7 @@ class LiveCoreState:
     def health(self) -> dict:
         context = self.context()
         payload = context_service.health_payload(context)
+        status = context.get("status") if isinstance(context.get("status"), dict) else {}
         payload.update(
             {
                 "schema": HEALTH_SCHEMA,
@@ -704,7 +1096,12 @@ class LiveCoreState:
                 "liveCoreDaemonActive": True,
                 "writeDebugLiveFiles": bool(self.write_debug_live_files),
                 "overlayStateWritten": bool(self.overlay_state_written),
-                "inputSourceActive": (context.get("status") or {}).get("inputSourceActive"),
+                "inputSourceActive": status.get("inputSourceActive"),
+                "dailyMode": status.get("dailyMode"),
+                "noFileDaily": status.get("noFileDaily"),
+                "compactPacketFilesRequired": status.get("compactPacketFilesRequired"),
+                "compactPacketFilesWriting": status.get("compactPacketFilesWriting"),
+                "debugMirrorEnabled": status.get("debugMirrorEnabled"),
                 "candidateCount": len(context.get("candidates") or []),
                 "updateCount": self.update_count,
                 "readOnlyTelemetry": True,
@@ -744,6 +1141,38 @@ class LiveCoreState:
             "candidateMarkersSuppressed",
             "overlayStateBytes",
             "overlayWriteError",
+            "rawBestTarget",
+            "stabilizedIntentTarget",
+            "intentRawBestTarget",
+            "intentStableTarget",
+            "stabilizedIntentTargetLabel",
+            "intentStableForTicks",
+            "intentSwitchReason",
+            "intentHardSwitch",
+            "intentSoftSwitch",
+            "intentSelectedTargetKey",
+            "intentRawBestTargetKey",
+            "intentPreviousTargetKey",
+            "intentCandidateWasRetained",
+            "intentCandidateWasSwitched",
+            "intentSwitchedThisTick",
+            "intentInterruptReason",
+            "intentRetainedDueToGrace",
+            "intentCurrentMissingTicks",
+            "intentCurrentMissingThisTick",
+            "intentCurrentInvalidReason",
+            "intentSwitchAuditTail",
+            "intentStabilizerMillis",
+            "intentCandidatesConsidered",
+            "dailyMode",
+            "noFileDaily",
+            "compactPacketFilesRequired",
+            "compactPacketFilesWriting",
+            "compactPacketFilesEnabledInManifest",
+            "compactPacketFilesAvailable",
+            "compactPacketFilesRecent",
+            "compactPacketFileCount",
+            "debugMirrorEnabled",
         )
         for key in passthrough_status_keys:
             if key in self.source_status:
@@ -783,6 +1212,8 @@ class LiveCoreDaemon:
         self.brain_reset_applied = bool(args.reset_brain_state)
         self.args.reset_brain_state = False
         self.processors: dict[str, live.LiveTargetProcessor] = {}
+        self.intent_stabilizer = intent_stabilizer.IntentStabilizer()
+        self.latest_intent_result: intent_stabilizer.IntentResult | None = None
         self.active_source: str | None = None
         self.fallback_reason: str | None = None
         self.server: ThreadingHTTPServer | None = None
@@ -831,6 +1262,73 @@ class LiveCoreDaemon:
             return False
         return True
 
+    def stabilize_intent(self, brain_decision: dict | None) -> tuple[intent_stabilizer.IntentResult, dict]:
+        started = time.perf_counter()
+        context = self.state.context()
+        status = context.get("status") if isinstance(context.get("status"), dict) else {}
+        candidates = context.get("candidates") if isinstance(context.get("candidates"), list) else []
+        decision = brain_decision if isinstance(brain_decision, dict) else {}
+        raw_best = brain_core.safe_get(decision, "currentContextSummary.bestTarget", {})
+        phase = str(decision.get("phase") or "observe")
+        if phase in {"goal_complete", "inventory_full", "stale_context", "no_context", "observe"}:
+            raw_best = {}
+            candidates = []
+        if not isinstance(raw_best, dict) or not raw_best:
+            raw_best = candidates[0] if decision and candidates else {}
+        task = str(decision.get("task") or self.args.brain_task or self.args.profile or "")
+        priority = intent_stabilizer.PRIORITY_SELECTED_TARGET
+        if phase in {"goal_complete", "inventory_full", "banking_needed"}:
+            priority = intent_stabilizer.PRIORITY_TASK_TRANSITION
+        if decision.get("interrupt") or str(decision.get("interruptReason") or "").lower() in {"threat", "emergency", "escape"}:
+            priority = intent_stabilizer.PRIORITY_EMERGENCY
+        intent_context = {
+            "activeTask": task,
+            "activeIntent": phase,
+            "profile": self.args.profile,
+            "latestTick": status.get("lastProcessedTick") or status.get("latestTickProcessed") or status.get("latestTick"),
+            "rawBestTarget": raw_best,
+            "intentPriority": decision.get("intentPriority") or priority,
+            "forceSwitch": bool(decision.get("forceSwitch")),
+            "interrupt": bool(decision.get("interrupt")),
+            "interruptReason": decision.get("interruptReason"),
+            "interruptPriority": decision.get("interruptPriority"),
+            "interruptTarget": decision.get("interruptTarget"),
+            "requireReachability": True,
+            "requireAimPoint": False,
+        }
+        result = self.intent_stabilizer.choose(candidates, intent_context)
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        selected_raw = result.selectedTarget.raw if result.selectedTarget else {}
+        selected_label = None
+        if selected_raw:
+            selected_label = selected_raw.get("targetName") or selected_raw.get("name") or selected_raw.get("classId") or result.selectedTargetKey
+        fields = {
+            "rawBestTarget": result.rawBestTargetKey,
+            "stabilizedIntentTarget": result.selectedTargetKey,
+            "intentRawBestTarget": result.rawBestTargetKey,
+            "intentStableTarget": result.selectedTargetKey,
+            "stabilizedIntentTargetLabel": selected_label,
+            "intentSelectedTargetKey": result.selectedTargetKey,
+            "intentRawBestTargetKey": result.rawBestTargetKey,
+            "intentPreviousTargetKey": result.previousTargetKey,
+            "intentStableForTicks": result.stableForTicks,
+            "intentSwitchReason": result.switchReason,
+            "intentHardSwitch": result.hardSwitch,
+            "intentSoftSwitch": result.softSwitch,
+            "intentCandidateWasRetained": result.candidateWasRetained,
+            "intentCandidateWasSwitched": result.candidateWasSwitched,
+            "intentSwitchedThisTick": result.candidateWasSwitched,
+            "intentInterruptReason": result.interruptReason,
+            "intentRetainedDueToGrace": result.retainedDueToGrace,
+            "intentCurrentMissingTicks": result.currentMissingTicks,
+            "intentCurrentMissingThisTick": result.currentTargetMissingThisTick,
+            "intentCurrentInvalidReason": result.currentInvalidReason,
+            "intentSwitchAuditTail": result.switchAuditTail[-5:],
+            "intentStabilizerMillis": elapsed_ms,
+            "intentCandidatesConsidered": result.candidatesConsidered,
+        }
+        return result, fields
+
     def poll_once(self) -> dict:
         source = self.active_source or self.initial_source()
         start = time.perf_counter()
@@ -849,6 +1347,19 @@ class LiveCoreDaemon:
                 self.fallback_reason = (self.fallback_reason or "plugin snapshot was not accepted") + "; compact packet fallback unavailable"
 
         self.active_source = source
+        no_file_daily = self.args.daily_mode == DAILY_MODE_SNAPSHOT_NO_FILES
+        packet_write_state = compact_packet_file_write_state(self.session)
+        daily_fields = {
+            "dailyMode": self.args.daily_mode,
+            "noFileDaily": bool(no_file_daily),
+            "compactPacketFilesRequired": source == live.COMPACT_PACKET_SOURCE,
+            "compactPacketFilesWriting": packet_write_state.get("compactPacketFilesWriting"),
+            "compactPacketFilesEnabledInManifest": packet_write_state.get("compactPacketFilesEnabledInManifest"),
+            "compactPacketFilesAvailable": packet_write_state.get("compactPacketFilesAvailable"),
+            "compactPacketFilesRecent": packet_write_state.get("compactPacketFilesRecent"),
+            "compactPacketFileCount": packet_write_state.get("compactPacketFileCount"),
+            "debugMirrorEnabled": bool(no_file_daily and packet_write_state.get("compactPacketFilesWriting") is True),
+        }
         if isinstance(result.get("status"), dict):
             result["status"] = dict(result["status"])
             result["status"]["liveCoreDaemonActive"] = True
@@ -860,6 +1371,7 @@ class LiveCoreDaemon:
             result["status"]["activeMs"] = round(active_millis, 3)
             result["status"]["budgetExceeded"] = bool(active_millis > float(self.args.target_update_ms))
             result["status"]["activeBottleneck"] = timing_bottleneck(result["status"])
+            result["status"].update(daily_fields)
             if self.brain_state_warning is None:
                 result["status"]["warnings"] = [
                     warning
@@ -882,6 +1394,13 @@ class LiveCoreDaemon:
         brain_decision = self.evaluate_brain_if_enabled(result)
         if brain_decision:
             self.state.brain_decision = brain_decision
+        stable_intent, intent_fields = self.stabilize_intent(brain_decision)
+        self.latest_intent_result = stable_intent
+        self.state.source_status.update(intent_fields)
+        if isinstance(result.get("status"), dict):
+            result["status"].update(intent_fields)
+        if isinstance(self.state.latest_context.get("status"), dict):
+            self.state.latest_context["status"].update(intent_fields)
         overlay_written, overlay_error, overlay_bytes = self.write_overlay_state_if_enabled(result)
         overlay_fields = {
             "overlayStateWritten": bool(overlay_written),
@@ -921,6 +1440,7 @@ class LiveCoreDaemon:
             self.state.context(),
             self.state.brain_decision if isinstance(self.state.brain_decision, dict) else {},
             generated_at,
+            self.latest_intent_result,
         )
         if not overlay:
             return False, "overlay debug state was not available", 0
@@ -1016,11 +1536,16 @@ class LiveCoreDaemon:
             print(f"Live core daemon: session={self.session}")
             print(f"context API: http://{self.args.context_host}:{self.args.context_port}")
             print("Daily mode:")
+            print(f"  mode={self.args.daily_mode}")
             print(f"  source={self.args.input_source}")
             print(f"  writes={'on' if self.args.write_debug_live_files else 'off'}")
             print(f"  overlay={'on' if self.args.write_overlay_state else 'off'} ({self.args.overlay_mode})")
             print(f"  brain={'on' if (self.args.human_dashboard or self.args.goal_count) else 'off'}")
             print(f"  debug files={'on' if self.args.write_debug_live_files else 'off'}")
+            print(
+                "  compact packet files required="
+                f"{'no' if self.args.input_source == live.PLUGIN_SNAPSHOT_SOURCE else 'yes'}"
+            )
             print(
                 "  experimental snapshot/stream="
                 f"{'on' if self.args.input_source == live.PLUGIN_SNAPSHOT_SOURCE else 'off'}/off"
@@ -1049,7 +1574,7 @@ class LiveCoreDaemon:
             "tick={tick} input={source} candidates={candidates} best={best} "
             "activeMs={active} contextMs={context_ms} brain={brain} progress={progress} overlay={overlay} writes={writes} "
             "budget={budget} bottleneck={bottleneck} progressRetained={progress_retained} "
-            "candidateRetained={candidate_retained}".format(
+            "candidateRetained={candidate_retained} intent={intent} stableFor={stable_for} switch={switch} intentMs={intent_ms}".format(
                 tick=status.get("lastProcessedTick") or status.get("latestTickProcessed"),
                 source=status.get("inputSourceActive"),
                 candidates=status.get("candidateCount"),
@@ -1064,6 +1589,10 @@ class LiveCoreDaemon:
                 bottleneck=status.get("activeBottleneck") or "unknown",
                 progress_retained="yes" if status.get("progressRetainedPreviousThisPoll") else "no",
                 candidate_retained="yes" if status.get("candidateRetainedPrevious") else "no",
+                intent=status.get("stabilizedIntentTargetLabel") or status.get("stabilizedIntentTarget") or "none",
+                stable_for=status.get("intentStableForTicks"),
+                switch=status.get("intentSwitchReason") or "unknown",
+                intent_ms=status.get("intentStabilizerMillis"),
             )
         )
         if status.get("progressRetainedPreviousThisPoll"):
@@ -1214,6 +1743,8 @@ class LiveCoreRequestHandler(BaseHTTPRequestHandler):
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    daily_mode_explicit = any(item == "--daily-mode" or item.startswith("--daily-mode=") for item in raw_argv)
     parser = argparse.ArgumentParser(
         description="Read-only in-memory daily live daemon. It serves context from telemetry observations only and emits no actions."
     )
@@ -1222,6 +1753,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     session.add_argument("--latest-session", action="store_true", help="Use newest telemetry session.")
     parser.add_argument("--sessions-dir", help="Override sessions root.")
     parser.add_argument("--profile", default="woodcutting", choices=["woodcutting", "broad_qa", "navigation_qa", "npc_qa", "ground_item_qa", "ui_qa"])
+    parser.add_argument("--daily-mode", choices=sorted(DAILY_MODES), default=DAILY_MODE_COMPACT_PACKETS)
     parser.add_argument("--input-source", choices=["plugin-snapshot", "compact-packets", "auto"], default="compact-packets")
     parser.add_argument("--plugin-snapshot-host", default="127.0.0.1")
     parser.add_argument("--plugin-snapshot-port", type=int, default=8893)
@@ -1251,7 +1783,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target-update-ms", type=float, default=100.0)
     parser.add_argument("--benchmark", action="store_true")
     parser.add_argument("--summary", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.daily_mode_explicit = daily_mode_explicit
+    if daily_mode_explicit:
+        if args.daily_mode == DAILY_MODE_SNAPSHOT_NO_FILES:
+            args.input_source = live.PLUGIN_SNAPSHOT_SOURCE
+            args.plugin_snapshot_tier = "hot"
+        elif args.daily_mode == DAILY_MODE_COMPACT_PACKETS:
+            args.input_source = live.COMPACT_PACKET_SOURCE
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
