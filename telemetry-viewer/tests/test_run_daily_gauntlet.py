@@ -125,6 +125,47 @@ class RunDailyGauntletTest(unittest.TestCase):
         self.assertTrue(report["navigationNeeded"])
         self.assertTrue(report["noActionEmitted"])
 
+    def test_process_inventory_phase_does_not_fail_for_optional_missing_tree_candidates(self):
+        brain = {
+            "genericTaskState": {"phase": "inventory_full", "activeIntent": "process_inventory"},
+            "serviceContext": {"serviceNeeded": False},
+            "processInventoryContext": {"processRequired": True, "processTypeNeeded": "firemaking"},
+            "navigationIntentContext": {"navigationNeeded": False},
+            "requiredContextDomains": ["inventory", "process_inventory"],
+            "missingRequiredContextDomains": [],
+            "optionalMissingContextDomains": ["target.candidates"],
+            "goalProgress": {},
+            "noActionEmitted": True,
+        }
+        result = gauntlet.evaluate_daemon_payloads(
+            {"status": "PASS"},
+            {
+                "liveCoreDaemonActive": True,
+                "inputSourceActive": "plugin-snapshot",
+                "dailyMode": "snapshot-no-files",
+                "noFileDaily": True,
+                "compactPacketFilesRequired": False,
+                "compactPacketFilesWriting": False,
+                "brainTaskPolicy": "woodcutting_firemake",
+                "candidateCount": 0,
+                "requiredContextDomains": ["inventory", "process_inventory"],
+                "missingRequiredContextDomains": [],
+                "optionalMissingContextDomains": ["target.candidates"],
+            },
+            {
+                "status": "FAIL",
+                "missingCapabilities": ["target.candidates"],
+                "requiredContextDomains": ["inventory", "process_inventory"],
+                "missingRequiredContextDomains": [],
+                "optionalMissingContextDomains": ["target.candidates"],
+            },
+            brain,
+            daily_mode="snapshot-no-files",
+        )
+
+        self.assertFalse(any("daily context endpoint returned FAIL" in failure for failure in result["failures"]))
+        self.assertTrue(any("optional" in warning and "context endpoint returned FAIL" in warning for warning in result["warnings"]))
+
     def test_fails_when_brain_does_not_report_no_action_emitted(self):
         result = gauntlet.evaluate_daemon_payloads(
             {"status": "PASS"},

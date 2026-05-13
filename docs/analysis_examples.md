@@ -41,8 +41,18 @@ tested explicitly before relying on it.
 
 ### Runtime Control
 
-Once `live_core_daemon.py` is running, you can change read-only brain/context
-settings without restarting the daemon:
+`live_core_daemon.py` also accepts startup mission presets:
+
+```text
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --human-dashboard --summary --benchmark
+```
+
+Startup `--preset` resolves through `mission_presets.py`. Explicit
+`--goal-count` overrides the preset goal. Explicit `--task-policy` still works
+and overrides the preset policy with a warning.
+
+Once `live_core_daemon.py` is running, you can change the same read-only
+brain/context settings without restarting the daemon:
 
 ```text
 python telemetry-viewer\control_live_daemon.py --get
@@ -53,7 +63,7 @@ python telemetry-viewer\control_live_daemon.py --set-policy woodcutting_firemake
 python telemetry-viewer\control_live_daemon.py --set-policy woodcutting_bank
 ```
 
-The Live Control Panel exposes the same local `/control` endpoint with a task
+The Live Control Panel exposes the same local `/control` endpoint with a
 mission preset dropdown, task policy dropdown, goal-count field, observe-only
 toggle, runtime apply button, and reset-baseline button. Mission presets are
 sidecar brain/context presets only:
@@ -75,6 +85,9 @@ generic phase, active intent, progress, inventory-full state,
 service/process/navigation needs, overlay selection, warning count, and
 `noActionEmitted`. Quick policy buttons such as Woodcut Firemake or Observe
 Only post `missionPreset` payloads; they do not operate the game.
+
+`diagnose_task_transition.py` uses policy names such as `woodcutting_bank`, not
+mission preset names such as `woodcut_bank`.
 
 By default, the daemon does not write these rolling legacy live files:
 

@@ -25,10 +25,10 @@
     {
       "name": "live_core_daemon.py",
       "category": "daily",
-      "purpose": "Daily in-memory live daemon. Stable mode uses compact-packets; experimental snapshot no-file mode uses PluginSnapshotEndpoint. Context/brain endpoints are in memory, writes are off by default, and overlay state is optional.",
+      "purpose": "Daily in-memory live daemon. Stable mode uses compact-packets; experimental snapshot no-file mode uses PluginSnapshotEndpoint. Context/brain endpoints are in memory, writes are off by default, overlay state is optional, and startup --preset is a safe mission-preset alias.",
       "dailyRequired": true,
-      "normalCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark",
-      "alternateCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark",
+      "normalCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --summary --benchmark",
+      "alternateCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --summary --benchmark",
       "input": "compact packet files for stable mode; PluginSnapshotEndpoint for explicit experimental no-file mode",
       "output": "localhost context/brain/status endpoints and optional capped brain intent overlay_debug_state.json",
       "status": "daily",

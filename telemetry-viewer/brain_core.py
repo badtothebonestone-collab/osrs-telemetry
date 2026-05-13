@@ -578,6 +578,109 @@ def inventory_policy_can_proceed_with_stale_targets(
     }
 
 
+def dedupe_domains(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text_value = str(value or "").strip()
+        if not text_value or text_value in seen:
+            continue
+        seen.add(text_value)
+        result.append(text_value)
+    return result
+
+
+def context_domain_summary(
+    decision: dict[str, Any],
+    *,
+    response: dict[str, Any] | None = None,
+    policy: task_policy_module.TaskPolicy | dict[str, Any] | str | None = None,
+) -> dict[str, Any]:
+    decision = decision if isinstance(decision, dict) else {}
+    response = response if isinstance(response, dict) else {}
+    generic = decision.get("genericTaskState") if isinstance(decision.get("genericTaskState"), dict) else {}
+    resolved_policy = task_policy_module.resolve_task_policy(
+        policy or decision.get("taskPolicy"),
+        task=decision.get("task"),
+        profile=decision.get("profile"),
+    )
+    phase = str(generic.get("phase") or decision.get("phase") or "")
+    active_intent = str(generic.get("activeIntent") or "")
+    required: list[str] = []
+    optional: list[str] = []
+
+    if active_intent == "process_inventory":
+        required = ["inventory", "process_inventory"]
+        optional = ["target.candidates", "target.freshness"]
+    elif active_intent == "needs_service":
+        required = ["inventory", "service"]
+        optional = ["target.candidates", "service.target"]
+    elif active_intent in {"select_target", "continue_current_target"} or phase in {"select_target", "target_selected"}:
+        required = ["target.candidates", "target.freshness"]
+        optional = ["navigation.full_pathfinding"]
+    elif active_intent == "continue_task":
+        required = ["target.candidates"]
+        optional = ["inventory", "target.freshness"]
+    elif phase in {"blocked", "needs_more_context"} and resolved_policy.fullInventoryStrategy not in {
+        task_policy_module.InventoryFullStrategy.PROCESS_INVENTORY,
+        task_policy_module.InventoryFullStrategy.NEEDS_SERVICE,
+    }:
+        required = ["target.candidates"]
+        optional = ["target.freshness"]
+    elif phase == "goal_complete":
+        required = ["inventory"]
+        optional = ["target.candidates"]
+    elif phase == "observe":
+        optional = ["inventory", "target.candidates"]
+
+    required = dedupe_domains(required)
+    optional = dedupe_domains(optional)
+
+    freshness_domains = decision.get("freshnessDomains") if isinstance(decision.get("freshnessDomains"), dict) else {}
+    current_context = decision.get("currentContextSummary") if isinstance(decision.get("currentContextSummary"), dict) else {}
+    inventory = response.get("inventory") if isinstance(response.get("inventory"), dict) else current_context.get("inventory") if isinstance(current_context.get("inventory"), dict) else {}
+    best = best_target(response) if response else current_context.get("bestTarget") if isinstance(current_context.get("bestTarget"), dict) else {}
+    target_count = candidate_count(response) if response else None
+    if target_count is None and best:
+        target_count = 1
+
+    inventory_missing = not inventory_snapshot_usable(inventory) or freshness_domains.get("inventoryFreshness") not in {None, "fresh"}
+    target_candidates_missing = not best and (target_count is None or target_count <= 0)
+    target_freshness_missing = freshness_domains.get("targetCandidateFreshness") not in {None, "fresh"}
+
+    missing_required: list[str] = []
+    optional_missing: list[str] = []
+    if "inventory" in required and inventory_missing:
+        missing_required.append("inventory")
+    if "target.candidates" in required and target_candidates_missing:
+        missing_required.append("target.candidates")
+    if "target.freshness" in required and target_freshness_missing:
+        missing_required.append("target.freshness")
+
+    process_context = decision.get("processInventoryContext") if isinstance(decision.get("processInventoryContext"), dict) else {}
+    if "process_inventory" in required and process_context and process_context.get("processRequired") is False:
+        missing_required.append("process_inventory")
+    service_context = decision.get("serviceContext") if isinstance(decision.get("serviceContext"), dict) else {}
+    if "service" in required and service_context and service_context.get("serviceNeeded") is False:
+        missing_required.append("service")
+
+    if "inventory" in optional and inventory_missing:
+        optional_missing.append("inventory")
+    if "target.candidates" in optional and target_candidates_missing:
+        optional_missing.append("target.candidates")
+    if "target.freshness" in optional and target_freshness_missing:
+        optional_missing.append("target.freshness")
+    if "service.target" in optional and service_context and not service_context.get("bestServiceCandidate"):
+        optional_missing.append("service.target")
+
+    return {
+        "requiredContextDomains": required,
+        "missingRequiredContextDomains": dedupe_domains(missing_required),
+        "optionalMissingContextDomains": dedupe_domains(optional_missing),
+        "targetCandidatesRequired": "target.candidates" in required,
+    }
+
+
 def inventory_is_full(inventory: dict) -> bool:
     full = as_bool(inventory.get("inventoryFull"))
     if full is not None:
@@ -1526,15 +1629,18 @@ def evaluate_brain(
 
     phase = "unknown"
     confidence = 0.35
+    policy_phase_can_ignore_context_fail = bool(inventory_policy_can_proceed and response.get("status") == "FAIL")
     if inventory_policy_can_proceed and freshness_domains.get("targetCandidateFreshness") != "fresh":
         if not best and not nearest:
             warnings.append("no tree candidates currently observed")
         warnings.append(f"target candidate freshness {freshness_domains.get('targetCandidateFreshness')}")
+    if policy_phase_can_ignore_context_fail:
+        warnings.append("context status is FAIL, but current inventory policy can proceed without target candidates")
     if stale and not inventory_policy_can_proceed:
         phase = "stale_context"
         confidence = 0.9
         blocking.append("context freshness failed")
-    elif response.get("status") == "FAIL":
+    elif response.get("status") == "FAIL" and not policy_phase_can_ignore_context_fail:
         phase = "no_context"
         confidence = 0.7
         blocking.append("context status is FAIL")
@@ -1606,12 +1712,16 @@ def evaluate_brain(
     current_context = build_current_context_summary(response, best, inventory, activity)
     watch_response = watch_response if isinstance(watch_response, dict) and watch_response else {}
 
+    context_status = response.get("status", "WARN")
+    if policy_phase_can_ignore_context_fail and context_status == "FAIL":
+        context_status = "WARN"
+
     decision = {
         "schema": DECISION_SCHEMA,
         "generatedAtUtc": now,
         "task": task,
         "goal": {"goalCount": goal_count},
-        "contextStatus": response.get("status", "WARN"),
+        "contextStatus": context_status,
         "latestTick": response.get("latestTick"),
         "phase": phase,
         "substate": primary_substate(substates),
@@ -1685,6 +1795,7 @@ def evaluate_brain(
         "noActionEmitted": True,
     }
     decision["genericTaskState"] = task_state.from_brain_decision(decision, policy=resolved_policy).to_dict()
+    decision.update(context_domain_summary(decision, response=response, policy=resolved_policy))
     validate_no_action_fields(decision)
     return decision, update_state_from_decision(state, decision, inventory, events, watch_response)
 

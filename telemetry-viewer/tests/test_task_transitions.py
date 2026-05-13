@@ -98,6 +98,19 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
         self.assertIn(payload["targetCandidateFreshness"], {"stale", "unknown"})
         self.assertIsNone(payload["overlaySelectedMarker"])
 
+    def test_firemake_live_style_fail_context_no_candidates_allows_process_inventory(self):
+        payload = transitions.evaluate_transition_scenario("woodcutting_firemake", "firemake_full_inventory_no_candidates_live_style")
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["actualPhase"], "inventory_full")
+        self.assertEqual(payload["actualActiveIntent"], "process_inventory")
+        self.assertTrue(payload["processInventoryAnalyzerRuns"])
+        self.assertEqual(payload["processContextSummary"]["processTypeNeeded"], "firemaking")
+        self.assertEqual(payload["requiredContextDomains"], ["inventory", "process_inventory"])
+        self.assertEqual(payload["missingRequiredContextDomains"], [])
+        self.assertIn("target.candidates", payload["optionalMissingContextDomains"])
+        self.assertFalse(payload["targetCandidatesRequired"])
+
     def test_drop_ready_reports_drop_context(self):
         payload = transitions.evaluate_transition_scenario("woodcutting_drop", "drop_ready")
 

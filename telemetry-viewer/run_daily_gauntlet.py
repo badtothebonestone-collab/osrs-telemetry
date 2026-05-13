@@ -150,9 +150,27 @@ def transition_summary_from(status: dict[str, Any], brain_payload: dict[str, Any
         "activeIntent": generic.get("activeIntent") or status.get("activeIntent"),
         "serviceNeeded": service.get("serviceNeeded", status.get("serviceNeeded")),
         "processNeeded": process.get("processRequired", status.get("processInventoryNeeded")),
+        "processTypeNeeded": process.get("processTypeNeeded", status.get("processTypeNeeded")),
         "navigationNeeded": navigation.get("navigationNeeded", status.get("navigationIntentNeeded")),
+        "requiredContextDomains": brain.get("requiredContextDomains", status.get("requiredContextDomains", [])),
+        "missingRequiredContextDomains": brain.get("missingRequiredContextDomains", status.get("missingRequiredContextDomains", [])),
+        "optionalMissingContextDomains": brain.get("optionalMissingContextDomains", status.get("optionalMissingContextDomains", [])),
         "noActionEmitted": brain.get("noActionEmitted") if brain else None,
     }
+
+
+def context_domain_list(*payloads: dict[str, Any] | None, key: str) -> list[str]:
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [str(item) for item in value if item]
+        brain = payload.get("brain") if isinstance(payload.get("brain"), dict) else {}
+        value = brain.get(key)
+        if isinstance(value, list):
+            return [str(item) for item in value if item]
+    return []
 
 
 def evaluate_daemon_payloads(
@@ -215,7 +233,30 @@ def evaluate_daemon_payloads(
         warnings.extend(policy_warnings_from(daemon_status))
     if context_payload:
         if context_payload.get("status") == "FAIL":
-            failures.append("daily context endpoint returned FAIL")
+            missing_required = context_domain_list(
+                daemon_status,
+                brain_payload,
+                context_payload,
+                key="missingRequiredContextDomains",
+            )
+            optional_missing = context_domain_list(
+                daemon_status,
+                brain_payload,
+                context_payload,
+                key="optionalMissingContextDomains",
+            )
+            required_domains = context_domain_list(
+                daemon_status,
+                brain_payload,
+                context_payload,
+                key="requiredContextDomains",
+            )
+            if missing_required or not required_domains:
+                detail = f": missing required context domains: {', '.join(missing_required)}" if missing_required else ""
+                failures.append(f"daily context endpoint returned FAIL{detail}")
+            else:
+                optional_detail = f" ({', '.join(optional_missing)})" if optional_missing else ""
+                warnings.append(f"daily context endpoint returned FAIL, but only optional context is missing for current phase{optional_detail}")
         elif context_payload.get("status") == "WARN":
             warnings.append("daily context endpoint returned WARN")
         forbidden = forbidden_field_paths(context_payload)
@@ -397,7 +438,11 @@ def build_report(args: argparse.Namespace, processes: list[dict[str, Any]] | Non
         "activeIntent": transition_summary.get("activeIntent"),
         "serviceNeeded": transition_summary.get("serviceNeeded"),
         "processNeeded": transition_summary.get("processNeeded"),
+        "processTypeNeeded": transition_summary.get("processTypeNeeded"),
         "navigationNeeded": transition_summary.get("navigationNeeded"),
+        "requiredContextDomains": transition_summary.get("requiredContextDomains") or daemon_status.get("requiredContextDomains") or [],
+        "missingRequiredContextDomains": transition_summary.get("missingRequiredContextDomains") or daemon_status.get("missingRequiredContextDomains") or [],
+        "optionalMissingContextDomains": transition_summary.get("optionalMissingContextDomains") or daemon_status.get("optionalMissingContextDomains") or [],
         "noActionEmitted": transition_summary.get("noActionEmitted"),
         "transitionSummary": transition_summary,
         "livePacketGrowth": packet_growth,
@@ -443,7 +488,11 @@ def format_human(report: dict) -> str:
         f"Active intent: {report.get('activeIntent') or 'unknown'}",
         f"Service needed: {str(report.get('serviceNeeded')).lower()}",
         f"Process needed: {str(report.get('processNeeded')).lower()}",
+        f"Process type: {report.get('processTypeNeeded') or 'none'}",
         f"Navigation needed: {str(report.get('navigationNeeded')).lower()}",
+        f"Required context domains: {', '.join(report.get('requiredContextDomains') or []) or 'none'}",
+        f"Missing required domains: {', '.join(report.get('missingRequiredContextDomains') or []) or 'none'}",
+        f"Optional missing domains: {', '.join(report.get('optionalMissingContextDomains') or []) or 'none'}",
         f"noActionEmitted: {str(report.get('noActionEmitted')).lower()}",
         "",
         "Processes:",

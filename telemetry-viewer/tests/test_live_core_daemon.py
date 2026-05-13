@@ -139,6 +139,80 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertFalse(decision["processInventoryContext"].get("serviceTypeNeeded"))
         self.assertEqual(core.state.source_status["brainTaskPolicy"], "woodcutting_firemake")
 
+    def test_process_inventory_status_domains_do_not_require_tree_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)), objects=[])
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--daily-mode",
+                "snapshot-no-files",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_firemake",
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                core = daemon.LiveCoreDaemon(session, args)
+                core.poll_once()
+
+        status = core.state.status()
+        decision = core.state.brain_decision
+        self.assertEqual(decision["genericTaskState"]["phase"], "inventory_full")
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "process_inventory")
+        self.assertEqual(status["processInventoryNeeded"], True)
+        self.assertEqual(status["processTypeNeeded"], "firemaking")
+        self.assertEqual(status["requiredContextDomains"], ["inventory", "process_inventory"])
+        self.assertEqual(status["missingRequiredContextDomains"], [])
+        self.assertIn("target.candidates", status["optionalMissingContextDomains"])
+
+    def test_startup_preset_resolves_to_runtime_control_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            args = make_args(session, "--preset", "woodcut_firemake")
+            control = daemon.runtime_control_from_args(args)
+
+        self.assertEqual(args.preset, "woodcut_firemake")
+        self.assertEqual(args.brain_task, "woodcutting")
+        self.assertEqual(args.task_policy, "woodcutting_firemake")
+        self.assertEqual(args.goal_count, 5)
+        self.assertEqual(args.overlay_mode, "intent")
+        self.assertEqual(args.overlay_backup_candidates, 2)
+        self.assertEqual(control.activeMissionPreset, "woodcut_firemake")
+        self.assertEqual(control.taskPolicy, "woodcutting_firemake")
+        self.assertEqual(control.goalCount, 5)
+
+    def test_startup_preset_goal_count_can_be_overridden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            args = make_args(session, "--preset", "woodcut_bank", "--goal-count", "10")
+            control = daemon.runtime_control_from_args(args)
+
+        self.assertEqual(args.task_policy, "woodcutting_bank")
+        self.assertEqual(args.goal_count, 10)
+        self.assertEqual(control.goalCount, 10)
+
+    def test_startup_preset_task_policy_can_be_overridden_with_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            args = make_args(session, "--preset", "woodcut_bank", "--task-policy", "woodcutting_firemake")
+            core = daemon.LiveCoreDaemon(session, args)
+
+        self.assertEqual(args.task_policy, "woodcutting_firemake")
+        self.assertIn("task policy overridden by explicit --task-policy", args.startup_warnings)
+        self.assertIn("task policy overridden by explicit --task-policy", core.state.warnings)
+        self.assertIn("task policy overridden by explicit --task-policy", core.runtime_control.warnings)
+        self.assertEqual(core.runtime_control.activeMissionPreset, "woodcut_bank")
+        self.assertEqual(core.runtime_control.taskPolicy, "woodcutting_firemake")
+
+    def test_startup_unknown_preset_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            with self.assertRaises(SystemExit):
+                make_args(session, "--preset", "not_a_preset")
+
     def test_bank_policy_service_candidate_adds_navigation_intent_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"

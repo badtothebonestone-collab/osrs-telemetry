@@ -62,6 +62,15 @@ def evaluate_brain_context(
     )
     missing = capabilities.normalize_capability_names(decision.get("missingCapabilities") or [])
     warnings = [str(item) for item in decision.get("warnings") or [] if item]
+    status_fields = brain_status_fields(updated, reset_applied)
+    for key in (
+        "requiredContextDomains",
+        "missingRequiredContextDomains",
+        "optionalMissingContextDomains",
+        "targetCandidatesRequired",
+    ):
+        if key in decision:
+            status_fields[key] = decision.get(key)
     return BrainContext(
         status=str(decision.get("contextStatus") or decision.get("status") or "PASS").upper(),
         warnings=warnings,
@@ -71,5 +80,5 @@ def evaluate_brain_context(
         timing_millis=(time.perf_counter() - started) * 1000.0,
         decision=decision,
         updated_state=updated,
-        status_fields=brain_status_fields(updated, reset_applied),
+        status_fields=status_fields,
     )

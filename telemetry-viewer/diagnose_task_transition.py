@@ -26,6 +26,7 @@ SCENARIOS = (
     "service_missing",
     "firemake_ready",
     "firemake_no_tree_candidates",
+    "firemake_full_inventory_no_candidates_live_style",
     "drop_ready",
     "drop_no_tree_candidates",
     "combat_full_inventory",
@@ -117,7 +118,7 @@ def inventory_from_items(items: list[dict[str, Any]]) -> dict[str, Any]:
 def inventory_for_scenario(scenario: str, *, tinderbox_present: bool = True) -> dict[str, Any]:
     if scenario == "woodcutting_not_full":
         return inventory_from_items([log_item(slot) for slot in range(5)])
-    if scenario in {"firemake_ready", "firemake_no_tree_candidates"}:
+    if scenario in {"firemake_ready", "firemake_no_tree_candidates", "firemake_full_inventory_no_candidates_live_style"}:
         items = [log_item(slot) for slot in range(27)]
         if tinderbox_present:
             items.append(tinderbox_item(27))
@@ -128,7 +129,7 @@ def inventory_for_scenario(scenario: str, *, tinderbox_present: bool = True) -> 
 
 
 def candidates_for_scenario(scenario: str) -> list[dict[str, Any]]:
-    if scenario in {"firemake_no_tree_candidates", "drop_no_tree_candidates"}:
+    if scenario in {"firemake_no_tree_candidates", "firemake_full_inventory_no_candidates_live_style", "drop_no_tree_candidates"}:
         return []
     candidates = [tree_candidate()]
     if scenario == "service_visible":
@@ -141,9 +142,12 @@ def context_response_for_scenario(scenario: str, *, tinderbox_present: bool = Tr
     tree = candidates[0] if candidates and candidates[0].get("classId") == "tree" else None
     response = {
         "schema": "context_response.v1",
-        "status": "PASS",
+        "status": "FAIL" if scenario == "firemake_full_inventory_no_candidates_live_style" else "PASS",
         "latestTick": 42,
-        "freshness": {"freshByTicks": scenario not in {"firemake_no_tree_candidates", "drop_no_tree_candidates"}, "freshByMillis": True},
+        "freshness": {
+            "freshByTicks": scenario not in {"firemake_no_tree_candidates", "firemake_full_inventory_no_candidates_live_style", "drop_no_tree_candidates"},
+            "freshByMillis": True,
+        },
         "baseline": {"player": {"worldX": 3155, "worldY": 3236, "plane": 0, "sceneX": 51, "sceneY": 52}},
         "inventory": inventory_for_scenario(scenario, tinderbox_present=tinderbox_present),
         "activity": {"apparentState": "idle", "animation": -1, "interacting": None},
@@ -157,7 +161,7 @@ def context_response_for_scenario(scenario: str, *, tinderbox_present: bool = Tr
         "reachabilitySummary": {"tree": {"candidateCount": 1 if tree else 0, "reachableCount": 1 if tree else 0, "blockedCount": 0, "unknownCount": 0}},
         "liveness": {"livenessMode": "delta", "suppressedCandidateCount": 0, "livenessDegraded": False},
         "warnings": [],
-        "missingCapabilities": ["navigation.full_pathfinding"],
+        "missingCapabilities": ["target.candidates"] if scenario == "firemake_full_inventory_no_candidates_live_style" else ["navigation.full_pathfinding"],
         "recentEvents": [],
     }
     if tree:
@@ -181,7 +185,7 @@ def expected_for(policy_name: str, scenario: str, *, tinderbox_present: bool = T
         return {"phase": "target_selected", "activeIntent": "continue_task", "overlay": "selected_tree"}
     if policy_name == "observe_only":
         return {"phase": "observe", "activeIntent": "observe", "overlay": "none"}
-    if policy_name == "woodcutting_firemake" or scenario in {"firemake_ready", "firemake_no_tree_candidates"}:
+    if policy_name == "woodcutting_firemake" or scenario in {"firemake_ready", "firemake_no_tree_candidates", "firemake_full_inventory_no_candidates_live_style"}:
         return {"phase": "inventory_full", "activeIntent": "process_inventory", "overlay": "none"}
     if policy_name == "woodcutting_drop" or scenario in {"drop_ready", "drop_no_tree_candidates"}:
         return {"phase": "inventory_full", "activeIntent": "process_inventory", "overlay": "none"}
@@ -397,6 +401,15 @@ def evaluate_transition_scenario(
         "inventoryFreshness": (decision.get("freshnessDomains") or {}).get("inventoryFreshness") if isinstance(decision.get("freshnessDomains"), dict) else None,
         "targetCandidateFreshness": (decision.get("freshnessDomains") or {}).get("targetCandidateFreshness") if isinstance(decision.get("freshnessDomains"), dict) else None,
         "processInventoryFreshness": (decision.get("freshnessDomains") or {}).get("processInventoryFreshness") if isinstance(decision.get("freshnessDomains"), dict) else None,
+        "requiredContextDomains": decision.get("requiredContextDomains") if isinstance(decision.get("requiredContextDomains"), list) else [],
+        "missingRequiredContextDomains": decision.get("missingRequiredContextDomains") if isinstance(decision.get("missingRequiredContextDomains"), list) else [],
+        "optionalMissingContextDomains": decision.get("optionalMissingContextDomains") if isinstance(decision.get("optionalMissingContextDomains"), list) else [],
+        "targetCandidatesRequired": bool(decision.get("targetCandidatesRequired")),
+        "candidateAbsenceExplanation": (
+            "target candidates are required for this phase"
+            if decision.get("targetCandidatesRequired")
+            else "target candidates are optional for this policy phase"
+        ),
         "overlaySelectedMarkerExpectation": overlay_expectation,
         "overlaySelectedMarker": selected_marker,
         "noActionEmitted": bool(decision.get("noActionEmitted") and generic.get("noActionEmitted", True)),
@@ -450,6 +463,15 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
         "inventoryFreshness": freshness_domains.get("inventoryFreshness"),
         "targetCandidateFreshness": freshness_domains.get("targetCandidateFreshness"),
         "processInventoryFreshness": freshness_domains.get("processInventoryFreshness"),
+        "requiredContextDomains": brain.get("requiredContextDomains") if isinstance(brain.get("requiredContextDomains"), list) else status.get("requiredContextDomains", []),
+        "missingRequiredContextDomains": brain.get("missingRequiredContextDomains") if isinstance(brain.get("missingRequiredContextDomains"), list) else status.get("missingRequiredContextDomains", []),
+        "optionalMissingContextDomains": brain.get("optionalMissingContextDomains") if isinstance(brain.get("optionalMissingContextDomains"), list) else status.get("optionalMissingContextDomains", []),
+        "targetCandidatesRequired": bool(brain.get("targetCandidatesRequired", status.get("targetCandidatesRequired", False))),
+        "candidateAbsenceExplanation": (
+            "target candidates are required for this phase"
+            if bool(brain.get("targetCandidatesRequired", status.get("targetCandidatesRequired", False)))
+            else "target candidates are optional for this policy phase"
+        ),
         "overlaySelectedMarkerType": overlay_selected_type,
         "noActionEmitted": bool(brain.get("noActionEmitted")),
         "status": "PASS",
@@ -479,6 +501,10 @@ def format_human(payload: dict[str, Any]) -> str:
         f"Inventory freshness: {payload.get('inventoryFreshness') or (payload.get('freshnessDomains') or {}).get('inventoryFreshness') or 'unknown'}",
         f"Target candidate freshness: {payload.get('targetCandidateFreshness') or (payload.get('freshnessDomains') or {}).get('targetCandidateFreshness') or 'unknown'}",
         f"Process inventory freshness: {payload.get('processInventoryFreshness') or (payload.get('freshnessDomains') or {}).get('processInventoryFreshness') or 'unknown'}",
+        f"Required context domains: {', '.join(payload.get('requiredContextDomains') or []) or 'none'}",
+        f"Missing required domains: {', '.join(payload.get('missingRequiredContextDomains') or []) or 'none'}",
+        f"Optional missing domains: {', '.join(payload.get('optionalMissingContextDomains') or []) or 'none'}",
+        f"Candidate absence: {payload.get('candidateAbsenceExplanation') or 'unknown'}",
         f"Overlay selected: {target_label(payload.get('overlaySelectedMarker')) or payload.get('overlaySelectedMarkerType') or 'none'}",
         f"noActionEmitted: {str(payload.get('noActionEmitted')).lower()}",
     ]

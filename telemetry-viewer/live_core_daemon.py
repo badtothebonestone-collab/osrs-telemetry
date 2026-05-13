@@ -17,6 +17,7 @@ import brain_core
 import context_service
 import intent_stabilizer
 import live_target_processor as live
+import mission_presets
 import runtime_control
 import task_policy as task_policy_module
 from analyzers import activity_analyzer
@@ -181,12 +182,16 @@ def brain_status_fields(state: dict, reset_applied: bool) -> dict:
 
 
 def runtime_control_from_args(args: argparse.Namespace) -> runtime_control.RuntimeControlState:
+    brain_enabled = getattr(args, "brain_enabled", None)
+    if brain_enabled is None:
+        brain_enabled = bool(args.human_dashboard or args.goal_count is not None)
     return runtime_control.RuntimeControlState(
         activeTask=str(args.brain_task or args.profile or "woodcutting"),
+        activeMissionPreset=getattr(args, "preset", None),
         taskPolicy=str(args.task_policy or task_policy_module.default_policy_name(args.brain_task, args.profile)),
         goalCount=args.goal_count,
-        observeOnly=False,
-        brainEnabled=bool(args.human_dashboard or args.goal_count is not None),
+        observeOnly=bool(getattr(args, "observe_only", False)),
+        brainEnabled=bool(brain_enabled),
         overlayEnabled=bool(args.write_overlay_state),
         overlayMode=str(args.overlay_mode or "intent"),
         overlayBackupCandidates=int(args.overlay_backup_candidates),
@@ -617,12 +622,21 @@ class LiveCoreState:
             "compactPacketFilesRecent",
             "compactPacketFileCount",
             "debugMirrorEnabled",
+            "serviceNeeded",
+            "serviceTypeNeeded",
+            "serviceCandidateCount",
+            "processInventoryNeeded",
+            "processTypeNeeded",
             "navigationIntentNeeded",
             "navigationIntentReason",
             "navigationIntentTargetKind",
             "navigationIntentReachability",
             "navigationIntentDistanceTiles",
             "navigationIntentCollisionWindowAvailable",
+            "requiredContextDomains",
+            "missingRequiredContextDomains",
+            "optionalMissingContextDomains",
+            "targetCandidatesRequired",
             "runtimeControl",
             "runtimeControlLastUpdatedUtc",
             "brainTaskPolicy",
@@ -667,6 +681,10 @@ class LiveCoreDaemon:
         )
         if brain_state_warning:
             self.state.warnings.append(brain_state_warning)
+        startup_warnings = list(getattr(args, "startup_warnings", []) or [])
+        if startup_warnings:
+            self.state.warnings.extend(warning for warning in startup_warnings if warning not in self.state.warnings)
+            self.runtime_control.warnings = list(dict.fromkeys([*self.runtime_control.warnings, *startup_warnings]))
         self.brain_reset_applied = bool(args.reset_brain_state)
         self.args.reset_brain_state = False
         self.processors: dict[str, live.LiveTargetProcessor] = {}
@@ -1062,11 +1080,11 @@ class LiveCoreDaemon:
             "responseMode": "compact",
         }
 
-    def build_context_response(self, request: dict | None = None) -> dict:
+    def build_context_response(self, request: dict | None = None, *, annotate: bool = True) -> dict:
         payload = request if isinstance(request, dict) else self.default_context_request()
         if payload.get("schema") != context_service.REQUEST_SCHEMA:
             return context_service.error_payload(f"unsupported schema: {payload.get('schema')}", request_id=payload.get("requestId"))
-        return context_service.build_context_response(
+        response = context_service.build_context_response(
             self.state.context(),
             payload,
             default_max_candidates=max(1, int(self.args.max_candidates)),
@@ -1074,6 +1092,29 @@ class LiveCoreDaemon:
             compact_include_source_files=False,
             compact_liveness_examples=0,
         )
+        return self.annotate_context_response_for_current_phase(response) if annotate else response
+
+    def annotate_context_response_for_current_phase(self, response: dict) -> dict:
+        if not isinstance(response, dict):
+            return response
+        decision = self.state.brain_decision if isinstance(self.state.brain_decision, dict) else {}
+        if not decision:
+            return response
+        annotated = dict(response)
+        domains = brain_core.context_domain_summary(
+            decision,
+            response=response,
+            policy=self.effective_task_policy(),
+        )
+        annotated.update(domains)
+        if annotated.get("status") == "FAIL" and not domains.get("missingRequiredContextDomains"):
+            annotated["status"] = "WARN"
+            warnings = list(annotated.get("warnings") or [])
+            note = "context endpoint reported FAIL, but missing context is optional for the current policy phase"
+            if note not in warnings:
+                warnings.append(note)
+            annotated["warnings"] = warnings
+        return annotated
 
     def evaluate_brain_if_enabled(self, result: dict) -> dict | None:
         if not self.runtime_control.brainEnabled:
@@ -1081,7 +1122,7 @@ class LiveCoreDaemon:
         task = self.effective_brain_task()
         goal_count = self.effective_goal_count()
         policy_name = self.effective_task_policy()
-        response = self.build_context_response(self.default_context_request())
+        response = self.build_context_response(self.default_context_request(), annotate=False)
         brain_context = brain_context_analyzer.evaluate_brain_context(
             response,
             self.state.brain_state,
@@ -1138,7 +1179,22 @@ class LiveCoreDaemon:
                 source_tick=source_tick,
             )
             brain_context.decision["navigationIntentContext"] = self.state.analysis_result.navigation_intent.to_dict()
+            brain_context.decision.update(
+                brain_core.context_domain_summary(
+                    brain_context.decision,
+                    response=response,
+                    policy=policy,
+                )
+            )
         fields = brain_context.status_fields
+        for key in (
+            "requiredContextDomains",
+            "missingRequiredContextDomains",
+            "optionalMissingContextDomains",
+            "targetCandidatesRequired",
+        ):
+            if key in brain_context.decision:
+                fields[key] = brain_context.decision.get(key)
         fields["brainTaskPolicy"] = policy_name
         fields["brainGoalCount"] = goal_count
         fields["observeOnly"] = bool(self.runtime_control.observeOnly)
@@ -1422,6 +1478,11 @@ class LiveCoreRequestHandler(BaseHTTPRequestHandler):
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     daily_mode_explicit = any(item == "--daily-mode" or item.startswith("--daily-mode=") for item in raw_argv)
+    task_policy_explicit = any(item == "--task-policy" or item.startswith("--task-policy=") for item in raw_argv)
+    goal_count_explicit = any(item == "--goal-count" or item.startswith("--goal-count=") for item in raw_argv)
+    brain_task_explicit = any(item == "--brain-task" or item.startswith("--brain-task=") for item in raw_argv)
+    overlay_mode_explicit = any(item == "--overlay-mode" or item.startswith("--overlay-mode=") for item in raw_argv)
+    overlay_backup_explicit = any(item == "--overlay-backup-candidates" or item.startswith("--overlay-backup-candidates=") for item in raw_argv)
     parser = argparse.ArgumentParser(
         description="Read-only in-memory daily live daemon. It serves context from telemetry observations only and emits no actions."
     )
@@ -1451,6 +1512,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.set_defaults(write_debug_live_files=False)
     parser.add_argument("--human-dashboard", action="store_true")
     parser.add_argument("--brain-task", default="woodcutting")
+    parser.add_argument("--preset", choices=mission_presets.preset_names(), help="Apply a named read-only startup mission preset.")
     parser.add_argument("--task-policy", choices=task_policy_module.policy_names(), default="woodcutting_bank")
     parser.add_argument("--goal-count", type=int)
     parser.add_argument("--brain-state-file", help="Optional brain_state.v1 file. If omitted, daily daemon progress stays in process memory only.")
@@ -1463,6 +1525,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args(argv)
     args.daily_mode_explicit = daily_mode_explicit
+    args.startup_warnings = []
+    args.observe_only = False
+    args.brain_enabled = None
+    if args.preset:
+        preset_fields = mission_presets.runtime_control_fields_for_preset(args.preset)
+        if not brain_task_explicit:
+            args.brain_task = str(preset_fields.get("activeTask") or args.brain_task)
+        if task_policy_explicit:
+            args.startup_warnings.append("task policy overridden by explicit --task-policy")
+        else:
+            args.task_policy = str(preset_fields.get("taskPolicy") or args.task_policy)
+        if not goal_count_explicit:
+            args.goal_count = preset_fields.get("goalCount")
+        args.observe_only = bool(preset_fields.get("observeOnly"))
+        args.brain_enabled = bool(preset_fields.get("brainEnabled"))
+        if not overlay_mode_explicit:
+            args.overlay_mode = str(preset_fields.get("overlayMode") or args.overlay_mode)
+        if not overlay_backup_explicit:
+            args.overlay_backup_candidates = int(preset_fields.get("overlayBackupCandidates") or args.overlay_backup_candidates)
     if daily_mode_explicit:
         if args.daily_mode == DAILY_MODE_SNAPSHOT_NO_FILES:
             args.input_source = live.PLUGIN_SNAPSHOT_SOURCE

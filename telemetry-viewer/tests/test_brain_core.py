@@ -326,6 +326,29 @@ class BrainCoreTest(unittest.TestCase):
         self.assertEqual(decision["freshnessDomains"]["inventoryFreshness"], "fresh")
         self.assertIn(decision["freshnessDomains"]["targetCandidateFreshness"], {"stale", "unknown"})
 
+    def test_firemake_full_inventory_with_fail_context_and_no_candidates_processes_inventory(self):
+        items = [log_item(slot) for slot in range(27)] + [{"slot": 27, "itemId": 590, "quantity": 1}]
+        response = context_response(
+            best=None,
+            nearest=None,
+            inventory=inventory_with_items(items),
+            freshness={"freshByTicks": False, "freshByMillis": True},
+            reachability_summary={"tree": {"candidateCount": 0, "reachableCount": 0, "blockedCount": 0, "unknownCount": 0}},
+            missing=["target.candidates"],
+            status="FAIL",
+        )
+
+        decision, _state = evaluate(response, task_policy="woodcutting_firemake")
+
+        self.assertEqual(decision["phase"], "inventory_full")
+        self.assertEqual(decision["genericTaskState"]["phase"], "inventory_full")
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "process_inventory")
+        self.assertEqual(decision["genericTaskState"]["processTypeNeeded"], "firemaking")
+        self.assertEqual(decision["requiredContextDomains"], ["inventory", "process_inventory"])
+        self.assertEqual(decision["missingRequiredContextDomains"], [])
+        self.assertIn("target.candidates", decision["optionalMissingContextDomains"])
+        self.assertNotIn("context status is FAIL", decision["blockingConditions"])
+
     def test_drop_full_inventory_with_stale_missing_tree_candidates_processes_inventory(self):
         response = context_response(
             best=None,

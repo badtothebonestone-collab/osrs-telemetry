@@ -54,6 +54,12 @@ Daily Snapshot No-File command (experimental):
 python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark
 ```
 
+Daily Snapshot No-File with a startup mission preset:
+
+```text
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --human-dashboard --summary --benchmark
+```
+
 Task policy examples:
 
 ```text
@@ -66,6 +72,17 @@ Debug file writes remain off unless `--write-debug-live-files` is explicitly
 supplied.
 
 ## Runtime Control
+
+Mission presets can be applied at daemon startup with
+`live_core_daemon.py --preset ...` or changed while the daemon is running with
+`control_live_daemon.py --preset ...`. Startup `--preset` is a convenience
+alias that resolves through `mission_presets.py` to safe runtime fields. An
+explicit startup `--goal-count` overrides the preset goal, and an explicit
+`--task-policy` overrides the preset policy with a warning:
+`task policy overridden by explicit --task-policy`.
+
+`diagnose_task_transition.py` still uses task policy names such as
+`woodcutting_bank` and `woodcutting_firemake`, not mission preset names.
 
 The daily daemon exposes local-only read-only control endpoints:
 
