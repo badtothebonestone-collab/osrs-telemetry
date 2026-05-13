@@ -210,6 +210,85 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertEqual(selected[0]["label"], "Service: Bank booth")
         self.assertFalse([marker for marker in result["markers"] if marker.get("classId") == "tree" and marker.get("markerType") == "selected_target"])
 
+    def test_bank_policy_overlay_uses_alternate_service_backups(self):
+        tree = candidate("selected")
+        booth = {
+            "objectKey": "bank-booth-1",
+            "targetName": "Bank booth",
+            "targetType": "sceneObject",
+            "classId": "bank_booth",
+            "serviceCandidateType": "bank_booth",
+            "id": 10355,
+            "worldX": 3208,
+            "worldY": 3219,
+            "plane": 0,
+            "sceneX": 20,
+            "sceneY": 21,
+            "qualityScore": 100,
+            "distanceTiles": 4,
+            "navigation": {"directReachability": "reachable"},
+        }
+        banker = {
+            "objectKey": "banker-1",
+            "targetName": "Banker",
+            "targetType": "npc",
+            "classId": "banker",
+            "serviceCandidateType": "banker",
+            "id": 2897,
+            "worldX": 3210,
+            "worldY": 3220,
+            "plane": 0,
+            "sceneX": 22,
+            "sceneY": 22,
+            "qualityScore": 90,
+            "distanceTiles": 5,
+        }
+
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 3}, "candidates": [tree, booth, banker]},
+            {
+                "task": "woodcutting",
+                "phase": "inventory_full",
+                "genericTaskState": {
+                    "phase": "inventory_full",
+                    "activeIntent": "needs_service",
+                    "activeIntentTarget": booth,
+                    "serviceTypeNeeded": "bank",
+                },
+                "serviceContext": {"serviceNeeded": True, "bestServiceCandidate": booth, "serviceCandidates": [booth, banker]},
+                "confidence": 0.95,
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2),
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        selected = [marker for marker in result["markers"] if marker["markerType"] == "selected_target"]
+        backups = [marker for marker in result["markers"] if marker["markerType"] == "backup_candidate"]
+        self.assertEqual(selected[0]["classId"], "bank_booth")
+        self.assertEqual([marker["classId"] for marker in backups], ["banker"])
+        self.assertFalse([marker for marker in backups if marker.get("classId") == "tree"])
+
+    def test_bank_policy_without_service_candidate_emits_compact_warning(self):
+        tree = candidate("selected")
+
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 3}, "candidates": [tree]},
+            {
+                "task": "woodcutting",
+                "phase": "inventory_full",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service", "serviceTypeNeeded": "bank"},
+                "serviceContext": {"serviceNeeded": True, "candidateCount": 0},
+                "confidence": 0.95,
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2),
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "selected_target"])
+        self.assertTrue(any(marker["markerType"] == "warning" and marker["label"] == "Inventory full: bank target not observed" for marker in result["markers"]))
+
     def test_process_inventory_intent_does_not_draw_selected_tree(self):
         selected = candidate("selected")
         state = intent_stabilizer.IntentState()

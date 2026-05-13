@@ -227,15 +227,40 @@ class BrainCoreTest(unittest.TestCase):
     def test_inventory_full_human_output_does_not_label_tree_current_target(self):
         response = context_response(inventory={"known": True, "freeSlots": 0, "filledSlots": 28, "inventoryFull": True})
         decision, _state = evaluate(response)
+        decision["serviceContext"] = {"serviceNeeded": True, "candidateCount": 0}
 
         output = brain.format_human(decision)
 
         self.assertIn("Active intent: needs service", output)
         self.assertIn("Task policy: bank resources", output)
         self.assertIn("Service needed: bank", output)
+        self.assertIn("Service candidate: not observed", output)
+        self.assertIn("Missing/needed context: bank_service candidate", output)
         self.assertIn("Previous target: Tree 1278, reachable", output)
         self.assertIn("Available target: Tree 1278, reachable", output)
         self.assertNotIn("Current target: Tree 1278", output)
+
+    def test_inventory_full_human_output_shows_observed_service_candidate(self):
+        response = context_response(inventory={"known": True, "freeSlots": 0, "filledSlots": 28, "inventoryFull": True})
+        decision, _state = evaluate(response)
+        decision["genericTaskState"]["activeIntentTarget"] = {
+            "name": "Bank booth",
+            "id": 10355,
+            "directReachability": "reachable",
+        }
+        decision["serviceContext"] = {
+            "serviceNeeded": True,
+            "bestServiceCandidate": {
+                "name": "Bank booth",
+                "id": 10355,
+                "directReachability": "reachable",
+            },
+        }
+
+        output = brain.format_human(decision)
+
+        self.assertIn("Best service candidate: Bank booth 10355, reachable", output)
+        self.assertIn("Reachability: reachable", output)
 
     def test_inventory_full_firemaking_policy_processes_inventory_context_only(self):
         response = context_response(inventory={"known": True, "freeSlots": 0, "filledSlots": 28, "inventoryFull": True})

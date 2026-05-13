@@ -151,7 +151,8 @@ diagnostics with `--json` print to stdout only.
 Service/process context is policy-gated:
 
 - `woodcutting_bank`: `service_analyzer.py` scans only the current in-memory
-  candidate list for bank-service candidates and reports best/nearest context.
+  candidate list for bank-service candidates and reports best/nearest context,
+  candidates grouped by type, and reachability counts.
 - `woodcutting_firemake`: `process_inventory_analyzer.py` reports held logs and
   whether a tinderbox is present, missing, or unknown from the current
   inventory snapshot.
@@ -162,6 +163,17 @@ Service/process context is policy-gated:
 
 These summaries are context, not commands. They do not include click/input/menu
 fields and they do not interact with the game.
+
+Service target matching is conservative and read-only. The service analyzer
+recognizes already-built candidates with class IDs or inferred types
+`bank_service`, `banker`, `bank_booth`, `bank_chest`, `deposit_box`, and
+`deposit_chest`. It can also infer those types from names such as `Banker`,
+`Bank booth`, `Bank chest`, `Deposit box`, `Bank deposit box`, and `Deposit
+chest`. Existing action metadata may help classify a candidate if present, but
+that metadata is stripped from all outputs. If no bank-service candidate is
+visible, the brain reports `Service candidate: not observed` and
+`Missing/needed context: bank_service candidate`; the overlay may show only a
+compact warning marker, not a fake service target.
 
 ## Daily Source Modes
 

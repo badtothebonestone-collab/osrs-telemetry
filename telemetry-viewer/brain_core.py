@@ -1991,7 +1991,8 @@ def format_human(decision: dict) -> str:
         if service_candidate:
             lines.append(f"  Best service candidate: {target_context_label(service_candidate)}")
         elif service_context.get("serviceNeeded"):
-            lines.append("  Best service candidate: none observed")
+            lines.append("  Service candidate: not observed")
+            lines.append("  Missing/needed context: bank_service candidate")
     if process_needed:
         lines.append(f"  Process needed: {text(process_needed)}")
         if process_context.get("heldResourceCount") is not None:

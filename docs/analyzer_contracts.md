@@ -307,11 +307,18 @@ requires service.
 Inputs: the resolved task policy and the current in-memory candidate list.
 
 Outputs: `ServiceContext` with service-required status, service type, candidate
-count, best/nearest visible service candidate, reachable count when available,
-and sanitized service candidates. Candidate detection can use class, name, id,
-and already-present candidate metadata. If optional service metadata is absent,
-the analyzer reports `service.actions` as an optional missing capability; it
-does not fail when class/name/id is enough.
+count, candidates grouped by service type, best/nearest visible service
+candidate, reachable and unknown-reachability counts, and sanitized service
+candidates. Candidate detection can use class, name, id, and already-present
+candidate metadata. The current read-only service target families are
+`bank_service`, `banker`, `bank_booth`, `bank_chest`, `deposit_box`, and
+`deposit_chest`. Names such as `Banker`, `Bank booth`, `Bank chest`, `Deposit
+box`, `Bank deposit box`, and `Deposit chest` are enough to classify a
+candidate when a generic `bank_related` class is all that is available.
+
+If optional service metadata is absent, the analyzer reports `service.actions`
+as an optional missing capability; it does not fail when class/name/id is
+enough. Action/menu metadata is never emitted in `ServiceContext`.
 
 Forbidden side effects: no file reads/writes, no endpoint calls, no navigation,
 no interaction, no action/click/input/menu fields.

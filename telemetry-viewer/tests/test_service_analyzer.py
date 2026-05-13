@@ -55,9 +55,22 @@ class ServiceAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["candidateCount"], 1)
         self.assertEqual(payload["reachableCount"], 1)
         self.assertEqual(payload["bestServiceCandidate"]["classId"], "bank_booth")
+        self.assertEqual(payload["bestServiceCandidate"]["serviceCandidateType"], "bank_booth")
         self.assertEqual(payload["nearestServiceCandidate"]["classId"], "bank_booth")
+        self.assertEqual(payload["unknownReachabilityCount"], 0)
+        self.assertEqual(payload["candidateCountsByType"], {"bank_booth": 1})
+        self.assertEqual(len(payload["candidatesByType"]["bank_booth"]), 1)
         self.assertNotIn("actions", payload["bestServiceCandidate"])
         self.assertNotIn("menuActions", payload["bestServiceCandidate"])
+
+    def test_identifies_bank_booth_by_name_when_class_is_generic(self):
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[{"targetType": "sceneObject", "classId": "bank_related", "targetName": "Bank booth", "distanceTiles": 3}],
+        )
+
+        self.assertEqual(context.best_service_candidate["serviceCandidateType"], "bank_booth")
+        self.assertEqual(context.to_dict()["candidateCountsByType"], {"bank_booth": 1})
 
     def test_identifies_banker_npc_by_name_and_class(self):
         context = service_analyzer.analyze_service_context(
@@ -78,7 +91,38 @@ class ServiceAnalyzerTest(unittest.TestCase):
 
         self.assertEqual(context.best_service_candidate["targetType"], "npc")
         self.assertEqual(context.best_service_candidate["classId"], "banker")
+        self.assertEqual(context.best_service_candidate["serviceCandidateType"], "banker")
         self.assertIn("service.actions", context.missing_capabilities)
+
+    def test_identifies_deposit_boxes_by_class_and_name(self):
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Deposit box", "distanceTiles": 4},
+                {"targetType": "sceneObject", "classId": "bank_related", "targetName": "Bank deposit box", "distanceTiles": 2},
+                {"targetType": "sceneObject", "classId": "bank_related", "targetName": "Deposit chest", "distanceTiles": 6},
+            ],
+        )
+        payload = context.to_dict()
+
+        self.assertEqual(payload["candidateCountsByType"], {"deposit_box": 2, "deposit_chest": 1})
+        self.assertEqual(payload["nearestServiceCandidate"]["serviceCandidateType"], "deposit_box")
+
+    def test_best_nearest_and_reachability_buckets_are_reported(self):
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "bank_booth", "targetName": "Bank booth", "qualityScore": 30, "distanceTiles": 1},
+                {"targetType": "npc", "classId": "banker", "targetName": "Banker", "qualityScore": 100, "distanceTiles": 5, "navigation": {"directReachability": "reachable"}},
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Deposit box", "qualityScore": 80, "distanceTiles": 2, "navigation": {"directReachability": "blocked"}},
+            ],
+        )
+        payload = context.to_dict()
+
+        self.assertEqual(payload["bestServiceCandidate"]["serviceCandidateType"], "banker")
+        self.assertEqual(payload["nearestServiceCandidate"]["serviceCandidateType"], "bank_booth")
+        self.assertEqual(payload["reachableCount"], 1)
+        self.assertEqual(payload["unknownReachabilityCount"], 1)
 
     def test_does_not_request_service_for_process_or_continue_policies(self):
         for policy_name in ("woodcutting_firemake", "woodcutting_drop", "combat_default", "observe_only"):
@@ -88,6 +132,19 @@ class ServiceAnalyzerTest(unittest.TestCase):
                 self.assertIsNone(context.service_type_needed)
                 self.assertEqual(context.missing_capabilities, [])
                 self.assertEqual(context.warnings, [])
+
+    def test_no_service_candidate_is_clean_warning(self):
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[{"targetType": "sceneObject", "classId": "tree", "targetName": "Tree"}],
+        )
+        payload = context.to_dict()
+
+        self.assertEqual(context.status, "WARN")
+        self.assertTrue(payload["serviceNeeded"])
+        self.assertEqual(payload["candidateCount"], 0)
+        self.assertEqual(payload["candidatesByType"], {})
+        self.assertIn("bank_service candidate", " ".join(context.warnings))
 
     def test_service_context_has_no_action_fields(self):
         context = service_analyzer.analyze_service_context(

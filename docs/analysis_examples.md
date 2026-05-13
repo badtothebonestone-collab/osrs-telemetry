@@ -128,8 +128,8 @@ Service/process context is also policy-gated and read-only:
 
 - `woodcutting_bank` runs service context over the current in-memory candidate
   list only. It can report visible bank booths, bankers, bank chests, deposit
-  boxes, deposit chests, or generic bank-service candidates, plus best/nearest
-  and reachability summary fields.
+  boxes, deposit chests, or generic bank-service candidates, plus candidates by
+  type, best/nearest, reachable count, and unknown-reachability count.
 - `woodcutting_firemake` runs process inventory context only. It reports held
   logs and whether the current inventory snapshot shows a tinderbox as present,
   missing, or unknown.
@@ -139,6 +139,13 @@ Service/process context is also policy-gated and read-only:
   because inventory is full.
 
 These summaries do not include action, click, input, or menu fields.
+
+Service matching is conservative. It accepts service class/type IDs
+`bank_service`, `banker`, `bank_booth`, `bank_chest`, `deposit_box`, and
+`deposit_chest`, or equivalent visible names such as `Bank booth`, `Banker`,
+`Deposit box`, `Bank deposit box`, and `Deposit chest`. If action metadata is
+already present it can be used only as an input signal, and it is stripped from
+diagnostic, brain, and overlay output.
 
 Policy matrix:
 

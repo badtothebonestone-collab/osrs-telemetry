@@ -196,8 +196,12 @@ class ServiceContext(AnalyzerContractFields):
     best_service_candidate: dict[str, Any] | None = None
     nearest_service_candidate: dict[str, Any] | None = None
     service_candidates: list[dict[str, Any]] = field(default_factory=list)
+    candidates_by_type: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    candidate_counts_by_type: dict[str, int] = field(default_factory=dict)
     candidate_count: int = 0
     reachable_count: int | None = None
+    unknown_reachability_count: int | None = None
+    sanitized_output_has_forbidden_fields: bool = False
     reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -209,8 +213,12 @@ class ServiceContext(AnalyzerContractFields):
             "bestServiceCandidate": self.best_service_candidate,
             "nearestServiceCandidate": self.nearest_service_candidate,
             "serviceCandidates": list(self.service_candidates),
+            "candidatesByType": {key: list(value) for key, value in self.candidates_by_type.items()},
+            "candidateCountsByType": dict(self.candidate_counts_by_type),
             "candidateCount": self.candidate_count,
             "reachableCount": self.reachable_count,
+            "unknownReachabilityCount": self.unknown_reachability_count,
+            "sanitizedOutputHasForbiddenFields": self.sanitized_output_has_forbidden_fields,
             "reason": self.reason,
         }
 

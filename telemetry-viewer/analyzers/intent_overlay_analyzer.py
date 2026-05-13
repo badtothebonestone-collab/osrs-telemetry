@@ -461,14 +461,15 @@ def build_intent_overlay_state(
     active_task = str(getattr(args, "brain_task", None) or brain_decision.get("task") or "")
     generic_state = brain_decision.get("genericTaskState") if isinstance(brain_decision.get("genericTaskState"), dict) else {}
     active_intent = str(generic_state.get("activeIntent") or generic_state.get("phase") or brain_decision.get("phase") or "observe")
+    service_context = brain_decision.get("serviceContext") if isinstance(brain_decision.get("serviceContext"), dict) else {}
+    service_candidates = service_context.get("serviceCandidates") if isinstance(service_context.get("serviceCandidates"), list) else []
     markers: list[dict] = []
     selected = None
     selected_key = None
     selected_target_type = None
     selected_class_id = None
     active_target = generic_state.get("activeIntentTarget") if isinstance(generic_state.get("activeIntentTarget"), dict) else None
-    if active_target is None and isinstance(brain_decision.get("serviceContext"), dict):
-        service_context = brain_decision.get("serviceContext")
+    if active_target is None and service_context:
         if service_context.get("serviceNeeded"):
             active_target = service_context.get("bestServiceCandidate") if isinstance(service_context.get("bestServiceCandidate"), dict) else None
     if stable_intent and stable_intent.selectedTarget:
@@ -479,8 +480,8 @@ def build_intent_overlay_state(
     if active_intent == "needs_service" and active_target:
         selected = active_target
         selected_key = intent_stabilizer.build_target_key(active_target, target_type_for_candidate(active_target))
-        selected_target_type = target_type_for_candidate(active_target)
-        selected_class_id = active_target.get("classId")
+        selected_target_type = None
+        selected_class_id = None
     elif not target_required_for_intent(active_intent):
         selected = None
         selected_key = None
@@ -505,7 +506,8 @@ def build_intent_overlay_state(
         if stable_intent and active_intent != "needs_service":
             marker["stableForTicks"] = stable_intent.stableForTicks
             marker["switchReason"] = stable_intent.switchReason
-        for candidate in candidates:
+        merge_candidates = service_candidates if active_intent == "needs_service" and service_candidates else candidates
+        for candidate in merge_candidates:
             if not isinstance(candidate, dict):
                 continue
             candidate_target_type = target_type_for_candidate(candidate)
@@ -514,8 +516,9 @@ def build_intent_overlay_state(
                 marker = merge_marker_from_source(marker, candidate)
         markers.append(marker)
         backup_limit = max(0, int(getattr(args, "overlay_backup_candidates", 2) or 0))
+        backup_source_candidates = service_candidates if active_intent == "needs_service" and service_candidates else candidates
         backups = stable_backup_candidates(
-            candidates,
+            backup_source_candidates,
             marker,
             selected_key=selected_key,
             selected_target_type=selected_target_type,
@@ -536,6 +539,8 @@ def build_intent_overlay_state(
             )
     elif active_task == "woodcutting" and target_required_for_intent(active_intent):
         markers.append(warning_intent_marker("No reachable tree", "brain did not select a reachable woodcutting target"))
+    elif active_intent == "needs_service" and service_context.get("serviceNeeded"):
+        markers.append(warning_intent_marker("Inventory full: bank target not observed", "task policy requires bank service context but no service candidate is visible"))
     elif active_intent == "process_inventory":
         process_type = generic_state.get("processTypeNeeded")
         if not process_type and isinstance(brain_decision.get("processInventoryContext"), dict):

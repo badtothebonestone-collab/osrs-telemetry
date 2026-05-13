@@ -142,7 +142,12 @@ def format_human(payload: dict[str, Any]) -> str:
                 f"  needed: {'yes' if service_context.get('serviceNeeded') else 'no'}",
                 f"  type: {service_context.get('serviceTypeNeeded') or 'none'}",
                 f"  candidates: {service_context.get('candidateCount')}",
+                f"  candidates by type: {service_context.get('candidateCountsByType') or {}}",
                 f"  best: {candidate.get('targetName') or candidate.get('name') or candidate.get('classId') or 'none'}",
+                f"  nearest: {(service_context.get('nearestServiceCandidate') or {}).get('targetName') or (service_context.get('nearestServiceCandidate') or {}).get('name') or (service_context.get('nearestServiceCandidate') or {}).get('classId') or 'none'}",
+                f"  reachable: {service_context.get('reachableCount')}",
+                f"  unknown reachability: {service_context.get('unknownReachabilityCount')}",
+                f"  sanitized output: {'yes' if not service_context.get('sanitizedOutputHasForbiddenFields') else 'no'}",
             ]
         )
     process_context = payload.get("processInventoryContext") if isinstance(payload.get("processInventoryContext"), dict) else {}

@@ -113,6 +113,8 @@ class DiagnoseTaskPolicyTest(unittest.TestCase):
         self.assertTrue(bank["serviceAnalyzerShouldRun"])
         self.assertTrue(bank["serviceCandidateExists"])
         self.assertEqual(bank["serviceContext"]["bestServiceCandidate"]["classId"], "bank_booth")
+        self.assertEqual(bank["serviceContext"]["candidateCountsByType"], {"bank_booth": 1})
+        self.assertFalse(bank["serviceContext"]["sanitizedOutputHasForbiddenFields"])
         self.assertTrue(firemake["processInventoryAnalyzerShouldRun"])
         self.assertTrue(firemake["processInventoryContext"]["resourcesAvailable"])
         self.assertEqual(firemake["processInventoryContext"]["tinderboxStatus"], "present")
