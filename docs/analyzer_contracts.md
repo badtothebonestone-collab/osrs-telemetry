@@ -64,6 +64,86 @@ Legacy aliases such as `inventoryDeltas`, `animationFrame`,
 normalized before display. Daily output should not show duplicate capability
 warnings for the same missing capability.
 
+## Generic Task State
+
+`telemetry-viewer\task_state.py` defines the shared read-only task phase model.
+The current woodcutting brain keeps its task-specific `phase` output, and also
+emits `genericTaskState` so future tasks can use common phases without adding
+new daemon branches.
+
+Generic phases are:
+
+- `observe`
+- `select_target`
+- `target_selected`
+- `wait_for_result`
+- `inventory_full`
+- `navigate_to_service`
+- `service_available`
+- `service_interaction_pending`
+- `goal_complete`
+- `blocked`
+- `needs_more_context`
+- `unknown`
+
+`genericTaskState` includes task, phase, previous phase, confidence, reason,
+active intent, selected target key, required capabilities, missing
+capabilities, blocking conditions, observation needs, goal progress, and
+`noActionEmitted=true`. It must not include action, click, input, menu, mouse,
+keyboard, invoke, or execute fields.
+
+Target roles are distinct:
+
+- `activeIntentTarget`: the target, if any, that the current generic phase is
+  focused on now.
+- `availableTarget`: a useful visible target from context that is not
+  necessarily the current intent.
+- `previousIntentTarget`: the last known target before a task phase transition,
+  when one is available.
+
+When task-specific output reports a full inventory, `genericTaskState` consults
+the selected task policy before choosing an active intent. Full inventory is a
+condition, not a hardcoded banking transition:
+
+- `needs_service` means the active target is cleared and service context such
+  as a bank can be reported read-only.
+- `process_inventory` means the active target is cleared and process context
+  such as firemaking or dropping can be reported read-only.
+- `continue_task` means full inventory is noted but does not by itself clear a
+  valid active target.
+- `observe_only` means no transition or service request is made.
+
+When `phase=goal_complete`, `activeIntent=none` and the selected target is
+cleared. Any service or process context remains interpretation only; this model
+does not execute service, process, inventory, or navigation actions.
+
+## Task Policy Model
+
+`telemetry-viewer\task_policy.py` defines the read-only policy model used by
+the generic task state. Policies are loaded from
+`telemetry-viewer\task_policies.json` with built-in defaults as a fallback.
+
+Current policies:
+
+| Policy | Inventory expectation | Full inventory strategy | Disposition | Service/process | Generic result when full |
+| --- | --- | --- | --- | --- | --- |
+| `woodcutting_bank` | `must_have_space` | `needs_service` | `bank` | service `bank` | `inventory_full` / `needs_service`, active target cleared |
+| `woodcutting_firemake` | `must_have_space` | `process_inventory` | `burn` | process `firemaking` | `inventory_full` / `process_inventory`, active target cleared |
+| `woodcutting_drop` | `must_have_space` | `process_inventory` | `drop` | process `drop` | `inventory_full` / `process_inventory`, active target cleared |
+| `combat_default` | `may_start_full` | `continue_task` | `keep` | none | `target_selected` / `continue_task` when a target exists |
+| `observe_only` | `unknown` | `observe_only` | `none` | none | `observe` / `observe` |
+
+`live_core_daemon.py` selects a policy with `--task-policy`. The daily
+woodcutting default is explicit: `woodcutting_bank`. Policy output must not
+contain action, click, input, menu, or execute fields.
+
+`telemetry-viewer\task_policies.json` is static configuration. It is loaded
+through the cached `task_policy.py` policy registry and must not be written by
+the live daemon loop. Policy, task-state, service, process, and analyzer runtime
+state stays in memory. Diagnostics may print JSON to stdout when `--json` is
+passed, but they must not create policy history JSONL, per-tick task state JSON,
+analyzer output JSON files, or other rolling live files.
+
 ## `analyzers\live_state.py`
 
 Purpose: shared dataclasses for in-memory analyzer inputs/outputs.
@@ -197,6 +277,10 @@ status.
 Outputs: `BrainContext` with `brain_decision.v1`, updated brain state, compact
 status fields, normalized missing capabilities, and retention flags.
 
+The brain decision also includes `genericTaskState` when available. The
+analyzer treats it as read-only interpretation data; it does not execute or
+recommend actions.
+
 Forbidden side effects: no action emission, no endpoint calls, no file writes.
 
 Allowed warnings: warnings already produced by `brain_core.py`.
@@ -205,3 +289,45 @@ Performance expectation: small and bounded by current context/candidate data.
 
 Future expansion: new task interpretation should flow through brain/context
 objects and capabilities rather than growing `live_core_daemon.py`.
+
+## `service_analyzer.py`
+
+Purpose: report read-only service context only when the selected task policy
+requires service.
+
+Inputs: the resolved task policy and the current in-memory candidate list.
+
+Outputs: `ServiceContext` with service-required status, service type, and best
+visible service candidate when one is already present in context.
+
+Forbidden side effects: no file reads/writes, no endpoint calls, no navigation,
+no interaction, no action/click/input/menu fields.
+
+Allowed warnings: service required by policy but no matching service candidate
+is currently visible.
+
+Performance expectation: linear in the current candidate slice.
+
+Future expansion: add service target families such as bankers, booths, and
+deposit boxes as context classifications only.
+
+## `process_inventory_analyzer.py`
+
+Purpose: report read-only inventory processing context when the selected policy
+uses `process_inventory`.
+
+Inputs: the resolved task policy and current `InventoryContext`.
+
+Outputs: `ProcessInventoryContext` with process type, resource disposition, and
+whether resources are currently held.
+
+Forbidden side effects: no clicking, dropping, burning, menu use, inventory
+mutation, file writes, endpoint calls, or action fields.
+
+Allowed warnings: process context is requested but no matching held resources
+are visible.
+
+Performance expectation: constant time over normalized inventory progress.
+
+Future expansion: add richer process context capabilities without adding an
+execution path.

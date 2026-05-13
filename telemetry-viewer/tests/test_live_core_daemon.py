@@ -110,6 +110,54 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(args.input_source, "compact-packets")
         self.assertFalse(args.write_debug_live_files)
         self.assertEqual(args.overlay_mode, "intent")
+        self.assertEqual(args.task_policy, "woodcutting_bank")
+
+    def test_task_policy_argument_is_preserved_for_brain_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--human-dashboard",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_firemake",
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                core = daemon.LiveCoreDaemon(session, args)
+                core.poll_once()
+
+        decision = core.state.brain_decision
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "process_inventory")
+        self.assertEqual(decision["genericTaskState"]["processTypeNeeded"], "firemaking")
+        self.assertEqual(core.state.source_status["brainTaskPolicy"], "woodcutting_firemake")
+
+    def test_daily_daemon_does_not_write_policy_task_or_analyzer_runtime_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, [0, 1, 2])
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--human-dashboard",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                core = daemon.LiveCoreDaemon(session, args)
+                core.poll_once()
+
+            unexpected = []
+            for pattern in ("*policy*.json", "*policy*.jsonl", "*task_state*.json", "*task_state*.jsonl", "*analyzer*.json", "*analyzer*.jsonl"):
+                unexpected.extend(path for path in session.rglob(pattern) if path.name != "overlay_debug_state.json")
+
+        self.assertEqual(unexpected, [])
 
     def test_snapshot_no_file_mode_selects_plugin_snapshot_without_compact_file_requirement(self):
         with tempfile.TemporaryDirectory() as tmp:

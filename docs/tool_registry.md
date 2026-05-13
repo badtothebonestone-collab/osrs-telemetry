@@ -33,10 +33,13 @@ Daily support modules are hidden from the UI but remain part of the daily lane:
 
 - `resource_progress.py`: single source of truth for woodcutting progress.
 - `brain_core.py`: read-only brain interpretation.
+- `task_policy.py` and `task_policies.json`: read-only task policy model for
+  interpreting conditions such as a full inventory.
 - `capabilities.py`: capability status/alias registry for analyzer and output
   consistency.
 - `analyzers\*.py`: in-memory daemon analyzers for inventory, targets,
-  navigation, activity, brain context, and intent overlay marker construction.
+  navigation, activity, service/process context, brain context, and intent
+  overlay marker construction.
 - `live_context_format.py`: human output formatting.
 - `live_packet_reader.py`, `telemetry_paths.py`, and
   `navigation_reachability.py`: compact-packet/session/reachability helpers.

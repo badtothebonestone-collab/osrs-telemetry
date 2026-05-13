@@ -111,6 +111,91 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         forbidden = {"action", "click", "mouse", "keyboard", "menu", "invoke", "execute"}
         self.assertFalse(forbidden.intersection(marker.keys()))
 
+    def test_overlay_uses_generic_active_intent_when_present(self):
+        selected = candidate("selected")
+        state = intent_stabilizer.IntentState()
+        stable = intent_stabilizer.choose_stable_intent(
+            state,
+            [selected],
+            {"activeTask": "woodcutting", "activeIntent": "target_selected", "profile": "woodcutting", "latestTick": 1, "rawBestTarget": selected},
+        )
+
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 1}, "candidates": [selected]},
+            {
+                "task": "woodcutting",
+                "phase": "target_available",
+                "genericTaskState": {"phase": "target_selected", "activeIntent": "target_selected"},
+                "confidence": 0.8,
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2),
+            "2026-01-01T00:00:00Z",
+            stable,
+        )
+
+        self.assertEqual(result["activeIntent"], "target_selected")
+        self.assertEqual(result["markers"][0]["markerType"], "selected_target")
+
+    def test_inventory_full_generic_intent_does_not_draw_selected_tree(self):
+        selected = candidate("selected")
+        state = intent_stabilizer.IntentState()
+        stable = intent_stabilizer.choose_stable_intent(
+            state,
+            [selected],
+            {"activeTask": "woodcutting", "activeIntent": "target_selected", "profile": "woodcutting", "latestTick": 1, "rawBestTarget": selected},
+        )
+        stable = intent_stabilizer.choose_stable_intent(
+            state,
+            [],
+            {"activeTask": "woodcutting", "activeIntent": "needs_service", "profile": "woodcutting", "latestTick": 2, "rawBestTarget": {}, "intentPriority": 70},
+        )
+
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 2}, "candidates": [selected]},
+            {
+                "task": "woodcutting",
+                "phase": "inventory_full",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "confidence": 0.95,
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2),
+            "2026-01-01T00:00:00Z",
+            stable,
+        )
+
+        self.assertEqual(result["activeIntent"], "needs_service")
+        self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "selected_target"])
+
+    def test_process_inventory_intent_does_not_draw_selected_tree(self):
+        selected = candidate("selected")
+        state = intent_stabilizer.IntentState()
+        stable = intent_stabilizer.choose_stable_intent(
+            state,
+            [selected],
+            {"activeTask": "woodcutting", "activeIntent": "target_selected", "profile": "woodcutting", "latestTick": 1, "rawBestTarget": selected},
+        )
+        stable = intent_stabilizer.choose_stable_intent(
+            state,
+            [],
+            {"activeTask": "woodcutting", "activeIntent": "process_inventory", "profile": "woodcutting", "latestTick": 2, "rawBestTarget": {}, "intentPriority": 70},
+        )
+
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 2}, "candidates": [selected]},
+            {
+                "task": "woodcutting",
+                "phase": "inventory_full",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "process_inventory", "processTypeNeeded": "firemaking"},
+                "confidence": 0.95,
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2),
+            "2026-01-01T00:00:00Z",
+            stable,
+        )
+
+        self.assertEqual(result["activeIntent"], "process_inventory")
+        self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "selected_target"])
+
 
 if __name__ == "__main__":
     unittest.main()

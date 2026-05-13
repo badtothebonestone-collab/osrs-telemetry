@@ -1,6 +1,8 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 VIEWER_DIR = Path(__file__).resolve().parents[1]
@@ -59,6 +61,7 @@ class RunDailyGauntletTest(unittest.TestCase):
                 "liveCoreDaemonActive": True,
                 "inputSourceActive": "compact-packets",
                 "writeDebugLiveFiles": False,
+                "brainTaskPolicy": "woodcutting_bank",
                 "compactPacketsRecent": True,
                 "brainProgress": {
                     "displayedGoalProgress": 4,
@@ -73,6 +76,55 @@ class RunDailyGauntletTest(unittest.TestCase):
 
         self.assertEqual(result["failures"], [])
         self.assertEqual(result["warnings"], [])
+
+    def test_warns_when_task_policy_missing_or_unknown(self):
+        missing = gauntlet.evaluate_daemon_payloads(
+            {"status": "PASS"},
+            {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets", "compactPacketsRecent": True},
+        )
+        unknown = gauntlet.evaluate_daemon_payloads(
+            {"status": "PASS"},
+            {
+                "liveCoreDaemonActive": True,
+                "inputSourceActive": "compact-packets",
+                "compactPacketsRecent": True,
+                "brainTaskPolicy": "mystery_policy",
+            },
+        )
+
+        self.assertTrue(any("task policy missing" in warning for warning in missing["warnings"]))
+        self.assertTrue(any("unknown task policy" in warning for warning in unknown["warnings"]))
+
+    def test_report_includes_active_task_policy(self):
+        args = gauntlet.parse_args(["--daily-mode", "compact-packets"])
+        with mock.patch.object(
+            gauntlet,
+            "fetch_json",
+            side_effect=[
+                {"status": "PASS"},
+                {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_drop"},
+                {"goalProgress": {}, "noActionEmitted": True},
+            ],
+        ):
+            with mock.patch.object(gauntlet, "post_json", return_value={"status": "PASS"}):
+                report = gauntlet.build_report(args, processes=[])
+
+        self.assertEqual(report["activeTaskPolicy"], "woodcutting_drop")
+
+    def test_detects_policy_task_analyzer_runtime_json_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            live_dir = session / "interaction_geometry" / "live"
+            live_dir.mkdir(parents=True)
+            (live_dir / "task_state.json").write_text("{}", encoding="utf-8")
+            (live_dir / "analyzer_output.json").write_text("{}", encoding="utf-8")
+            (live_dir / "policy_history.jsonl").write_text("{}", encoding="utf-8")
+
+            report = gauntlet.runtime_policy_file_report(str(session))
+
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["unexpectedRuntimeFileCount"], 3)
+        self.assertTrue(any("task_state.json" in warning for warning in report["warnings"]))
 
     def test_detects_invalid_progress_without_retention(self):
         result = gauntlet.evaluate_daemon_payloads(

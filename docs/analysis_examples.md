@@ -98,6 +98,54 @@ Analyzer modules do not poll the plugin, read compact packet files, start
 services, or write JSON/NDJSON. They return one shared in-memory analysis result
 for the daemon to serve through the existing context/status endpoints.
 
+## Task Policy Model
+
+Inventory full is interpreted by task policy, not by a hardcoded banking rule.
+The current policy is selected with `--task-policy`:
+
+- `woodcutting_bank`: full inventory means read-only `needs_service` context for
+  a bank.
+- `woodcutting_firemake`: full inventory means read-only `process_inventory`
+  context for firemaking/burning logs.
+- `woodcutting_drop`: full inventory means read-only `process_inventory`
+  context for dropping logs.
+- `combat_default`: full inventory can be expected and does not by itself clear
+  the active target.
+- `observe_only`: full inventory is only observed.
+
+Policy examples for Snapshot No-File daily:
+
+```text
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --task-policy woodcutting_bank --goal-count 5 --summary --benchmark
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --task-policy woodcutting_firemake --goal-count 5 --summary --benchmark
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --task-policy woodcutting_drop --goal-count 5 --summary --benchmark
+```
+
+This is still interpretation only. The daemon does not bank, burn, drop,
+navigate, click, type, invoke menus, or mutate game/client state.
+
+Policy matrix:
+
+| Policy | Inventory full strategy | Result |
+| --- | --- | --- |
+| `woodcutting_bank` | `needs_service`, disposition `bank` | active intent `needs_service`, service needed `bank`, target cleared |
+| `woodcutting_firemake` | `process_inventory`, disposition `burn` | active intent `process_inventory`, process needed `firemaking`, target cleared |
+| `woodcutting_drop` | `process_inventory`, disposition `drop` | active intent `process_inventory`, process needed `drop`, target cleared |
+| `combat_default` | `continue_task`, disposition `keep` | active intent `continue_task`; full inventory is expected/allowed |
+| `observe_only` | `observe_only` | no transition; observe the condition only |
+
+Policy diagnostic:
+
+```text
+python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_bank --task woodcutting --inventory-full true --resource-count 28 --goal-count 5
+python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_firemake --task woodcutting --inventory-full true --resource-count 28 --goal-count 5 --json
+```
+
+`task_policies.json` is static config. The live daemon must not write it or
+create per-tick policy, task-state, analyzer, JSONL, or rolling live output
+files. Diagnostic `--json` output is stdout-only unless a future command
+explicitly documents otherwise.
+
 ## Live Config Doctor And Presets
 
 `live_config_doctor.py` checks the current live workflow against a named preset.
@@ -2036,6 +2084,39 @@ $request = @{
 
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
 ```
+
+## Generic task state model
+
+Daily brain output now keeps the existing woodcutting-specific phase and also
+adds `genericTaskState`.
+
+Example generic phases:
+
+- `target_selected`: a current target intent exists.
+- `wait_for_result`: the task appears busy or recently changed and should keep
+  observing.
+- `inventory_full`: inventory state blocks the current gather loop.
+- `goal_complete`: displayed goal progress reached the requested goal count.
+- `blocked`: candidates exist but the local context says they are blocked or
+  unreachable.
+- `needs_more_context`: context is stale, missing, or has no candidates.
+
+This is read-only interpretation. It does not execute actions, click, type,
+invoke menus, or create new daily files. Future banking, mining, waypoint, UI,
+or inventory-slot tasks should map their task-specific interpretation into
+these generic phases instead of adding one-off daemon branches.
+
+Target wording:
+
+- `activeIntentTarget` is the thing the current generic phase is focused on.
+- `availableTarget` is useful context that may still be visible.
+- `previousIntentTarget` is the last known target before a task transition.
+
+For `inventory_full`, the active intent is `needs_service`. The tree that was
+being watched may still be shown as previous or available context, but it is no
+longer the current target and the daily intent overlay should not draw it as
+`selected_target`. Service targets will be supplied later by a read-only
+analyzer; no banking action is added here.
 
 ## Brain Resource Progress Idempotency
 

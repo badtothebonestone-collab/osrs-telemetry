@@ -715,7 +715,8 @@ def choose_stable_intent(previous_state: IntentState, candidates: list[dict], co
         return hard_switch(raw_best, "task_changed")
 
     if previous_intent is not None and intent != previous_intent:
-        return hard_switch(raw_best, "intent_changed")
+        reason = "task_phase_changed" if intent in {"needs_service", "process_inventory", "none", "inventory_full", "goal_complete"} else "intent_changed"
+        return hard_switch(raw_best, reason)
 
     if context.get("forceSwitch"):
         return hard_switch(raw_best, "force_switch")

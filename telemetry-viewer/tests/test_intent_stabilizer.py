@@ -271,6 +271,36 @@ class IntentStabilizerTest(unittest.TestCase):
         self.assertEqual(result.selectedTargetKey, "banker")
         self.assertEqual(result.switchReason, "intent_changed")
 
+    def test_phase_transition_to_inventory_full_clears_selected_target(self):
+        state = stabilizer.IntentState()
+        stabilizer.choose_stable_intent(state, [target("oak-a")], context([target("oak-a")], intent="target_selected", tick=1))
+
+        result = stabilizer.choose_stable_intent(
+            state,
+            [],
+            context([], intent="needs_service", tick=2, intentPriority=70),
+        )
+
+        self.assertIsNone(result.selectedTargetKey)
+        self.assertIsNone(result.selectedTarget)
+        self.assertEqual(result.switchReason, "task_phase_changed")
+        self.assertTrue(result.hardSwitch)
+
+    def test_phase_transition_to_process_inventory_clears_selected_target(self):
+        state = stabilizer.IntentState()
+        stabilizer.choose_stable_intent(state, [target("oak-a")], context([target("oak-a")], intent="target_selected", tick=1))
+
+        result = stabilizer.choose_stable_intent(
+            state,
+            [],
+            context([], intent="process_inventory", tick=2, intentPriority=70),
+        )
+
+        self.assertIsNone(result.selectedTargetKey)
+        self.assertIsNone(result.selectedTarget)
+        self.assertEqual(result.switchReason, "task_phase_changed")
+        self.assertTrue(result.hardSwitch)
+
     def test_generic_target_types_are_supported(self):
         for target_type, class_id in (
             ("sceneObject", "tree"),

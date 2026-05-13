@@ -12,6 +12,8 @@ from typing import Any
 
 import resource_progress as rp
 import capabilities
+import task_state
+import task_policy as task_policy_module
 from analyzers import inventory_analyzer
 
 
@@ -1278,8 +1280,11 @@ def evaluate_brain(
     watch_response: dict | None = None,
     capability_error: str | None = None,
     watch_error: str | None = None,
+    task_policy: task_policy_module.TaskPolicy | dict[str, Any] | str | None = None,
 ) -> tuple[dict, dict]:
     now = utc_now()
+    resolved_policy = task_policy_module.resolve_task_policy(task_policy, task=task, profile=task)
+    policy_payload = resolved_policy.to_dict()
     if not isinstance(response, dict) or response.get("schema") != "context_response.v1":
         decision = {
             "schema": DECISION_SCHEMA,
@@ -1298,8 +1303,10 @@ def evaluate_brain(
             "blockingConditions": ["context service unavailable or returned no valid response"],
             "missingCapabilities": ["context_response.v1"],
             "internalNextState": "wait_for_context",
+            "taskPolicy": policy_payload,
             "noActionEmitted": True,
         }
+        decision["genericTaskState"] = task_state.from_brain_decision(decision, policy=resolved_policy).to_dict()
         validate_no_action_fields(decision)
         return decision, update_state_from_decision(state, decision, {}, [], watch_response)
 
@@ -1446,7 +1453,7 @@ def evaluate_brain(
         warnings.append(f"watch request failed: {watch_error}")
 
     observation_needs = build_observation_needs(missing, suggestions, capability_needs, progress)
-    internal_next = internal_next_state_for(phase, progress, suggestions)
+    internal_next = internal_next_state_for(phase, progress, suggestions, resolved_policy)
     current_context = build_current_context_summary(response, best, inventory, activity)
     watch_response = watch_response if isinstance(watch_response, dict) and watch_response else {}
 
@@ -1522,10 +1529,12 @@ def evaluate_brain(
         "blockingConditions": blocking,
         "missingCapabilities": sorted(set(canonical_capability(item) for item in missing)),
         "internalNextState": internal_next,
+        "taskPolicy": policy_payload,
         "warnings": dedupe_strings(warnings),
         "observations": observations,
         "noActionEmitted": True,
     }
+    decision["genericTaskState"] = task_state.from_brain_decision(decision, policy=resolved_policy).to_dict()
     validate_no_action_fields(decision)
     return decision, update_state_from_decision(state, decision, inventory, events, watch_response)
 
@@ -1605,7 +1614,7 @@ def build_observation_needs(missing: list[str], suggestions: list[dict], capabil
     return deduped
 
 
-def internal_next_state_for(phase: str, progress: dict, suggestions: list[dict]) -> str:
+def internal_next_state_for(phase: str, progress: dict, suggestions: list[dict], policy: task_policy_module.TaskPolicy | None = None) -> str:
     if phase == "no_context":
         return "wait_for_context"
     if phase == "stale_context":
@@ -1613,7 +1622,15 @@ def internal_next_state_for(phase: str, progress: dict, suggestions: list[dict])
     if phase == "goal_complete":
         return "hold_goal_complete_state"
     if phase == "inventory_full":
-        return "mark_goal_blocked_by_inventory"
+        if policy and policy.fullInventoryStrategy == task_policy_module.InventoryFullStrategy.NEEDS_SERVICE:
+            return "observe_service_context"
+        if policy and policy.fullInventoryStrategy == task_policy_module.InventoryFullStrategy.PROCESS_INVENTORY:
+            return "observe_inventory_processing_context"
+        if policy and policy.fullInventoryStrategy == task_policy_module.InventoryFullStrategy.CONTINUE_TASK:
+            return "continue_task_with_full_inventory"
+        if policy and policy.fullInventoryStrategy == task_policy_module.InventoryFullStrategy.OBSERVE_ONLY:
+            return "observe_inventory_full_condition"
+        return "mark_inventory_full_condition"
     if phase in {"target_depleted", "waiting_for_respawn", "no_target_observed"}:
         return "observe_for_replacement_target"
     if phase == "blocked_or_unreachable":
@@ -1775,6 +1792,7 @@ def brain_once(args: argparse.Namespace, state: dict) -> tuple[dict, dict]:
     capabilities, capability_error = fetch_optional_endpoint(args.host, args.port, "/capabilities", args.timeout)
     _watches, watches_error = fetch_optional_endpoint(args.host, args.port, "/watches", args.timeout)
     capability_error = capability_error or watches_error
+    selected_policy = getattr(args, "task_policy", None)
     try:
         context = fetch_context(args.host, args.port, args.task, args.max_candidates, args.max_events, args.timeout)
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
@@ -1787,6 +1805,7 @@ def brain_once(args: argparse.Namespace, state: dict) -> tuple[dict, dict]:
         max_events=args.max_events,
         capabilities=capabilities,
         capability_error=capability_error,
+        task_policy=selected_policy,
     )
     watch_response: dict = {}
     watch_error: str | None = None
@@ -1808,6 +1827,7 @@ def brain_once(args: argparse.Namespace, state: dict) -> tuple[dict, dict]:
         watch_response=watch_response,
         capability_error=capability_error,
         watch_error=watch_error,
+        task_policy=selected_policy,
     )
 
 
@@ -1884,6 +1904,45 @@ def important_observation_needs(needs: list[dict], progress: dict) -> list[dict]
     return result
 
 
+def intent_label(value: Any) -> str:
+    return text(value).replace("_", " ")
+
+
+def policy_disposition_label(generic_state: dict[str, Any]) -> str | None:
+    strategy = str(generic_state.get("fullInventoryStrategy") or "")
+    disposition = str(generic_state.get("resourceDisposition") or "")
+    if strategy == "needs_service":
+        if disposition == "bank":
+            return "bank resources"
+        if disposition and disposition not in {"none", "unknown"}:
+            return f"{disposition} resources"
+        return "needs service"
+    if strategy == "process_inventory":
+        if disposition == "burn":
+            return "burn resources"
+        if disposition == "drop":
+            return "drop resources"
+        if disposition and disposition not in {"none", "unknown"}:
+            return f"{disposition} resources"
+        return "process inventory"
+    if strategy == "continue_task":
+        return "continue task"
+    if strategy == "observe_only":
+        return "observe only"
+    return None
+
+
+def target_context_label(target: dict | None) -> str:
+    if not isinstance(target, dict) or not target:
+        return "none"
+    name = text(target.get("name") or target.get("targetName"), "target")
+    target_id = text(target.get("id"), "")
+    reachability = text(target.get("directReachability"), "unknown")
+    if target_id:
+        return f"{name} {target_id}, {reachability}"
+    return f"{name}, {reachability}"
+
+
 def format_human(decision: dict) -> str:
     task = str(decision.get("task") or "task").upper()
     status = decision.get("contextStatus") or "WARN"
@@ -1895,6 +1954,11 @@ def format_human(decision: dict) -> str:
     liveness = context.get("liveness") if isinstance(context.get("liveness"), dict) else {}
     reachability = context.get("reachability") if isinstance(context.get("reachability"), dict) else {}
     progress = decision.get("progress") if isinstance(decision.get("progress"), dict) else {}
+    generic_state = decision.get("genericTaskState") if isinstance(decision.get("genericTaskState"), dict) else {}
+    active_intent = str(generic_state.get("activeIntent") or "")
+    active_target = generic_state.get("activeIntentTarget") if isinstance(generic_state.get("activeIntentTarget"), dict) else None
+    available_target = generic_state.get("availableTarget") if isinstance(generic_state.get("availableTarget"), dict) else None
+    previous_target = generic_state.get("previousIntentTarget") if isinstance(generic_state.get("previousIntentTarget"), dict) else None
     goal_count = safe_get(decision, "goal.goalCount")
     observe_only = goal_count is None or progress.get("progressDisabled")
     lines = [
@@ -1912,16 +1976,43 @@ def format_human(decision: dict) -> str:
         f"  Inventory: {text(inventory.get('freeSlots'))} free slots, {'full' if inventory_is_full(inventory) else 'not full'}",
         f"  Activity: {activity_state_label(activity)}",
     ]
-    if best:
+    if active_intent:
+        lines.append(f"  Active intent: {intent_label(active_intent)}")
+    policy_label = policy_disposition_label(generic_state)
+    if policy_label:
+        lines.append(f"  Task policy: {policy_label}")
+    service_needed = generic_state.get("serviceTypeNeeded")
+    process_needed = generic_state.get("processTypeNeeded")
+    if service_needed:
+        lines.append(f"  Service needed: {text(service_needed)}")
+    if process_needed:
+        lines.append(f"  Process needed: {text(process_needed)}")
+        lines.append("  No service target required")
+    if inventory_is_full(inventory) and str(generic_state.get("fullInventoryStrategy") or "") == "continue_task":
+        lines.append("  Inventory full: expected/allowed")
+    if active_target:
+        lines.append(f"  Current target: {target_context_label(active_target)}, aim {aim_label(active_target)}")
+    elif best and not active_intent:
         lines.extend(
             [
                 f"  Current target: {text(best.get('name'))} {text(best.get('id'))}, {text(best.get('directReachability'))}, aim {aim_label(best)}",
+            ]
+        )
+    elif active_intent in {"needs_service", "none", "observe"}:
+        lines.append("  Current target: none")
+    else:
+        lines.append("  Current target: none")
+    if previous_target:
+        lines.append(f"  Previous target: {target_context_label(previous_target)}")
+    if available_target and not active_target:
+        lines.append(f"  Available target: {target_context_label(available_target)}")
+    if best:
+        lines.extend(
+            [
                 f"  Liveness: {text(liveness.get('livenessInterpretation') or liveness.get('targetLiveState'))}",
                 f"  Reachability: {text(reachability.get('directReachability'))}, path length {text(reachability.get('pathLengthTiles'))}",
             ]
         )
-    else:
-        lines.append("  Current target: none")
     recent_signals = decision.get("recentTaskSignals") if isinstance(decision.get("recentTaskSignals"), list) else []
     if recent_signals:
         lines.extend(["", "Recent task signals:"])
@@ -1982,7 +2073,7 @@ def format_human(decision: dict) -> str:
             lines.append(f"  {text(need.get('capability'))}: {text(need.get('status'))} - {text(need.get('reason'), '')}".rstrip())
     else:
         lines.append("  none")
-    blocking = decision.get("blockingConditions") if isinstance(decision.get("blockingConditions"), list) else []
+    blocking = generic_state.get("blockingConditions") if isinstance(generic_state.get("blockingConditions"), list) else decision.get("blockingConditions") if isinstance(decision.get("blockingConditions"), list) else []
     lines.extend(["", "Blocking conditions:"])
     if blocking:
         for item in blocking:
@@ -2030,6 +2121,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="Context service host. Default: 127.0.0.1.")
     parser.add_argument("--port", type=int, default=8890, help="Context service port. Default: 8890.")
     parser.add_argument("--task", default="woodcutting", help="Task to evaluate. Default: woodcutting.")
+    parser.add_argument("--task-policy", choices=task_policy_module.policy_names(), default="woodcutting_bank", help="Read-only task policy for interpreting conditions such as full inventory.")
     parser.add_argument("--goal-count", type=int, default=None, help="Goal count for the task, e.g. logs to collect.")
     parser.add_argument("--watch", action="store_true", help="Refresh until Ctrl+C.")
     parser.add_argument("--interval", type=float, default=1.0, help="Watch refresh interval seconds. Default: 1.")

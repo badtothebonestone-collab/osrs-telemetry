@@ -355,7 +355,20 @@ def marker_label_for_candidate(candidate: dict, prefix: str = "Target") -> str:
 
 def target_required_for_intent(active_intent: str) -> bool:
     intent = str(active_intent or "").lower()
-    if intent in {"goal_complete", "inventory_full", "stale_context", "no_context", "observe"}:
+    if intent in {
+        "goal_complete",
+        "inventory_full",
+        "needs_service",
+        "process_inventory",
+        "stale_context",
+        "no_context",
+        "observe",
+        "none",
+        "needs_more_context",
+        "navigate_to_service",
+        "service_available",
+        "service_interaction_pending",
+    }:
         return False
     return True
 
@@ -438,7 +451,8 @@ def build_intent_overlay_state(
     status = context.get("status") if isinstance(context.get("status"), dict) else {}
     candidates = context.get("candidates") if isinstance(context.get("candidates"), list) else []
     active_task = str(getattr(args, "brain_task", None) or brain_decision.get("task") or "")
-    active_intent = str(brain_decision.get("phase") or "observe")
+    generic_state = brain_decision.get("genericTaskState") if isinstance(brain_decision.get("genericTaskState"), dict) else {}
+    active_intent = str(generic_state.get("activeIntent") or generic_state.get("phase") or brain_decision.get("phase") or "observe")
     markers: list[dict] = []
     selected = None
     selected_key = None

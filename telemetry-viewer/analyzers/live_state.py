@@ -184,6 +184,60 @@ class BrainContext(AnalyzerContractFields):
 
 
 @dataclass
+class ServiceContext(AnalyzerContractFields):
+    status: str = "PASS"
+    warnings: list[str] = field(default_factory=list)
+    missing_capabilities: list[str] = field(default_factory=list)
+    source_tick: int | None = None
+    retained_from_previous: bool = False
+    timing_millis: float | None = None
+    service_required: bool = False
+    service_type_needed: str | None = None
+    best_service_candidate: dict[str, Any] | None = None
+    service_candidates: list[dict[str, Any]] = field(default_factory=list)
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.contract_payload(),
+            "serviceRequired": self.service_required,
+            "serviceTypeNeeded": self.service_type_needed,
+            "bestServiceCandidate": self.best_service_candidate,
+            "serviceCandidates": list(self.service_candidates),
+            "reason": self.reason,
+        }
+
+
+@dataclass
+class ProcessInventoryContext(AnalyzerContractFields):
+    status: str = "PASS"
+    warnings: list[str] = field(default_factory=list)
+    missing_capabilities: list[str] = field(default_factory=list)
+    source_tick: int | None = None
+    retained_from_previous: bool = False
+    timing_millis: float | None = None
+    process_required: bool = False
+    process_type_needed: str | None = None
+    resource_disposition: str | None = None
+    resources_available: bool = False
+    held_resource_count: int | None = None
+    service_type_needed: str | None = None
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.contract_payload(),
+            "processRequired": self.process_required,
+            "processTypeNeeded": self.process_type_needed,
+            "resourceDisposition": self.resource_disposition,
+            "resourcesAvailable": self.resources_available,
+            "heldResourceCount": self.held_resource_count,
+            "serviceTypeNeeded": self.service_type_needed,
+            "reason": self.reason,
+        }
+
+
+@dataclass
 class LiveAnalysisResult:
     input_snapshot: LiveInputSnapshot | None = None
     source_status: LiveSourceStatus | None = None
@@ -192,6 +246,8 @@ class LiveAnalysisResult:
     targets: TargetContext | None = None
     navigation: NavigationContext | None = None
     activity: ActivityContext | None = None
+    service: ServiceContext | None = None
+    process_inventory: ProcessInventoryContext | None = None
     intent_overlay: IntentOverlayContext | None = None
     brain: BrainContext | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)

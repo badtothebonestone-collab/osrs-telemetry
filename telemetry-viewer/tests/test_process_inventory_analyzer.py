@@ -1,0 +1,58 @@
+import sys
+import unittest
+from pathlib import Path
+
+
+VIEWER_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(VIEWER_DIR))
+
+from analyzers import process_inventory_analyzer
+from analyzers.live_state import InventoryContext
+import task_policy
+
+
+class ProcessInventoryAnalyzerTest(unittest.TestCase):
+    def test_reports_firemaking_process_context_without_actions(self):
+        inventory = InventoryContext(progress={"currentHeldCount": 12})
+
+        context = process_inventory_analyzer.analyze_process_inventory_context(
+            task_policy.resolve_task_policy("woodcutting_firemake"),
+            inventory,
+            source_tick=20,
+        )
+
+        self.assertTrue(context.process_required)
+        self.assertEqual(context.process_type_needed, "firemaking")
+        self.assertEqual(context.resource_disposition, "burn")
+        self.assertTrue(context.resources_available)
+        self.assertEqual(context.source_tick, 20)
+        for forbidden in ("action", "click", "mouse", "keyboard", "menu", "invoke", "execute"):
+            self.assertNotIn(forbidden, " ".join(context.to_dict().keys()).lower())
+
+    def test_reports_drop_process_context_without_service(self):
+        inventory = InventoryContext(progress={"currentHeldCount": 5})
+
+        context = process_inventory_analyzer.analyze_process_inventory_context(
+            task_policy.resolve_task_policy("woodcutting_drop"),
+            inventory,
+        )
+
+        self.assertTrue(context.process_required)
+        self.assertEqual(context.process_type_needed, "drop")
+        self.assertEqual(context.resource_disposition, "drop")
+        self.assertTrue(context.resources_available)
+        self.assertIsNone(context.service_type_needed)
+
+    def test_non_process_policies_do_not_request_inventory_processing(self):
+        for policy_name in ("woodcutting_bank", "combat_default", "observe_only"):
+            with self.subTest(policy_name=policy_name):
+                context = process_inventory_analyzer.analyze_process_inventory_context(
+                    task_policy.resolve_task_policy(policy_name),
+                    InventoryContext(progress={"currentHeldCount": 28}),
+                )
+                self.assertFalse(context.process_required)
+                self.assertFalse(context.resources_available)
+
+
+if __name__ == "__main__":
+    unittest.main()

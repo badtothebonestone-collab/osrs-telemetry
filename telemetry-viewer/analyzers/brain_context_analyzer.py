@@ -49,6 +49,7 @@ def evaluate_brain_context(
     goal_count: int | None,
     max_events: int,
     reset_applied: bool = False,
+    task_policy: Any = None,
 ) -> BrainContext:
     started = time.perf_counter()
     decision, updated = brain_core.evaluate_brain(
@@ -57,6 +58,7 @@ def evaluate_brain_context(
         task=task,
         goal_count=goal_count,
         max_events=max_events,
+        task_policy=task_policy,
     )
     missing = capabilities.normalize_capability_names(decision.get("missingCapabilities") or [])
     warnings = [str(item) for item in decision.get("warnings") or [] if item]

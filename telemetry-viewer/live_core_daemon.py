@@ -17,12 +17,15 @@ import brain_core
 import context_service
 import intent_stabilizer
 import live_target_processor as live
+import task_policy as task_policy_module
 from analyzers import activity_analyzer
 from analyzers import brain_context_analyzer
 from analyzers import intent_overlay_analyzer
 from analyzers import navigation_analyzer
+from analyzers import process_inventory_analyzer
+from analyzers import service_analyzer
 from analyzers import target_analyzer
-from analyzers.live_state import LiveAnalysisResult, LiveInputSnapshot, LiveSourceStatus, PlayerContext
+from analyzers.live_state import InventoryContext, LiveAnalysisResult, LiveInputSnapshot, LiveSourceStatus, PlayerContext
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
 
@@ -738,15 +741,16 @@ class LiveCoreDaemon:
         candidates = context.get("candidates") if isinstance(context.get("candidates"), list) else []
         decision = brain_decision if isinstance(brain_decision, dict) else {}
         raw_best = brain_core.safe_get(decision, "currentContextSummary.bestTarget", {})
-        phase = str(decision.get("phase") or "observe")
-        if phase in {"goal_complete", "inventory_full", "stale_context", "no_context", "observe"}:
+        generic_state = decision.get("genericTaskState") if isinstance(decision.get("genericTaskState"), dict) else {}
+        phase = str(generic_state.get("activeIntent") or generic_state.get("phase") or decision.get("phase") or "observe")
+        if phase in {"goal_complete", "inventory_full", "stale_context", "no_context", "observe", "none", "needs_service", "process_inventory", "needs_more_context", "navigate_to_service", "service_available", "service_interaction_pending"}:
             raw_best = {}
             candidates = []
         if not isinstance(raw_best, dict) or not raw_best:
             raw_best = candidates[0] if decision and candidates else {}
         task = str(decision.get("task") or self.args.brain_task or self.args.profile or "")
         priority = intent_stabilizer.PRIORITY_SELECTED_TARGET
-        if phase in {"goal_complete", "inventory_full", "banking_needed"}:
+        if phase in {"goal_complete", "inventory_full", "none", "needs_service", "process_inventory", "banking_needed", "navigate_to_service", "service_available", "service_interaction_pending"}:
             priority = intent_stabilizer.PRIORITY_TASK_TRANSITION
         if decision.get("interrupt") or str(decision.get("interruptReason") or "").lower() in {"threat", "emergency", "escape"}:
             priority = intent_stabilizer.PRIORITY_EMERGENCY
@@ -969,11 +973,33 @@ class LiveCoreDaemon:
             goal_count=self.args.goal_count,
             max_events=self.args.max_events,
             reset_applied=self.brain_reset_applied,
+            task_policy=self.args.task_policy,
         )
         self.state.brain_state = brain_context.updated_state
         if self.state.analysis_result:
             self.state.analysis_result.brain = brain_context
+            policy = task_policy_module.resolve_task_policy(self.args.task_policy, task=self.args.brain_task, profile=self.args.profile)
+            context = self.state.context()
+            candidates = context.get("candidates") if isinstance(context.get("candidates"), list) else []
+            progress = brain_context.decision.get("progress") if isinstance(brain_context.decision.get("progress"), dict) else {}
+            source_tick = context.get("status", {}).get("lastProcessedTick") if isinstance(context.get("status"), dict) else None
+            inventory_context = InventoryContext(
+                inventory=context.get("inventory") if isinstance(context.get("inventory"), dict) else {},
+                progress=progress,
+                source_tick=source_tick,
+            )
+            self.state.analysis_result.service = service_analyzer.analyze_service_context(
+                policy,
+                candidates=candidates,
+                source_tick=source_tick,
+            )
+            self.state.analysis_result.process_inventory = process_inventory_analyzer.analyze_process_inventory_context(
+                policy,
+                inventory_context,
+                source_tick=source_tick,
+            )
         fields = brain_context.status_fields
+        fields["brainTaskPolicy"] = self.args.task_policy
         self.state.source_status.update(fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)
@@ -1017,6 +1043,7 @@ class LiveCoreDaemon:
             print(f"  writes={'on' if self.args.write_debug_live_files else 'off'}")
             print(f"  overlay={'on' if self.args.write_overlay_state else 'off'} ({self.args.overlay_mode})")
             print(f"  brain={'on' if (self.args.human_dashboard or self.args.goal_count) else 'off'}")
+            print(f"  task policy={self.args.task_policy}")
             print(f"  debug files={'on' if self.args.write_debug_live_files else 'off'}")
             print(
                 "  compact packet files required="
@@ -1253,6 +1280,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.set_defaults(write_debug_live_files=False)
     parser.add_argument("--human-dashboard", action="store_true")
     parser.add_argument("--brain-task", default="woodcutting")
+    parser.add_argument("--task-policy", choices=task_policy_module.policy_names(), default="woodcutting_bank")
     parser.add_argument("--goal-count", type=int)
     parser.add_argument("--brain-state-file", help="Optional brain_state.v1 file. If omitted, daily daemon progress stays in process memory only.")
     parser.add_argument("--reset-brain-state", action="store_true", help="Reset in-memory or file-backed brain progress before observing.")

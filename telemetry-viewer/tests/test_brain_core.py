@@ -185,9 +185,12 @@ class BrainCoreTest(unittest.TestCase):
         decision, state = evaluate(context_response())
         self.assertEqual(decision["schema"], "brain_decision.v1")
         self.assertEqual(decision["phase"], "target_available")
+        self.assertEqual(decision["genericTaskState"]["phase"], "target_selected")
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "continue_current_target")
         self.assertEqual(decision["substate"], "liveness_assumed")
         self.assertEqual(decision["blockingConditions"], [])
         self.assertTrue(decision["noActionEmitted"])
+        self.assertTrue(decision["genericTaskState"]["noActionEmitted"])
         self.assertEqual(state["latestTick"], 42)
 
     def test_likely_busy_phase_with_explicit_evidence(self):
@@ -213,12 +216,83 @@ class BrainCoreTest(unittest.TestCase):
         response = context_response(inventory={"known": True, "freeSlots": 0, "filledSlots": 28, "inventoryFull": True})
         decision, _state = evaluate(response)
         self.assertEqual(decision["phase"], "inventory_full")
+        self.assertEqual(decision["genericTaskState"]["phase"], "inventory_full")
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "needs_service")
+        self.assertEqual(decision["genericTaskState"]["serviceTypeNeeded"], "bank")
+        self.assertIsNone(decision["genericTaskState"]["selectedTargetKey"])
+        self.assertIsNone(decision["genericTaskState"]["activeIntentTarget"])
+        self.assertEqual(decision["genericTaskState"]["availableTarget"]["id"], 1278)
         self.assertIn("inventory is full", decision["blockingConditions"])
+
+    def test_inventory_full_human_output_does_not_label_tree_current_target(self):
+        response = context_response(inventory={"known": True, "freeSlots": 0, "filledSlots": 28, "inventoryFull": True})
+        decision, _state = evaluate(response)
+
+        output = brain.format_human(decision)
+
+        self.assertIn("Active intent: needs service", output)
+        self.assertIn("Task policy: bank resources", output)
+        self.assertIn("Service needed: bank", output)
+        self.assertIn("Previous target: Tree 1278, reachable", output)
+        self.assertIn("Available target: Tree 1278, reachable", output)
+        self.assertNotIn("Current target: Tree 1278", output)
+
+    def test_inventory_full_firemaking_policy_processes_inventory_context_only(self):
+        response = context_response(inventory={"known": True, "freeSlots": 0, "filledSlots": 28, "inventoryFull": True})
+        decision, _state = evaluate(response, task_policy="woodcutting_firemake")
+
+        self.assertEqual(decision["phase"], "inventory_full")
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "process_inventory")
+        self.assertEqual(decision["genericTaskState"]["processTypeNeeded"], "firemaking")
+        self.assertEqual(decision["genericTaskState"]["resourceDisposition"], "burn")
+        self.assertIsNone(decision["genericTaskState"]["activeIntentTarget"])
+
+        output = brain.format_human(decision)
+        self.assertIn("Task policy: burn resources", output)
+        self.assertIn("Active intent: process inventory", output)
+        self.assertIn("Process needed: firemaking", output)
+        self.assertIn("No service target required", output)
+        self.assertNotIn("Current target: Tree 1278", output)
+
+    def test_inventory_full_drop_policy_processes_inventory_context_only(self):
+        response = context_response(inventory={"known": True, "freeSlots": 0, "filledSlots": 28, "inventoryFull": True})
+        decision, _state = evaluate(response, task_policy="woodcutting_drop")
+
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "process_inventory")
+        self.assertEqual(decision["genericTaskState"]["processTypeNeeded"], "drop")
+        self.assertEqual(decision["genericTaskState"]["resourceDisposition"], "drop")
+        self.assertIsNone(decision["genericTaskState"]["activeIntentTarget"])
+
+    def test_inventory_full_combat_policy_continues_task(self):
+        response = context_response(inventory={"known": True, "freeSlots": 0, "filledSlots": 28, "inventoryFull": True})
+        state = brain.default_state("combat", None)
+        decision, _state = brain.evaluate_brain(response, state, task="combat", goal_count=None, task_policy="combat_default")
+
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "continue_task")
+        self.assertEqual(decision["genericTaskState"]["phase"], "target_selected")
+        self.assertIsNotNone(decision["genericTaskState"]["activeIntentTarget"])
+        self.assertNotEqual(decision["genericTaskState"].get("serviceTypeNeeded"), "bank")
+
+        output = brain.format_human(decision)
+        self.assertIn("Task policy: continue task", output)
+        self.assertIn("Inventory full: expected/allowed", output)
+        self.assertIn("Active intent: continue task", output)
+        self.assertIn("Current target: Tree 1278", output)
+
+    def test_observe_only_inventory_full_does_not_request_service(self):
+        response = context_response(inventory={"known": True, "freeSlots": 0, "filledSlots": 28, "inventoryFull": True})
+        decision, _state = evaluate(response, task_policy="observe_only")
+
+        self.assertEqual(decision["genericTaskState"]["phase"], "observe")
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "observe")
+        self.assertIsNone(decision["genericTaskState"]["activeIntentTarget"])
+        self.assertIsNone(decision["genericTaskState"].get("serviceTypeNeeded"))
 
     def test_no_target_observed_phase(self):
         response = context_response(best=None, nearest=None, reachability_summary={"tree": {"candidateCount": 0, "reachableCount": 0}})
         decision, _state = evaluate(response)
         self.assertEqual(decision["phase"], "no_target_observed")
+        self.assertEqual(decision["genericTaskState"]["phase"], "needs_more_context")
 
     def test_blocked_or_unreachable_phase(self):
         response = context_response(
@@ -228,6 +302,7 @@ class BrainCoreTest(unittest.TestCase):
         )
         decision, _state = evaluate(response)
         self.assertEqual(decision["phase"], "blocked_or_unreachable")
+        self.assertEqual(decision["genericTaskState"]["phase"], "blocked")
 
     def test_stale_context_phase(self):
         response = context_response(freshness={"freshByTicks": False, "freshByMillis": True})
@@ -721,6 +796,9 @@ class BrainCoreTest(unittest.TestCase):
         _decision, state = evaluate(context_response(inventory=inventory_with_items([])), state)
         decision, state = evaluate(context_response(inventory=inventory_with_items([log_item(index, 1511) for index in range(5)])), state)
         self.assertEqual(decision["phase"], "goal_complete")
+        self.assertEqual(decision["genericTaskState"]["phase"], "goal_complete")
+        self.assertEqual(decision["genericTaskState"]["activeIntent"], "none")
+        self.assertIsNone(decision["genericTaskState"]["selectedTargetKey"])
         self.assertEqual(decision["substate"], "goal_count_reached")
         self.assertEqual(decision["confidence"], 0.95)
         self.assertTrue(decision["goalComplete"])

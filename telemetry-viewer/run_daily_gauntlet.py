@@ -10,6 +10,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import task_policy
 from telemetry_paths import find_newest_session, get_sessions_dir
 
 
@@ -124,6 +125,17 @@ def progress_failures_from(payload: dict) -> list[str]:
     return failures
 
 
+def policy_warnings_from(status: dict[str, Any]) -> list[str]:
+    if not status:
+        return []
+    policy_name = status.get("brainTaskPolicy") or status.get("taskPolicy")
+    if not policy_name:
+        return ["task policy missing from daemon status"]
+    if str(policy_name) not in task_policy.policy_names():
+        return [f"unknown task policy in daemon status: {policy_name}"]
+    return []
+
+
 def evaluate_daemon_payloads(
     daemon_health: dict[str, Any],
     daemon_status: dict[str, Any],
@@ -181,6 +193,7 @@ def evaluate_daemon_payloads(
         if daemon_status.get("progressRetainedFromPrevious") or daemon_status.get("progressRetainedPreviousThisPoll"):
             warnings.append("progress retained previous valid snapshot this poll; inventory input may be transiently incomplete")
         failures.extend(progress_failures_from(daemon_status))
+        warnings.extend(policy_warnings_from(daemon_status))
     if context_payload:
         if context_payload.get("status") == "FAIL":
             failures.append("daily context endpoint returned FAIL")
@@ -276,6 +289,40 @@ def live_packet_growth_failure(before: dict[str, Any], after: dict[str, Any]) ->
     return None
 
 
+def runtime_policy_file_report(session_path: str | None) -> dict[str, Any]:
+    if not session_path:
+        return {"status": "PASS", "unexpectedRuntimeFiles": [], "unexpectedRuntimeFileCount": 0, "warnings": []}
+    session = Path(session_path)
+    if not session.exists():
+        return {"status": "PASS", "unexpectedRuntimeFiles": [], "unexpectedRuntimeFileCount": 0, "warnings": []}
+    patterns = (
+        "*policy*.json",
+        "*policy*.jsonl",
+        "*task_state*.json",
+        "*task_state*.jsonl",
+        "*analyzer*.json",
+        "*analyzer*.jsonl",
+    )
+    found: list[str] = []
+    for pattern in patterns:
+        for path in session.rglob(pattern):
+            if path.name == "overlay_debug_state.json":
+                continue
+            try:
+                relative = str(path.relative_to(session))
+            except ValueError:
+                relative = str(path)
+            if relative not in found:
+                found.append(relative)
+    warnings = [f"unexpected policy/task/analyzer runtime file: {path}" for path in sorted(found)]
+    return {
+        "status": "FAIL" if found else "PASS",
+        "unexpectedRuntimeFiles": sorted(found),
+        "unexpectedRuntimeFileCount": len(found),
+        "warnings": warnings,
+    }
+
+
 def build_report(args: argparse.Namespace, processes: list[dict[str, Any]] | None = None) -> dict:
     warnings: list[str] = []
     failures: list[str] = []
@@ -301,6 +348,9 @@ def build_report(args: argparse.Namespace, processes: list[dict[str, Any]] | Non
     warnings.extend(daemon_eval.get("warnings") or [])
     failures.extend(daemon_eval.get("failures") or [])
     session_path = resolve_session(args)
+    runtime_file_report = runtime_policy_file_report(session_path)
+    if runtime_file_report.get("status") == "FAIL":
+        failures.extend(runtime_file_report.get("warnings") or [])
     packet_growth: dict[str, Any] | None = None
     if args.daily_mode == "snapshot-no-files":
         before = live_packet_dir_stats(session_path)
@@ -320,7 +370,9 @@ def build_report(args: argparse.Namespace, processes: list[dict[str, Any]] | Non
         "sessionPath": session_path,
         "daemonUrl": args.daemon_url,
         "dailyMode": args.daily_mode,
+        "activeTaskPolicy": daemon_status.get("brainTaskPolicy") or daemon_status.get("taskPolicy"),
         "livePacketGrowth": packet_growth,
+        "runtimePolicyFiles": runtime_file_report,
         "daemonHealth": daemon_health,
         "daemonStatus": daemon_status,
         "context": context_payload,
@@ -345,6 +397,8 @@ def suggestions_for(messages: list[str]) -> list[str]:
         suggestions.append("Apply Daily Live Preset and keep screenshot/crop/perception tooling under Advanced Debug.")
     if "inventory" in joined:
         suggestions.append("Run diagnose_brain_progress.py --from-daemon --strict to inspect retained progress.")
+    if "task policy" in joined or "policy/task/analyzer runtime file" in joined:
+        suggestions.append("Keep task policy output in daemon memory; remove any per-tick policy/task/analyzer JSON files from the session.")
     return list(dict.fromkeys(suggestions))
 
 
@@ -355,6 +409,7 @@ def format_human(report: dict) -> str:
         f"Status: {report.get('status')}",
         f"Session: {report.get('sessionPath') or 'not resolved'}",
         f"Daemon: {report.get('daemonUrl')}",
+        f"Task policy: {report.get('activeTaskPolicy') or 'unknown'}",
         "",
         "Processes:",
     ]

@@ -54,6 +54,14 @@ Daily Snapshot No-File command (experimental):
 python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --goal-count 5 --summary --benchmark
 ```
 
+Task policy examples:
+
+```text
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --task-policy woodcutting_bank --goal-count 5 --summary --benchmark
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --task-policy woodcutting_firemake --goal-count 5 --summary --benchmark
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --brain-task woodcutting --task-policy woodcutting_drop --goal-count 5 --summary --benchmark
+```
+
 Debug file writes remain off unless `--write-debug-live-files` is explicitly
 supplied.
 
@@ -80,6 +88,13 @@ small in-memory analyzers now keep the responsibilities separated:
 - `capabilities.py` normalizes capability names and status values so daily
   warnings do not duplicate old aliases such as `inventoryDeltas` and
   `inventory.deltas`.
+- `task_state.py` maps task-specific brain phases into generic read-only task
+  phases for future task support.
+- `task_policy.py` defines how task policies interpret conditions such as a
+  full inventory.
+- `analyzers\service_analyzer.py` and
+  `analyzers\process_inventory_analyzer.py` report read-only service/process
+  context only when the active policy asks for it.
 
 These analyzers do not poll inputs, call RuneLite, read compact packet files,
 write JSON/NDJSON, or start services. They consume the snapshot/context already
@@ -88,6 +103,46 @@ the optional `overlay_debug_state.json` when `--write-overlay-state` is enabled.
 Analyzer contracts are documented in `docs\analyzer_contracts.md`; future task
 support should add capabilities and analyzer output fields there instead of
 adding ad-hoc daemon logic.
+
+## Generic Task State Model
+
+The woodcutting brain now emits both the existing task-specific phase and a
+generic `genericTaskState` payload. The generic state uses common phases such
+as `target_selected`, `wait_for_result`, `inventory_full`, `goal_complete`,
+`blocked`, and `needs_more_context`.
+
+This is interpretation only. It does not add banking, mining, navigation
+behavior, action execution, click targets, menu calls, input, or any new daily
+file output. The intent overlay reads the generic `activeIntent` when present,
+so a selected woodcutting tree still renders as the selected intent today while
+future bankers, waypoints, UI targets, or inventory slots can share the same
+phase model later.
+
+`activeIntentTarget`, `availableTarget`, and `previousIntentTarget` are separate
+roles. A full inventory is a condition, not a hardcoded "go bank" state. The
+selected task policy decides what it means:
+
+| Policy | Full inventory meaning | Active intent | Target behavior |
+| --- | --- | --- | --- |
+| `woodcutting_bank` | resources need bank service | `needs_service` | clear selected tree; service context only |
+| `woodcutting_firemake` | logs would be processed by firemaking | `process_inventory` | clear selected tree; process context only |
+| `woodcutting_drop` | logs would be processed by dropping | `process_inventory` | clear selected tree; process context only |
+| `combat_default` | full inventory can be expected | `continue_task` | do not clear current target solely due to inventory |
+| `observe_only` | condition is observed only | `observe` | no service/process transition |
+
+When a woodcutting policy needs service or processing, the active selected tree
+is cleared and any tree remains only as previous/available context. The overlay
+therefore stops drawing a tree as `selected_target` until the generic phase
+returns to target selection, or until a future service analyzer supplies a
+read-only service target. No policy executes banking, burning, dropping,
+navigation, or inventory actions.
+
+`task_policies.json` is a small static config file. The live daemon caches the
+policy registry and keeps policy/task/analyzer state in memory. Daily runtime
+must not write per-tick policy JSON, task state JSON, analyzer JSON, policy
+history JSONL, or any new rolling live files. The only daily file write remains
+optional `overlay_debug_state.json` when overlay state is enabled. Policy
+diagnostics with `--json` print to stdout only.
 
 ## Daily Source Modes
 
