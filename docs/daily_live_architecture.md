@@ -133,9 +133,13 @@ selected task policy decides what it means:
 When a woodcutting policy needs service or processing, the active selected tree
 is cleared and any tree remains only as previous/available context. The overlay
 therefore stops drawing a tree as `selected_target` until the generic phase
-returns to target selection, or until a future service analyzer supplies a
-read-only service target. No policy executes banking, burning, dropping,
-navigation, or inventory actions.
+returns to target selection. If `woodcutting_bank` is active and the current
+candidate context already contains a bank booth, banker, bank chest, deposit
+box, deposit chest, or other bank-service candidate, the service analyzer can
+surface that candidate as read-only service context and the overlay can draw it
+as `Service: <name>`. Firemake/drop policies do not run service analysis; they
+show read-only process context instead. No policy executes banking, burning,
+dropping, navigation, or inventory actions.
 
 `task_policies.json` is a small static config file. The live daemon caches the
 policy registry and keeps policy/task/analyzer state in memory. Daily runtime
@@ -143,6 +147,21 @@ must not write per-tick policy JSON, task state JSON, analyzer JSON, policy
 history JSONL, or any new rolling live files. The only daily file write remains
 optional `overlay_debug_state.json` when overlay state is enabled. Policy
 diagnostics with `--json` print to stdout only.
+
+Service/process context is policy-gated:
+
+- `woodcutting_bank`: `service_analyzer.py` scans only the current in-memory
+  candidate list for bank-service candidates and reports best/nearest context.
+- `woodcutting_firemake`: `process_inventory_analyzer.py` reports held logs and
+  whether a tinderbox is present, missing, or unknown from the current
+  inventory snapshot.
+- `woodcutting_drop`: `process_inventory_analyzer.py` reports held resources
+  for drop disposition only.
+- `combat_default` and `observe_only`: no service/process analyzer warning is
+  produced solely because inventory is full.
+
+These summaries are context, not commands. They do not include click/input/menu
+fields and they do not interact with the game.
 
 ## Daily Source Modes
 

@@ -124,6 +124,22 @@ python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutti
 This is still interpretation only. The daemon does not bank, burn, drop,
 navigate, click, type, invoke menus, or mutate game/client state.
 
+Service/process context is also policy-gated and read-only:
+
+- `woodcutting_bank` runs service context over the current in-memory candidate
+  list only. It can report visible bank booths, bankers, bank chests, deposit
+  boxes, deposit chests, or generic bank-service candidates, plus best/nearest
+  and reachability summary fields.
+- `woodcutting_firemake` runs process inventory context only. It reports held
+  logs and whether the current inventory snapshot shows a tinderbox as present,
+  missing, or unknown.
+- `woodcutting_drop` runs process inventory context only and reports held
+  resources for drop disposition.
+- `combat_default` and `observe_only` do not run service/process analyzers just
+  because inventory is full.
+
+These summaries do not include action, click, input, or menu fields.
+
 Policy matrix:
 
 | Policy | Inventory full strategy | Result |

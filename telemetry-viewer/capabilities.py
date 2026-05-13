@@ -33,6 +33,7 @@ CAPABILITY_ALIASES = {
     "watch_values": "plugin_snapshot.watch_values",
     "watch_values.java_runtime": "plugin_snapshot.watch_values",
     "plugin_snapshot.watch_values": "plugin_snapshot.watch_values",
+    "service.actions": "service.actions",
 }
 
 KNOWN_CAPABILITIES = {
@@ -49,6 +50,7 @@ KNOWN_CAPABILITIES = {
     "activity.explicit_movement_state": STATUS_OPTIONAL,
     "overlay.intent_markers": STATUS_AVAILABLE,
     "plugin_snapshot.watch_values": STATUS_EXPERIMENTAL,
+    "service.actions": STATUS_OPTIONAL,
 }
 
 

@@ -1955,6 +1955,8 @@ def format_human(decision: dict) -> str:
     reachability = context.get("reachability") if isinstance(context.get("reachability"), dict) else {}
     progress = decision.get("progress") if isinstance(decision.get("progress"), dict) else {}
     generic_state = decision.get("genericTaskState") if isinstance(decision.get("genericTaskState"), dict) else {}
+    service_context = decision.get("serviceContext") if isinstance(decision.get("serviceContext"), dict) else {}
+    process_context = decision.get("processInventoryContext") if isinstance(decision.get("processInventoryContext"), dict) else {}
     active_intent = str(generic_state.get("activeIntent") or "")
     active_target = generic_state.get("activeIntentTarget") if isinstance(generic_state.get("activeIntentTarget"), dict) else None
     available_target = generic_state.get("availableTarget") if isinstance(generic_state.get("availableTarget"), dict) else None
@@ -1985,8 +1987,17 @@ def format_human(decision: dict) -> str:
     process_needed = generic_state.get("processTypeNeeded")
     if service_needed:
         lines.append(f"  Service needed: {text(service_needed)}")
+        service_candidate = service_context.get("bestServiceCandidate") if isinstance(service_context.get("bestServiceCandidate"), dict) else None
+        if service_candidate:
+            lines.append(f"  Best service candidate: {target_context_label(service_candidate)}")
+        elif service_context.get("serviceNeeded"):
+            lines.append("  Best service candidate: none observed")
     if process_needed:
         lines.append(f"  Process needed: {text(process_needed)}")
+        if process_context.get("heldResourceCount") is not None:
+            lines.append(f"  Held logs: {text(process_context.get('heldResourceCount'))}")
+        if process_context.get("tinderboxStatus") not in (None, "not_required"):
+            lines.append(f"  Tinderbox: {text(process_context.get('tinderboxStatus'))}")
         lines.append("  No service target required")
     if inventory_is_full(inventory) and str(generic_state.get("fullInventoryStrategy") or "") == "continue_task":
         lines.append("  Inventory full: expected/allowed")

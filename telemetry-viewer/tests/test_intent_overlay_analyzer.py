@@ -166,6 +166,50 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertEqual(result["activeIntent"], "needs_service")
         self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "selected_target"])
 
+    def test_bank_policy_overlay_selects_service_target_when_available(self):
+        tree = candidate("selected")
+        service_target = {
+            "objectKey": "bank-booth-1",
+            "targetName": "Bank booth",
+            "targetType": "sceneObject",
+            "classId": "bank_booth",
+            "id": 10355,
+            "worldX": 3208,
+            "worldY": 3219,
+            "plane": 0,
+            "sceneX": 20,
+            "sceneY": 21,
+            "qualityScore": 95,
+            "distanceTiles": 4,
+            "navigation": {"directReachability": "reachable"},
+            "aimPoint": {"canvasX": 220, "canvasY": 230},
+        }
+
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 3}, "candidates": [tree, service_target]},
+            {
+                "task": "woodcutting",
+                "phase": "inventory_full",
+                "genericTaskState": {
+                    "phase": "inventory_full",
+                    "activeIntent": "needs_service",
+                    "activeIntentTarget": service_target,
+                    "serviceTypeNeeded": "bank",
+                },
+                "serviceContext": {"serviceNeeded": True, "bestServiceCandidate": service_target},
+                "confidence": 0.95,
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2),
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        selected = [marker for marker in result["markers"] if marker["markerType"] == "selected_target"]
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["classId"], "bank_booth")
+        self.assertEqual(selected[0]["label"], "Service: Bank booth")
+        self.assertFalse([marker for marker in result["markers"] if marker.get("classId") == "tree" and marker.get("markerType") == "selected_target"])
+
     def test_process_inventory_intent_does_not_draw_selected_tree(self):
         selected = candidate("selected")
         state = intent_stabilizer.IntentState()
@@ -195,6 +239,7 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
 
         self.assertEqual(result["activeIntent"], "process_inventory")
         self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "selected_target"])
+        self.assertTrue(any(marker["markerType"] in {"warning", "diagnostic"} and "firemaking" in marker["label"] for marker in result["markers"]))
 
 
 if __name__ == "__main__":

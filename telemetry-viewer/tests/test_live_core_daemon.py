@@ -133,6 +133,9 @@ class LiveCoreDaemonTest(unittest.TestCase):
         decision = core.state.brain_decision
         self.assertEqual(decision["genericTaskState"]["activeIntent"], "process_inventory")
         self.assertEqual(decision["genericTaskState"]["processTypeNeeded"], "firemaking")
+        self.assertIn("processInventoryContext", decision)
+        self.assertTrue(decision["processInventoryContext"]["processRequired"])
+        self.assertFalse(decision["processInventoryContext"].get("serviceTypeNeeded"))
         self.assertEqual(core.state.source_status["brainTaskPolicy"], "woodcutting_firemake")
 
     def test_daily_daemon_does_not_write_policy_task_or_analyzer_runtime_files(self):

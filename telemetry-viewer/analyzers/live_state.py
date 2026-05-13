@@ -194,16 +194,23 @@ class ServiceContext(AnalyzerContractFields):
     service_required: bool = False
     service_type_needed: str | None = None
     best_service_candidate: dict[str, Any] | None = None
+    nearest_service_candidate: dict[str, Any] | None = None
     service_candidates: list[dict[str, Any]] = field(default_factory=list)
+    candidate_count: int = 0
+    reachable_count: int | None = None
     reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             **self.contract_payload(),
             "serviceRequired": self.service_required,
+            "serviceNeeded": self.service_required,
             "serviceTypeNeeded": self.service_type_needed,
             "bestServiceCandidate": self.best_service_candidate,
+            "nearestServiceCandidate": self.nearest_service_candidate,
             "serviceCandidates": list(self.service_candidates),
+            "candidateCount": self.candidate_count,
+            "reachableCount": self.reachable_count,
             "reason": self.reason,
         }
 
@@ -222,6 +229,9 @@ class ProcessInventoryContext(AnalyzerContractFields):
     resources_available: bool = False
     held_resource_count: int | None = None
     service_type_needed: str | None = None
+    tinderbox_present: bool | None = None
+    tinderbox_status: str | None = None
+    inventory_items_known: bool | None = None
     reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -233,6 +243,9 @@ class ProcessInventoryContext(AnalyzerContractFields):
             "resourcesAvailable": self.resources_available,
             "heldResourceCount": self.held_resource_count,
             "serviceTypeNeeded": self.service_type_needed,
+            "tinderboxPresent": self.tinderbox_present,
+            "tinderboxStatus": self.tinderbox_status,
+            "inventoryItemsKnown": self.inventory_items_known,
             "reason": self.reason,
         }
 

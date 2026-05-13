@@ -297,6 +297,14 @@ def warning_intent_marker(label: str, reason: str, *, source: str = "brain") -> 
     }
 
 
+def diagnostic_intent_marker(label: str, reason: str, *, source: str = "brain") -> dict:
+    marker = warning_intent_marker(label, reason, source=source)
+    marker["markerType"] = "diagnostic"
+    marker["role"] = "diagnostic"
+    marker["priority"] = intent_stabilizer.PRIORITY_DIAGNOSTIC
+    return marker
+
+
 def overlay_target_from_intent_marker(marker: dict) -> dict:
     target = {
         "markerType": marker.get("markerType"),
@@ -458,22 +466,43 @@ def build_intent_overlay_state(
     selected_key = None
     selected_target_type = None
     selected_class_id = None
+    active_target = generic_state.get("activeIntentTarget") if isinstance(generic_state.get("activeIntentTarget"), dict) else None
+    if active_target is None and isinstance(brain_decision.get("serviceContext"), dict):
+        service_context = brain_decision.get("serviceContext")
+        if service_context.get("serviceNeeded"):
+            active_target = service_context.get("bestServiceCandidate") if isinstance(service_context.get("bestServiceCandidate"), dict) else None
     if stable_intent and stable_intent.selectedTarget:
         selected = stable_intent.selectedTarget.raw
         selected_key = stable_intent.selectedTargetKey
         selected_target_type = stable_intent.selectedTarget.targetType
         selected_class_id = stable_intent.selectedTarget.classId
+    if active_intent == "needs_service" and active_target:
+        selected = active_target
+        selected_key = intent_stabilizer.build_target_key(active_target, target_type_for_candidate(active_target))
+        selected_target_type = target_type_for_candidate(active_target)
+        selected_class_id = active_target.get("classId")
+    elif not target_required_for_intent(active_intent):
+        selected = None
+        selected_key = None
+        selected_target_type = None
+        selected_class_id = None
     if isinstance(selected, dict) and selected:
+        label_prefix = "Service" if active_intent == "needs_service" else "Target"
+        reason = (
+            "policy requires service context"
+            if active_intent == "needs_service"
+            else f"stabilized brain intent: {stable_intent.switchReason if stable_intent else 'selected'}"
+        )
         marker = intent_marker_from_candidate(
             selected,
             "selected_target",
-            marker_label_for_candidate(selected),
-            f"stabilized brain intent: {stable_intent.switchReason if stable_intent else 'selected'}",
+            marker_label_for_candidate(selected, label_prefix),
+            reason,
             confidence=brain_decision.get("confidence"),
             source="brain",
         )
         marker["targetKey"] = selected_key
-        if stable_intent:
+        if stable_intent and active_intent != "needs_service":
             marker["stableForTicks"] = stable_intent.stableForTicks
             marker["switchReason"] = stable_intent.switchReason
         for candidate in candidates:
@@ -507,6 +536,12 @@ def build_intent_overlay_state(
             )
     elif active_task == "woodcutting" and target_required_for_intent(active_intent):
         markers.append(warning_intent_marker("No reachable tree", "brain did not select a reachable woodcutting target"))
+    elif active_intent == "process_inventory":
+        process_type = generic_state.get("processTypeNeeded")
+        if not process_type and isinstance(brain_decision.get("processInventoryContext"), dict):
+            process_type = brain_decision["processInventoryContext"].get("processTypeNeeded")
+        if process_type:
+            markers.append(diagnostic_intent_marker(f"Process inventory: {process_type}", "task policy requires read-only inventory processing context"))
 
     return {
         "schema": OVERLAY_INTENT_SCHEMA,

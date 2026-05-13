@@ -998,8 +998,28 @@ class LiveCoreDaemon:
                 inventory_context,
                 source_tick=source_tick,
             )
+            service_context = self.state.analysis_result.service
+            process_context = self.state.analysis_result.process_inventory
+            if service_context:
+                brain_context.decision["serviceContext"] = service_context.to_dict()
+            if process_context:
+                brain_context.decision["processInventoryContext"] = process_context.to_dict()
+            generic_state = brain_context.decision.get("genericTaskState") if isinstance(brain_context.decision.get("genericTaskState"), dict) else {}
+            if generic_state.get("activeIntent") == "needs_service" and service_context and service_context.best_service_candidate:
+                active_target = dict(service_context.best_service_candidate)
+                target_type = active_target.get("targetType") or "sceneObject"
+                generic_state["activeIntentTarget"] = active_target
+                generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(active_target, str(target_type))
+                brain_context.decision["genericTaskState"] = generic_state
         fields = brain_context.status_fields
         fields["brainTaskPolicy"] = self.args.task_policy
+        if self.state.analysis_result and self.state.analysis_result.service:
+            fields["serviceNeeded"] = self.state.analysis_result.service.service_required
+            fields["serviceTypeNeeded"] = self.state.analysis_result.service.service_type_needed
+            fields["serviceCandidateCount"] = self.state.analysis_result.service.candidate_count
+        if self.state.analysis_result and self.state.analysis_result.process_inventory:
+            fields["processInventoryNeeded"] = self.state.analysis_result.process_inventory.process_required
+            fields["processTypeNeeded"] = self.state.analysis_result.process_inventory.process_type_needed
         self.state.source_status.update(fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)

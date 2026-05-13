@@ -39,6 +39,8 @@ class DiagnoseTaskPolicyTest(unittest.TestCase):
                 self.assertEqual(diagnostic["processInventoryAnalyzerShouldRun"], process_runs)
                 self.assertEqual(diagnostic["serviceTypeNeeded"], service_type)
                 self.assertEqual(diagnostic["processTypeNeeded"], process_type)
+                self.assertIn("serviceContext", diagnostic)
+                self.assertIn("processInventoryContext", diagnostic)
                 self.assertTrue(diagnostic["noActionEmitted"])
 
     def test_non_full_woodcutting_policies_keep_target_selection(self):
@@ -87,7 +89,33 @@ class DiagnoseTaskPolicyTest(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["selectedPolicy"], "woodcutting_firemake")
         self.assertEqual(payload["expectedActiveIntent"], "process_inventory")
+        self.assertTrue(payload["processInventoryContext"]["processRequired"])
         self.assertEqual(files, [])
+
+    def test_diagnostic_reports_service_and_process_context(self):
+        bank = diagnose_task_policy.build_policy_diagnostic(
+            policy_name="woodcutting_bank",
+            task="woodcutting",
+            inventory_full=True,
+            resource_count=28,
+            goal_count=5,
+            service_candidates=[{"targetType": "sceneObject", "classId": "bank_booth", "targetName": "Bank booth"}],
+        )
+        firemake = diagnose_task_policy.build_policy_diagnostic(
+            policy_name="woodcutting_firemake",
+            task="woodcutting",
+            inventory_full=True,
+            resource_count=28,
+            goal_count=5,
+            inventory_items=[{"slot": 0, "itemId": 1511, "quantity": 27}, {"slot": 1, "itemId": 590, "quantity": 1}],
+        )
+
+        self.assertTrue(bank["serviceAnalyzerShouldRun"])
+        self.assertTrue(bank["serviceCandidateExists"])
+        self.assertEqual(bank["serviceContext"]["bestServiceCandidate"]["classId"], "bank_booth")
+        self.assertTrue(firemake["processInventoryAnalyzerShouldRun"])
+        self.assertTrue(firemake["processInventoryContext"]["resourcesAvailable"])
+        self.assertEqual(firemake["processInventoryContext"]["tinderboxStatus"], "present")
 
     def test_diagnostic_has_no_action_like_fields_except_no_action_emitted(self):
         payload = diagnose_task_policy.build_policy_diagnostic(

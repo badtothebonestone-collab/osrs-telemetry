@@ -198,14 +198,14 @@
       "categories": ["bank"],
       "roles": ["interactable", "entity"],
       "objectIds": [],
-      "nameContains": ["bank", "banker", "booth", "deposit"],
+      "nameContains": ["bank", "banker", "booth", "deposit", "bank chest", "bank deposit box", "deposit chest"],
       "actionContains": ["bank", "collect"],
-      "tags": ["bank", "banker", "bank_booth", "deposit_box"],
+      "tags": ["bank", "banker", "bank_booth", "bank_chest", "deposit_box", "deposit_chest", "bank_service"],
       "preferredGeometryTypes": ["clickboxPolygon", "clickboxBounds", "convexHullPolygon", "convexHullBounds"],
       "requiredSignals": [],
       "negativeSignals": ["uiBlocked"],
       "defaultQualityWeight": 1.1,
-      "profileHints": ["broad_qa"],
+      "profileHints": ["woodcutting", "broad_qa"],
       "notes": "Bank booths, deposit boxes, bankers, and related targets."
     },
     {

@@ -58,6 +58,7 @@ Canonical names include:
 - `activity.explicit_movement_state`
 - `overlay.intent_markers`
 - `plugin_snapshot.watch_values`
+- `service.actions` (optional read-only context only, never emitted as commands)
 
 Legacy aliases such as `inventoryDeltas`, `animationFrame`,
 `explicitMovementState`, `fullPathfinding`, and `watch_values` should be
@@ -116,6 +117,14 @@ condition, not a hardcoded banking transition:
 When `phase=goal_complete`, `activeIntent=none` and the selected target is
 cleared. Any service or process context remains interpretation only; this model
 does not execute service, process, inventory, or navigation actions.
+
+Service and process context is policy-gated. `woodcutting_bank` is allowed to
+ask the service analyzer for already-visible bank/deposit candidates. Firemake,
+drop, combat, and observe policies do not run or warn about service candidates.
+`woodcutting_firemake` and `woodcutting_drop` are allowed to ask the process
+inventory analyzer for held-resource context. These analyzers report what is
+visible or missing only; they do not bank, burn, drop, use items, navigate, or
+interact.
 
 ## Task Policy Model
 
@@ -297,8 +306,12 @@ requires service.
 
 Inputs: the resolved task policy and the current in-memory candidate list.
 
-Outputs: `ServiceContext` with service-required status, service type, and best
-visible service candidate when one is already present in context.
+Outputs: `ServiceContext` with service-required status, service type, candidate
+count, best/nearest visible service candidate, reachable count when available,
+and sanitized service candidates. Candidate detection can use class, name, id,
+and already-present candidate metadata. If optional service metadata is absent,
+the analyzer reports `service.actions` as an optional missing capability; it
+does not fail when class/name/id is enough.
 
 Forbidden side effects: no file reads/writes, no endpoint calls, no navigation,
 no interaction, no action/click/input/menu fields.
@@ -318,14 +331,15 @@ uses `process_inventory`.
 
 Inputs: the resolved task policy and current `InventoryContext`.
 
-Outputs: `ProcessInventoryContext` with process type, resource disposition, and
-whether resources are currently held.
+Outputs: `ProcessInventoryContext` with process type, resource disposition,
+held-resource count, resource availability, and read-only process context such
+as tinderbox present/missing/unknown for firemaking.
 
 Forbidden side effects: no clicking, dropping, burning, menu use, inventory
 mutation, file writes, endpoint calls, or action fields.
 
 Allowed warnings: process context is requested but no matching held resources
-are visible.
+are visible, or firemaking context cannot confirm a tinderbox.
 
 Performance expectation: constant time over normalized inventory progress.
 
