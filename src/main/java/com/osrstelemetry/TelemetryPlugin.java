@@ -1005,14 +1005,15 @@ public class TelemetryPlugin extends Plugin
 			currentWriter.enqueueLivePacket(PACKET_ACTIVITY, snapshot.tickId, snapshot.timestampUtc, activityPayload(snapshot));
 		}
 
-		if (config.emitCompactNavigationPackets() && compactPacketTypeEnabled("navigation"))
+		boolean navigationEffective = emitNavigationEffective(currentWriter);
+		boolean collisionWindowEffective = emitCollisionWindowEffective(currentWriter);
+
+		if (navigationEffective)
 		{
 			currentWriter.enqueueLivePacket(PACKET_NAVIGATION, snapshot.tickId, snapshot.timestampUtc, navigationPayload(snapshot));
 		}
 
-		if (config.emitCompactNavigationPackets()
-				&& config.compactNavigationEmitCollisionWindow()
-				&& compactPacketTypeEnabled("collisionWindow"))
+		if (collisionWindowEffective)
 		{
 			currentWriter.enqueueLivePacket(PACKET_COLLISION_WINDOW, snapshot.tickId, snapshot.timestampUtc, collisionWindowPayload(snapshot));
 		}
@@ -1028,8 +1029,35 @@ public class TelemetryPlugin extends Plugin
 
 		if (compactPacketTypeEnabled("writerHealth"))
 		{
-			currentWriter.enqueueLivePacket(PACKET_WRITER_HEALTH, snapshot.tickId, snapshot.timestampUtc, writerHealthPayload(currentWriter));
+			currentWriter.enqueueLivePacket(PACKET_WRITER_HEALTH, snapshot.tickId, snapshot.timestampUtc, writerHealthPayload(currentWriter, snapshot));
 		}
+	}
+
+	private boolean snapshotNoFileLiveCacheOnly(TelemetryWriter currentWriter)
+	{
+		return CompactLiveEmissionPolicy.snapshotNoFileLiveCacheOnly(
+				currentWriter.isLiveCacheEnabled(),
+				currentWriter.isCompactLivePacketFilesEnabled(),
+				currentWriter.isCompactLiveStreamEnabled(),
+				pluginSnapshotEndpoint != null);
+	}
+
+	private boolean emitNavigationEffective(TelemetryWriter currentWriter)
+	{
+		return CompactLiveEmissionPolicy.navigationEffective(
+				config.emitCompactNavigationPackets(),
+				compactPacketTypeEnabled("navigation"),
+				snapshotNoFileLiveCacheOnly(currentWriter));
+	}
+
+	private boolean emitCollisionWindowEffective(TelemetryWriter currentWriter)
+	{
+		return CompactLiveEmissionPolicy.collisionWindowEffective(
+				config.emitCompactNavigationPackets(),
+				config.compactNavigationEmitCollisionWindow(),
+				compactPacketTypeEnabled("navigation"),
+				compactPacketTypeEnabled("collisionWindow"),
+				snapshotNoFileLiveCacheOnly(currentWriter));
 	}
 
 	private boolean compactPacketTypeEnabled(String packetGroup)
@@ -2415,9 +2443,11 @@ public class TelemetryPlugin extends Plugin
 		return hash * 1099511628211L;
 	}
 
-	private Map<String, Object> writerHealthPayload(TelemetryWriter currentWriter)
+	private Map<String, Object> writerHealthPayload(TelemetryWriter currentWriter, TickSnapshot snapshot)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
+		List<String> liveCachePayloadTypes = currentWriter.getLiveCachePayloadTypes();
+		Map<String, Object> liveCacheHealth = currentWriter.getLiveCacheHealth();
 		payload.put("recordingMode", currentWriter.getRecordingMode());
 		payload.put("rawTickRecordingEnabled", currentWriter.isRawTickRecordingEnabled());
 		payload.put("rawEventRecordingEnabled", currentWriter.isRawEventRecordingEnabled());
@@ -2448,11 +2478,21 @@ public class TelemetryPlugin extends Plugin
 		payload.put("liveCacheEnabled", currentWriter.isLiveCacheEnabled());
 		payload.put("liveCacheUpdates", currentWriter.getLiveCacheUpdates());
 		payload.put("liveCacheUpdateErrors", currentWriter.getLiveCacheUpdateErrors());
-		payload.put("liveCachePayloadTypes", currentWriter.getLiveCachePayloadTypes());
+		payload.put("liveCachePayloadTypes", liveCachePayloadTypes);
 		payload.put("liveCacheLatestTick", currentWriter.getLiveCacheLatestTick());
 		payload.put("liveCacheLatestSequence", currentWriter.getLiveCacheLatestSequence());
 		payload.put("liveCacheEstimatedBytes", currentWriter.getLiveCacheEstimatedBytes());
-		payload.put("liveCacheHealth", currentWriter.getLiveCacheHealth());
+		payload.put("liveCacheHealth", liveCacheHealth);
+		payload.put("navigationCachePresent", liveCachePayloadTypes.contains(PACKET_NAVIGATION));
+		payload.put("collisionWindowCachePresent", liveCachePayloadTypes.contains(PACKET_COLLISION_WINDOW));
+		payload.put("navigationPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_NAVIGATION, snapshot));
+		payload.put("collisionWindowPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_COLLISION_WINDOW, snapshot));
+		payload.put("emitNavigationEffective", emitNavigationEffective(currentWriter));
+		payload.put("emitCollisionWindowEffective", emitCollisionWindowEffective(currentWriter));
+		payload.put("emitCompactNavigationPacketsConfigured", config.emitCompactNavigationPackets());
+		payload.put("compactNavigationEmitCollisionWindowConfigured", config.compactNavigationEmitCollisionWindow());
+		payload.put("compactLivePacketTypesConfigured", config.compactLivePacketTypes());
+		payload.put("snapshotNoFileLiveCacheOnly", snapshotNoFileLiveCacheOnly(currentWriter));
 		payload.put("compactLiveStreamEnabled", currentWriter.isCompactLiveStreamEnabled());
 		payload.put("compactLiveStreamHost", config.compactLiveStreamHost());
 		payload.put("compactLiveStreamPort", config.compactLiveStreamPort());
@@ -2497,6 +2537,23 @@ public class TelemetryPlugin extends Plugin
 		payload.put("compactLiveHullDroppedNullClickbox", lastCompactHullDroppedNullClickbox);
 		payload.put("rawRecordingEnabled", currentWriter.isRawRecordingEnabled());
 		return payload;
+	}
+
+	@SuppressWarnings("unchecked")
+	private boolean liveCachePacketBuiltThisTick(Map<String, Object> liveCacheHealth, String packetType, TickSnapshot snapshot)
+	{
+		if (liveCacheHealth == null || snapshot == null)
+		{
+			return false;
+		}
+		Object raw = liveCacheHealth.get("liveCacheLatestTickByType");
+		if (!(raw instanceof Map<?, ?>))
+		{
+			return false;
+		}
+		Map<Object, Object> latestTickByType = (Map<Object, Object>) raw;
+		Object tick = latestTickByType.get(packetType);
+		return tick instanceof Number && ((Number) tick).longValue() == snapshot.tickId;
 	}
 
 	private BufferedImage copyRuneliteFrame(Image image)

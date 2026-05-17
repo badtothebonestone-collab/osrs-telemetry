@@ -68,6 +68,7 @@ COMMANDS = [
     [sys.executable, "telemetry-viewer\\tests\\test_live_control_panel.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_diagnose_brain_progress.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_diagnose_service_context.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_diagnose_pathing_context.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_run_daily_gauntlet.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_context_service.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_live_target_processor.py"],

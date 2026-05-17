@@ -102,6 +102,9 @@ public class TelemetryPresetApplierTest
 		assertEquals("false", store.values.get("emitCompactLivePackets"));
 		assertEquals("false", store.values.get("compactLivePacketsRequiredForLive"));
 		assertEquals("false", store.values.get("emitCompactLiveStream"));
+		assertEquals("true", store.values.get("emitCompactNavigationPackets"));
+		assertEquals("true", store.values.get("compactNavigationEmitCollisionWindow"));
+		assertEquals("all", store.values.get("compactLivePacketTypes"));
 		assertEquals("true", store.values.get("enablePluginSnapshotEndpoint"));
 		assertEquals("true", store.values.get("pluginSnapshotEnabledInNormalLive"));
 		assertEquals("127.0.0.1", store.values.get("pluginSnapshotHost"));

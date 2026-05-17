@@ -118,7 +118,19 @@ public class TelemetryRecordingModeTest
 				7L,
 				"2026-05-11T00:00:00Z",
 				java.util.Map.of("gameState", "LOGGED_IN")));
+		assertTrue(writer.enqueueLivePacket(
+				"live_navigation_packet.v1",
+				7L,
+				"2026-05-11T00:00:00Z",
+				java.util.Map.of("collision", java.util.Map.of("collisionKnown", true))));
+		assertTrue(writer.enqueueLivePacket(
+				"live_collision_window_packet.v1",
+				7L,
+				"2026-05-11T00:00:00Z",
+				java.util.Map.of("collisionKnown", true, "windowRadius", 24)));
 		assertTrue(writer.getLiveCachePayloadTypes().contains("live_baseline_packet.v1"));
+		assertTrue(writer.getLiveCachePayloadTypes().contains("live_navigation_packet.v1"));
+		assertTrue(writer.getLiveCachePayloadTypes().contains("live_collision_window_packet.v1"));
 		assertTrue(writer.getLiveCacheUpdates() > 0L);
 	}
 

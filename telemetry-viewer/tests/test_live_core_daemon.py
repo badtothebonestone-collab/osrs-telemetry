@@ -293,6 +293,14 @@ class LiveCoreDaemonTest(unittest.TestCase):
                 next_waypoint_tile={"worldX": 3201, "worldY": 3200, "plane": 0},
                 pathing_millis=0.1,
                 path_nodes_expanded=5,
+                collision_window_available=True,
+                collision_window_fresh=True,
+                collision_window_radius=24,
+                collision_window_center_world={"worldX": 3200, "worldY": 3200, "plane": 0},
+                collision_window_plane=0,
+                collision_window_age_ticks=0,
+                destination_inside_collision_window=True,
+                destination_plane_matches=True,
             )
             with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
                 with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
@@ -309,6 +317,9 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(status["pathingPathLengthTiles"], 4)
         self.assertEqual(status["pathingDestinationTile"]["worldX"], 3208)
         self.assertEqual(status["pathingNextWaypointTile"]["worldX"], 3201)
+        self.assertTrue(status["pathingCollisionWindowAvailable"])
+        self.assertTrue(status["pathingDestinationInsideCollisionWindow"])
+        self.assertTrue(status["pathingDestinationPlaneMatches"])
 
     def test_daily_daemon_does_not_write_policy_task_or_analyzer_runtime_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -884,8 +895,15 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(service.best_service_candidate["objectKey"], "bank-booth-1")
         self.assertEqual(navigation_intent.destination_target["objectKey"], "bank-booth-1")
         self.assertEqual(pathing.destination_tile, {"worldX": 3207, "worldY": 3215, "plane": 0})
+        self.assertTrue(pathing.collision_window_available)
+        self.assertTrue(pathing.collision_window_fresh)
+        self.assertEqual(pathing.collision_window_radius, 10)
+        self.assertTrue(pathing.destination_inside_collision_window)
+        self.assertNotIn("navigation.local_collision_window", pathing.missing_capabilities)
         self.assertEqual(status["serviceCandidateInputCount"], 1)
         self.assertEqual(status["profileCandidateCount"], 1)
+        self.assertTrue(status["collisionWindowAvailable"])
+        self.assertTrue(status["pathingCollisionWindowAvailable"])
 
     def test_context_response_preserves_read_only_navigation_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:

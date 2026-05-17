@@ -242,6 +242,7 @@ public class PluginSnapshotEndpoint implements Closeable
 				if (cached == null)
 				{
 					missingCapabilities.add(need);
+					warnings.add("missing cached payload: " + need + " (" + packetType + ")");
 					continue;
 				}
 				if ("projection".equals(need))

@@ -143,6 +143,14 @@ class NavigationContext(AnalyzerContractFields):
     timing_millis: float | None = None
     collision_known: bool | None = None
     collision_window_available: bool | None = None
+    collision_window_fresh: bool | None = None
+    collision_window_radius: int | None = None
+    collision_window_center_world: dict[str, Any] | None = None
+    collision_window_plane: int | None = None
+    collision_window_age_ticks: int | None = None
+    collision_window_tiles: dict[str, Any] | None = None
+    collision_window_bounds: dict[str, Any] | None = None
+    collision_window_missing_reason: str | None = None
     reachable_count: int = 0
     blocked_count: int = 0
     unknown_count: int = 0
@@ -211,6 +219,15 @@ class PathingContext(AnalyzerContractFields):
     pathing_millis: float | None = None
     path_nodes_expanded: int = 0
     pathing_budget_exceeded: bool = False
+    collision_window_available: bool | None = None
+    collision_window_fresh: bool | None = None
+    collision_window_radius: int | None = None
+    collision_window_center_world: dict[str, Any] | None = None
+    collision_window_plane: int | None = None
+    collision_window_age_ticks: int | None = None
+    destination_inside_collision_window: bool | None = None
+    destination_plane_matches: bool | None = None
+    collision_window_missing_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -238,6 +255,15 @@ class PathingContext(AnalyzerContractFields):
             "pathingMillis": self.pathing_millis,
             "pathNodesExpanded": self.path_nodes_expanded,
             "pathingBudgetExceeded": self.pathing_budget_exceeded,
+            "collisionWindowAvailable": self.collision_window_available,
+            "collisionWindowFresh": self.collision_window_fresh,
+            "collisionWindowRadius": self.collision_window_radius,
+            "collisionWindowCenterWorld": self.collision_window_center_world,
+            "collisionWindowPlane": self.collision_window_plane,
+            "collisionWindowAgeTicks": self.collision_window_age_ticks,
+            "destinationInsideCollisionWindow": self.destination_inside_collision_window,
+            "destinationPlaneMatches": self.destination_plane_matches,
+            "collisionWindowMissingReason": self.collision_window_missing_reason,
         }
 
 

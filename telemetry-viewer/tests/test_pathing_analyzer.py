@@ -84,9 +84,13 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertEqual(context.status, "PASS")
         self.assertTrue(payload["pathingNeeded"])
         self.assertEqual(payload["localReachability"], "reachable")
+        self.assertEqual(payload["reason"], "path_reachable")
         self.assertEqual(payload["pathLengthTiles"], 2)
         self.assertEqual(payload["nextWaypointTile"], {"worldX": 101, "worldY": 100, "plane": 0})
         self.assertEqual(payload["destinationTile"], {"worldX": 102, "worldY": 100, "plane": 0})
+        self.assertTrue(payload["collisionWindowAvailable"])
+        self.assertTrue(payload["destinationInsideCollisionWindow"])
+        self.assertTrue(payload["destinationPlaneMatches"])
         self.assertLessEqual(len(payload["predictedPathTiles"]), 10)
         self.assertEqual(payload["predictedMovementModel"], "cardinal_only")
         self.assertIn("Predicted local path", " ".join(payload["predictedMovementNotes"]))
@@ -122,7 +126,7 @@ class PathingAnalyzerTest(unittest.TestCase):
 
         self.assertEqual(context.local_reachability, "blocked")
         self.assertEqual(context.status, "WARN")
-        self.assertEqual(context.reason, "no_local_path")
+        self.assertEqual(context.reason, "destination_inside_window_but_no_path")
 
     def test_destination_outside_collision_window_is_unknown(self):
         context = pathing_analyzer.analyze_pathing_context(
@@ -133,6 +137,7 @@ class PathingAnalyzerTest(unittest.TestCase):
 
         self.assertEqual(context.local_reachability, "unknown")
         self.assertEqual(context.reason, "destination_outside_collision_window")
+        self.assertFalse(context.destination_inside_collision_window)
         self.assertIn("navigation.global_pathfinding", context.missing_capabilities)
 
     def test_collision_window_missing_is_unknown(self):
@@ -144,7 +149,33 @@ class PathingAnalyzerTest(unittest.TestCase):
 
         self.assertEqual(context.local_reachability, "unknown")
         self.assertEqual(context.reason, "collision_window_missing")
+        self.assertFalse(context.collision_window_available)
+        self.assertEqual(context.collision_window_missing_reason, "collision_window_missing")
         self.assertIn("navigation.local_collision_window", context.missing_capabilities)
+
+    def test_stale_collision_window_is_unknown(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, collision_window_fresh=False, collision_window_age_ticks=8, raw=collision_window()),
+            navigation_intent_context=nav_intent(),
+        )
+
+        self.assertEqual(context.local_reachability, "unknown")
+        self.assertEqual(context.reason, "collision_window_stale")
+        self.assertFalse(context.collision_window_fresh)
+        self.assertEqual(context.collision_window_age_ticks, 8)
+        self.assertIn("navigation.local_collision_window", context.missing_capabilities)
+
+    def test_plane_mismatch_is_reported(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window()),
+            navigation_intent_context=nav_intent(destination_target=destination(plane=2)),
+        )
+
+        self.assertEqual(context.local_reachability, "unknown")
+        self.assertEqual(context.reason, "destination_plane_mismatch")
+        self.assertFalse(context.destination_plane_matches)
 
     def test_max_node_cap_prevents_runaway(self):
         context = pathing_analyzer.analyze_pathing_context(

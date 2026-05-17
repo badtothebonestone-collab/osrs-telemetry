@@ -634,6 +634,13 @@ class LiveCoreState:
             "serviceCandidateInputCount",
             "serviceCandidateVisibility",
             "serviceCandidateInputsPreview",
+            "collisionWindowAvailable",
+            "collisionWindowFresh",
+            "collisionWindowRadius",
+            "collisionWindowCenterWorld",
+            "collisionWindowPlane",
+            "collisionWindowAgeTicks",
+            "collisionWindowMissingReason",
             "processInventoryNeeded",
             "processTypeNeeded",
             "navigationIntentNeeded",
@@ -649,6 +656,15 @@ class LiveCoreState:
             "pathingDestinationTile",
             "pathingFinalApproachTile",
             "pathingNextWaypointTile",
+            "pathingCollisionWindowAvailable",
+            "pathingCollisionWindowFresh",
+            "pathingCollisionWindowRadius",
+            "pathingCollisionWindowCenterWorld",
+            "pathingCollisionWindowPlane",
+            "pathingCollisionWindowAgeTicks",
+            "pathingDestinationInsideCollisionWindow",
+            "pathingDestinationPlaneMatches",
+            "pathingCollisionWindowMissingReason",
             "pathingMillis",
             "pathNodesExpanded",
             "pathingBudgetExceeded",
@@ -915,6 +931,15 @@ class LiveCoreDaemon:
                 for candidate in analysis.targets.service_candidate_inputs[:10]
             ],
         }
+        navigation_fields = {
+            "collisionWindowAvailable": analysis.navigation.collision_window_available,
+            "collisionWindowFresh": analysis.navigation.collision_window_fresh,
+            "collisionWindowRadius": analysis.navigation.collision_window_radius,
+            "collisionWindowCenterWorld": analysis.navigation.collision_window_center_world,
+            "collisionWindowPlane": analysis.navigation.collision_window_plane,
+            "collisionWindowAgeTicks": analysis.navigation.collision_window_age_ticks,
+            "collisionWindowMissingReason": analysis.navigation.collision_window_missing_reason,
+        }
         if (
             analysis.targets.service_candidate_input_count == 0
             and status.get("inputSourceActive") == live.PLUGIN_SNAPSHOT_SOURCE
@@ -923,10 +948,13 @@ class LiveCoreDaemon:
             target_fields["serviceCandidateVisibility"] = "possibly_capped_or_filtered"
             analysis.targets.service_candidate_visibility = "possibly_capped_or_filtered"
         self.state.source_status.update(target_fields)
+        self.state.source_status.update(navigation_fields)
         if isinstance(result.get("status"), dict):
             result["status"].update(target_fields)
+            result["status"].update(navigation_fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(target_fields)
+            self.state.latest_context["status"].update(navigation_fields)
         self.state.latest_context["profileCandidates"] = list(analysis.targets.profile_candidates)
         self.state.latest_context["broadCandidates"] = list(analysis.targets.broad_candidates)
         self.state.latest_context["serviceCandidateInputs"] = list(analysis.targets.service_candidate_inputs)
@@ -1303,6 +1331,15 @@ class LiveCoreDaemon:
             fields["pathingDestinationTile"] = pathing.destination_tile
             fields["pathingFinalApproachTile"] = pathing.final_approach_tile
             fields["pathingNextWaypointTile"] = pathing.next_waypoint_tile
+            fields["pathingCollisionWindowAvailable"] = pathing.collision_window_available
+            fields["pathingCollisionWindowFresh"] = pathing.collision_window_fresh
+            fields["pathingCollisionWindowRadius"] = pathing.collision_window_radius
+            fields["pathingCollisionWindowCenterWorld"] = pathing.collision_window_center_world
+            fields["pathingCollisionWindowPlane"] = pathing.collision_window_plane
+            fields["pathingCollisionWindowAgeTicks"] = pathing.collision_window_age_ticks
+            fields["pathingDestinationInsideCollisionWindow"] = pathing.destination_inside_collision_window
+            fields["pathingDestinationPlaneMatches"] = pathing.destination_plane_matches
+            fields["pathingCollisionWindowMissingReason"] = pathing.collision_window_missing_reason
             fields["pathingMillis"] = pathing.pathing_millis
             fields["pathNodesExpanded"] = pathing.path_nodes_expanded
             fields["pathingBudgetExceeded"] = pathing.pathing_budget_exceeded

@@ -4994,10 +4994,36 @@ def navigation_summary_for(tick: dict | None, processed_at: str) -> dict:
     if collision_known and not collision_grid:
         notes.append("Collision hash/count summary is known; full collision grid pathing is not available.")
     collision_window_available = bool(collision_window.get("flags"))
+    latest_tick = tick_id_for(tick)
+    collision_window_tick = collision_window.get("tick")
+    if not isinstance(collision_window_tick, int):
+        collision_window_tick = latest_tick if collision_window else None
+    collision_window_age_ticks = (
+        max(0, latest_tick - collision_window_tick)
+        if isinstance(latest_tick, int) and isinstance(collision_window_tick, int)
+        else None
+    )
+    collision_window_fresh = None
+    if collision_window_available:
+        collision_window_fresh = collision_window_age_ticks is None or collision_window_age_ticks <= 5
+    collision_window_missing_reason = None
+    if not collision_window:
+        collision_window_missing_reason = "collision_window_missing"
+    elif not collision_window_available:
+        collision_window_missing_reason = "collision_window_payload_without_flags"
+    elif collision_window_fresh is False:
+        collision_window_missing_reason = "collision_window_stale"
+    collision_window_center_world = None
+    if player and player.get("worldX") is not None and player.get("worldY") is not None and player.get("plane") is not None:
+        collision_window_center_world = {
+            "worldX": player.get("worldX"),
+            "worldY": player.get("worldY"),
+            "plane": player.get("plane"),
+        }
     return {
         "schema": LIVE_NAVIGATION_SCHEMA,
         "generatedAtUtc": processed_at,
-        "latestTick": tick_id_for(tick),
+        "latestTick": latest_tick,
         "collisionKnown": bool(collision_known) if collision_known is not None else False,
         "plane": plane,
         "playerWorldX": nav_player.get("worldX", player.get("worldX")),
@@ -5021,7 +5047,11 @@ def navigation_summary_for(tick: dict | None, processed_at: str) -> dict:
         "collisionMapVersion": collision.get("collisionMapVersion", grid_collision.get("collisionMapVersion")),
         "obstaclesKnown": bool(collision_known),
         "collisionWindowAvailable": collision_window_available,
+        "collisionWindowFresh": collision_window_fresh,
         "collisionWindowRadius": collision_window.get("windowRadius"),
+        "collisionWindowCenterWorld": collision_window_center_world,
+        "collisionWindowPlane": collision_window.get("plane", plane),
+        "collisionWindowAgeTicks": collision_window_age_ticks,
         "collisionWindowBounds": {
             "minSceneX": collision_window.get("minSceneX"),
             "maxSceneX": collision_window.get("maxSceneX"),
@@ -5031,9 +5061,10 @@ def navigation_summary_for(tick: dict | None, processed_at: str) -> dict:
             "height": collision_window.get("height"),
         } if collision_window else None,
         "collisionWindowHash": collision_window.get("collisionWindowHash") or collision_window.get("windowHash"),
-        "collisionWindowTick": tick_id_for(tick) if collision_window else None,
+        "collisionWindowTick": collision_window_tick,
         "collisionWindowTileCount": collision_window.get("collisionWindowTileCount"),
         "collisionWindowEncoding": collision_window.get("encoding"),
+        "collisionWindowMissingReason": collision_window_missing_reason,
         "collisionWindow": collision_window if collision_window_available else None,
         "reachabilityComputed": collision_window_available,
         "fullCollisionGridAvailable": bool(grid_collision.get("flags")),

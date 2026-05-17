@@ -37,6 +37,15 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
         "movementModel": pathing.get("predictedMovementModel") if pathing else None,
         "localReachability": pathing.get("localReachability") if pathing else status.get("pathingLocalReachability"),
         "pathLengthTiles": pathing.get("pathLengthTiles") if pathing else status.get("pathingPathLengthTiles"),
+        "collisionWindowAvailable": pathing.get("collisionWindowAvailable") if pathing else status.get("collisionWindowAvailable"),
+        "collisionWindowFresh": pathing.get("collisionWindowFresh") if pathing else status.get("collisionWindowFresh"),
+        "collisionWindowRadius": pathing.get("collisionWindowRadius") if pathing else status.get("collisionWindowRadius"),
+        "collisionWindowCenter": pathing.get("collisionWindowCenterWorld") if pathing else status.get("collisionWindowCenterWorld"),
+        "collisionWindowPlane": pathing.get("collisionWindowPlane") if pathing else status.get("collisionWindowPlane"),
+        "collisionWindowAgeTicks": pathing.get("collisionWindowAgeTicks") if pathing else status.get("collisionWindowAgeTicks"),
+        "destinationInsideCollisionWindow": pathing.get("destinationInsideCollisionWindow") if pathing else status.get("pathingDestinationInsideCollisionWindow"),
+        "destinationPlaneMatches": pathing.get("destinationPlaneMatches") if pathing else status.get("pathingDestinationPlaneMatches"),
+        "collisionWindowMissingReason": pathing.get("collisionWindowMissingReason") if pathing else status.get("pathingCollisionWindowMissingReason") or status.get("collisionWindowMissingReason"),
         "pathingMillis": pathing.get("pathingMillis") if pathing else status.get("pathingMillis"),
         "pathNodesExpanded": pathing.get("pathNodesExpanded") if pathing else status.get("pathNodesExpanded"),
         "pathingBudgetExceeded": pathing.get("pathingBudgetExceeded") if pathing else status.get("pathingBudgetExceeded"),
@@ -57,6 +66,12 @@ def tile_label(tile: Any) -> str:
     return f"{tile.get('worldX')},{tile.get('worldY')},{tile.get('plane')}"
 
 
+def bool_label(value: Any) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return "unknown"
+
+
 def format_human(payload: dict[str, Any]) -> str:
     tiles = payload.get("predictedPathTiles") if isinstance(payload.get("predictedPathTiles"), list) else []
     preview = " -> ".join(tile_label(tile) for tile in tiles[:10] if isinstance(tile, dict)) or "none"
@@ -72,6 +87,15 @@ def format_human(payload: dict[str, Any]) -> str:
         f"Next waypoint: {tile_label(payload.get('nextWaypointTile'))}",
         f"Local reachability: {payload.get('localReachability') or 'unknown'}",
         f"Path length: {payload.get('pathLengthTiles') if payload.get('pathLengthTiles') is not None else 'unknown'}",
+        f"Collision window available: {bool_label(payload.get('collisionWindowAvailable'))}",
+        f"Collision window fresh: {bool_label(payload.get('collisionWindowFresh'))}",
+        f"Collision window radius: {payload.get('collisionWindowRadius') if payload.get('collisionWindowRadius') is not None else 'unknown'}",
+        f"Collision window center: {tile_label(payload.get('collisionWindowCenter'))}",
+        f"Collision window plane: {payload.get('collisionWindowPlane') if payload.get('collisionWindowPlane') is not None else 'unknown'}",
+        f"Collision window age ticks: {payload.get('collisionWindowAgeTicks') if payload.get('collisionWindowAgeTicks') is not None else 'unknown'}",
+        f"Destination inside collision window: {bool_label(payload.get('destinationInsideCollisionWindow'))}",
+        f"Destination plane matches: {bool_label(payload.get('destinationPlaneMatches'))}",
+        f"Collision window reason: {payload.get('collisionWindowMissingReason') or 'none'}",
         f"Movement model: {payload.get('movementModel') or 'unknown'}",
         f"Predicted path: {preview}",
         f"Pathing millis: {payload.get('pathingMillis') if payload.get('pathingMillis') is not None else 'unknown'}",

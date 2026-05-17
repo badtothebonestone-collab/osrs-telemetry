@@ -126,6 +126,34 @@ public class PluginSnapshotEndpointTest
 	}
 
 	@Test
+	public void snapshotReturnsNavigationAndCollisionWindowWhenCached()
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		cache.update("live_baseline_packet.v1", 8L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
+		cache.update("live_navigation_packet.v1", 8L, "2026-05-11T00:00:00Z", Map.of("collision", Map.of("collisionKnown", true)));
+		cache.update("live_collision_window_packet.v1", 8L, "2026-05-11T00:00:00Z", Map.of("collisionKnown", true, "windowRadius", 24));
+		cache.update("live_writer_health_packet.v1", 8L, "2026-05-11T00:00:00Z", Map.of("liveCachePayloadTypes", cache.packetTypes()));
+		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
+		JsonObject request = new JsonObject();
+		JsonArray needs = new JsonArray();
+		needs.add("baseline");
+		needs.add("navigation");
+		needs.add("collision_window");
+		needs.add("writer_health");
+		request.add("needs", needs);
+		request.addProperty("maxAgeTicks", 5);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		Map<String, JsonElement> payloads = payloads(response);
+
+		assertEquals("PASS", response.get("status"));
+		assertTrue(payloads.containsKey("navigation"));
+		assertTrue(payloads.containsKey("collision_window"));
+		assertFalse(((List<?>) response.get("missingCapabilities")).contains("navigation"));
+		assertFalse(((List<?>) response.get("missingCapabilities")).contains("collision_window"));
+	}
+
+	@Test
 	public void missingPayloadReturnsMissingCapabilities()
 	{
 		PluginSnapshotEndpoint endpoint = endpoint(new PluginLiveCache(gson), 50, 1024 * 1024);
@@ -138,6 +166,7 @@ public class PluginSnapshotEndpointTest
 
 		assertEquals("FAIL", response.get("status"));
 		assertTrue(((List<?>) response.get("missingCapabilities")).contains("navigation"));
+		assertTrue(((List<?>) response.get("warnings")).contains("missing cached payload: navigation (live_navigation_packet.v1)"));
 	}
 
 	@Test

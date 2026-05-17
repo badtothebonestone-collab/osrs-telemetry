@@ -52,6 +52,9 @@ def source_tick_from(*contexts: Any) -> int | None:
 
 
 def collision_payload(navigation_context: Any) -> dict[str, Any] | None:
+    normalized = context_value(navigation_context, "collision_window_tiles", "collisionWindowTiles")
+    if isinstance(normalized, dict) and isinstance(normalized.get("flags"), list):
+        return normalized
     raw = context_value(navigation_context, "raw")
     if not isinstance(raw, dict):
         raw = navigation_context if isinstance(navigation_context, dict) else {}
@@ -73,6 +76,57 @@ def collision_window_is_available(navigation_context: Any) -> bool | None:
         value = raw.get("collisionWindowAvailable")
         if isinstance(value, bool):
             return value
+    return None
+
+
+def collision_window_field(navigation_context: Any, snake_key: str, camel_key: str) -> Any:
+    value = context_value(navigation_context, snake_key, camel_key)
+    if value is not None:
+        return value
+    raw = context_value(navigation_context, "raw")
+    if isinstance(raw, dict):
+        return raw.get(camel_key)
+    return None
+
+
+def collision_window_fresh(navigation_context: Any) -> bool | None:
+    value = collision_window_field(navigation_context, "collision_window_fresh", "collisionWindowFresh")
+    return value if isinstance(value, bool) else None
+
+
+def collision_window_age_ticks(navigation_context: Any) -> int | None:
+    return int_value(collision_window_field(navigation_context, "collision_window_age_ticks", "collisionWindowAgeTicks"))
+
+
+def collision_window_radius(navigation_context: Any, window: navigation_reachability.CollisionWindow | None) -> int | None:
+    value = int_value(collision_window_field(navigation_context, "collision_window_radius", "collisionWindowRadius"))
+    if value is not None:
+        return value
+    return window.radius if window is not None else None
+
+
+def collision_window_center_world(navigation_context: Any) -> dict[str, Any] | None:
+    value = collision_window_field(navigation_context, "collision_window_center_world", "collisionWindowCenterWorld")
+    return dict(value) if isinstance(value, dict) else None
+
+
+def collision_window_plane(navigation_context: Any, window: navigation_reachability.CollisionWindow | None) -> int | None:
+    value = int_value(collision_window_field(navigation_context, "collision_window_plane", "collisionWindowPlane"))
+    if value is not None:
+        return value
+    return window.plane if window is not None else None
+
+
+def collision_window_missing_reason(navigation_context: Any, payload: dict[str, Any] | None, window: navigation_reachability.CollisionWindow | None) -> str | None:
+    value = collision_window_field(navigation_context, "collision_window_missing_reason", "collisionWindowMissingReason")
+    if isinstance(value, str) and value:
+        return value
+    if payload is None:
+        return "collision_window_missing"
+    if window is None:
+        return "collision_window_payload_without_flags"
+    if collision_window_fresh(navigation_context) is False:
+        return "collision_window_stale"
     return None
 
 
@@ -158,6 +212,15 @@ def base_context(
     local_reachability: str = "unknown",
     pathing_budget_exceeded: bool = False,
     path_nodes_expanded: int = 0,
+    collision_window_available: bool | None = None,
+    collision_window_fresh: bool | None = None,
+    collision_window_radius: int | None = None,
+    collision_window_center_world: dict[str, Any] | None = None,
+    collision_window_plane: int | None = None,
+    collision_window_age_ticks: int | None = None,
+    destination_inside_collision_window: bool | None = None,
+    destination_plane_matches: bool | None = None,
+    collision_window_missing_reason: str | None = None,
 ) -> PathingContext:
     elapsed = (time.perf_counter() - started) * 1000.0
     return PathingContext(
@@ -173,6 +236,15 @@ def base_context(
         pathing_millis=elapsed,
         path_nodes_expanded=path_nodes_expanded,
         pathing_budget_exceeded=pathing_budget_exceeded,
+        collision_window_available=collision_window_available,
+        collision_window_fresh=collision_window_fresh,
+        collision_window_radius=collision_window_radius,
+        collision_window_center_world=collision_window_center_world,
+        collision_window_plane=collision_window_plane,
+        collision_window_age_ticks=collision_window_age_ticks,
+        destination_inside_collision_window=destination_inside_collision_window,
+        destination_plane_matches=destination_plane_matches,
+        collision_window_missing_reason=collision_window_missing_reason,
     )
 
 
@@ -293,16 +365,78 @@ def analyze_pathing_context(
     destination_tile = tile_dict(int_value(destination.get("worldX")), int_value(destination.get("worldY")), target_plane)
     payload = collision_payload(navigation_context)
     window = navigation_reachability.parse_collision_window(payload)
-    if window is None or collision_window_is_available(navigation_context) is False:
+    available_value = collision_window_is_available(navigation_context)
+    window_available = bool(window) if available_value is None else bool(available_value and window is not None)
+    window_fresh = collision_window_fresh(navigation_context)
+    window_radius = collision_window_radius(navigation_context, window)
+    window_center = collision_window_center_world(navigation_context)
+    window_plane = collision_window_plane(navigation_context, window)
+    window_age_ticks = collision_window_age_ticks(navigation_context)
+    window_missing_reason = collision_window_missing_reason(navigation_context, payload, window)
+    if target_plane is not None and player_plane is not None:
+        destination_plane_matches = player_plane == target_plane
+    elif target_plane is not None and window_plane is not None:
+        destination_plane_matches = window_plane == target_plane
+    else:
+        destination_plane_matches = None
+
+    if window is not None and target_scene_x is not None and target_scene_y is not None:
+        destination_inside_window = navigation_reachability.contains(window, target_scene_x, target_scene_y)
+    else:
+        destination_inside_window = None
+
+    if window is None or not window_available:
+        reason = window_missing_reason or "collision_window_missing"
+        warning = {
+            "collision_window_payload_without_flags": "collision window payload has no flag grid; pathing preview is unknown",
+            "collision_window_stale": "local collision window is stale; pathing preview is unknown",
+        }.get(reason, "local collision window unavailable; pathing preview is unknown")
         context = base_context(
             started=started,
             source_tick=tick,
             pathing_needed=True,
             destination=destination,
-            reason="collision_window_missing",
+            reason=reason,
             status="WARN",
-            warnings=["local collision window unavailable; pathing preview is unknown"],
+            warnings=[warning],
             missing_capabilities=["navigation.local_collision_window"],
+            collision_window_available=window_available,
+            collision_window_fresh=window_fresh,
+            collision_window_radius=window_radius,
+            collision_window_center_world=window_center,
+            collision_window_plane=window_plane,
+            collision_window_age_ticks=window_age_ticks,
+            destination_inside_collision_window=destination_inside_window,
+            destination_plane_matches=destination_plane_matches,
+            collision_window_missing_reason=reason,
+        )
+        context.destination_tile = destination_tile
+        context.destination_tile_source = "target_world_tile" if destination_tile else None
+        context.destination_world_x = int_value(destination.get("worldX"))
+        context.destination_world_y = int_value(destination.get("worldY"))
+        context.destination_plane = target_plane
+        context.destination_scene_x = target_scene_x
+        context.destination_scene_y = target_scene_y
+        return context
+    if window_fresh is False:
+        context = base_context(
+            started=started,
+            source_tick=tick,
+            pathing_needed=True,
+            destination=destination,
+            reason="collision_window_stale",
+            status="WARN",
+            warnings=["local collision window is stale; pathing preview is unknown"],
+            missing_capabilities=["navigation.local_collision_window"],
+            collision_window_available=window_available,
+            collision_window_fresh=window_fresh,
+            collision_window_radius=window_radius,
+            collision_window_center_world=window_center,
+            collision_window_plane=window_plane,
+            collision_window_age_ticks=window_age_ticks,
+            destination_inside_collision_window=destination_inside_window,
+            destination_plane_matches=destination_plane_matches,
+            collision_window_missing_reason="collision_window_stale",
         )
         context.destination_tile = destination_tile
         context.destination_tile_source = "target_world_tile" if destination_tile else None
@@ -318,7 +452,39 @@ def analyze_pathing_context(
         player_scene_y = window.player_scene_y
     if player_plane is None:
         player_plane = window.plane
-    if None in (player_scene_x, player_scene_y, target_scene_x, target_scene_y, player_plane, target_plane) or player_plane != target_plane:
+    if target_plane is not None and player_plane is not None:
+        destination_plane_matches = player_plane == target_plane
+    if window is not None and target_scene_x is not None and target_scene_y is not None:
+        destination_inside_window = navigation_reachability.contains(window, target_scene_x, target_scene_y)
+    if player_plane is not None and target_plane is not None and player_plane != target_plane:
+        context = base_context(
+            started=started,
+            source_tick=tick,
+            pathing_needed=True,
+            destination=destination,
+            reason="destination_plane_mismatch",
+            status="WARN",
+            warnings=["destination is on a different plane from the local collision window/player"],
+            missing_capabilities=[],
+            collision_window_available=window_available,
+            collision_window_fresh=window_fresh,
+            collision_window_radius=window_radius,
+            collision_window_center_world=window_center,
+            collision_window_plane=window_plane,
+            collision_window_age_ticks=window_age_ticks,
+            destination_inside_collision_window=destination_inside_window,
+            destination_plane_matches=False,
+            collision_window_missing_reason=window_missing_reason,
+        )
+        context.destination_tile = destination_tile
+        context.destination_tile_source = "target_world_tile" if destination_tile else None
+        context.destination_world_x = int_value(destination.get("worldX"))
+        context.destination_world_y = int_value(destination.get("worldY"))
+        context.destination_plane = target_plane
+        context.destination_scene_x = target_scene_x
+        context.destination_scene_y = target_scene_y
+        return context
+    if None in (player_scene_x, player_scene_y, target_scene_x, target_scene_y, player_plane, target_plane):
         context = base_context(
             started=started,
             source_tick=tick,
@@ -328,6 +494,15 @@ def analyze_pathing_context(
             status="WARN",
             warnings=["player or destination tile is incomplete for local path preview"],
             missing_capabilities=["navigation.local_collision_window"],
+            collision_window_available=window_available,
+            collision_window_fresh=window_fresh,
+            collision_window_radius=window_radius,
+            collision_window_center_world=window_center,
+            collision_window_plane=window_plane,
+            collision_window_age_ticks=window_age_ticks,
+            destination_inside_collision_window=destination_inside_window,
+            destination_plane_matches=destination_plane_matches,
+            collision_window_missing_reason=window_missing_reason,
         )
         context.destination_tile = destination_tile
         context.destination_tile_source = "target_world_tile" if destination_tile else None
@@ -348,6 +523,13 @@ def analyze_pathing_context(
         budget_millis=max(0.1, float(budget_millis)),
         started=started,
     )
+    output_reason = reason
+    if reachability == "reachable":
+        output_reason = "path_reachable"
+    elif reason == "no_local_path":
+        output_reason = "destination_inside_window_but_no_path"
+    elif reason in {"destination_blocked", "player_tile_blocked"}:
+        output_reason = "path_blocked"
     missing: list[str] = []
     warnings: list[str] = []
     if reason == "destination_outside_collision_window":
@@ -427,8 +609,17 @@ def analyze_pathing_context(
         predicted_movement_model=movement_model if movement_model in {"cardinal_only", "diagonal_guarded"} else "unknown",
         predicted_movement_notes=[PREDICTION_NOTE],
         prediction_confidence=0.75 if reachability == "reachable" else 0.25 if reachability == "unknown" else 0.55,
-        reason=reason,
+        reason=output_reason,
         pathing_millis=elapsed,
         path_nodes_expanded=expanded,
         pathing_budget_exceeded=budget_exceeded,
+        collision_window_available=window_available,
+        collision_window_fresh=window_fresh,
+        collision_window_radius=window_radius,
+        collision_window_center_world=window_center,
+        collision_window_plane=window_plane,
+        collision_window_age_ticks=window_age_ticks,
+        destination_inside_collision_window=destination_inside_window,
+        destination_plane_matches=destination_plane_matches,
+        collision_window_missing_reason=window_missing_reason,
     )
