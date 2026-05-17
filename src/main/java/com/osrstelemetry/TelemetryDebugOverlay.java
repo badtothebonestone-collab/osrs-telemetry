@@ -296,10 +296,16 @@ public class TelemetryDebugOverlay extends Overlay
 		}
 		if (config.telemetryDebugOverlayShowAimPoints() && shouldPreferLiveProjectionPoint(target, liveProjection))
 		{
-			drawAimPoint(graphics, liveProjection.point.getX(), liveProjection.point.getY());
-			livePointDrawn = true;
+			if (!(isPathTileMarker(target) && liveProjection.shape != null))
+			{
+				drawAimPoint(graphics, liveProjection.point.getX(), liveProjection.point.getY());
+				livePointDrawn = true;
+			}
 		}
-		if (config.telemetryDebugOverlayShowAimPoints() && !livePointDrawn && target.aimPoint != null)
+		if (config.telemetryDebugOverlayShowAimPoints()
+				&& !livePointDrawn
+				&& target.aimPoint != null
+				&& !(isPathTileMarker(target) && liveShapeDrawn))
 		{
 			drawAimPoint(graphics, round(target.aimPoint.canvasX), round(target.aimPoint.canvasY));
 		}
@@ -405,6 +411,10 @@ public class TelemetryDebugOverlay extends Overlay
 		}
 		if (hasProjectionIdentity(target))
 		{
+			if (isPathTileMarker(target))
+			{
+				return "live_tile_polygon";
+			}
 			return "live_tile_fallback";
 		}
 		return "none";
@@ -642,6 +652,11 @@ public class TelemetryDebugOverlay extends Overlay
 		{
 			return objectProjection;
 		}
+		LiveProjection tileProjection = liveTilePolygonProjectionFor(target);
+		if (tileProjection != null)
+		{
+			return tileProjection;
+		}
 		Point tilePoint = liveTilePointForTarget(target);
 		if (tilePoint != null)
 		{
@@ -835,6 +850,37 @@ public class TelemetryDebugOverlay extends Overlay
 		}
 	}
 
+	private LiveProjection liveTilePolygonProjectionFor(OverlayTarget target)
+	{
+		if (!isPathTileMarker(target) || client == null)
+		{
+			return null;
+		}
+		try
+		{
+			LocalPoint localPoint = localPointForTarget(target);
+			if (localPoint == null)
+			{
+				return null;
+			}
+			int plane = target.plane == null ? client.getPlane() : round(target.plane);
+			if (plane != client.getPlane())
+			{
+				return null;
+			}
+			Polygon tilePolygon = Perspective.getCanvasTilePoly(client, localPoint);
+			if (tilePolygon == null)
+			{
+				return null;
+			}
+			return new LiveProjection(centerOf(tilePolygon), tilePolygon, "live_tile_polygon");
+		}
+		catch (RuntimeException ignored)
+		{
+			return null;
+		}
+	}
+
 	private Point liveTilePointForTarget(OverlayTarget target)
 	{
 		if (target == null || client == null)
@@ -946,6 +992,31 @@ public class TelemetryDebugOverlay extends Overlay
 		int sceneX = sceneLocation == null ? -1 : sceneLocation.getX();
 		int sceneY = sceneLocation == null ? -1 : sceneLocation.getY();
 		return plane + ":" + worldX + ":" + worldY + ":" + sceneX + ":" + sceneY + ":" + kind + ":" + object.getId() + ":" + (hash == null ? "nohash" : hash) + ":" + orientation;
+	}
+
+	static boolean isPathTileMarker(OverlayTarget target)
+	{
+		if (target == null)
+		{
+			return false;
+		}
+		if (isPathTileMarkerType(target.markerType))
+		{
+			return true;
+		}
+		return "waypoint".equals(target.markerType)
+				&& target.markerId != null
+				&& target.markerId.startsWith("next_waypoint_tile:");
+	}
+
+	static boolean isPathTileMarkerType(String markerType)
+	{
+		return "destination_tile".equals(markerType)
+				|| "final_approach_tile".equals(markerType)
+				|| "next_waypoint_tile".equals(markerType)
+				|| "predicted_path_tile".equals(markerType)
+				|| "path_blocked".equals(markerType)
+				|| "path_unknown".equals(markerType);
 	}
 
 	private String formatLabel(OverlayTarget target)

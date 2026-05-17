@@ -13,6 +13,8 @@ from analyzers.live_state import IntentOverlayContext
 OVERLAY_INTENT_SCHEMA = "overlay_intent_state.v1"
 OVERLAY_DEBUG_SCHEMA = "telemetry_overlay_debug_state.v1"
 OVERLAY_MODES = {"intent", "candidates", "debug"}
+DAILY_PREDICTED_PATH_LIMIT = 8
+DEBUG_PREDICTED_PATH_LIMIT = 24
 
 
 def candidate_identity(candidate: dict | None) -> tuple:
@@ -311,6 +313,32 @@ def diagnostic_intent_marker(label: str, reason: str, *, source: str = "brain") 
     return marker
 
 
+def tile_identity(tile: dict | None) -> tuple[Any, Any, Any] | None:
+    if not isinstance(tile, dict):
+        return None
+    world_x = tile.get("worldX")
+    world_y = tile.get("worldY")
+    plane = tile.get("plane")
+    if world_x is None or world_y is None or plane is None:
+        return None
+    return (world_x, world_y, plane)
+
+
+def predicted_path_limit(args: Any, mode: str) -> int:
+    override = getattr(args, "overlay_predicted_path_limit", None)
+    if override is not None:
+        return max(0, int(override))
+    if hasattr(args, "overlay_path_tile_limit"):
+        legacy = getattr(args, "overlay_path_tile_limit")
+        if legacy is not None:
+            return max(0, int(legacy))
+    return DAILY_PREDICTED_PATH_LIMIT if mode == "intent" else DEBUG_PREDICTED_PATH_LIMIT
+
+
+def marker_id_prefix(marker_type: str) -> str:
+    return "next_waypoint_tile" if marker_type == "waypoint" else marker_type
+
+
 def path_tile_marker(marker_type: str, label: str, tile: dict, reason: str, *, index: int | None = None) -> dict:
     marker = {
         "markerVersion": "overlay_intent_marker.v1",
@@ -332,36 +360,75 @@ def path_tile_marker(marker_type: str, label: str, tile: dict, reason: str, *, i
     if index is not None:
         marker["pathIndex"] = index
         marker["label"] = f"{label} {index}"
-    marker["markerId"] = ":".join(
-        str(marker.get(key))
-        for key in ("markerType", "worldX", "worldY", "plane", "pathIndex")
-        if marker.get(key) is not None
-    )
+    if marker_type == "predicted_path_tile" and index is not None:
+        marker["markerId"] = f"predicted_path_tile:{index}:{marker.get('worldX')}:{marker.get('worldY')}:{marker.get('plane')}"
+    else:
+        marker["markerId"] = f"{marker_id_prefix(marker_type)}:{marker.get('worldX')}:{marker.get('worldY')}:{marker.get('plane')}"
     return {key: value for key, value in marker.items() if value is not None}
 
 
-def append_pathing_markers(markers: list[dict], pathing_context: dict[str, Any], *, include_predicted_path: bool, path_tile_limit: int) -> None:
+def append_pathing_markers(
+    markers: list[dict],
+    pathing_context: dict[str, Any],
+    *,
+    include_predicted_path: bool,
+    include_final_approach: bool,
+    path_tile_limit: int,
+) -> None:
     if not isinstance(pathing_context, dict) or not pathing_context.get("pathingNeeded"):
         return
     reason = str(pathing_context.get("reason") or "read-only pathing context")
+    occupied_tiles: set[tuple[Any, Any, Any]] = set()
     destination_tile = pathing_context.get("destinationTile") if isinstance(pathing_context.get("destinationTile"), dict) else None
     if destination_tile:
         markers.append(path_tile_marker("destination_tile", "Destination", destination_tile, reason))
+        identity = tile_identity(destination_tile)
+        if identity is not None:
+            occupied_tiles.add(identity)
     waypoint = pathing_context.get("nextWaypointTile") if isinstance(pathing_context.get("nextWaypointTile"), dict) else None
     if waypoint:
         markers.append(path_tile_marker("waypoint", "Next waypoint", waypoint, "predicted next local waypoint for visualization"))
+        identity = tile_identity(waypoint)
+        if identity is not None:
+            occupied_tiles.add(identity)
     if pathing_context.get("localReachability") == "blocked":
         markers.append(warning_intent_marker("Path blocked", "local collision path appears blocked", source="pathing_context"))
     elif pathing_context.get("localReachability") == "unknown" and pathing_context.get("pathingNeeded"):
         markers.append(diagnostic_intent_marker("Path unknown", reason, source="pathing_context"))
-    if include_predicted_path:
+    if include_predicted_path and include_final_approach:
         final_approach = pathing_context.get("finalApproachTile") if isinstance(pathing_context.get("finalApproachTile"), dict) else None
         if final_approach:
             markers.append(path_tile_marker("final_approach_tile", "Final approach", final_approach, "predicted final local approach tile for visualization"))
+            identity = tile_identity(final_approach)
+            if identity is not None:
+                occupied_tiles.add(identity)
+    if include_predicted_path:
         tiles = pathing_context.get("predictedPathTiles") if isinstance(pathing_context.get("predictedPathTiles"), list) else []
-        for index, tile in enumerate(tiles[: max(0, int(path_tile_limit))], start=1):
-            if isinstance(tile, dict):
-                markers.append(path_tile_marker("predicted_path_tile", "Predicted path", tile, "predicted local path tile for visual QA", index=index))
+        emitted = 0
+        for index, tile in enumerate(tiles, start=1):
+            if not isinstance(tile, dict):
+                continue
+            identity = tile_identity(tile)
+            if identity is not None and identity in occupied_tiles:
+                continue
+            markers.append(path_tile_marker("predicted_path_tile", "Path", tile, "predicted local path tile for visual QA", index=index))
+            if identity is not None:
+                occupied_tiles.add(identity)
+            emitted += 1
+            if emitted >= max(0, int(path_tile_limit)):
+                break
+
+
+def pathing_marker_summary(markers: list[dict], pathing_context: dict[str, Any], path_limit: int) -> dict[str, Any]:
+    predicted_tiles = pathing_context.get("predictedPathTiles") if isinstance(pathing_context.get("predictedPathTiles"), list) else []
+    return {
+        "predictedPathTilesAvailableCount": len(predicted_tiles),
+        "predictedPathMarkersEmittedCount": sum(1 for marker in markers if marker.get("markerType") == "predicted_path_tile"),
+        "predictedPathLimit": path_limit,
+        "destinationMarkerEmitted": any(marker.get("markerType") == "destination_tile" for marker in markers),
+        "nextWaypointMarkerEmitted": any(marker.get("markerType") == "waypoint" for marker in markers),
+        "finalApproachMarkerEmitted": any(marker.get("markerType") == "final_approach_tile" for marker in markers),
+    }
 
 
 def overlay_target_from_intent_marker(marker: dict) -> dict:
@@ -616,12 +683,15 @@ def build_intent_overlay_state(
         if process_type:
             markers.append(diagnostic_intent_marker(f"Process inventory: {process_type}", "task policy requires read-only inventory processing context"))
 
+    path_limit = predicted_path_limit(args, "intent")
     append_pathing_markers(
         markers,
         pathing_context,
-        include_predicted_path=False,
-        path_tile_limit=int(getattr(args, "overlay_path_tile_limit", 5) or 5),
+        include_predicted_path=True,
+        include_final_approach=False,
+        path_tile_limit=path_limit,
     )
+    path_summary = pathing_marker_summary(markers, pathing_context, path_limit)
 
     return {
         "schema": OVERLAY_INTENT_SCHEMA,
@@ -639,6 +709,7 @@ def build_intent_overlay_state(
         "switchAuditTail": (stable_intent.switchAuditTail[-5:] if stable_intent else []),
         "backupKeys": (stable_intent.state.backupTargetKeys if stable_intent else []),
         "markers": markers,
+        "pathingOverlaySummary": path_summary,
     }
 
 
@@ -659,16 +730,19 @@ def build_overlay_state_for_mode(
     if mode != "intent":
         pathing_context = brain_decision.get("pathingContext") if isinstance(brain_decision, dict) and isinstance(brain_decision.get("pathingContext"), dict) else {}
         markers = list(overlay.get("markers") or [])
+        path_limit = predicted_path_limit(args, mode)
         append_pathing_markers(
             markers,
             pathing_context,
             include_predicted_path=mode in {"candidates", "debug"},
-            path_tile_limit=int(getattr(args, "overlay_path_tile_limit", 5) or 5),
+            include_final_approach=mode in {"candidates", "debug"},
+            path_tile_limit=path_limit,
         )
         summary["overlayMode"] = mode
         summary["intentMarkerCount"] = 0
         summary["candidateMarkersSuppressed"] = 0
         summary["pathingMarkerCount"] = sum(1 for marker in markers if marker.get("source") == "pathing_context")
+        summary.update(pathing_marker_summary(markers, pathing_context, path_limit))
         overlay["summary"] = summary
         if markers:
             overlay["markers"] = markers
@@ -705,6 +779,7 @@ def build_overlay_state_for_mode(
             "intentRetainedDueToGrace": stable_intent.retainedDueToGrace if stable_intent else False,
             "intentCurrentMissingTicks": stable_intent.currentMissingTicks if stable_intent else 0,
             "pathingMarkerCount": sum(1 for marker in markers if marker.get("source") == "pathing_context"),
+            **intent.get("pathingOverlaySummary", {}),
         }
     )
     if not overlay:

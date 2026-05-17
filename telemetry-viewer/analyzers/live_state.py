@@ -211,10 +211,20 @@ class PathingContext(AnalyzerContractFields):
     final_approach_tile: dict[str, Any] | str | None = None
     predicted_path_tiles: list[dict[str, Any]] = field(default_factory=list)
     predicted_step_count: int | None = None
+    predicted_path_count: int | None = None
+    predicted_path_displayed_count: int | None = None
+    path_was_capped: bool = False
+    diagonal_step_count: int = 0
+    cardinal_step_count: int = 0
     predicted_run_segments: list[dict[str, Any]] = field(default_factory=list)
     predicted_movement_model: str = "cardinal_only"
     predicted_movement_notes: list[str] = field(default_factory=lambda: ["Predicted local path; exact server movement may differ."])
     prediction_confidence: float | None = None
+    path_cap_tiles: int | None = None
+    exact_destination_reached: bool | None = None
+    final_approach_substituted: bool | None = None
+    skipped_run_tiles: list[dict[str, Any]] = field(default_factory=list)
+    run_behavior: str = "unknown"
     reason: str = "not_needed"
     pathing_millis: float | None = None
     path_nodes_expanded: int = 0
@@ -247,10 +257,20 @@ class PathingContext(AnalyzerContractFields):
             "finalApproachTile": self.final_approach_tile,
             "predictedPathTiles": list(self.predicted_path_tiles),
             "predictedStepCount": self.predicted_step_count,
+            "predictedPathCount": self.predicted_path_count,
+            "predictedPathDisplayedCount": self.predicted_path_displayed_count,
+            "pathWasCapped": self.path_was_capped,
+            "diagonalStepCount": self.diagonal_step_count,
+            "cardinalStepCount": self.cardinal_step_count,
             "predictedRunSegments": list(self.predicted_run_segments),
             "predictedMovementModel": self.predicted_movement_model,
             "predictedMovementNotes": list(self.predicted_movement_notes),
             "predictionConfidence": self.prediction_confidence,
+            "pathCapTiles": self.path_cap_tiles,
+            "exactDestinationReached": self.exact_destination_reached,
+            "finalApproachSubstituted": self.final_approach_substituted,
+            "skippedRunTiles": list(self.skipped_run_tiles),
+            "runBehavior": self.run_behavior,
             "reason": self.reason,
             "pathingMillis": self.pathing_millis,
             "pathNodesExpanded": self.path_nodes_expanded,

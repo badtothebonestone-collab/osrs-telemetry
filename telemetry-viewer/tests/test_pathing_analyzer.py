@@ -73,11 +73,58 @@ def nav_intent(**overrides):
 
 
 class PathingAnalyzerTest(unittest.TestCase):
+    def test_osrs_like_predicted_is_default_when_collision_data_exists(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window()),
+            navigation_intent_context=nav_intent(destination_target=destination(worldX=102, worldY=102, sceneX=3, sceneY=3, targetType="tile", classId="tile")),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["predictedMovementModel"], "osrs_like_predicted")
+        self.assertEqual(payload["pathLengthTiles"], 2)
+        self.assertEqual(payload["diagonalStepCount"], 2)
+        self.assertEqual(payload["cardinalStepCount"], 0)
+
+    def test_osrs_like_predicted_allows_guarded_diagonal_path(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window()),
+            navigation_intent_context=nav_intent(destination_target=destination(worldX=102, worldY=102, sceneX=3, sceneY=3, targetType="tile", classId="tile")),
+            movement_model="osrs_like_predicted",
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "reachable")
+        self.assertEqual(payload["predictedMovementModel"], "osrs_like_predicted")
+        self.assertEqual(payload["pathLengthTiles"], 2)
+        self.assertEqual(payload["nextWaypointTile"], {"worldX": 101, "worldY": 101, "plane": 0})
+        self.assertTrue(payload["exactDestinationReached"])
+        self.assertFalse(payload["finalApproachSubstituted"])
+        self.assertEqual(payload["diagonalStepCount"], 2)
+        self.assertEqual(payload["cardinalStepCount"], 0)
+
+    def test_osrs_like_predicted_blocks_diagonal_when_adjacent_cardinals_are_blocked(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(
+                collision_window_available=True,
+                raw=collision_window(blocked={(2, 1), (1, 2), (0, 1), (1, 0), (0, 0), (0, 2), (2, 0)}),
+            ),
+            navigation_intent_context=nav_intent(destination_target=destination(worldX=102, worldY=102, sceneX=3, sceneY=3)),
+            movement_model="osrs_like_predicted",
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "blocked")
+        self.assertEqual(payload["predictedPathTiles"], [])
+        self.assertEqual(payload["reason"], "destination_inside_window_but_no_path")
+
     def test_reachable_path_in_simple_collision_grid(self):
         context = pathing_analyzer.analyze_pathing_context(
             player_context=player(),
             navigation_context=NavigationContext(collision_window_available=True, raw=collision_window()),
-            navigation_intent_context=nav_intent(),
+            navigation_intent_context=nav_intent(destination_target=destination(targetType="tile", classId="tile")),
         )
 
         payload = context.to_dict()
@@ -91,9 +138,38 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertTrue(payload["collisionWindowAvailable"])
         self.assertTrue(payload["destinationInsideCollisionWindow"])
         self.assertTrue(payload["destinationPlaneMatches"])
-        self.assertLessEqual(len(payload["predictedPathTiles"]), 10)
-        self.assertEqual(payload["predictedMovementModel"], "cardinal_only")
+        self.assertLessEqual(len(payload["predictedPathTiles"]), 24)
+        self.assertEqual(payload["predictedMovementModel"], "osrs_like_predicted")
         self.assertIn("Predicted local path", " ".join(payload["predictedMovementNotes"]))
+
+    def test_object_destination_uses_final_approach_even_when_target_tile_is_walkable(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window()),
+            navigation_intent_context=nav_intent(destination_target=destination(worldX=102, worldY=102, sceneX=3, sceneY=3)),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "reachable")
+        self.assertEqual(payload["destinationTile"], {"worldX": 102, "worldY": 102, "plane": 0})
+        self.assertEqual(payload["finalApproachTile"], {"worldX": 101, "worldY": 101, "plane": 0})
+        self.assertNotEqual(payload["destinationTile"], payload["finalApproachTile"])
+        self.assertFalse(payload["exactDestinationReached"])
+        self.assertTrue(payload["finalApproachSubstituted"])
+        self.assertIn("navigation.interaction_tile", payload["missingCapabilities"])
+
+    def test_cardinal_only_fallback_still_uses_cardinal_steps(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window()),
+            navigation_intent_context=nav_intent(destination_target=destination(worldX=102, worldY=102, sceneX=3, sceneY=3, targetType="tile", classId="tile")),
+            movement_model="cardinal_only",
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["predictedMovementModel"], "cardinal_only")
+        self.assertEqual(payload["pathLengthTiles"], 4)
+        self.assertEqual(payload["nextWaypointTile"], {"worldX": 101, "worldY": 100, "plane": 0})
 
     def test_final_approach_tile_is_last_predicted_tile_when_destination_tile_is_blocked(self):
         context = pathing_analyzer.analyze_pathing_context(
@@ -107,6 +183,8 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["destinationTile"], {"worldX": 102, "worldY": 100, "plane": 0})
         self.assertEqual(payload["predictedPathTiles"][-1], {"worldX": 101, "worldY": 100, "plane": 0})
         self.assertEqual(payload["finalApproachTile"], {"worldX": 101, "worldY": 100, "plane": 0})
+        self.assertFalse(payload["exactDestinationReached"])
+        self.assertTrue(payload["finalApproachSubstituted"])
         self.assertIn("navigation.interaction_tile", payload["missingCapabilities"])
 
     def test_blocked_path_in_simple_collision_grid(self):
@@ -229,7 +307,12 @@ class PathingAnalyzerTest(unittest.TestCase):
         )
 
         self.assertLessEqual(len(context.predicted_path_tiles), 4)
+        self.assertEqual(context.path_cap_tiles, 4)
         self.assertEqual(context.predicted_step_count, context.path_length_tiles)
+        payload = context.to_dict()
+        self.assertGreater(payload["predictedPathCount"], payload["predictedPathDisplayedCount"])
+        self.assertEqual(payload["predictedPathDisplayedCount"], 4)
+        self.assertTrue(payload["pathWasCapped"])
 
     def test_pathing_context_writes_no_files(self):
         with tempfile.TemporaryDirectory() as temp:

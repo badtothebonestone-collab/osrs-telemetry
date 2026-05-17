@@ -75,6 +75,48 @@ public class TelemetryDebugOverlayTest
 	}
 
 	@Test
+	public void pathTileMarkersPreferLiveTilePolygonGeometry()
+	{
+		TelemetryDebugOverlay.OverlayTarget destination = new TelemetryDebugOverlay.OverlayTarget();
+		destination.markerType = "destination_tile";
+		destination.targetType = "tile";
+		destination.worldX = 3207.0;
+		destination.worldY = 3215.0;
+		destination.plane = 0.0;
+
+		TelemetryDebugOverlay.OverlayTarget waypoint = new TelemetryDebugOverlay.OverlayTarget();
+		waypoint.markerType = "waypoint";
+		waypoint.markerId = "next_waypoint_tile:3206:3215:0";
+		waypoint.targetType = "tile";
+		waypoint.worldX = 3206.0;
+		waypoint.worldY = 3215.0;
+		waypoint.plane = 0.0;
+
+		TelemetryDebugOverlay.OverlayTarget predictedPath = new TelemetryDebugOverlay.OverlayTarget();
+		predictedPath.markerType = "predicted_path_tile";
+		predictedPath.targetType = "tile";
+		predictedPath.worldX = 3205.0;
+		predictedPath.worldY = 3215.0;
+		predictedPath.plane = 0.0;
+
+		Assert.assertEquals("live_tile_polygon", TelemetryDebugOverlay.drawableGeometrySource(destination));
+		Assert.assertEquals("live_tile_polygon", TelemetryDebugOverlay.drawableGeometrySource(waypoint));
+		Assert.assertEquals("live_tile_polygon", TelemetryDebugOverlay.drawableGeometrySource(predictedPath));
+	}
+
+	@Test
+	public void pathTileMarkerTypesAreRecognized()
+	{
+		Assert.assertTrue(TelemetryDebugOverlay.isPathTileMarkerType("destination_tile"));
+		Assert.assertTrue(TelemetryDebugOverlay.isPathTileMarkerType("final_approach_tile"));
+		Assert.assertTrue(TelemetryDebugOverlay.isPathTileMarkerType("next_waypoint_tile"));
+		Assert.assertTrue(TelemetryDebugOverlay.isPathTileMarkerType("predicted_path_tile"));
+		Assert.assertTrue(TelemetryDebugOverlay.isPathTileMarkerType("path_blocked"));
+		Assert.assertTrue(TelemetryDebugOverlay.isPathTileMarkerType("path_unknown"));
+		Assert.assertFalse(TelemetryDebugOverlay.isPathTileMarkerType("selected_target"));
+	}
+
+	@Test
 	public void drawableGeometryPrefersStoredClickableHullBeforeTileFallback()
 	{
 		TelemetryDebugOverlay.OverlayTarget target = new TelemetryDebugOverlay.OverlayTarget();

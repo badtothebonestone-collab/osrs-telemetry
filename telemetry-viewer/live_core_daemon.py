@@ -665,6 +665,15 @@ class LiveCoreState:
             "pathingDestinationInsideCollisionWindow",
             "pathingDestinationPlaneMatches",
             "pathingCollisionWindowMissingReason",
+            "pathingMovementModel",
+            "pathingPathCapTiles",
+            "pathingExactDestinationReached",
+            "pathingFinalApproachSubstituted",
+            "pathingPredictedPathCount",
+            "pathingPredictedPathDisplayedCount",
+            "pathingPathWasCapped",
+            "pathingDiagonalStepCount",
+            "pathingCardinalStepCount",
             "pathingMillis",
             "pathNodesExpanded",
             "pathingBudgetExceeded",
@@ -1285,6 +1294,7 @@ class LiveCoreDaemon:
                 process_inventory_context=process_context,
                 target_context=self.state.analysis_result.targets,
                 source_tick=source_tick,
+                movement_model="osrs_like_predicted",
             )
             brain_context.decision["pathingContext"] = self.state.analysis_result.pathing.to_dict()
             brain_context.decision.update(
@@ -1340,6 +1350,15 @@ class LiveCoreDaemon:
             fields["pathingDestinationInsideCollisionWindow"] = pathing.destination_inside_collision_window
             fields["pathingDestinationPlaneMatches"] = pathing.destination_plane_matches
             fields["pathingCollisionWindowMissingReason"] = pathing.collision_window_missing_reason
+            fields["pathingMovementModel"] = pathing.predicted_movement_model
+            fields["pathingPathCapTiles"] = pathing.path_cap_tiles
+            fields["pathingExactDestinationReached"] = pathing.exact_destination_reached
+            fields["pathingFinalApproachSubstituted"] = pathing.final_approach_substituted
+            fields["pathingPredictedPathCount"] = pathing.predicted_path_count
+            fields["pathingPredictedPathDisplayedCount"] = pathing.predicted_path_displayed_count
+            fields["pathingPathWasCapped"] = pathing.path_was_capped
+            fields["pathingDiagonalStepCount"] = pathing.diagonal_step_count
+            fields["pathingCardinalStepCount"] = pathing.cardinal_step_count
             fields["pathingMillis"] = pathing.pathing_millis
             fields["pathNodesExpanded"] = pathing.path_nodes_expanded
             fields["pathingBudgetExceeded"] = pathing.pathing_budget_exceeded
@@ -1636,6 +1655,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--overlay-mode", choices=sorted(OVERLAY_MODES), default="intent")
     parser.add_argument("--overlay-backup-candidates", type=int, default=2)
     parser.add_argument("--overlay-debug-target-limit", type=int, default=10)
+    parser.add_argument("--overlay-predicted-path-limit", type=int, default=None)
     parser.add_argument("--write-debug-live-files", dest="write_debug_live_files", action="store_true")
     parser.add_argument("--no-debug-live-files", dest="write_debug_live_files", action="store_false")
     parser.set_defaults(write_debug_live_files=False)

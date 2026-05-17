@@ -300,6 +300,53 @@ class DiagnoseOverlayStateTest(unittest.TestCase):
             self.assertTrue(report["intentSummary"]["intentFlickerDetected"])
             self.assertIn("intent flicker detected", " ".join(report["conclusions"]))
 
+    def test_intent_mode_reports_path_marker_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            live_dir = session / "interaction_geometry" / "live"
+            write_json(
+                live_dir / "overlay_debug_state.json",
+                {
+                    "schema": "telemetry_overlay_debug_state.v1",
+                    "latestTick": 12,
+                    "summary": {
+                        "predictedPathTilesAvailableCount": 5,
+                        "predictedPathMarkersEmittedCount": 3,
+                        "predictedPathLimit": 8,
+                        "destinationMarkerEmitted": True,
+                        "nextWaypointMarkerEmitted": True,
+                        "finalApproachMarkerEmitted": False,
+                    },
+                    "intentState": {
+                        "schema": "overlay_intent_state.v1",
+                        "markers": [
+                            {"markerType": "destination_tile", "label": "Destination", "worldX": 3205, "worldY": 3200, "plane": 0},
+                            {"markerType": "waypoint", "markerId": "next_waypoint_tile:3201:3200:0", "label": "Next waypoint", "worldX": 3201, "worldY": 3200, "plane": 0},
+                            {"markerType": "predicted_path_tile", "label": "Path 2", "worldX": 3202, "worldY": 3200, "plane": 0},
+                            {"markerType": "predicted_path_tile", "label": "Path 3", "worldX": 3203, "worldY": 3200, "plane": 0},
+                            {"markerType": "predicted_path_tile", "label": "Path 4", "worldX": 3204, "worldY": 3200, "plane": 0},
+                            {"markerType": "path_unknown", "label": "Path unknown"},
+                        ],
+                    },
+                },
+            )
+
+            report = diagnose.build_report(session, args(intent=True))
+
+            self.assertEqual(report["intentSummary"]["predictedPathTilesAvailableCount"], 5)
+            self.assertEqual(report["intentSummary"]["predictedPathMarkersEmittedCount"], 3)
+            self.assertEqual(report["intentSummary"]["predictedPathLimit"], 8)
+            self.assertTrue(report["intentSummary"]["destinationMarkerEmitted"])
+            self.assertTrue(report["intentSummary"]["nextWaypointMarkerEmitted"])
+            self.assertFalse(report["intentSummary"]["finalApproachMarkerEmitted"])
+            self.assertEqual(report["intentSummary"]["tileMarkerCount"], 6)
+            self.assertEqual(report["intentSummary"]["tilePolygonEligibleMarkerCount"], 5)
+            self.assertEqual(report["intentSummary"]["pointFallbackMarkerCount"], 1)
+            self.assertEqual(
+                report["intentSummary"]["tilePolygonMarkerTypes"],
+                ["destination_tile", "predicted_path_tile", "waypoint"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

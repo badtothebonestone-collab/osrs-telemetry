@@ -330,7 +330,7 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "selected_target"])
         self.assertTrue(any(marker["markerType"] in {"warning", "diagnostic"} and "firemaking" in marker["label"] for marker in result["markers"]))
 
-    def test_daily_overlay_emits_destination_and_waypoint_without_path_spam(self):
+    def test_daily_overlay_emits_destination_waypoint_and_capped_predicted_path(self):
         service_target = {
             "objectKey": "bank-booth-1",
             "targetName": "Bank booth",
@@ -361,27 +361,67 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
                     "predictedPathTiles": [
                         {"worldX": 3201, "worldY": 3200, "plane": 0},
                         {"worldX": 3202, "worldY": 3200, "plane": 0},
+                        {"worldX": 3203, "worldY": 3200, "plane": 0},
+                        {"worldX": 3204, "worldY": 3200, "plane": 0},
+                        {"worldX": 3205, "worldY": 3200, "plane": 0},
+                        {"worldX": 3206, "worldY": 3200, "plane": 0},
+                        {"worldX": 3207, "worldY": 3200, "plane": 0},
+                        {"worldX": 3208, "worldY": 3200, "plane": 0},
+                        {"worldX": 3209, "worldY": 3200, "plane": 0},
                     ],
                     "localReachability": "reachable",
                 },
             },
-            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent"),
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent", overlay_predicted_path_limit=None),
             "2026-01-01T00:00:00Z",
             None,
         )
 
         marker_types = [marker["markerType"] for marker in result["markers"]]
         selected = [marker for marker in result["markers"] if marker["markerType"] == "selected_target"]
+        path_markers = [marker for marker in result["markers"] if marker["markerType"] == "predicted_path_tile"]
+        destination = [marker for marker in result["markers"] if marker["markerType"] == "destination_tile"]
+        waypoint = [marker for marker in result["markers"] if marker["markerType"] == "waypoint"]
         self.assertEqual(selected[0]["label"], "Service: Bank booth")
         self.assertIn("destination_tile", marker_types)
         self.assertIn("waypoint", marker_types)
         self.assertNotIn("final_approach_tile", marker_types)
-        self.assertNotIn("predicted_path_tile", marker_types)
+        self.assertEqual(len(path_markers), 8)
+        self.assertEqual(path_markers[0]["label"], "Path 2")
+        self.assertEqual(path_markers[-1]["label"], "Path 9")
+        self.assertEqual(destination[0]["label"], "Destination")
+        self.assertEqual(waypoint[0]["label"], "Next waypoint")
+        self.assertEqual(destination[0]["markerId"], "destination_tile:3208:3219:0")
+        self.assertEqual(waypoint[0]["markerId"], "next_waypoint_tile:3201:3200:0")
+        self.assertEqual(path_markers[0]["markerId"], "predicted_path_tile:2:3202:3200:0")
+
+    def test_daily_predicted_path_limit_can_be_overridden(self):
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 4}, "candidates": []},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "pathingContext": {
+                    "pathingNeeded": True,
+                    "predictedPathTiles": [
+                        {"worldX": 3201, "worldY": 3200, "plane": 0},
+                        {"worldX": 3202, "worldY": 3200, "plane": 0},
+                        {"worldX": 3203, "worldY": 3200, "plane": 0},
+                    ],
+                },
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent", overlay_predicted_path_limit=2),
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        path_markers = [marker for marker in result["markers"] if marker.get("markerType") == "predicted_path_tile"]
+        self.assertEqual(len(path_markers), 2)
 
     def test_debug_overlay_mode_can_emit_predicted_path_tiles(self):
         state = overlay.build_overlay_state_for_mode(
             Path("."),
-            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="debug", overlay_path_tile_limit=2),
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="debug", overlay_predicted_path_limit=None),
             {
                 "overlayDebug": {
                     "summary": {},
@@ -395,11 +435,15 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
                 "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
                 "pathingContext": {
                     "pathingNeeded": True,
+                    "destinationTile": {"worldX": 3205, "worldY": 3200, "plane": 0},
+                    "nextWaypointTile": {"worldX": 3201, "worldY": 3200, "plane": 0},
                     "finalApproachTile": {"worldX": 3204, "worldY": 3200, "plane": 0},
                     "predictedPathTiles": [
                         {"worldX": 3201, "worldY": 3200, "plane": 0},
                         {"worldX": 3202, "worldY": 3200, "plane": 0},
                         {"worldX": 3203, "worldY": 3200, "plane": 0},
+                        {"worldX": 3204, "worldY": 3200, "plane": 0},
+                        {"worldX": 3205, "worldY": 3200, "plane": 0},
                     ],
                 },
             },
@@ -411,9 +455,38 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         final_approach_markers = [marker for marker in state["markers"] if marker.get("markerType") == "final_approach_tile"]
         self.assertEqual(len(final_approach_markers), 1)
         self.assertEqual(final_approach_markers[0]["label"], "Final approach")
+        self.assertEqual(final_approach_markers[0]["markerId"], "final_approach_tile:3204:3200:0")
         self.assertEqual(len(path_markers), 2)
-        self.assertEqual([marker["label"] for marker in path_markers], ["Predicted path 1", "Predicted path 2"])
+        self.assertEqual([marker["label"] for marker in path_markers], ["Path 2", "Path 3"])
+        self.assertEqual([marker["pathIndex"] for marker in path_markers], [2, 3])
         self.assertTrue(all(marker.get("source") == "pathing_context" for marker in path_markers))
+
+    def test_debug_overlay_mode_defaults_to_higher_predicted_path_cap(self):
+        state = overlay.build_overlay_state_for_mode(
+            Path("."),
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="debug", overlay_predicted_path_limit=None),
+            {"overlayDebug": {"summary": {}, "targets": [], "markers": []}},
+            {"status": {"lastProcessedTick": 4}, "candidates": []},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "pathingContext": {
+                    "pathingNeeded": True,
+                    "predictedPathTiles": [
+                        {"worldX": 3200 + index, "worldY": 3200, "plane": 0}
+                        for index in range(30)
+                    ],
+                },
+            },
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        path_markers = [marker for marker in state["markers"] if marker.get("markerType") == "predicted_path_tile"]
+        self.assertEqual(len(path_markers), 24)
+        self.assertEqual(state["summary"]["predictedPathTilesAvailableCount"], 30)
+        self.assertEqual(state["summary"]["predictedPathMarkersEmittedCount"], 24)
+        self.assertEqual(state["summary"]["predictedPathLimit"], 24)
 
 
 if __name__ == "__main__":

@@ -305,6 +305,28 @@ def intent_flicker_detected(audit: list[dict]) -> bool:
     return False
 
 
+PATH_TILE_MARKER_TYPES = {
+    "destination_tile",
+    "final_approach_tile",
+    "next_waypoint_tile",
+    "predicted_path_tile",
+    "path_blocked",
+    "path_unknown",
+}
+
+
+def is_path_tile_marker(marker: dict) -> bool:
+    marker_type = marker.get("markerType")
+    if marker_type in PATH_TILE_MARKER_TYPES:
+        return True
+    marker_id = marker.get("markerId")
+    return marker_type == "waypoint" and isinstance(marker_id, str) and marker_id.startswith("next_waypoint_tile:")
+
+
+def has_world_tile_identity(marker: dict) -> bool:
+    return marker.get("worldX") is not None and marker.get("worldY") is not None and marker.get("plane") is not None
+
+
 def intent_summary(markers: list[dict], overlay: dict) -> dict:
     intent = overlay.get("intentState") if isinstance(overlay.get("intentState"), dict) else {}
     selected = [marker for marker in markers if marker.get("markerType") == "selected_target"]
@@ -316,6 +338,9 @@ def intent_summary(markers: list[dict], overlay: dict) -> dict:
     selected_geometry_source = geometry_source_for(first)
     duplicate_geometry_sources = [geometry_source_for(marker) for marker in duplicate_backups]
     duplicate_has_better_geometry = selected_geometry_source in {"none", "aimPoint"} and any(source in {"clickableHull", "clickboxPolygon", "convexHull", "convexHullPolygon", "canvasTilePolygon", "bounds"} for source in duplicate_geometry_sources)
+    predicted_path_markers = [marker for marker in markers if marker.get("markerType") == "predicted_path_tile"]
+    tile_markers = [marker for marker in markers if is_path_tile_marker(marker)]
+    tile_polygon_eligible = [marker for marker in tile_markers if has_world_tile_identity(marker)]
     return {
         "selectedTargetCount": len(selected),
         "backupCount": len(backups),
@@ -342,6 +367,17 @@ def intent_summary(markers: list[dict], overlay: dict) -> dict:
         "switchReason": intent.get("switchReason") or summary.get("intentSwitchReason"),
         "switchAuditTail": audit_tail[-5:],
         "intentFlickerDetected": intent_flicker_detected(audit_tail),
+        "predictedPathTilesAvailableCount": summary.get("predictedPathTilesAvailableCount"),
+        "predictedPathMarkersEmittedCount": summary.get("predictedPathMarkersEmittedCount", len(predicted_path_markers)),
+        "predictedPathLimit": summary.get("predictedPathLimit"),
+        "destinationMarkerEmitted": summary.get("destinationMarkerEmitted", any(marker.get("markerType") == "destination_tile" for marker in markers)),
+        "nextWaypointMarkerEmitted": summary.get("nextWaypointMarkerEmitted", any(marker.get("markerType") == "waypoint" for marker in markers)),
+        "finalApproachMarkerEmitted": summary.get("finalApproachMarkerEmitted", any(marker.get("markerType") == "final_approach_tile" for marker in markers)),
+        "tileMarkerCount": len(tile_markers),
+        "tilePolygonEligibleMarkerCount": len(tile_polygon_eligible),
+        "pointFallbackMarkerCount": len(tile_markers) - len(tile_polygon_eligible),
+        "tilePolygonNullOrOffsceneCount": None,
+        "tilePolygonMarkerTypes": sorted({str(marker.get("markerType")) for marker in tile_polygon_eligible}),
     }
 
 
@@ -604,6 +640,23 @@ def print_report(report: dict) -> None:
             f"missingFor={intent.get('selectedMissingForTicks')} "
             f"grace={intent.get('selectedRetainedDueToGrace')} "
             f"switch={intent.get('switchReason')}"
+        )
+        print(
+            "path overlay: "
+            f"available={intent.get('predictedPathTilesAvailableCount')} "
+            f"emitted={intent.get('predictedPathMarkersEmittedCount')} "
+            f"limit={intent.get('predictedPathLimit')} "
+            f"destination={intent.get('destinationMarkerEmitted')} "
+            f"waypoint={intent.get('nextWaypointMarkerEmitted')} "
+            f"finalApproach={intent.get('finalApproachMarkerEmitted')}"
+        )
+        print(
+            "path tile projection: "
+            f"tileMarkers={intent.get('tileMarkerCount')} "
+            f"tilePolygonEligible={intent.get('tilePolygonEligibleMarkerCount')} "
+            f"pointFallback={intent.get('pointFallbackMarkerCount')} "
+            f"offsceneOrNull={intent.get('tilePolygonNullOrOffsceneCount')} "
+            f"types={','.join(intent.get('tilePolygonMarkerTypes') or [])}"
         )
         if intent.get("selectedFallbackReason"):
             print(f"selected fallback reason: {intent.get('selectedFallbackReason')}")
