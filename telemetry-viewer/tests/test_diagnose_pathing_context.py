@@ -70,6 +70,7 @@ class DiagnosePathingContextTest(unittest.TestCase):
         self.assertIn("Final approach substituted: yes", text)
         self.assertIn("Diagonal steps: 1", text)
         self.assertIn("Cardinal steps: 5", text)
+        self.assertIn("Comparison hint: diagonal=1 cardinal=5 finalApproach=yes exactDestination=no capped=yes", text)
         self.assertIn("Run behavior: unknown", text)
         self.assertIn("Predicted path count: 6", text)
         self.assertIn("Predicted path displayed: 1", text)

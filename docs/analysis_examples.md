@@ -230,6 +230,21 @@ Daily overlay shows only destination and next waypoint markers by default when
 pathing is relevant. Debug overlay mode can show capped `predicted_path_tile`
 markers for visual QA.
 
+Pathing QA Matrix uses synthetic in-memory fixtures and does not require
+RuneLite, sessions, compact packets, or live files. It is useful for checking
+the local prediction model before comparing a live overlay:
+
+```text
+python telemetry-viewer\diagnose_pathing_matrix.py
+python telemetry-viewer\diagnose_pathing_matrix.py --json
+python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+```
+
+The matrix covers straight cardinal paths, guarded diagonal shortcuts,
+corner-blocked diagonals, object/service final approach tiles, destination
+outside the collision window, plane mismatch, blocked paths, and path cap
+behavior. JSON mode prints one object to stdout only.
+
 Service matching is conservative. It accepts service class/type IDs
 `bank_service`, `banker`, `bank_booth`, `bank_chest`, `deposit_box`, and
 `deposit_chest`, or equivalent visible names such as `Bank booth`, `Banker`,
@@ -260,6 +275,8 @@ python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_bank --task
 python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_firemake --task woodcutting --inventory-full true --resource-count 28 --goal-count 5 --json
 python telemetry-viewer\diagnose_navigation_intent.py --from-daemon --daemon-url http://127.0.0.1:8890 --task woodcutting --policy woodcutting_bank
 python telemetry-viewer\diagnose_service_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_pathing_matrix.py
+python telemetry-viewer\diagnose_pathing_matrix.py --json
 python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
 ```

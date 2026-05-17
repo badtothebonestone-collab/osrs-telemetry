@@ -125,6 +125,12 @@ def format_human(payload: dict[str, Any]) -> str:
         f"Final approach tile used: {bool_label(payload.get('finalApproachTileUsed'))}",
         f"Diagonal steps: {payload.get('diagonalSteps') if payload.get('diagonalSteps') is not None else 'unknown'}",
         f"Cardinal steps: {payload.get('cardinalSteps') if payload.get('cardinalSteps') is not None else 'unknown'}",
+        "Comparison hint: "
+        f"diagonal={payload.get('diagonalSteps') if payload.get('diagonalSteps') is not None else 'unknown'} "
+        f"cardinal={payload.get('cardinalSteps') if payload.get('cardinalSteps') is not None else 'unknown'} "
+        f"finalApproach={bool_label(payload.get('finalApproachTileUsed'))} "
+        f"exactDestination={bool_label(payload.get('exactDestinationReached'))} "
+        f"capped={bool_label(payload.get('pathWasCapped'))}",
         f"Run behavior: {payload.get('runBehavior') or 'unknown'}",
         f"Skipped run tiles: {len(payload.get('skippedRunTiles') if isinstance(payload.get('skippedRunTiles'), list) else [])}",
         f"Predicted path count: {payload.get('predictedPathCount') if payload.get('predictedPathCount') is not None else 0}",

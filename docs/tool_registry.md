@@ -61,6 +61,7 @@ Diagnostics and inspectors that are useful when daily output looks wrong:
 - `diagnose_overlay_state.py`
 - `diagnose_overlay_geometry.py`
 - `diagnose_pathing_context.py`
+- `diagnose_pathing_matrix.py`
 - `diagnose_service_context.py`
 - `diagnose_target_coverage.py`
 - `run_stabilization_suite.py`
@@ -68,6 +69,14 @@ Diagnostics and inspectors that are useful when daily output looks wrong:
 
 These tools are safe to hide from the daily view because they are not required
 to start or watch the daily daemon.
+
+Pathing matrix examples:
+
+```text
+python telemetry-viewer\diagnose_pathing_matrix.py
+python telemetry-viewer\diagnose_pathing_matrix.py --json
+python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+```
 
 ## Legacy File Pipeline
 
