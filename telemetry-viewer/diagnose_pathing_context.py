@@ -24,18 +24,27 @@ def daemon_status_url(daemon_url: str) -> str:
 def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
     brain = status.get("brain") if isinstance(status.get("brain"), dict) else {}
     pathing = brain.get("pathingContext") if isinstance(brain.get("pathingContext"), dict) else {}
+    destination = pathing.get("destination") if isinstance(pathing.get("destination"), dict) else {}
+    predicted_tiles = pathing.get("predictedPathTiles", []) if pathing else []
+    if not isinstance(predicted_tiles, list):
+        predicted_tiles = []
     return {
         "schema": SCHEMA,
         "source": "daemon-memory",
         "daemonReachable": True,
         "pathingContextPresent": bool(pathing),
         "pathingNeeded": pathing.get("pathingNeeded") if pathing else status.get("pathingNeeded"),
+        "destinationTargetName": destination.get("targetName") or destination.get("name") or destination.get("classId"),
+        "destinationTargetType": destination.get("targetType"),
+        "destinationTargetClassId": destination.get("classId"),
         "destinationTile": pathing.get("destinationTile") if pathing else status.get("pathingDestinationTile"),
         "finalApproachTile": pathing.get("finalApproachTile") if pathing else status.get("pathingFinalApproachTile"),
         "nextWaypointTile": pathing.get("nextWaypointTile") if pathing else status.get("pathingNextWaypointTile"),
-        "predictedPathTiles": pathing.get("predictedPathTiles", []) if pathing else [],
+        "predictedPathTiles": predicted_tiles if pathing else [],
+        "predictedPathCount": len(predicted_tiles) if pathing else 0,
         "movementModel": pathing.get("predictedMovementModel") if pathing else None,
         "localReachability": pathing.get("localReachability") if pathing else status.get("pathingLocalReachability"),
+        "reachabilityReason": pathing.get("reason") if pathing else status.get("pathingReason"),
         "pathLengthTiles": pathing.get("pathLengthTiles") if pathing else status.get("pathingPathLengthTiles"),
         "collisionWindowAvailable": pathing.get("collisionWindowAvailable") if pathing else status.get("collisionWindowAvailable"),
         "collisionWindowFresh": pathing.get("collisionWindowFresh") if pathing else status.get("collisionWindowFresh"),
@@ -82,10 +91,12 @@ def format_human(payload: dict[str, Any]) -> str:
         f"Daemon reachable: {'yes' if payload.get('daemonReachable') else 'no'}",
         f"Pathing context present: {'yes' if payload.get('pathingContextPresent') else 'no'}",
         f"Pathing needed: {'yes' if payload.get('pathingNeeded') else 'no'}",
+        f"Destination target: {payload.get('destinationTargetName') or 'none'} ({payload.get('destinationTargetClassId') or payload.get('destinationTargetType') or 'unknown'})",
         f"Destination tile: {tile_label(payload.get('destinationTile'))}",
         f"Final approach tile: {tile_label(payload.get('finalApproachTile'))}",
         f"Next waypoint: {tile_label(payload.get('nextWaypointTile'))}",
         f"Local reachability: {payload.get('localReachability') or 'unknown'}",
+        f"Reachability reason: {payload.get('reachabilityReason') or 'unknown'}",
         f"Path length: {payload.get('pathLengthTiles') if payload.get('pathLengthTiles') is not None else 'unknown'}",
         f"Collision window available: {bool_label(payload.get('collisionWindowAvailable'))}",
         f"Collision window fresh: {bool_label(payload.get('collisionWindowFresh'))}",
@@ -97,6 +108,7 @@ def format_human(payload: dict[str, Any]) -> str:
         f"Destination plane matches: {bool_label(payload.get('destinationPlaneMatches'))}",
         f"Collision window reason: {payload.get('collisionWindowMissingReason') or 'none'}",
         f"Movement model: {payload.get('movementModel') or 'unknown'}",
+        f"Predicted path count: {payload.get('predictedPathCount') if payload.get('predictedPathCount') is not None else 0}",
         f"Predicted path: {preview}",
         f"Pathing millis: {payload.get('pathingMillis') if payload.get('pathingMillis') is not None else 'unknown'}",
         f"Nodes expanded: {payload.get('pathNodesExpanded') if payload.get('pathNodesExpanded') is not None else 'unknown'}",

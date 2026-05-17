@@ -38,6 +38,13 @@ class DiagnoseServiceContextTest(unittest.TestCase):
                             "worldX": 3207,
                             "worldY": 3215,
                             "plane": 2,
+                            "distanceTiles": 3,
+                            "serviceScore": 987.0,
+                            "serviceTypePriority": 0,
+                            "serviceReachabilityContribution": 0,
+                            "serviceDistanceContribution": 3.0,
+                            "servicePathingContribution": 3.0,
+                            "serviceSelectedReason": "selected by type priority bank_booth",
                             "interactionRadiusTiles": 2,
                             "clickbox": {"x": 1, "y": 2, "w": 3, "h": 4},
                         },
@@ -51,8 +58,15 @@ class DiagnoseServiceContextTest(unittest.TestCase):
         self.assertEqual(payload["bestServiceCandidate"]["targetName"], "Bank booth")
         self.assertEqual(payload["bestServiceCandidate"]["interactionRadiusTiles"], 2)
         self.assertEqual(payload["bestServiceCandidate"]["clickbox"]["w"], 3)
+        self.assertEqual(payload["bestServiceCandidate"]["serviceTypePriority"], 0)
+        self.assertEqual(payload["selectedReason"], "selected by type priority bank_booth")
         self.assertEqual(payload["candidatesByType"], {"bank_booth": 1})
         self.assertEqual(payload["serviceCandidateVisibility"], "available")
+
+        text = diagnose_service_context.format_human(payload)
+        self.assertIn("Score: 987.0", text)
+        self.assertIn("Type priority: 0", text)
+        self.assertIn("Selected reason: selected by type priority bank_booth", text)
 
     def test_json_prints_stdout_only_without_files(self):
         with tempfile.TemporaryDirectory() as tmp:

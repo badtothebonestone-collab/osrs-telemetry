@@ -42,6 +42,14 @@ def compact_candidate(candidate: Any) -> dict[str, Any]:
         "localY",
         "distanceTiles",
         "directReachability",
+        "serviceScore",
+        "serviceTypePriority",
+        "serviceReachabilityContribution",
+        "serviceDistanceContribution",
+        "servicePathingContribution",
+        "serviceQualityContribution",
+        "serviceRankReason",
+        "serviceSelectedReason",
         "interactionRadiusTiles",
         "approachRadiusTiles",
         "navigation",
@@ -78,6 +86,12 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
         "candidatesByType": service_context.get("candidateCountsByType") or {},
         "bestServiceCandidate": compact_candidate(service_context.get("bestServiceCandidate")),
         "nearestServiceCandidate": compact_candidate(service_context.get("nearestServiceCandidate")),
+        "selectedReason": (
+            service_context.get("reason")
+            or (service_context.get("bestServiceCandidate") or {}).get("serviceSelectedReason")
+            if isinstance(service_context.get("bestServiceCandidate"), dict)
+            else service_context.get("reason")
+        ),
         "topServiceLikeRawCandidates": [compact_candidate(candidate) for candidate in preview[:10]],
         "filteredOutByProfileFiltering": bool(
             (status.get("serviceCandidateInputCount") or 0) == 0
@@ -121,6 +135,19 @@ def format_human(payload: dict[str, Any]) -> str:
             f"{best.get('targetName') or best.get('name') or best.get('classId')} "
             f"at {best.get('worldX')},{best.get('worldY')},{best.get('plane')}"
         )
+        if best.get("serviceScore") is not None:
+            lines.append(f"  Score: {best.get('serviceScore')}")
+        if best.get("serviceTypePriority") is not None:
+            lines.append(f"  Type priority: {best.get('serviceTypePriority')}")
+        if best.get("distanceTiles") is not None:
+            lines.append(f"  Distance: {best.get('distanceTiles')}")
+        if best.get("serviceReachabilityContribution") is not None:
+            lines.append(f"  Reachability contribution: {best.get('serviceReachabilityContribution')}")
+        if best.get("servicePathingContribution") is not None:
+            lines.append(f"  Pathing contribution: {best.get('servicePathingContribution')}")
+        selected_reason = payload.get("selectedReason") or best.get("serviceSelectedReason") or best.get("serviceRankReason")
+        if selected_reason:
+            lines.append(f"  Selected reason: {selected_reason}")
     else:
         lines.append("Best service candidate: none")
     if payload.get("filteredOutByProfileFiltering"):

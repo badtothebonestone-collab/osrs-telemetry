@@ -1,4 +1,6 @@
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -123,10 +125,65 @@ class ServiceAnalyzerTest(unittest.TestCase):
         )
         payload = context.to_dict()
 
-        self.assertEqual(payload["bestServiceCandidate"]["serviceCandidateType"], "banker")
+        self.assertEqual(payload["bestServiceCandidate"]["serviceCandidateType"], "bank_booth")
         self.assertEqual(payload["nearestServiceCandidate"]["serviceCandidateType"], "bank_booth")
         self.assertEqual(payload["reachableCount"], 1)
         self.assertEqual(payload["unknownReachabilityCount"], 1)
+
+    def test_bank_booth_outranks_generic_bank_table(self):
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {
+                    "targetType": "sceneObject",
+                    "classId": "bank_related",
+                    "targetName": "Bank table",
+                    "qualityScore": 100,
+                    "distanceTiles": 1,
+                    "navigation": {"directReachability": "reachable"},
+                },
+                {
+                    "targetType": "sceneObject",
+                    "classId": "bank_booth",
+                    "targetName": "Bank booth",
+                    "qualityScore": 10,
+                    "distanceTiles": 6,
+                    "navigation": {"directReachability": "unknown"},
+                },
+            ],
+        )
+
+        best = context.to_dict()["bestServiceCandidate"]
+        self.assertEqual(best["serviceCandidateType"], "bank_booth")
+        self.assertLess(best["serviceTypePriority"], context.service_candidates[0]["serviceTypePriority"])
+        self.assertIn("type priority", best["serviceSelectedReason"])
+        self.assertIn("serviceScore", best)
+        self.assertIn("serviceReachabilityContribution", best)
+        self.assertIn("serviceDistanceContribution", best)
+        self.assertIn("servicePathingContribution", best)
+
+    def test_deposit_box_outranks_generic_bank_related_fallback(self):
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "bank_related", "targetName": "Bank table", "qualityScore": 100, "distanceTiles": 1},
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Deposit box", "qualityScore": 1, "distanceTiles": 8},
+            ],
+        )
+
+        self.assertEqual(context.best_service_candidate["serviceCandidateType"], "deposit_box")
+
+    def test_distance_breaks_ties_within_same_service_priority(self):
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "bank_booth", "targetName": "Bank booth", "objectKey": "far", "distanceTiles": 8},
+                {"targetType": "sceneObject", "classId": "bank_booth", "targetName": "Bank booth", "objectKey": "near", "distanceTiles": 2},
+            ],
+        )
+
+        self.assertEqual(context.best_service_candidate["objectKey"], "near")
+        self.assertEqual(context.best_service_candidate["serviceDistanceContribution"], 2.0)
 
     def test_does_not_request_service_for_process_or_continue_policies(self):
         for policy_name in ("woodcutting_firemake", "woodcutting_drop", "combat_default", "observe_only"):
@@ -169,6 +226,18 @@ class ServiceAnalyzerTest(unittest.TestCase):
         self.assertEqual(candidate["interactionRadiusTiles"], 1)
         self.assertEqual(candidate["approachRadiusTiles"], 2)
         self.assertEqual(candidate["clickboxPolygon"], [{"x": 1, "y": 1}])
+
+    def test_service_ranking_writes_no_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            before = set(os.listdir(temp))
+            context = service_analyzer.analyze_service_context(
+                "woodcutting_bank",
+                candidates=[{"targetType": "sceneObject", "classId": "bank_booth", "targetName": "Bank booth"}],
+            )
+            after = set(os.listdir(temp))
+
+        self.assertEqual(before, after)
+        self.assertEqual(context.best_service_candidate["serviceCandidateType"], "bank_booth")
 
 
 if __name__ == "__main__":

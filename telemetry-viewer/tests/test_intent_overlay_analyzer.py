@@ -331,14 +331,32 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertTrue(any(marker["markerType"] in {"warning", "diagnostic"} and "firemaking" in marker["label"] for marker in result["markers"]))
 
     def test_daily_overlay_emits_destination_and_waypoint_without_path_spam(self):
+        service_target = {
+            "objectKey": "bank-booth-1",
+            "targetName": "Bank booth",
+            "targetType": "sceneObject",
+            "classId": "bank_booth",
+            "id": 10355,
+            "worldX": 3208,
+            "worldY": 3219,
+            "plane": 0,
+            "sceneX": 20,
+            "sceneY": 21,
+        }
         result = overlay.build_intent_overlay_state(
             {"status": {"lastProcessedTick": 4}, "candidates": []},
             {
                 "task": "woodcutting",
-                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "genericTaskState": {
+                    "phase": "inventory_full",
+                    "activeIntent": "needs_service",
+                    "activeIntentTarget": service_target,
+                },
+                "serviceContext": {"serviceNeeded": True, "bestServiceCandidate": service_target, "serviceCandidates": [service_target]},
                 "pathingContext": {
                     "pathingNeeded": True,
                     "destinationTile": {"worldX": 3208, "worldY": 3219, "plane": 0},
+                    "finalApproachTile": {"worldX": 3207, "worldY": 3219, "plane": 0},
                     "nextWaypointTile": {"worldX": 3201, "worldY": 3200, "plane": 0},
                     "predictedPathTiles": [
                         {"worldX": 3201, "worldY": 3200, "plane": 0},
@@ -353,8 +371,11 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         )
 
         marker_types = [marker["markerType"] for marker in result["markers"]]
+        selected = [marker for marker in result["markers"] if marker["markerType"] == "selected_target"]
+        self.assertEqual(selected[0]["label"], "Service: Bank booth")
         self.assertIn("destination_tile", marker_types)
         self.assertIn("waypoint", marker_types)
+        self.assertNotIn("final_approach_tile", marker_types)
         self.assertNotIn("predicted_path_tile", marker_types)
 
     def test_debug_overlay_mode_can_emit_predicted_path_tiles(self):
@@ -374,6 +395,7 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
                 "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
                 "pathingContext": {
                     "pathingNeeded": True,
+                    "finalApproachTile": {"worldX": 3204, "worldY": 3200, "plane": 0},
                     "predictedPathTiles": [
                         {"worldX": 3201, "worldY": 3200, "plane": 0},
                         {"worldX": 3202, "worldY": 3200, "plane": 0},
@@ -386,7 +408,11 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         )
 
         path_markers = [marker for marker in state["markers"] if marker.get("markerType") == "predicted_path_tile"]
+        final_approach_markers = [marker for marker in state["markers"] if marker.get("markerType") == "final_approach_tile"]
+        self.assertEqual(len(final_approach_markers), 1)
+        self.assertEqual(final_approach_markers[0]["label"], "Final approach")
         self.assertEqual(len(path_markers), 2)
+        self.assertEqual([marker["label"] for marker in path_markers], ["Predicted path 1", "Predicted path 2"])
         self.assertTrue(all(marker.get("source") == "pathing_context" for marker in path_markers))
 
 

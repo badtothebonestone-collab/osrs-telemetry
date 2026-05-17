@@ -355,10 +355,13 @@ def append_pathing_markers(markers: list[dict], pathing_context: dict[str, Any],
     elif pathing_context.get("localReachability") == "unknown" and pathing_context.get("pathingNeeded"):
         markers.append(diagnostic_intent_marker("Path unknown", reason, source="pathing_context"))
     if include_predicted_path:
+        final_approach = pathing_context.get("finalApproachTile") if isinstance(pathing_context.get("finalApproachTile"), dict) else None
+        if final_approach:
+            markers.append(path_tile_marker("final_approach_tile", "Final approach", final_approach, "predicted final local approach tile for visualization"))
         tiles = pathing_context.get("predictedPathTiles") if isinstance(pathing_context.get("predictedPathTiles"), list) else []
         for index, tile in enumerate(tiles[: max(0, int(path_tile_limit))], start=1):
             if isinstance(tile, dict):
-                markers.append(path_tile_marker("predicted_path_tile", "Path", tile, "predicted local path tile for visual QA", index=index))
+                markers.append(path_tile_marker("predicted_path_tile", "Predicted path", tile, "predicted local path tile for visual QA", index=index))
 
 
 def overlay_target_from_intent_marker(marker: dict) -> dict:
@@ -659,7 +662,7 @@ def build_overlay_state_for_mode(
         append_pathing_markers(
             markers,
             pathing_context,
-            include_predicted_path=mode == "debug",
+            include_predicted_path=mode in {"candidates", "debug"},
             path_tile_limit=int(getattr(args, "overlay_path_tile_limit", 5) or 5),
         )
         summary["overlayMode"] = mode

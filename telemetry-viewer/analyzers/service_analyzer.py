@@ -21,6 +21,14 @@ SERVICE_CANDIDATE_TYPES = {
     "deposit_box",
     "deposit_chest",
 }
+SERVICE_TYPE_PRIORITY = {
+    "bank_booth": 0,
+    "banker": 1,
+    "bank_chest": 2,
+    "deposit_box": 3,
+    "deposit_chest": 4,
+    "bank_service": 5,
+}
 SERVICE_NAME_TOKENS = {
     "bank": ("banker", "bank booth", "bank chest", "bank deposit box", "deposit box", "deposit chest", "bank service"),
     "deposit": ("bank deposit box", "deposit box", "deposit chest", "bank chest"),
@@ -112,6 +120,13 @@ def service_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
         payload["serviceCandidateType"] = candidate_type
     if payload.get("serviceType") is None:
         payload["serviceType"] = "bank"
+    payload["serviceTypePriority"] = service_type_priority(payload)
+    payload["serviceReachabilityContribution"] = reachability_rank(payload)
+    payload["serviceDistanceContribution"] = finite_metric_or_none(candidate_distance(payload))
+    payload["servicePathingContribution"] = finite_metric_or_none(candidate_path_length(payload))
+    payload["serviceQualityContribution"] = candidate_quality(payload)
+    payload["serviceScore"] = service_score(payload)
+    payload["serviceRankReason"] = service_rank_reason(payload)
     return payload
 
 
@@ -131,11 +146,27 @@ def is_unknown_reachability(candidate: dict[str, Any]) -> bool:
     return value in {None, "", "unknown", "unavailable", "none"}
 
 
+def reachability_rank(candidate: dict[str, Any]) -> int:
+    return 0 if is_reachable(candidate) else (1 if is_unknown_reachability(candidate) else 2)
+
+
 def candidate_distance(candidate: dict[str, Any]) -> float:
     value = candidate.get("distanceTiles")
     if isinstance(value, (int, float)):
         return float(value)
     return float("inf")
+
+
+def candidate_path_length(candidate: dict[str, Any]) -> float:
+    navigation = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
+    for value in (candidate.get("pathLengthTiles"), navigation.get("pathLengthTiles")):
+        if isinstance(value, (int, float)):
+            return float(value)
+    return float("inf")
+
+
+def finite_metric_or_none(value: float) -> float | None:
+    return None if value == float("inf") else value
 
 
 def candidate_quality(candidate: dict[str, Any]) -> float:
@@ -145,9 +176,53 @@ def candidate_quality(candidate: dict[str, Any]) -> float:
     return 0.0
 
 
-def service_rank(candidate: dict[str, Any]) -> tuple[int, float, float]:
-    reachability_rank = 0 if is_reachable(candidate) else (1 if is_unknown_reachability(candidate) else 2)
-    return (reachability_rank, -candidate_quality(candidate), candidate_distance(candidate))
+def service_type_priority(candidate: dict[str, Any]) -> int:
+    candidate_type = service_candidate_type(candidate) or str(candidate.get("serviceCandidateType") or "bank_service")
+    return SERVICE_TYPE_PRIORITY.get(candidate_type, SERVICE_TYPE_PRIORITY["bank_service"])
+
+
+def service_rank(candidate: dict[str, Any]) -> tuple[int, int, float, float, float]:
+    return (
+        service_type_priority(candidate),
+        reachability_rank(candidate),
+        candidate_path_length(candidate),
+        candidate_distance(candidate),
+        -candidate_quality(candidate),
+    )
+
+
+def service_score(candidate: dict[str, Any]) -> float:
+    path_length = candidate_path_length(candidate)
+    distance = candidate_distance(candidate)
+    path_cost = min(path_length, 50.0) if path_length != float("inf") else 25.0
+    distance_cost = min(distance, 50.0) if distance != float("inf") else 25.0
+    return round(
+        1000.0
+        - (service_type_priority(candidate) * 120.0)
+        - (reachability_rank(candidate) * 30.0)
+        - path_cost
+        - (distance_cost * 0.25)
+        + min(candidate_quality(candidate), 100.0) * 0.05,
+        3,
+    )
+
+
+def readable_contribution(value: float) -> str:
+    if value == float("inf"):
+        return "unknown"
+    if value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def service_rank_reason(candidate: dict[str, Any]) -> str:
+    candidate_type = service_candidate_type(candidate) or str(candidate.get("serviceCandidateType") or "bank_service")
+    return (
+        f"type priority {service_type_priority(candidate)} ({candidate_type}); "
+        f"reachability rank {reachability_rank(candidate)}; "
+        f"path {readable_contribution(candidate_path_length(candidate))}; "
+        f"distance {readable_contribution(candidate_distance(candidate))}"
+    )
 
 
 def group_candidates_by_type(candidates: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -185,6 +260,8 @@ def analyze_service_context(
     for candidate in service_candidates:
         candidate["serviceType"] = service_type
     ranked = sorted(service_candidates, key=service_rank)
+    if ranked:
+        ranked[0]["serviceSelectedReason"] = f"selected by {ranked[0].get('serviceRankReason')}"
     nearest = min(service_candidates, key=candidate_distance, default=None)
     reachable_count = sum(1 for candidate in service_candidates if is_reachable(candidate))
     unknown_count = sum(1 for candidate in service_candidates if is_unknown_reachability(candidate))
@@ -209,5 +286,5 @@ def analyze_service_context(
         candidate_count=len(service_candidates),
         reachable_count=reachable_count,
         unknown_reachability_count=unknown_count,
-        reason="task policy requires service context",
+        reason=ranked[0].get("serviceSelectedReason") if ranked else "task policy requires service context",
     )
