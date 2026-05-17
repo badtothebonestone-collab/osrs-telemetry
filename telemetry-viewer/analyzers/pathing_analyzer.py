@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import time
-from collections import deque
-from dataclasses import is_dataclass
+from collections import Counter, deque
+from dataclasses import dataclass, is_dataclass
 from typing import Any
 
 import capabilities
@@ -27,6 +27,29 @@ OSRS_LIKE_DIRECTIONS = (
     (1, 1),
 )
 CARDINAL_DIRECTIONS = tuple((dx, dy) for dx, dy, _source, _dest in navigation_reachability.DIRECTIONS)
+
+
+@dataclass
+class ApproachCandidate:
+    tile: tuple[int, int]
+    tile_kind: str
+    direction_index: int
+
+
+@dataclass
+class LocalPathResult:
+    reachability: str
+    reason: str
+    scene_path: list[tuple[int, int]]
+    expanded: int
+    budget_exceeded: bool
+    exact_destination_reached: bool
+    final_approach_scene_tile: tuple[int, int] | None = None
+    final_approach_tile_source: str | None = None
+    final_approach_candidate_count: int = 0
+    rejected_approach_tile_reasons: dict[str, int] | None = None
+    path_target_scene_tile: tuple[int, int] | None = None
+    path_target_tile_source: str | None = None
 
 def context_value(context: Any, snake_key: str, camel_key: str | None = None, default: Any = None) -> Any:
     if context is None:
@@ -339,14 +362,64 @@ def target_uses_approach_tile(destination: dict[str, Any] | None) -> bool:
     }
 
 
-def approach_goal_tiles(window: navigation_reachability.CollisionWindow, destination: tuple[int, int]) -> set[tuple[int, int]]:
-    goals: set[tuple[int, int]] = set()
-    target_x, target_y = destination
-    for dx, dy in OSRS_LIKE_DIRECTIONS:
-        tile = (target_x + dx, target_y + dy)
-        if navigation_reachability.tile_walkable(window, tile[0], tile[1]):
-            goals.add(tile)
-    return goals
+def target_footprint_size(destination: dict[str, Any] | None) -> tuple[int, int]:
+    if not isinstance(destination, dict):
+        return 1, 1
+    width = None
+    height = None
+    for key in ("sizeX", "footprintWidth", "objectSizeX", "width"):
+        width = int_value(destination.get(key))
+        if width is not None:
+            break
+    for key in ("sizeY", "footprintHeight", "objectSizeY", "height"):
+        height = int_value(destination.get(key))
+        if height is not None:
+            break
+    return max(1, min(4, width or 1)), max(1, min(4, height or 1))
+
+
+def target_footprint_tiles(destination_scene: tuple[int, int], destination: dict[str, Any] | None) -> set[tuple[int, int]]:
+    width, height = target_footprint_size(destination)
+    base_x, base_y = destination_scene
+    return {(base_x + dx, base_y + dy) for dx in range(width) for dy in range(height)}
+
+
+def approach_directions_for_model(model: str) -> tuple[tuple[int, int], ...]:
+    if model in {"osrs_like_predicted", "diagonal_guarded"}:
+        return OSRS_LIKE_DIRECTIONS
+    return CARDINAL_DIRECTIONS
+
+
+def approach_tile_candidates(
+    window: navigation_reachability.CollisionWindow,
+    *,
+    destination_scene: tuple[int, int],
+    destination: dict[str, Any] | None,
+    movement_model: str,
+) -> tuple[list[ApproachCandidate], dict[str, int]]:
+    footprint = target_footprint_tiles(destination_scene, destination)
+    rejected: Counter[str] = Counter()
+    candidates: list[ApproachCandidate] = []
+    seen: set[tuple[int, int]] = set()
+    directions = approach_directions_for_model(movement_model)
+    for footprint_tile in sorted(footprint):
+        for direction_index, (dx, dy) in enumerate(directions):
+            tile = (footprint_tile[0] + dx, footprint_tile[1] + dy)
+            if tile in seen:
+                continue
+            seen.add(tile)
+            if tile in footprint:
+                rejected["inside_target_footprint"] += 1
+                continue
+            if not navigation_reachability.contains(window, tile[0], tile[1]):
+                rejected["outside_collision_window"] += 1
+                continue
+            if not navigation_reachability.tile_walkable(window, tile[0], tile[1]):
+                rejected["tile_blocked"] += 1
+                continue
+            tile_kind = "diagonal" if abs(dx) == 1 and abs(dy) == 1 else "cardinal"
+            candidates.append(ApproachCandidate(tile=tile, tile_kind=tile_kind, direction_index=direction_index))
+    return candidates, dict(rejected)
 
 
 def bfs_to_goals(
@@ -390,18 +463,19 @@ def local_scene_path(
     *,
     start: tuple[int, int],
     destination: tuple[int, int],
+    destination_payload: dict[str, Any] | None,
     movement_model: str,
     max_nodes: int,
     budget_millis: float,
     started: float,
     require_approach_tile: bool = False,
-) -> tuple[str, str, list[tuple[int, int]], int, bool, bool]:
+) -> LocalPathResult:
     if not navigation_reachability.contains(window, start[0], start[1]):
-        return "unknown", "player_outside_collision_window", [], 0, False, False
+        return LocalPathResult("unknown", "player_outside_collision_window", [], 0, False, False)
     if not navigation_reachability.contains(window, destination[0], destination[1]):
-        return "unknown", "destination_outside_collision_window", [], 0, False, False
+        return LocalPathResult("unknown", "destination_outside_collision_window", [], 0, False, False)
     if not navigation_reachability.tile_walkable(window, start[0], start[1]):
-        return "blocked", "player_tile_blocked", [], 1, False, False
+        return LocalPathResult("blocked", "player_tile_blocked", [], 1, False, False)
 
     exact_expanded = 0
     if not require_approach_tile:
@@ -418,31 +492,116 @@ def local_scene_path(
             started=started,
         )
         if exact_budget:
-            return "unknown", "pathing_budget_exceeded", [], exact_expanded, True, False
+            return LocalPathResult("unknown", "pathing_budget_exceeded", [], exact_expanded, True, False)
         if exact_reachability == "reachable":
-            return "reachable", "local_path_found", exact_path, exact_expanded, False, True
+            final_approach_scene_tile = exact_path[-2] if len(exact_path) >= 2 else exact_path[-1]
+            return LocalPathResult(
+                "reachable",
+                "local_path_found",
+                exact_path,
+                exact_expanded,
+                False,
+                True,
+                final_approach_scene_tile=final_approach_scene_tile,
+                final_approach_tile_source="path_before_destination",
+                path_target_scene_tile=destination,
+                path_target_tile_source="exact_destination_tile",
+            )
 
-    goals = approach_goal_tiles(window, destination)
-    if destination in goals:
-        goals.remove(destination)
-    if not goals:
-        return "blocked", "destination_blocked", [], max(1, exact_expanded), False, False
-    remaining_nodes = max(1, max_nodes - exact_expanded)
-    approach_reachability, approach_path, approach_expanded, approach_budget = bfs_to_goals(
+    candidates, rejected = approach_tile_candidates(
         window,
-        start=start,
-        goals=goals,
+        destination_scene=destination,
+        destination=destination_payload,
         movement_model=movement_model,
-        max_nodes=remaining_nodes,
-        budget_millis=budget_millis,
-        started=started,
     )
-    total_expanded = exact_expanded + approach_expanded
-    if approach_budget:
-        return "unknown", "pathing_budget_exceeded", [], total_expanded, True, False
-    if approach_reachability == "reachable":
-        return "reachable", "approach_tile_found", approach_path, total_expanded, False, False
-    return "blocked", "no_local_path", [], total_expanded, False, False
+    if not candidates:
+        return LocalPathResult(
+            "blocked",
+            "destination_blocked",
+            [],
+            max(1, exact_expanded),
+            False,
+            False,
+            final_approach_candidate_count=0,
+            rejected_approach_tile_reasons=rejected,
+        )
+
+    best_score: tuple[int, int, int, int, int] | None = None
+    best_path: list[tuple[int, int]] = []
+    best_candidate: ApproachCandidate | None = None
+    total_expanded = exact_expanded
+    rejected_counter: Counter[str] = Counter(rejected)
+    for candidate in candidates:
+        if total_expanded >= max_nodes:
+            return LocalPathResult(
+                "unknown",
+                "pathing_budget_exceeded",
+                [],
+                total_expanded,
+                True,
+                False,
+                final_approach_candidate_count=len(candidates),
+                rejected_approach_tile_reasons=dict(rejected_counter),
+            )
+        remaining_nodes = max(1, max_nodes - total_expanded)
+        reachability, path, expanded, budget = bfs_to_goals(
+            window,
+            start=start,
+            goals={candidate.tile},
+            movement_model=movement_model,
+            max_nodes=remaining_nodes,
+            budget_millis=budget_millis,
+            started=started,
+        )
+        total_expanded += expanded
+        if budget:
+            return LocalPathResult(
+                "unknown",
+                "pathing_budget_exceeded",
+                [],
+                total_expanded,
+                True,
+                False,
+                final_approach_candidate_count=len(candidates),
+                rejected_approach_tile_reasons=dict(rejected_counter),
+            )
+        if reachability != "reachable":
+            rejected_counter["unreachable"] += 1
+            continue
+        path_length = max(0, len(path) - 1)
+        tile_kind_preference = 0 if candidate.tile_kind == "cardinal" else 1
+        player_distance = abs(candidate.tile[0] - start[0]) + abs(candidate.tile[1] - start[1])
+        score = (path_length, tile_kind_preference, player_distance, candidate.direction_index, candidate.tile[0] * 256 + candidate.tile[1])
+        if best_score is None or score < best_score:
+            best_score = score
+            best_path = path
+            best_candidate = candidate
+
+    if best_candidate is None:
+        return LocalPathResult(
+            "blocked",
+            "no_local_path",
+            [],
+            total_expanded,
+            False,
+            False,
+            final_approach_candidate_count=len(candidates),
+            rejected_approach_tile_reasons=dict(rejected_counter),
+        )
+    return LocalPathResult(
+        "reachable",
+        "approach_tile_found",
+        best_path,
+        total_expanded,
+        False,
+        False,
+        final_approach_scene_tile=best_candidate.tile,
+        final_approach_tile_source="local_collision_approach_candidate",
+        final_approach_candidate_count=len(candidates),
+        rejected_approach_tile_reasons=dict(rejected_counter),
+        path_target_scene_tile=best_candidate.tile,
+        path_target_tile_source="final_approach_tile",
+    )
 
 
 def path_step_counts(scene_path: list[tuple[int, int]]) -> tuple[int, int]:
@@ -667,16 +826,23 @@ def analyze_pathing_context(
 
     assert player_scene_x is not None and player_scene_y is not None and target_scene_x is not None and target_scene_y is not None
     assert player_plane is not None
-    reachability, reason, scene_path, expanded, budget_exceeded, exact_destination_reached = local_scene_path(
+    local_path = local_scene_path(
         window,
         start=(player_scene_x, player_scene_y),
         destination=(target_scene_x, target_scene_y),
+        destination_payload=destination,
         movement_model=search_movement_model,
         max_nodes=max(1, int(max_nodes)),
         budget_millis=max(0.1, float(budget_millis)),
         started=started,
         require_approach_tile=target_uses_approach_tile(destination),
     )
+    reachability = local_path.reachability
+    reason = local_path.reason
+    scene_path = local_path.scene_path
+    expanded = local_path.expanded
+    budget_exceeded = local_path.budget_exceeded
+    exact_destination_reached = local_path.exact_destination_reached
     output_reason = reason
     if reachability == "reachable":
         output_reason = "path_reachable"
@@ -697,7 +863,8 @@ def analyze_pathing_context(
     elif reachability == "blocked":
         warnings.append("no reachable local path found inside the collision window")
     if reachability == "reachable":
-        missing.append("navigation.interaction_tile")
+        if target_uses_approach_tile(destination) and local_path.final_approach_tile_source != "local_collision_approach_candidate":
+            missing.append("navigation.interaction_tile")
         missing.append("activity.explicit_movement_state")
     status = "PASS" if reachability == "reachable" else "WARN"
     path_cap_tiles = max(0, int(max_predicted_tiles))
@@ -730,19 +897,34 @@ def analyze_pathing_context(
     cardinal_steps, diagonal_steps = path_step_counts(scene_path)
     path_was_capped = len(full_predicted_tiles) > len(predicted_tiles)
     final_approach: dict[str, Any] | str | None = None
+    path_target_tile: dict[str, Any] | None = None
     if reachability == "reachable":
-        if full_predicted_tiles:
-            if not exact_destination_reached:
-                final_approach = full_predicted_tiles[-1]
-            elif destination_tile and full_predicted_tiles[-1] != destination_tile:
-                final_approach = full_predicted_tiles[-1]
-            elif len(full_predicted_tiles) >= 2:
-                final_approach = full_predicted_tiles[-2]
-            else:
-                final_approach = full_predicted_tiles[-1]
+        if local_path.final_approach_scene_tile is not None:
+            final_approach = scene_to_world(
+                local_path.final_approach_scene_tile[0],
+                local_path.final_approach_scene_tile[1],
+                player_world_x=player_world_x,
+                player_world_y=player_world_y,
+                player_scene_x=player_scene_x,
+                player_scene_y=player_scene_y,
+                plane=player_plane,
+            )
+        elif full_predicted_tiles:
+            final_approach = full_predicted_tiles[-1]
         else:
             final_approach = "unknown"
-    final_approach_substituted = bool(reachability == "reachable" and not exact_destination_reached)
+        if local_path.path_target_scene_tile is not None:
+            path_target_tile = scene_to_world(
+                local_path.path_target_scene_tile[0],
+                local_path.path_target_scene_tile[1],
+                player_world_x=player_world_x,
+                player_world_y=player_world_y,
+                player_scene_x=player_scene_x,
+                player_scene_y=player_scene_y,
+                plane=player_plane,
+            )
+    final_approach_tile_used = bool(reachability == "reachable" and local_path.path_target_tile_source == "final_approach_tile")
+    final_approach_substituted = bool(reachability == "reachable" and final_approach_tile_used and not exact_destination_reached)
     elapsed = (time.perf_counter() - started) * 1000.0
     return PathingContext(
         status=status,
@@ -763,6 +945,12 @@ def analyze_pathing_context(
         path_length_tiles=(len(scene_path) - 1) if scene_path else None,
         next_waypoint_tile=predicted_tiles[0] if predicted_tiles else None,
         final_approach_tile=final_approach,
+        final_approach_tile_source=local_path.final_approach_tile_source,
+        final_approach_candidate_count=local_path.final_approach_candidate_count,
+        rejected_approach_tile_reasons=dict(local_path.rejected_approach_tile_reasons or {}),
+        final_approach_tile_used=final_approach_tile_used,
+        path_target_tile=path_target_tile,
+        path_target_tile_source=local_path.path_target_tile_source,
         predicted_path_tiles=predicted_tiles,
         predicted_step_count=(len(scene_path) - 1) if scene_path else None,
         predicted_path_count=len(full_predicted_tiles),

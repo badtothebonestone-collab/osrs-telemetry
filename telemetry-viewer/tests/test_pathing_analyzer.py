@@ -156,7 +156,73 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertNotEqual(payload["destinationTile"], payload["finalApproachTile"])
         self.assertFalse(payload["exactDestinationReached"])
         self.assertTrue(payload["finalApproachSubstituted"])
-        self.assertIn("navigation.interaction_tile", payload["missingCapabilities"])
+        self.assertEqual(payload["finalApproachTileSource"], "local_collision_approach_candidate")
+        self.assertTrue(payload["finalApproachTileUsed"])
+        self.assertGreater(payload["finalApproachCandidateCount"], 0)
+        self.assertEqual(payload["pathTargetTile"], payload["finalApproachTile"])
+        self.assertNotIn("navigation.interaction_tile", payload["missingCapabilities"])
+
+    def test_blocked_adjacent_approach_tile_is_rejected(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(blocked={(2, 1)})),
+            navigation_intent_context=nav_intent(),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "reachable")
+        self.assertNotEqual(payload["finalApproachTile"], {"worldX": 101, "worldY": 100, "plane": 0})
+        self.assertGreaterEqual(payload["rejectedApproachTileReasons"].get("tile_blocked", 0), 1)
+        self.assertEqual(payload["pathTargetTile"], payload["finalApproachTile"])
+
+    def test_shortest_reachable_approach_tile_wins(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=6, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=4, sceneY=2, worldX=103, worldY=101)),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "reachable")
+        self.assertEqual(payload["finalApproachTile"], {"worldX": 102, "worldY": 101, "plane": 0})
+        self.assertEqual(payload["pathLengthTiles"], 2)
+        self.assertEqual(payload["pathTargetTile"], payload["finalApproachTile"])
+
+    def test_bank_booth_prefers_inside_reachable_approach_tile_over_outside_wall(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=6, height=4)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=3, sceneY=1, worldX=102, worldY=100)),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "reachable")
+        self.assertEqual(payload["finalApproachTile"], {"worldX": 101, "worldY": 100, "plane": 0})
+        self.assertEqual(payload["destinationTile"], {"worldX": 102, "worldY": 100, "plane": 0})
+        self.assertNotEqual(payload["finalApproachTile"], payload["destinationTile"])
+
+    def test_npc_target_handling_preserves_service_selection_pathing(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window()),
+            navigation_intent_context=nav_intent(
+                destination_target=destination(
+                    targetType="npc",
+                    classId="banker",
+                    targetName="Banker",
+                    sceneX=3,
+                    sceneY=2,
+                    worldX=102,
+                    worldY=101,
+                )
+            ),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "reachable")
+        self.assertEqual(payload["destinationTile"], {"worldX": 102, "worldY": 101, "plane": 0})
+        self.assertEqual(payload["finalApproachTileSource"], "local_collision_approach_candidate")
+        self.assertEqual(payload["pathTargetTile"], payload["finalApproachTile"])
 
     def test_cardinal_only_fallback_still_uses_cardinal_steps(self):
         context = pathing_analyzer.analyze_pathing_context(
@@ -185,7 +251,8 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["finalApproachTile"], {"worldX": 101, "worldY": 100, "plane": 0})
         self.assertFalse(payload["exactDestinationReached"])
         self.assertTrue(payload["finalApproachSubstituted"])
-        self.assertIn("navigation.interaction_tile", payload["missingCapabilities"])
+        self.assertEqual(payload["finalApproachTileSource"], "local_collision_approach_candidate")
+        self.assertNotIn("navigation.interaction_tile", payload["missingCapabilities"])
 
     def test_blocked_path_in_simple_collision_grid(self):
         context = pathing_analyzer.analyze_pathing_context(

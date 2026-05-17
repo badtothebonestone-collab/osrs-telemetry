@@ -209,6 +209,12 @@ class PathingContext(AnalyzerContractFields):
     path_length_tiles: int | None = None
     next_waypoint_tile: dict[str, Any] | None = None
     final_approach_tile: dict[str, Any] | str | None = None
+    final_approach_tile_source: str | None = None
+    final_approach_candidate_count: int | None = None
+    rejected_approach_tile_reasons: dict[str, int] = field(default_factory=dict)
+    final_approach_tile_used: bool | None = None
+    path_target_tile: dict[str, Any] | None = None
+    path_target_tile_source: str | None = None
     predicted_path_tiles: list[dict[str, Any]] = field(default_factory=list)
     predicted_step_count: int | None = None
     predicted_path_count: int | None = None
@@ -255,6 +261,12 @@ class PathingContext(AnalyzerContractFields):
             "pathLengthTiles": self.path_length_tiles,
             "nextWaypointTile": self.next_waypoint_tile,
             "finalApproachTile": self.final_approach_tile,
+            "finalApproachTileSource": self.final_approach_tile_source,
+            "finalApproachCandidateCount": self.final_approach_candidate_count,
+            "rejectedApproachTileReasons": dict(self.rejected_approach_tile_reasons),
+            "finalApproachTileUsed": self.final_approach_tile_used,
+            "pathTargetTile": self.path_target_tile,
+            "pathTargetTileSource": self.path_target_tile_source,
             "predictedPathTiles": list(self.predicted_path_tiles),
             "predictedStepCount": self.predicted_step_count,
             "predictedPathCount": self.predicted_path_count,

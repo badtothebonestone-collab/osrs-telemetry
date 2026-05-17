@@ -655,6 +655,12 @@ class LiveCoreState:
             "pathingPathLengthTiles",
             "pathingDestinationTile",
             "pathingFinalApproachTile",
+            "pathingFinalApproachTileSource",
+            "pathingFinalApproachCandidateCount",
+            "pathingRejectedApproachTileReasons",
+            "pathingFinalApproachTileUsed",
+            "pathingPathTargetTile",
+            "pathingPathTargetTileSource",
             "pathingNextWaypointTile",
             "pathingCollisionWindowAvailable",
             "pathingCollisionWindowFresh",
@@ -1340,6 +1346,12 @@ class LiveCoreDaemon:
             fields["pathingPathLengthTiles"] = pathing.path_length_tiles
             fields["pathingDestinationTile"] = pathing.destination_tile
             fields["pathingFinalApproachTile"] = pathing.final_approach_tile
+            fields["pathingFinalApproachTileSource"] = pathing.final_approach_tile_source
+            fields["pathingFinalApproachCandidateCount"] = pathing.final_approach_candidate_count
+            fields["pathingRejectedApproachTileReasons"] = pathing.rejected_approach_tile_reasons
+            fields["pathingFinalApproachTileUsed"] = pathing.final_approach_tile_used
+            fields["pathingPathTargetTile"] = pathing.path_target_tile
+            fields["pathingPathTargetTileSource"] = pathing.path_target_tile_source
             fields["pathingNextWaypointTile"] = pathing.next_waypoint_tile
             fields["pathingCollisionWindowAvailable"] = pathing.collision_window_available
             fields["pathingCollisionWindowFresh"] = pathing.collision_window_fresh

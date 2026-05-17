@@ -688,7 +688,7 @@ def build_intent_overlay_state(
         markers,
         pathing_context,
         include_predicted_path=True,
-        include_final_approach=False,
+        include_final_approach=True,
         path_tile_limit=path_limit,
     )
     path_summary = pathing_marker_summary(markers, pathing_context, path_limit)

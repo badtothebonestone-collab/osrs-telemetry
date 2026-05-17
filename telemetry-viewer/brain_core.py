@@ -2277,6 +2277,12 @@ def format_human(decision: dict) -> str:
             destination_tile = pathing_context.get("destinationTile") if isinstance(pathing_context.get("destinationTile"), dict) else None
             if destination_tile:
                 lines.append(f"  Destination tile: {text(destination_tile.get('worldX'))},{text(destination_tile.get('worldY'))},{text(destination_tile.get('plane'))}")
+            final_approach_tile = pathing_context.get("finalApproachTile") if isinstance(pathing_context.get("finalApproachTile"), dict) else None
+            if final_approach_tile:
+                lines.append(f"  Final approach: {text(final_approach_tile.get('worldX'))},{text(final_approach_tile.get('worldY'))},{text(final_approach_tile.get('plane'))}")
+            path_target_tile = pathing_context.get("pathTargetTile") if isinstance(pathing_context.get("pathTargetTile"), dict) else None
+            if path_target_tile:
+                lines.append(f"  Routed-to tile: {text(path_target_tile.get('worldX'))},{text(path_target_tile.get('worldY'))},{text(path_target_tile.get('plane'))}")
             lines.append(f"  Local reachability: {text(pathing_context.get('localReachability'))}")
             if pathing_context.get("pathLengthTiles") is not None:
                 lines.append(f"  Path length: {text(pathing_context.get('pathLengthTiles'))} tiles")

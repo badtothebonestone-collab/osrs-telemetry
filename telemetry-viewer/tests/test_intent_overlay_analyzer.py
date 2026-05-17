@@ -382,17 +382,20 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         path_markers = [marker for marker in result["markers"] if marker["markerType"] == "predicted_path_tile"]
         destination = [marker for marker in result["markers"] if marker["markerType"] == "destination_tile"]
         waypoint = [marker for marker in result["markers"] if marker["markerType"] == "waypoint"]
+        final_approach = [marker for marker in result["markers"] if marker["markerType"] == "final_approach_tile"]
         self.assertEqual(selected[0]["label"], "Service: Bank booth")
         self.assertIn("destination_tile", marker_types)
         self.assertIn("waypoint", marker_types)
-        self.assertNotIn("final_approach_tile", marker_types)
+        self.assertIn("final_approach_tile", marker_types)
         self.assertEqual(len(path_markers), 8)
         self.assertEqual(path_markers[0]["label"], "Path 2")
         self.assertEqual(path_markers[-1]["label"], "Path 9")
         self.assertEqual(destination[0]["label"], "Destination")
         self.assertEqual(waypoint[0]["label"], "Next waypoint")
+        self.assertEqual(final_approach[0]["label"], "Final approach")
         self.assertEqual(destination[0]["markerId"], "destination_tile:3208:3219:0")
         self.assertEqual(waypoint[0]["markerId"], "next_waypoint_tile:3201:3200:0")
+        self.assertEqual(final_approach[0]["markerId"], "final_approach_tile:3207:3219:0")
         self.assertEqual(path_markers[0]["markerId"], "predicted_path_tile:2:3202:3200:0")
 
     def test_daily_predicted_path_limit_can_be_overridden(self):
