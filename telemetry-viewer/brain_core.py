@@ -2292,12 +2292,39 @@ def format_human(decision: dict) -> str:
             predicted = pathing_context.get("predictedPathTiles") if isinstance(pathing_context.get("predictedPathTiles"), list) else []
             if predicted:
                 preview = []
-                for tile in predicted[:5]:
+                for tile in predicted[:8]:
                     if isinstance(tile, dict):
                         preview.append(f"{text(tile.get('worldX'))},{text(tile.get('worldY'))},{text(tile.get('plane'))}")
                 if preview:
                     lines.append(f"  Predicted path: {' -> '.join(preview)}")
+            if pathing_context.get("pathDisplayWasCapped") is not None:
+                lines.append(
+                    "  Path display: "
+                    f"available={text(pathing_context.get('predictedPathAvailableCount'))}, "
+                    f"displayed={text(pathing_context.get('predictedPathDisplayedCount'))}, "
+                    f"capped={'yes' if pathing_context.get('pathDisplayWasCapped') else 'no'}"
+                )
+            if pathing_context.get("pathSegmentsValid") is False:
+                lines.append(
+                    "  Path warning: invalid segment "
+                    f"({text((pathing_context.get('firstInvalidPathSegment') or {}).get('reason') if isinstance(pathing_context.get('firstInvalidPathSegment'), dict) else None)})"
+                )
+            if pathing_context.get("approachQuality"):
+                lines.append(
+                    "  Approach: "
+                    f"{text(pathing_context.get('approachQuality'))}, "
+                    f"reason={text(pathing_context.get('selectedApproachReason'))}"
+                )
             lines.append(f"  Movement model: {text(pathing_context.get('predictedMovementModel'))}")
+            if pathing_context.get("pathIntentRetained") is not None:
+                retained = "yes" if pathing_context.get("pathIntentRetained") else "no"
+                lines.append(
+                    "  Path intent: "
+                    f"retained={retained}, "
+                    f"stableFor={text(pathing_context.get('pathStableForTicks'))}, "
+                    f"movement={text(pathing_context.get('movementState'))}, "
+                    f"switch={text(pathing_context.get('switchReason'))}"
+                )
             notes = pathing_context.get("predictedMovementNotes") if isinstance(pathing_context.get("predictedMovementNotes"), list) else []
             if notes:
                 lines.append(f"  Note: {text(notes[0])}")

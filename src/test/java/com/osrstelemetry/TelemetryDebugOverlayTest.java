@@ -257,6 +257,50 @@ public class TelemetryDebugOverlayTest
 		Assert.assertFalse(line.contains("| best no nearest no"));
 	}
 
+	@Test
+	public void orderedDrawableTargetsProtectSelectedTargetFromPathCap()
+	{
+		TelemetryDebugOverlay.OverlayDebugState state = new TelemetryDebugOverlay.OverlayDebugState();
+		state.intentState = new TelemetryDebugOverlay.OverlayIntentState();
+		TelemetryDebugOverlay.OverlayTarget selected = new TelemetryDebugOverlay.OverlayTarget();
+		selected.markerType = "selected_target";
+		selected.selected = true;
+		selected.clickableHull = polygon();
+		TelemetryDebugOverlay.OverlayTarget destination = pathMarker("destination_tile", 3208, 3219);
+		TelemetryDebugOverlay.OverlayTarget waypoint = pathMarker("waypoint", 3201, 3200);
+		TelemetryDebugOverlay.OverlayTarget backup = new TelemetryDebugOverlay.OverlayTarget();
+		backup.markerType = "backup_candidate";
+		TelemetryDebugOverlay.OverlayTarget path1 = pathMarker("predicted_path_tile", 3202, 3200);
+		TelemetryDebugOverlay.OverlayTarget path2 = pathMarker("predicted_path_tile", 3203, 3200);
+		TelemetryDebugOverlay.OverlayTarget path3 = pathMarker("predicted_path_tile", 3204, 3200);
+		state.intentState.markers = List.of(selected, destination, waypoint, path1, path2, path3, backup);
+
+		List<TelemetryDebugOverlay.OverlayTarget> ordered = TelemetryDebugOverlay.orderedDrawableTargets(state, 5);
+
+		Assert.assertTrue(ordered.contains(selected));
+		Assert.assertFalse(ordered.contains(backup));
+		Assert.assertEquals(selected, ordered.get(ordered.size() - 1));
+		Assert.assertEquals(5, ordered.size());
+	}
+
+	@Test
+	public void orderedDrawableTargetsDrawSelectedAfterPathTiles()
+	{
+		TelemetryDebugOverlay.OverlayDebugState state = new TelemetryDebugOverlay.OverlayDebugState();
+		state.intentState = new TelemetryDebugOverlay.OverlayIntentState();
+		TelemetryDebugOverlay.OverlayTarget selected = new TelemetryDebugOverlay.OverlayTarget();
+		selected.markerType = "selected_target";
+		selected.selected = true;
+		selected.clickableHull = polygon();
+		TelemetryDebugOverlay.OverlayTarget path = pathMarker("predicted_path_tile", 3202, 3200);
+		state.intentState.markers = List.of(selected, path);
+
+		List<TelemetryDebugOverlay.OverlayTarget> ordered = TelemetryDebugOverlay.orderedDrawableTargets(state, 25);
+
+		Assert.assertEquals(path, ordered.get(0));
+		Assert.assertEquals(selected, ordered.get(1));
+	}
+
 	private static java.util.List<java.util.List<Double>> polygon()
 	{
 		return Arrays.asList(
@@ -264,5 +308,16 @@ public class TelemetryDebugOverlayTest
 				Arrays.asList(4.0, 0.0),
 				Arrays.asList(4.0, 4.0),
 				Arrays.asList(0.0, 4.0));
+	}
+
+	private static TelemetryDebugOverlay.OverlayTarget pathMarker(String markerType, double worldX, double worldY)
+	{
+		TelemetryDebugOverlay.OverlayTarget target = new TelemetryDebugOverlay.OverlayTarget();
+		target.markerType = markerType;
+		target.targetType = "tile";
+		target.worldX = worldX;
+		target.worldY = worldY;
+		target.plane = 0.0;
+		return target;
 	}
 }

@@ -15,7 +15,7 @@ import diagnose_task_policy
 class DiagnoseTaskPolicyTest(unittest.TestCase):
     def test_policy_matrix_for_inventory_full(self):
         cases = {
-            "woodcutting_bank": ("inventory_full", "needs_service", True, True, False, "bank", None),
+            "woodcutting_bank": ("inventory_full", "needs_service", True, True, False, "bank_full", None),
             "woodcutting_firemake": ("inventory_full", "process_inventory", True, False, True, None, "firemaking"),
             "woodcutting_drop": ("inventory_full", "process_inventory", True, False, True, None, "drop"),
             "combat_default": ("target_selected", "continue_task", False, False, False, None, None),

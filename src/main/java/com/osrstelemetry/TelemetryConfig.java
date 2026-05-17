@@ -864,7 +864,7 @@ public interface TelemetryConfig extends Config
 	)
 	default int telemetryDebugOverlayMaxTargets()
 	{
-		return 25;
+		return 32;
 	}
 
 	@ConfigItem(

@@ -1085,6 +1085,12 @@ PROJECTION_REF_FIELD_NAMES = (
     "sceneObjects",
     "projectedSceneObjects",
 )
+SERVICE_SCENE_FIELD_NAMES = (
+    "serviceSceneObjects",
+    "service_scene_objects",
+    "loadedServiceScene",
+    "serviceCandidates",
+)
 PROJECTION_WRAPPER_FIELD_NAMES = ("payload", "projection", "sceneProjection", "sceneProjectionPayload")
 
 
@@ -1239,6 +1245,15 @@ def normalize_projection_payload(projection: dict | None) -> tuple[dict, dict]:
             for item in refs
             if isinstance(item, dict)
         ]
+    for field_name in SERVICE_SCENE_FIELD_NAMES:
+        service_scene = raw_projection.get(field_name)
+        if isinstance(service_scene, list):
+            normalized["serviceSceneObjects"] = [
+                normalize_compact_scene_object(item)
+                for item in service_scene
+                if isinstance(item, dict)
+            ]
+            break
     diagnostics = projection_payload_diagnostics(normalized)
     diagnostics["refListPath"] = ref_path
     diagnostics["refListFound"] = ref_path is not None
@@ -1390,6 +1405,13 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
         tick["visibleSceneObjectRefs"] = [
             normalize_compact_scene_object(item)
             for item in visible_refs
+            if isinstance(item, dict)
+        ]
+    service_scene_objects = projection.get("serviceSceneObjects")
+    if isinstance(service_scene_objects, list):
+        tick["serviceSceneObjects"] = [
+            normalize_compact_scene_object(item)
+            for item in service_scene_objects
             if isinstance(item, dict)
         ]
 
@@ -7260,6 +7282,11 @@ class LiveTargetProcessor:
         candidate_counts = Counter(candidate.get("tickId") for candidate in candidates)
         tick_summaries = tick_summaries_for(self.session, output_ticks, self.source_files, world_counts, candidate_counts, build_durations, processed_at)
         latest_tick_record = output_ticks[-1] if output_ticks else (selected_ticks[-1] if selected_ticks else (next(reversed(self.tick_window.values())) if self.tick_window else None))
+        loaded_service_scene = (
+            list(latest_tick_record.get("serviceSceneObjects") or [])
+            if isinstance(latest_tick_record, dict) and isinstance(latest_tick_record.get("serviceSceneObjects"), list)
+            else []
+        )
         navigation = navigation_summary_for(latest_tick_record, processed_at)
         candidates = apply_navigation_to_candidates(candidates, navigation)
         candidate_signature = candidate_output_signature(candidates)
@@ -7326,6 +7353,8 @@ class LiveTargetProcessor:
         if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE:
             status["pluginSnapshotCandidateSignature"] = candidate_signature
             status["pluginSnapshotCandidateOutputSkippedUnchanged"] = skip_plugin_candidate_outputs
+            status["pluginSnapshotLoadedServiceSceneCount"] = len(loaded_service_scene)
+        status["loadedServiceSceneCount"] = len(loaded_service_scene)
         watch_values = live_watch_values_state(latest_tick_record, inventory_state, activity, status, processed_at)
         status["watchValuesPath"] = str(paths["watchValues"])
         status["watchValueCount"] = len(watch_values.get("valuesByAlias") or {})
@@ -7530,6 +7559,7 @@ class LiveTargetProcessor:
             "worldRecords": world_output_records,
             "uiRecords": ui_records,
             "candidates": candidates,
+            "loadedServiceScene": loaded_service_scene,
             "tickSummaries": tick_summaries,
             "baseline": baseline,
             "activity": activity,

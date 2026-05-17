@@ -13,7 +13,7 @@ from analyzers.live_state import IntentOverlayContext
 OVERLAY_INTENT_SCHEMA = "overlay_intent_state.v1"
 OVERLAY_DEBUG_SCHEMA = "telemetry_overlay_debug_state.v1"
 OVERLAY_MODES = {"intent", "candidates", "debug"}
-DAILY_PREDICTED_PATH_LIMIT = 8
+DAILY_PREDICTED_PATH_LIMIT = 24
 DEBUG_PREDICTED_PATH_LIMIT = 24
 
 
@@ -374,10 +374,14 @@ def append_pathing_markers(
     include_predicted_path: bool,
     include_final_approach: bool,
     path_tile_limit: int,
+    show_tentative_path: bool = False,
 ) -> None:
     if not isinstance(pathing_context, dict) or not pathing_context.get("pathingNeeded"):
         return
     reason = str(pathing_context.get("reason") or "read-only pathing context")
+    approach_quality = str(pathing_context.get("approachQuality") or "")
+    tentative_path = approach_quality in {"side_access_unknown", "suspect_outside_wall", "invalid_no_side_access", "invalid_no_line_of_sight"}
+    draw_path_steps = not tentative_path or show_tentative_path
     occupied_tiles: set[tuple[Any, Any, Any]] = set()
     destination_tile = pathing_context.get("destinationTile") if isinstance(pathing_context.get("destinationTile"), dict) else None
     if destination_tile:
@@ -385,7 +389,7 @@ def append_pathing_markers(
         identity = tile_identity(destination_tile)
         if identity is not None:
             occupied_tiles.add(identity)
-    waypoint = pathing_context.get("nextWaypointTile") if isinstance(pathing_context.get("nextWaypointTile"), dict) else None
+    waypoint = pathing_context.get("nextWaypointTile") if draw_path_steps and isinstance(pathing_context.get("nextWaypointTile"), dict) else None
     if waypoint:
         markers.append(path_tile_marker("waypoint", "Next waypoint", waypoint, "predicted next local waypoint for visualization"))
         identity = tile_identity(waypoint)
@@ -395,14 +399,14 @@ def append_pathing_markers(
         markers.append(warning_intent_marker("Path blocked", "local collision path appears blocked", source="pathing_context"))
     elif pathing_context.get("localReachability") == "unknown" and pathing_context.get("pathingNeeded"):
         markers.append(diagnostic_intent_marker("Path unknown", reason, source="pathing_context"))
-    if include_predicted_path and include_final_approach:
+    if include_predicted_path and include_final_approach and draw_path_steps:
         final_approach = pathing_context.get("finalApproachTile") if isinstance(pathing_context.get("finalApproachTile"), dict) else None
         if final_approach:
             markers.append(path_tile_marker("final_approach_tile", "Final approach", final_approach, "predicted final local approach tile for visualization"))
             identity = tile_identity(final_approach)
             if identity is not None:
                 occupied_tiles.add(identity)
-    if include_predicted_path:
+    if include_predicted_path and draw_path_steps:
         tiles = pathing_context.get("predictedPathTiles") if isinstance(pathing_context.get("predictedPathTiles"), list) else []
         emitted = 0
         for index, tile in enumerate(tiles, start=1):
@@ -421,13 +425,76 @@ def append_pathing_markers(
 
 def pathing_marker_summary(markers: list[dict], pathing_context: dict[str, Any], path_limit: int) -> dict[str, Any]:
     predicted_tiles = pathing_context.get("predictedPathTiles") if isinstance(pathing_context.get("predictedPathTiles"), list) else []
+    emitted = sum(1 for marker in markers if marker.get("markerType") == "predicted_path_tile")
+    available_count = pathing_context.get("predictedPathAvailableCount", pathing_context.get("predictedPathCount", len(predicted_tiles)))
+    available_count = available_count if isinstance(available_count, int) and not isinstance(available_count, bool) else len(predicted_tiles)
+    represented_tiles = {
+        identity
+        for marker in markers
+        if marker.get("markerType") in {"destination_tile", "waypoint", "final_approach_tile", "predicted_path_tile"}
+        for identity in [tile_identity(marker)]
+        if identity is not None
+    }
+    displayed_count = 0
+    for tile in predicted_tiles:
+        identity = tile_identity(tile) if isinstance(tile, dict) else None
+        if identity is not None and identity in represented_tiles:
+            displayed_count += 1
+    if not predicted_tiles:
+        displayed_count = emitted
+    displayed_count = min(displayed_count, available_count)
+    path_display_was_capped = available_count > displayed_count and emitted >= max(0, int(path_limit))
+    selected_marker = next((marker for marker in markers if marker.get("markerType") == "selected_target"), None)
+    selected_geometry_source = selected_target_geometry_source(selected_marker)
+    lane_counts = geometry_lane_counts(markers)
     return {
         "predictedPathTilesAvailableCount": len(predicted_tiles),
-        "predictedPathMarkersEmittedCount": sum(1 for marker in markers if marker.get("markerType") == "predicted_path_tile"),
+        "predictedPathAvailableCount": available_count,
+        "predictedPathDisplayedCount": displayed_count,
+        "predictedPathMarkersEmittedCount": emitted,
         "predictedPathLimit": path_limit,
+        "overlayPredictedPathLimit": path_limit,
+        "pathDisplayWasCapped": path_display_was_capped,
+        "pathMarkersAvailable": available_count,
+        "pathMarkersEmitted": emitted,
+        "pathMarkerLimit": path_limit,
+        "pathMarkersCapped": path_display_was_capped,
         "destinationMarkerEmitted": any(marker.get("markerType") == "destination_tile" for marker in markers),
         "nextWaypointMarkerEmitted": any(marker.get("markerType") == "waypoint" for marker in markers),
         "finalApproachMarkerEmitted": any(marker.get("markerType") == "final_approach_tile" for marker in markers),
+        "selectedTargetGeometryPresent": selected_geometry_source != "none",
+        "selectedTargetGeometrySource": selected_geometry_source,
+        "selectedTargetDroppedByPathCap": False,
+        "geometryLaneCounts": lane_counts,
+        "pathIntentRetained": pathing_context.get("pathIntentRetained"),
+        "pathStableForTicks": pathing_context.get("pathStableForTicks"),
+        "pathMovementState": pathing_context.get("movementState"),
+        "pathRetentionReason": pathing_context.get("retentionReason"),
+        "pathSwitchReason": pathing_context.get("switchReason"),
+    }
+
+
+def selected_target_geometry_source(marker: dict | None) -> str:
+    if not isinstance(marker, dict):
+        return "none"
+    source = best_marker_geometry_source(marker)
+    if source != "none":
+        return source
+    if any(marker.get(key) is not None for key in ("worldX", "worldY", "sceneX", "sceneY", "localX", "localY")):
+        projection_mode = marker.get("projectionMode")
+        return str(projection_mode or "live_projection")
+    return "none"
+
+
+def geometry_lane_counts(markers: list[dict]) -> dict[str, int]:
+    return {
+        "selectedTarget": sum(1 for marker in markers if marker.get("markerType") == "selected_target"),
+        "backups": sum(1 for marker in markers if marker.get("markerType") == "backup_candidate"),
+        "destinationWaypointFinalApproach": sum(
+            1 for marker in markers if marker.get("markerType") in {"destination_tile", "waypoint", "final_approach_tile"}
+        ),
+        "predictedPath": sum(1 for marker in markers if marker.get("markerType") == "predicted_path_tile"),
+        "debugLabels": sum(1 for marker in markers if marker.get("markerType") in {"warning", "diagnostic", "path_blocked", "path_unknown"}),
     }
 
 
@@ -733,11 +800,12 @@ def build_overlay_state_for_mode(
         path_limit = predicted_path_limit(args, mode)
         append_pathing_markers(
             markers,
-            pathing_context,
-            include_predicted_path=mode in {"candidates", "debug"},
-            include_final_approach=mode in {"candidates", "debug"},
-            path_tile_limit=path_limit,
-        )
+        pathing_context,
+        include_predicted_path=mode in {"candidates", "debug"},
+        include_final_approach=mode in {"candidates", "debug"},
+        path_tile_limit=path_limit,
+        show_tentative_path=mode in {"candidates", "debug"},
+    )
         summary["overlayMode"] = mode
         summary["intentMarkerCount"] = 0
         summary["candidateMarkersSuppressed"] = 0

@@ -150,7 +150,7 @@ public class TelemetryPresetApplier
 		values.add(v("compactLiveStreamAlsoWriteFiles", true));
 		values.add(v("enablePluginSnapshotEndpoint", false));
 		values.add(v("pluginSnapshotEnabledInNormalLive", false));
-		values.add(v("telemetryDebugOverlayMaxTargets", 10));
+		values.add(v("telemetryDebugOverlayMaxTargets", 32));
 		values.add(v("telemetryDebugOverlayMode", TelemetryDebugOverlayMode.CANDIDATES));
 		values.add(v("telemetryDebugOverlayShowLabels", true));
 		values.add(v("telemetryDebugOverlayShowCollisionWindow", false));
@@ -180,7 +180,7 @@ public class TelemetryPresetApplier
 		values.add(v("pluginSnapshotMaxResponseBytes", 1048576));
 		values.add(v("pluginSnapshotAllowNonLocalHost", false));
 		values.add(v("pluginSnapshotEnabledInNormalLive", true));
-		values.add(v("telemetryDebugOverlayMaxTargets", 10));
+		values.add(v("telemetryDebugOverlayMaxTargets", 32));
 		values.add(v("telemetryDebugOverlayMode", TelemetryDebugOverlayMode.CANDIDATES));
 		values.add(v("telemetryDebugOverlayShowLabels", true));
 		values.add(v("telemetryDebugOverlayShowCollisionWindow", false));
@@ -207,7 +207,7 @@ public class TelemetryPresetApplier
 		values.add(v("pluginSnapshotEnabledInNormalLive", false));
 		values.add(v("telemetryDebugOverlayEnabled", true));
 		values.add(v("telemetryDebugOverlayMode", TelemetryDebugOverlayMode.CANDIDATES));
-		values.add(v("telemetryDebugOverlayMaxTargets", 25));
+		values.add(v("telemetryDebugOverlayMaxTargets", 32));
 		values.add(v("telemetryDebugOverlayShowLabels", true));
 		values.add(v("telemetryDebugOverlayShowAimPoints", true));
 		values.add(v("telemetryDebugOverlayShowReachability", true));

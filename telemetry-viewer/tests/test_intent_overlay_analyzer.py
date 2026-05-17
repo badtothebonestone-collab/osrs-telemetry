@@ -330,7 +330,7 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "selected_target"])
         self.assertTrue(any(marker["markerType"] in {"warning", "diagnostic"} and "firemaking" in marker["label"] for marker in result["markers"]))
 
-    def test_daily_overlay_emits_destination_waypoint_and_capped_predicted_path(self):
+    def test_daily_overlay_emits_destination_waypoint_and_full_default_predicted_path(self):
         service_target = {
             "objectKey": "bank-booth-1",
             "targetName": "Bank booth",
@@ -397,6 +397,9 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertEqual(waypoint[0]["markerId"], "next_waypoint_tile:3201:3200:0")
         self.assertEqual(final_approach[0]["markerId"], "final_approach_tile:3207:3219:0")
         self.assertEqual(path_markers[0]["markerId"], "predicted_path_tile:2:3202:3200:0")
+        self.assertEqual(result["pathingOverlaySummary"]["overlayPredictedPathLimit"], 24)
+        self.assertEqual(result["pathingOverlaySummary"]["predictedPathDisplayedCount"], 9)
+        self.assertFalse(result["pathingOverlaySummary"]["pathDisplayWasCapped"])
 
     def test_daily_predicted_path_limit_can_be_overridden(self):
         result = overlay.build_intent_overlay_state(
@@ -420,6 +423,35 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
 
         path_markers = [marker for marker in result["markers"] if marker.get("markerType") == "predicted_path_tile"]
         self.assertEqual(len(path_markers), 2)
+
+    def test_daily_overlay_summary_reports_retained_path_intent(self):
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 4}, "candidates": []},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "pathingContext": {
+                    "pathingNeeded": True,
+                    "destinationTile": {"worldX": 3205, "worldY": 3200, "plane": 0},
+                    "nextWaypointTile": {"worldX": 3201, "worldY": 3200, "plane": 0},
+                    "predictedPathTiles": [{"worldX": 3201, "worldY": 3200, "plane": 0}],
+                    "pathIntentRetained": True,
+                    "pathStableForTicks": 5,
+                    "movementState": "moving",
+                    "retentionReason": "player_moving_same_destination",
+                    "switchReason": None,
+                },
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent", overlay_predicted_path_limit=None),
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        summary = result["pathingOverlaySummary"]
+        self.assertTrue(summary["pathIntentRetained"])
+        self.assertEqual(summary["pathStableForTicks"], 5)
+        self.assertEqual(summary["pathMovementState"], "moving")
+        self.assertEqual(summary["pathRetentionReason"], "player_moving_same_destination")
 
     def test_debug_overlay_mode_can_emit_predicted_path_tiles(self):
         state = overlay.build_overlay_state_for_mode(
@@ -490,6 +522,157 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertEqual(state["summary"]["predictedPathTilesAvailableCount"], 30)
         self.assertEqual(state["summary"]["predictedPathMarkersEmittedCount"], 24)
         self.assertEqual(state["summary"]["predictedPathLimit"], 24)
+        self.assertEqual(state["summary"]["overlayPredictedPathLimit"], 24)
+        self.assertTrue(state["summary"]["pathDisplayWasCapped"])
+
+    def test_daily_overlay_reports_default_full_path_without_hiding_intermediate_tiles(self):
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 4}, "candidates": []},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "pathingContext": {
+                    "pathingNeeded": True,
+                    "destinationTile": {"worldX": 3212, "worldY": 3200, "plane": 0},
+                    "finalApproachTile": {"worldX": 3211, "worldY": 3200, "plane": 0},
+                    "nextWaypointTile": {"worldX": 3201, "worldY": 3200, "plane": 0},
+                    "predictedPathTiles": [
+                        {"worldX": 3200 + index, "worldY": 3200, "plane": 0}
+                        for index in range(1, 13)
+                    ],
+                    "predictedPathCount": 12,
+                    "predictedPathDisplayedCount": 12,
+                },
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent", overlay_predicted_path_limit=None),
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        path_markers = [marker for marker in result["markers"] if marker.get("markerType") == "predicted_path_tile"]
+        self.assertEqual(len(path_markers), 9)
+        self.assertEqual([marker["pathIndex"] for marker in path_markers], [2, 3, 4, 5, 6, 7, 8, 9, 10])
+        self.assertEqual(result["pathingOverlaySummary"]["predictedPathTilesAvailableCount"], 12)
+        self.assertEqual(result["pathingOverlaySummary"]["predictedPathDisplayedCount"], 12)
+        self.assertEqual(result["pathingOverlaySummary"]["predictedPathMarkersEmittedCount"], 9)
+        self.assertEqual(result["pathingOverlaySummary"]["overlayPredictedPathLimit"], 24)
+        self.assertFalse(result["pathingOverlaySummary"]["pathDisplayWasCapped"])
+
+    def test_daily_overlay_defaults_to_internal_predicted_path_cap(self):
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 4}, "candidates": []},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "pathingContext": {
+                    "pathingNeeded": True,
+                    "predictedPathTiles": [
+                        {"worldX": 3200 + index, "worldY": 3200, "plane": 0}
+                        for index in range(30)
+                    ],
+                    "predictedPathCount": 30,
+                    "predictedPathAvailableCount": 30,
+                },
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent", overlay_predicted_path_limit=None),
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        path_markers = [marker for marker in result["markers"] if marker.get("markerType") == "predicted_path_tile"]
+        self.assertEqual(len(path_markers), 24)
+        self.assertEqual(result["pathingOverlaySummary"]["predictedPathDisplayedCount"], 24)
+        self.assertEqual(result["pathingOverlaySummary"]["predictedPathMarkersEmittedCount"], 24)
+        self.assertEqual(result["pathingOverlaySummary"]["overlayPredictedPathLimit"], 24)
+        self.assertTrue(result["pathingOverlaySummary"]["pathDisplayWasCapped"])
+
+    def test_selected_service_target_geometry_is_separate_from_path_marker_cap(self):
+        service_target = {
+            "objectKey": "bank-booth-1",
+            "targetName": "Bank booth",
+            "targetType": "sceneObject",
+            "classId": "bank_booth",
+            "id": 10355,
+            "worldX": 3208,
+            "worldY": 3219,
+            "plane": 0,
+            "sceneX": 20,
+            "sceneY": 21,
+            "clickableHull": [[1, 1], [4, 1], [4, 4]],
+            "clickboxPolygon": [[1, 1], [4, 1], [4, 4]],
+        }
+        result = overlay.build_overlay_state_for_mode(
+            Path("."),
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent", overlay_predicted_path_limit=3),
+            {"overlayDebug": {"summary": {}, "targets": [], "markers": []}},
+            {"status": {"lastProcessedTick": 4}, "candidates": []},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {
+                    "phase": "inventory_full",
+                    "activeIntent": "needs_service",
+                    "activeIntentTarget": service_target,
+                },
+                "serviceContext": {"serviceNeeded": True, "bestServiceCandidate": service_target, "serviceCandidates": [service_target]},
+                "pathingContext": {
+                    "pathingNeeded": True,
+                    "predictedPathTiles": [
+                        {"worldX": 3200 + index, "worldY": 3200, "plane": 0}
+                        for index in range(12)
+                    ],
+                    "predictedPathCount": 12,
+                    "predictedPathAvailableCount": 12,
+                },
+            },
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        selected = [marker for marker in result["markers"] if marker.get("markerType") == "selected_target"]
+        path_markers = [marker for marker in result["markers"] if marker.get("markerType") == "predicted_path_tile"]
+        self.assertEqual(len(selected), 1)
+        self.assertIn("clickableHull", selected[0])
+        self.assertIn("clickboxPolygon", selected[0])
+        self.assertEqual(len(path_markers), 3)
+        self.assertTrue(result["summary"]["selectedTargetGeometryPresent"])
+        self.assertEqual(result["summary"]["selectedTargetGeometrySource"], "clickableHull")
+        self.assertFalse(result["summary"]["selectedTargetDroppedByPathCap"])
+        self.assertEqual(result["summary"]["pathMarkersAvailable"], 12)
+        self.assertEqual(result["summary"]["pathMarkersEmitted"], 3)
+        self.assertEqual(result["summary"]["pathMarkerLimit"], 3)
+        self.assertTrue(result["summary"]["pathMarkersCapped"])
+        self.assertEqual(result["summary"]["geometryLaneCounts"]["selectedTarget"], 1)
+        self.assertEqual(result["summary"]["geometryLaneCounts"]["predictedPath"], 3)
+
+    def test_daily_overlay_does_not_draw_clean_path_for_suspect_approach(self):
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 4}, "candidates": []},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "pathingContext": {
+                    "pathingNeeded": True,
+                    "localReachability": "unknown",
+                    "reason": "approach_side_access_blocked",
+                    "approachQuality": "suspect_outside_wall",
+                    "destinationTile": {"worldX": 3210, "worldY": 3217, "plane": 2},
+                    "nextWaypointTile": {"worldX": 3211, "worldY": 3216, "plane": 2},
+                    "predictedPathTiles": [
+                        {"worldX": 3211, "worldY": 3216, "plane": 2},
+                        {"worldX": 3210, "worldY": 3216, "plane": 2},
+                    ],
+                },
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent", overlay_predicted_path_limit=None),
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        marker_types = [marker.get("markerType") for marker in result["markers"]]
+        self.assertIn("destination_tile", marker_types)
+        self.assertNotIn("waypoint", marker_types)
+        self.assertNotIn("predicted_path_tile", marker_types)
+        self.assertIn("diagnostic", marker_types)
 
 
 if __name__ == "__main__":

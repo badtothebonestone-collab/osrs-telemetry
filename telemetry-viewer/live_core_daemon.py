@@ -390,6 +390,8 @@ class LiveCoreState:
     brain_state: dict = field(default_factory=dict)
     brain_decision: dict = field(default_factory=dict)
     analysis_result: LiveAnalysisResult = field(default_factory=LiveAnalysisResult)
+    path_intent_state: pathing_analyzer.PathIntentState = field(default_factory=pathing_analyzer.PathIntentState)
+    service_target_state: service_analyzer.ServiceTargetState = field(default_factory=service_analyzer.ServiceTargetState)
     context_retained_previous_count: int = 0
     candidate_retained_previous_count: int = 0
     context_retention_streak: int = 0
@@ -493,6 +495,7 @@ class LiveCoreState:
                 "watchValues": result.get("watchValues") or {},
                 "performance": result.get("performance") or {},
                 "candidates": result.get("candidates") or [],
+                "loadedServiceScene": result.get("loadedServiceScene") or [],
                 "warnings": list(self.warnings),
                 "missingFields": [],
                 "sourceFiles": [],
@@ -530,6 +533,7 @@ class LiveCoreState:
             "watchValues": {},
             "performance": {},
             "candidates": [],
+            "loadedServiceScene": [],
             "warnings": ["live core daemon has not processed a telemetry update yet"],
             "missingFields": ["baseline", "candidates", "status"],
             "sourceFiles": [],
@@ -629,10 +633,33 @@ class LiveCoreState:
             "serviceNeeded",
             "serviceTypeNeeded",
             "serviceCandidateCount",
+            "serviceTargetRetained",
+            "retainedServiceTargetName",
+            "retainedServiceMissingTicks",
+            "retainedServiceCandidateCount",
+            "retainedBestServiceCandidate",
+            "retainedServiceAgeTicks",
+            "preferredServiceTypesSeen",
+            "preferredServiceTypesRecentlySeen",
+            "missingPreferredReason",
+            "selectedServiceTargetSource",
+            "primaryServiceVisible",
+            "primaryServiceRetained",
+            "depositFallbackAllowed",
+            "selectedServiceGroup",
+            "logicError",
+            "visiblePrimaryServiceTargetCount",
+            "visibleDepositServiceTargetCount",
+            "sourceStageCounts",
+            "memoryLifecycle",
+            "serviceSwitchReason",
+            "serviceCandidateDroppedReason",
             "profileCandidateCount",
             "broadCandidateCount",
             "serviceCandidateInputCount",
             "serviceCandidateVisibility",
+            "serviceCandidateSourceLanes",
+            "pluginSnapshotServiceHintsUsed",
             "serviceCandidateInputsPreview",
             "collisionWindowAvailable",
             "collisionWindowFresh",
@@ -677,12 +704,32 @@ class LiveCoreState:
             "pathingFinalApproachSubstituted",
             "pathingPredictedPathCount",
             "pathingPredictedPathDisplayedCount",
+            "pathingPredictedPathAvailableCount",
             "pathingPathWasCapped",
+            "pathingPathDisplayWasCapped",
+            "overlayPredictedPathLimit",
+            "pathingPathSegmentsValid",
+            "pathingInvalidPathSegmentCount",
+            "pathingFirstInvalidPathSegment",
+            "pathingSelectedApproachReason",
+            "pathingApproachQuality",
+            "pathingApproachCandidatesTested",
+            "pathingApproachCandidatesRejectedByBlockedSide",
+            "pathingApproachCandidatesRejectedByNoLineOfSight",
+            "pathingSideAccessValid",
+            "pathingLineOfSightToTarget",
             "pathingDiagonalStepCount",
             "pathingCardinalStepCount",
             "pathingMillis",
             "pathNodesExpanded",
             "pathingBudgetExceeded",
+            "pathIntentKey",
+            "pathDestinationTargetKey",
+            "pathIntentRetained",
+            "pathStableForTicks",
+            "pathMovementState",
+            "pathRetentionReason",
+            "pathSwitchReason",
             "requiredContextDomains",
             "missingRequiredContextDomains",
             "optionalMissingContextDomains",
@@ -828,6 +875,8 @@ class LiveCoreDaemon:
             self.state.brain_state["brainStateScope"] = brain_state_scope(self.session, task, goal_count)
             self.state.brain_state["goalResourceGroup"] = self.state.brain_state["brainStateScope"].get("resourceGroup")
             self.state.brain_decision = {}
+            self.state.path_intent_state.clear(reason="runtime_control_changed")
+            self.state.service_target_state.clear(reason="runtime_control_changed")
             self.brain_reset_applied = True
             self.runtime_control.resetBaselineRequested = False
         self.publish_runtime_control_status()
@@ -883,6 +932,7 @@ class LiveCoreDaemon:
         baseline = context.get("baseline") if isinstance(context.get("baseline"), dict) else {}
         player = baseline.get("player") if isinstance(baseline.get("player"), dict) else {}
         candidates = context.get("candidates") if isinstance(context.get("candidates"), list) else []
+        loaded_service_scene = context.get("loadedServiceScene") if isinstance(context.get("loadedServiceScene"), list) else []
         navigation = context.get("navigation") if isinstance(context.get("navigation"), dict) else {}
         activity = context.get("activity") if isinstance(context.get("activity"), dict) else {}
         events = context.get("events") if isinstance(context.get("events"), list) else []
@@ -912,6 +962,7 @@ class LiveCoreDaemon:
                 candidates,
                 class_id="tree" if self.args.profile == "woodcutting" else None,
                 max_candidates=max(1, int(self.args.max_candidates)),
+                loaded_service_scene=loaded_service_scene,
             ),
             navigation=navigation_analyzer.analyze_navigation(navigation, candidates),
             activity=activity_analyzer.analyze_activity(activity, events),
@@ -921,8 +972,21 @@ class LiveCoreDaemon:
         target_fields = {
             "profileCandidateCount": analysis.targets.profile_candidate_count,
             "broadCandidateCount": analysis.targets.broad_candidate_count,
+            "loadedServiceSceneCount": analysis.targets.loaded_service_scene_count,
             "serviceCandidateInputCount": analysis.targets.service_candidate_input_count,
             "serviceCandidateVisibility": analysis.targets.service_candidate_visibility,
+            "serviceCandidateSourceLanes": {
+                "profileCandidates": analysis.targets.profile_candidate_count,
+                "broadCandidates": analysis.targets.broad_candidate_count,
+                "loadedServiceScene": analysis.targets.loaded_service_scene_count,
+                "serviceCandidateInputs": analysis.targets.service_candidate_input_count,
+                "retainedServiceCandidates": len(self.state.service_target_state.recent_service_candidates),
+            },
+            "pluginSnapshotServiceHintsUsed": (
+                list(getattr(live, "PLUGIN_SNAPSHOT_SERVICE_CLASS_HINTS", ()))
+                if live.task_policy_requires_service(self.args)
+                else []
+            ),
             "serviceCandidateInputsPreview": [
                 {
                     key: candidate.get(key)
@@ -972,6 +1036,7 @@ class LiveCoreDaemon:
             self.state.latest_context["status"].update(navigation_fields)
         self.state.latest_context["profileCandidates"] = list(analysis.targets.profile_candidates)
         self.state.latest_context["broadCandidates"] = list(analysis.targets.broad_candidates)
+        self.state.latest_context["loadedServiceScene"] = list(analysis.targets.loaded_service_scene)
         self.state.latest_context["serviceCandidateInputs"] = list(analysis.targets.service_candidate_inputs)
         return analysis
 
@@ -1251,6 +1316,18 @@ class LiveCoreDaemon:
             context = self.state.context()
             target_context = self.state.analysis_result.targets
             service_candidate_inputs = target_context.service_candidate_inputs if target_context else []
+            service_memory_candidates = []
+            if target_context:
+                for lane_name, lane_candidates in (
+                    ("profileCandidates", target_context.profile_candidates),
+                    ("broadCandidates", target_context.broad_candidates),
+                    ("loadedServiceScene", target_context.loaded_service_scene),
+                    ("serviceCandidateInputs", target_context.service_candidate_inputs),
+                ):
+                    for candidate in lane_candidates:
+                        payload = dict(candidate)
+                        payload["_serviceSourceLane"] = lane_name
+                        service_memory_candidates.append(payload)
             progress = brain_context.decision.get("progress") if isinstance(brain_context.decision.get("progress"), dict) else {}
             source_tick = context.get("status", {}).get("lastProcessedTick") if isinstance(context.get("status"), dict) else None
             inventory_context = InventoryContext(
@@ -1261,7 +1338,13 @@ class LiveCoreDaemon:
             self.state.analysis_result.service = service_analyzer.analyze_service_context(
                 policy,
                 candidates=service_candidate_inputs,
+                memory_candidates=service_memory_candidates,
+                profile_candidates=target_context.profile_candidates if target_context else [],
+                broad_candidates=target_context.broad_candidates if target_context else [],
+                loaded_service_scene=target_context.loaded_service_scene if target_context else [],
                 source_tick=source_tick,
+                service_target_state=self.state.service_target_state,
+                current_plane=self.state.analysis_result.player.plane if self.state.analysis_result.player else None,
             )
             self.state.analysis_result.process_inventory = process_inventory_analyzer.analyze_process_inventory_context(
                 policy,
@@ -1299,10 +1382,15 @@ class LiveCoreDaemon:
                 service_context=service_context,
                 process_inventory_context=process_context,
                 target_context=self.state.analysis_result.targets,
+                activity_context=self.state.analysis_result.activity,
+                generic_task_state=generic_state,
+                path_intent_state=self.state.path_intent_state,
                 source_tick=source_tick,
                 movement_model="osrs_like_predicted",
             )
-            brain_context.decision["pathingContext"] = self.state.analysis_result.pathing.to_dict()
+            pathing_payload = self.state.analysis_result.pathing.to_dict()
+            pathing_payload["overlayPredictedPathLimit"] = intent_overlay_analyzer.predicted_path_limit(self.args, self.args.overlay_mode)
+            brain_context.decision["pathingContext"] = pathing_payload
             brain_context.decision.update(
                 brain_core.context_domain_summary(
                     brain_context.decision,
@@ -1327,6 +1415,39 @@ class LiveCoreDaemon:
             fields["serviceNeeded"] = self.state.analysis_result.service.service_required
             fields["serviceTypeNeeded"] = self.state.analysis_result.service.service_type_needed
             fields["serviceCandidateCount"] = self.state.analysis_result.service.candidate_count
+            fields["serviceTargetRetained"] = self.state.analysis_result.service.service_target_retained
+            fields["retainedServiceTargetName"] = self.state.analysis_result.service.retained_service_target_name
+            fields["retainedServiceMissingTicks"] = self.state.analysis_result.service.retained_service_missing_ticks
+            fields["retainedServiceCandidateCount"] = self.state.analysis_result.service.retained_service_candidate_count
+            fields["retainedBestServiceCandidate"] = self.state.analysis_result.service.retained_best_service_candidate
+            fields["retainedServiceAgeTicks"] = self.state.analysis_result.service.retained_service_age_ticks
+            fields["preferredServiceTypesSeen"] = self.state.analysis_result.service.preferred_service_types_seen
+            fields["preferredServiceTypesRecentlySeen"] = self.state.analysis_result.service.preferred_service_types_recently_seen
+            fields["missingPreferredReason"] = self.state.analysis_result.service.missing_preferred_reason
+            fields["selectedServiceTargetSource"] = self.state.analysis_result.service.selected_service_target_source
+            fields["primaryServiceVisible"] = self.state.analysis_result.service.primary_service_visible
+            fields["primaryServiceRetained"] = self.state.analysis_result.service.primary_service_retained
+            fields["depositFallbackAllowed"] = self.state.analysis_result.service.deposit_fallback_allowed
+            fields["selectedServiceGroup"] = self.state.analysis_result.service.selected_service_group
+            fields["logicError"] = self.state.analysis_result.service.logic_error
+            fields["visiblePrimaryServiceTargetCount"] = self.state.analysis_result.service.visible_primary_service_target_count
+            fields["visibleDepositServiceTargetCount"] = self.state.analysis_result.service.visible_deposit_service_target_count
+            fields["sourceStageCounts"] = self.state.analysis_result.service.source_stage_counts
+            fields["memoryLifecycle"] = self.state.analysis_result.service.memory_lifecycle
+            fields["serviceSwitchReason"] = self.state.analysis_result.service.service_switch_reason
+            fields["serviceCandidateDroppedReason"] = self.state.analysis_result.service.service_candidate_dropped_reason
+            fields["serviceCandidateSourceLanes"] = {
+                "profileCandidates": self.state.source_status.get("profileCandidateCount"),
+                "broadCandidates": self.state.source_status.get("broadCandidateCount"),
+                "loadedServiceScene": self.state.source_status.get("loadedServiceSceneCount"),
+                "serviceCandidateInputs": self.state.source_status.get("serviceCandidateInputCount"),
+                "retainedServiceCandidates": self.state.analysis_result.service.retained_service_candidate_count,
+            }
+            fields["pluginSnapshotServiceHintsUsed"] = (
+                list(getattr(live, "PLUGIN_SNAPSHOT_SERVICE_CLASS_HINTS", ()))
+                if live.task_policy_requires_service(self.args)
+                else []
+            )
         if self.state.analysis_result and self.state.analysis_result.process_inventory:
             fields["processInventoryNeeded"] = self.state.analysis_result.process_inventory.process_required
             fields["processTypeNeeded"] = self.state.analysis_result.process_inventory.process_type_needed
@@ -1368,12 +1489,32 @@ class LiveCoreDaemon:
             fields["pathingFinalApproachSubstituted"] = pathing.final_approach_substituted
             fields["pathingPredictedPathCount"] = pathing.predicted_path_count
             fields["pathingPredictedPathDisplayedCount"] = pathing.predicted_path_displayed_count
+            fields["pathingPredictedPathAvailableCount"] = pathing.predicted_path_available_count
             fields["pathingPathWasCapped"] = pathing.path_was_capped
+            fields["pathingPathDisplayWasCapped"] = pathing.path_display_was_capped
+            fields["overlayPredictedPathLimit"] = intent_overlay_analyzer.predicted_path_limit(self.args, self.args.overlay_mode)
+            fields["pathingPathSegmentsValid"] = pathing.path_segments_valid
+            fields["pathingInvalidPathSegmentCount"] = pathing.invalid_path_segment_count
+            fields["pathingFirstInvalidPathSegment"] = pathing.first_invalid_path_segment
+            fields["pathingSelectedApproachReason"] = pathing.selected_approach_reason
+            fields["pathingApproachQuality"] = pathing.approach_quality
+            fields["pathingApproachCandidatesTested"] = pathing.approach_candidates_tested
+            fields["pathingApproachCandidatesRejectedByBlockedSide"] = pathing.approach_candidates_rejected_by_blocked_side
+            fields["pathingApproachCandidatesRejectedByNoLineOfSight"] = pathing.approach_candidates_rejected_by_no_line_of_sight
+            fields["pathingSideAccessValid"] = pathing.side_access_valid
+            fields["pathingLineOfSightToTarget"] = pathing.line_of_sight_to_target
             fields["pathingDiagonalStepCount"] = pathing.diagonal_step_count
             fields["pathingCardinalStepCount"] = pathing.cardinal_step_count
             fields["pathingMillis"] = pathing.pathing_millis
             fields["pathNodesExpanded"] = pathing.path_nodes_expanded
             fields["pathingBudgetExceeded"] = pathing.pathing_budget_exceeded
+            fields["pathIntentKey"] = pathing.path_intent_key
+            fields["pathDestinationTargetKey"] = pathing.destination_target_key
+            fields["pathIntentRetained"] = pathing.path_intent_retained
+            fields["pathStableForTicks"] = pathing.path_stable_for_ticks
+            fields["pathMovementState"] = pathing.movement_state
+            fields["pathRetentionReason"] = pathing.retention_reason
+            fields["pathSwitchReason"] = pathing.switch_reason
         self.state.source_status.update(fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)

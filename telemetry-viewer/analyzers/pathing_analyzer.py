@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from copy import deepcopy
 from collections import Counter, deque
 from dataclasses import dataclass, is_dataclass
 from typing import Any
@@ -34,6 +35,9 @@ class ApproachCandidate:
     tile: tuple[int, int]
     tile_kind: str
     direction_index: int
+    side_access_valid: bool | None = None
+    line_of_sight_to_target: bool | None = None
+    side_access_reason: str | None = None
 
 
 @dataclass
@@ -50,6 +54,53 @@ class LocalPathResult:
     rejected_approach_tile_reasons: dict[str, int] | None = None
     path_target_scene_tile: tuple[int, int] | None = None
     path_target_tile_source: str | None = None
+    approach_candidates_tested: int = 0
+    approach_candidates_rejected_by_blocked_side: int = 0
+    approach_candidates_rejected_by_no_line_of_sight: int = 0
+    selected_approach_reason: str | None = None
+    approach_quality: str | None = None
+    side_access_valid: bool | None = None
+    line_of_sight_to_target: bool | None = None
+    invalid_path_segments: list[dict[str, Any]] | None = None
+
+
+@dataclass
+class PathIntentState:
+    active_path_intent_key: str | None = None
+    active_phase_key: str | None = None
+    destination_target_key: str | None = None
+    destination_tile: dict[str, Any] | None = None
+    final_approach_tile: dict[str, Any] | str | None = None
+    next_waypoint_tile: dict[str, Any] | None = None
+    predicted_path_tiles: list[dict[str, Any]] | None = None
+    retained_path_fields: dict[str, Any] | None = None
+    path_started_tick: int | None = None
+    last_updated_tick: int | None = None
+    stable_for_ticks: int = 0
+    retention_reason: str | None = None
+    switch_reason: str | None = None
+    last_player_tile: dict[str, Any] | None = None
+    last_player_tile_changed_tick: int | None = None
+    pending_switch_key: str | None = None
+    pending_switch_ticks: int = 0
+    switch_debounce_ticks: int = 2
+
+    def clear(self, *, reason: str | None = None) -> None:
+        self.active_path_intent_key = None
+        self.active_phase_key = None
+        self.destination_target_key = None
+        self.destination_tile = None
+        self.final_approach_tile = None
+        self.next_waypoint_tile = None
+        self.predicted_path_tiles = None
+        self.retained_path_fields = None
+        self.path_started_tick = None
+        self.last_updated_tick = None
+        self.stable_for_ticks = 0
+        self.retention_reason = None
+        self.switch_reason = reason
+        self.pending_switch_key = None
+        self.pending_switch_ticks = 0
 
 def context_value(context: Any, snake_key: str, camel_key: str | None = None, default: Any = None) -> Any:
     if context is None:
@@ -234,6 +285,367 @@ def target_label(target: dict[str, Any] | None) -> str:
     return str(target.get("targetName") or target.get("name") or target.get("classId") or "target")
 
 
+def tile_key(tile: dict[str, Any] | None) -> str | None:
+    if not isinstance(tile, dict):
+        return None
+    world_x = int_value(tile.get("worldX"))
+    world_y = int_value(tile.get("worldY"))
+    plane = int_value(tile.get("plane"))
+    if world_x is None or world_y is None or plane is None:
+        return None
+    return f"{world_x}:{world_y}:{plane}"
+
+
+def player_tile(player_context: Any) -> dict[str, Any] | None:
+    return tile_dict(
+        player_field(player_context, "world_x", "worldX"),
+        player_field(player_context, "world_y", "worldY"),
+        player_field(player_context, "plane", "plane"),
+    )
+
+
+def destination_target_key(destination: dict[str, Any] | None) -> str | None:
+    if not isinstance(destination, dict) or not destination:
+        return None
+    for key in ("objectKey", "targetKey", "candidateKey"):
+        value = destination.get(key)
+        if value:
+            return f"{key}:{value}"
+    value = destination.get("hash")
+    if value is not None:
+        return f"hash:{value}"
+    target_type = destination.get("targetType") or destination.get("target_type") or ""
+    class_id = destination.get("classId") or destination.get("class_id") or ""
+    object_id = destination.get("id")
+    world_x = destination.get("worldX")
+    world_y = destination.get("worldY")
+    plane = destination.get("plane")
+    if object_id is not None and world_x is not None and world_y is not None and plane is not None:
+        return f"id-world:{object_id}:{world_x}:{world_y}:{plane}:{target_type}:{class_id}"
+    scene_x = destination.get("sceneX")
+    scene_y = destination.get("sceneY")
+    if object_id is not None and scene_x is not None and scene_y is not None and plane is not None:
+        return f"id-scene:{object_id}:{scene_x}:{scene_y}:{plane}"
+    return f"{target_type}:{class_id}:{world_x}:{world_y}:{plane}"
+
+
+def phase_key(generic_task_state: Any) -> str:
+    phase = context_value(generic_task_state, "phase", "phase", "unknown")
+    active_intent = context_value(generic_task_state, "active_intent", "activeIntent", "unknown")
+    task = context_value(generic_task_state, "task", "task", "unknown")
+    return f"{task}:{phase}:{active_intent}"
+
+
+def build_path_intent_key(
+    *,
+    destination: dict[str, Any] | None,
+    destination_tile: dict[str, Any] | None,
+    generic_task_state: Any,
+) -> str | None:
+    target_key = destination_target_key(destination)
+    tile = tile_key(destination_tile)
+    if not target_key and not tile:
+        return None
+    target_type = destination.get("targetType") if isinstance(destination, dict) else None
+    class_id = destination.get("classId") if isinstance(destination, dict) else None
+    return "|".join(
+        str(part)
+        for part in (
+            phase_key(generic_task_state),
+            target_key or "target:none",
+            tile or "tile:none",
+            target_type or "",
+            class_id or "",
+        )
+    )
+
+
+def infer_movement_state(
+    *,
+    state: PathIntentState | None,
+    current_player_tile: dict[str, Any] | None,
+    activity_context: Any,
+    tick: int | None,
+    recent_ticks: int = 2,
+) -> str:
+    explicit = str(context_value(activity_context, "current_activity", "currentActivity", "") or "").lower()
+    raw = context_value(activity_context, "raw")
+    raw_activity = raw.get("activity") if isinstance(raw, dict) and isinstance(raw.get("activity"), dict) else {}
+    raw_is_moving = raw_activity.get("isMoving") if isinstance(raw_activity, dict) else None
+    if explicit == "moving" or raw_is_moving is True:
+        return "moving"
+    if state is None or current_player_tile is None:
+        return "unknown"
+    current_key = tile_key(current_player_tile)
+    previous_key = tile_key(state.last_player_tile)
+    if current_key and previous_key and current_key != previous_key:
+        return "moving"
+    if tick is not None and state.last_player_tile_changed_tick is not None:
+        if max(0, int(tick) - int(state.last_player_tile_changed_tick)) <= recent_ticks:
+            return "recently_moved"
+    if current_key:
+        return "stationary"
+    return "unknown"
+
+
+def update_player_movement_state(state: PathIntentState | None, current_player_tile: dict[str, Any] | None, tick: int | None) -> None:
+    if state is None or current_player_tile is None:
+        return
+    current_key = tile_key(current_player_tile)
+    previous_key = tile_key(state.last_player_tile)
+    if current_key and previous_key and current_key != previous_key:
+        state.last_player_tile_changed_tick = tick
+    elif current_key and previous_key is None:
+        state.last_player_tile_changed_tick = tick
+    state.last_player_tile = deepcopy(current_player_tile)
+
+
+RETAINED_PATH_ATTRIBUTES = (
+    "destination",
+    "destination_tile",
+    "destination_world_x",
+    "destination_world_y",
+    "destination_plane",
+    "destination_scene_x",
+    "destination_scene_y",
+    "destination_tile_source",
+    "local_reachability",
+    "path_length_tiles",
+    "next_waypoint_tile",
+    "final_approach_tile",
+    "final_approach_tile_source",
+    "final_approach_candidate_count",
+    "rejected_approach_tile_reasons",
+    "final_approach_tile_used",
+    "path_target_tile",
+    "path_target_tile_source",
+    "predicted_path_tiles",
+    "predicted_step_count",
+    "predicted_path_count",
+    "predicted_path_displayed_count",
+    "predicted_path_available_count",
+    "path_was_capped",
+    "path_display_was_capped",
+    "overlay_predicted_path_limit",
+    "diagonal_step_count",
+    "cardinal_step_count",
+    "path_segments_valid",
+    "invalid_path_segment_count",
+    "invalid_path_segments",
+    "first_invalid_path_segment",
+    "predicted_run_segments",
+    "predicted_movement_model",
+    "predicted_movement_notes",
+    "prediction_confidence",
+    "path_cap_tiles",
+    "exact_destination_reached",
+    "final_approach_substituted",
+    "approach_candidates_tested",
+    "approach_candidates_rejected_by_blocked_side",
+    "approach_candidates_rejected_by_no_line_of_sight",
+    "selected_approach_reason",
+    "approach_quality",
+    "side_access_valid",
+    "line_of_sight_to_target",
+    "skipped_run_tiles",
+    "run_behavior",
+    "reason",
+)
+
+
+def snapshot_path_fields(context: PathingContext) -> dict[str, Any]:
+    return {name: deepcopy(getattr(context, name)) for name in RETAINED_PATH_ATTRIBUTES}
+
+
+def apply_retained_path_fields(context: PathingContext, state: PathIntentState) -> None:
+    for name, value in (state.retained_path_fields or {}).items():
+        setattr(context, name, deepcopy(value))
+
+
+def arrived_at_final_approach(current_player_tile: dict[str, Any] | None, state: PathIntentState | None) -> bool:
+    if state is None or not isinstance(state.final_approach_tile, dict):
+        return False
+    return tile_key(current_player_tile) == tile_key(state.final_approach_tile)
+
+
+def store_path_intent_state(
+    state: PathIntentState,
+    context: PathingContext,
+    *,
+    intent_key: str | None,
+    destination_key: str | None,
+    current_phase_key: str,
+    tick: int | None,
+    switch_reason: str | None,
+) -> None:
+    if not intent_key:
+        state.clear(reason=switch_reason)
+        return
+    if state.active_path_intent_key == intent_key:
+        state.stable_for_ticks = max(1, state.stable_for_ticks + 1)
+    else:
+        state.stable_for_ticks = 1
+        state.path_started_tick = tick
+    state.active_path_intent_key = intent_key
+    state.active_phase_key = current_phase_key
+    state.destination_target_key = destination_key
+    state.destination_tile = deepcopy(context.destination_tile)
+    state.final_approach_tile = deepcopy(context.final_approach_tile)
+    state.next_waypoint_tile = deepcopy(context.next_waypoint_tile)
+    state.predicted_path_tiles = deepcopy(context.predicted_path_tiles)
+    state.retained_path_fields = snapshot_path_fields(context)
+    state.last_updated_tick = tick
+    state.retention_reason = None
+    state.switch_reason = switch_reason
+    state.pending_switch_key = None
+    state.pending_switch_ticks = 0
+
+
+def stabilize_path_intent(
+    context: PathingContext,
+    *,
+    path_intent_state: PathIntentState | None,
+    generic_task_state: Any,
+    current_player_tile: dict[str, Any] | None,
+    movement_state: str,
+    tick: int | None,
+) -> PathingContext:
+    destination_key = destination_target_key(context.destination)
+    current_phase_key = phase_key(generic_task_state)
+    intent_key = build_path_intent_key(
+        destination=context.destination,
+        destination_tile=context.destination_tile,
+        generic_task_state=generic_task_state,
+    )
+    if path_intent_state is None:
+        annotate_path_intent(
+            context,
+            state=None,
+            intent_key=intent_key,
+            destination_key=destination_key,
+            movement_state=movement_state,
+            retained=False,
+            retention_reason=None,
+            switch_reason=None,
+            tick=tick,
+        )
+        return context
+
+    def finish(retained: bool, retention_reason: str | None, switch_reason: str | None, key: str | None = None, dest_key: str | None = None) -> PathingContext:
+        annotate_path_intent(
+            context,
+            state=path_intent_state,
+            intent_key=key if key is not None else intent_key,
+            destination_key=dest_key if dest_key is not None else destination_key,
+            movement_state=movement_state,
+            retained=retained,
+            retention_reason=retention_reason,
+            switch_reason=switch_reason,
+            tick=tick,
+        )
+        update_player_movement_state(path_intent_state, current_player_tile, tick)
+        return context
+
+    if not context.pathing_needed or not context.destination or not intent_key:
+        switch_reason = context.reason or "pathing_not_needed"
+        path_intent_state.clear(reason=switch_reason)
+        return finish(False, None, switch_reason)
+
+    if context.local_reachability == "blocked":
+        path_intent_state.clear(reason="path_blocked")
+        return finish(False, None, "path_blocked")
+
+    if (
+        path_intent_state.active_path_intent_key == intent_key
+        and arrived_at_final_approach(current_player_tile, path_intent_state)
+    ):
+        path_intent_state.clear(reason="arrived_at_final_approach")
+        context.predicted_path_tiles = []
+        context.next_waypoint_tile = None
+        context.path_length_tiles = 0
+        return finish(False, None, "arrived_at_final_approach")
+
+    moving = movement_state in {"moving", "recently_moved"}
+    active_key = path_intent_state.active_path_intent_key
+    if active_key == intent_key:
+        if moving and path_intent_state.retained_path_fields:
+            path_intent_state.stable_for_ticks = max(1, path_intent_state.stable_for_ticks + 1)
+            path_intent_state.last_updated_tick = tick
+            path_intent_state.retention_reason = "player_moving_same_destination"
+            path_intent_state.switch_reason = None
+            apply_retained_path_fields(context, path_intent_state)
+            return finish(True, "player_moving_same_destination", None, key=active_key, dest_key=path_intent_state.destination_target_key)
+        store_path_intent_state(
+            path_intent_state,
+            context,
+            intent_key=intent_key,
+            destination_key=destination_key,
+            current_phase_key=current_phase_key,
+            tick=tick,
+            switch_reason=None,
+        )
+        return finish(False, None, None)
+
+    if active_key and path_intent_state.active_phase_key == current_phase_key and moving and path_intent_state.retained_path_fields:
+        if path_intent_state.pending_switch_key == intent_key:
+            path_intent_state.pending_switch_ticks += 1
+        else:
+            path_intent_state.pending_switch_key = intent_key
+            path_intent_state.pending_switch_ticks = 1
+        if path_intent_state.pending_switch_ticks < max(1, int(path_intent_state.switch_debounce_ticks)):
+            path_intent_state.stable_for_ticks = max(1, path_intent_state.stable_for_ticks + 1)
+            path_intent_state.last_updated_tick = tick
+            path_intent_state.retention_reason = "candidate_switch_debounce"
+            apply_retained_path_fields(context, path_intent_state)
+            return finish(True, "candidate_switch_debounce", None, key=active_key, dest_key=path_intent_state.destination_target_key)
+        store_path_intent_state(
+            path_intent_state,
+            context,
+            intent_key=intent_key,
+            destination_key=destination_key,
+            current_phase_key=current_phase_key,
+            tick=tick,
+            switch_reason="destination_changed_after_debounce",
+        )
+        return finish(False, None, "destination_changed_after_debounce")
+
+    switch_reason = "new_path_intent" if not active_key else "path_intent_key_changed"
+    store_path_intent_state(
+        path_intent_state,
+        context,
+        intent_key=intent_key,
+        destination_key=destination_key,
+        current_phase_key=current_phase_key,
+        tick=tick,
+        switch_reason=switch_reason,
+    )
+    return finish(False, None, switch_reason)
+
+
+def annotate_path_intent(
+    context: PathingContext,
+    *,
+    state: PathIntentState | None,
+    intent_key: str | None,
+    destination_key: str | None,
+    movement_state: str,
+    retained: bool,
+    retention_reason: str | None,
+    switch_reason: str | None,
+    tick: int | None,
+) -> None:
+    context.path_intent_key = intent_key
+    context.destination_target_key = destination_key
+    context.path_intent_retained = retained
+    context.movement_state = movement_state
+    context.retention_reason = retention_reason
+    context.switch_reason = switch_reason
+    if state is not None:
+        context.path_stable_for_ticks = state.stable_for_ticks or (1 if intent_key else 0)
+        context.path_started_tick = state.path_started_tick
+        context.path_last_updated_tick = state.last_updated_tick or tick
+
+
 def base_context(
     *,
     started: float,
@@ -331,6 +743,20 @@ def can_move_diagonal(window: navigation_reachability.CollisionWindow, x: int, y
     )
 
 
+def cardinal_edge_clear(window: navigation_reachability.CollisionWindow, x: int, y: int, nx: int, ny: int) -> bool:
+    dx = nx - x
+    dy = ny - y
+    for dir_x, dir_y, source_block, dest_block in navigation_reachability.DIRECTIONS:
+        if dx == dir_x and dy == dir_y:
+            return (
+                navigation_reachability.contains(window, x, y)
+                and navigation_reachability.contains(window, nx, ny)
+                and (navigation_reachability.flag_at(window, x, y) & source_block) == 0
+                and (navigation_reachability.flag_at(window, nx, ny) & dest_block) == 0
+            )
+    return False
+
+
 def step_allowed_for_model(window: navigation_reachability.CollisionWindow, x: int, y: int, nx: int, ny: int, model: str) -> bool:
     dx = nx - x
     dy = ny - y
@@ -339,6 +765,53 @@ def step_allowed_for_model(window: navigation_reachability.CollisionWindow, x: i
     if model in {"osrs_like_predicted", "diagonal_guarded"} and abs(dx) == 1 and abs(dy) == 1:
         return can_move_diagonal(window, x, y, nx, ny)
     return False
+
+
+def path_segment_payload(start: tuple[int, int], end: tuple[int, int], reason: str) -> dict[str, Any]:
+    return {
+        "from": {"sceneX": start[0], "sceneY": start[1]},
+        "to": {"sceneX": end[0], "sceneY": end[1]},
+        "reason": reason,
+    }
+
+
+def validate_path_segments(
+    window: navigation_reachability.CollisionWindow | None,
+    scene_path: list[tuple[int, int]],
+    movement_model: str,
+    *,
+    diagnostic_cap: int = 12,
+) -> dict[str, Any]:
+    invalid: list[dict[str, Any]] = []
+    if window is None or len(scene_path) <= 1:
+        return {"valid": True, "invalidCount": 0, "invalidSegments": [], "firstInvalidSegment": None}
+    for start, end in zip(scene_path, scene_path[1:]):
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        reason: str | None = None
+        if dx == 0 and dy == 0:
+            reason = "zero_length_step"
+        elif abs(dx) > 1 or abs(dy) > 1:
+            reason = "non_adjacent_step"
+        elif abs(dx) + abs(dy) == 1:
+            if not can_move_cardinal(window, start[0], start[1], end[0], end[1]):
+                reason = "blocked_cardinal_step"
+        elif abs(dx) == 1 and abs(dy) == 1:
+            if movement_model not in {"osrs_like_predicted", "diagonal_guarded"}:
+                reason = "diagonal_not_allowed"
+            elif not can_move_diagonal(window, start[0], start[1], end[0], end[1]):
+                reason = "blocked_diagonal_step"
+        else:
+            reason = "illegal_step"
+        if reason:
+            invalid.append(path_segment_payload(start, end, reason))
+    capped = invalid[: max(0, int(diagnostic_cap))]
+    return {
+        "valid": not invalid,
+        "invalidCount": len(invalid),
+        "invalidSegments": capped,
+        "firstInvalidSegment": invalid[0] if invalid else None,
+    }
 
 
 def target_uses_approach_tile(destination: dict[str, Any] | None) -> bool:
@@ -362,6 +835,22 @@ def target_uses_approach_tile(destination: dict[str, Any] | None) -> bool:
     }
 
 
+def target_prefers_direct_side_access(destination: dict[str, Any] | None) -> bool:
+    if not isinstance(destination, dict):
+        return False
+    target_type = str(destination.get("targetType") or destination.get("target_type") or "")
+    class_id = str(destination.get("classId") or destination.get("class_id") or "")
+    service_type = str(destination.get("serviceCandidateType") or destination.get("serviceClassId") or "")
+    name = str(destination.get("targetName") or destination.get("name") or "").lower()
+    if target_type != "sceneObject":
+        return False
+    if service_type in {"bank_service", "bank_booth", "bank_chest", "deposit_box", "deposit_chest"}:
+        return True
+    if class_id in {"bank_service", "bank_booth", "bank_chest", "deposit_box", "deposit_chest"}:
+        return True
+    return any(token in name for token in ("bank booth", "bank chest", "deposit box", "deposit chest", "bank deposit box"))
+
+
 def target_footprint_size(destination: dict[str, Any] | None) -> tuple[int, int]:
     if not isinstance(destination, dict):
         return 1, 1
@@ -382,6 +871,30 @@ def target_footprint_tiles(destination_scene: tuple[int, int], destination: dict
     width, height = target_footprint_size(destination)
     base_x, base_y = destination_scene
     return {(base_x + dx, base_y + dy) for dx in range(width) for dy in range(height)}
+
+
+def evaluate_approach_side_access(
+    window: navigation_reachability.CollisionWindow,
+    *,
+    candidate_tile: tuple[int, int],
+    footprint: set[tuple[int, int]],
+) -> tuple[bool | None, bool | None, str]:
+    diagonal_touch = False
+    blocked_cardinal = False
+    for target_tile in footprint:
+        dx = target_tile[0] - candidate_tile[0]
+        dy = target_tile[1] - candidate_tile[1]
+        if abs(dx) + abs(dy) == 1:
+            if cardinal_edge_clear(window, candidate_tile[0], candidate_tile[1], target_tile[0], target_tile[1]):
+                return True, True, "direct_side_access"
+            blocked_cardinal = True
+        elif abs(dx) == 1 and abs(dy) == 1:
+            diagonal_touch = True
+    if blocked_cardinal:
+        return False, False, "blocked_side_access"
+    if diagonal_touch:
+        return None, None, "diagonal_only_side_access_unknown"
+    return None, None, "not_adjacent_to_target_footprint"
 
 
 def approach_directions_for_model(model: str) -> tuple[tuple[int, int], ...]:
@@ -418,7 +931,21 @@ def approach_tile_candidates(
                 rejected["tile_blocked"] += 1
                 continue
             tile_kind = "diagonal" if abs(dx) == 1 and abs(dy) == 1 else "cardinal"
-            candidates.append(ApproachCandidate(tile=tile, tile_kind=tile_kind, direction_index=direction_index))
+            side_access, line_of_sight, side_reason = evaluate_approach_side_access(
+                window,
+                candidate_tile=tile,
+                footprint=footprint,
+            )
+            candidates.append(
+                ApproachCandidate(
+                    tile=tile,
+                    tile_kind=tile_kind,
+                    direction_index=direction_index,
+                    side_access_valid=side_access,
+                    line_of_sight_to_target=line_of_sight,
+                    side_access_reason=side_reason,
+                )
+            )
     return candidates, dict(rejected)
 
 
@@ -526,11 +1053,15 @@ def local_scene_path(
             rejected_approach_tile_reasons=rejected,
         )
 
-    best_score: tuple[int, int, int, int, int] | None = None
+    best_score: tuple[int, int, int, int, int, int] | None = None
     best_path: list[tuple[int, int]] = []
     best_candidate: ApproachCandidate | None = None
+    best_suspect_score: tuple[int, int, int, int, int, int] | None = None
+    best_suspect_path: list[tuple[int, int]] = []
+    best_suspect_candidate: ApproachCandidate | None = None
     total_expanded = exact_expanded
     rejected_counter: Counter[str] = Counter(rejected)
+    prefer_direct_side_access = target_prefers_direct_side_access(destination_payload)
     for candidate in candidates:
         if total_expanded >= max_nodes:
             return LocalPathResult(
@@ -571,13 +1102,47 @@ def local_scene_path(
         path_length = max(0, len(path) - 1)
         tile_kind_preference = 0 if candidate.tile_kind == "cardinal" else 1
         player_distance = abs(candidate.tile[0] - start[0]) + abs(candidate.tile[1] - start[1])
-        score = (path_length, tile_kind_preference, player_distance, candidate.direction_index, candidate.tile[0] * 256 + candidate.tile[1])
+        side_preference = 0 if candidate.side_access_valid is True else 1
+        if prefer_direct_side_access:
+            score = (side_preference, path_length, tile_kind_preference, player_distance, candidate.direction_index, candidate.tile[0] * 256 + candidate.tile[1])
+        else:
+            score = (path_length, tile_kind_preference, side_preference, player_distance, candidate.direction_index, candidate.tile[0] * 256 + candidate.tile[1])
+        if candidate.side_access_valid is False:
+            rejected_counter["blocked_side_access"] += 1
+            rejected_counter["no_line_of_sight"] += 1
+            if best_suspect_score is None or score < best_suspect_score:
+                best_suspect_score = score
+                best_suspect_path = path
+                best_suspect_candidate = candidate
+            continue
         if best_score is None or score < best_score:
             best_score = score
             best_path = path
             best_candidate = candidate
 
     if best_candidate is None:
+        if best_suspect_candidate is not None:
+            return LocalPathResult(
+                "unknown",
+                "approach_side_access_blocked",
+                best_suspect_path,
+                total_expanded,
+                False,
+                False,
+                final_approach_scene_tile=best_suspect_candidate.tile,
+                final_approach_tile_source="local_collision_approach_candidate",
+                final_approach_candidate_count=len(candidates),
+                rejected_approach_tile_reasons=dict(rejected_counter),
+                path_target_scene_tile=best_suspect_candidate.tile,
+                path_target_tile_source="final_approach_tile",
+                approach_candidates_tested=len(candidates),
+                approach_candidates_rejected_by_blocked_side=rejected_counter.get("blocked_side_access", 0),
+                approach_candidates_rejected_by_no_line_of_sight=rejected_counter.get("no_line_of_sight", 0),
+                selected_approach_reason="suspect_blocked_side_access",
+                approach_quality="suspect_outside_wall",
+                side_access_valid=False,
+                line_of_sight_to_target=False,
+            )
         return LocalPathResult(
             "blocked",
             "no_local_path",
@@ -587,7 +1152,40 @@ def local_scene_path(
             False,
             final_approach_candidate_count=len(candidates),
             rejected_approach_tile_reasons=dict(rejected_counter),
+            approach_candidates_tested=len(candidates),
+            approach_candidates_rejected_by_blocked_side=rejected_counter.get("blocked_side_access", 0),
+            approach_candidates_rejected_by_no_line_of_sight=rejected_counter.get("no_line_of_sight", 0),
         )
+    if prefer_direct_side_access and best_candidate.side_access_valid is not True:
+        return LocalPathResult(
+            "unknown",
+            "approach_side_access_blocked",
+            best_path,
+            total_expanded,
+            False,
+            False,
+            final_approach_scene_tile=best_candidate.tile,
+            final_approach_tile_source="local_collision_approach_candidate",
+            final_approach_candidate_count=len(candidates),
+            rejected_approach_tile_reasons=dict(rejected_counter),
+            path_target_scene_tile=best_candidate.tile,
+            path_target_tile_source="final_approach_tile",
+            approach_candidates_tested=len(candidates),
+            approach_candidates_rejected_by_blocked_side=rejected_counter.get("blocked_side_access", 0),
+            approach_candidates_rejected_by_no_line_of_sight=rejected_counter.get("no_line_of_sight", 0),
+            selected_approach_reason="suspect_side_access_unknown",
+            approach_quality="suspect_outside_wall",
+            side_access_valid=best_candidate.side_access_valid,
+            line_of_sight_to_target=best_candidate.line_of_sight_to_target,
+        )
+    selected_reason = (
+        "reachable_direct_side_access"
+        if best_candidate.side_access_valid is True
+        else "reachable_side_access_unknown"
+        if best_candidate.side_access_valid is None
+        else "reachable"
+    )
+    approach_quality = "direct_side_access" if best_candidate.side_access_valid is True else "side_access_unknown"
     return LocalPathResult(
         "reachable",
         "approach_tile_found",
@@ -601,6 +1199,13 @@ def local_scene_path(
         rejected_approach_tile_reasons=dict(rejected_counter),
         path_target_scene_tile=best_candidate.tile,
         path_target_tile_source="final_approach_tile",
+        approach_candidates_tested=len(candidates),
+        approach_candidates_rejected_by_blocked_side=rejected_counter.get("blocked_side_access", 0),
+        approach_candidates_rejected_by_no_line_of_sight=rejected_counter.get("no_line_of_sight", 0),
+        selected_approach_reason=selected_reason,
+        approach_quality=approach_quality,
+        side_access_valid=best_candidate.side_access_valid,
+        line_of_sight_to_target=best_candidate.line_of_sight_to_target,
     )
 
 
@@ -625,6 +1230,9 @@ def analyze_pathing_context(
     service_context: Any = None,
     process_inventory_context: Any = None,
     target_context: Any = None,
+    activity_context: Any = None,
+    generic_task_state: Any = None,
+    path_intent_state: PathIntentState | None = None,
     source_tick: int | None = None,
     max_predicted_tiles: int = DEFAULT_MAX_PREDICTED_TILES,
     max_nodes: int = DEFAULT_MAX_NODES,
@@ -639,17 +1247,35 @@ def analyze_pathing_context(
     navigation_reason = str(context_value(navigation_intent_context, "navigation_reason", "navigationReason") or "")
     target_kind = str(context_value(navigation_intent_context, "target_kind", "targetKind") or "none")
     destination = destination_from_navigation_intent(navigation_intent_context)
+    generic_task_state = generic_task_state if generic_task_state is not None else {}
+    current_player_tile = player_tile(player_context)
+    movement_state = infer_movement_state(
+        state=path_intent_state,
+        current_player_tile=current_player_tile,
+        activity_context=activity_context,
+        tick=tick,
+    )
+
+    def finalize(context: PathingContext) -> PathingContext:
+        return stabilize_path_intent(
+            context,
+            path_intent_state=path_intent_state,
+            generic_task_state=generic_task_state,
+            current_player_tile=current_player_tile,
+            movement_state=movement_state,
+            tick=tick,
+        )
 
     if target_kind == "process_inventory":
-        return base_context(started=started, source_tick=tick, pathing_needed=False, destination=None, reason="not_needed_for_process_inventory")
+        return finalize(base_context(started=started, source_tick=tick, pathing_needed=False, destination=None, reason="not_needed_for_process_inventory"))
     if navigation_reason == "service_target_missing":
-        return base_context(started=started, source_tick=tick, pathing_needed=False, destination=None, reason="service_target_missing", status="WARN", warnings=["service target missing; pathing waits for destination context"])
+        return finalize(base_context(started=started, source_tick=tick, pathing_needed=False, destination=None, reason="service_target_missing", status="WARN", warnings=["service target missing; pathing waits for destination context"]))
     if not navigation_needed and target_kind in {"none", "process_inventory"}:
-        return base_context(started=started, source_tick=tick, pathing_needed=False, destination=None, reason="not_needed_for_current_phase")
+        return finalize(base_context(started=started, source_tick=tick, pathing_needed=False, destination=None, reason="not_needed_for_current_phase"))
     if not navigation_needed and navigation_reason == "target_reachable":
-        return base_context(started=started, source_tick=tick, pathing_needed=False, destination=destination, reason="target_reachable", local_reachability="reachable")
+        return finalize(base_context(started=started, source_tick=tick, pathing_needed=False, destination=destination, reason="target_reachable", local_reachability="reachable"))
     if not destination:
-        return base_context(
+        return finalize(base_context(
             started=started,
             source_tick=tick,
             pathing_needed=bool(navigation_needed),
@@ -658,7 +1284,7 @@ def analyze_pathing_context(
             status="WARN" if navigation_needed else "PASS",
             warnings=["navigation intent did not provide a destination target"] if navigation_needed else [],
             missing_capabilities=["target.candidates"] if navigation_needed else [],
-        )
+        ))
 
     player_world_x = player_field(player_context, "world_x", "worldX")
     player_world_y = player_field(player_context, "world_y", "worldY")
@@ -728,7 +1354,7 @@ def analyze_pathing_context(
         context.destination_plane = target_plane
         context.destination_scene_x = target_scene_x
         context.destination_scene_y = target_scene_y
-        return context
+        return finalize(context)
     if window_fresh is False:
         context = base_context(
             started=started,
@@ -756,7 +1382,7 @@ def analyze_pathing_context(
         context.destination_plane = target_plane
         context.destination_scene_x = target_scene_x
         context.destination_scene_y = target_scene_y
-        return context
+        return finalize(context)
     if player_scene_x is None:
         player_scene_x = window.player_scene_x
     if player_scene_y is None:
@@ -794,7 +1420,7 @@ def analyze_pathing_context(
         context.destination_plane = target_plane
         context.destination_scene_x = target_scene_x
         context.destination_scene_y = target_scene_y
-        return context
+        return finalize(context)
     if None in (player_scene_x, player_scene_y, target_scene_x, target_scene_y, player_plane, target_plane):
         context = base_context(
             started=started,
@@ -822,7 +1448,7 @@ def analyze_pathing_context(
         context.destination_plane = target_plane
         context.destination_scene_x = target_scene_x
         context.destination_scene_y = target_scene_y
-        return context
+        return finalize(context)
 
     assert player_scene_x is not None and player_scene_y is not None and target_scene_x is not None and target_scene_y is not None
     assert player_plane is not None
@@ -840,6 +1466,10 @@ def analyze_pathing_context(
     reachability = local_path.reachability
     reason = local_path.reason
     scene_path = local_path.scene_path
+    segment_validation = validate_path_segments(window, scene_path, search_movement_model)
+    if scene_path and not segment_validation["valid"] and reachability == "reachable":
+        reachability = "unknown"
+        reason = "invalid_path_segment"
     expanded = local_path.expanded
     budget_exceeded = local_path.budget_exceeded
     exact_destination_reached = local_path.exact_destination_reached
@@ -860,6 +1490,10 @@ def analyze_pathing_context(
         warnings.append("player is outside the local collision window")
     elif reason == "pathing_budget_exceeded":
         warnings.append("pathing search budget exceeded")
+    elif reason == "invalid_path_segment":
+        warnings.append("predicted path contains a movement segment blocked by collision data")
+    elif reason == "approach_side_access_blocked":
+        warnings.append("approach tile is reachable, but target-side access appears blocked or outside-wall")
     elif reachability == "blocked":
         warnings.append("no reachable local path found inside the collision window")
     if reachability == "reachable":
@@ -898,7 +1532,7 @@ def analyze_pathing_context(
     path_was_capped = len(full_predicted_tiles) > len(predicted_tiles)
     final_approach: dict[str, Any] | str | None = None
     path_target_tile: dict[str, Any] | None = None
-    if reachability == "reachable":
+    if scene_path:
         if local_path.final_approach_scene_tile is not None:
             final_approach = scene_to_world(
                 local_path.final_approach_scene_tile[0],
@@ -924,9 +1558,12 @@ def analyze_pathing_context(
                 plane=player_plane,
             )
     final_approach_tile_used = bool(reachability == "reachable" and local_path.path_target_tile_source == "final_approach_tile")
-    final_approach_substituted = bool(reachability == "reachable" and final_approach_tile_used and not exact_destination_reached)
+    if final_approach_tile_used is False and local_path.path_target_tile_source == "final_approach_tile" and isinstance(final_approach, dict):
+        final_approach_tile_used = True
+    reported_exact_destination_reached = exact_destination_reached if reachability == "reachable" else False
+    final_approach_substituted = bool(final_approach_tile_used and not reported_exact_destination_reached)
     elapsed = (time.perf_counter() - started) * 1000.0
-    return PathingContext(
+    return finalize(PathingContext(
         status=status,
         warnings=warnings,
         missing_capabilities=capabilities.normalize_capability_names(missing),
@@ -955,16 +1592,29 @@ def analyze_pathing_context(
         predicted_step_count=(len(scene_path) - 1) if scene_path else None,
         predicted_path_count=len(full_predicted_tiles),
         predicted_path_displayed_count=len(predicted_tiles),
+        predicted_path_available_count=len(full_predicted_tiles),
         path_was_capped=path_was_capped,
+        path_display_was_capped=path_was_capped,
         diagonal_step_count=diagonal_steps,
         cardinal_step_count=cardinal_steps,
+        path_segments_valid=segment_validation["valid"],
+        invalid_path_segment_count=segment_validation["invalidCount"],
+        invalid_path_segments=segment_validation["invalidSegments"],
+        first_invalid_path_segment=segment_validation["firstInvalidSegment"],
         predicted_run_segments=[],
         predicted_movement_model=normalized_movement_model,
         predicted_movement_notes=[PREDICTION_NOTE],
         prediction_confidence=0.75 if reachability == "reachable" else 0.25 if reachability == "unknown" else 0.55,
         path_cap_tiles=path_cap_tiles,
-        exact_destination_reached=exact_destination_reached if reachability == "reachable" else False,
+        exact_destination_reached=reported_exact_destination_reached,
         final_approach_substituted=final_approach_substituted,
+        approach_candidates_tested=local_path.approach_candidates_tested or local_path.final_approach_candidate_count,
+        approach_candidates_rejected_by_blocked_side=local_path.approach_candidates_rejected_by_blocked_side,
+        approach_candidates_rejected_by_no_line_of_sight=local_path.approach_candidates_rejected_by_no_line_of_sight,
+        selected_approach_reason=local_path.selected_approach_reason,
+        approach_quality=local_path.approach_quality,
+        side_access_valid=local_path.side_access_valid,
+        line_of_sight_to_target=local_path.line_of_sight_to_target,
         skipped_run_tiles=[],
         run_behavior="unknown",
         reason=output_reason,
@@ -980,4 +1630,4 @@ def analyze_pathing_context(
         destination_inside_collision_window=destination_inside_window,
         destination_plane_matches=destination_plane_matches,
         collision_window_missing_reason=window_missing_reason,
-    )
+    ))

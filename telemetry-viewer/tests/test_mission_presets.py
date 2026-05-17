@@ -14,6 +14,7 @@ class MissionPresetModelTest(unittest.TestCase):
     def test_named_presets_resolve_expected_runtime_fields(self):
         expected = {
             "woodcut_bank": ("woodcutting", "woodcutting_bank", 5, False),
+            "woodcut_deposit": ("woodcutting", "woodcutting_deposit", 5, False),
             "woodcut_firemake": ("woodcutting", "woodcutting_firemake", 5, False),
             "woodcut_drop": ("woodcutting", "woodcutting_drop", 5, False),
             "observe_only": ("observe", "observe_only", None, True),

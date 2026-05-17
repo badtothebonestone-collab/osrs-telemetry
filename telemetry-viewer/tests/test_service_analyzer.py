@@ -24,7 +24,7 @@ class ServiceAnalyzerTest(unittest.TestCase):
         )
 
         self.assertTrue(context.service_required)
-        self.assertEqual(context.service_type_needed, "bank")
+        self.assertEqual(context.service_type_needed, "bank_full")
         self.assertEqual(context.best_service_candidate["classId"], "banker")
         self.assertEqual(context.source_tick, 12)
         self.assertTrue(context.to_dict()["serviceNeeded"])
@@ -162,6 +162,71 @@ class ServiceAnalyzerTest(unittest.TestCase):
         self.assertIn("serviceDistanceContribution", best)
         self.assertIn("servicePathingContribution", best)
 
+    def test_woodcut_bank_prefers_full_bank_target_over_closer_deposit_box(self):
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {
+                    "targetType": "sceneObject",
+                    "classId": "deposit_box",
+                    "targetName": "Bank Deposit Box",
+                    "objectKey": "deposit-1",
+                    "distanceTiles": 1,
+                    "pathLengthTiles": 1,
+                    "approachQuality": "direct_side_access",
+                    "navigation": {"directReachability": "reachable"},
+                },
+                {
+                    "targetType": "sceneObject",
+                    "classId": "bank_booth",
+                    "targetName": "Bank booth",
+                    "objectKey": "booth-1",
+                    "distanceTiles": 9,
+                    "pathLengthTiles": 9,
+                    "approachQuality": "side_access_unknown",
+                    "navigation": {"directReachability": "unknown"},
+                },
+            ],
+        )
+        payload = context.to_dict()
+
+        self.assertEqual(payload["serviceTypeNeeded"], "bank_full")
+        self.assertEqual(payload["bestServiceCandidate"]["objectKey"], "booth-1")
+        self.assertEqual(payload["bestServiceCandidate"]["serviceGroup"], "full_bank")
+        self.assertTrue(payload["primaryServiceVisible"])
+        self.assertFalse(payload["depositFallbackAllowed"])
+        self.assertEqual(payload["selectedServiceGroup"], "full_bank")
+        self.assertIn("full bank target required", payload["bestServiceCandidate"]["serviceSelectedReason"])
+
+    def test_deposit_policy_prefers_deposit_box_over_full_bank_target(self):
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_deposit",
+            candidates=[
+                {
+                    "targetType": "sceneObject",
+                    "classId": "bank_booth",
+                    "targetName": "Bank booth",
+                    "objectKey": "booth-1",
+                    "distanceTiles": 1,
+                    "pathLengthTiles": 1,
+                },
+                {
+                    "targetType": "sceneObject",
+                    "classId": "deposit_box",
+                    "targetName": "Bank Deposit Box",
+                    "objectKey": "deposit-1",
+                    "distanceTiles": 5,
+                    "pathLengthTiles": 5,
+                },
+            ],
+        )
+        payload = context.to_dict()
+
+        self.assertEqual(payload["serviceTypeNeeded"], "bank_deposit")
+        self.assertEqual(payload["bestServiceCandidate"]["objectKey"], "deposit-1")
+        self.assertEqual(payload["selectedServiceGroup"], "deposit_only")
+        self.assertTrue(payload["depositFallbackAllowed"])
+
     def test_deposit_box_outranks_generic_bank_related_fallback(self):
         context = service_analyzer.analyze_service_context(
             "woodcutting_bank",
@@ -172,6 +237,340 @@ class ServiceAnalyzerTest(unittest.TestCase):
         )
 
         self.assertEqual(context.best_service_candidate["serviceCandidateType"], "deposit_box")
+
+    def test_bank_booth_is_retained_when_hot_candidates_temporarily_drop_it(self):
+        state = service_analyzer.ServiceTargetState()
+        first = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "bank_booth", "targetName": "Bank booth", "objectKey": "booth-1", "worldX": 3208, "worldY": 3221, "plane": 2, "distanceTiles": 5},
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Bank Deposit Box", "objectKey": "deposit-1", "worldX": 3210, "worldY": 3217, "plane": 2, "distanceTiles": 2},
+            ],
+            source_tick=10,
+            service_target_state=state,
+            current_plane=2,
+        )
+        second = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Bank Deposit Box", "objectKey": "deposit-1", "worldX": 3210, "worldY": 3217, "plane": 2, "distanceTiles": 2},
+            ],
+            source_tick=11,
+            service_target_state=state,
+            current_plane=2,
+        )
+        payload = second.to_dict()
+
+        self.assertEqual(first.best_service_candidate["serviceCandidateType"], "bank_booth")
+        self.assertEqual(second.best_service_candidate["objectKey"], "booth-1")
+        self.assertTrue(payload["serviceTargetRetained"])
+        self.assertEqual(payload["retainedServiceTargetName"], "Bank booth")
+        self.assertEqual(payload["retainedServiceMissingTicks"], 1)
+        self.assertEqual(payload["serviceSwitchReason"], "retained_primary_blocks_deposit_fallback")
+        self.assertEqual(payload["serviceCandidateDroppedReason"], "preferred_service_missing_from_current_candidates")
+        self.assertEqual(payload["retainedServiceCandidateCount"], 1)
+        self.assertEqual(payload["retainedBestServiceCandidate"]["objectKey"], "booth-1")
+        self.assertEqual(payload["retainedServiceAgeTicks"], 1)
+        self.assertEqual(payload["preferredServiceTypesSeen"], [])
+        self.assertEqual(payload["preferredServiceTypesRecentlySeen"], ["bank_booth"])
+        self.assertEqual(payload["missingPreferredReason"], "preferred_service_missing_from_current_candidates")
+        self.assertEqual(payload["selectedServiceTargetSource"], "retained_primary")
+        self.assertTrue(payload["primaryServiceRetained"])
+        self.assertFalse(payload["depositFallbackAllowed"])
+        self.assertEqual(payload["selectedServiceGroup"], "full_bank")
+
+    def test_bank_full_retained_primary_blocks_active_visible_deposit_box(self):
+        state = service_analyzer.ServiceTargetState(
+            active_service_target_key="objectKey:deposit-1",
+            active_policy_name="woodcutting_bank",
+            active_service_type="bank_full",
+            retained_candidate={
+                "targetType": "sceneObject",
+                "classId": "deposit_box",
+                "targetName": "Bank Deposit Box",
+                "objectKey": "deposit-1",
+                "worldX": 3210,
+                "worldY": 3217,
+                "plane": 2,
+                "serviceCandidateType": "deposit_box",
+                "serviceGroup": "deposit_only",
+            },
+            retained_candidate_type="deposit_box",
+            last_seen_tick=14,
+        )
+        state.recent_service_candidates["objectKey:booth-1"] = {
+            "targetType": "sceneObject",
+            "classId": "bank_booth",
+            "targetName": "Bank booth",
+            "objectKey": "booth-1",
+            "worldX": 3208,
+            "worldY": 3221,
+            "plane": 2,
+            "serviceCandidateType": "bank_booth",
+            "serviceGroup": "full_bank",
+            "lastSeenTick": 10,
+        }
+
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {
+                    "targetType": "sceneObject",
+                    "classId": "deposit_box",
+                    "targetName": "Bank Deposit Box",
+                    "objectKey": "deposit-1",
+                    "worldX": 3210,
+                    "worldY": 3217,
+                    "plane": 2,
+                    "distanceTiles": 1,
+                    "pathLengthTiles": 1,
+                },
+            ],
+            source_tick=15,
+            service_target_state=state,
+            current_plane=2,
+        )
+        payload = context.to_dict()
+        deposit = next(candidate for candidate in payload["serviceCandidates"] if candidate.get("objectKey") == "deposit-1")
+
+        self.assertEqual(payload["bestServiceCandidate"]["objectKey"], "booth-1")
+        self.assertEqual(payload["selectedServiceGroup"], "full_bank")
+        self.assertEqual(payload["selectedServiceTargetSource"], "retained_primary")
+        self.assertTrue(payload["primaryServiceRetained"])
+        self.assertFalse(payload["depositFallbackAllowed"])
+        self.assertFalse(payload["logicError"])
+        self.assertFalse(deposit["policyEligible"])
+        self.assertEqual(deposit["ineligibleReason"], "deposit_fallback_blocked_by_retained_primary")
+
+    def test_bank_booth_seen_in_broad_candidates_enters_memory_without_being_selected_first(self):
+        state = service_analyzer.ServiceTargetState()
+
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {
+                    "targetType": "sceneObject",
+                    "classId": "deposit_box",
+                    "targetName": "Bank Deposit Box",
+                    "objectKey": "deposit-1",
+                    "worldX": 3210,
+                    "worldY": 3217,
+                    "plane": 2,
+                    "distanceTiles": 2,
+                },
+            ],
+            memory_candidates=[
+                {
+                    "targetType": "sceneObject",
+                    "classId": "bank_booth",
+                    "targetName": "Bank booth",
+                    "objectKey": "booth-broad",
+                    "worldX": 3208,
+                    "worldY": 3221,
+                    "plane": 2,
+                    "distanceTiles": 7,
+                    "_serviceSourceLane": "broadCandidates",
+                }
+            ],
+            source_tick=100,
+            service_target_state=state,
+            current_plane=2,
+        )
+        payload = context.to_dict()
+
+        self.assertEqual(payload["bestServiceCandidate"]["objectKey"], "booth-broad")
+        self.assertEqual(payload["selectedServiceTargetSource"], "retained_primary")
+        self.assertTrue(payload["primaryServiceRetained"])
+        self.assertFalse(payload["depositFallbackAllowed"])
+        self.assertEqual(payload["retainedServiceCandidateCount"], 1)
+        self.assertEqual(payload["retainedBestServiceCandidate"]["lastSeenSourceLane"], "broadCandidates")
+        self.assertEqual(payload["sourceStageCounts"]["bank_booth"]["broadCandidates"], 1)
+        self.assertEqual(payload["memoryLifecycle"]["memorySize"], 2)
+
+    def test_loaded_service_scene_bank_booth_enters_memory_without_projection_candidate(self):
+        state = service_analyzer.ServiceTargetState()
+
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {
+                    "targetType": "sceneObject",
+                    "classId": "deposit_box",
+                    "targetName": "Bank Deposit Box",
+                    "objectKey": "deposit-current",
+                    "worldX": 3210,
+                    "worldY": 3217,
+                    "plane": 2,
+                    "_serviceSourceLane": "serviceCandidateInputs",
+                }
+            ],
+            memory_candidates=[
+                {
+                    "targetType": "sceneObject",
+                    "classId": "bank_booth",
+                    "targetName": "Bank booth",
+                    "objectKey": "booth-loaded",
+                    "worldX": 3208,
+                    "worldY": 3221,
+                    "plane": 2,
+                    "_serviceSourceLane": "loadedServiceScene",
+                }
+            ],
+            loaded_service_scene=[
+                {
+                    "targetType": "sceneObject",
+                    "classId": "bank_booth",
+                    "targetName": "Bank booth",
+                    "objectKey": "booth-loaded",
+                    "worldX": 3208,
+                    "worldY": 3221,
+                    "plane": 2,
+                }
+            ],
+            source_tick=100,
+            service_target_state=state,
+            current_plane=2,
+        )
+        payload = context.to_dict()
+
+        self.assertEqual(payload["bestServiceCandidate"]["objectKey"], "booth-loaded")
+        self.assertEqual(payload["selectedServiceTargetSource"], "retained_primary")
+        self.assertFalse(payload["depositFallbackAllowed"])
+        self.assertEqual(payload["sourceStageCounts"]["bank_booth"]["loadedServiceScene"], 1)
+        self.assertEqual(payload["retainedBestServiceCandidate"]["lastSeenSourceLane"], "loadedServiceScene")
+
+    def test_primary_memory_survives_longer_than_deposit_memory(self):
+        state = service_analyzer.ServiceTargetState()
+        service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "bank_booth", "targetName": "Bank booth", "objectKey": "booth-1", "worldX": 3208, "worldY": 3221, "plane": 2},
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Bank Deposit Box", "objectKey": "deposit-1", "worldX": 3210, "worldY": 3217, "plane": 2},
+            ],
+            source_tick=10,
+            service_target_state=state,
+            current_plane=2,
+        )
+
+        retained_at_59 = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Bank Deposit Box", "objectKey": "deposit-2", "worldX": 3211, "worldY": 3217, "plane": 2},
+            ],
+            source_tick=59,
+            service_target_state=state,
+            current_plane=2,
+        )
+        expired_at_61 = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Bank Deposit Box", "objectKey": "deposit-2", "worldX": 3211, "worldY": 3217, "plane": 2},
+            ],
+            source_tick=61,
+            service_target_state=state,
+            current_plane=2,
+        )
+
+        self.assertEqual(retained_at_59.best_service_candidate["objectKey"], "booth-1")
+        self.assertEqual(retained_at_59.to_dict()["retainedServiceAgeTicks"], 49)
+        self.assertEqual(expired_at_61.best_service_candidate["objectKey"], "deposit-2")
+        self.assertEqual(expired_at_61.to_dict()["memoryLifecycle"]["memoryEvictionReasons"][0]["reason"], "stale_beyond_grace")
+
+    def test_default_service_memory_survives_multiple_hot_omissions(self):
+        state = service_analyzer.ServiceTargetState()
+        service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "bank_booth", "targetName": "Bank booth", "objectKey": "booth-1", "worldX": 3208, "worldY": 3221, "plane": 2, "distanceTiles": 5},
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Bank Deposit Box", "objectKey": "deposit-1", "worldX": 3210, "worldY": 3217, "plane": 2, "distanceTiles": 2},
+            ],
+            source_tick=10,
+            service_target_state=state,
+            current_plane=2,
+        )
+
+        latest = None
+        for tick in range(11, 17):
+            latest = service_analyzer.analyze_service_context(
+                "woodcutting_bank",
+                candidates=[
+                    {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Bank Deposit Box", "objectKey": "deposit-1", "worldX": 3210, "worldY": 3217, "plane": 2, "distanceTiles": 2},
+                ],
+                source_tick=tick,
+                service_target_state=state,
+                current_plane=2,
+            )
+
+        payload = latest.to_dict()
+        self.assertEqual(latest.best_service_candidate["objectKey"], "booth-1")
+        self.assertTrue(payload["serviceTargetRetained"])
+        self.assertEqual(payload["retainedServiceMissingTicks"], 6)
+        self.assertEqual(payload["retainedServiceAgeTicks"], 6)
+        self.assertEqual(payload["selectedServiceTargetSource"], "retained_primary")
+
+    def test_deposit_box_selected_after_preferred_service_retention_expires(self):
+        state = service_analyzer.ServiceTargetState()
+        state.primary_bank_grace_ticks = 1
+        service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "bank_booth", "targetName": "Bank booth", "objectKey": "booth-1", "worldX": 3208, "worldY": 3221, "plane": 2},
+            ],
+            source_tick=10,
+            service_target_state=state,
+            current_plane=2,
+        )
+
+        service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Bank Deposit Box", "objectKey": "deposit-1", "worldX": 3210, "worldY": 3217, "plane": 2},
+            ],
+            source_tick=11,
+            service_target_state=state,
+            current_plane=2,
+        )
+        second_missing = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Bank Deposit Box", "objectKey": "deposit-1", "worldX": 3210, "worldY": 3217, "plane": 2},
+            ],
+            source_tick=12,
+            service_target_state=state,
+            current_plane=2,
+        )
+
+        self.assertFalse(second_missing.service_target_retained)
+        self.assertEqual(second_missing.best_service_candidate["serviceCandidateType"], "deposit_box")
+        self.assertEqual(second_missing.service_switch_reason, "retained_service_missing_grace_expired")
+
+    def test_direct_approach_quality_beats_unknown_side_access_within_same_type(self):
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Deposit box", "objectKey": "unknown", "distanceTiles": 1, "approachQuality": "side_access_unknown"},
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Deposit box", "objectKey": "direct", "distanceTiles": 5, "approachQuality": "direct_side_access"},
+            ],
+        )
+
+        best = context.to_dict()["bestServiceCandidate"]
+        self.assertEqual(best["objectKey"], "direct")
+        self.assertEqual(best["serviceApproachQualityContribution"], 0)
+        self.assertIn("approach quality", best["serviceSelectedReason"])
+
+    def test_side_access_unknown_deposit_box_is_tentative(self):
+        context = service_analyzer.analyze_service_context(
+            "woodcutting_bank",
+            candidates=[
+                {"targetType": "sceneObject", "classId": "deposit_box", "targetName": "Bank Deposit Box", "objectKey": "deposit-1", "approachQuality": "side_access_unknown"},
+            ],
+        )
+        payload = context.to_dict()
+
+        self.assertEqual(payload["bestServiceCandidate"]["serviceCandidateType"], "deposit_box")
+        self.assertTrue(payload["bestServiceCandidate"]["serviceSelectionTentative"])
+        self.assertEqual(payload["bestServiceCandidate"]["serviceApproachQualityContribution"], 2)
+        self.assertIn("tentative", payload["bestServiceCandidate"]["serviceSelectedReason"])
 
     def test_distance_breaks_ties_within_same_service_priority(self):
         context = service_analyzer.analyze_service_context(

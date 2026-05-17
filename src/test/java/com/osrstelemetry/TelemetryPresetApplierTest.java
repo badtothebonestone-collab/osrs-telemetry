@@ -40,7 +40,7 @@ public class TelemetryPresetApplierTest
 		assertEquals("false", store.values.get("debugRecordRawTicks"));
 		assertEquals("false", store.values.get("debugRecordRawEvents"));
 		assertEquals("false", store.values.get("debugRecordFrames"));
-		assertEquals("10", store.values.get("telemetryDebugOverlayMaxTargets"));
+		assertEquals("32", store.values.get("telemetryDebugOverlayMaxTargets"));
 	}
 
 	@Test
@@ -53,7 +53,7 @@ public class TelemetryPresetApplierTest
 
 		assertEquals("LIVE_COMPACT_ONLY", store.values.get("telemetryRecordingMode"));
 		assertEquals("true", store.values.get("telemetryDebugOverlayEnabled"));
-		assertEquals("25", store.values.get("telemetryDebugOverlayMaxTargets"));
+		assertEquals("32", store.values.get("telemetryDebugOverlayMaxTargets"));
 		assertEquals("CLICKABLE_HULL", store.values.get("telemetryDebugOverlayGeometryMode"));
 		assertEquals("true", store.values.get("compactLiveIncludeClickableHull"));
 		assertEquals("false", store.values.get("emitCompactLiveStream"));
@@ -113,6 +113,7 @@ public class TelemetryPresetApplierTest
 		assertEquals("false", store.values.get("debugRecordRawEvents"));
 		assertEquals("false", store.values.get("debugRecordFrames"));
 		assertEquals("false", store.values.get("captureScreenshots"));
+		assertEquals("32", store.values.get("telemetryDebugOverlayMaxTargets"));
 	}
 
 	@Test

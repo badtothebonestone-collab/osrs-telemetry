@@ -732,6 +732,11 @@ public class PluginSnapshotEndpoint implements Closeable
 		copyIfPresent(projection, compactProjection, "sceneProjectionSummary");
 		copyIfPresent(projection, compactProjection, "projectionStateHash");
 		copyIfPresent(projection, compactProjection, "refreshMode");
+		copyIfPresent(projection, compactProjection, "serviceSceneObjects");
+		copyIfPresent(projection, compactProjection, "serviceSceneObjectCount");
+		copyIfPresent(projection, compactProjection, "serviceSceneObjectCap");
+		copyIfPresent(projection, compactProjection, "serviceSceneObjectRadius");
+		copyIfPresent(projection, compactProjection, "serviceSceneObjectCapHit");
 
 		JsonArray compactRefs = new JsonArray();
 		JsonArray refs = projectionRefs(projection);

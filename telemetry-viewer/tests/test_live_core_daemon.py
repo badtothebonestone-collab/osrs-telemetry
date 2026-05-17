@@ -291,6 +291,13 @@ class LiveCoreDaemonTest(unittest.TestCase):
                 path_length_tiles=4,
                 destination_tile={"worldX": 3208, "worldY": 3219, "plane": 0},
                 next_waypoint_tile={"worldX": 3201, "worldY": 3200, "plane": 0},
+                path_intent_key="woodcutting:inventory_full:needs_service|objectKey:bank-booth-1|3208:3219:0|sceneObject|bank_booth",
+                destination_target_key="objectKey:bank-booth-1",
+                path_intent_retained=True,
+                path_stable_for_ticks=3,
+                movement_state="moving",
+                retention_reason="player_moving_same_destination",
+                switch_reason=None,
                 pathing_millis=0.1,
                 path_nodes_expanded=5,
                 collision_window_available=True,
@@ -317,9 +324,82 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(status["pathingPathLengthTiles"], 4)
         self.assertEqual(status["pathingDestinationTile"]["worldX"], 3208)
         self.assertEqual(status["pathingNextWaypointTile"]["worldX"], 3201)
+        self.assertTrue(status["pathIntentRetained"])
+        self.assertEqual(status["pathStableForTicks"], 3)
+        self.assertEqual(status["pathMovementState"], "moving")
+        self.assertEqual(status["pathRetentionReason"], "player_moving_same_destination")
+        self.assertEqual(status["pathDestinationTargetKey"], "objectKey:bank-booth-1")
         self.assertTrue(status["pathingCollisionWindowAvailable"])
         self.assertTrue(status["pathingDestinationInsideCollisionWindow"])
         self.assertTrue(status["pathingDestinationPlaneMatches"])
+
+    def test_daemon_passes_in_memory_path_intent_state_to_pathing_analyzer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--human-dashboard",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service = ServiceContext(
+                service_required=True,
+                service_type_needed="bank",
+                best_service_candidate={
+                    "objectKey": "bank-booth-1",
+                    "targetType": "sceneObject",
+                    "classId": "bank_booth",
+                    "targetName": "Bank booth",
+                    "id": 10355,
+                    "worldX": 3208,
+                    "worldY": 3219,
+                    "plane": 0,
+                    "sceneX": 20,
+                    "sceneY": 21,
+                },
+                service_candidates=[],
+                candidate_count=1,
+            )
+            pathing = PathingContext(pathing_needed=True, destination_tile={"worldX": 3208, "worldY": 3219, "plane": 0})
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
+                    with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", return_value=pathing) as pathing_mock:
+                        core = daemon.LiveCoreDaemon(session, args)
+                        core.poll_once()
+
+        kwargs = pathing_mock.call_args.kwargs
+        self.assertIs(kwargs["path_intent_state"], core.state.path_intent_state)
+        self.assertIsNotNone(kwargs["activity_context"])
+        self.assertEqual(kwargs["generic_task_state"]["activeIntent"], "needs_service")
+
+    def test_daemon_passes_in_memory_service_target_state_to_service_analyzer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--human-dashboard",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service = ServiceContext(service_required=True, service_type_needed="bank", candidate_count=0)
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service) as service_mock:
+                    core = daemon.LiveCoreDaemon(session, args)
+                    core.poll_once()
+
+        kwargs = service_mock.call_args.kwargs
+        self.assertIs(kwargs["service_target_state"], core.state.service_target_state)
+        self.assertEqual(kwargs["current_plane"], core.state.analysis_result.player.plane)
 
     def test_daily_daemon_does_not_write_policy_task_or_analyzer_runtime_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -904,6 +984,59 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(status["profileCandidateCount"], 1)
         self.assertTrue(status["collisionWindowAvailable"])
         self.assertTrue(status["pathingCollisionWindowAvailable"])
+
+    def test_loaded_service_scene_bank_booth_blocks_deposit_fallback_without_projection_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            tree = fixtures.raw_scene_object(10820, 3201, 3201, 140, 120, name="Oak tree", object_key="oak-1")
+            deposit = fixtures.raw_scene_object(
+                10583,
+                3210,
+                3217,
+                180,
+                150,
+                name="Bank Deposit Box",
+                actions=["Deposit"],
+                object_key="deposit-1",
+            )
+            booth = fixtures.raw_scene_object(
+                10355,
+                3208,
+                3221,
+                160,
+                140,
+                name="Bank booth",
+                actions=["Bank"],
+                object_key="booth-loaded",
+            )
+            response = snapshot_with_logs(session, 1, list(range(28)), objects=[tree, deposit])
+            response["payloads"]["projection"]["serviceSceneObjects"] = [fixtures.compact_scene_object(booth)]
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--task-policy",
+                "woodcutting_bank",
+                "--goal-count",
+                "5",
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                core = daemon.LiveCoreDaemon(session, args)
+                core.poll_once()
+
+        targets = core.state.analysis_result.targets
+        service = core.state.analysis_result.service
+        status = core.state.status()
+
+        self.assertEqual(targets.raw_best_target["objectKey"], "oak-1")
+        self.assertEqual(targets.profile_candidate_count, 1)
+        self.assertEqual(targets.loaded_service_scene_count, 1)
+        self.assertEqual(targets.service_candidate_input_count, 2)
+        self.assertEqual(service.best_service_candidate["objectKey"], "booth-loaded")
+        self.assertEqual(service.selected_service_group, "full_bank")
+        self.assertFalse(service.deposit_fallback_allowed)
+        self.assertEqual(status["serviceCandidateSourceLanes"]["loadedServiceScene"], 1)
+        self.assertEqual(status["sourceStageCounts"]["bank_booth"]["loadedServiceScene"], 1)
 
     def test_context_response_preserves_read_only_navigation_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:

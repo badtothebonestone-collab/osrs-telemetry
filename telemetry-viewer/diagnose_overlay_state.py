@@ -368,8 +368,26 @@ def intent_summary(markers: list[dict], overlay: dict) -> dict:
         "switchAuditTail": audit_tail[-5:],
         "intentFlickerDetected": intent_flicker_detected(audit_tail),
         "predictedPathTilesAvailableCount": summary.get("predictedPathTilesAvailableCount"),
+        "predictedPathAvailableCount": summary.get("predictedPathAvailableCount"),
+        "predictedPathDisplayedCount": summary.get("predictedPathDisplayedCount"),
         "predictedPathMarkersEmittedCount": summary.get("predictedPathMarkersEmittedCount", len(predicted_path_markers)),
         "predictedPathLimit": summary.get("predictedPathLimit"),
+        "overlayPredictedPathLimit": summary.get("overlayPredictedPathLimit"),
+        "pathDisplayWasCapped": summary.get("pathDisplayWasCapped"),
+        "selectedTargetGeometryPresent": summary.get("selectedTargetGeometryPresent", selected_geometry_source != "none"),
+        "selectedTargetGeometrySource": summary.get("selectedTargetGeometrySource", selected_geometry_source),
+        "selectedTargetDroppedByPathCap": summary.get("selectedTargetDroppedByPathCap", False),
+        "pathMarkersAvailable": summary.get("pathMarkersAvailable", summary.get("predictedPathAvailableCount")),
+        "pathMarkersEmitted": summary.get("pathMarkersEmitted", summary.get("predictedPathMarkersEmittedCount", len(predicted_path_markers))),
+        "pathMarkerLimit": summary.get("pathMarkerLimit", summary.get("overlayPredictedPathLimit", summary.get("predictedPathLimit"))),
+        "pathMarkersCapped": summary.get("pathMarkersCapped", summary.get("pathDisplayWasCapped")),
+        "geometryLaneCounts": summary.get("geometryLaneCounts") if isinstance(summary.get("geometryLaneCounts"), dict) else {
+            "selectedTarget": len(selected),
+            "backups": len(backups),
+            "destinationWaypointFinalApproach": sum(1 for marker in markers if marker.get("markerType") in {"destination_tile", "waypoint", "final_approach_tile"}),
+            "predictedPath": len(predicted_path_markers),
+            "debugLabels": sum(1 for marker in markers if marker.get("markerType") in {"warning", "diagnostic", "path_blocked", "path_unknown"}),
+        },
         "destinationMarkerEmitted": summary.get("destinationMarkerEmitted", any(marker.get("markerType") == "destination_tile" for marker in markers)),
         "nextWaypointMarkerEmitted": summary.get("nextWaypointMarkerEmitted", any(marker.get("markerType") == "waypoint" for marker in markers)),
         "finalApproachMarkerEmitted": summary.get("finalApproachMarkerEmitted", any(marker.get("markerType") == "final_approach_tile" for marker in markers)),
@@ -643,12 +661,29 @@ def print_report(report: dict) -> None:
         )
         print(
             "path overlay: "
-            f"available={intent.get('predictedPathTilesAvailableCount')} "
+            f"available={intent.get('predictedPathAvailableCount') or intent.get('predictedPathTilesAvailableCount')} "
+            f"displayed={intent.get('predictedPathDisplayedCount')} "
             f"emitted={intent.get('predictedPathMarkersEmittedCount')} "
-            f"limit={intent.get('predictedPathLimit')} "
+            f"limit={intent.get('overlayPredictedPathLimit') or intent.get('predictedPathLimit')} "
+            f"capped={intent.get('pathDisplayWasCapped')} "
             f"destination={intent.get('destinationMarkerEmitted')} "
             f"waypoint={intent.get('nextWaypointMarkerEmitted')} "
             f"finalApproach={intent.get('finalApproachMarkerEmitted')}"
+        )
+        print(
+            "selected geometry: "
+            f"present={intent.get('selectedTargetGeometryPresent')} "
+            f"source={intent.get('selectedTargetGeometrySource')} "
+            f"droppedByPathCap={intent.get('selectedTargetDroppedByPathCap')}"
+        )
+        lanes = intent.get("geometryLaneCounts") or {}
+        print(
+            "geometry lanes: "
+            f"selected={lanes.get('selectedTarget')} "
+            f"backups={lanes.get('backups')} "
+            f"destination/waypoint/final={lanes.get('destinationWaypointFinalApproach')} "
+            f"predictedPath={lanes.get('predictedPath')} "
+            f"debugLabels={lanes.get('debugLabels')}"
         )
         print(
             "path tile projection: "

@@ -66,12 +66,38 @@ def analyze_targets(
     *,
     class_id: str | None = None,
     max_candidates: int = 10,
+    loaded_service_scene: list[dict[str, Any]] | None = None,
 ) -> TargetContext:
     started = time.perf_counter()
     candidates = [candidate for candidate in (candidates or []) if isinstance(candidate, dict)]
+    loaded_service_scene = [candidate for candidate in (loaded_service_scene or []) if isinstance(candidate, dict)]
     broad_candidates = list(candidates)
     scoped = [candidate for candidate in candidates if _class_matches(candidate, class_id)]
-    service_inputs = [candidate for candidate in broad_candidates if _is_service_candidate(candidate)]
+    service_inputs = []
+    seen_service_keys: set[tuple[Any, ...]] = set()
+    for lane_name, lane_candidates in (
+        ("serviceCandidateInputs", broad_candidates),
+        ("loadedServiceScene", loaded_service_scene),
+    ):
+        for candidate in lane_candidates:
+            if not _is_service_candidate(candidate):
+                continue
+            key = (
+                candidate.get("objectKey"),
+                candidate.get("targetKey"),
+                candidate.get("id"),
+                candidate.get("hash"),
+                candidate.get("worldX"),
+                candidate.get("worldY"),
+                candidate.get("plane"),
+                candidate.get("targetName") or candidate.get("name"),
+            )
+            if key in seen_service_keys:
+                continue
+            seen_service_keys.add(key)
+            payload = dict(candidate)
+            payload["_serviceSourceLane"] = payload.get("_serviceSourceLane") or lane_name
+            service_inputs.append(payload)
     raw_best = scoped[0] if scoped else (candidates[0] if candidates and class_id is None else None)
     if scoped:
         raw_best = max(scoped, key=_score)
@@ -95,6 +121,7 @@ def analyze_targets(
         candidates=candidates,
         profile_candidates=scoped,
         broad_candidates=broad_candidates,
+        loaded_service_scene=loaded_service_scene,
         service_candidate_inputs=service_inputs,
         raw_best_target=raw_best,
         nearest_target=nearest,
@@ -102,6 +129,7 @@ def analyze_targets(
         candidate_count=len(candidates),
         profile_candidate_count=len(scoped),
         broad_candidate_count=len(broad_candidates),
+        loaded_service_scene_count=len(loaded_service_scene),
         service_candidate_input_count=len(service_inputs),
         service_candidate_visibility="available" if service_inputs else "not_observed",
     )

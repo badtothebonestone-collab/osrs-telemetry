@@ -21,6 +21,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import javax.inject.Inject;
@@ -122,6 +123,8 @@ public class TelemetryPlugin extends Plugin
 	private static final String PACKET_COLLISION_WINDOW = "live_collision_window_packet.v1";
 	private static final String PACKET_COLLISION_GRID = "live_collision_grid_packet.v1";
 	private static final String PACKET_WRITER_HEALTH = "live_writer_health_packet.v1";
+	private static final int MAX_SERVICE_SCENE_OBJECTS = 32;
+	private static final int SERVICE_SCENE_OBJECT_RADIUS = 48;
 	private static final int COMPACT_LIVE_GEOMETRY_MAX_REFS_HARD_CAP = 200;
 	private static final int COLLISION_MOVEMENT_MASK = CollisionDataFlag.BLOCK_MOVEMENT_NORTH_WEST
 			| CollisionDataFlag.BLOCK_MOVEMENT_NORTH
@@ -1219,14 +1222,260 @@ public class TelemetryPlugin extends Plugin
 	private Map<String, Object> projectionPayload(TickSnapshot snapshot)
 	{
 		CompactProjectionGeometryOptions geometryOptions = compactProjectionGeometryOptions(snapshot);
+		List<Map<String, Object>> serviceSceneObjects = compactServiceSceneObjects(snapshot);
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("sceneProjectionSummary", snapshot.sceneProjectionSummary);
 		payload.put("projectionStateHash", snapshot.sceneProjectionSummary == null ? null : snapshot.sceneProjectionSummary.projectionStateHash);
 		payload.put("refreshMode", snapshot.sceneProjectionSummary == null ? null : snapshot.sceneProjectionSummary.projectionRefreshMode);
 		payload.put("visibleObjectRefs", compactSceneObjects(snapshot.visibleSceneObjectRefs, true, geometryOptions));
+		payload.put("serviceSceneObjects", serviceSceneObjects);
+		payload.put("serviceSceneObjectCount", serviceSceneObjects.size());
+		payload.put("serviceSceneObjectCap", MAX_SERVICE_SCENE_OBJECTS);
+		payload.put("serviceSceneObjectRadius", SERVICE_SCENE_OBJECT_RADIUS);
+		payload.put("serviceSceneObjectCapHit", serviceSceneObjects.size() >= MAX_SERVICE_SCENE_OBJECTS);
 		payload.put("geometryEmission", compactProjectionGeometrySummary(geometryOptions));
 		recordLastCompactProjectionGeometry(geometryOptions);
 		return payload;
+	}
+
+	private List<Map<String, Object>> compactServiceSceneObjects(TickSnapshot snapshot)
+	{
+		List<TickSnapshot.SceneObjectSnapshot> matches = new ArrayList<>();
+
+		if (snapshot != null)
+		{
+			for (SceneIndexEntry entry : sceneObjectIndex.values())
+			{
+				if (!serviceSceneEntryEligible(entry, snapshot))
+				{
+					continue;
+				}
+
+				TickSnapshot.SceneObjectSnapshot object = snapshotFromIndex(entry, false);
+				matches.add(object);
+			}
+		}
+
+		matches.sort(Comparator
+				.comparingInt((TickSnapshot.SceneObjectSnapshot object) -> serviceScenePriority(serviceSceneClass(object.objectName, object.actions)))
+				.thenComparingDouble(object -> serviceSceneDistanceSquared(object, snapshot))
+				.thenComparing(object -> String.valueOf(object.objectKey)));
+
+		List<Map<String, Object>> compact = new ArrayList<>();
+		for (TickSnapshot.SceneObjectSnapshot object : matches)
+		{
+			if (compact.size() >= MAX_SERVICE_SCENE_OBJECTS)
+			{
+				break;
+			}
+
+			Map<String, Object> payload = compactSceneObject(object, false, null, false);
+			String serviceClass = serviceSceneClass(object.objectName, object.actions);
+			payload.put("classId", serviceClass);
+			payload.put("serviceSceneClass", serviceClass);
+			payload.put("serviceSceneLane", "loadedServiceScene");
+			compact.add(payload);
+		}
+
+		for (Map<String, Object> npc : compactServiceNpcCandidates(snapshot))
+		{
+			if (compact.size() >= MAX_SERVICE_SCENE_OBJECTS)
+			{
+				break;
+			}
+
+			compact.add(npc);
+		}
+
+		return compact;
+	}
+
+	private boolean serviceSceneEntryEligible(SceneIndexEntry entry, TickSnapshot snapshot)
+	{
+		if (entry == null || !entry.present || snapshot == null || snapshot.localPlayer == null)
+		{
+			return false;
+		}
+		if (entry.plane != snapshot.localPlayer.plane)
+		{
+			return false;
+		}
+		if (snapshot.localPlayer.sceneX == null || snapshot.localPlayer.sceneY == null)
+		{
+			return false;
+		}
+		if (Math.abs(entry.sceneX - snapshot.localPlayer.sceneX) > SERVICE_SCENE_OBJECT_RADIUS
+				|| Math.abs(entry.sceneY - snapshot.localPlayer.sceneY) > SERVICE_SCENE_OBJECT_RADIUS)
+		{
+			return false;
+		}
+		return isServiceSceneClass(serviceSceneClass(entry.objectName, entry.actions));
+	}
+
+	private List<Map<String, Object>> compactServiceNpcCandidates(TickSnapshot snapshot)
+	{
+		List<Map<String, Object>> compact = new ArrayList<>();
+		if (snapshot == null || snapshot.localPlayer == null || snapshot.npcs == null)
+		{
+			return compact;
+		}
+
+		for (TickSnapshot.NpcSnapshot npc : snapshot.npcs)
+		{
+			if (npc == null || npc.plane != snapshot.localPlayer.plane)
+			{
+				continue;
+			}
+			String name = firstNonBlank(npc.npcName, npc.name);
+			String serviceClass = serviceSceneClass(name, null);
+			if (!"banker".equals(serviceClass))
+			{
+				continue;
+			}
+			if (snapshot.localPlayer.sceneX != null && snapshot.localPlayer.sceneY != null
+					&& npc.localX != null && npc.localY != null)
+			{
+				int npcSceneX = npc.worldX - (snapshot.localPlayer.worldX - snapshot.localPlayer.sceneX);
+				int npcSceneY = npc.worldY - (snapshot.localPlayer.worldY - snapshot.localPlayer.sceneY);
+				if (Math.abs(npcSceneX - snapshot.localPlayer.sceneX) > SERVICE_SCENE_OBJECT_RADIUS
+						|| Math.abs(npcSceneY - snapshot.localPlayer.sceneY) > SERVICE_SCENE_OBJECT_RADIUS)
+				{
+					continue;
+				}
+			}
+
+			Map<String, Object> payload = new LinkedHashMap<>();
+			payload.put("targetKey", "npc:" + npc.index + ":" + npc.id + ":" + npc.worldX + ":" + npc.worldY + ":" + npc.plane);
+			payload.put("targetType", "npc");
+			payload.put("id", npc.id);
+			payload.put("name", name);
+			payload.put("classId", "banker");
+			payload.put("serviceCandidateType", "banker");
+			payload.put("serviceSceneClass", "banker");
+			payload.put("serviceSceneLane", "loadedServiceScene");
+			payload.put("worldX", npc.worldX);
+			payload.put("worldY", npc.worldY);
+			payload.put("plane", npc.plane);
+			payload.put("localX", npc.localX);
+			payload.put("localY", npc.localY);
+			payload.put("present", !npc.dead);
+			payload.put("source", "loadedServiceScene");
+			compact.add(payload);
+		}
+
+		return compact;
+	}
+
+	private double serviceSceneDistanceSquared(TickSnapshot.SceneObjectSnapshot object, TickSnapshot snapshot)
+	{
+		if (object == null || snapshot == null || snapshot.localPlayer == null)
+		{
+			return Double.MAX_VALUE;
+		}
+		int dx = object.worldX - snapshot.localPlayer.worldX;
+		int dy = object.worldY - snapshot.localPlayer.worldY;
+		return (double) dx * dx + (double) dy * dy;
+	}
+
+	private int serviceScenePriority(String serviceClass)
+	{
+		if ("bank_booth".equals(serviceClass))
+		{
+			return 0;
+		}
+		if ("banker".equals(serviceClass))
+		{
+			return 1;
+		}
+		if ("bank_chest".equals(serviceClass))
+		{
+			return 2;
+		}
+		if ("deposit_box".equals(serviceClass))
+		{
+			return 3;
+		}
+		if ("deposit_chest".equals(serviceClass))
+		{
+			return 4;
+		}
+		return 5;
+	}
+
+	private boolean isServiceSceneClass(String serviceClass)
+	{
+		return "bank_booth".equals(serviceClass)
+				|| "banker".equals(serviceClass)
+				|| "bank_chest".equals(serviceClass)
+				|| "deposit_box".equals(serviceClass)
+				|| "deposit_chest".equals(serviceClass)
+				|| "bank_related".equals(serviceClass)
+				|| "bank_service".equals(serviceClass);
+	}
+
+	private String serviceSceneClass(String name, String[] actions)
+	{
+		String text = (name == null ? "" : name).toLowerCase(Locale.ROOT);
+		String actionText = "";
+		if (actions != null)
+		{
+			List<String> clean = new ArrayList<>();
+			for (String action : actions)
+			{
+				if (action != null && !action.isBlank())
+				{
+					clean.add(action.toLowerCase(Locale.ROOT));
+				}
+			}
+			actionText = String.join(" ", clean);
+		}
+
+		if (text.contains("bank deposit box") || text.contains("deposit box"))
+		{
+			return "deposit_box";
+		}
+		if (text.contains("deposit chest"))
+		{
+			return "deposit_chest";
+		}
+		if (text.contains("bank booth"))
+		{
+			return "bank_booth";
+		}
+		if (text.contains("banker"))
+		{
+			return "banker";
+		}
+		if (text.contains("bank chest"))
+		{
+			return "bank_chest";
+		}
+		if (text.contains("bank table"))
+		{
+			return "bank_related";
+		}
+		if (text.contains("bank") || actionText.contains("bank"))
+		{
+			return "bank_service";
+		}
+		if (actionText.contains("deposit"))
+		{
+			return "deposit_box";
+		}
+		return "";
+	}
+
+	private String firstNonBlank(String first, String second)
+	{
+		if (first != null && !first.isBlank())
+		{
+			return first;
+		}
+		if (second != null && !second.isBlank())
+		{
+			return second;
+		}
+		return "";
 	}
 
 	private List<Map<String, Object>> compactSceneObjects(TickSnapshot.SceneObjectSnapshot[] objects, boolean includeProjection)

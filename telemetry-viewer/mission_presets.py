@@ -52,6 +52,7 @@ class MissionPreset:
 
 _PRESET_ORDER = (
     "woodcut_bank",
+    "woodcut_deposit",
     "woodcut_firemake",
     "woodcut_drop",
     "observe_only",
@@ -70,6 +71,17 @@ PRESETS: dict[str, MissionPreset] = {
         overlayMode="intent",
         overlayBackupCandidates=2,
         description="Woodcutting resources with service context when inventory is full.",
+    ),
+    "woodcut_deposit": MissionPreset(
+        name="woodcut_deposit",
+        activeTask="woodcutting",
+        taskPolicy="woodcutting_deposit",
+        goalCount=5,
+        observeOnly=False,
+        brainEnabled=True,
+        overlayMode="intent",
+        overlayBackupCandidates=2,
+        description="Woodcutting resources with deposit-only service context when inventory is full.",
     ),
     "woodcut_firemake": MissionPreset(
         name="woodcut_firemake",

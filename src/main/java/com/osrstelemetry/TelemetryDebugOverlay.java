@@ -203,26 +203,23 @@ public class TelemetryDebugOverlay extends Overlay
 
 	private void drawTargets(Graphics2D graphics, OverlayDebugState state, TelemetryDebugOverlayMode mode)
 	{
-		List<OverlayTarget> targets = drawableTargets(state);
-		int limit = Math.max(0, Math.min(MAX_TARGET_CAP, config.telemetryDebugOverlayMaxTargets()));
-		int drawn = 0;
-		for (OverlayTarget target : targets)
+		List<OverlayTarget> targets = new ArrayList<>();
+		for (OverlayTarget target : drawableTargets(state))
 		{
-			if (target == null || drawn >= limit)
+			if (target != null && shouldDrawTarget(target, mode))
 			{
-				break;
+				targets.add(target);
 			}
-			if (!shouldDrawTarget(target, mode))
-			{
-				continue;
-			}
+		}
+		int limit = Math.max(0, Math.min(MAX_TARGET_CAP, config.telemetryDebugOverlayMaxTargets()));
+		for (OverlayTarget target : orderedDrawableTargets(targets, limit))
+		{
 			Color color = colorFor(target);
 			drawTargetShape(graphics, target, color);
 			if (config.telemetryDebugOverlayShowLabels())
 			{
 				drawTargetLabel(graphics, target, color);
 			}
-			drawn++;
 		}
 	}
 
@@ -1081,6 +1078,120 @@ public class TelemetryDebugOverlay extends Overlay
 			return state.markers;
 		}
 		return state.targets == null ? Collections.emptyList() : state.targets;
+	}
+
+	static List<OverlayTarget> orderedDrawableTargets(OverlayDebugState state, int limit)
+	{
+		return orderedDrawableTargets(drawableTargets(state), limit);
+	}
+
+	private static List<OverlayTarget> orderedDrawableTargets(List<OverlayTarget> targets, int limit)
+	{
+		int max = Math.max(0, Math.min(MAX_TARGET_CAP, limit));
+		if (targets == null || targets.isEmpty() || max <= 0)
+		{
+			return Collections.emptyList();
+		}
+
+		List<OverlayTarget> selected = new ArrayList<>();
+		List<OverlayTarget> destinationTiles = new ArrayList<>();
+		List<OverlayTarget> predictedPath = new ArrayList<>();
+		List<OverlayTarget> backups = new ArrayList<>();
+		List<OverlayTarget> diagnostics = new ArrayList<>();
+		List<OverlayTarget> other = new ArrayList<>();
+
+		for (OverlayTarget target : targets)
+		{
+			if (target == null)
+			{
+				continue;
+			}
+			if (isSelectedTarget(target))
+			{
+				selected.add(target);
+			}
+			else if (isDestinationWaypointOrApproachMarker(target))
+			{
+				destinationTiles.add(target);
+			}
+			else if ("predicted_path_tile".equals(target.markerType))
+			{
+				predictedPath.add(target);
+			}
+			else if ("backup_candidate".equals(target.markerType))
+			{
+				backups.add(target);
+			}
+			else if (isDiagnosticMarker(target))
+			{
+				diagnostics.add(target);
+			}
+			else
+			{
+				other.add(target);
+			}
+		}
+
+		List<OverlayTarget> selectedDraw = take(selected, max);
+		int remaining = Math.max(0, max - selectedDraw.size());
+		List<OverlayTarget> destinationDraw = take(destinationTiles, remaining);
+		remaining -= destinationDraw.size();
+		List<OverlayTarget> predictedDraw = take(predictedPath, remaining);
+		remaining -= predictedDraw.size();
+		List<OverlayTarget> backupDraw = take(backups, remaining);
+		remaining -= backupDraw.size();
+		List<OverlayTarget> otherDraw = take(other, remaining);
+		remaining -= otherDraw.size();
+		List<OverlayTarget> diagnosticDraw = take(diagnostics, remaining);
+
+		List<OverlayTarget> ordered = new ArrayList<>();
+		ordered.addAll(diagnosticDraw);
+		ordered.addAll(otherDraw);
+		ordered.addAll(backupDraw);
+		ordered.addAll(predictedDraw);
+		ordered.addAll(destinationDraw);
+		ordered.addAll(selectedDraw);
+		return ordered;
+	}
+
+	private static List<OverlayTarget> take(List<OverlayTarget> targets, int limit)
+	{
+		if (targets == null || targets.isEmpty() || limit <= 0)
+		{
+			return Collections.emptyList();
+		}
+		return new ArrayList<>(targets.subList(0, Math.min(targets.size(), limit)));
+	}
+
+	private static boolean isSelectedTarget(OverlayTarget target)
+	{
+		return target != null && ("selected_target".equals(target.markerType) || Boolean.TRUE.equals(target.selected));
+	}
+
+	private static boolean isDestinationWaypointOrApproachMarker(OverlayTarget target)
+	{
+		if (target == null)
+		{
+			return false;
+		}
+		return "destination_tile".equals(target.markerType)
+				|| "final_approach_tile".equals(target.markerType)
+				|| "next_waypoint_tile".equals(target.markerType)
+				|| ("waypoint".equals(target.markerType)
+				&& target.markerId != null
+				&& target.markerId.startsWith("next_waypoint_tile:"));
+	}
+
+	private static boolean isDiagnosticMarker(OverlayTarget target)
+	{
+		if (target == null)
+		{
+			return false;
+		}
+		return "warning".equals(target.markerType)
+				|| "diagnostic".equals(target.markerType)
+				|| "path_blocked".equals(target.markerType)
+				|| "path_unknown".equals(target.markerType);
 	}
 
 	static String statusLine(OverlayDebugState state, TelemetryDebugOverlayGeometryMode geometryMode)

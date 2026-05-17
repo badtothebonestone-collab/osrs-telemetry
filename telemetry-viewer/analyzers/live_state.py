@@ -122,6 +122,7 @@ class TargetContext(AnalyzerContractFields):
     candidates: list[dict[str, Any]] = field(default_factory=list)
     profile_candidates: list[dict[str, Any]] = field(default_factory=list)
     broad_candidates: list[dict[str, Any]] = field(default_factory=list)
+    loaded_service_scene: list[dict[str, Any]] = field(default_factory=list)
     service_candidate_inputs: list[dict[str, Any]] = field(default_factory=list)
     raw_best_target: dict[str, Any] | None = None
     nearest_target: dict[str, Any] | None = None
@@ -129,6 +130,7 @@ class TargetContext(AnalyzerContractFields):
     candidate_count: int = 0
     profile_candidate_count: int = 0
     broad_candidate_count: int = 0
+    loaded_service_scene_count: int = 0
     service_candidate_input_count: int = 0
     service_candidate_visibility: str | None = None
 
@@ -219,9 +221,16 @@ class PathingContext(AnalyzerContractFields):
     predicted_step_count: int | None = None
     predicted_path_count: int | None = None
     predicted_path_displayed_count: int | None = None
+    predicted_path_available_count: int | None = None
     path_was_capped: bool = False
+    path_display_was_capped: bool = False
+    overlay_predicted_path_limit: int | None = None
     diagonal_step_count: int = 0
     cardinal_step_count: int = 0
+    path_segments_valid: bool | None = None
+    invalid_path_segment_count: int = 0
+    invalid_path_segments: list[dict[str, Any]] = field(default_factory=list)
+    first_invalid_path_segment: dict[str, Any] | None = None
     predicted_run_segments: list[dict[str, Any]] = field(default_factory=list)
     predicted_movement_model: str = "cardinal_only"
     predicted_movement_notes: list[str] = field(default_factory=lambda: ["Predicted local path; exact server movement may differ."])
@@ -229,6 +238,13 @@ class PathingContext(AnalyzerContractFields):
     path_cap_tiles: int | None = None
     exact_destination_reached: bool | None = None
     final_approach_substituted: bool | None = None
+    approach_candidates_tested: int | None = None
+    approach_candidates_rejected_by_blocked_side: int = 0
+    approach_candidates_rejected_by_no_line_of_sight: int = 0
+    selected_approach_reason: str | None = None
+    approach_quality: str | None = None
+    side_access_valid: bool | None = None
+    line_of_sight_to_target: bool | None = None
     skipped_run_tiles: list[dict[str, Any]] = field(default_factory=list)
     run_behavior: str = "unknown"
     reason: str = "not_needed"
@@ -244,6 +260,15 @@ class PathingContext(AnalyzerContractFields):
     destination_inside_collision_window: bool | None = None
     destination_plane_matches: bool | None = None
     collision_window_missing_reason: str | None = None
+    path_intent_key: str | None = None
+    destination_target_key: str | None = None
+    path_intent_retained: bool = False
+    path_stable_for_ticks: int | None = None
+    path_started_tick: int | None = None
+    path_last_updated_tick: int | None = None
+    movement_state: str = "unknown"
+    retention_reason: str | None = None
+    switch_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -271,9 +296,16 @@ class PathingContext(AnalyzerContractFields):
             "predictedStepCount": self.predicted_step_count,
             "predictedPathCount": self.predicted_path_count,
             "predictedPathDisplayedCount": self.predicted_path_displayed_count,
+            "predictedPathAvailableCount": self.predicted_path_available_count,
             "pathWasCapped": self.path_was_capped,
+            "pathDisplayWasCapped": self.path_display_was_capped,
+            "overlayPredictedPathLimit": self.overlay_predicted_path_limit,
             "diagonalStepCount": self.diagonal_step_count,
             "cardinalStepCount": self.cardinal_step_count,
+            "pathSegmentsValid": self.path_segments_valid,
+            "invalidPathSegmentCount": self.invalid_path_segment_count,
+            "invalidPathSegments": list(self.invalid_path_segments),
+            "firstInvalidPathSegment": self.first_invalid_path_segment,
             "predictedRunSegments": list(self.predicted_run_segments),
             "predictedMovementModel": self.predicted_movement_model,
             "predictedMovementNotes": list(self.predicted_movement_notes),
@@ -281,6 +313,13 @@ class PathingContext(AnalyzerContractFields):
             "pathCapTiles": self.path_cap_tiles,
             "exactDestinationReached": self.exact_destination_reached,
             "finalApproachSubstituted": self.final_approach_substituted,
+            "approachCandidatesTested": self.approach_candidates_tested,
+            "approachCandidatesRejectedByBlockedSide": self.approach_candidates_rejected_by_blocked_side,
+            "approachCandidatesRejectedByNoLineOfSight": self.approach_candidates_rejected_by_no_line_of_sight,
+            "selectedApproachReason": self.selected_approach_reason,
+            "approachQuality": self.approach_quality,
+            "sideAccessValid": self.side_access_valid,
+            "lineOfSightToTarget": self.line_of_sight_to_target,
             "skippedRunTiles": list(self.skipped_run_tiles),
             "runBehavior": self.run_behavior,
             "reason": self.reason,
@@ -296,6 +335,15 @@ class PathingContext(AnalyzerContractFields):
             "destinationInsideCollisionWindow": self.destination_inside_collision_window,
             "destinationPlaneMatches": self.destination_plane_matches,
             "collisionWindowMissingReason": self.collision_window_missing_reason,
+            "pathIntentKey": self.path_intent_key,
+            "destinationTargetKey": self.destination_target_key,
+            "pathIntentRetained": self.path_intent_retained,
+            "pathStableForTicks": self.path_stable_for_ticks,
+            "pathStartedTick": self.path_started_tick,
+            "pathLastUpdatedTick": self.path_last_updated_tick,
+            "movementState": self.movement_state,
+            "retentionReason": self.retention_reason,
+            "switchReason": self.switch_reason,
         }
 
 
@@ -355,10 +403,32 @@ class ServiceContext(AnalyzerContractFields):
     service_candidates: list[dict[str, Any]] = field(default_factory=list)
     candidates_by_type: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     candidate_counts_by_type: dict[str, int] = field(default_factory=dict)
+    candidate_counts_by_service_group: dict[str, int] = field(default_factory=dict)
     candidate_count: int = 0
+    visible_primary_service_target_count: int = 0
+    visible_deposit_service_target_count: int = 0
+    source_stage_counts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    memory_lifecycle: dict[str, Any] = field(default_factory=dict)
     reachable_count: int | None = None
     unknown_reachability_count: int | None = None
     reason: str | None = None
+    service_target_retained: bool = False
+    retained_service_target_name: str | None = None
+    retained_service_missing_ticks: int | None = None
+    retained_service_candidate_count: int = 0
+    retained_best_service_candidate: dict[str, Any] | None = None
+    retained_service_age_ticks: int | None = None
+    preferred_service_types_seen: list[str] = field(default_factory=list)
+    preferred_service_types_recently_seen: list[str] = field(default_factory=list)
+    missing_preferred_reason: str | None = None
+    selected_service_target_source: str | None = None
+    primary_service_visible: bool = False
+    primary_service_retained: bool = False
+    deposit_fallback_allowed: bool = True
+    selected_service_group: str | None = None
+    logic_error: bool = False
+    service_switch_reason: str | None = None
+    service_candidate_dropped_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -371,10 +441,32 @@ class ServiceContext(AnalyzerContractFields):
             "serviceCandidates": list(self.service_candidates),
             "candidatesByType": {key: list(value) for key, value in self.candidates_by_type.items()},
             "candidateCountsByType": dict(self.candidate_counts_by_type),
+            "candidateCountsByServiceGroup": dict(self.candidate_counts_by_service_group),
             "candidateCount": self.candidate_count,
+            "visiblePrimaryServiceTargetCount": self.visible_primary_service_target_count,
+            "visibleDepositServiceTargetCount": self.visible_deposit_service_target_count,
+            "sourceStageCounts": {key: dict(value) for key, value in self.source_stage_counts.items()},
+            "memoryLifecycle": dict(self.memory_lifecycle),
             "reachableCount": self.reachable_count,
             "unknownReachabilityCount": self.unknown_reachability_count,
             "reason": self.reason,
+            "serviceTargetRetained": self.service_target_retained,
+            "retainedServiceTargetName": self.retained_service_target_name,
+            "retainedServiceMissingTicks": self.retained_service_missing_ticks,
+            "retainedServiceCandidateCount": self.retained_service_candidate_count,
+            "retainedBestServiceCandidate": self.retained_best_service_candidate,
+            "retainedServiceAgeTicks": self.retained_service_age_ticks,
+            "preferredServiceTypesSeen": list(self.preferred_service_types_seen),
+            "preferredServiceTypesRecentlySeen": list(self.preferred_service_types_recently_seen),
+            "missingPreferredReason": self.missing_preferred_reason,
+            "selectedServiceTargetSource": self.selected_service_target_source,
+            "primaryServiceVisible": self.primary_service_visible,
+            "primaryServiceRetained": self.primary_service_retained,
+            "depositFallbackAllowed": self.deposit_fallback_allowed,
+            "selectedServiceGroup": self.selected_service_group,
+            "logicError": self.logic_error,
+            "serviceSwitchReason": self.service_switch_reason,
+            "serviceCandidateDroppedReason": self.service_candidate_dropped_reason,
         }
 
 

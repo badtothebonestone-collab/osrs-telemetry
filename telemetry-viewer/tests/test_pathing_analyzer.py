@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -9,19 +10,20 @@ VIEWER_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(VIEWER_DIR))
 
 from analyzers import pathing_analyzer
-from analyzers.live_state import NavigationContext, NavigationIntentContext, PlayerContext, ProcessInventoryContext
+from analyzers.live_state import ActivityContext, NavigationContext, NavigationIntentContext, PlayerContext, ProcessInventoryContext
 
 
 FULL_BLOCK = 256
 
 
-def collision_window(width=5, height=5, *, blocked=None):
+def collision_window(width=5, height=5, *, blocked=None, flags=None):
     blocked = set(blocked or [])
+    flags = dict(flags or {})
     rows = []
     for y in range(height):
         row = []
         for x in range(width):
-            row.append(FULL_BLOCK if (x, y) in blocked else 0)
+            row.append(flags.get((x, y), FULL_BLOCK if (x, y) in blocked else 0))
         rows.append(row)
     return {
         "collisionWindowAvailable": True,
@@ -40,6 +42,10 @@ def collision_window(width=5, height=5, *, blocked=None):
 
 def player():
     return PlayerContext(world_x=100, world_y=100, plane=0, scene_x=1, scene_y=1)
+
+
+def moved_player():
+    return PlayerContext(world_x=101, world_y=100, plane=0, scene_x=2, scene_y=1)
 
 
 def destination(**overrides):
@@ -73,6 +79,172 @@ def nav_intent(**overrides):
 
 
 class PathingAnalyzerTest(unittest.TestCase):
+    def test_same_destination_path_is_retained_while_player_is_moving(self):
+        state = pathing_analyzer.PathIntentState()
+        first = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=1,
+        )
+        second = pathing_analyzer.analyze_pathing_context(
+            player_context=moved_player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            activity_context=ActivityContext(current_activity="moving"),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=2,
+        )
+
+        self.assertTrue(second.path_intent_retained)
+        self.assertEqual(second.movement_state, "moving")
+        self.assertEqual(second.retention_reason, "player_moving_same_destination")
+        self.assertEqual(second.predicted_path_tiles, first.predicted_path_tiles)
+        self.assertEqual(second.path_stable_for_ticks, 2)
+        self.assertEqual(second.path_intent_key, first.path_intent_key)
+
+    def test_path_switches_when_policy_phase_changes(self):
+        state = pathing_analyzer.PathIntentState()
+        pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=1,
+        )
+        second = pathing_analyzer.analyze_pathing_context(
+            player_context=moved_player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            activity_context=ActivityContext(current_activity="moving"),
+            generic_task_state={"phase": "target_selected", "activeIntent": "target_selected"},
+            path_intent_state=state,
+            source_tick=2,
+        )
+
+        self.assertFalse(second.path_intent_retained)
+        self.assertEqual(second.switch_reason, "path_intent_key_changed")
+        self.assertEqual(second.path_stable_for_ticks, 1)
+
+    def test_path_switch_debounces_changed_destination_while_moving(self):
+        state = pathing_analyzer.PathIntentState(switch_debounce_ticks=2)
+        first = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100, objectKey="booth-a")),
+            activity_context=ActivityContext(current_activity="moving"),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=1,
+        )
+        second = pathing_analyzer.analyze_pathing_context(
+            player_context=moved_player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=2, worldX=105, worldY=101, objectKey="booth-b")),
+            activity_context=ActivityContext(current_activity="moving"),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=2,
+        )
+        third = pathing_analyzer.analyze_pathing_context(
+            player_context=moved_player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=2, worldX=105, worldY=101, objectKey="booth-b")),
+            activity_context=ActivityContext(current_activity="moving"),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=3,
+        )
+
+        self.assertTrue(second.path_intent_retained)
+        self.assertEqual(second.retention_reason, "candidate_switch_debounce")
+        self.assertEqual(second.predicted_path_tiles, first.predicted_path_tiles)
+        self.assertFalse(third.path_intent_retained)
+        self.assertEqual(third.switch_reason, "destination_changed_after_debounce")
+        self.assertEqual(third.destination_target_key, "objectKey:booth-b")
+
+    def test_path_clears_when_player_arrives_at_final_approach(self):
+        state = pathing_analyzer.PathIntentState()
+        first = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=1,
+        )
+        final_tile = first.final_approach_tile
+        arrived = PlayerContext(world_x=final_tile["worldX"], world_y=final_tile["worldY"], plane=0, scene_x=5, scene_y=1)
+        second = pathing_analyzer.analyze_pathing_context(
+            player_context=arrived,
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=2,
+        )
+
+        self.assertFalse(second.path_intent_retained)
+        self.assertEqual(second.switch_reason, "arrived_at_final_approach")
+        self.assertIsNone(state.active_path_intent_key)
+
+    def test_path_clears_when_current_path_is_blocked(self):
+        state = pathing_analyzer.PathIntentState()
+        pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=1,
+        )
+        second = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5, blocked={(2, 1), (1, 0), (1, 2), (0, 1)})),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=2,
+        )
+
+        self.assertFalse(second.path_intent_retained)
+        self.assertEqual(second.local_reachability, "blocked")
+        self.assertEqual(second.switch_reason, "path_blocked")
+        self.assertIsNone(state.active_path_intent_key)
+
+    def test_path_switches_when_destination_disappears(self):
+        state = pathing_analyzer.PathIntentState()
+        pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=1,
+        )
+        second = pathing_analyzer.analyze_pathing_context(
+            player_context=moved_player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=NavigationIntentContext(
+                navigation_needed=True,
+                navigation_reason="destination_missing",
+                target_kind="service",
+                destination_target=None,
+            ),
+            activity_context=ActivityContext(current_activity="moving"),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=2,
+        )
+
+        self.assertFalse(second.path_intent_retained)
+        self.assertEqual(second.switch_reason, "destination_missing")
+        self.assertIsNone(state.active_path_intent_key)
+
     def test_osrs_like_predicted_is_default_when_collision_data_exists(self):
         context = pathing_analyzer.analyze_pathing_context(
             player_context=player(),
@@ -152,7 +324,7 @@ class PathingAnalyzerTest(unittest.TestCase):
         payload = context.to_dict()
         self.assertEqual(payload["localReachability"], "reachable")
         self.assertEqual(payload["destinationTile"], {"worldX": 102, "worldY": 102, "plane": 0})
-        self.assertEqual(payload["finalApproachTile"], {"worldX": 101, "worldY": 101, "plane": 0})
+        self.assertEqual(payload["finalApproachTile"], {"worldX": 101, "worldY": 102, "plane": 0})
         self.assertNotEqual(payload["destinationTile"], payload["finalApproachTile"])
         self.assertFalse(payload["exactDestinationReached"])
         self.assertTrue(payload["finalApproachSubstituted"])
@@ -189,17 +361,153 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["pathTargetTile"], payload["finalApproachTile"])
 
     def test_bank_booth_prefers_inside_reachable_approach_tile_over_outside_wall(self):
+        block = pathing_analyzer.navigation_reachability
         context = pathing_analyzer.analyze_pathing_context(
             player_context=player(),
-            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=6, height=4)),
+            navigation_context=NavigationContext(
+                collision_window_available=True,
+                raw=collision_window(
+                    width=6,
+                    height=4,
+                    flags={
+                        (3, 1): block.BLOCK_MOVEMENT_OBJECT
+                        | block.BLOCK_MOVEMENT_WEST
+                        | block.BLOCK_MOVEMENT_NORTH
+                        | block.BLOCK_MOVEMENT_SOUTH,
+                    },
+                ),
+            ),
             navigation_intent_context=nav_intent(destination_target=destination(sceneX=3, sceneY=1, worldX=102, worldY=100)),
         )
 
         payload = context.to_dict()
         self.assertEqual(payload["localReachability"], "reachable")
-        self.assertEqual(payload["finalApproachTile"], {"worldX": 101, "worldY": 100, "plane": 0})
+        self.assertEqual(payload["finalApproachTile"], {"worldX": 103, "worldY": 100, "plane": 0})
         self.assertEqual(payload["destinationTile"], {"worldX": 102, "worldY": 100, "plane": 0})
         self.assertNotEqual(payload["finalApproachTile"], payload["destinationTile"])
+        self.assertEqual(payload["approachQuality"], "direct_side_access")
+        self.assertEqual(payload["selectedApproachReason"], "reachable_direct_side_access")
+        self.assertGreaterEqual(payload["approachCandidatesRejectedByBlockedSide"], 1)
+
+    def test_no_side_access_approach_is_marked_suspect_not_clean_reachable(self):
+        block = pathing_analyzer.navigation_reachability
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(
+                collision_window_available=True,
+                raw=collision_window(
+                    width=6,
+                    height=4,
+                    flags={
+                        (3, 1): block.BLOCK_MOVEMENT_OBJECT
+                        | block.BLOCK_MOVEMENT_WEST
+                        | block.BLOCK_MOVEMENT_EAST
+                        | block.BLOCK_MOVEMENT_NORTH
+                        | block.BLOCK_MOVEMENT_SOUTH,
+                    },
+                ),
+            ),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=3, sceneY=1, worldX=102, worldY=100)),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "unknown")
+        self.assertEqual(payload["reason"], "approach_side_access_blocked")
+        self.assertEqual(payload["approachQuality"], "suspect_outside_wall")
+        self.assertTrue(payload["pathSegmentsValid"])
+        self.assertGreater(payload["approachCandidatesRejectedByBlockedSide"], 0)
+
+    def test_deposit_box_inferred_from_service_candidate_type_requires_strict_side_access(self):
+        block = pathing_analyzer.navigation_reachability
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(
+                collision_window_available=True,
+                raw=collision_window(
+                    width=6,
+                    height=4,
+                    flags={
+                        (3, 1): block.BLOCK_MOVEMENT_OBJECT
+                        | block.BLOCK_MOVEMENT_WEST
+                        | block.BLOCK_MOVEMENT_EAST
+                        | block.BLOCK_MOVEMENT_NORTH
+                        | block.BLOCK_MOVEMENT_SOUTH,
+                    },
+                ),
+            ),
+            navigation_intent_context=nav_intent(
+                destination_target=destination(
+                    classId="bank_related",
+                    serviceCandidateType="deposit_box",
+                    targetName="Bank Deposit Box",
+                    sceneX=3,
+                    sceneY=1,
+                    worldX=102,
+                    worldY=100,
+                )
+            ),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "unknown")
+        self.assertEqual(payload["reason"], "approach_side_access_blocked")
+        self.assertEqual(payload["approachQuality"], "suspect_outside_wall")
+        self.assertEqual(payload["selectedApproachReason"], "suspect_side_access_unknown")
+
+    def test_path_segment_validation_rejects_blocked_cardinal_step(self):
+        block = pathing_analyzer.navigation_reachability
+        window = pathing_analyzer.navigation_reachability.parse_collision_window(
+            collision_window(flags={(1, 1): block.BLOCK_MOVEMENT_EAST})["collisionWindow"]
+        )
+
+        validation = pathing_analyzer.validate_path_segments(window, [(1, 1), (2, 1)], "osrs_like_predicted")
+
+        self.assertFalse(validation["valid"])
+        self.assertEqual(validation["invalidCount"], 1)
+        self.assertEqual(validation["firstInvalidSegment"]["reason"], "blocked_cardinal_step")
+
+    def test_path_segment_validation_rejects_diagonal_corner_clipping(self):
+        window = pathing_analyzer.navigation_reachability.parse_collision_window(
+            collision_window(blocked={(2, 1)})["collisionWindow"]
+        )
+
+        validation = pathing_analyzer.validate_path_segments(window, [(1, 1), (2, 2)], "osrs_like_predicted")
+
+        self.assertFalse(validation["valid"])
+        self.assertEqual(validation["firstInvalidSegment"]["reason"], "blocked_diagonal_step")
+
+    def test_invalid_emitted_path_is_marked_not_reachable_but_kept_for_diagnostics(self):
+        block = pathing_analyzer.navigation_reachability
+        fake_path = pathing_analyzer.LocalPathResult(
+            "reachable",
+            "local_path_found",
+            [(1, 1), (2, 1)],
+            2,
+            False,
+            True,
+            final_approach_scene_tile=(1, 1),
+            final_approach_tile_source="path_before_destination",
+            path_target_scene_tile=(2, 1),
+            path_target_tile_source="exact_destination_tile",
+        )
+
+        with patch.object(pathing_analyzer, "local_scene_path", return_value=fake_path):
+            context = pathing_analyzer.analyze_pathing_context(
+                player_context=player(),
+                navigation_context=NavigationContext(
+                    collision_window_available=True,
+                    raw=collision_window(flags={(1, 1): block.BLOCK_MOVEMENT_EAST}),
+                ),
+                navigation_intent_context=nav_intent(destination_target=destination(targetType="tile", classId="tile")),
+            )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "unknown")
+        self.assertEqual(payload["reason"], "invalid_path_segment")
+        self.assertFalse(payload["pathSegmentsValid"])
+        self.assertEqual(payload["invalidPathSegmentCount"], 1)
+        self.assertEqual(payload["firstInvalidPathSegment"]["reason"], "blocked_cardinal_step")
+        self.assertEqual(payload["predictedPathTiles"], [{"worldX": 101, "worldY": 100, "plane": 0}])
 
     def test_npc_target_handling_preserves_service_selection_pathing(self):
         context = pathing_analyzer.analyze_pathing_context(
@@ -378,8 +686,10 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertEqual(context.predicted_step_count, context.path_length_tiles)
         payload = context.to_dict()
         self.assertGreater(payload["predictedPathCount"], payload["predictedPathDisplayedCount"])
+        self.assertEqual(payload["predictedPathAvailableCount"], payload["predictedPathCount"])
         self.assertEqual(payload["predictedPathDisplayedCount"], 4)
         self.assertTrue(payload["pathWasCapped"])
+        self.assertTrue(payload["pathDisplayWasCapped"])
 
     def test_pathing_context_writes_no_files(self):
         with tempfile.TemporaryDirectory() as temp:

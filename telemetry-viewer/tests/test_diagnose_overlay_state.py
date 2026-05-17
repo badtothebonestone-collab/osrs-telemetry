@@ -311,8 +311,26 @@ class DiagnoseOverlayStateTest(unittest.TestCase):
                     "latestTick": 12,
                     "summary": {
                         "predictedPathTilesAvailableCount": 5,
+                        "predictedPathAvailableCount": 5,
+                        "predictedPathDisplayedCount": 5,
                         "predictedPathMarkersEmittedCount": 3,
-                        "predictedPathLimit": 8,
+                        "predictedPathLimit": 24,
+                        "overlayPredictedPathLimit": 24,
+                        "pathDisplayWasCapped": False,
+                        "selectedTargetGeometryPresent": True,
+                        "selectedTargetGeometrySource": "clickableHull",
+                        "selectedTargetDroppedByPathCap": False,
+                        "pathMarkersAvailable": 5,
+                        "pathMarkersEmitted": 3,
+                        "pathMarkerLimit": 24,
+                        "pathMarkersCapped": False,
+                        "geometryLaneCounts": {
+                            "selectedTarget": 1,
+                            "backups": 0,
+                            "destinationWaypointFinalApproach": 2,
+                            "predictedPath": 3,
+                            "debugLabels": 0,
+                        },
                         "destinationMarkerEmitted": True,
                         "nextWaypointMarkerEmitted": True,
                         "finalApproachMarkerEmitted": False,
@@ -320,6 +338,7 @@ class DiagnoseOverlayStateTest(unittest.TestCase):
                     "intentState": {
                         "schema": "overlay_intent_state.v1",
                         "markers": [
+                            {"markerType": "selected_target", "label": "Service: Bank booth", "worldX": 3206, "worldY": 3200, "plane": 0, "clickableHull": [[1, 1], [4, 1], [4, 4]]},
                             {"markerType": "destination_tile", "label": "Destination", "worldX": 3205, "worldY": 3200, "plane": 0},
                             {"markerType": "waypoint", "markerId": "next_waypoint_tile:3201:3200:0", "label": "Next waypoint", "worldX": 3201, "worldY": 3200, "plane": 0},
                             {"markerType": "predicted_path_tile", "label": "Path 2", "worldX": 3202, "worldY": 3200, "plane": 0},
@@ -334,8 +353,20 @@ class DiagnoseOverlayStateTest(unittest.TestCase):
             report = diagnose.build_report(session, args(intent=True))
 
             self.assertEqual(report["intentSummary"]["predictedPathTilesAvailableCount"], 5)
+            self.assertEqual(report["intentSummary"]["predictedPathDisplayedCount"], 5)
             self.assertEqual(report["intentSummary"]["predictedPathMarkersEmittedCount"], 3)
-            self.assertEqual(report["intentSummary"]["predictedPathLimit"], 8)
+            self.assertEqual(report["intentSummary"]["predictedPathLimit"], 24)
+            self.assertEqual(report["intentSummary"]["overlayPredictedPathLimit"], 24)
+            self.assertFalse(report["intentSummary"]["pathDisplayWasCapped"])
+            self.assertTrue(report["intentSummary"]["selectedTargetGeometryPresent"])
+            self.assertEqual(report["intentSummary"]["selectedTargetGeometrySource"], "clickableHull")
+            self.assertFalse(report["intentSummary"]["selectedTargetDroppedByPathCap"])
+            self.assertEqual(report["intentSummary"]["pathMarkersAvailable"], 5)
+            self.assertEqual(report["intentSummary"]["pathMarkersEmitted"], 3)
+            self.assertEqual(report["intentSummary"]["pathMarkerLimit"], 24)
+            self.assertFalse(report["intentSummary"]["pathMarkersCapped"])
+            self.assertEqual(report["intentSummary"]["geometryLaneCounts"]["selectedTarget"], 1)
+            self.assertEqual(report["intentSummary"]["geometryLaneCounts"]["predictedPath"], 3)
             self.assertTrue(report["intentSummary"]["destinationMarkerEmitted"])
             self.assertTrue(report["intentSummary"]["nextWaypointMarkerEmitted"])
             self.assertFalse(report["intentSummary"]["finalApproachMarkerEmitted"])

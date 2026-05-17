@@ -48,8 +48,21 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
         "predictedPathTiles": predicted_tiles if pathing else [],
         "predictedPathCount": pathing.get("predictedPathCount", len(predicted_tiles)) if pathing else 0,
         "predictedPathDisplayedCount": pathing.get("predictedPathDisplayedCount", len(predicted_tiles)) if pathing else 0,
+        "predictedPathAvailableCount": pathing.get("predictedPathAvailableCount", pathing.get("predictedPathCount", len(predicted_tiles))) if pathing else 0,
         "pathWasCapped": pathing.get("pathWasCapped") if pathing else False,
+        "pathDisplayWasCapped": pathing.get("pathDisplayWasCapped", pathing.get("pathWasCapped")) if pathing else False,
+        "overlayPredictedPathLimit": pathing.get("overlayPredictedPathLimit") if pathing else status.get("overlayPredictedPathLimit"),
         "pathCapTiles": pathing.get("pathCapTiles") if pathing else status.get("pathingPathCapTiles"),
+        "pathSegmentsValid": pathing.get("pathSegmentsValid") if pathing else status.get("pathingPathSegmentsValid"),
+        "invalidPathSegmentCount": pathing.get("invalidPathSegmentCount") if pathing else status.get("pathingInvalidPathSegmentCount"),
+        "firstInvalidPathSegment": pathing.get("firstInvalidPathSegment") if pathing else status.get("pathingFirstInvalidPathSegment"),
+        "selectedApproachReason": pathing.get("selectedApproachReason") if pathing else status.get("pathingSelectedApproachReason"),
+        "approachQuality": pathing.get("approachQuality") if pathing else status.get("pathingApproachQuality"),
+        "approachCandidatesTested": pathing.get("approachCandidatesTested") if pathing else status.get("pathingApproachCandidatesTested"),
+        "approachCandidatesRejectedByBlockedSide": pathing.get("approachCandidatesRejectedByBlockedSide") if pathing else status.get("pathingApproachCandidatesRejectedByBlockedSide"),
+        "approachCandidatesRejectedByNoLineOfSight": pathing.get("approachCandidatesRejectedByNoLineOfSight") if pathing else status.get("pathingApproachCandidatesRejectedByNoLineOfSight"),
+        "sideAccessValid": pathing.get("sideAccessValid") if pathing else status.get("pathingSideAccessValid"),
+        "lineOfSightToTarget": pathing.get("lineOfSightToTarget") if pathing else status.get("pathingLineOfSightToTarget"),
         "exactDestinationReached": pathing.get("exactDestinationReached") if pathing else status.get("pathingExactDestinationReached"),
         "finalApproachSubstituted": pathing.get("finalApproachSubstituted") if pathing else status.get("pathingFinalApproachSubstituted"),
         "finalApproachTileUsed": pathing.get("finalApproachTileUsed", bool(pathing.get("finalApproachTile"))) if pathing else status.get("pathingFinalApproachTileUsed", bool(status.get("pathingFinalApproachTile"))),
@@ -73,6 +86,13 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
         "pathingMillis": pathing.get("pathingMillis") if pathing else status.get("pathingMillis"),
         "pathNodesExpanded": pathing.get("pathNodesExpanded") if pathing else status.get("pathNodesExpanded"),
         "pathingBudgetExceeded": pathing.get("pathingBudgetExceeded") if pathing else status.get("pathingBudgetExceeded"),
+        "pathIntentKey": pathing.get("pathIntentKey") if pathing else status.get("pathIntentKey"),
+        "pathRetained": pathing.get("pathIntentRetained") if pathing else status.get("pathIntentRetained"),
+        "stableForTicks": pathing.get("pathStableForTicks") if pathing else status.get("pathStableForTicks"),
+        "movementState": pathing.get("movementState") if pathing else status.get("pathMovementState"),
+        "retentionReason": pathing.get("retentionReason") if pathing else status.get("pathRetentionReason"),
+        "switchReason": pathing.get("switchReason") if pathing else status.get("pathSwitchReason"),
+        "destinationTargetKey": pathing.get("destinationTargetKey") if pathing else status.get("pathDestinationTargetKey"),
         "missingCapabilities": pathing.get("missingCapabilities", []) if pathing else [],
         "warnings": pathing.get("warnings", []) if pathing else ["daemon brain state did not expose pathing context"],
         "approachTileNote": (
@@ -128,11 +148,30 @@ def format_human(payload: dict[str, Any]) -> str:
         f"Destination plane matches: {bool_label(payload.get('destinationPlaneMatches'))}",
         f"Collision window reason: {payload.get('collisionWindowMissingReason') or 'none'}",
         f"Movement model: {payload.get('movementModel') or 'unknown'}",
+        f"Path intent key: {payload.get('pathIntentKey') or 'none'}",
+        f"Destination target key: {payload.get('destinationTargetKey') or 'none'}",
+        f"Path retained: {bool_label(payload.get('pathRetained'))}",
+        f"Path stable for: {payload.get('stableForTicks') if payload.get('stableForTicks') is not None else 'unknown'}",
+        f"Movement state: {payload.get('movementState') or 'unknown'}",
+        f"Retention reason: {payload.get('retentionReason') or 'none'}",
+        f"Switch reason: {payload.get('switchReason') or 'none'}",
         f"Path cap used: {payload.get('pathCapTiles') if payload.get('pathCapTiles') is not None else 'unknown'}",
         f"Path was capped: {bool_label(payload.get('pathWasCapped'))}",
+        f"Overlay predicted path limit: {payload.get('overlayPredictedPathLimit') if payload.get('overlayPredictedPathLimit') is not None else 'unknown'}",
+        f"Path display capped: {bool_label(payload.get('pathDisplayWasCapped'))}",
+        f"Path segments valid: {bool_label(payload.get('pathSegmentsValid'))}",
+        f"Invalid path segments: {payload.get('invalidPathSegmentCount') if payload.get('invalidPathSegmentCount') is not None else 0}",
+        f"First invalid segment: {(payload.get('firstInvalidPathSegment') or {}).get('reason') if isinstance(payload.get('firstInvalidPathSegment'), dict) else 'none'}",
         f"Exact destination reached: {bool_label(payload.get('exactDestinationReached'))}",
         f"Final approach substituted: {bool_label(payload.get('finalApproachSubstituted'))}",
         f"Final approach tile used: {bool_label(payload.get('finalApproachTileUsed'))}",
+        f"Selected approach reason: {payload.get('selectedApproachReason') or 'unknown'}",
+        f"Approach quality: {payload.get('approachQuality') or 'unknown'}",
+        f"Approach candidates tested: {payload.get('approachCandidatesTested') if payload.get('approachCandidatesTested') is not None else 'unknown'}",
+        f"Rejected by blocked side: {payload.get('approachCandidatesRejectedByBlockedSide') if payload.get('approachCandidatesRejectedByBlockedSide') is not None else 0}",
+        f"Rejected by no line-of-sight: {payload.get('approachCandidatesRejectedByNoLineOfSight') if payload.get('approachCandidatesRejectedByNoLineOfSight') is not None else 0}",
+        f"Side access valid: {bool_label(payload.get('sideAccessValid'))}",
+        f"Line of sight to target: {bool_label(payload.get('lineOfSightToTarget'))}",
         f"Diagonal steps: {payload.get('diagonalSteps') if payload.get('diagonalSteps') is not None else 'unknown'}",
         f"Cardinal steps: {payload.get('cardinalSteps') if payload.get('cardinalSteps') is not None else 'unknown'}",
         "Comparison hint: "
@@ -144,6 +183,7 @@ def format_human(payload: dict[str, Any]) -> str:
         f"Run behavior: {payload.get('runBehavior') or 'unknown'}",
         f"Skipped run tiles: {len(payload.get('skippedRunTiles') if isinstance(payload.get('skippedRunTiles'), list) else [])}",
         f"Predicted path count: {payload.get('predictedPathCount') if payload.get('predictedPathCount') is not None else 0}",
+        f"Predicted path available: {payload.get('predictedPathAvailableCount') if payload.get('predictedPathAvailableCount') is not None else 0}",
         f"Predicted path displayed: {payload.get('predictedPathDisplayedCount') if payload.get('predictedPathDisplayedCount') is not None else 0}",
         f"Predicted path: {preview}",
         f"Pathing millis: {payload.get('pathingMillis') if payload.get('pathingMillis') is not None else 'unknown'}",
@@ -155,6 +195,12 @@ def format_human(payload: dict[str, Any]) -> str:
         lines.append(f"Missing: {', '.join(str(item) for item in missing)}")
     if payload.get("approachTileNote"):
         lines.append(str(payload.get("approachTileNote")))
+    if payload.get("pathSegmentsValid") is False:
+        lines.append("Warning: predicted path has an invalid collision segment.")
+    if payload.get("approachQuality") == "suspect_outside_wall":
+        lines.append("Warning: selected approach tile may be on a blocked/outside-wall side of the target.")
+    if payload.get("pathDisplayWasCapped") is True:
+        lines.append("Warning: displayed path markers are capped; diagnostics retain the available predicted path list.")
     warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
     lines.extend(["", "Warnings:"])
     if warnings:

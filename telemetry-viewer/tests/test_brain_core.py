@@ -208,7 +208,7 @@ class BrainCoreTest(unittest.TestCase):
         self.assertEqual(decision["phase"], "inventory_full")
         self.assertEqual(decision["genericTaskState"]["phase"], "inventory_full")
         self.assertEqual(decision["genericTaskState"]["activeIntent"], "needs_service")
-        self.assertEqual(decision["genericTaskState"]["serviceTypeNeeded"], "bank")
+        self.assertEqual(decision["genericTaskState"]["serviceTypeNeeded"], "bank_full")
         self.assertIsNone(decision["genericTaskState"]["selectedTargetKey"])
         self.assertIsNone(decision["genericTaskState"]["activeIntentTarget"])
         self.assertEqual(decision["genericTaskState"]["availableTarget"]["id"], 1278)

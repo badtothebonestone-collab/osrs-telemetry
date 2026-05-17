@@ -197,6 +197,29 @@ public class PluginSnapshotEndpointTest
 	}
 
 	@Test
+	public void projectionCompactionPreservesLoadedServiceSceneObjects()
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		Map<String, Object> payload = projectionPayload(5);
+		payload.put("serviceSceneObjects", List.of(serviceSceneRef("bank-booth-loaded", "Bank booth")));
+		cache.update("live_projection_packet.v1", 5L, "2026-05-11T00:00:00Z", payload);
+		PluginSnapshotEndpoint endpoint = endpoint(cache, 5, 1024 * 1024);
+		JsonObject request = projectionRequest(1);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		JsonObject projection = payloads(response).get("projection").getAsJsonObject();
+		JsonArray refs = projection.getAsJsonArray("visibleObjectRefs");
+		JsonArray serviceScene = projection.getAsJsonArray("serviceSceneObjects");
+
+		assertEquals("WARN", response.get("status"));
+		assertEquals(1, refs.size());
+		assertNotNull(serviceScene);
+		assertEquals(1, serviceScene.size());
+		assertEquals("bank-booth-loaded", serviceScene.get(0).getAsJsonObject().get("objectKey").getAsString());
+		assertEquals("Bank booth", serviceScene.get(0).getAsJsonObject().get("name").getAsString());
+	}
+
+	@Test
 	public void cappedCompactProjectionCanFitEvenWhenCachedProjectionIsLarge()
 	{
 		PluginLiveCache cache = new PluginLiveCache(gson);
@@ -414,6 +437,26 @@ public class PluginSnapshotEndpointTest
 		}
 		payload.put("visibleObjectRefs", refs);
 		return payload;
+	}
+
+	private Map<String, Object> serviceSceneRef(String objectKey, String name)
+	{
+		Map<String, Object> ref = new LinkedHashMap<>();
+		ref.put("objectKey", objectKey);
+		ref.put("targetType", "sceneObject");
+		ref.put("id", 10355);
+		ref.put("hash", objectKey.hashCode());
+		ref.put("name", name);
+		ref.put("actions", List.of("Bank"));
+		ref.put("kind", "GAME_OBJECT");
+		ref.put("worldX", 3208);
+		ref.put("worldY", 3221);
+		ref.put("plane", 0);
+		ref.put("sceneX", 28);
+		ref.put("sceneY", 31);
+		ref.put("present", true);
+		ref.put("source", "loadedServiceScene");
+		return ref;
 	}
 
 	private JsonObject projectionRequest(int maxRefs)

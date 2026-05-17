@@ -72,7 +72,7 @@ class TaskStateTest(unittest.TestCase):
         ).to_dict()
         self.assertEqual(inventory_full["phase"], "inventory_full")
         self.assertEqual(inventory_full["activeIntent"], "needs_service")
-        self.assertEqual(inventory_full["serviceTypeNeeded"], "bank")
+        self.assertEqual(inventory_full["serviceTypeNeeded"], "bank_full")
         self.assertIsNone(inventory_full["selectedTargetKey"])
         self.assertIsNone(inventory_full["activeIntentTarget"])
         self.assertEqual(inventory_full["availableTarget"]["id"], 10820)

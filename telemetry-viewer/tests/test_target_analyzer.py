@@ -38,6 +38,29 @@ class TargetAnalyzerTest(unittest.TestCase):
         self.assertEqual(context.service_candidate_inputs[0]["targetName"], "Bank booth")
         self.assertEqual(context.service_candidate_visibility, "available")
 
+    def test_loaded_service_scene_feeds_service_inputs_without_polluting_profile_candidates(self):
+        candidates = [
+            {"classId": "tree", "targetName": "Tree", "qualityScore": 30, "distanceTiles": 2},
+        ]
+        loaded_service_scene = [
+            {"targetType": "sceneObject", "name": "Bank booth", "objectKey": "booth-loaded", "worldX": 3208, "worldY": 3221, "plane": 0},
+        ]
+
+        context = target_analyzer.analyze_targets(
+            candidates,
+            class_id="tree",
+            max_candidates=5,
+            loaded_service_scene=loaded_service_scene,
+        )
+
+        self.assertEqual(context.raw_best_target["targetName"], "Tree")
+        self.assertEqual(context.profile_candidate_count, 1)
+        self.assertEqual(context.broad_candidate_count, 1)
+        self.assertEqual(context.loaded_service_scene_count, 1)
+        self.assertEqual(context.service_candidate_input_count, 1)
+        self.assertEqual(context.service_candidate_inputs[0]["objectKey"], "booth-loaded")
+        self.assertEqual(context.service_candidate_inputs[0]["_serviceSourceLane"], "loadedServiceScene")
+
     def test_supports_future_target_classes_without_woodcutting_only_logic(self):
         candidates = [{"classId": "bank_booth", "targetName": "Booth", "qualityScore": 12, "distanceTiles": 4}]
 

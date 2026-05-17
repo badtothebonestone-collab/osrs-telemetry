@@ -18,7 +18,12 @@ class TaskPolicyTest(unittest.TestCase):
         self.assertEqual(bank.inventoryExpectation, task_policy.InventoryExpectation.MUST_HAVE_SPACE)
         self.assertEqual(bank.fullInventoryStrategy, task_policy.InventoryFullStrategy.NEEDS_SERVICE)
         self.assertEqual(bank.resourceDisposition, task_policy.ResourceDisposition.BANK)
-        self.assertEqual(bank.serviceTypeNeeded, "bank")
+        self.assertEqual(bank.serviceTypeNeeded, "bank_full")
+
+        deposit = policies["woodcutting_deposit"]
+        self.assertEqual(deposit.fullInventoryStrategy, task_policy.InventoryFullStrategy.NEEDS_SERVICE)
+        self.assertEqual(deposit.resourceDisposition, task_policy.ResourceDisposition.BANK)
+        self.assertEqual(deposit.serviceTypeNeeded, "bank_deposit")
 
         firemake = policies["woodcutting_firemake"]
         self.assertEqual(firemake.fullInventoryStrategy, task_policy.InventoryFullStrategy.PROCESS_INVENTORY)
@@ -43,7 +48,7 @@ class TaskPolicyTest(unittest.TestCase):
 
         self.assertEqual(policy.name, "woodcutting_bank")
         self.assertEqual(policy.fullInventoryStrategy, task_policy.InventoryFullStrategy.NEEDS_SERVICE)
-        self.assertEqual(policy.serviceTypeNeeded, "bank")
+        self.assertEqual(policy.serviceTypeNeeded, "bank_full")
 
     def test_policy_payload_reports_inventory_strategy(self):
         payload = task_policy.resolve_task_policy("woodcutting_drop").to_dict()
