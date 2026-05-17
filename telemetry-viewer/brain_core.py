@@ -603,6 +603,9 @@ def context_domain_summary(
     elif active_intent == "needs_service":
         required = ["inventory", "service"]
         optional = ["target.candidates", "service.target"]
+    elif active_intent == "service_available":
+        required = ["inventory", "service"]
+        optional = ["target.candidates", "navigation.pathing"]
     elif active_intent in {"select_target", "continue_current_target"} or phase in {"select_target", "target_selected"}:
         required = ["target.candidates", "target.freshness"]
         optional = ["navigation.full_pathfinding"]
@@ -2229,6 +2232,19 @@ def format_human(decision: dict) -> str:
         elif service_context.get("serviceNeeded"):
             lines.append("  Service candidate: not observed")
             lines.append("  Missing/needed context: bank_service candidate")
+    if service_context and (service_context.get("serviceNeeded") or service_context.get("serviceReady")):
+        service_target = service_context.get("bestServiceCandidate") if isinstance(service_context.get("bestServiceCandidate"), dict) else active_target
+        lines.extend(["", "Service:"])
+        lines.append(f"  target: {target_context_label(service_target) if isinstance(service_target, dict) else 'none'}")
+        lines.append(
+            "  arrived: "
+            f"{'yes' if service_context.get('arrivedAtFinalApproach') or service_context.get('arrivedNearDestination') else 'no'}"
+        )
+        lines.append(f"  ready: {'yes' if service_context.get('serviceReady') else 'no'}")
+        if service_context.get("distanceToServiceTarget") is not None:
+            lines.append(f"  distance to target: {text(service_context.get('distanceToServiceTarget'))}")
+        if service_context.get("distanceToFinalApproach") is not None:
+            lines.append(f"  distance to final approach: {text(service_context.get('distanceToFinalApproach'))}")
     if process_needed:
         lines.append(f"  Process needed: {text(process_needed)}")
         if process_context.get("heldResourceCount") is not None:
@@ -2268,7 +2284,10 @@ def format_human(decision: dict) -> str:
     if pathing_context:
         lines.extend(["", "Pathing:"])
         if not pathing_context.get("pathingNeeded"):
-            lines.append("  not needed for current phase")
+            if pathing_context.get("pathCompleted"):
+                lines.append(f"  completed: {text(pathing_context.get('pathCompletionReason'))}")
+            else:
+                lines.append("  not needed for current phase")
         else:
             destination = pathing_context.get("destination") if isinstance(pathing_context.get("destination"), dict) else {}
             destination_label = target_context_label(destination) if destination else "none"
@@ -2324,6 +2343,14 @@ def format_human(decision: dict) -> str:
                     f"stableFor={text(pathing_context.get('pathStableForTicks'))}, "
                     f"movement={text(pathing_context.get('movementState'))}, "
                     f"switch={text(pathing_context.get('switchReason'))}"
+                )
+            if pathing_context.get("arrivedAtFinalApproach") is not None:
+                lines.append(
+                    "  Arrival: "
+                    f"finalApproach={'yes' if pathing_context.get('arrivedAtFinalApproach') else 'no'}, "
+                    f"nearDestination={'yes' if pathing_context.get('arrivedNearDestination') else 'no'}, "
+                    f"stableFor={text(pathing_context.get('arrivedStableForTicks'))}, "
+                    f"ready={'yes' if pathing_context.get('serviceReady') else 'no'}"
                 )
             notes = pathing_context.get("predictedMovementNotes") if isinstance(pathing_context.get("predictedMovementNotes"), list) else []
             if notes:

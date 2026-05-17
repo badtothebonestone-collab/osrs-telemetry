@@ -15,6 +15,8 @@ from analyzers.live_state import PathingContext
 DEFAULT_MAX_PREDICTED_TILES = 24
 DEFAULT_MAX_NODES = 512
 DEFAULT_BUDGET_MILLIS = 5.0
+ARRIVAL_READY_STABLE_TICKS = 2
+SERVICE_READY_GRACE_TICKS = 4
 PREDICTION_NOTE = "Predicted local path; exact server movement may differ."
 MOVEMENT_MODELS = {"cardinal_only", "osrs_like_predicted", "diagonal_guarded"}
 OSRS_LIKE_DIRECTIONS = (
@@ -84,6 +86,12 @@ class PathIntentState:
     pending_switch_key: str | None = None
     pending_switch_ticks: int = 0
     switch_debounce_ticks: int = 2
+    arrival_key: str | None = None
+    arrived_stable_for_ticks: int = 0
+    service_ready: bool = False
+    service_ready_stable_for_ticks: int = 0
+    service_ready_started_tick: int | None = None
+    service_ready_last_tick: int | None = None
 
     def clear(self, *, reason: str | None = None) -> None:
         self.active_path_intent_key = None
@@ -101,6 +109,12 @@ class PathIntentState:
         self.switch_reason = reason
         self.pending_switch_key = None
         self.pending_switch_ticks = 0
+        self.arrival_key = None
+        self.arrived_stable_for_ticks = 0
+        self.service_ready = False
+        self.service_ready_stable_for_ticks = 0
+        self.service_ready_started_tick = None
+        self.service_ready_last_tick = None
 
 def context_value(context: Any, snake_key: str, camel_key: str | None = None, default: Any = None) -> Any:
     if context is None:
@@ -450,6 +464,19 @@ RETAINED_PATH_ATTRIBUTES = (
     "skipped_run_tiles",
     "run_behavior",
     "reason",
+    "arrived_at_final_approach",
+    "arrived_near_destination",
+    "distance_to_final_approach",
+    "distance_to_destination",
+    "distance_to_path_target",
+    "arrived_stable_for_ticks",
+    "arrival_reason",
+    "service_ready",
+    "service_ready_reason",
+    "service_ready_stable_for_ticks",
+    "path_completed",
+    "path_completion_reason",
+    "retained_path_after_arrival",
 )
 
 
@@ -466,6 +493,146 @@ def arrived_at_final_approach(current_player_tile: dict[str, Any] | None, state:
     if state is None or not isinstance(state.final_approach_tile, dict):
         return False
     return tile_key(current_player_tile) == tile_key(state.final_approach_tile)
+
+
+def tile_distance(left: dict[str, Any] | None, right: dict[str, Any] | None) -> int | None:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return None
+    left_x = int_value(left.get("worldX"))
+    left_y = int_value(left.get("worldY"))
+    left_plane = int_value(left.get("plane"))
+    right_x = int_value(right.get("worldX"))
+    right_y = int_value(right.get("worldY"))
+    right_plane = int_value(right.get("plane"))
+    if None in (left_x, left_y, left_plane, right_x, right_y, right_plane):
+        return None
+    if left_plane != right_plane:
+        return None
+    assert left_x is not None and left_y is not None and right_x is not None and right_y is not None
+    return max(abs(left_x - right_x), abs(left_y - right_y))
+
+
+def approach_radius_tiles(destination: dict[str, Any] | None) -> int:
+    if not isinstance(destination, dict):
+        return 1
+    for key in ("approachRadiusTiles", "interactionRadiusTiles", "navigationInteractionRadiusTiles"):
+        value = int_value(destination.get(key))
+        if value is not None:
+            return max(0, min(8, value))
+    return 1
+
+
+def update_arrival_context(
+    context: PathingContext,
+    *,
+    state: PathIntentState | None,
+    current_player_tile: dict[str, Any] | None,
+    movement_state: str,
+    intent_key: str | None,
+    tick: int | None,
+) -> None:
+    context.distance_to_final_approach = tile_distance(
+        current_player_tile,
+        context.final_approach_tile if isinstance(context.final_approach_tile, dict) else None,
+    )
+    context.distance_to_destination = tile_distance(current_player_tile, context.destination_tile)
+    context.distance_to_path_target = tile_distance(current_player_tile, context.path_target_tile)
+    context.arrived_at_final_approach = context.distance_to_final_approach == 0
+    context.arrived_near_destination = (
+        context.distance_to_destination is not None
+        and context.distance_to_destination <= approach_radius_tiles(context.destination)
+        and movement_state != "moving"
+    )
+    arrived_at_path_target = context.distance_to_path_target == 0 if context.distance_to_path_target is not None else False
+    arrival_candidate = bool(context.arrived_at_final_approach or context.arrived_near_destination or arrived_at_path_target)
+    if context.arrived_at_final_approach:
+        base_reason = "arrived_at_final_approach"
+    elif arrived_at_path_target:
+        base_reason = "arrived_at_path_target"
+    elif context.arrived_near_destination:
+        base_reason = "arrived_near_destination"
+    else:
+        base_reason = "not_arrived"
+
+    if state is None:
+        context.arrival_reason = base_reason
+        context.arrived_stable_for_ticks = 1 if arrival_candidate and movement_state != "moving" else 0
+        return
+
+    if not arrival_candidate:
+        state.arrival_key = None
+        state.arrived_stable_for_ticks = 0
+        state.service_ready = False
+        state.service_ready_stable_for_ticks = 0
+        state.service_ready_started_tick = None
+        context.arrived_stable_for_ticks = 0
+        context.service_ready = False
+        context.service_ready_reason = "not_arrived"
+        context.arrival_reason = base_reason
+        return
+
+    arrival_key = "|".join(
+        part
+        for part in (
+            intent_key or "intent:none",
+            tile_key(context.final_approach_tile if isinstance(context.final_approach_tile, dict) else None) or "final:none",
+            tile_key(context.path_target_tile) or "path_target:none",
+            tile_key(context.destination_tile) or "destination:none",
+        )
+    )
+    if state.arrival_key == arrival_key:
+        state.arrived_stable_for_ticks = max(1, state.arrived_stable_for_ticks + 1)
+    else:
+        state.arrival_key = arrival_key
+        state.arrived_stable_for_ticks = 1
+        state.service_ready_started_tick = None
+        state.service_ready_stable_for_ticks = 0
+        state.service_ready = False
+    context.arrived_stable_for_ticks = state.arrived_stable_for_ticks
+
+    if movement_state == "moving":
+        context.arrival_reason = "arrival_tentative_player_moving"
+        context.service_ready = False
+        context.service_ready_reason = "waiting_for_player_to_stop"
+        state.service_ready = False
+        state.service_ready_stable_for_ticks = 0
+        return
+
+    if state.arrived_stable_for_ticks < ARRIVAL_READY_STABLE_TICKS:
+        context.arrival_reason = "arrival_stabilizing"
+        context.service_ready = False
+        context.service_ready_reason = "arrival_stabilizing"
+        return
+
+    state.service_ready = True
+    state.service_ready_last_tick = tick
+    if state.service_ready_started_tick is None:
+        state.service_ready_started_tick = tick
+    state.service_ready_stable_for_ticks = max(1, state.service_ready_stable_for_ticks + 1)
+    context.arrival_reason = base_reason
+    context.service_ready = True
+    context.service_ready_reason = "arrived_at_service"
+    context.service_ready_stable_for_ticks = state.service_ready_stable_for_ticks
+
+
+def complete_path_after_arrival(context: PathingContext) -> None:
+    context.path_completed = True
+    context.path_completion_reason = "arrived_at_service"
+    context.retained_path_after_arrival = True
+    context.pathing_needed = False
+    context.reason = "arrived_at_service"
+    context.next_waypoint_tile = None
+    context.path_length_tiles = 0
+
+
+def service_ready_grace_available(state: PathIntentState, current_player_tile: dict[str, Any] | None, tick: int | None) -> bool:
+    if not state.service_ready or not isinstance(state.destination_tile, dict):
+        return False
+    if tick is not None and state.service_ready_last_tick is not None:
+        if int(tick) - int(state.service_ready_last_tick) > SERVICE_READY_GRACE_TICKS:
+            return False
+    distance = tile_distance(current_player_tile, state.destination_tile)
+    return distance is not None and distance <= 1
 
 
 def store_path_intent_state(
@@ -532,6 +699,16 @@ def stabilize_path_intent(
         return context
 
     def finish(retained: bool, retention_reason: str | None, switch_reason: str | None, key: str | None = None, dest_key: str | None = None) -> PathingContext:
+        update_arrival_context(
+            context,
+            state=path_intent_state,
+            current_player_tile=current_player_tile,
+            movement_state=movement_state,
+            intent_key=key if key is not None else intent_key,
+            tick=tick,
+        )
+        if context.service_ready:
+            complete_path_after_arrival(context)
         annotate_path_intent(
             context,
             state=path_intent_state,
@@ -547,6 +724,29 @@ def stabilize_path_intent(
         return context
 
     if not context.pathing_needed or not context.destination or not intent_key:
+        if (
+            not context.destination
+            and path_intent_state.active_path_intent_key
+            and path_intent_state.retained_path_fields
+            and service_ready_grace_available(path_intent_state, current_player_tile, tick)
+        ):
+            apply_retained_path_fields(context, path_intent_state)
+            context.service_ready = True
+            context.service_ready_reason = "remembered_service_target_nearby"
+            context.arrival_reason = "remembered_service_target_nearby"
+            context.arrived_near_destination = True
+            context.distance_to_destination = tile_distance(current_player_tile, context.destination_tile)
+            context.path_completed = True
+            context.path_completion_reason = "arrived_at_service"
+            context.retained_path_after_arrival = True
+            context.reason = "arrived_at_service"
+            return finish(
+                True,
+                "remembered_service_ready_grace",
+                None,
+                key=path_intent_state.active_path_intent_key,
+                dest_key=path_intent_state.destination_target_key,
+            )
         switch_reason = context.reason or "pathing_not_needed"
         path_intent_state.clear(reason=switch_reason)
         return finish(False, None, switch_reason)
@@ -554,16 +754,6 @@ def stabilize_path_intent(
     if context.local_reachability == "blocked":
         path_intent_state.clear(reason="path_blocked")
         return finish(False, None, "path_blocked")
-
-    if (
-        path_intent_state.active_path_intent_key == intent_key
-        and arrived_at_final_approach(current_player_tile, path_intent_state)
-    ):
-        path_intent_state.clear(reason="arrived_at_final_approach")
-        context.predicted_path_tiles = []
-        context.next_waypoint_tile = None
-        context.path_length_tiles = 0
-        return finish(False, None, "arrived_at_final_approach")
 
     moving = movement_state in {"moving", "recently_moved"}
     active_key = path_intent_state.active_path_intent_key

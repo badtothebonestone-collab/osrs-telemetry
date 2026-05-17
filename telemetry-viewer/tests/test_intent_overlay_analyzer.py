@@ -674,6 +674,56 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertNotIn("predicted_path_tile", marker_types)
         self.assertIn("diagnostic", marker_types)
 
+    def test_service_ready_daily_overlay_keeps_service_target_and_suppresses_completed_path(self):
+        service_target = {
+            "targetName": "Bank booth",
+            "classId": "bank_booth",
+            "targetType": "sceneObject",
+            "worldX": 3208,
+            "worldY": 3221,
+            "plane": 2,
+            "objectKey": "booth-1",
+            "clickboxPolygon": [{"x": 1, "y": 1}],
+        }
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 8}, "candidates": []},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {
+                    "phase": "service_available",
+                    "activeIntent": "service_available",
+                    "activeIntentTarget": service_target,
+                },
+                "serviceContext": {
+                    "serviceNeeded": True,
+                    "serviceReady": True,
+                    "bestServiceCandidate": service_target,
+                    "serviceCandidates": [service_target],
+                },
+                "pathingContext": {
+                    "pathingNeeded": False,
+                    "pathCompleted": True,
+                    "pathCompletionReason": "arrived_at_service",
+                    "destinationTile": {"worldX": 3208, "worldY": 3221, "plane": 2},
+                    "finalApproachTile": {"worldX": 3207, "worldY": 3221, "plane": 2},
+                    "predictedPathTiles": [
+                        {"worldX": 3206, "worldY": 3221, "plane": 2},
+                        {"worldX": 3207, "worldY": 3221, "plane": 2},
+                    ],
+                },
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent", overlay_predicted_path_limit=None),
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        marker_types = [marker.get("markerType") for marker in result["markers"]]
+        selected = next(marker for marker in result["markers"] if marker.get("markerType") == "selected_target")
+        self.assertEqual(selected["label"], "Service: Bank booth")
+        self.assertIn("final_approach_tile", marker_types)
+        self.assertNotIn("predicted_path_tile", marker_types)
+        self.assertTrue(result["pathingOverlaySummary"]["pathCompleted"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -333,6 +333,77 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertTrue(status["pathingDestinationInsideCollisionWindow"])
         self.assertTrue(status["pathingDestinationPlaneMatches"])
 
+    def test_service_ready_pathing_updates_brain_phase_and_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service_target = {
+                "targetType": "sceneObject",
+                "classId": "bank_booth",
+                "targetName": "Bank booth",
+                "id": 10355,
+                "worldX": 3208,
+                "worldY": 3219,
+                "plane": 0,
+                "sceneX": 20,
+                "sceneY": 21,
+                "distanceTiles": 1,
+            }
+            service = ServiceContext(
+                service_required=True,
+                service_type_needed="bank_full",
+                best_service_candidate=service_target,
+                candidate_count=1,
+                source_tick=1,
+            )
+            pathing = PathingContext(
+                pathing_needed=False,
+                destination=service_target,
+                destination_tile={"worldX": 3208, "worldY": 3219, "plane": 0},
+                final_approach_tile={"worldX": 3207, "worldY": 3219, "plane": 0},
+                path_target_tile={"worldX": 3207, "worldY": 3219, "plane": 0},
+                local_reachability="reachable",
+                reason="arrived_at_service",
+                arrived_at_final_approach=True,
+                arrived_near_destination=True,
+                distance_to_final_approach=0,
+                distance_to_destination=1,
+                distance_to_path_target=0,
+                arrived_stable_for_ticks=2,
+                arrival_reason="arrived_at_final_approach",
+                service_ready=True,
+                service_ready_reason="arrived_at_service",
+                service_ready_stable_for_ticks=1,
+                path_completed=True,
+                path_completion_reason="arrived_at_service",
+                retained_path_after_arrival=True,
+                source_tick=1,
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
+                    with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", return_value=pathing):
+                        core = daemon.LiveCoreDaemon(session, args)
+                        core.poll_once()
+
+        status = core.state.status()
+        generic = core.state.brain_decision["genericTaskState"]
+        self.assertEqual(generic["phase"], "service_available")
+        self.assertEqual(generic["activeIntent"], "service_available")
+        self.assertTrue(status["serviceReady"])
+        self.assertEqual(status["serviceReadyReason"], "arrived_at_service")
+        self.assertTrue(status["pathCompleted"])
+        self.assertFalse(status["pathingNeeded"])
+        self.assertEqual(status["pathCompletionReason"], "arrived_at_service")
+
     def test_daemon_passes_in_memory_path_intent_state_to_pathing_analyzer(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"

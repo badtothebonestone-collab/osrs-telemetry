@@ -376,13 +376,21 @@ def append_pathing_markers(
     path_tile_limit: int,
     show_tentative_path: bool = False,
 ) -> None:
-    if not isinstance(pathing_context, dict) or not pathing_context.get("pathingNeeded"):
+    if not isinstance(pathing_context, dict):
+        return
+    path_completed = bool(pathing_context.get("pathCompleted"))
+    if not pathing_context.get("pathingNeeded") and not path_completed:
         return
     reason = str(pathing_context.get("reason") or "read-only pathing context")
     approach_quality = str(pathing_context.get("approachQuality") or "")
     tentative_path = approach_quality in {"side_access_unknown", "suspect_outside_wall", "invalid_no_side_access", "invalid_no_line_of_sight"}
     draw_path_steps = not tentative_path or show_tentative_path
     occupied_tiles: set[tuple[Any, Any, Any]] = set()
+    if path_completed:
+        final_approach = pathing_context.get("finalApproachTile") if isinstance(pathing_context.get("finalApproachTile"), dict) else None
+        if include_final_approach and final_approach:
+            markers.append(path_tile_marker("final_approach_tile", "Final approach", final_approach, "arrived at predicted final approach tile"))
+        return
     destination_tile = pathing_context.get("destinationTile") if isinstance(pathing_context.get("destinationTile"), dict) else None
     if destination_tile:
         markers.append(path_tile_marker("destination_tile", "Destination", destination_tile, reason))
@@ -426,6 +434,7 @@ def append_pathing_markers(
 def pathing_marker_summary(markers: list[dict], pathing_context: dict[str, Any], path_limit: int) -> dict[str, Any]:
     predicted_tiles = pathing_context.get("predictedPathTiles") if isinstance(pathing_context.get("predictedPathTiles"), list) else []
     emitted = sum(1 for marker in markers if marker.get("markerType") == "predicted_path_tile")
+    path_completed = bool(pathing_context.get("pathCompleted"))
     available_count = pathing_context.get("predictedPathAvailableCount", pathing_context.get("predictedPathCount", len(predicted_tiles)))
     available_count = available_count if isinstance(available_count, int) and not isinstance(available_count, bool) else len(predicted_tiles)
     represented_tiles = {
@@ -444,6 +453,9 @@ def pathing_marker_summary(markers: list[dict], pathing_context: dict[str, Any],
         displayed_count = emitted
     displayed_count = min(displayed_count, available_count)
     path_display_was_capped = available_count > displayed_count and emitted >= max(0, int(path_limit))
+    if path_completed:
+        displayed_count = 0
+        path_display_was_capped = False
     selected_marker = next((marker for marker in markers if marker.get("markerType") == "selected_target"), None)
     selected_geometry_source = selected_target_geometry_source(selected_marker)
     lane_counts = geometry_lane_counts(markers)
@@ -459,6 +471,9 @@ def pathing_marker_summary(markers: list[dict], pathing_context: dict[str, Any],
         "pathMarkersEmitted": emitted,
         "pathMarkerLimit": path_limit,
         "pathMarkersCapped": path_display_was_capped,
+        "pathCompleted": path_completed,
+        "pathCompletionReason": pathing_context.get("pathCompletionReason"),
+        "predictedPathSuppressedAfterArrival": bool(path_completed and predicted_tiles),
         "destinationMarkerEmitted": any(marker.get("markerType") == "destination_tile" for marker in markers),
         "nextWaypointMarkerEmitted": any(marker.get("markerType") == "waypoint" for marker in markers),
         "finalApproachMarkerEmitted": any(marker.get("markerType") == "final_approach_tile" for marker in markers),
@@ -577,6 +592,10 @@ def target_required_for_intent(active_intent: str) -> bool:
     return True
 
 
+def service_target_intent(active_intent: str) -> bool:
+    return str(active_intent or "").lower() in {"needs_service", "service_available", "hold_service_context"}
+
+
 def candidate_key(candidate: dict) -> str:
     return intent_stabilizer.build_target_key(candidate, target_type_for_candidate(candidate))
 
@@ -675,7 +694,7 @@ def build_intent_overlay_state(
         selected_key = stable_intent.selectedTargetKey
         selected_target_type = stable_intent.selectedTarget.targetType
         selected_class_id = stable_intent.selectedTarget.classId
-    if active_intent == "needs_service" and active_target:
+    if service_target_intent(active_intent) and active_target:
         selected = active_target
         selected_key = intent_stabilizer.build_target_key(active_target, target_type_for_candidate(active_target))
         selected_target_type = None
@@ -686,10 +705,10 @@ def build_intent_overlay_state(
         selected_target_type = None
         selected_class_id = None
     if isinstance(selected, dict) and selected:
-        label_prefix = "Service" if active_intent == "needs_service" else "Target"
+        label_prefix = "Service" if service_target_intent(active_intent) else "Target"
         reason = (
             "policy requires service context"
-            if active_intent == "needs_service"
+            if service_target_intent(active_intent)
             else f"stabilized brain intent: {stable_intent.switchReason if stable_intent else 'selected'}"
         )
         marker = intent_marker_from_candidate(
@@ -701,14 +720,14 @@ def build_intent_overlay_state(
             source="brain",
         )
         marker["targetKey"] = selected_key
-        if stable_intent and active_intent != "needs_service":
+        if stable_intent and not service_target_intent(active_intent):
             marker["stableForTicks"] = stable_intent.stableForTicks
             marker["switchReason"] = stable_intent.switchReason
         if navigation_intent_context:
             marker["navigationNeeded"] = navigation_intent_context.get("navigationNeeded")
             marker["navigationReason"] = navigation_intent_context.get("navigationReason")
             marker["navigationStatus"] = navigation_intent_context.get("directReachability") or "unknown"
-        merge_candidates = service_candidates if active_intent == "needs_service" and service_candidates else candidates
+        merge_candidates = service_candidates if service_target_intent(active_intent) and service_candidates else candidates
         for candidate in merge_candidates:
             if not isinstance(candidate, dict):
                 continue
@@ -718,7 +737,7 @@ def build_intent_overlay_state(
                 marker = merge_marker_from_source(marker, candidate)
         markers.append(marker)
         backup_limit = max(0, int(getattr(args, "overlay_backup_candidates", 2) or 0))
-        backup_source_candidates = service_candidates if active_intent == "needs_service" and service_candidates else candidates
+        backup_source_candidates = service_candidates if service_target_intent(active_intent) and service_candidates else candidates
         backups = stable_backup_candidates(
             backup_source_candidates,
             marker,

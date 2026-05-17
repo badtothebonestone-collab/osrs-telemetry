@@ -167,7 +167,25 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertEqual(third.switch_reason, "destination_changed_after_debounce")
         self.assertEqual(third.destination_target_key, "objectKey:booth-b")
 
-    def test_path_clears_when_player_arrives_at_final_approach(self):
+    def test_player_away_from_final_approach_is_not_arrived(self):
+        state = pathing_analyzer.PathIntentState()
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=1,
+        )
+
+        self.assertFalse(context.arrived_at_final_approach)
+        self.assertFalse(context.arrived_near_destination)
+        self.assertFalse(context.service_ready)
+        self.assertFalse(context.path_completed)
+        self.assertTrue(context.pathing_needed)
+        self.assertGreater(context.distance_to_final_approach, 0)
+
+    def test_path_completes_when_player_arrives_at_final_approach(self):
         state = pathing_analyzer.PathIntentState()
         first = pathing_analyzer.analyze_pathing_context(
             player_context=player(),
@@ -187,10 +205,81 @@ class PathingAnalyzerTest(unittest.TestCase):
             path_intent_state=state,
             source_tick=2,
         )
+        third = pathing_analyzer.analyze_pathing_context(
+            player_context=arrived,
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=3,
+        )
 
-        self.assertFalse(second.path_intent_retained)
-        self.assertEqual(second.switch_reason, "arrived_at_final_approach")
-        self.assertIsNone(state.active_path_intent_key)
+        self.assertTrue(second.arrived_at_final_approach)
+        self.assertEqual(second.distance_to_final_approach, 0)
+        self.assertFalse(second.service_ready)
+        self.assertEqual(second.arrival_reason, "arrival_tentative_player_moving")
+        self.assertTrue(third.arrived_at_final_approach)
+        self.assertTrue(third.service_ready)
+        self.assertEqual(third.service_ready_reason, "arrived_at_service")
+        self.assertEqual(third.path_completion_reason, "arrived_at_service")
+        self.assertTrue(third.path_completed)
+        self.assertFalse(third.pathing_needed)
+        self.assertEqual(third.reason, "arrived_at_service")
+        self.assertIsNotNone(state.active_path_intent_key)
+
+    def test_moving_player_arrival_is_tentative_until_stopped(self):
+        state = pathing_analyzer.PathIntentState()
+        first = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=1,
+        )
+        final_tile = first.final_approach_tile
+        arrived = PlayerContext(world_x=final_tile["worldX"], world_y=final_tile["worldY"], plane=0, scene_x=5, scene_y=1)
+        second = pathing_analyzer.analyze_pathing_context(
+            player_context=arrived,
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=6, sceneY=1, worldX=105, worldY=100)),
+            activity_context=ActivityContext(current_activity="moving"),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=2,
+        )
+
+        self.assertTrue(second.arrived_at_final_approach)
+        self.assertFalse(second.service_ready)
+        self.assertEqual(second.arrival_reason, "arrival_tentative_player_moving")
+        self.assertTrue(second.pathing_needed)
+
+    def test_player_near_destination_becomes_service_ready_after_stability(self):
+        state = pathing_analyzer.PathIntentState()
+        near_destination = PlayerContext(world_x=104, world_y=100, plane=0, scene_x=5, scene_y=1)
+        destination_with_radius = destination(sceneX=6, sceneY=1, worldX=105, worldY=100, approachRadiusTiles=1)
+        first = pathing_analyzer.analyze_pathing_context(
+            player_context=near_destination,
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination_with_radius),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=1,
+        )
+        second = pathing_analyzer.analyze_pathing_context(
+            player_context=near_destination,
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=5)),
+            navigation_intent_context=nav_intent(destination_target=destination_with_radius),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=2,
+        )
+
+        self.assertTrue(first.arrived_near_destination)
+        self.assertEqual(first.distance_to_destination, 1)
+        self.assertFalse(first.service_ready)
+        self.assertTrue(second.service_ready)
+        self.assertIn(second.arrival_reason, {"arrived_near_destination", "arrived_at_final_approach"})
 
     def test_path_clears_when_current_path_is_blocked(self):
         state = pathing_analyzer.PathIntentState()

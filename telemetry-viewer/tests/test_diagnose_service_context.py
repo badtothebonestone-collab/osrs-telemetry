@@ -165,6 +165,15 @@ class DiagnoseServiceContextTest(unittest.TestCase):
                         "logicError": False,
                         "serviceSwitchReason": "retained_preferred_service_target_transient_missing",
                         "serviceCandidateDroppedReason": "preferred_service_missing_from_current_candidates",
+                        "serviceReady": True,
+                        "serviceReadyReason": "arrived_at_service",
+                        "serviceReadyStableForTicks": 2,
+                        "selectedServiceTargetName": "Bank booth",
+                        "selectedServiceTargetTile": {"worldX": 3207, "worldY": 3215, "plane": 2},
+                        "distanceToServiceTarget": 1,
+                        "arrivedAtFinalApproach": True,
+                        "arrivedNearDestination": True,
+                        "distanceToFinalApproach": 0,
                     },
                 },
             }
@@ -207,6 +216,10 @@ class DiagnoseServiceContextTest(unittest.TestCase):
         self.assertEqual(payload["projectionRefsEffective"], 31)
         self.assertEqual(payload["serviceHintsUsed"], ["bank_booth", "banker"])
         self.assertEqual(payload["serviceSwitchReason"], "retained_preferred_service_target_transient_missing")
+        self.assertTrue(payload["serviceReady"])
+        self.assertEqual(payload["serviceReadyReason"], "arrived_at_service")
+        self.assertEqual(payload["selectedServiceTargetName"], "Bank booth")
+        self.assertEqual(payload["distanceToServiceTarget"], 1)
 
         text = diagnose_service_context.format_human(payload)
         self.assertIn("Score: 987.0", text)
@@ -220,6 +233,10 @@ class DiagnoseServiceContextTest(unittest.TestCase):
         self.assertIn("Visible primary targets: yes", text)
         self.assertIn("Deposit fallback allowed: no", text)
         self.assertIn("Selected service group: full_bank", text)
+        self.assertIn("Service ready: yes", text)
+        self.assertIn("Service ready reason: arrived_at_service", text)
+        self.assertIn("Selected service target: Bank booth", text)
+        self.assertIn("Distance to service target: 1", text)
         self.assertIn("Visible deposit targets: 0", text)
         self.assertIn("Memory grace: primary=50 deposit=10", text)
         self.assertIn("Source stages:", text)

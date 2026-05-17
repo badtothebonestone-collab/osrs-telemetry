@@ -654,6 +654,15 @@ class LiveCoreState:
             "memoryLifecycle",
             "serviceSwitchReason",
             "serviceCandidateDroppedReason",
+            "serviceReady",
+            "serviceReadyReason",
+            "serviceReadyStableForTicks",
+            "selectedServiceTargetName",
+            "selectedServiceTargetTile",
+            "distanceToServiceTarget",
+            "serviceArrivedAtFinalApproach",
+            "serviceArrivedNearDestination",
+            "serviceDistanceToFinalApproach",
             "profileCandidateCount",
             "broadCandidateCount",
             "serviceCandidateInputCount",
@@ -730,6 +739,16 @@ class LiveCoreState:
             "pathMovementState",
             "pathRetentionReason",
             "pathSwitchReason",
+            "arrivedAtFinalApproach",
+            "arrivedNearDestination",
+            "distanceToFinalApproach",
+            "distanceToDestination",
+            "distanceToPathTarget",
+            "arrivedStableForTicks",
+            "arrivalReason",
+            "pathCompleted",
+            "pathCompletionReason",
+            "retainedPathAfterArrival",
             "requiredContextDomains",
             "missingRequiredContextDomains",
             "optionalMissingContextDomains",
@@ -1388,6 +1407,31 @@ class LiveCoreDaemon:
                 source_tick=source_tick,
                 movement_model="osrs_like_predicted",
             )
+            if service_context and self.state.analysis_result.pathing:
+                pathing = self.state.analysis_result.pathing
+                selected_service = service_context.best_service_candidate if isinstance(service_context.best_service_candidate, dict) else {}
+                selected_name = selected_service.get("targetName") or selected_service.get("name") or selected_service.get("classId")
+                service_context.service_ready = bool(pathing.service_ready)
+                service_context.service_ready_reason = pathing.service_ready_reason
+                service_context.service_ready_stable_for_ticks = pathing.service_ready_stable_for_ticks
+                service_context.selected_service_target_name = str(selected_name) if selected_name else None
+                service_context.selected_service_target_tile = pathing.destination_tile
+                service_context.distance_to_service_target = pathing.distance_to_destination
+                service_context.arrived_at_final_approach = pathing.arrived_at_final_approach
+                service_context.arrived_near_destination = pathing.arrived_near_destination
+                service_context.distance_to_final_approach = pathing.distance_to_final_approach
+                brain_context.decision["serviceContext"] = service_context.to_dict()
+                if pathing.service_ready and service_context.best_service_candidate:
+                    active_target = dict(service_context.best_service_candidate)
+                    target_type = active_target.get("targetType") or "sceneObject"
+                    generic_state["phase"] = "service_available"
+                    generic_state["activeIntent"] = "service_available"
+                    generic_state["activeIntentTarget"] = active_target
+                    generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(active_target, str(target_type))
+                    generic_state["serviceReady"] = True
+                    generic_state["serviceReadyReason"] = pathing.service_ready_reason
+                    brain_context.decision["phase"] = "service_available"
+                    brain_context.decision["genericTaskState"] = generic_state
             pathing_payload = self.state.analysis_result.pathing.to_dict()
             pathing_payload["overlayPredictedPathLimit"] = intent_overlay_analyzer.predicted_path_limit(self.args, self.args.overlay_mode)
             brain_context.decision["pathingContext"] = pathing_payload
@@ -1436,6 +1480,15 @@ class LiveCoreDaemon:
             fields["memoryLifecycle"] = self.state.analysis_result.service.memory_lifecycle
             fields["serviceSwitchReason"] = self.state.analysis_result.service.service_switch_reason
             fields["serviceCandidateDroppedReason"] = self.state.analysis_result.service.service_candidate_dropped_reason
+            fields["serviceReady"] = self.state.analysis_result.service.service_ready
+            fields["serviceReadyReason"] = self.state.analysis_result.service.service_ready_reason
+            fields["serviceReadyStableForTicks"] = self.state.analysis_result.service.service_ready_stable_for_ticks
+            fields["selectedServiceTargetName"] = self.state.analysis_result.service.selected_service_target_name
+            fields["selectedServiceTargetTile"] = self.state.analysis_result.service.selected_service_target_tile
+            fields["distanceToServiceTarget"] = self.state.analysis_result.service.distance_to_service_target
+            fields["serviceArrivedAtFinalApproach"] = self.state.analysis_result.service.arrived_at_final_approach
+            fields["serviceArrivedNearDestination"] = self.state.analysis_result.service.arrived_near_destination
+            fields["serviceDistanceToFinalApproach"] = self.state.analysis_result.service.distance_to_final_approach
             fields["serviceCandidateSourceLanes"] = {
                 "profileCandidates": self.state.source_status.get("profileCandidateCount"),
                 "broadCandidates": self.state.source_status.get("broadCandidateCount"),
@@ -1515,6 +1568,16 @@ class LiveCoreDaemon:
             fields["pathMovementState"] = pathing.movement_state
             fields["pathRetentionReason"] = pathing.retention_reason
             fields["pathSwitchReason"] = pathing.switch_reason
+            fields["arrivedAtFinalApproach"] = pathing.arrived_at_final_approach
+            fields["arrivedNearDestination"] = pathing.arrived_near_destination
+            fields["distanceToFinalApproach"] = pathing.distance_to_final_approach
+            fields["distanceToDestination"] = pathing.distance_to_destination
+            fields["distanceToPathTarget"] = pathing.distance_to_path_target
+            fields["arrivedStableForTicks"] = pathing.arrived_stable_for_ticks
+            fields["arrivalReason"] = pathing.arrival_reason
+            fields["pathCompleted"] = pathing.path_completed
+            fields["pathCompletionReason"] = pathing.path_completion_reason
+            fields["retainedPathAfterArrival"] = pathing.retained_path_after_arrival
         self.state.source_status.update(fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)

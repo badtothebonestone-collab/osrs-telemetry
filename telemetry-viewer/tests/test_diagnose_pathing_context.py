@@ -70,6 +70,19 @@ class DiagnosePathingContextTest(unittest.TestCase):
                         "movementState": "moving",
                         "retentionReason": "player_moving_same_destination",
                         "switchReason": None,
+                        "arrivedAtFinalApproach": True,
+                        "arrivedNearDestination": True,
+                        "distanceToFinalApproach": 0,
+                        "distanceToDestination": 1,
+                        "distanceToPathTarget": 0,
+                        "arrivedStableForTicks": 2,
+                        "arrivalReason": "arrived_at_final_approach",
+                        "serviceReady": True,
+                        "serviceReadyReason": "arrived_at_service",
+                        "serviceReadyStableForTicks": 1,
+                        "pathCompleted": True,
+                        "pathCompletionReason": "arrived_at_service",
+                        "retainedPathAfterArrival": True,
                         "warnings": [],
                     }
                 }
@@ -91,12 +104,26 @@ class DiagnosePathingContextTest(unittest.TestCase):
         self.assertTrue(payload["pathRetained"])
         self.assertEqual(payload["stableForTicks"], 4)
         self.assertEqual(payload["movementState"], "moving")
+        self.assertTrue(payload["arrivedAtFinalApproach"])
+        self.assertTrue(payload["serviceReady"])
+        self.assertTrue(payload["pathCompleted"])
         self.assertIn("Destination target: Bank booth (bank_booth)", text)
         self.assertIn("Reachability reason: path_reachable", text)
         self.assertIn("Path retained: yes", text)
         self.assertIn("Path stable for: 4", text)
         self.assertIn("Movement state: moving", text)
         self.assertIn("Retention reason: player_moving_same_destination", text)
+        self.assertIn("Arrived at final approach: yes", text)
+        self.assertIn("Arrived near destination: yes", text)
+        self.assertIn("Distance to final approach: 0", text)
+        self.assertIn("Distance to destination: 1", text)
+        self.assertIn("Distance to path target: 0", text)
+        self.assertIn("Arrival reason: arrived_at_final_approach", text)
+        self.assertIn("Service ready: yes", text)
+        self.assertIn("Service ready reason: arrived_at_service", text)
+        self.assertIn("Path completed: yes", text)
+        self.assertIn("Path completion reason: arrived_at_service", text)
+        self.assertIn("Retained path after arrival: yes", text)
         self.assertIn("Path cap used: 10", text)
         self.assertIn("Path was capped: yes", text)
         self.assertIn("Exact destination reached: no", text)

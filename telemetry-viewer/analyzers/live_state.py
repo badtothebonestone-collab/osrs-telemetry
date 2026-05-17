@@ -269,6 +269,19 @@ class PathingContext(AnalyzerContractFields):
     movement_state: str = "unknown"
     retention_reason: str | None = None
     switch_reason: str | None = None
+    arrived_at_final_approach: bool = False
+    arrived_near_destination: bool = False
+    distance_to_final_approach: int | None = None
+    distance_to_destination: int | None = None
+    distance_to_path_target: int | None = None
+    arrived_stable_for_ticks: int = 0
+    arrival_reason: str | None = None
+    service_ready: bool = False
+    service_ready_reason: str | None = None
+    service_ready_stable_for_ticks: int = 0
+    path_completed: bool = False
+    path_completion_reason: str | None = None
+    retained_path_after_arrival: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -344,6 +357,19 @@ class PathingContext(AnalyzerContractFields):
             "movementState": self.movement_state,
             "retentionReason": self.retention_reason,
             "switchReason": self.switch_reason,
+            "arrivedAtFinalApproach": self.arrived_at_final_approach,
+            "arrivedNearDestination": self.arrived_near_destination,
+            "distanceToFinalApproach": self.distance_to_final_approach,
+            "distanceToDestination": self.distance_to_destination,
+            "distanceToPathTarget": self.distance_to_path_target,
+            "arrivedStableForTicks": self.arrived_stable_for_ticks,
+            "arrivalReason": self.arrival_reason,
+            "serviceReady": self.service_ready,
+            "serviceReadyReason": self.service_ready_reason,
+            "serviceReadyStableForTicks": self.service_ready_stable_for_ticks,
+            "pathCompleted": self.path_completed,
+            "pathCompletionReason": self.path_completion_reason,
+            "retainedPathAfterArrival": self.retained_path_after_arrival,
         }
 
 
@@ -429,6 +455,15 @@ class ServiceContext(AnalyzerContractFields):
     logic_error: bool = False
     service_switch_reason: str | None = None
     service_candidate_dropped_reason: str | None = None
+    service_ready: bool = False
+    service_ready_reason: str | None = None
+    service_ready_stable_for_ticks: int = 0
+    selected_service_target_name: str | None = None
+    selected_service_target_tile: dict[str, Any] | None = None
+    distance_to_service_target: int | None = None
+    arrived_at_final_approach: bool = False
+    arrived_near_destination: bool = False
+    distance_to_final_approach: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -467,6 +502,15 @@ class ServiceContext(AnalyzerContractFields):
             "logicError": self.logic_error,
             "serviceSwitchReason": self.service_switch_reason,
             "serviceCandidateDroppedReason": self.service_candidate_dropped_reason,
+            "serviceReady": self.service_ready,
+            "serviceReadyReason": self.service_ready_reason,
+            "serviceReadyStableForTicks": self.service_ready_stable_for_ticks,
+            "selectedServiceTargetName": self.selected_service_target_name,
+            "selectedServiceTargetTile": self.selected_service_target_tile,
+            "distanceToServiceTarget": self.distance_to_service_target,
+            "arrivedAtFinalApproach": self.arrived_at_final_approach,
+            "arrivedNearDestination": self.arrived_near_destination,
+            "distanceToFinalApproach": self.distance_to_final_approach,
         }
 
 

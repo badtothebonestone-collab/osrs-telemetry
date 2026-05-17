@@ -48,6 +48,25 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
         self.assertEqual(payload["overlaySelectedMarker"]["classId"], "bank_booth")
         self.assertEqual(payload["overlaySelectedMarkerExpectation"], "selected_service")
 
+    def test_service_visible_not_arrived_stays_needs_service(self):
+        payload = transitions.evaluate_transition_scenario("woodcutting_bank", "service_visible_not_arrived")
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["actualPhase"], "inventory_full")
+        self.assertEqual(payload["actualActiveIntent"], "needs_service")
+        self.assertFalse(payload["serviceContextSummary"]["serviceReady"])
+        self.assertEqual(payload["overlaySelectedMarker"]["classId"], "bank_booth")
+
+    def test_service_visible_arrived_becomes_service_available(self):
+        payload = transitions.evaluate_transition_scenario("woodcutting_bank", "service_visible_arrived")
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["actualPhase"], "service_available")
+        self.assertEqual(payload["actualActiveIntent"], "service_available")
+        self.assertTrue(payload["serviceContextSummary"]["serviceReady"])
+        self.assertEqual(payload["serviceContextSummary"]["serviceReadyReason"], "arrived_at_service")
+        self.assertEqual(payload["overlaySelectedMarker"]["classId"], "bank_booth")
+
     def test_firemake_ready_reports_process_context_without_service(self):
         payload = transitions.evaluate_transition_scenario("woodcutting_firemake", "firemake_ready")
 

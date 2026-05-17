@@ -23,6 +23,9 @@ SCENARIOS = (
     "woodcutting_inventory_full",
     "woodcutting_not_full",
     "service_visible",
+    "service_visible_not_arrived",
+    "service_visible_arrived",
+    "service_ready_from_daemon",
     "service_missing",
     "firemake_ready",
     "firemake_no_tree_candidates",
@@ -128,7 +131,7 @@ def candidates_for_scenario(scenario: str) -> list[dict[str, Any]]:
     if scenario in {"firemake_no_tree_candidates", "firemake_full_inventory_no_candidates_live_style", "drop_no_tree_candidates"}:
         return []
     candidates = [tree_candidate()]
-    if scenario == "service_visible":
+    if scenario in {"service_visible", "service_visible_not_arrived", "service_visible_arrived", "service_ready_from_daemon"}:
         candidates.append(bank_booth_candidate())
     return candidates
 
@@ -185,8 +188,10 @@ def expected_for(policy_name: str, scenario: str, *, tinderbox_present: bool = T
         return {"phase": "inventory_full", "activeIntent": "process_inventory", "overlay": "none"}
     if policy_name == "woodcutting_drop" or scenario in {"drop_ready", "drop_no_tree_candidates"}:
         return {"phase": "inventory_full", "activeIntent": "process_inventory", "overlay": "none"}
-    if scenario == "service_visible":
+    if scenario in {"service_visible", "service_visible_not_arrived"}:
         return {"phase": "inventory_full", "activeIntent": "needs_service", "overlay": "selected_service"}
+    if scenario in {"service_visible_arrived", "service_ready_from_daemon"}:
+        return {"phase": "service_available", "activeIntent": "service_available", "overlay": "selected_service"}
     return {"phase": "inventory_full", "activeIntent": "needs_service", "overlay": "none"}
 
 
@@ -204,6 +209,9 @@ def compact_service_summary(context: ServiceContext) -> dict[str, Any]:
         "serviceTypeNeeded": payload.get("serviceTypeNeeded"),
         "candidateCount": payload.get("candidateCount"),
         "best": target_label(best),
+        "serviceReady": payload.get("serviceReady"),
+        "serviceReadyReason": payload.get("serviceReadyReason"),
+        "serviceReadyStableForTicks": payload.get("serviceReadyStableForTicks"),
         "reachableCount": payload.get("reachableCount"),
         "warnings": payload.get("warnings", []),
     }
@@ -324,6 +332,29 @@ def evaluate_transition_scenario(
             generic["activeIntentTarget"] = active_target
             generic["selectedTargetKey"] = intent_stabilizer.build_target_key(active_target, str(active_target.get("targetType") or "sceneObject"))
             decision["genericTaskState"] = generic
+        if scenario in {"service_visible_arrived", "service_ready_from_daemon"} and service_context.best_service_candidate:
+            active_target = dict(service_context.best_service_candidate)
+            service_context.service_ready = True
+            service_context.service_ready_reason = "arrived_at_service"
+            service_context.service_ready_stable_for_ticks = 2
+            service_context.selected_service_target_name = target_label(active_target)
+            service_context.selected_service_target_tile = {
+                "worldX": active_target.get("worldX"),
+                "worldY": active_target.get("worldY"),
+                "plane": active_target.get("plane"),
+            }
+            service_context.distance_to_service_target = 1
+            service_context.arrived_at_final_approach = True
+            service_context.arrived_near_destination = True
+            service_context.distance_to_final_approach = 0
+            generic["phase"] = "service_available"
+            generic["activeIntent"] = "service_available"
+            generic["activeIntentTarget"] = active_target
+            generic["selectedTargetKey"] = intent_stabilizer.build_target_key(active_target, str(active_target.get("targetType") or "sceneObject"))
+            generic["serviceReady"] = True
+            generic["serviceReadyReason"] = "arrived_at_service"
+            decision["phase"] = "service_available"
+            decision["genericTaskState"] = generic
     if generic.get("activeIntent") == "process_inventory":
         process_context = process_inventory_analyzer.analyze_process_inventory_context(policy, inventory_context, source_tick=42)
     decision["serviceContext"] = service_context.to_dict()
@@ -369,7 +400,7 @@ def evaluate_transition_scenario(
         "expectedActiveIntent": expected["activeIntent"],
         "actualActiveIntent": generic.get("activeIntent"),
         "expectedAnalyzers": {
-            "service": expected["activeIntent"] == "needs_service",
+            "service": expected["activeIntent"] in {"needs_service", "service_available"},
             "processInventory": expected["activeIntent"] == "process_inventory",
             "navigation": expected["activeIntent"] in {"needs_service", "target_selected", "continue_current_target", "continue_task"},
         },
@@ -432,6 +463,9 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
             "serviceTypeNeeded": service_context.get("serviceTypeNeeded"),
             "candidateCount": service_context.get("candidateCount"),
             "best": target_label(service_context.get("bestServiceCandidate") if isinstance(service_context.get("bestServiceCandidate"), dict) else None),
+            "serviceReady": service_context.get("serviceReady", status.get("serviceReady")),
+            "serviceReadyReason": service_context.get("serviceReadyReason", status.get("serviceReadyReason")),
+            "serviceReadyStableForTicks": service_context.get("serviceReadyStableForTicks", status.get("serviceReadyStableForTicks")),
         },
         "processContextSummary": {
             "processRequired": process_context.get("processRequired"),
@@ -492,7 +526,7 @@ def format_human(payload: dict[str, Any]) -> str:
         [
             "",
             "Service/process/navigation:",
-            f"  service: needed={service.get('serviceNeeded')} best={service.get('best')}",
+            f"  service: needed={service.get('serviceNeeded')} best={service.get('best')} ready={service.get('serviceReady')} reason={service.get('serviceReadyReason')}",
             f"  process: needed={process.get('processRequired')} type={process.get('processTypeNeeded')} tinderbox={process.get('tinderboxStatus')}",
             f"  navigation: reason={navigation.get('navigationReason')} target={navigation.get('destination')} reachability={navigation.get('directReachability')}",
         ]
