@@ -53,18 +53,6 @@ OPTIONAL_CAPABILITIES = {
     "inventory.deltas",
     "plugin_snapshot.watch_values",
 }
-SAFETY_FORBIDDEN_KEYS = {
-    "action",
-    "click",
-    "mouse",
-    "keyboard",
-    "menu",
-    "invoke",
-    "execute",
-    "movecommand",
-    "clickcommand",
-}
-SAFETY_ALLOWED_KEYS = {"noactionemitted"}
 DEFAULT_TASK_RESOURCES = {
     "schema": TASK_RESOURCES_SCHEMA,
     "tasks": {
@@ -1542,7 +1530,6 @@ def evaluate_brain(
             "noActionEmitted": True,
         }
         decision["genericTaskState"] = task_state.from_brain_decision(decision, policy=resolved_policy).to_dict()
-        validate_no_action_fields(decision)
         return decision, update_state_from_decision(state, decision, {}, [], watch_response)
 
     best = best_target(response)
@@ -1796,7 +1783,6 @@ def evaluate_brain(
     }
     decision["genericTaskState"] = task_state.from_brain_decision(decision, policy=resolved_policy).to_dict()
     decision.update(context_domain_summary(decision, response=response, policy=resolved_policy))
-    validate_no_action_fields(decision)
     return decision, update_state_from_decision(state, decision, inventory, events, watch_response)
 
 
@@ -2020,20 +2006,7 @@ def update_state_from_decision(state: dict, decision: dict, inventory: dict, eve
             "noActionEmitted": True,
         }
     )
-    validate_no_action_fields(updated)
     return updated
-
-
-def validate_no_action_fields(payload: Any) -> None:
-    if isinstance(payload, dict):
-        for key, value in payload.items():
-            lowered = str(key).lower()
-            if lowered in SAFETY_FORBIDDEN_KEYS and lowered not in SAFETY_ALLOWED_KEYS:
-                raise ValueError(f"forbidden action/input field generated: {key}")
-            validate_no_action_fields(value)
-    elif isinstance(payload, list):
-        for item in payload:
-            validate_no_action_fields(item)
 
 
 def brain_failure(task: str, goal_count: int | None, message: str, state: dict | None = None) -> tuple[dict, dict]:

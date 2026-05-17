@@ -1532,11 +1532,6 @@ def candidate_record(
         "targetWorld": world,
         "screenCenterDistance": center_distance,
         "frame": frame_payload(record, frame_exists),
-        "safety": {
-            "readOnly": True,
-            "actionGenerated": False,
-            "inputGenerated": False,
-        },
     }
 
 

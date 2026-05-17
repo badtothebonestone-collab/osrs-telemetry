@@ -431,7 +431,7 @@ public interface TelemetryConfig extends Config
 			section = advancedSection,
 			keyName = "maxSceneIndexObjects",
 			name = "Max scene index objects",
-			description = "Safety cap for diagnostic static scene index object count."
+			description = "Size cap for diagnostic static scene index object count."
 	)
 	default int maxSceneIndexObjects()
 	{
@@ -508,7 +508,7 @@ public interface TelemetryConfig extends Config
 			section = normalLiveSection,
 			keyName = "compactLiveStreamCircuitBreakerEnabled",
 			name = "Compact stream circuit breaker",
-			description = "Temporarily disables the experimental stream if writes or queue pressure look unsafe. Compact packet files stay unaffected."
+			description = "Temporarily disables the experimental stream if writes or queue pressure are unhealthy. Compact packet files stay unaffected."
 	)
 	default boolean compactLiveStreamCircuitBreakerEnabled()
 	{
@@ -530,7 +530,7 @@ public interface TelemetryConfig extends Config
 			section = normalLiveSection,
 			keyName = "compactLiveStreamDisableSeconds",
 			name = "Compact stream pause seconds",
-			description = "How long the circuit breaker pauses stream publishing after unsafe stream behavior is detected."
+			description = "How long the circuit breaker pauses stream publishing after unhealthy stream behavior is detected."
 	)
 	default int compactLiveStreamDisableSeconds()
 	{

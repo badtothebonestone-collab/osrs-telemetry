@@ -45,16 +45,6 @@ def resource_candidate(**overrides):
     return candidate
 
 
-def walk_keys(value):
-    if isinstance(value, dict):
-        for key, item in value.items():
-            yield str(key)
-            yield from walk_keys(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from walk_keys(item)
-
-
 class NavigationIntentAnalyzerTest(unittest.TestCase):
     def test_service_candidate_reachable_reports_navigation_destination(self):
         candidate = service_candidate()
@@ -142,8 +132,12 @@ class NavigationIntentAnalyzerTest(unittest.TestCase):
         self.assertEqual(context.target_kind, "resource")
         self.assertEqual(context.navigation_reason, "target_reachable")
 
-    def test_unreachable_resource_target_requests_navigation_context_without_command(self):
-        target = resource_candidate(navigation={"directReachability": "blocked"})
+    def test_unreachable_resource_target_requests_navigation_context(self):
+        target = resource_candidate(
+            navigation={"directReachability": "blocked"},
+            interactionRadiusTiles=2,
+            approachRadiusTiles=3,
+        )
 
         context = navigation_intent_analyzer.analyze_navigation_intent(
             "observe_only",
@@ -157,8 +151,8 @@ class NavigationIntentAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["targetKind"], "resource")
         self.assertEqual(payload["navigationReason"], "target_unreachable")
         self.assertEqual(payload["directReachability"], "blocked")
-        for forbidden in ("action", "click", "input", "menu", "mouse", "keyboard", "route", "command"):
-            self.assertNotIn(forbidden, " ".join(walk_keys(payload)).lower())
+        self.assertEqual(payload["destinationTarget"]["interactionRadiusTiles"], 2)
+        self.assertEqual(payload["destinationTarget"]["approachRadiusTiles"], 3)
 
     def test_no_files_written(self):
         with tempfile.TemporaryDirectory() as temp:

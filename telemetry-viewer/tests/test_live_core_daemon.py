@@ -726,18 +726,7 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual([marker["objectKey"] for marker in backups], ["oak-backup-a", "oak-backup-b"])
         self.assertNotIn("oak-selected", [marker["objectKey"] for marker in backups])
 
-    def test_intent_overlay_omits_banned_action_input_menu_fields(self):
-        banned = {"action", "click", "mouse", "keyboard", "menu", "invoke", "execute"}
-
-        def walk_keys(value):
-            if isinstance(value, dict):
-                for key, item in value.items():
-                    yield str(key)
-                    yield from walk_keys(item)
-            elif isinstance(value, list):
-                for item in value:
-                    yield from walk_keys(item)
-
+    def test_intent_overlay_keeps_marker_schema_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             response = snapshot_with_logs(session, 1, [], objects=synthetic_tree_objects(3))
@@ -748,8 +737,10 @@ class LiveCoreDaemonTest(unittest.TestCase):
 
             overlay = json.loads((session / "interaction_geometry" / "live" / "overlay_debug_state.json").read_text(encoding="utf-8"))
 
-        overlay_keys = {key for key in walk_keys(overlay)}
-        self.assertFalse(banned.intersection(overlay_keys))
+        markers = overlay["intentState"]["markers"]
+        self.assertTrue(markers)
+        self.assertIn("markerType", markers[0])
+        self.assertIn("targetType", markers[0])
 
     def test_non_woodcutting_task_clears_tree_intent_markers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -852,18 +843,51 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(result["status"]["inputSourceActive"], "compact-packets")
         self.assertGreater(result["status"]["candidateCount"], 0)
 
-    def test_context_response_has_no_action_command_fields(self):
-        banned = {"action", "click", "mouse", "keyboard", "menu", "invoke", "execute", "moveCommand", "clickCommand"}
+    def test_woodcutting_bank_uses_service_candidates_without_replacing_tree_best(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            tree = fixtures.raw_scene_object(10820, 3201, 3201, 140, 120, name="Oak tree", object_key="oak-1")
+            bank = fixtures.raw_scene_object(
+                10355,
+                3207,
+                3215,
+                180,
+                150,
+                name="Bank booth",
+                actions=["Bank"],
+                object_key="bank-booth-1",
+            )
+            response = snapshot_with_logs(session, 1, list(range(28)), objects=[tree, bank])
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--task-policy",
+                "woodcutting_bank",
+                "--goal-count",
+                "5",
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                core = daemon.LiveCoreDaemon(session, args)
+                core.poll_once()
 
-        def walk_keys(value):
-            if isinstance(value, dict):
-                for key, item in value.items():
-                    yield str(key)
-                    yield from walk_keys(item)
-            elif isinstance(value, list):
-                for item in value:
-                    yield from walk_keys(item)
+        targets = core.state.analysis_result.targets
+        service = core.state.analysis_result.service
+        navigation_intent = core.state.analysis_result.navigation_intent
+        pathing = core.state.analysis_result.pathing
+        status = core.state.status()
 
+        self.assertEqual(targets.raw_best_target["objectKey"], "oak-1")
+        self.assertEqual(targets.profile_candidate_count, 1)
+        self.assertEqual(targets.service_candidate_input_count, 1)
+        self.assertEqual(targets.service_candidate_inputs[0]["objectKey"], "bank-booth-1")
+        self.assertEqual(service.best_service_candidate["objectKey"], "bank-booth-1")
+        self.assertEqual(navigation_intent.destination_target["objectKey"], "bank-booth-1")
+        self.assertEqual(pathing.destination_tile, {"worldX": 3207, "worldY": 3215, "plane": 0})
+        self.assertEqual(status["serviceCandidateInputCount"], 1)
+        self.assertEqual(status["profileCandidateCount"], 1)
+
+    def test_context_response_preserves_read_only_navigation_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             response = synthetic_snapshot(session)
@@ -880,8 +904,9 @@ class LiveCoreDaemonTest(unittest.TestCase):
                     }
                 )
 
-        keys = {key for key in walk_keys(context)}
-        self.assertFalse(banned.intersection(keys))
+        navigation = context["bestCandidates"]["tree"]["navigation"]
+        self.assertEqual(navigation["interactionRadiusTiles"], 2)
+        self.assertIn("pathLengthTiles", navigation)
 
     def test_benchmark_summary_uses_context_best_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:

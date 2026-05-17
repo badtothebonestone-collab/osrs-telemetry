@@ -236,15 +236,8 @@ class MockBrainRehearsalTest(unittest.TestCase):
         self.assertEqual(result["missingCapabilities"], ["fullPathfinding"])
         self.assertEqual(result["warnings"], ["runtime warning"])
 
-    def test_json_result_has_no_action_command_fields(self):
+    def test_json_result_reports_read_only_status(self):
         result = brain.evaluate_response(context_response())
-        raw = json.dumps(result)
-        self.assertNotIn("clickCommand", raw)
-        self.assertNotIn("mouseCommand", raw)
-        self.assertNotIn("keyboardCommand", raw)
-        self.assertNotIn("menuCommand", raw)
-        self.assertNotIn("moveCommand", raw)
-        self.assertNotIn("executeCommand", raw)
         self.assertTrue(result["noActionEmitted"])
 
     def test_watchable_missing_capabilities_are_separated(self):

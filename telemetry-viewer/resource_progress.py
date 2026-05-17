@@ -626,7 +626,7 @@ def update_resource_progress(
     return initialize_or_update_progress(state, snapshot, definition, goal_count)
 
 
-def sanitize_resource_progress_state(state: ResourceProgressState, snapshot: InventorySnapshot, definition: ResourceDefinition) -> ResourceProgressState:
+def repair_resource_progress_state(state: ResourceProgressState, snapshot: InventorySnapshot, definition: ResourceDefinition) -> ResourceProgressState:
     return initialize_or_update_progress(state, snapshot, definition, state.goal_count).state
 
 

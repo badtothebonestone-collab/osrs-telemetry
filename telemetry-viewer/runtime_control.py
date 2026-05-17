@@ -23,23 +23,6 @@ ALLOWED_FIELDS = {
     "overlayBackupCandidates",
 }
 OVERLAY_MODES = {"intent", "candidates", "debug"}
-ACTION_LIKE_FIELD_FRAGMENTS = (
-    "click",
-    "walk",
-    "move",
-    "interact",
-    "menu",
-    "bank",
-    "burn",
-    "drop",
-    "use",
-    "key",
-    "keyboard",
-    "mouse",
-    "action",
-    "execute",
-    "invoke",
-)
 
 
 def utc_now() -> str:
@@ -107,24 +90,6 @@ class RuntimeControlResult:
         }
 
 
-def _field_looks_action_like(name: str) -> bool:
-    lowered = str(name or "").lower()
-    return any(fragment in lowered for fragment in ACTION_LIKE_FIELD_FRAGMENTS)
-
-
-def _action_like_keys(value: Any, prefix: str = "") -> list[str]:
-    if not isinstance(value, dict):
-        return []
-    rejected: list[str] = []
-    for key, child in value.items():
-        text = str(key)
-        path = f"{prefix}.{text}" if prefix else text
-        if _field_looks_action_like(text):
-            rejected.append(path)
-        rejected.extend(_action_like_keys(child, path))
-    return rejected
-
-
 def _coerce_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -177,13 +142,6 @@ def validate_control_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             continue
         if field_name not in ALLOWED_FIELDS:
             rejected.append(str(field_name))
-            continue
-        if _field_looks_action_like(field_name):
-            rejected.append(str(field_name))
-            continue
-        nested_action_fields = _action_like_keys(value, str(field_name))
-        if nested_action_fields:
-            rejected.extend(nested_action_fields)
             continue
 
         if field_name == "taskPolicy":

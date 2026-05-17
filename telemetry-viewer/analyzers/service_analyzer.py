@@ -33,45 +33,6 @@ SERVICE_TYPE_NAME_TOKENS = (
     ("banker", ("banker",)),
     ("bank_service", ("bank service", "bank")),
 )
-SERVICE_OUTPUT_FIELDS = (
-    "targetKey",
-    "objectKey",
-    "candidateKey",
-    "targetType",
-    "classId",
-    "name",
-    "targetName",
-    "id",
-    "rawId",
-    "hash",
-    "worldX",
-    "worldY",
-    "plane",
-    "sceneX",
-    "sceneY",
-    "localX",
-    "localY",
-    "distanceTiles",
-    "qualityScore",
-    "qualityTier",
-    "targetLiveState",
-    "liveness",
-    "directReachability",
-    "navigation",
-    "aimPoint",
-    "geometrySource",
-    "clickableHull",
-    "clickboxPolygon",
-    "convexHull",
-    "canvasTilePolygon",
-    "bounds",
-    "onScreen",
-    "geometryAvailable",
-    "serviceCandidateType",
-    "serviceType",
-)
-
-
 def normalized_text(value: Any) -> str:
     return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
 
@@ -137,25 +98,21 @@ def candidate_has_optional_service_detail(candidate: dict[str, Any]) -> bool:
     return False
 
 
-def sanitized_service_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
-    sanitized: dict[str, Any] = {}
-    for key in SERVICE_OUTPUT_FIELDS:
-        value = candidate.get(key)
-        if value is not None:
-            sanitized[key] = value
-    navigation = sanitized.get("navigation") if isinstance(sanitized.get("navigation"), dict) else {}
-    if "directReachability" not in sanitized and navigation.get("directReachability") is not None:
-        sanitized["directReachability"] = navigation.get("directReachability")
-    if "name" not in sanitized and sanitized.get("targetName") is not None:
-        sanitized["name"] = sanitized.get("targetName")
-    if "targetName" not in sanitized and sanitized.get("name") is not None:
-        sanitized["targetName"] = sanitized.get("name")
+def service_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(candidate)
+    navigation = payload.get("navigation") if isinstance(payload.get("navigation"), dict) else {}
+    if "directReachability" not in payload and navigation.get("directReachability") is not None:
+        payload["directReachability"] = navigation.get("directReachability")
+    if "name" not in payload and payload.get("targetName") is not None:
+        payload["name"] = payload.get("targetName")
+    if "targetName" not in payload and payload.get("name") is not None:
+        payload["targetName"] = payload.get("name")
     candidate_type = service_candidate_type(candidate)
     if candidate_type:
-        sanitized["serviceCandidateType"] = candidate_type
-    if sanitized.get("serviceType") is None:
-        sanitized["serviceType"] = "bank"
-    return sanitized
+        payload["serviceCandidateType"] = candidate_type
+    if payload.get("serviceType") is None:
+        payload["serviceType"] = "bank"
+    return payload
 
 
 def reachability_value(candidate: dict[str, Any]) -> str | None:
@@ -201,19 +158,6 @@ def group_candidates_by_type(candidates: list[dict[str, Any]]) -> dict[str, list
     return grouped
 
 
-def contains_forbidden_output_fields(value: Any) -> bool:
-    forbidden = {"action", "actions", "click", "input", "mouse", "keyboard", "menu", "invoke", "execute", "menuactions"}
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if str(key).lower() in forbidden:
-                return True
-            if contains_forbidden_output_fields(item):
-                return True
-    elif isinstance(value, list):
-        return any(contains_forbidden_output_fields(item) for item in value)
-    return False
-
-
 def analyze_service_context(
     policy: task_policy_module.TaskPolicy | dict[str, Any] | str | None,
     *,
@@ -237,7 +181,7 @@ def analyze_service_context(
         for candidate in candidates or []
         if candidate_service_match(candidate, service_type)
     ]
-    service_candidates = [sanitized_service_candidate(candidate) for candidate in raw_service_candidates]
+    service_candidates = [service_candidate_payload(candidate) for candidate in raw_service_candidates]
     for candidate in service_candidates:
         candidate["serviceType"] = service_type
     ranked = sorted(service_candidates, key=service_rank)
@@ -265,6 +209,5 @@ def analyze_service_context(
         candidate_count=len(service_candidates),
         reachable_count=reachable_count,
         unknown_reachability_count=unknown_count,
-        sanitized_output_has_forbidden_fields=contains_forbidden_output_fields(service_candidates),
         reason="task policy requires service context",
     )

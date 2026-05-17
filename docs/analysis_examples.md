@@ -218,10 +218,13 @@ Navigation intent context is policy-gated read-only context too:
 
 Pathing Context v1 is the next read-only layer. It uses the destination from
 navigation intent and the local collision window already in daemon memory to
-summarize destination tile, local reachability, path length, next waypoint, and
-a capped predicted local path preview. The preview is labeled predicted and is
-for visualization/debug context only. It is not a walk command, click target,
-route execution, or guaranteed OSRS movement.
+summarize destination tile, final approach tile, local reachability, path
+length, next waypoint, and a capped predicted local path preview. The preview
+is labeled predicted and is for visualization/debug context only. It is not a
+walk command, click target, route execution, or guaranteed OSRS movement.
+When an exact interaction tile is unknown, `finalApproachTile` is the predicted
+local endpoint or adjacent approach tile, and `navigation.interaction_tile`
+remains a missing capability.
 
 Daily overlay shows only destination and next waypoint markers by default when
 pathing is relevant. Debug overlay mode can show capped `predicted_path_tile`
@@ -231,8 +234,14 @@ Service matching is conservative. It accepts service class/type IDs
 `bank_service`, `banker`, `bank_booth`, `bank_chest`, `deposit_box`, and
 `deposit_chest`, or equivalent visible names such as `Bank booth`, `Banker`,
 `Deposit box`, `Bank deposit box`, and `Deposit chest`. If action metadata is
-already present it can be used only as an input signal, and it is stripped from
-diagnostic, brain, and overlay output.
+already present it can be used as read-only classification metadata.
+
+When a task policy requires service context, the daemon keeps resource target
+selection profile-scoped while also exposing a separate bounded
+`serviceCandidateInputs` view to the service analyzer. This allows a
+woodcutting profile to keep best/nearest tree selection tree-focused while
+still seeing already-visible bank/deposit candidates for read-only service
+context.
 
 Policy matrix:
 
@@ -250,6 +259,7 @@ Policy diagnostic:
 python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_bank --task woodcutting --inventory-full true --resource-count 28 --goal-count 5
 python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_firemake --task woodcutting --inventory-full true --resource-count 28 --goal-count 5 --json
 python telemetry-viewer\diagnose_navigation_intent.py --from-daemon --daemon-url http://127.0.0.1:8890 --task woodcutting --policy woodcutting_bank
+python telemetry-viewer\diagnose_service_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
 ```
@@ -421,7 +431,7 @@ Key buttons:
 - **Config Doctor** runs the selected preset check and prints copy/paste fix
   suggestions.
 - **Daily Gauntlet** runs strict daily invariants, duplicate process checks, and
-  no-action-field checks.
+  required-context-domain checks.
 - **Open Latest Session Folder** opens the latest telemetry session.
 
 Legacy live processor, legacy context service, plugin-snapshot testing,
@@ -805,7 +815,7 @@ RuneLite config:
 - **Compact stream port**: default `8891`.
 - **Compact stream queue size**: bounded pending stream packet queue.
 - **Compact stream circuit breaker**: pauses stream publishing if stream writes
-  or queue pressure look unsafe.
+  or queue pressure are unhealthy.
 - **Compact stream max write ms**: stream worker write time budget before the
   circuit breaker trips.
 - **Compact stream pause seconds**: temporary stream disable period after a
@@ -2263,7 +2273,7 @@ Daily rules:
 - Daily gained logs are `max(0, currentHeldCount - baselineHeldCount)`.
 - Daily mode does not use cumulative gained/removed counters.
 - Old or partial brain state without the current progress schema is treated as
-  untrusted; unsafe gained/removed counters are cleared.
+  untrusted; unreliable gained/removed counters are cleared.
 
 With daemon writes off, use the daemon API for diagnostics instead of stale
 rolling live files:

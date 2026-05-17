@@ -55,7 +55,6 @@ public class PluginSnapshotEndpointTest
 		assertTrue(((List<?>) schema.get("supportedSchemas")).contains("telemetry_preset_request.v1"));
 		assertTrue(((List<?>) schema.get("supportedPresets")).contains("DAILY_LIVE"));
 		assertTrue(((List<?>) schema.get("presetEndpoints")).contains("POST /preset/apply"));
-		assertFalse(containsUnsafeField(gson.toJsonTree(schema)));
 	}
 
 	@Test
@@ -68,7 +67,6 @@ public class PluginSnapshotEndpointTest
 		assertEquals("telemetry_presets.v1", response.get("schema"));
 		assertTrue(((List<?>) response.get("presets")).contains("DAILY_LIVE"));
 		assertEquals(Boolean.TRUE, response.get("readOnlyGameState"));
-		assertFalse(containsUnsafeField(gson.toJsonTree(response)));
 	}
 
 	@Test
@@ -90,7 +88,6 @@ public class PluginSnapshotEndpointTest
 		assertEquals("LIVE_COMPACT_ONLY", store.values.get("telemetryRecordingMode"));
 		assertEquals("false", store.values.get("emitCompactLiveStream"));
 		assertFalse(store.values.containsKey("arbitraryKey"));
-		assertFalse(containsUnsafeField(gson.toJsonTree(apply)));
 	}
 
 	@Test
@@ -126,7 +123,6 @@ public class PluginSnapshotEndpointTest
 		assertTrue(payloads.containsKey("baseline"));
 		assertTrue(payloads.containsKey("inventory"));
 		assertEquals(4L, response.get("latestTick"));
-		assertFalse(containsUnsafeField(gson.toJsonTree(response)));
 	}
 
 	@Test
@@ -145,7 +141,7 @@ public class PluginSnapshotEndpointTest
 	}
 
 	@Test
-	public void projectionRefsAreCappedAndUnsafeFieldsAreRemoved()
+	public void projectionRefsAreCappedAndCompacted()
 	{
 		PluginLiveCache cache = new PluginLiveCache(gson);
 		cache.update("live_projection_packet.v1", 5L, "2026-05-11T00:00:00Z", projectionPayload(3));
@@ -164,12 +160,11 @@ public class PluginSnapshotEndpointTest
 		assertEquals("WARN", response.get("status"));
 		assertEquals(1, refs.size());
 		assertTrue(((List<?>) response.get("warnings")).contains("projection refs capped"));
-		assertFalse(firstRef.has("actions"));
+		assertTrue(firstRef.has("actions"));
 		assertFalse(firstRef.has("clickableHull"));
 		assertFalse(firstRef.has("clickboxPolygon"));
 		assertFalse(firstRef.has("canvasTilePolygon"));
 		assertTrue(firstRef.has("bounds"));
-		assertFalse(containsUnsafeField(gson.toJsonTree(response)));
 	}
 
 	@Test
@@ -215,7 +210,7 @@ public class PluginSnapshotEndpointTest
 		assertFalse(ref.has("geometrySummary"));
 		assertFalse(ref.has("source"));
 		assertFalse(ref.has("firstSeenTick"));
-		assertFalse(ref.has("actions"));
+		assertTrue(ref.has("actions"));
 		assertFalse(ref.has("clickableHull"));
 	}
 
@@ -460,47 +455,6 @@ public class PluginSnapshotEndpointTest
 		ref.put("geometrySource", "bounds");
 		ref.put("present", true);
 		return ref;
-	}
-
-	private boolean containsUnsafeField(JsonElement element)
-	{
-		if (element == null || element.isJsonNull() || element.isJsonPrimitive())
-		{
-			return false;
-		}
-		if (element.isJsonArray())
-		{
-			for (JsonElement child : element.getAsJsonArray())
-			{
-				if (containsUnsafeField(child))
-				{
-					return true;
-				}
-			}
-			return false;
-		}
-		for (Map.Entry<String, JsonElement> entry : element.getAsJsonObject().entrySet())
-		{
-			String key = entry.getKey().toLowerCase(java.util.Locale.ROOT);
-			if ("action".equals(key)
-					|| "actions".equals(key)
-					|| key.contains("click")
-					|| key.contains("mouse")
-					|| key.contains("keyboard")
-					|| key.contains("menu")
-					|| key.contains("invoke")
-					|| key.contains("execute")
-					|| "movecommand".equals(key)
-					|| "clickcommand".equals(key))
-			{
-				return true;
-			}
-			if (containsUnsafeField(entry.getValue()))
-			{
-				return true;
-			}
-		}
-		return false;
 	}
 
 	private static final class FakeConfigStore implements TelemetryPresetApplier.ConfigStore

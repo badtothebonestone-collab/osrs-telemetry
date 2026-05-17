@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 import capabilities
+from analyzers import service_analyzer
 from analyzers.live_state import TargetContext
 
 
@@ -50,6 +51,16 @@ def _tick(candidate: dict[str, Any]) -> int | None:
     return None
 
 
+def _is_service_candidate(candidate: dict[str, Any]) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    return bool(
+        service_analyzer.service_candidate_type(candidate)
+        or service_analyzer.candidate_service_match(candidate, "bank")
+        or service_analyzer.candidate_service_match(candidate, "deposit")
+    )
+
+
 def analyze_targets(
     candidates: list[dict[str, Any]] | None,
     *,
@@ -58,8 +69,10 @@ def analyze_targets(
 ) -> TargetContext:
     started = time.perf_counter()
     candidates = [candidate for candidate in (candidates or []) if isinstance(candidate, dict)]
+    broad_candidates = list(candidates)
     scoped = [candidate for candidate in candidates if _class_matches(candidate, class_id)]
-    raw_best = scoped[0] if scoped else (candidates[0] if candidates else None)
+    service_inputs = [candidate for candidate in broad_candidates if _is_service_candidate(candidate)]
+    raw_best = scoped[0] if scoped else (candidates[0] if candidates and class_id is None else None)
     if scoped:
         raw_best = max(scoped, key=_score)
     nearest = min(scoped, key=_distance) if scoped else None
@@ -80,8 +93,15 @@ def analyze_targets(
         retained_from_previous=False,
         timing_millis=(time.perf_counter() - started) * 1000.0,
         candidates=candidates,
+        profile_candidates=scoped,
+        broad_candidates=broad_candidates,
+        service_candidate_inputs=service_inputs,
         raw_best_target=raw_best,
         nearest_target=nearest,
         top_candidates=scoped[: max(0, max_candidates)],
         candidate_count=len(candidates),
+        profile_candidate_count=len(scoped),
+        broad_candidate_count=len(broad_candidates),
+        service_candidate_input_count=len(service_inputs),
+        service_candidate_visibility="available" if service_inputs else "not_observed",
     )

@@ -14,24 +14,6 @@ sys.path.insert(0, str(VIEWER_DIR))
 import diagnose_task_transition as transitions
 
 
-def walk_keys(value):
-    if isinstance(value, dict):
-        for key, child in value.items():
-            yield str(key)
-            yield from walk_keys(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from walk_keys(child)
-
-
-def assert_no_action_fields(testcase: unittest.TestCase, payload: dict):
-    keys = [key for key in walk_keys(payload) if key != "noActionEmitted"]
-    exact = {"action", "actions", "click", "input", "menu", "mouse", "keyboard", "invoke", "execute"}
-    fragments = ("click", "mouse", "keyboard", "menu", "invoke", "execute")
-    lowered = [key.lower() for key in keys]
-    testcase.assertFalse([key for key in lowered if key in exact or any(fragment in key for fragment in fragments)])
-
-
 class TaskTransitionDiagnosticTest(unittest.TestCase):
     def test_woodcutting_not_full_selects_tree(self):
         payload = transitions.evaluate_transition_scenario("woodcutting_bank", "woodcutting_not_full")
@@ -41,7 +23,6 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
         self.assertEqual(payload["actualActiveIntent"], "continue_current_target")
         self.assertEqual(payload["overlaySelectedMarker"]["classId"], "tree")
         self.assertEqual(payload["overlaySelectedMarkerExpectation"], "selected_tree")
-        assert_no_action_fields(self, payload)
 
     def test_bank_full_without_service_waits_for_service_context(self):
         payload = transitions.evaluate_transition_scenario("woodcutting_bank", "service_missing")

@@ -1995,7 +1995,7 @@ def conclude(report_pieces: dict) -> dict:
     return {
         "mostLikelyLossStage": most_likely_stage,
         "strongestEvidence": evidence,
-        "sourceHasCapSafetyLogic": source_has_cap_logic,
+        "sourceHasCapLogic": source_has_cap_logic,
         "selectedTicksHitSceneObjectCap": bool(cap_hit_ticks),
         "selectedSceneObjectsSkippedByCap": skipped_by_cap,
         "currentCaptureModeLikelyCompleteForSelectedScan": current_capture_complete,
@@ -2308,7 +2308,7 @@ def print_human(report: dict) -> None:
     print("  strongest evidence:")
     for item in conclusion.get("strongestEvidence") or []:
         print(f"    {item}")
-    print(f"  source has cap/radius safety logic: {'yes' if conclusion.get('sourceHasCapSafetyLogic') else 'no'}")
+    print(f"  source has cap/radius limiting logic: {'yes' if conclusion.get('sourceHasCapLogic') else 'no'}")
     print(f"  selected ticks hit scene object cap: {'yes' if conclusion.get('selectedTicksHitSceneObjectCap') else 'no'}")
     print(f"  selected scene objects skipped by cap: {conclusion.get('selectedSceneObjectsSkippedByCap', 0)}")
     print(

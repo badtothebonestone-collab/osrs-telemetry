@@ -120,10 +120,17 @@ class TargetContext(AnalyzerContractFields):
     retained_from_previous: bool = False
     timing_millis: float | None = None
     candidates: list[dict[str, Any]] = field(default_factory=list)
+    profile_candidates: list[dict[str, Any]] = field(default_factory=list)
+    broad_candidates: list[dict[str, Any]] = field(default_factory=list)
+    service_candidate_inputs: list[dict[str, Any]] = field(default_factory=list)
     raw_best_target: dict[str, Any] | None = None
     nearest_target: dict[str, Any] | None = None
     top_candidates: list[dict[str, Any]] = field(default_factory=list)
     candidate_count: int = 0
+    profile_candidate_count: int = 0
+    broad_candidate_count: int = 0
+    service_candidate_input_count: int = 0
+    service_candidate_visibility: str | None = None
 
 
 @dataclass
@@ -293,7 +300,6 @@ class ServiceContext(AnalyzerContractFields):
     candidate_count: int = 0
     reachable_count: int | None = None
     unknown_reachability_count: int | None = None
-    sanitized_output_has_forbidden_fields: bool = False
     reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -310,7 +316,6 @@ class ServiceContext(AnalyzerContractFields):
             "candidateCount": self.candidate_count,
             "reachableCount": self.reachable_count,
             "unknownReachabilityCount": self.unknown_reachability_count,
-            "sanitizedOutputHasForbiddenFields": self.sanitized_output_has_forbidden_fields,
             "reason": self.reason,
         }
 

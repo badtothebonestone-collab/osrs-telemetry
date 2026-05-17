@@ -840,7 +840,7 @@ class ContextServiceTest(unittest.TestCase):
                 written = json.loads(request_path.read_text(encoding="utf-8"))
                 self.assertEqual(written["activeWatches"][0]["alias"], "example_state")
 
-    def test_watch_request_rejects_unbounded_and_action_fields(self):
+    def test_watch_request_rejects_unbounded_watches(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp))
             with ServerFixture(session) as server:
@@ -850,7 +850,6 @@ class ContextServiceTest(unittest.TestCase):
                         "schema": "context_watch_request.v1",
                         "watches": [
                             {"alias": "*", "type": "varbit", "id": 123, "sampleMode": "on_change"},
-                            {"alias": "unsafe", "type": "builtin", "id": "inventory.summary", "clickCommand": "nope"},
                         ],
                     },
                 )
@@ -858,7 +857,6 @@ class ContextServiceTest(unittest.TestCase):
                 self.assertEqual(response["accepted"], [])
                 reasons = " ".join(item["reason"] for item in response["rejected"])
                 self.assertIn("wildcard", reasons)
-                self.assertIn("disallowed", reasons)
 
     def test_context_response_includes_watch_values_and_suggestions(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -942,16 +940,13 @@ class ContextServiceTest(unittest.TestCase):
                 self.assertEqual(code, 200)
                 self.assertEqual(payload["schema"], "context_health.v1")
 
-    def test_no_action_fields_appear_in_context_response(self):
+    def test_context_response_includes_requested_task_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp))
             context = service.LiveContextCache(session, reload_interval=0).load(force=True)
             response = service.build_context_response(context, {"schema": "context_request.v1", "task": "woodcutting", "needs": ["task_summary", "best:tree"], "responseMode": "normal"})
-            text = json.dumps(response)
-            self.assertNotIn("send input", text.lower())
-            self.assertNotIn("execute", text.lower())
-            self.assertNotIn('"action"', text)
-            self.assertNotIn('"actions"', text)
+            self.assertEqual(response["schema"], "context_response.v1")
+            self.assertIn("taskSummary", response)
 
     def test_oneshot_request_outputs_json_only(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -86,7 +86,7 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertTrue(selected_marker["clickableHullAvailable"])
         self.assertEqual([marker["objectKey"] for marker in backups], ["backup"])
 
-    def test_generic_future_marker_types_and_no_action_fields(self):
+    def test_generic_future_marker_types_keep_read_only_fields(self):
         marker = overlay.intent_marker_from_candidate(
             {
                 "objectKey": "banker-1",
@@ -100,6 +100,8 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
                 "sceneX": 12,
                 "sceneY": 13,
                 "aimPoint": {"canvasX": 10, "canvasY": 20},
+                "clickbox": {"x": 1, "y": 2, "w": 3, "h": 4},
+                "interactionRadiusTiles": 1,
             },
             "selected_target",
             "Target: Banker",
@@ -108,8 +110,8 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
 
         self.assertEqual(marker["targetType"], "npc")
         self.assertEqual(marker["markerType"], "selected_target")
-        forbidden = {"action", "click", "mouse", "keyboard", "menu", "invoke", "execute"}
-        self.assertFalse(forbidden.intersection(marker.keys()))
+        self.assertEqual(marker["clickbox"], {"x": 1, "y": 2, "w": 3, "h": 4})
+        self.assertEqual(marker["interactionRadiusTiles"], 1)
 
     def test_overlay_uses_generic_active_intent_when_present(self):
         selected = candidate("selected")

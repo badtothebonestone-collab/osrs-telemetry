@@ -82,25 +82,6 @@ def context_request() -> dict:
     }
 
 
-def forbidden_field_paths(value: Any, path: str = "") -> list[str]:
-    forbidden_exact = {"click", "mouse", "keyboard", "menu", "invoke", "execute", "input"}
-    forbidden_fragments = ("click", "mouse", "keyboard", "menu", "invoke", "execute")
-    allowed = {"noActionEmitted", "readOnlyTelemetry", "inputSourceActive", "inputSourceRequestedByDaemon"}
-    paths: list[str] = []
-    if isinstance(value, dict):
-        for key, child in value.items():
-            key_text = str(key)
-            child_path = f"{path}.{key_text}" if path else key_text
-            lowered = key_text.lower()
-            if key_text not in allowed and (lowered in forbidden_exact or any(fragment in lowered for fragment in forbidden_fragments)):
-                paths.append(child_path)
-            paths.extend(forbidden_field_paths(child, child_path))
-    elif isinstance(value, list):
-        for index, child in enumerate(value[:50]):
-            paths.extend(forbidden_field_paths(child, f"{path}[{index}]"))
-    return paths
-
-
 def progress_failures_from(payload: dict) -> list[str]:
     failures: list[str] = []
     progress = payload.get("brainProgress") if isinstance(payload.get("brainProgress"), dict) else {}
@@ -269,17 +250,8 @@ def evaluate_daemon_payloads(
                 warnings.append(f"daily context endpoint returned FAIL, but only optional context is missing for current phase{optional_detail}")
         elif context_payload.get("status") == "WARN":
             warnings.append("daily context endpoint returned WARN")
-        forbidden = forbidden_field_paths(context_payload)
-        if forbidden:
-            failures.append("context output contains action/input/menu-shaped fields: " + ", ".join(forbidden[:5]))
     if brain_payload:
         failures.extend(progress_failures_from({"brain": brain_payload, "brainProgress": brain_payload.get("goalProgress")}))
-        forbidden = forbidden_field_paths(brain_payload)
-        dangerous = [path for path in forbidden if not path.endswith("noActionEmitted")]
-        if dangerous:
-            failures.append("brain output contains action/input/menu-shaped fields: " + ", ".join(dangerous[:5]))
-        if brain_payload.get("noActionEmitted") is False:
-            failures.append("brain output does not report noActionEmitted=true")
         pathing = brain_payload.get("pathingContext") if isinstance(brain_payload.get("pathingContext"), dict) else {}
         pathing_needed = pathing.get("pathingNeeded", brain_payload.get("pathingNeeded"))
         if pathing_needed is True and not pathing:

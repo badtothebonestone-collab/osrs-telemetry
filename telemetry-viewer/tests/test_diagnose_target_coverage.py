@@ -173,7 +173,6 @@ def candidate_from_world(world_target: dict) -> dict:
         },
         "scoring": {"scoreParts": [], "reasons": ["test"], "penalties": []},
         "frame": world_target["frame"],
-        "safety": {"readOnly": True, "actionGenerated": False},
     }
 
 
@@ -196,7 +195,6 @@ def scenario_record_from_candidate(candidate: dict) -> dict:
             }
         ],
         "context": {"targets": []},
-        "safety": {"readOnly": True, "actionGenerated": False, "inputGenerated": False},
     }
 
 

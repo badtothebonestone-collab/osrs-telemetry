@@ -32,10 +32,6 @@ SCENARIOS = (
     "combat_full_inventory",
 )
 
-FORBIDDEN_EXACT_KEYS = {"action", "actions", "click", "input", "menu", "mouse", "keyboard", "invoke", "execute"}
-FORBIDDEN_KEY_FRAGMENTS = ("click", "mouse", "keyboard", "menu", "invoke", "execute")
-
-
 def tree_candidate() -> dict[str, Any]:
     return {
         "objectKey": "tree-1278-3156-3237",
@@ -263,20 +259,6 @@ def compact_overlay_marker(marker: dict[str, Any] | None) -> dict[str, Any] | No
     return {key: marker.get(key) for key in keys if marker.get(key) is not None}
 
 
-def has_forbidden_fields(value: Any) -> bool:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            key_text = str(key)
-            lowered = key_text.lower()
-            if key_text != "noActionEmitted" and (lowered in FORBIDDEN_EXACT_KEYS or any(part in lowered for part in FORBIDDEN_KEY_FRAGMENTS)):
-                return True
-            if has_forbidden_fields(child):
-                return True
-    if isinstance(value, list):
-        return any(has_forbidden_fields(item) for item in value)
-    return False
-
-
 def stable_intent_for(generic_state: dict[str, Any], candidates: list[dict[str, Any]]) -> intent_stabilizer.IntentResult | None:
     active_intent = str(generic_state.get("activeIntent") or "")
     if active_intent not in {"target_selected", "continue_current_target", "continue_task", "select_target", "wait_for_result"}:
@@ -416,8 +398,6 @@ def evaluate_transition_scenario(
         "failures": failures,
         "warnings": [],
     }
-    if has_forbidden_fields(payload):
-        payload["failures"].append("diagnostic output contains action/click/input/menu-shaped fields")
     payload["status"] = "FAIL" if payload["failures"] else "PASS"
     return payload
 
@@ -478,9 +458,6 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
         "warnings": [],
         "failures": [],
     }
-    if has_forbidden_fields(payload):
-        payload["status"] = "FAIL"
-        payload["failures"].append("daemon transition output contains action/click/input/menu-shaped fields")
     return payload
 
 

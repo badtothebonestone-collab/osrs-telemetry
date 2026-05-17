@@ -594,11 +594,6 @@ def scenario_record(
         },
         "duplicateCandidateCount": duplicate_candidate_count,
         "warnings": ([f"removed {duplicate_candidate_count} duplicate selected candidates"] if duplicate_candidate_count else []),
-        "safety": {
-            "readOnly": True,
-            "actionGenerated": False,
-            "inputGenerated": False,
-        },
     }
 
 

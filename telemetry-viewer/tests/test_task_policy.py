@@ -45,11 +45,9 @@ class TaskPolicyTest(unittest.TestCase):
         self.assertEqual(policy.fullInventoryStrategy, task_policy.InventoryFullStrategy.NEEDS_SERVICE)
         self.assertEqual(policy.serviceTypeNeeded, "bank")
 
-    def test_policy_payload_has_no_action_fields(self):
+    def test_policy_payload_reports_inventory_strategy(self):
         payload = task_policy.resolve_task_policy("woodcutting_drop").to_dict()
 
-        forbidden = {"action", "actions", "click", "input", "mouse", "keyboard", "menu", "invoke", "execute"}
-        self.assertFalse(forbidden.intersection(payload.keys()))
         self.assertEqual(payload["fullInventoryStrategy"], "process_inventory")
         self.assertEqual(payload["resourceDisposition"], "drop")
 

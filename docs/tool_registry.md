@@ -24,12 +24,12 @@ These are the only tools that belong in the main daily view.
 
 | Tool | Purpose | Command |
 | --- | --- | --- |
-| `live_control_panel.py` | Simple launcher, Mission Control status view, and safe runtime-control surface for the daily daemon. | `python telemetry-viewer\live_control_panel.py` |
-| `live_core_daemon.py` | Streamlined daily daemon: stable compact-packets input or explicit experimental snapshot no-file input, in-memory context, writes off by default, optional brain intent overlay state. Accepts startup `--preset` as a safe mission-preset alias. | `python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --summary --benchmark` |
+| `live_control_panel.py` | Simple launcher, Mission Control status view, and runtime-control surface for the daily daemon. | `python telemetry-viewer\live_control_panel.py` |
+| `live_core_daemon.py` | Streamlined daily daemon: stable compact-packets input or explicit experimental snapshot no-file input, in-memory context, writes off by default, optional brain intent overlay state. Accepts startup `--preset` as a mission-preset alias. | `python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --summary --benchmark` |
 | `control_live_daemon.py` | Local read-only runtime control for daemon mission presets, task policy, goal count, observe-only mode, and baseline reset. Prints JSON to stdout only when requested. | `python telemetry-viewer\control_live_daemon.py --get` |
 | `mission_snapshot.py` | One-shot Mission Snapshot diagnostic for bug reports and before/after comparisons. Reads `/health`, `/status`, and `/control` once, prints to stdout by default, and writes one JSON file only when `--output` is explicit. | `python telemetry-viewer\mission_snapshot.py --daemon-url http://127.0.0.1:8890` |
 | `live_config_doctor.py` | Preset-aware PASS/WARN/FAIL check for daily settings. | `python telemetry-viewer\live_config_doctor.py --latest-session --mode daily --fix-suggestions` or `--mode snapshot_no_file` |
-| `run_daily_gauntlet.py` | Strict daily sanity check for daemon health, process conflicts, progress invariants, and unsafe fields. | `python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode compact-packets --strict --check-processes` |
+| `run_daily_gauntlet.py` | Strict daily sanity check for daemon health, process conflicts, progress invariants, and required context domains. | `python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode compact-packets --strict --check-processes` |
 
 Daily support modules are hidden from the UI but remain part of the daily lane:
 
@@ -37,9 +37,9 @@ Daily support modules are hidden from the UI but remain part of the daily lane:
 - `brain_core.py`: read-only brain interpretation.
 - `task_policy.py` and `task_policies.json`: read-only task policy model for
   interpreting conditions such as a full inventory.
-- `runtime_control.py`: in-memory model and validation for safe daemon
+- `runtime_control.py`: in-memory model and validation for daemon
   `/control` updates.
-- `mission_presets.py`: named sidecar brain/context presets for safe runtime
+- `mission_presets.py`: named sidecar brain/context presets for runtime
   control updates; no game actions.
 - `capabilities.py`: capability status/alias registry for analyzer and output
   consistency.
@@ -61,6 +61,7 @@ Diagnostics and inspectors that are useful when daily output looks wrong:
 - `diagnose_overlay_state.py`
 - `diagnose_overlay_geometry.py`
 - `diagnose_pathing_context.py`
+- `diagnose_service_context.py`
 - `diagnose_target_coverage.py`
 - `run_stabilization_suite.py`
 - visual/perception/tab inspection helpers
@@ -125,5 +126,4 @@ removed.
 - top-level `test_telemetry_paths.py`
 
 See `docs\cleanup_report.md` for what was kept, moved, or left alone.
-See `docs\runtime_cleanup_report.md` for the Daily Live runtime audit and
-guardrail summary.
+See `docs\runtime_cleanup_report.md` for the Daily Live runtime audit.

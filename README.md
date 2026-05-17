@@ -118,9 +118,8 @@ them:
 - Open newest event segment
 - Open active/newest session folder
 
-Safety: the launcher only manages processes it started. It does not perform
-game automation, clicking, input hooks, overlays, menu actions, or client-state
-mutation.
+The launcher only manages processes it started. It does not control the game
+client or mutate client state.
 
 Frame timing diagnostics are written as line-oriented JSONL at
 `frames\frame_index.jsonl`. The tools expose normalized frame timing fields

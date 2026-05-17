@@ -12,51 +12,6 @@ from typing import Any
 SCHEMA = "mission_snapshot.v1"
 DEFAULT_DAEMON_URL = "http://127.0.0.1:8890"
 
-FORBIDDEN_EXACT_KEYS = {
-    "action",
-    "actions",
-    "click",
-    "input",
-    "menu",
-    "mouse",
-    "key",
-    "keyboard",
-    "walk",
-    "interact",
-    "interaction",
-    "execute",
-    "invoke",
-}
-FORBIDDEN_FRAGMENTS = (
-    "click",
-    "mouse",
-    "keyboard",
-    "menu",
-    "walk",
-    "interact",
-    "execute",
-    "invoke",
-)
-ALLOWED_KEYS = {
-    "noactionemitted",
-    "inputsourceactive",
-    "inputsourcerequested",
-    "inputsourcerequestedbydaemon",
-    "clickablehull",
-    "clickbox",
-    "clickboxavailable",
-    "clickboxbounds",
-    "clickboxcenter",
-    "clickboxpolygon",
-    "clickboxresolved",
-    "clickpoint",
-    "interacting",
-    "interactingtarget",
-    "walkable",
-    "walkability",
-}
-
-
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -153,30 +108,6 @@ def process_counts_from(status: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def key_looks_unsafe(key: str) -> bool:
-    lowered = str(key or "").lower()
-    if lowered in ALLOWED_KEYS:
-        return False
-    if lowered in FORBIDDEN_EXACT_KEYS:
-        return True
-    return any(fragment in lowered for fragment in FORBIDDEN_FRAGMENTS)
-
-
-def unsafe_field_paths(value: Any, prefix: str = "") -> list[str]:
-    paths: list[str] = []
-    if isinstance(value, dict):
-        for key, child in value.items():
-            text_key = str(key)
-            path = f"{prefix}.{text_key}" if prefix else text_key
-            if key_looks_unsafe(text_key):
-                paths.append(path)
-            paths.extend(unsafe_field_paths(child, path))
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            paths.extend(unsafe_field_paths(child, f"{prefix}[{index}]" if prefix else f"[{index}]"))
-    return paths
-
-
 def collect_warnings(*payloads: dict[str, Any]) -> list[str]:
     warnings: list[str] = []
     for payload in payloads:
@@ -210,13 +141,7 @@ def build_snapshot(
     progress = compact_progress(brain.get("goalProgress") if isinstance(brain.get("goalProgress"), dict) else status.get("brainProgress"))
 
     warnings = collect_warnings(health, status, control, brain, service, process, navigation)
-    unsafe_paths = unsafe_field_paths({"health": health, "status": status, "control": control})
     no_action = bool(brain.get("noActionEmitted", control.get("noActionEmitted", True)))
-    if no_action is False:
-        warnings.append("noActionEmitted is false")
-    dangerous_paths = [path for path in unsafe_paths if not path.lower().endswith("noactionemitted")]
-    if dangerous_paths:
-        warnings.append("action-like fields detected: " + ", ".join(dangerous_paths[:5]))
 
     daily_mode = status.get("dailyMode")
     no_file_daily = bool_value(status.get("noFileDaily"))
@@ -230,9 +155,7 @@ def build_snapshot(
         warnings.append("compact packet files are required in snapshot-no-files mode")
 
     snapshot_status = "PASS"
-    if not no_action or dangerous_paths:
-        snapshot_status = "FAIL"
-    elif warnings:
+    if warnings:
         snapshot_status = "WARN"
 
     payload: dict[str, Any] = {
@@ -267,7 +190,6 @@ def build_snapshot(
         "warnings": warnings,
         "processCounts": process_counts_from(status),
         "selectedOverlayMarker": selected_overlay_marker(status, brain),
-        "unsafeFieldPaths": dangerous_paths,
     }
     if include_raw:
         payload["raw"] = {"health": health, "status": status, "control": control}

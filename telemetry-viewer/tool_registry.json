@@ -14,7 +14,7 @@
     {
       "name": "live_control_panel.py",
       "category": "daily",
-      "purpose": "Simple daily launcher, Mission Control status view, and safe runtime-control surface for the daily daemon.",
+      "purpose": "Simple daily launcher, Mission Control status view, and runtime-control surface for the daily daemon.",
       "dailyRequired": true,
       "normalCommand": "python telemetry-viewer\\live_control_panel.py",
       "input": "latest session and local helper process state",
@@ -25,7 +25,7 @@
     {
       "name": "live_core_daemon.py",
       "category": "daily",
-      "purpose": "Daily in-memory live daemon. Stable mode uses compact-packets; experimental snapshot no-file mode uses PluginSnapshotEndpoint. Context/brain endpoints are in memory, writes are off by default, overlay state is optional, and startup --preset is a safe mission-preset alias.",
+      "purpose": "Daily in-memory live daemon. Stable mode uses compact-packets; experimental snapshot no-file mode uses PluginSnapshotEndpoint. Context/brain endpoints are in memory, writes are off by default, overlay state is optional, and startup --preset is a mission-preset alias.",
       "dailyRequired": true,
       "normalCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --summary --benchmark",
       "alternateCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --summary --benchmark",
@@ -73,7 +73,7 @@
     {
       "name": "run_daily_gauntlet.py",
       "category": "daily",
-      "purpose": "Daily daemon sanity check for context health, progress invariants, duplicate processes, and unsafe fields.",
+      "purpose": "Daily daemon sanity check for context health, progress invariants, duplicate processes, and required context domains.",
       "dailyRequired": false,
       "normalCommand": "python telemetry-viewer\\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode compact-packets --strict --check-processes",
       "alternateCommand": "python telemetry-viewer\\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes",
@@ -107,11 +107,11 @@
     {
       "name": "mission_presets.py",
       "category": "daily",
-      "purpose": "Static named mission presets for safe in-memory sidecar brain/context runtime control; no game actions.",
+      "purpose": "Static named mission presets for in-memory sidecar brain/context runtime control; no game actions.",
       "dailyRequired": true,
       "normalCommand": "imported by runtime_control.py, control_live_daemon.py, and live_control_panel.py",
       "input": "preset name such as woodcut_bank, woodcut_firemake, woodcut_drop, observe_only, or combat_default",
-      "output": "safe runtime control fields with noActionEmitted=true",
+      "output": "runtime control fields with noActionEmitted=true",
       "status": "daily",
       "safeToHideInUi": true
     },
@@ -299,7 +299,19 @@
       "normalCommand": "python telemetry-viewer\\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890",
       "alternateCommand": "python telemetry-viewer\\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json",
       "input": "live_core_daemon localhost /status endpoint",
-      "output": "destination tile, next waypoint, predicted path preview, local reachability, and missing capabilities; no file writes",
+      "output": "destination tile, final approach tile, next waypoint, predicted path preview, local reachability, and missing capabilities; no file writes",
+      "status": "advanced_debug",
+      "safeToHideInUi": true
+    },
+    {
+      "name": "diagnose_service_context.py",
+      "category": "advanced_debug",
+      "purpose": "One-shot read-only diagnostic for policy-gated service candidate visibility. Reads /status only and prints to stdout; JSON mode is stdout-only.",
+      "dailyRequired": false,
+      "normalCommand": "python telemetry-viewer\\diagnose_service_context.py --from-daemon --daemon-url http://127.0.0.1:8890",
+      "alternateCommand": "python telemetry-viewer\\diagnose_service_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json",
+      "input": "live_core_daemon localhost /status endpoint",
+      "output": "profile/service candidate counts, service candidate inputs, candidate types, top service-like raw candidates, and tier/cap visibility notes; no file writes",
       "status": "advanced_debug",
       "safeToHideInUi": true
     },

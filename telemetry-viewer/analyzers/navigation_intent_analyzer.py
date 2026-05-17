@@ -22,53 +22,6 @@ TARGET_KIND_RESOURCE = "resource"
 TARGET_KIND_PROCESS_INVENTORY = "process_inventory"
 TARGET_KIND_NONE = "none"
 
-FORBIDDEN_TARGET_KEY_PARTS = (
-    "action",
-    "click",
-    "input",
-    "menu",
-    "mouse",
-    "keyboard",
-    "invoke",
-    "execute",
-    "route",
-    "movement",
-)
-
-SAFE_TARGET_KEYS = (
-    "targetKey",
-    "objectKey",
-    "candidateKey",
-    "key",
-    "markerType",
-    "targetType",
-    "classId",
-    "serviceCandidateType",
-    "name",
-    "targetName",
-    "id",
-    "hash",
-    "kind",
-    "layer",
-    "worldX",
-    "worldY",
-    "plane",
-    "sceneX",
-    "sceneY",
-    "localX",
-    "localY",
-    "aimPoint",
-    "bounds",
-    "qualityScore",
-    "qualityTier",
-    "distanceTiles",
-    "directReachability",
-    "targetLiveState",
-    "liveness",
-    "navigation",
-)
-
-
 def context_value(context: Any, snake_key: str, camel_key: str | None = None, default: Any = None) -> Any:
     if context is None:
         return default
@@ -94,26 +47,10 @@ def source_tick_from(*contexts: Any) -> int | None:
     return None
 
 
-def sanitized_target(target: Any) -> dict[str, Any] | None:
+def target_payload(target: Any) -> dict[str, Any] | None:
     if not isinstance(target, dict) or not target:
         return None
-    clean: dict[str, Any] = {}
-    for key in SAFE_TARGET_KEYS:
-        value = target.get(key)
-        if value is None:
-            continue
-        key_lower = key.lower()
-        if any(part in key_lower for part in FORBIDDEN_TARGET_KEY_PARTS):
-            continue
-        if key == "navigation" and isinstance(value, dict):
-            navigation = {
-                "directReachability": value.get("directReachability"),
-                "pathLengthTiles": value.get("pathLengthTiles"),
-            }
-            clean[key] = {nav_key: nav_value for nav_key, nav_value in navigation.items() if nav_value is not None}
-        else:
-            clean[key] = value
-    return clean
+    return dict(target)
 
 
 def target_distance(target: dict[str, Any] | None) -> int | float | None:
@@ -178,7 +115,7 @@ def with_target_fields(
     missing_capabilities: list[str] | None = None,
     status: str | None = None,
 ) -> NavigationIntentContext:
-    clean_destination = sanitized_target(destination)
+    clean_destination = target_payload(destination)
     direct = target_reachability(clean_destination)
     missing = list(missing_capabilities or [])
     notes = list(warnings or [])

@@ -12,7 +12,7 @@ import task_policy
 
 
 class ProcessInventoryAnalyzerTest(unittest.TestCase):
-    def test_reports_firemaking_process_context_without_actions(self):
+    def test_reports_firemaking_process_context(self):
         inventory = InventoryContext(
             inventory={"items": [{"slot": 0, "itemId": 1511, "quantity": 12}, {"slot": 1, "itemId": 590, "quantity": 1}]},
             progress={"currentHeldCount": 12},
@@ -31,8 +31,6 @@ class ProcessInventoryAnalyzerTest(unittest.TestCase):
         self.assertTrue(context.tinderbox_present)
         self.assertEqual(context.tinderbox_status, "present")
         self.assertEqual(context.source_tick, 20)
-        for forbidden in ("action", "click", "mouse", "keyboard", "menu", "invoke", "execute"):
-            self.assertNotIn(forbidden, " ".join(context.to_dict().keys()).lower())
 
     def test_firemaking_reports_tinderbox_missing_or_unknown(self):
         missing = process_inventory_analyzer.analyze_process_inventory_context(

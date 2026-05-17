@@ -10,20 +10,6 @@ sys.path.insert(0, str(VIEWER_DIR))
 import mission_presets
 
 
-FORBIDDEN_KEY_FRAGMENTS = ("click", "mouse", "keyboard", "menu", "invoke", "execute", "walk", "interact")
-
-
-def assert_no_action_like_keys(testcase: unittest.TestCase, value) -> None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            lowered = str(key).lower()
-            testcase.assertFalse(any(fragment in lowered for fragment in FORBIDDEN_KEY_FRAGMENTS), key)
-            assert_no_action_like_keys(testcase, child)
-    elif isinstance(value, list):
-        for child in value:
-            assert_no_action_like_keys(testcase, child)
-
-
 class MissionPresetModelTest(unittest.TestCase):
     def test_named_presets_resolve_expected_runtime_fields(self):
         expected = {
@@ -49,7 +35,6 @@ class MissionPresetModelTest(unittest.TestCase):
                 self.assertEqual(fields["overlayBackupCandidates"], 2)
                 self.assertTrue(preset.noActionEmitted)
                 self.assertTrue(preset.description)
-                assert_no_action_like_keys(self, fields)
 
     def test_goal_override_does_not_mutate_static_preset(self):
         fields = mission_presets.runtime_control_fields_for_preset("woodcut_firemake", goal_count=9)

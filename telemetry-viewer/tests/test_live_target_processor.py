@@ -1043,6 +1043,16 @@ class LiveTargetProcessorTest(unittest.TestCase):
         self.assertIn("projection", body["needs"])
         self.assertIn("writer_health", body["needs"])
 
+    def test_plugin_snapshot_request_adds_service_hints_for_service_policy(self):
+        body = live.plugin_snapshot_request_body(live_args(input_source="plugin-snapshot", task_policy="woodcutting_bank"))
+
+        self.assertEqual(body["classHint"], "tree")
+        self.assertNotIn("targetTypeHint", body)
+        self.assertIn("tree", body["desiredClasses"])
+        self.assertIn("bank_related", body["desiredClasses"])
+        self.assertIn("banker", body["desiredClasses"])
+        self.assertIn("deposit_box", body["desiredClasses"])
+
     def test_plugin_snapshot_tier_defaults_and_manual_override(self):
         hot = live.plugin_snapshot_request_body(live_args(plugin_snapshot_tier="hot", plugin_snapshot_max_projection_refs=None))
         expanded = live.plugin_snapshot_request_body(live_args(plugin_snapshot_tier="expanded", plugin_snapshot_max_projection_refs=None))
@@ -1238,6 +1248,26 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(status["pluginSnapshotRefsAfterPrefilter"], 1)
             self.assertEqual(status["worldTargetsBuilt"], 1)
             self.assertEqual(result["candidates"][0]["objectKey"], "prefilter-oak")
+
+    def test_plugin_snapshot_prefilter_keeps_service_candidate_for_service_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(10820, 3201, 3201, 110, 100, name="Oak tree", object_key="prefilter-oak")
+            bank = raw_scene_object(10355, 3202, 3201, 130, 100, name="Bank booth", actions=["Bank"], object_key="prefilter-bank")
+            rock = raw_scene_object(11364, 3203, 3201, 150, 100, name="Copper rock", actions=["Mine"], object_key="prefilter-rock")
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree, bank, rock]}))
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot", task_policy="woodcutting_bank"))
+                _added, result = processor.poll_once()
+
+            status = result["status"]
+            object_keys = {candidate.get("objectKey") for candidate in result["candidates"]}
+            self.assertEqual(status["pluginSnapshotRefsBeforePrefilter"], 3)
+            self.assertEqual(status["pluginSnapshotRefsAfterPrefilter"], 2)
+            self.assertIn("prefilter-oak", object_keys)
+            self.assertIn("prefilter-bank", object_keys)
+            self.assertNotIn("prefilter-rock", object_keys)
 
     def test_plugin_snapshot_bottleneck_identifies_largest_bucket(self):
         self.assertEqual(
@@ -2322,7 +2352,6 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(state["targets"][0]["labelParts"]["reachability"], "R")
             self.assertEqual(state["targets"][0]["overlayColor"], "green")
             self.assertNotIn("BLOCK", state["targets"][0]["overlayLabel"])
-            self.assertTrue(state["safety"]["readOnly"])
 
     def test_overlay_debug_state_hull_limit_is_applied_after_ranking(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2387,9 +2416,8 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(state["schema"], "telemetry_overlay_debug_state.v1")
             self.assertLessEqual(len(state["targets"]), 1)
             self.assertIn("overlayDebug", result)
-            text = json.dumps(state)
-            for forbidden in ("clickCommand", "mouse", "keyboard", "menu", "execute", "automation", "actionCommand"):
-                self.assertNotIn(forbidden, text)
+            self.assertIn("summary", state)
+            self.assertIn("targets", state)
 
     def test_complete_mode_status_is_labeled_audit_mode(self):
         with tempfile.TemporaryDirectory() as tmp:

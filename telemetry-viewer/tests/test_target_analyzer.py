@@ -23,6 +23,21 @@ class TargetAnalyzerTest(unittest.TestCase):
         self.assertEqual(context.nearest_target["targetName"], "Tree A")
         self.assertEqual(len(context.top_candidates), 2)
 
+    def test_separates_profile_candidates_from_policy_service_candidates(self):
+        candidates = [
+            {"classId": "tree", "targetName": "Tree", "qualityScore": 30, "distanceTiles": 2},
+            {"classId": "bank_booth", "targetName": "Bank booth", "qualityScore": 999, "distanceTiles": 1},
+        ]
+
+        context = target_analyzer.analyze_targets(candidates, class_id="tree", max_candidates=5)
+
+        self.assertEqual(context.raw_best_target["targetName"], "Tree")
+        self.assertEqual(context.profile_candidate_count, 1)
+        self.assertEqual(context.broad_candidate_count, 2)
+        self.assertEqual(context.service_candidate_input_count, 1)
+        self.assertEqual(context.service_candidate_inputs[0]["targetName"], "Bank booth")
+        self.assertEqual(context.service_candidate_visibility, "available")
+
     def test_supports_future_target_classes_without_woodcutting_only_logic(self):
         candidates = [{"classId": "bank_booth", "targetName": "Booth", "qualityScore": 12, "distanceTiles": 4}]
 
@@ -34,4 +49,3 @@ class TargetAnalyzerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

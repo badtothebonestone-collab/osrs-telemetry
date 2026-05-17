@@ -323,9 +323,8 @@ Projection refs are prioritized before capping by generic usefulness:
 on-screen scene objects with geometry, stable IDs/locations, and player-near
 scene coordinates come first. `projectionFieldMode=compact` keeps only
 candidate-building fields and omits heavy geometry/debug metadata. Geometry is
-omitted unless requested, and response payloads are sanitized to remove fields
-that look like input, command, menu, or click-command surfaces. The endpoint has
-no arbitrary file serving and no command routes. If a capped response still
+omitted unless requested. The endpoint has no arbitrary file serving and no
+command routes. If a capped response still
 exceeds `pluginSnapshotMaxResponseBytes`, the endpoint returns
 `errorCode=response_too_large` with `responseSizing` diagnostics; this means the
 endpoint is available but the requested response was too large.
@@ -360,7 +359,7 @@ The recognized ref lists are `visibleObjectRefs`, `visibleSceneObjectRefs`,
 `projectedSceneObjects`. Each ref is normalized into the compact scene-object
 shape used by file input: id/hash/name/kind, world/scene/local coordinates,
 `onScreen`, `geometryAvailable`, aim point, bounds, and optional hull/tile
-geometry. If only sanitized `bounds` are present, Python uses them as compact
+geometry. If only compact `bounds` are present, Python uses them as compact
 geometry for candidate scoring.
 
 Plugin snapshot processor status fields include:
@@ -502,7 +501,7 @@ plugin. It is disabled by default until opted in through RuneLite config:
 - `compactLiveStreamPort`: default `8891`.
 - `compactLiveStreamQueueSize`: bounded pending stream packet queue.
 - `compactLiveStreamCircuitBreakerEnabled`: pause stream publishing when stream
-  writes or queue pressure look unsafe.
+  writes or queue pressure are unhealthy.
 - `compactLiveStreamMaxWriteMillis`: stream worker write-time budget before the
   circuit breaker trips.
 - `compactLiveStreamDisableSeconds`: temporary stream pause after a circuit
@@ -758,8 +757,8 @@ definitions are conservative and bounded:
 
 `POST /watch-request` accepts schema `context_watch_request.v1` and returns
 `context_watch_response.v1`. Requests are rejected if they contain wildcard or
-unbounded identifiers, unsupported types, action/input/menu fields, unsafe
-normal-live settings, or limit violations. Accepted requests are written to the
+unbounded identifiers, unsupported types, normal-live-disabled settings, or
+limit violations. Accepted requests are written to the
 small bounded request file:
 
 ```text
@@ -889,7 +888,6 @@ Top-level fields:
 - `targets`: capped candidate summaries in visual/debug mode, or a small
   drawable view of intent markers in daily mode.
 - `collisionWindow`: availability, bounds, radius, and player scene tile.
-- `safety`: read-only/draw-only flags.
 
 Target summaries may include rank, `isBest`, `isNearest`, class/name/id,
 category, world and scene tile, source/latest tick, on-screen and geometry

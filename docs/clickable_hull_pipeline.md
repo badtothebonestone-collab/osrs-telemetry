@@ -27,6 +27,6 @@ The intended path is now:
 
 Java polygon emission is capped, so the cap must be spent on useful refs. The compact projection writer now prioritizes visible refs with clickbox geometry nearest the player scene tile, then nearest the screen center, before applying `compactLiveGeometryMaxRefs`; this avoids spending the hull cap on arbitrary scene iteration order such as corner/edge refs. The Python overlay state adds `bestHullAvailable`, `nearestHullAvailable`, and `hullRankBuckets` so the diagnostics can tell whether hull coverage is landing on the intended targets.
 
-## Safety Notes
+## Read-Only Notes
 
-Clickable hulls are read-only visual telemetry. They are not click commands, action instructions, movement instructions, or menu interactions. Geometry emission is opt-in and capped so normal compact live mode does not become a large per-tick geometry dump.
+Clickable hulls are read-only visual telemetry. Geometry emission is opt-in and capped so normal compact live mode does not become a large per-tick geometry dump.

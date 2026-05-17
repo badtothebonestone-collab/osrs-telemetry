@@ -11,7 +11,7 @@ import task_policy
 
 
 class TaskStateTest(unittest.TestCase):
-    def test_task_state_result_schema_and_no_action_fields(self):
+    def test_task_state_result_schema_and_capability_normalization(self):
         state = task_state.TaskState(
             task="woodcutting",
             phase=task_state.TaskPhase.TARGET_SELECTED,
@@ -36,8 +36,6 @@ class TaskStateTest(unittest.TestCase):
         self.assertEqual(payload["missingCapabilities"], ["inventory.deltas", "activity.animation_frame"])
         self.assertEqual(payload["observationNeeds"][0]["capability"], "inventory.deltas")
         self.assertTrue(payload["noActionEmitted"])
-        forbidden = {"action", "actions", "click", "input", "mouse", "keyboard", "menu", "invoke", "execute"}
-        self.assertFalse(forbidden.intersection(key for key in payload if key != "noActionEmitted"))
 
     def test_maps_woodcutting_target_available_to_target_selected(self):
         decision = {

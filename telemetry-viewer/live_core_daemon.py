@@ -321,6 +321,7 @@ def processor_args(args: argparse.Namespace, input_source: str, *, suppress_outp
         compare_input_sources=False,
         require_compact_packets=input_source == live.COMPACT_PACKET_SOURCE,
         profile=args.profile,
+        task_policy=getattr(args, "task_policy", None),
         target_type="all",
         limit=100,
         window_ticks=10,
@@ -544,6 +545,8 @@ class LiveCoreState:
                 "schema": HEALTH_SCHEMA,
                 "service": "live_core_daemon",
                 "liveCoreDaemonActive": True,
+                "profile": self.profile,
+                "activeProfile": self.profile,
                 "writeDebugLiveFiles": bool(self.write_debug_live_files),
                 "overlayStateWritten": bool(self.overlay_state_written),
                 "inputSourceActive": status.get("inputSourceActive"),
@@ -626,6 +629,11 @@ class LiveCoreState:
             "serviceNeeded",
             "serviceTypeNeeded",
             "serviceCandidateCount",
+            "profileCandidateCount",
+            "broadCandidateCount",
+            "serviceCandidateInputCount",
+            "serviceCandidateVisibility",
+            "serviceCandidateInputsPreview",
             "processInventoryNeeded",
             "processTypeNeeded",
             "navigationIntentNeeded",
@@ -639,6 +647,7 @@ class LiveCoreState:
             "pathingLocalReachability",
             "pathingPathLengthTiles",
             "pathingDestinationTile",
+            "pathingFinalApproachTile",
             "pathingNextWaypointTile",
             "pathingMillis",
             "pathNodesExpanded",
@@ -775,6 +784,11 @@ class LiveCoreDaemon:
         ):
             self.intent_stabilizer = intent_stabilizer.IntentStabilizer()
             self.latest_intent_result = None
+            for processor in self.processors.values():
+                processor.args.task_policy = self.effective_task_policy()
+                processor.processed_ticks.clear()
+                processor.classification_cache.clear()
+                processor.last_result = None
         if result.resetBrainState:
             task = self.effective_brain_task()
             goal_count = self.effective_goal_count()
@@ -791,8 +805,10 @@ class LiveCoreDaemon:
     def make_processor(self, input_source: str) -> live.LiveTargetProcessor:
         existing = self.processors.get(input_source)
         if existing is not None:
+            existing.args.task_policy = self.effective_task_policy()
             return existing
         args = processor_args(self.args, input_source, suppress_output_writes=not self.args.write_debug_live_files)
+        args.task_policy = self.effective_task_policy()
         processor = live.LiveTargetProcessor(self.session, args)
         processor.initialize_from_existing()
         if processor.tick_window and processor.last_result is None:
@@ -871,6 +887,49 @@ class LiveCoreDaemon:
             diagnostics={"contextSource": "memory", "analyzerFileWrites": False},
         )
         self.state.analysis_result = analysis
+        target_fields = {
+            "profileCandidateCount": analysis.targets.profile_candidate_count,
+            "broadCandidateCount": analysis.targets.broad_candidate_count,
+            "serviceCandidateInputCount": analysis.targets.service_candidate_input_count,
+            "serviceCandidateVisibility": analysis.targets.service_candidate_visibility,
+            "serviceCandidateInputsPreview": [
+                {
+                    key: candidate.get(key)
+                    for key in (
+                        "objectKey",
+                        "targetKey",
+                        "targetType",
+                        "classId",
+                        "targetName",
+                        "name",
+                        "id",
+                        "worldX",
+                        "worldY",
+                        "plane",
+                        "sceneX",
+                        "sceneY",
+                        "distanceTiles",
+                    )
+                    if candidate.get(key) is not None
+                }
+                for candidate in analysis.targets.service_candidate_inputs[:10]
+            ],
+        }
+        if (
+            analysis.targets.service_candidate_input_count == 0
+            and status.get("inputSourceActive") == live.PLUGIN_SNAPSHOT_SOURCE
+            and (status.get("pluginSnapshotProjectionCapped") or self.args.plugin_snapshot_tier == "hot")
+        ):
+            target_fields["serviceCandidateVisibility"] = "possibly_capped_or_filtered"
+            analysis.targets.service_candidate_visibility = "possibly_capped_or_filtered"
+        self.state.source_status.update(target_fields)
+        if isinstance(result.get("status"), dict):
+            result["status"].update(target_fields)
+        if isinstance(self.state.latest_context.get("status"), dict):
+            self.state.latest_context["status"].update(target_fields)
+        self.state.latest_context["profileCandidates"] = list(analysis.targets.profile_candidates)
+        self.state.latest_context["broadCandidates"] = list(analysis.targets.broad_candidates)
+        self.state.latest_context["serviceCandidateInputs"] = list(analysis.targets.service_candidate_inputs)
         return analysis
 
     def stabilize_intent(self, brain_decision: dict | None) -> tuple[intent_stabilizer.IntentResult, dict]:
@@ -1147,7 +1206,8 @@ class LiveCoreDaemon:
             self.state.analysis_result.brain = brain_context
             policy = task_policy_module.resolve_task_policy(policy_name, task=task, profile=self.args.profile)
             context = self.state.context()
-            candidates = context.get("candidates") if isinstance(context.get("candidates"), list) else []
+            target_context = self.state.analysis_result.targets
+            service_candidate_inputs = target_context.service_candidate_inputs if target_context else []
             progress = brain_context.decision.get("progress") if isinstance(brain_context.decision.get("progress"), dict) else {}
             source_tick = context.get("status", {}).get("lastProcessedTick") if isinstance(context.get("status"), dict) else None
             inventory_context = InventoryContext(
@@ -1157,7 +1217,7 @@ class LiveCoreDaemon:
             )
             self.state.analysis_result.service = service_analyzer.analyze_service_context(
                 policy,
-                candidates=candidates,
+                candidates=service_candidate_inputs,
                 source_tick=source_tick,
             )
             self.state.analysis_result.process_inventory = process_inventory_analyzer.analyze_process_inventory_context(
@@ -1241,6 +1301,7 @@ class LiveCoreDaemon:
             fields["pathingLocalReachability"] = pathing.local_reachability
             fields["pathingPathLengthTiles"] = pathing.path_length_tiles
             fields["pathingDestinationTile"] = pathing.destination_tile
+            fields["pathingFinalApproachTile"] = pathing.final_approach_tile
             fields["pathingNextWaypointTile"] = pathing.next_waypoint_tile
             fields["pathingMillis"] = pathing.pathing_millis
             fields["pathNodesExpanded"] = pathing.path_nodes_expanded

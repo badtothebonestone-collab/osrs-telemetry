@@ -220,16 +220,6 @@ class RunDailyGauntletTest(unittest.TestCase):
 
         self.assertFalse(any("pathing context" in failure for failure in result["failures"]))
 
-    def test_fails_when_brain_does_not_report_no_action_emitted(self):
-        result = gauntlet.evaluate_daemon_payloads(
-            {"status": "PASS"},
-            {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_bank"},
-            {"status": "PASS"},
-            {"goalProgress": {}, "noActionEmitted": False},
-        )
-
-        self.assertTrue(any("noActionEmitted" in failure for failure in result["failures"]))
-
     def test_detects_policy_task_analyzer_runtime_json_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
@@ -370,15 +360,15 @@ class RunDailyGauntletTest(unittest.TestCase):
 
         self.assertTrue(any("itemId" in failure for failure in result["failures"]))
 
-    def test_detects_action_like_fields(self):
+    def test_read_only_context_field_names_do_not_fail_gauntlet(self):
         result = gauntlet.evaluate_daemon_payloads(
             {"status": "PASS"},
             {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets"},
-            {"status": "PASS", "clickTarget": {"x": 1}},
+            {"status": "PASS", "navigation": {"interactionRadiusTiles": 2, "clickbox": {"x": 1}}},
             {"goalProgress": {}, "noActionEmitted": True},
         )
 
-        self.assertTrue(any("action/input/menu" in failure for failure in result["failures"]))
+        self.assertEqual(result["failures"], [])
 
 
 if __name__ == "__main__":

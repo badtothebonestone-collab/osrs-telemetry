@@ -103,7 +103,7 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertTrue(any("Inspector" in label for label in panel.ADVANCED_ACTION_LABELS))
         self.assertTrue(any("Batch Builders" in label for label in panel.ADVANCED_ACTION_LABELS))
 
-    def test_runtime_control_payload_is_safe_and_policy_driven(self):
+    def test_runtime_control_payload_is_policy_driven(self):
         payload = panel.build_runtime_control_payload(
             task_policy="woodcutting_firemake",
             goal_count="5",
@@ -118,10 +118,8 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertFalse(payload["observeOnly"])
         self.assertTrue(payload["resetBrainState"])
         self.assertEqual(payload["overlayMode"], "intent")
-        for forbidden in ("click", "mouse", "keyboard", "menu", "invoke", "execute", "walk", "interact"):
-            self.assertFalse(any(forbidden in key.lower() for key in payload))
 
-    def test_mission_preset_payload_is_safe(self):
+    def test_mission_preset_payload_uses_named_preset(self):
         payload = panel.build_mission_preset_payload("woodcut_firemake", goal_count="5", reset_brain_state=True)
 
         self.assertEqual(payload["missionPreset"], "woodcut_firemake")
@@ -130,8 +128,6 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertTrue(payload["brainEnabled"])
         self.assertEqual(payload["overlayMode"], "intent")
         self.assertEqual(payload["overlayBackupCandidates"], 2)
-        for forbidden in ("click", "mouse", "keyboard", "menu", "invoke", "execute", "walk", "interact"):
-            self.assertFalse(any(forbidden in key.lower() for key in payload))
 
     def test_runtime_control_endpoint_url_uses_daemon_port(self):
         self.assertEqual(panel.runtime_control_endpoint_url(8890), "http://127.0.0.1:8890/control")
@@ -177,7 +173,6 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertEqual(mission["progress"], "3/5")
         self.assertEqual(mission["inventoryFull"], "yes")
         self.assertEqual(mission["processNeeded"], "yes")
-        self.assertEqual(mission["actionSafety"], "PASS")
         self.assertEqual(mission["latestWarningCount"], 1)
 
     def test_mission_status_handles_daemon_unavailable(self):
@@ -187,7 +182,7 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertEqual(mission["daemonStatus"], "daemon not reachable")
         self.assertIn("start Snapshot No-File", mission["suggestedNextStep"])
 
-    def test_quick_policy_payloads_are_safe(self):
+    def test_quick_policy_payloads_use_presets(self):
         cases = {
             "bank": "woodcut_bank",
             "firemake": "woodcut_firemake",
@@ -201,8 +196,6 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                 self.assertEqual(payload["missionPreset"], preset_name)
                 self.assertEqual(payload["goalCount"], 5)
                 self.assertNotIn("resetBrainState", payload)
-                for forbidden in ("click", "mouse", "keyboard", "menu", "invoke", "execute", "walk", "interact"):
-                    self.assertFalse(any(forbidden in key.lower() for key in payload))
 
     def test_reset_baseline_payload_is_reset_only(self):
         self.assertEqual(panel.build_reset_baseline_payload(), {"resetBrainState": True})

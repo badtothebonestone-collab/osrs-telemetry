@@ -122,7 +122,9 @@ cleared. Any service or process context remains interpretation only; this model
 does not execute service, process, inventory, or navigation actions.
 
 Service and process context is policy-gated. `woodcutting_bank` is allowed to
-ask the service analyzer for already-visible bank/deposit candidates. Firemake,
+ask the service analyzer for already-visible bank/deposit candidates. The
+target analyzer exposes those through a separate `serviceCandidateInputs` lane
+so normal woodcutting best/nearest selection can stay tree-focused. Firemake,
 drop, combat, and observe policies do not run or warn about service candidates.
 `woodcutting_firemake` and `woodcutting_drop` are allowed to ask the process
 inventory analyzer for held-resource context. These analyzers report what is
@@ -227,8 +229,11 @@ information without rebuilding candidates.
 Inputs: candidate list already produced by the daemon and optional class/profile
 filter.
 
-Outputs: `TargetContext` with candidates, raw best target, nearest target, top
-candidates, and candidate capability status.
+Outputs: `TargetContext` with candidates, profile-scoped candidates, broad
+candidates, `serviceCandidateInputs`, raw best target, nearest target, top
+candidates, and candidate capability status. Service candidates are exposed for
+policy-required service analysis without replacing tree/resource best target
+selection.
 
 Forbidden side effects: no packet reads, endpoint calls, or candidate building.
 
@@ -287,8 +292,7 @@ Policy behavior:
   no route, movement, click, or interaction command.
 
 Forbidden side effects: no file reads/writes, endpoint calls, pathfinding
-expansion, route generation, movement commands, or action/click/input/menu
-fields.
+expansion, route generation, movement commands, or game interaction.
 
 Allowed warnings: service destination missing, local context says target is
 blocked, local collision window missing, or full pathfinding context is not
@@ -320,7 +324,7 @@ global pathfinding is reported missing rather than requested.
 
 Forbidden side effects: no file reads/writes, no endpoint calls, no new
 context requests, no services, no movement commands, no route execution, and no
-action/click/input/menu fields.
+game interaction.
 
 Allowed warnings: missing local collision window, destination outside the local
 window, blocked local path, incomplete player/destination tile, or pathing
@@ -365,7 +369,7 @@ Outputs: `IntentOverlayContext` with selected target marker, backup markers,
 generic marker list, and overlay status.
 
 Forbidden side effects: no overlay file write, no extra input reads, no context
-rebuild, no action/click/input/menu fields.
+rebuild, and no game interaction.
 
 Allowed warnings: no selected marker when a target is required, or marker
 diagnostics.
@@ -408,8 +412,8 @@ Inputs: the resolved task policy and the current in-memory candidate list.
 
 Outputs: `ServiceContext` with service-required status, service type, candidate
 count, candidates grouped by service type, best/nearest visible service
-candidate, reachable and unknown-reachability counts, and sanitized service
-candidates. Candidate detection can use class, name, id, and already-present
+candidate, reachable and unknown-reachability counts, and read-only service
+candidate context. Candidate detection can use class, name, id, and already-present
 candidate metadata. The current read-only service target families are
 `bank_service`, `banker`, `bank_booth`, `bank_chest`, `deposit_box`, and
 `deposit_chest`. Names such as `Banker`, `Bank booth`, `Bank chest`, `Deposit
@@ -418,10 +422,10 @@ candidate when a generic `bank_related` class is all that is available.
 
 If optional service metadata is absent, the analyzer reports `service.actions`
 as an optional missing capability; it does not fail when class/name/id is
-enough. Action/menu metadata is never emitted in `ServiceContext`.
+enough.
 
 Forbidden side effects: no file reads/writes, no endpoint calls, no navigation,
-no interaction, no action/click/input/menu fields.
+and no game interaction.
 
 Allowed warnings: service required by policy but no matching service candidate
 is currently visible.

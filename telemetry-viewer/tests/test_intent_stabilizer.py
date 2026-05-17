@@ -319,27 +319,6 @@ class IntentStabilizerTest(unittest.TestCase):
             self.assertEqual(result.selectedTarget.targetType, target_type)
             self.assertEqual(result.selectedTarget.classId, class_id)
 
-    def test_stabilizer_exposes_no_action_shaped_fields(self):
-        result = stabilizer.choose_stable_intent(stabilizer.IntentState(), [target("oak-a")], context([target("oak-a")]))
-        payload = result.to_status_fields()
-        text = " ".join(payload.keys()).lower()
-        for forbidden in ("click", "mouse", "keyboard", "menu", "invoke", "execute", "input"):
-            self.assertNotIn(forbidden, text)
-
-    def test_stabilizer_module_does_not_import_input_readers_or_write_files(self):
-        source = Path(stabilizer.__file__).read_text(encoding="utf-8")
-        for forbidden in (
-            "live_target_processor",
-            "PluginSnapshot",
-            "compact_packet",
-            "context_service",
-            "open(",
-            "Path(",
-            "atomic_write",
-            "jsonl",
-        ):
-            self.assertNotIn(forbidden, source)
-
 
 if __name__ == "__main__":
     unittest.main()

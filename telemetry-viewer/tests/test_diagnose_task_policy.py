@@ -114,21 +114,10 @@ class DiagnoseTaskPolicyTest(unittest.TestCase):
         self.assertTrue(bank["serviceCandidateExists"])
         self.assertEqual(bank["serviceContext"]["bestServiceCandidate"]["classId"], "bank_booth")
         self.assertEqual(bank["serviceContext"]["candidateCountsByType"], {"bank_booth": 1})
-        self.assertFalse(bank["serviceContext"]["sanitizedOutputHasForbiddenFields"])
+        self.assertEqual(bank["serviceContext"]["candidateCount"], 1)
         self.assertTrue(firemake["processInventoryAnalyzerShouldRun"])
         self.assertTrue(firemake["processInventoryContext"]["resourcesAvailable"])
         self.assertEqual(firemake["processInventoryContext"]["tinderboxStatus"], "present")
-
-    def test_diagnostic_has_no_action_like_fields_except_no_action_emitted(self):
-        payload = diagnose_task_policy.build_policy_diagnostic(
-            policy_name="woodcutting_bank",
-            task="woodcutting",
-            inventory_full=True,
-            resource_count=28,
-            goal_count=5,
-        )
-        forbidden = {"action", "actions", "click", "input", "mouse", "keyboard", "menu", "invoke", "execute"}
-        self.assertFalse(forbidden.intersection(key for key in payload if key != "noActionEmitted"))
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import inspect_target_geometry as geometry
 import live_packet_reader
 import navigation_reachability
 import select_target_candidates as candidate_builder
+import task_policy as task_policy_module
 from telemetry_paths import find_newest_session, get_sessions_dir, list_tick_files
 
 
@@ -105,6 +106,15 @@ PLUGIN_SNAPSHOT_TIER_DEFAULT_MAX_REFS = {
 PLUGIN_SNAPSHOT_DEFAULT_TIER = "hot"
 PLUGIN_SNAPSHOT_DEFAULT_MAX_PROJECTION_REFS = PLUGIN_SNAPSHOT_TIER_DEFAULT_MAX_REFS[PLUGIN_SNAPSHOT_DEFAULT_TIER]
 PLUGIN_SNAPSHOT_PROJECTION_FIELD_MODES = {"compact", "normal", "full"}
+PLUGIN_SNAPSHOT_SERVICE_CLASS_HINTS = (
+    "bank_related",
+    "bank_service",
+    "banker",
+    "bank_booth",
+    "bank_chest",
+    "deposit_box",
+    "deposit_chest",
+)
 PLUGIN_SNAPSHOT_NEED_TO_PACKET_TYPE = {
     "baseline": COMPACT_PACKET_TYPES["baseline"],
     "scene_delta": COMPACT_PACKET_TYPES["sceneDelta"],
@@ -1446,11 +1456,39 @@ def plugin_snapshot_target_type_hint(args, class_hint: str | None) -> str | None
     return None
 
 
+def task_policy_requires_service(args) -> bool:
+    policy_name = getattr(args, "task_policy", None)
+    if not policy_name:
+        return False
+    try:
+        policy = task_policy_module.resolve_task_policy(policy_name)
+        return policy.fullInventoryStrategy == task_policy_module.InventoryFullStrategy.NEEDS_SERVICE
+    except Exception:  # noqa: BLE001 - keep low-level live reader tolerant of unknown policy config
+        return str(policy_name).strip().lower() in {"woodcutting_bank", "woodcut_bank"}
+
+
+def plugin_snapshot_desired_classes(args, class_hint: str | None) -> list[str]:
+    desired: list[str] = []
+    if class_hint:
+        desired.append(class_hint)
+    if task_policy_requires_service(args):
+        desired.extend(PLUGIN_SNAPSHOT_SERVICE_CLASS_HINTS)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in desired:
+        normalized = str(item or "").strip().lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(normalized)
+    return deduped
+
+
 def plugin_snapshot_request_hints(args) -> dict:
     profile = getattr(args, "profile", None)
     class_hint = plugin_snapshot_profile_class_hint(profile)
-    target_type_hint = plugin_snapshot_target_type_hint(args, class_hint)
-    desired_classes = [class_hint] if class_hint else []
+    service_hints = task_policy_requires_service(args)
+    target_type_hint = None if service_hints else plugin_snapshot_target_type_hint(args, class_hint)
+    desired_classes = plugin_snapshot_desired_classes(args, class_hint)
     hints = {
         "profileHint": profile,
         "taskHint": profile,
@@ -4212,12 +4250,6 @@ def overlay_debug_state_for(
             "playerSceneX": navigation.get("playerSceneX"),
             "playerSceneY": navigation.get("playerSceneY"),
         },
-        "safety": {
-            "readOnly": True,
-            "drawOnly": True,
-            "actionGenerated": False,
-            "inputGenerated": False,
-        },
     }
 
 
@@ -5233,11 +5265,6 @@ def activity_state_for(
         "performance": {
             "buildDurationMillis": round(elapsed, 3),
         },
-        "safety": {
-            "readOnly": True,
-            "actionGenerated": False,
-            "inputGenerated": False,
-        },
     }
 
 
@@ -5918,7 +5945,13 @@ class LiveTargetProcessor:
         class_info = candidate_builder.classify_record(preview, self.library)
         class_ids = class_info.get("targetClassIds") if isinstance(class_info.get("targetClassIds"), list) else []
         desired_class = plugin_snapshot_profile_class_hint(self.args.profile) if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else None
-        if desired_class and class_info.get("knownTargetClass") and desired_class not in {str(value).lower() for value in class_ids}:
+        profile_match_for_hint = profile_stable_match(preview, class_info, self.profile) if self.profile else True
+        if (
+            desired_class
+            and class_info.get("knownTargetClass")
+            and desired_class not in {str(value).lower() for value in class_ids}
+            and not profile_match_for_hint
+        ):
             self.classification_cache[key] = {
                 "fingerprint": fingerprint,
                 "profileMatch": False,
@@ -5965,7 +5998,7 @@ class LiveTargetProcessor:
                 "sceneY": source.get("sceneY"),
             }
             return True
-        profile_match = profile_stable_match(preview, class_info, self.profile)
+        profile_match = profile_match_for_hint
         reject_reason = None if profile_match else "profileMismatch"
         self.classification_cache[key] = {
             "fingerprint": fingerprint,

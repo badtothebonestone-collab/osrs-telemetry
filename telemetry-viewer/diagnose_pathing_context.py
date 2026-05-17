@@ -31,6 +31,7 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
         "pathingContextPresent": bool(pathing),
         "pathingNeeded": pathing.get("pathingNeeded") if pathing else status.get("pathingNeeded"),
         "destinationTile": pathing.get("destinationTile") if pathing else status.get("pathingDestinationTile"),
+        "finalApproachTile": pathing.get("finalApproachTile") if pathing else status.get("pathingFinalApproachTile"),
         "nextWaypointTile": pathing.get("nextWaypointTile") if pathing else status.get("pathingNextWaypointTile"),
         "predictedPathTiles": pathing.get("predictedPathTiles", []) if pathing else [],
         "movementModel": pathing.get("predictedMovementModel") if pathing else None,
@@ -41,6 +42,11 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
         "pathingBudgetExceeded": pathing.get("pathingBudgetExceeded") if pathing else status.get("pathingBudgetExceeded"),
         "missingCapabilities": pathing.get("missingCapabilities", []) if pathing else [],
         "warnings": pathing.get("warnings", []) if pathing else ["daemon brain state did not expose pathing context"],
+        "approachTileNote": (
+            "Exact interaction tile unknown; finalApproachTile is a read-only predicted local visualization point."
+            if pathing and "navigation.interaction_tile" in (pathing.get("missingCapabilities") or [])
+            else None
+        ),
         "noActionEmitted": brain.get("noActionEmitted", True),
     }
 
@@ -62,6 +68,7 @@ def format_human(payload: dict[str, Any]) -> str:
         f"Pathing context present: {'yes' if payload.get('pathingContextPresent') else 'no'}",
         f"Pathing needed: {'yes' if payload.get('pathingNeeded') else 'no'}",
         f"Destination tile: {tile_label(payload.get('destinationTile'))}",
+        f"Final approach tile: {tile_label(payload.get('finalApproachTile'))}",
         f"Next waypoint: {tile_label(payload.get('nextWaypointTile'))}",
         f"Local reachability: {payload.get('localReachability') or 'unknown'}",
         f"Path length: {payload.get('pathLengthTiles') if payload.get('pathLengthTiles') is not None else 'unknown'}",
@@ -74,6 +81,8 @@ def format_human(payload: dict[str, Any]) -> str:
     missing = payload.get("missingCapabilities") if isinstance(payload.get("missingCapabilities"), list) else []
     if missing:
         lines.append(f"Missing: {', '.join(str(item) for item in missing)}")
+    if payload.get("approachTileNote"):
+        lines.append(str(payload.get("approachTileNote")))
     warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
     lines.extend(["", "Warnings:"])
     if warnings:

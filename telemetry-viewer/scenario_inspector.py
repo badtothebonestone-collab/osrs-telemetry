@@ -1446,7 +1446,6 @@ def html_page() -> str:
           byCategory: record.context?.countsByCategory || {},
         },
         warnings: record.warnings || [],
-        safety: record.safety || {},
       };
       el.recordDetails.textContent = JSON.stringify(compactRecord, null, 2);
       el.candidateDetails.textContent = JSON.stringify(candidate || contextTarget || {}, null, 2);

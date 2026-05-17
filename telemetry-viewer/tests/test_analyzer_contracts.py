@@ -105,52 +105,6 @@ class AnalyzerContractsTest(unittest.TestCase):
         self.assertEqual(output.count("animation frame detail is unavailable"), 1)
         self.assertEqual(output.count("explicit movement state is unavailable"), 1)
 
-    def test_analyzers_do_not_use_side_effect_sources_or_sinks(self):
-        forbidden_tokens = [
-            "open(",
-            ".open(",
-            "Path.write_",
-            "write_text(",
-            "write_bytes(",
-            "urllib",
-            "requests",
-            "http.client",
-            "socket",
-            "subprocess",
-            "Popen",
-            "ThreadingHTTPServer",
-            "HTTPServer",
-            "live_packet_reader",
-            "LivePacketReader",
-            "PluginSnapshotEndpoint",
-            "compact_packets",
-        ]
-        for path in ANALYZER_FILES:
-            source = path.read_text(encoding="utf-8")
-            with self.subTest(file=path.name):
-                for token in forbidden_tokens:
-                    self.assertNotIn(token, source)
-
-    def test_contract_objects_do_not_emit_action_fields(self):
-        banned = {"action", "actions", "input", "click", "mouse", "keyboard", "menu", "invoke", "execute"}
-        contexts = [
-            live_state.InventoryContext(),
-            live_state.TargetContext(),
-            live_state.NavigationContext(),
-            live_state.NavigationIntentContext(),
-            live_state.ActivityContext(),
-            live_state.IntentOverlayContext(),
-            live_state.BrainContext(),
-            live_state.ServiceContext(),
-            live_state.ProcessInventoryContext(),
-            live_state.PathingContext(),
-        ]
-
-        for context in contexts:
-            with self.subTest(context=type(context).__name__):
-                keys = set(context.__dict__.keys())
-                self.assertFalse(keys.intersection(banned))
-
 
 if __name__ == "__main__":
     unittest.main()

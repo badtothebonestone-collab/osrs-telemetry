@@ -258,7 +258,7 @@ public class PluginSnapshotEndpoint implements Closeable
 				}
 
 				JsonElement payload = parsePayload(cached.payloadJson);
-				payload = sanitizePayload(
+				payload = compactPayloadForResponse(
 						need,
 						payload,
 						includeGeometry,
@@ -414,7 +414,7 @@ public class PluginSnapshotEndpoint implements Closeable
 		return payload;
 	}
 
-	private JsonElement sanitizePayload(
+	private JsonElement compactPayloadForResponse(
 			String need,
 			JsonElement payload,
 			boolean includeGeometry,
@@ -424,11 +424,11 @@ public class PluginSnapshotEndpoint implements Closeable
 			List<String> warnings,
 			Map<String, Object> responseSizing)
 	{
-		JsonElement sanitized = sanitizeKeys(payload);
-		if ("projection".equals(need) && sanitized != null && sanitized.isJsonObject())
+		JsonElement compactPayload = payload == null ? null : payload.deepCopy();
+		if ("projection".equals(need) && compactPayload != null && compactPayload.isJsonObject())
 		{
-			JsonObject projection = sanitized.getAsJsonObject();
-			sanitizeProjectionPayload(
+			JsonObject projection = compactPayload.getAsJsonObject();
+			compactProjectionPayloadForResponse(
 					projection,
 					includeGeometry,
 					effectiveProjectionRefs,
@@ -437,10 +437,10 @@ public class PluginSnapshotEndpoint implements Closeable
 					warnings,
 					responseSizing);
 		}
-		return sanitized == null ? JsonNull.INSTANCE : sanitized;
+		return compactPayload == null ? JsonNull.INSTANCE : compactPayload;
 	}
 
-	private void sanitizeProjectionPayload(
+	private void compactProjectionPayloadForResponse(
 			JsonObject projection,
 			boolean includeGeometry,
 			int effectiveProjectionRefs,
@@ -448,10 +448,10 @@ public class PluginSnapshotEndpoint implements Closeable
 			PriorityContext priorityContext,
 			List<String> warnings)
 	{
-		sanitizeProjectionPayload(projection, includeGeometry, effectiveProjectionRefs, projectionFieldMode, priorityContext, warnings, new LinkedHashMap<>());
+		compactProjectionPayloadForResponse(projection, includeGeometry, effectiveProjectionRefs, projectionFieldMode, priorityContext, warnings, new LinkedHashMap<>());
 	}
 
-	private void sanitizeProjectionPayload(
+	private void compactProjectionPayloadForResponse(
 			JsonObject projection,
 			boolean includeGeometry,
 			int effectiveProjectionRefs,
@@ -791,6 +791,9 @@ public class PluginSnapshotEndpoint implements Closeable
 				"aimPoint",
 				"bounds",
 				"geometrySource",
+				"actions",
+				"menuActions",
+				"actionNames",
 				"present"));
 		if (includeGeometry)
 		{
@@ -807,54 +810,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		{
 			target.add(key, source.get(key));
 		}
-	}
-
-	private JsonElement sanitizeKeys(JsonElement element)
-	{
-		if (element == null || element.isJsonNull() || element.isJsonPrimitive())
-		{
-			return element == null ? JsonNull.INSTANCE : element.deepCopy();
-		}
-
-		if (element.isJsonArray())
-		{
-			JsonArray copy = new JsonArray();
-			for (JsonElement child : element.getAsJsonArray())
-			{
-				copy.add(sanitizeKeys(child));
-			}
-			return copy;
-		}
-
-		JsonObject copy = new JsonObject();
-		for (Map.Entry<String, JsonElement> entry : element.getAsJsonObject().entrySet())
-		{
-			if (!isUnsafeResponseField(entry.getKey()))
-			{
-				copy.add(entry.getKey(), sanitizeKeys(entry.getValue()));
-			}
-		}
-		return copy;
-	}
-
-	private boolean isUnsafeResponseField(String key)
-	{
-		if (key == null)
-		{
-			return false;
-		}
-
-		String normalized = key.toLowerCase(Locale.ROOT);
-		return "action".equals(normalized)
-				|| "actions".equals(normalized)
-				|| normalized.contains("click")
-				|| normalized.contains("mouse")
-				|| normalized.contains("keyboard")
-				|| normalized.contains("menu")
-				|| normalized.contains("invoke")
-				|| normalized.contains("execute")
-				|| "movecommand".equals(normalized)
-				|| "clickcommand".equals(normalized);
 	}
 
 	Map<String, Object> boundedSnapshotPayload(JsonObject request)

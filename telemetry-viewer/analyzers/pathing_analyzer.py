@@ -16,40 +16,6 @@ DEFAULT_MAX_NODES = 512
 DEFAULT_BUDGET_MILLIS = 5.0
 PREDICTION_NOTE = "Predicted local path; exact server movement may differ."
 
-SAFE_TARGET_KEYS = (
-    "targetKey",
-    "objectKey",
-    "candidateKey",
-    "key",
-    "markerType",
-    "targetType",
-    "classId",
-    "serviceCandidateType",
-    "name",
-    "targetName",
-    "id",
-    "hash",
-    "kind",
-    "layer",
-    "worldX",
-    "worldY",
-    "plane",
-    "sceneX",
-    "sceneY",
-    "localX",
-    "localY",
-    "aimPoint",
-    "bounds",
-    "qualityScore",
-    "qualityTier",
-    "distanceTiles",
-    "directReachability",
-    "targetLiveState",
-    "liveness",
-    "navigation",
-)
-
-
 def context_value(context: Any, snake_key: str, camel_key: str | None = None, default: Any = None) -> Any:
     if context is None:
         return default
@@ -71,24 +37,10 @@ def int_value(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def sanitized_target(target: Any) -> dict[str, Any] | None:
+def target_payload(target: Any) -> dict[str, Any] | None:
     if not isinstance(target, dict) or not target:
         return None
-    clean: dict[str, Any] = {}
-    for key in SAFE_TARGET_KEYS:
-        value = target.get(key)
-        if value is None:
-            continue
-        if key == "navigation" and isinstance(value, dict):
-            navigation = {
-                "directReachability": value.get("directReachability"),
-                "pathLengthTiles": value.get("pathLengthTiles"),
-                "targetInCollisionWindow": value.get("targetInCollisionWindow"),
-            }
-            clean[key] = {item_key: item_value for item_key, item_value in navigation.items() if item_value is not None}
-        else:
-            clean[key] = value
-    return clean
+    return dict(target)
 
 
 def source_tick_from(*contexts: Any) -> int | None:
@@ -184,7 +136,7 @@ def target_scene_from_world(
 
 def destination_from_navigation_intent(navigation_intent_context: Any) -> dict[str, Any] | None:
     target = context_value(navigation_intent_context, "destination_target", "destinationTarget")
-    return sanitized_target(target)
+    return target_payload(target)
 
 
 def target_label(target: dict[str, Any] | None) -> str:
@@ -438,7 +390,17 @@ def analyze_pathing_context(
         for scene_x, scene_y in scene_path[1:]
     ]
     full_predicted_tiles = [tile for tile in full_predicted_tiles if tile is not None]
-    final_approach = full_predicted_tiles[-2] if len(full_predicted_tiles) >= 2 else ("unknown" if reachability == "reachable" else None)
+    final_approach: dict[str, Any] | str | None = None
+    if reachability == "reachable":
+        if full_predicted_tiles:
+            if destination_tile and full_predicted_tiles[-1] != destination_tile:
+                final_approach = full_predicted_tiles[-1]
+            elif len(full_predicted_tiles) >= 2:
+                final_approach = full_predicted_tiles[-2]
+            else:
+                final_approach = full_predicted_tiles[-1]
+        else:
+            final_approach = "unknown"
     elapsed = (time.perf_counter() - started) * 1000.0
     return PathingContext(
         status=status,

@@ -15,7 +15,7 @@ sys.path.insert(0, str(VIEWER_DIR))
 import mission_snapshot
 
 
-def sample_payloads(*, unsafe: bool = False, no_action: bool = True) -> tuple[dict, dict, dict]:
+def sample_payloads(*, no_action: bool = True) -> tuple[dict, dict, dict]:
     health = {"status": "PASS", "liveCoreDaemonActive": True}
     status = {
         "status": "PASS",
@@ -47,6 +47,12 @@ def sample_payloads(*, unsafe: bool = False, no_action: bool = True) -> tuple[di
             "serviceContext": {"serviceNeeded": False},
             "processInventoryContext": {"processRequired": True, "processTypeNeeded": "firemaking"},
             "navigationIntentContext": {"navigationNeeded": False},
+            "pathingContext": {
+                "pathingNeeded": False,
+                "destinationTile": {"worldX": 3207, "worldY": 3215, "plane": 0},
+                "interactionRadiusTiles": 2,
+                "clickbox": {"x": 1, "y": 2, "w": 3, "h": 4},
+            },
             "requiredContextDomains": ["inventory", "process_inventory"],
             "missingRequiredContextDomains": [],
             "optionalMissingContextDomains": ["target.candidates"],
@@ -63,8 +69,6 @@ def sample_payloads(*, unsafe: bool = False, no_action: bool = True) -> tuple[di
             ]
         },
     }
-    if unsafe:
-        status["brain"]["clickCommand"] = {"x": 1, "y": 2}
     control = {
         "status": "PASS",
         "state": {
@@ -155,21 +159,20 @@ class MissionSnapshotTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("daemon endpoint unavailable", stdout.getvalue())
 
-    def test_warns_if_no_action_emitted_false(self):
+    def test_reports_no_action_emitted_as_snapshot_data(self):
         health, status, control = sample_payloads(no_action=False)
         payload = mission_snapshot.build_snapshot(health, status, control, daemon_url="http://127.0.0.1:8890")
 
-        self.assertEqual(payload["status"], "FAIL")
+        self.assertEqual(payload["status"], "WARN")
         self.assertFalse(payload["noActionEmitted"])
-        self.assertTrue(any("noActionEmitted" in warning for warning in payload["warnings"]))
+        self.assertFalse(any("noActionEmitted" in warning for warning in payload["warnings"]))
 
-    def test_detects_unsafe_action_like_fields(self):
-        health, status, control = sample_payloads(unsafe=True)
+    def test_keeps_snapshot_warnings_focused_on_runtime_status(self):
+        health, status, control = sample_payloads()
         payload = mission_snapshot.build_snapshot(health, status, control, daemon_url="http://127.0.0.1:8890")
 
-        self.assertEqual(payload["status"], "FAIL")
-        self.assertTrue(any("action-like" in warning for warning in payload["warnings"]))
-        self.assertTrue(any("clickCommand" in path for path in payload["unsafeFieldPaths"]))
+        self.assertIn("no tree candidates currently observed", payload["warnings"])
+        self.assertEqual(payload["warningCount"], len(payload["warnings"]))
 
     def test_summarizes_health_status_and_control(self):
         health, status, control = sample_payloads()

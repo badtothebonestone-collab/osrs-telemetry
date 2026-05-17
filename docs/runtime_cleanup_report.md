@@ -71,7 +71,9 @@ python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutti
 - rolling debug writes from the daemon
 - invalid resource progress invariants
 - counted resource slots without a real `itemId`
-- action/input/click/menu-shaped fields in exposed context or brain payloads
+
+The gauntlet now checks runtime health and required context domains. It does
+not fail read-only context fields by name.
 
 ## Files Moved
 

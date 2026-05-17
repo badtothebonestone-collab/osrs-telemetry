@@ -171,6 +171,9 @@ def merge_marker_from_source(marker: dict, source: dict) -> dict:
         "localY",
         "onScreen",
         "geometryAvailable",
+        "interactionRadiusTiles",
+        "approachRadiusTiles",
+        "clickbox",
         "qualityTier",
         "qualityScore",
         "distanceTiles",
@@ -259,6 +262,9 @@ def intent_marker_from_candidate(
         "distanceTiles": candidate.get("distanceTiles"),
         "onScreen": candidate.get("onScreen"),
         "geometryAvailable": candidate.get("geometryAvailable"),
+        "interactionRadiusTiles": candidate.get("interactionRadiusTiles"),
+        "approachRadiusTiles": candidate.get("approachRadiusTiles"),
+        "clickbox": candidate.get("clickbox"),
         "tick": candidate.get("lastSeenTick") or candidate.get("lastUpdatedTick") or candidate.get("tick"),
     }
     geometry = candidate.get("geometry") if isinstance(candidate.get("geometry"), dict) else {}
@@ -706,9 +712,9 @@ def build_overlay_state_for_mode(
             "latestTick": status.get("lastProcessedTick") or status.get("latestTickProcessed") or status.get("latestTick"),
             "profile": getattr(args, "profile", None),
             "status": intent.get("status"),
-            "safety": {"readOnly": True, "drawOnly": True},
+            "overlayPurpose": "read_only_visualization",
         }
-    overlay["safety"] = {"readOnly": True, "drawOnly": True}
+    overlay["overlayPurpose"] = "read_only_visualization"
     overlay["summary"] = summary
     overlay["targets"] = targets
     overlay["markers"] = markers

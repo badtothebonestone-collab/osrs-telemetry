@@ -76,7 +76,7 @@ supplied.
 Mission presets can be applied at daemon startup with
 `live_core_daemon.py --preset ...` or changed while the daemon is running with
 `control_live_daemon.py --preset ...`. Startup `--preset` is a convenience
-alias that resolves through `mission_presets.py` to safe runtime fields. An
+alias that resolves through `mission_presets.py` to runtime fields. An
 explicit startup `--goal-count` overrides the preset goal, and an explicit
 `--task-policy` overrides the preset policy with a warning:
 `task policy overridden by explicit --task-policy`.
@@ -116,7 +116,7 @@ mode/backups without restarting the daemon. They do not persist config, write
 live JSON/NDJSON, click, walk, bank, burn, drop, use items, invoke menus, or
 mutate game/client state.
 
-Action-like control fields are rejected. The accepted fields are:
+Runtime control accepts these top-level fields:
 
 ```text
 missionPreset
@@ -155,10 +155,9 @@ It polls the existing local daemon endpoints:
 The panel shows daemon health, daily mode, input source, active mission preset,
 active task policy, goal count, generic phase, active intent, progress,
 inventory-full state, service/process/navigation needs, selected overlay
-marker, warning count, no-file status, overlay status, and `noActionEmitted`
-safety status.
+marker, warning count, no-file status, overlay status, and `noActionEmitted`.
 
-Mission Control can post safe runtime-control updates for named mission
+Mission Control can post runtime-control updates for named mission
 presets, task policy, goal count, observe-only mode, overlay mode/backups, and
 one-shot baseline reset. The mission presets are sidecar brain/context presets
 only:
@@ -259,9 +258,12 @@ returns to target selection. If `woodcutting_bank` is active and the current
 candidate context already contains a bank booth, banker, bank chest, deposit
 box, deposit chest, or other bank-service candidate, the service analyzer can
 surface that candidate as read-only service context and the overlay can draw it
-as `Service: <name>`. Firemake/drop policies do not run service analysis; they
-show read-only process context instead. No policy executes banking, burning,
-dropping, navigation, or inventory actions.
+as `Service: <name>`. The daemon keeps profile target selection tree-focused
+while also exposing a separate bounded `serviceCandidateInputs` view for
+policy-required service analysis, so bank/deposit candidates do not replace
+best/nearest tree context. Firemake/drop policies do not run service analysis;
+they show read-only process context instead. No policy executes banking,
+burning, dropping, navigation, or inventory actions.
 
 `task_policies.json` is a small static config file. The live daemon caches the
 policy registry and keeps policy/task/analyzer state in memory. Daily runtime
@@ -273,8 +275,8 @@ diagnostics with `--json` print to stdout only.
 Service/process context is policy-gated:
 
 - `woodcutting_bank`: `service_analyzer.py` scans only the current in-memory
-  candidate list for bank-service candidates and reports best/nearest context,
-  candidates grouped by type, and reachability counts.
+  `serviceCandidateInputs` list for bank-service candidates and reports
+  best/nearest context, candidates grouped by type, and reachability counts.
 - `woodcutting_firemake`: `process_inventory_analyzer.py` reports held logs and
   whether a tinderbox is present, missing, or unknown from the current
   inventory snapshot.
@@ -283,8 +285,8 @@ Service/process context is policy-gated:
 - `combat_default` and `observe_only`: no service/process analyzer warning is
   produced solely because inventory is full.
 
-These summaries are context, not commands. They do not include click/input/menu
-fields and they do not interact with the game.
+These summaries are context, not commands. Diagnostics report read-only context
+fields directly and do not interact with the game.
 
 Navigation intent context is also read-only. When `woodcutting_bank` reaches a
 full-inventory `needs_service` phase and a bank-service candidate is already
@@ -313,8 +315,11 @@ collision window already present in daemon memory and runs a bounded
 The path preview is labeled predicted. It is not a click tile, walk command,
 route execution, or guaranteed OSRS movement. Exact server movement can differ
 because of run energy, diagonals, obstacles, collision flags, interaction rules,
-server ticks, and the player's current movement state. If the destination is
-outside the local collision window, the daemon reports
+server ticks, and the player's current movement state. If the exact interaction
+tile is unknown, the destination tile remains the service/resource target tile
+and `finalApproachTile` is only the predicted local endpoint or adjacent
+approach tile; `navigation.interaction_tile` remains a missing capability. If
+the destination is outside the local collision window, the daemon reports
 `navigation.global_pathfinding` as missing; it does not request global data or
 start another pathing service.
 
@@ -330,6 +335,8 @@ fixtures:
 python telemetry-viewer\diagnose_task_transition.py --policy woodcutting_bank --scenario service_visible
 python telemetry-viewer\diagnose_task_transition.py --policy woodcutting_firemake --scenario firemake_ready
 python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
+python telemetry-viewer\diagnose_service_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 ```
 
 It reports expected versus actual generic phase, active intent,
@@ -343,7 +350,7 @@ recognizes already-built candidates with class IDs or inferred types
 `deposit_chest`. It can also infer those types from names such as `Banker`,
 `Bank booth`, `Bank chest`, `Deposit box`, `Bank deposit box`, and `Deposit
 chest`. Existing action metadata may help classify a candidate if present, but
-that metadata is stripped from all outputs. If no bank-service candidate is
+that metadata remains read-only telemetry. If no bank-service candidate is
 visible, the brain reports `Service candidate: not observed` and
 `Missing/needed context: bank_service candidate`; the overlay may show only a
 compact warning marker, not a fake service target.

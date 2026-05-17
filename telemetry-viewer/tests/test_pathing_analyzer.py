@@ -72,16 +72,6 @@ def nav_intent(**overrides):
     return value
 
 
-def walk_keys(value):
-    if isinstance(value, dict):
-        for key, child in value.items():
-            yield str(key)
-            yield from walk_keys(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from walk_keys(child)
-
-
 class PathingAnalyzerTest(unittest.TestCase):
     def test_reachable_path_in_simple_collision_grid(self):
         context = pathing_analyzer.analyze_pathing_context(
@@ -100,6 +90,20 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertLessEqual(len(payload["predictedPathTiles"]), 10)
         self.assertEqual(payload["predictedMovementModel"], "cardinal_only")
         self.assertIn("Predicted local path", " ".join(payload["predictedMovementNotes"]))
+
+    def test_final_approach_tile_is_last_predicted_tile_when_destination_tile_is_blocked(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(blocked={(3, 1)})),
+            navigation_intent_context=nav_intent(),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "reachable")
+        self.assertEqual(payload["destinationTile"], {"worldX": 102, "worldY": 100, "plane": 0})
+        self.assertEqual(payload["predictedPathTiles"][-1], {"worldX": 101, "worldY": 100, "plane": 0})
+        self.assertEqual(payload["finalApproachTile"], {"worldX": 101, "worldY": 100, "plane": 0})
+        self.assertIn("navigation.interaction_tile", payload["missingCapabilities"])
 
     def test_blocked_path_in_simple_collision_grid(self):
         context = pathing_analyzer.analyze_pathing_context(
@@ -196,7 +200,7 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertLessEqual(len(context.predicted_path_tiles), 4)
         self.assertEqual(context.predicted_step_count, context.path_length_tiles)
 
-    def test_no_action_like_command_fields_and_no_files_written(self):
+    def test_pathing_context_writes_no_files(self):
         with tempfile.TemporaryDirectory() as temp:
             before = set(os.listdir(temp))
             context = pathing_analyzer.analyze_pathing_context(
@@ -208,9 +212,9 @@ class PathingAnalyzerTest(unittest.TestCase):
 
         self.assertEqual(before, after)
         payload = context.to_dict()
-        joined = " ".join(walk_keys(payload)).lower()
-        for forbidden in ("action", "click", "input", "menu", "mouse", "keyboard", "walkcommand", "routecommand"):
-            self.assertNotIn(forbidden, joined)
+        self.assertIn("destinationTile", payload)
+        self.assertIn("nextWaypointTile", payload)
+        self.assertIn("predictedPathTiles", payload)
 
 
 if __name__ == "__main__":

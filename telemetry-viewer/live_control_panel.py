@@ -30,7 +30,7 @@ import task_policy
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VIEWER_DIR = PROJECT_ROOT / "telemetry-viewer"
 MAX_LOG_LINES = 1000
-SAFETY_TEXT = "Read-only telemetry launcher. Starts local tools only. Does not click, type, invoke menus, or execute actions."
+READ_ONLY_TEXT = "Read-only telemetry launcher. Starts local tools and shows context without controlling the game."
 PROFILES = ("woodcutting", "broad_qa", "navigation_qa", "npc_qa", "ground_item_qa", "ui_qa")
 COMPACT_STREAM_EXPERIMENTAL_LABEL = "compact-stream EXPERIMENTAL"
 PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL = "plugin-snapshot EXPERIMENTAL"
@@ -371,7 +371,6 @@ def build_mission_control_status(
             "selectedOverlayMarker": "none",
             "latestWarningCount": 0,
             "noFileStatus": "WARN",
-            "actionSafety": "WARN",
             "policyStatus": "WARN",
             "overlayStatus": "unknown",
             "gauntletStatus": gauntlet_status or "unknown",
@@ -397,7 +396,6 @@ def build_mission_control_status(
     daily_mode = status.get("dailyMode") or health.get("dailyMode") or "unknown"
     input_source = status.get("inputSourceActive") or health.get("inputSourceActive") or "unknown"
     no_file_ok = daily_mode == "snapshot-no-files" and input_source == "plugin-snapshot" and status.get("noFileDaily") is not False
-    no_action = brain.get("noActionEmitted")
     policy_name = control_state.get("taskPolicy") or status.get("brainTaskPolicy") or "unknown"
     return {
         "daemonHealth": "PASS" if health.get("liveCoreDaemonActive") else "WARN",
@@ -410,7 +408,7 @@ def build_mission_control_status(
         "goalCount": control_state.get("goalCount") if control_state.get("goalCount") is not None else "observe",
         "genericPhase": generic.get("phase") or status.get("brainPhase") or "unknown",
         "activeIntent": generic.get("activeIntent") or "unknown",
-        "noActionEmitted": _bool_label(no_action),
+        "noActionEmitted": _bool_label(brain.get("noActionEmitted")),
         "progress": _progress_label(brain, status, control_state),
         "inventoryFull": _bool_label(inventory.get("inventoryFull")),
         "serviceNeeded": _bool_label(service.get("serviceNeeded") if "serviceNeeded" in service else status.get("serviceNeeded")),
@@ -419,7 +417,6 @@ def build_mission_control_status(
         "selectedOverlayMarker": selected_marker,
         "latestWarningCount": len(warnings),
         "noFileStatus": "PASS" if no_file_ok else ("WARN" if daily_mode == "snapshot-no-files" else "n/a"),
-        "actionSafety": "PASS" if no_action is True else "FAIL" if no_action is False else "WARN",
         "policyStatus": "PASS" if policy_name in task_policy.policy_names() else "WARN",
         "overlayStatus": "PASS" if health.get("overlayStateWritten") or status.get("overlayStateWritten") else "off",
         "gauntletStatus": gauntlet_status or "unknown",
@@ -436,7 +433,7 @@ def format_mission_control_status(mission: dict[str, Any]) -> str:
             f"Phase: {mission.get('genericPhase')} | intent: {mission.get('activeIntent')} | progress: {mission.get('progress')}",
             f"Inventory full: {mission.get('inventoryFull')} | service: {mission.get('serviceNeeded')} | process: {mission.get('processNeeded')} | navigation: {mission.get('navigationNeeded')}",
             f"Overlay: {mission.get('overlayStatus')} | selected: {mission.get('selectedOverlayMarker')} | warnings: {mission.get('latestWarningCount')}",
-            f"Action safety: {mission.get('actionSafety')} | noActionEmitted: {mission.get('noActionEmitted')} | gauntlet: {mission.get('gauntletStatus')}",
+            f"noActionEmitted: {mission.get('noActionEmitted')} | gauntlet: {mission.get('gauntletStatus')}",
             mission.get("suggestedNextStep") or "",
         ]
     ).strip()
@@ -1023,7 +1020,7 @@ class LiveControlPanel:
         outer = ttk.Frame(self.root, padding=10)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(outer, text=SAFETY_TEXT, foreground="#064e3b").pack(anchor=tk.W, pady=(0, 8))
+        ttk.Label(outer, text=READ_ONLY_TEXT, foreground="#064e3b").pack(anchor=tk.W, pady=(0, 8))
 
         top = ttk.Frame(outer)
         top.pack(fill=tk.X)

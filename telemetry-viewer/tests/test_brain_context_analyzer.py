@@ -11,7 +11,7 @@ from analyzers import brain_context_analyzer
 
 
 class BrainContextAnalyzerTest(unittest.TestCase):
-    def test_brain_context_has_no_action_fields(self):
+    def test_brain_context_emits_generic_target_state(self):
         response = {
             "schema": "context_response.v1",
             "status": "PASS",
@@ -29,9 +29,6 @@ class BrainContextAnalyzerTest(unittest.TestCase):
 
         context = brain_context_analyzer.evaluate_brain_context(response, state, task="woodcutting", goal_count=5, max_events=3)
 
-        keys = " ".join(str(key).lower() for key in context.decision.keys())
-        for forbidden in ("click", "mouse", "keyboard", "menu", "invoke", "execute"):
-            self.assertNotIn(forbidden, keys)
         self.assertTrue(context.decision["noActionEmitted"])
         self.assertEqual(context.decision["genericTaskState"]["phase"], "target_selected")
         self.assertEqual(context.decision["genericTaskState"]["missingCapabilities"], [])

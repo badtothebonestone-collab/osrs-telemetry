@@ -65,16 +65,16 @@ class RuntimeControlModelTest(unittest.TestCase):
         self.assertFalse(state.observeOnly)
         self.assertTrue(result.noActionEmitted)
 
-    def test_rejects_unknown_policy_and_action_like_fields(self):
+    def test_rejects_unknown_policy_and_unknown_fields(self):
         state = runtime_control.RuntimeControlState(activeTask="woodcutting", taskPolicy="woodcutting_bank", goalCount=5)
 
         unknown = runtime_control.apply_control_command(state, {"taskPolicy": "not_a_policy"})
-        unsafe = runtime_control.apply_control_command(state, {"clickTarget": {"x": 1}, "taskPolicy": "woodcutting_drop"})
+        rejected = runtime_control.apply_control_command(state, {"extraField": {"x": 1}, "taskPolicy": "woodcutting_drop"})
 
         self.assertEqual(unknown.status, "FAIL")
         self.assertIn("taskPolicy", unknown.rejectedFields)
-        self.assertEqual(unsafe.status, "FAIL")
-        self.assertIn("clickTarget", unsafe.rejectedFields)
+        self.assertEqual(rejected.status, "FAIL")
+        self.assertIn("extraField", rejected.rejectedFields)
         self.assertEqual(state.taskPolicy, "woodcutting_bank")
 
     def test_rejects_unknown_mission_preset(self):
@@ -136,7 +136,7 @@ class RuntimeControlDaemonEndpointTest(unittest.TestCase):
         self.assertEqual(changed["state"]["taskPolicy"], "woodcutting_drop")
         self.assertEqual(changed["state"]["goalCount"], 12)
 
-    def test_action_like_control_payload_is_rejected(self):
+    def test_unknown_control_payload_field_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             args = make_args(session, "--input-source", "plugin-snapshot", "--human-dashboard", "--goal-count", "5")
@@ -145,14 +145,14 @@ class RuntimeControlDaemonEndpointTest(unittest.TestCase):
             try:
                 base = f"http://127.0.0.1:{args.context_port}"
                 with self.assertRaises(urllib.error.HTTPError) as raised:
-                    post_json(f"{base}/control", {"walkTo": {"x": 1}, "taskPolicy": "woodcutting_drop"})
+                    post_json(f"{base}/control", {"extraField": {"x": 1}, "taskPolicy": "woodcutting_drop"})
             finally:
                 core.stop_context_server()
 
         body = raised.exception.read().decode("utf-8")
         payload = json.loads(body)
         self.assertEqual(payload["status"], "FAIL")
-        self.assertIn("walkTo", payload["rejectedFields"])
+        self.assertIn("extraField", payload["rejectedFields"])
 
     def test_runtime_policy_is_used_without_restart_and_reset_applies_once(self):
         with tempfile.TemporaryDirectory() as tmp:

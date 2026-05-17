@@ -28,7 +28,7 @@ class ServiceAnalyzerTest(unittest.TestCase):
         self.assertTrue(context.to_dict()["serviceNeeded"])
         self.assertEqual(context.to_dict()["candidateCount"], 1)
 
-    def test_identifies_bank_booth_by_name_and_class_without_action_fields(self):
+    def test_identifies_bank_booth_by_name_and_class_and_preserves_context_fields(self):
         context = service_analyzer.analyze_service_context(
             task_policy.resolve_task_policy("woodcutting_bank"),
             candidates=[
@@ -42,6 +42,9 @@ class ServiceAnalyzerTest(unittest.TestCase):
                     "plane": 0,
                     "distanceTiles": 4,
                     "navigation": {"directReachability": "reachable"},
+                    "interactionRadiusTiles": 2,
+                    "clickbox": {"x": 10, "y": 20, "w": 30, "h": 40},
+                    "clickableHull": [{"x": 1, "y": 2}],
                     "actions": ["Bank"],
                     "menuActions": ["Bank"],
                 }
@@ -60,8 +63,9 @@ class ServiceAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["unknownReachabilityCount"], 0)
         self.assertEqual(payload["candidateCountsByType"], {"bank_booth": 1})
         self.assertEqual(len(payload["candidatesByType"]["bank_booth"]), 1)
-        self.assertNotIn("actions", payload["bestServiceCandidate"])
-        self.assertNotIn("menuActions", payload["bestServiceCandidate"])
+        self.assertEqual(payload["bestServiceCandidate"]["interactionRadiusTiles"], 2)
+        self.assertEqual(payload["bestServiceCandidate"]["clickbox"]["w"], 30)
+        self.assertEqual(payload["bestServiceCandidate"]["clickableHull"], [{"x": 1, "y": 2}])
 
     def test_identifies_bank_booth_by_name_when_class_is_generic(self):
         context = service_analyzer.analyze_service_context(
@@ -146,25 +150,25 @@ class ServiceAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["candidatesByType"], {})
         self.assertIn("bank_service candidate", " ".join(context.warnings))
 
-    def test_service_context_has_no_action_fields(self):
+    def test_service_context_preserves_read_only_interaction_metadata(self):
         context = service_analyzer.analyze_service_context(
             task_policy.resolve_task_policy("woodcutting_bank"),
-            candidates=[{"targetType": "sceneObject", "classId": "deposit_box", "name": "Deposit box", "actions": ["Deposit"]}],
+            candidates=[
+                {
+                    "targetType": "sceneObject",
+                    "classId": "deposit_box",
+                    "name": "Deposit box",
+                    "interactionRadiusTiles": 1,
+                    "approachRadiusTiles": 2,
+                    "clickboxPolygon": [{"x": 1, "y": 1}],
+                }
+            ],
         )
 
-        def walk_keys(value):
-            if isinstance(value, dict):
-                for key, item in value.items():
-                    yield str(key)
-                    yield from walk_keys(item)
-            elif isinstance(value, list):
-                for item in value:
-                    yield from walk_keys(item)
-
-        keys = " ".join(key.lower() for key in walk_keys(context.to_dict()))
-
-        for forbidden in ("action", "click", "mouse", "keyboard", "menu", "invoke", "execute"):
-            self.assertNotIn(forbidden, keys)
+        candidate = context.to_dict()["bestServiceCandidate"]
+        self.assertEqual(candidate["interactionRadiusTiles"], 1)
+        self.assertEqual(candidate["approachRadiusTiles"], 2)
+        self.assertEqual(candidate["clickboxPolygon"], [{"x": 1, "y": 1}])
 
 
 if __name__ == "__main__":

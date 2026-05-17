@@ -42,27 +42,6 @@ WATCH_TYPE_LIMITS = {
     "widget_summary": 4,
     "builtin": 16,
 }
-DISALLOWED_WATCH_KEYS = {
-    "action",
-    "actions",
-    "clickCommand",
-    "click",
-    "mouse",
-    "mouseCommand",
-    "keyboard",
-    "keyboardCommand",
-    "menu",
-    "menuCommand",
-    "invoke",
-    "move",
-    "moveCommand",
-    "actionCommand",
-    "execute",
-    "executeCommand",
-    "automation",
-    "antiDetection",
-}
-DISALLOWED_WATCH_KEYS_LOWER = {key.lower() for key in DISALLOWED_WATCH_KEYS}
 SUPPORTED_TASKS = ["woodcutting"]
 SUPPORTED_RESPONSE_MODES = ["compact", "normal", "full"]
 SUPPORTED_NEEDS = [
@@ -190,22 +169,6 @@ def active_watch_file_payload(session: Path | None) -> dict:
     return payload
 
 
-def contains_disallowed_watch_key(value: Any) -> str | None:
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if str(key).lower() in DISALLOWED_WATCH_KEYS_LOWER:
-                return key
-            found = contains_disallowed_watch_key(item)
-            if found:
-                return found
-    elif isinstance(value, list):
-        for item in value:
-            found = contains_disallowed_watch_key(item)
-            if found:
-                return found
-    return None
-
-
 def watch_library_by_alias(library: dict) -> dict[str, dict]:
     return {
         str(item.get("alias")): item
@@ -241,9 +204,6 @@ def bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
 def normalize_watch_request_item(item: dict, library: dict) -> tuple[dict | None, str | None]:
     if not isinstance(item, dict):
         return None, "watch entry must be an object"
-    disallowed = contains_disallowed_watch_key(item)
-    if disallowed:
-        return None, f"watch entry contains disallowed action/input field: {disallowed}"
     alias = str(item.get("alias") or "").strip()
     watch_type = str(item.get("type") or "").strip()
     if not alias:
