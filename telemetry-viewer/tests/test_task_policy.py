@@ -19,11 +19,14 @@ class TaskPolicyTest(unittest.TestCase):
         self.assertEqual(bank.fullInventoryStrategy, task_policy.InventoryFullStrategy.NEEDS_SERVICE)
         self.assertEqual(bank.resourceDisposition, task_policy.ResourceDisposition.BANK)
         self.assertEqual(bank.serviceTypeNeeded, "bank_full")
+        self.assertEqual(bank.bankOperation, "deposit_inventory")
+        self.assertEqual(bank.completionCondition, "no_resource_items_held")
 
         deposit = policies["woodcutting_deposit"]
         self.assertEqual(deposit.fullInventoryStrategy, task_policy.InventoryFullStrategy.NEEDS_SERVICE)
         self.assertEqual(deposit.resourceDisposition, task_policy.ResourceDisposition.BANK)
         self.assertEqual(deposit.serviceTypeNeeded, "bank_deposit")
+        self.assertEqual(deposit.bankOperation, "deposit_inventory")
 
         firemake = policies["woodcutting_firemake"]
         self.assertEqual(firemake.fullInventoryStrategy, task_policy.InventoryFullStrategy.PROCESS_INVENTORY)
@@ -55,6 +58,8 @@ class TaskPolicyTest(unittest.TestCase):
 
         self.assertEqual(payload["fullInventoryStrategy"], "process_inventory")
         self.assertEqual(payload["resourceDisposition"], "drop")
+        self.assertIsNone(payload["bankOperation"])
+        self.assertIsNone(payload["completionCondition"])
 
 
 if __name__ == "__main__":

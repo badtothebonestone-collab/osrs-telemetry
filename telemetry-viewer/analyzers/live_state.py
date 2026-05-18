@@ -600,6 +600,50 @@ class BankUiContext(AnalyzerContractFields):
 
 
 @dataclass
+class BankOperationContext(AnalyzerContractFields):
+    status: str = "PASS"
+    warnings: list[str] = field(default_factory=list)
+    missing_capabilities: list[str] = field(default_factory=list)
+    source_tick: int | None = None
+    retained_from_previous: bool = False
+    timing_millis: float | None = None
+    operation_needed: bool = False
+    operation_type: str = "unknown"
+    resource_items_held: int | None = None
+    resource_item_slots: list[int] = field(default_factory=list)
+    resource_item_quantity: int | None = None
+    non_resource_items_held: int | None = None
+    inventory_free_slots: int | None = None
+    inventory_full: bool | None = None
+    deposit_inventory_available: bool | None = None
+    deposit_would_clear_resource_inventory: bool | None = None
+    bank_readable: bool = False
+    banking_complete: bool = False
+    completion_reason: str | None = None
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.contract_payload(),
+            "operationNeeded": self.operation_needed,
+            "operationType": self.operation_type,
+            "resourceItemsHeld": self.resource_items_held,
+            "resourceItemSlots": list(self.resource_item_slots),
+            "resourceItemQuantity": self.resource_item_quantity,
+            "nonResourceItemsHeld": self.non_resource_items_held,
+            "inventoryFreeSlots": self.inventory_free_slots,
+            "inventoryFull": self.inventory_full,
+            "depositInventoryAvailable": self.deposit_inventory_available,
+            "depositWouldClearResourceInventory": self.deposit_would_clear_resource_inventory,
+            "depositWouldClearResources": self.deposit_would_clear_resource_inventory,
+            "bankReadable": self.bank_readable,
+            "bankingComplete": self.banking_complete,
+            "completionReason": self.completion_reason,
+            "reason": self.reason,
+        }
+
+
+@dataclass
 class LiveAnalysisResult:
     input_snapshot: LiveInputSnapshot | None = None
     source_status: LiveSourceStatus | None = None
@@ -613,6 +657,7 @@ class LiveAnalysisResult:
     service: ServiceContext | None = None
     process_inventory: ProcessInventoryContext | None = None
     bank_ui: BankUiContext | None = None
+    bank_operation: BankOperationContext | None = None
     intent_overlay: IntentOverlayContext | None = None
     brain: BrainContext | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)

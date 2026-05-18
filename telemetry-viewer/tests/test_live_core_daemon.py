@@ -414,6 +414,7 @@ class LiveCoreDaemonTest(unittest.TestCase):
                 "bankRootVisible": True,
                 "bankContainerVisible": True,
                 "bankInventoryVisible": True,
+                "depositInventoryButtonVisible": True,
                 "closeButtonVisible": True,
                 "inventorySummary": {"freeSlots": 0, "occupiedSlots": 28, "matchingResourceCount": 28},
                 "bankSummary": {"occupiedSlots": 12, "uniqueItemIds": [1511, 1521]},
@@ -462,14 +463,100 @@ class LiveCoreDaemonTest(unittest.TestCase):
         status = core.state.status()
         generic = core.state.brain_decision["genericTaskState"]
         self.assertEqual(generic["phase"], "service_open")
-        self.assertEqual(generic["activeIntent"], "service_open")
+        self.assertEqual(generic["activeIntent"], "bank_operation_pending")
         self.assertIn("bankUiContext", core.state.brain_decision)
+        self.assertIn("bankOperationContext", core.state.brain_decision)
+        self.assertTrue(core.state.brain_decision["bankOperationContext"]["operationNeeded"])
+        self.assertEqual(core.state.brain_decision["bankOperationContext"]["operationType"], "deposit_inventory")
         self.assertTrue(status["bankOpen"])
         self.assertTrue(status["bankReadable"])
         self.assertFalse(status["bankPinOpen"])
+        self.assertTrue(status["bankOperationNeeded"])
+        self.assertEqual(status["bankOperationType"], "deposit_inventory")
+        self.assertEqual(status["bankResourceItemQuantity"], 28)
         self.assertTrue(status["closeButtonVisible"])
         self.assertEqual(status["bankOccupiedSlots"], 12)
         self.assertEqual(status["bankUniqueItemCount"], 2)
+
+    def test_readable_bank_ui_with_no_logs_completes_bank_operation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            coin_items = [{"slot": slot, "itemId": 995, "quantity": 100} for slot in range(28)]
+            coin_signature = "|".join(f"{item['slot']}:{item['itemId']}:{item['quantity']}" for item in coin_items)
+            response["payloads"]["inventory"]["inventory"] = {
+                "known": True,
+                "freeSlots": 0,
+                "filledSlots": 28,
+                "itemCount": 2800,
+                "inventoryFull": True,
+                "inventorySlotCount": 28,
+                "slotCount": 28,
+                "signature": coin_signature,
+                "inventorySignature": coin_signature,
+                "items": coin_items,
+            }
+            response["payloads"]["bank_ui"] = {
+                "bankOpen": True,
+                "bankPinOpen": False,
+                "bankRootVisible": True,
+                "bankContainerVisible": True,
+                "bankInventoryVisible": True,
+                "depositInventoryButtonVisible": True,
+                "closeButtonVisible": True,
+                "inventorySummary": {"freeSlots": 0, "occupiedSlots": 28, "matchingResourceCount": 0},
+                "bankSummary": {"occupiedSlots": 12, "uniqueItemIds": [1511, 1521]},
+            }
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service_target = {
+                "targetType": "sceneObject",
+                "classId": "bank_booth",
+                "targetName": "Bank booth",
+                "id": 10355,
+                "worldX": 3208,
+                "worldY": 3219,
+                "plane": 0,
+            }
+            service = ServiceContext(
+                service_required=True,
+                service_type_needed="bank_full",
+                best_service_candidate=service_target,
+                candidate_count=1,
+                source_tick=1,
+            )
+            pathing = PathingContext(
+                pathing_needed=False,
+                destination=service_target,
+                destination_tile={"worldX": 3208, "worldY": 3219, "plane": 0},
+                service_ready=True,
+                service_ready_reason="arrived_at_service",
+                service_ready_stable_for_ticks=2,
+                path_completed=True,
+                source_tick=1,
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
+                    with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", return_value=pathing):
+                        core = daemon.LiveCoreDaemon(session, args)
+                        core.poll_once()
+
+        status = core.state.status()
+        generic = core.state.brain_decision["genericTaskState"]
+        self.assertEqual(generic["phase"], "service_complete")
+        self.assertEqual(generic["activeIntent"], "resume_resource_collection")
+        self.assertTrue(core.state.brain_decision["bankOperationContext"]["bankingComplete"])
+        self.assertEqual(core.state.brain_decision["bankOperationContext"]["resourceItemQuantity"], 0)
+        self.assertFalse(status["bankOperationNeeded"])
+        self.assertTrue(status["bankingComplete"])
+        self.assertEqual(status["bankOperationCompletionReason"], "no_resource_items_held")
 
     def test_bank_pin_ui_blocks_after_service_ready(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -609,6 +609,12 @@ def context_domain_summary(
     elif active_intent == "service_open":
         required = ["inventory", "service", "bank_ui"]
         optional = ["target.candidates", "navigation.pathing"]
+    elif active_intent == "bank_operation_pending":
+        required = ["inventory", "service", "bank_ui", "bank_operation"]
+        optional = ["target.candidates", "navigation.pathing"]
+    elif active_intent == "resume_resource_collection" or phase in {"service_complete", "return_to_resource"}:
+        required = ["inventory", "bank_operation"]
+        optional = ["service", "bank_ui", "target.candidates"]
     elif active_intent == "needs_user_resolution":
         required = ["service", "bank_ui"]
         optional = ["inventory", "target.candidates", "navigation.pathing"]
@@ -663,6 +669,14 @@ def context_domain_summary(
     bank_ui_context = decision.get("bankUiContext") if isinstance(decision.get("bankUiContext"), dict) else {}
     if "bank_ui" in required and (not bank_ui_context or bank_ui_context.get("bankOpen") is None):
         missing_required.append("bank_ui")
+    bank_operation_context = decision.get("bankOperationContext") if isinstance(decision.get("bankOperationContext"), dict) else {}
+    if "bank_operation" in required:
+        if not bank_operation_context:
+            missing_required.append("bank_operation")
+        elif active_intent == "bank_operation_pending" and bank_operation_context.get("operationNeeded") is not True:
+            missing_required.append("bank_operation")
+        elif active_intent == "resume_resource_collection" and bank_operation_context.get("bankingComplete") is not True:
+            missing_required.append("bank_operation")
 
     if "inventory" in optional and inventory_missing:
         optional_missing.append("inventory")
@@ -672,6 +686,8 @@ def context_domain_summary(
         optional_missing.append("target.freshness")
     if "service.target" in optional and service_context and not service_context.get("bestServiceCandidate"):
         optional_missing.append("service.target")
+    if "bank_ui" in optional and (not bank_ui_context or bank_ui_context.get("bankOpen") is None):
+        optional_missing.append("bank_ui")
 
     return {
         "requiredContextDomains": required,
@@ -2206,6 +2222,7 @@ def format_human(decision: dict) -> str:
     navigation_intent_context = decision.get("navigationIntentContext") if isinstance(decision.get("navigationIntentContext"), dict) else {}
     pathing_context = decision.get("pathingContext") if isinstance(decision.get("pathingContext"), dict) else {}
     bank_ui_context = decision.get("bankUiContext") if isinstance(decision.get("bankUiContext"), dict) else {}
+    bank_operation_context = decision.get("bankOperationContext") if isinstance(decision.get("bankOperationContext"), dict) else {}
     active_intent = str(generic_state.get("activeIntent") or "")
     active_target = generic_state.get("activeIntentTarget") if isinstance(generic_state.get("activeIntentTarget"), dict) else None
     available_target = generic_state.get("availableTarget") if isinstance(generic_state.get("availableTarget"), dict) else None
@@ -2261,6 +2278,14 @@ def format_human(decision: dict) -> str:
         lines.append(f"  bank open: {text(bank_ui_context.get('bankOpen'))}")
         lines.append(f"  bank readable: {text(bank_ui_context.get('bankReadable'))}")
         lines.append(f"  bank pin open: {text(bank_ui_context.get('bankPinOpen'))}")
+    if bank_operation_context:
+        lines.extend(["", "Bank operation:"])
+        lines.append(f"  needed: {text(bank_operation_context.get('operationNeeded'))}")
+        lines.append(f"  type: {text(bank_operation_context.get('operationType'))}")
+        lines.append(f"  resource quantity: {text(bank_operation_context.get('resourceItemQuantity'))}")
+        lines.append(f"  complete: {text(bank_operation_context.get('bankingComplete'))}")
+        if bank_operation_context.get("completionReason"):
+            lines.append(f"  reason: {text(bank_operation_context.get('completionReason'))}")
     if process_needed:
         lines.append(f"  Process needed: {text(process_needed)}")
         if process_context.get("heldResourceCount") is not None:

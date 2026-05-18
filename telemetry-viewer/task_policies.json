@@ -8,6 +8,8 @@
       "fullInventoryStrategy": "needs_service",
       "resourceDisposition": "bank",
       "serviceTypeNeeded": "bank_full",
+      "bankOperation": "deposit_inventory",
+      "completionCondition": "no_resource_items_held",
       "minFreeSlotsPreferred": 1,
       "requiredCapabilities": ["inventory.items"],
       "optionalCapabilities": ["target.candidates", "navigation.local_collision_window"]
@@ -19,6 +21,8 @@
       "fullInventoryStrategy": "needs_service",
       "resourceDisposition": "bank",
       "serviceTypeNeeded": "bank_deposit",
+      "bankOperation": "deposit_inventory",
+      "completionCondition": "no_resource_items_held",
       "minFreeSlotsPreferred": 1,
       "requiredCapabilities": ["inventory.items"],
       "optionalCapabilities": ["target.candidates", "navigation.local_collision_window"]

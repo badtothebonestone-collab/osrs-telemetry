@@ -82,9 +82,23 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
 
         self.assertEqual(payload["status"], "PASS")
         self.assertEqual(payload["actualPhase"], "service_open")
-        self.assertEqual(payload["actualActiveIntent"], "service_open")
+        self.assertEqual(payload["actualActiveIntent"], "bank_operation_pending")
         self.assertTrue(payload["bankUiContextSummary"]["bankOpen"])
         self.assertTrue(payload["bankUiContextSummary"]["bankReadable"])
+        self.assertTrue(payload["bankOperationContextSummary"]["operationNeeded"])
+        self.assertEqual(payload["bankOperationContextSummary"]["operationType"], "deposit_inventory")
+        self.assertEqual(payload["bankOperationContextSummary"]["resourceItemQuantity"], 28)
+
+    def test_service_ready_readable_bank_without_logs_completes_service(self):
+        payload = transitions.evaluate_transition_scenario("woodcutting_bank", "service_complete")
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["actualPhase"], "service_complete")
+        self.assertEqual(payload["actualActiveIntent"], "resume_resource_collection")
+        self.assertTrue(payload["bankUiContextSummary"]["bankReadable"])
+        self.assertFalse(payload["bankOperationContextSummary"]["operationNeeded"])
+        self.assertTrue(payload["bankOperationContextSummary"]["bankingComplete"])
+        self.assertEqual(payload["bankOperationContextSummary"]["completionReason"], "no_resource_items_held")
 
     def test_bank_pin_open_becomes_blocked_user_resolution(self):
         payload = transitions.evaluate_transition_scenario("woodcutting_bank", "bank_pin_required")

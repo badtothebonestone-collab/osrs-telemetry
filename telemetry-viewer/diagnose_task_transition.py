@@ -11,11 +11,12 @@ import brain_core
 import intent_stabilizer
 import task_policy
 from analyzers import intent_overlay_analyzer
+from analyzers import bank_operation_analyzer
 from analyzers import bank_ui_analyzer
 from analyzers import navigation_intent_analyzer
 from analyzers import process_inventory_analyzer
 from analyzers import service_analyzer
-from analyzers.live_state import BankUiContext, InventoryContext, NavigationContext, ProcessInventoryContext, ServiceContext, TargetContext
+from analyzers.live_state import BankOperationContext, BankUiContext, InventoryContext, NavigationContext, ProcessInventoryContext, ServiceContext, TargetContext
 
 
 SCHEMA = "task_transition_diagnostic.v1"
@@ -29,6 +30,7 @@ SCENARIOS = (
     "service_ready_from_daemon",
     "service_ready_bank_closed",
     "service_open",
+    "service_complete",
     "bank_pin_required",
     "service_missing",
     "firemake_ready",
@@ -128,6 +130,8 @@ def inventory_for_scenario(scenario: str, *, tinderbox_present: bool = True) -> 
         else:
             items.append(log_item(27))
         return inventory_from_items(items)
+    if scenario == "service_complete":
+        return inventory_from_items([{"slot": slot, "itemId": 995, "quantity": 100} for slot in range(28)])
     return inventory_from_items([log_item(slot) for slot in range(28)])
 
 
@@ -135,7 +139,7 @@ def candidates_for_scenario(scenario: str) -> list[dict[str, Any]]:
     if scenario in {"firemake_no_tree_candidates", "firemake_full_inventory_no_candidates_live_style", "drop_no_tree_candidates"}:
         return []
     candidates = [tree_candidate()]
-    if scenario in {"service_visible", "service_visible_not_arrived", "service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed", "service_open", "bank_pin_required"}:
+    if scenario in {"service_visible", "service_visible_not_arrived", "service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed", "service_open", "service_complete", "bank_pin_required"}:
         candidates.append(bank_booth_candidate())
     return candidates
 
@@ -195,7 +199,9 @@ def expected_for(policy_name: str, scenario: str, *, tinderbox_present: bool = T
     if scenario in {"service_visible", "service_visible_not_arrived"}:
         return {"phase": "inventory_full", "activeIntent": "needs_service", "overlay": "selected_service"}
     if scenario == "service_open":
-        return {"phase": "service_open", "activeIntent": "service_open", "overlay": "selected_service"}
+        return {"phase": "service_open", "activeIntent": "bank_operation_pending", "overlay": "selected_service"}
+    if scenario == "service_complete":
+        return {"phase": "service_complete", "activeIntent": "resume_resource_collection", "overlay": "none"}
     if scenario == "bank_pin_required":
         return {"phase": "blocked", "activeIntent": "needs_user_resolution", "overlay": "selected_service"}
     if scenario in {"service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed"}:
@@ -264,6 +270,25 @@ def compact_bank_ui_summary(context: BankUiContext) -> dict[str, Any]:
         "inventorySummary": payload.get("inventorySummary") or {},
         "bankSummary": payload.get("bankSummary") or {},
         "warnings": payload.get("warnings", []),
+    }
+
+
+def compact_bank_operation_summary(context: BankOperationContext) -> dict[str, Any]:
+    payload = context.to_dict()
+    return {
+        "operationNeeded": payload.get("operationNeeded"),
+        "operationType": payload.get("operationType"),
+        "resourceItemsHeld": payload.get("resourceItemsHeld"),
+        "resourceItemSlots": payload.get("resourceItemSlots") or [],
+        "resourceItemQuantity": payload.get("resourceItemQuantity"),
+        "nonResourceItemsHeld": payload.get("nonResourceItemsHeld"),
+        "inventoryFreeSlots": payload.get("inventoryFreeSlots"),
+        "depositInventoryAvailable": payload.get("depositInventoryAvailable"),
+        "bankReadable": payload.get("bankReadable"),
+        "bankingComplete": payload.get("bankingComplete"),
+        "completionReason": payload.get("completionReason"),
+        "warnings": payload.get("warnings", []),
+        "missingCapabilities": payload.get("missingCapabilities", []),
     }
 
 
@@ -351,6 +376,7 @@ def evaluate_transition_scenario(
     service_context = ServiceContext(source_tick=42)
     process_context = ProcessInventoryContext(source_tick=42)
     bank_ui_context = BankUiContext(source_tick=42)
+    bank_operation_context = BankOperationContext(source_tick=42)
     if generic.get("activeIntent") == "needs_service":
         service_context = service_analyzer.analyze_service_context(policy, candidates=candidates, source_tick=42)
         if service_context.best_service_candidate:
@@ -358,7 +384,7 @@ def evaluate_transition_scenario(
             generic["activeIntentTarget"] = active_target
             generic["selectedTargetKey"] = intent_stabilizer.build_target_key(active_target, str(active_target.get("targetType") or "sceneObject"))
             decision["genericTaskState"] = generic
-        if scenario in {"service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed", "service_open", "bank_pin_required"} and service_context.best_service_candidate:
+        if scenario in {"service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed", "service_open", "service_complete", "bank_pin_required"} and service_context.best_service_candidate:
             active_target = dict(service_context.best_service_candidate)
             service_context.service_ready = True
             service_context.service_ready_reason = "arrived_at_service"
@@ -381,14 +407,14 @@ def evaluate_transition_scenario(
             generic["serviceReadyReason"] = "arrived_at_service"
             decision["phase"] = "service_available"
             decision["genericTaskState"] = generic
-            if scenario in {"service_ready_bank_closed", "service_open", "bank_pin_required"}:
+            if scenario in {"service_ready_bank_closed", "service_open", "service_complete", "bank_pin_required"}:
                 bank_payload = {
                     "bankOpen": False,
                     "bankPinOpen": False,
                     "bankRootVisible": False,
-                    "inventorySummary": {"freeSlots": 0, "occupiedSlots": 28, "matchingResourceCount": 28},
+                    "inventorySummary": {"freeSlots": 0, "occupiedSlots": 28, "matchingResourceCount": 0 if scenario == "service_complete" else 28},
                 }
-                if scenario == "service_open":
+                if scenario in {"service_open", "service_complete"}:
                     bank_payload.update(
                         {
                             "bankOpen": True,
@@ -408,6 +434,14 @@ def evaluate_transition_scenario(
                     service_context=service_context,
                     source_tick=42,
                 )
+                bank_operation_context = bank_operation_analyzer.analyze_bank_operation_context(
+                    policy,
+                    bank_ui_context=bank_ui_context,
+                    inventory_context=inventory_context,
+                    resource_definition=brain_core.task_resource_group(task),
+                    current_task_state=generic,
+                    source_tick=42,
+                )
                 if bank_ui_context.bank_pin_open:
                     generic["phase"] = "blocked"
                     generic["activeIntent"] = "needs_user_resolution"
@@ -415,15 +449,26 @@ def evaluate_transition_scenario(
                     decision["phase"] = "blocked"
                     decision["genericTaskState"] = generic
                 elif bank_ui_context.bank_open and bank_ui_context.bank_readable:
-                    generic["phase"] = "service_open"
-                    generic["activeIntent"] = "service_open"
-                    decision["phase"] = "service_open"
+                    if bank_operation_context.banking_complete:
+                        generic["phase"] = "service_complete"
+                        generic["activeIntent"] = "resume_resource_collection"
+                        generic["activeIntentTarget"] = None
+                        generic["selectedTargetKey"] = None
+                    else:
+                        generic["phase"] = "service_open"
+                        generic["activeIntent"] = "bank_operation_pending"
+                    generic["bankOperationNeeded"] = bank_operation_context.operation_needed
+                    generic["bankOperationType"] = bank_operation_context.operation_type
+                    generic["bankingComplete"] = bank_operation_context.banking_complete
+                    generic["bankOperationCompletionReason"] = bank_operation_context.completion_reason
+                    decision["phase"] = generic["phase"]
                     decision["genericTaskState"] = generic
     if generic.get("activeIntent") == "process_inventory":
         process_context = process_inventory_analyzer.analyze_process_inventory_context(policy, inventory_context, source_tick=42)
     decision["serviceContext"] = service_context.to_dict()
     decision["processInventoryContext"] = process_context.to_dict()
     decision["bankUiContext"] = bank_ui_context.to_dict()
+    decision["bankOperationContext"] = bank_operation_context.to_dict()
     decision.update(brain_core.context_domain_summary(decision, response=response, policy=policy))
     target_context = TargetContext(
         candidates=candidates,
@@ -468,14 +513,17 @@ def evaluate_transition_scenario(
         "expectedAnalyzers": {
             "service": expected["activeIntent"] in {"needs_service", "service_available"},
             "processInventory": expected["activeIntent"] == "process_inventory",
+            "bankOperation": expected["activeIntent"] in {"bank_operation_pending", "resume_resource_collection"},
             "navigation": expected["activeIntent"] in {"needs_service", "target_selected", "continue_current_target", "continue_task"},
         },
         "serviceAnalyzerRuns": bool(service_context.service_required),
         "processInventoryAnalyzerRuns": bool(process_context.process_required),
+        "bankOperationAnalyzerRuns": bool(bank_operation_context.operation_needed or bank_operation_context.banking_complete or bank_operation_context.bank_readable),
         "navigationAnalyzerRuns": bool(navigation_context.navigation_reason),
         "serviceContextSummary": compact_service_summary(service_context),
         "processContextSummary": compact_process_summary(process_context),
         "bankUiContextSummary": compact_bank_ui_summary(bank_ui_context),
+        "bankOperationContextSummary": compact_bank_operation_summary(bank_operation_context),
         "navigationContextSummary": compact_navigation_summary(navigation_context.to_dict()),
         "freshnessDomains": decision.get("freshnessDomains") if isinstance(decision.get("freshnessDomains"), dict) else {},
         "inventoryFreshness": (decision.get("freshnessDomains") or {}).get("inventoryFreshness") if isinstance(decision.get("freshnessDomains"), dict) else None,
@@ -513,6 +561,7 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
     generic = brain.get("genericTaskState") if isinstance(brain.get("genericTaskState"), dict) else {}
     service_context = brain.get("serviceContext") if isinstance(brain.get("serviceContext"), dict) else {}
     process_context = brain.get("processInventoryContext") if isinstance(brain.get("processInventoryContext"), dict) else {}
+    bank_operation_context = brain.get("bankOperationContext") if isinstance(brain.get("bankOperationContext"), dict) else {}
     navigation_context = brain.get("navigationIntentContext") if isinstance(brain.get("navigationIntentContext"), dict) else {}
     freshness_domains = brain.get("freshnessDomains") if isinstance(brain.get("freshnessDomains"), dict) else {}
     overlay_selected_type = None
@@ -539,6 +588,15 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
             "processRequired": process_context.get("processRequired"),
             "processTypeNeeded": process_context.get("processTypeNeeded"),
             "tinderboxStatus": process_context.get("tinderboxStatus"),
+        },
+        "bankOperationContextSummary": {
+            "operationNeeded": bank_operation_context.get("operationNeeded", status.get("bankOperationNeeded")),
+            "operationType": bank_operation_context.get("operationType", status.get("bankOperationType")),
+            "resourceItemsHeld": bank_operation_context.get("resourceItemsHeld", status.get("bankResourceItemsHeld")),
+            "resourceItemQuantity": bank_operation_context.get("resourceItemQuantity", status.get("bankResourceItemQuantity")),
+            "depositInventoryAvailable": bank_operation_context.get("depositInventoryAvailable", status.get("bankDepositInventoryAvailable")),
+            "bankingComplete": bank_operation_context.get("bankingComplete", status.get("bankingComplete")),
+            "completionReason": bank_operation_context.get("completionReason", status.get("bankOperationCompletionReason")),
         },
         "navigationContextSummary": compact_navigation_summary(navigation_context),
         "freshnessDomains": freshness_domains,
@@ -589,6 +647,7 @@ def format_human(payload: dict[str, Any]) -> str:
     ]
     service = payload.get("serviceContextSummary") if isinstance(payload.get("serviceContextSummary"), dict) else {}
     process = payload.get("processContextSummary") if isinstance(payload.get("processContextSummary"), dict) else {}
+    bank_operation = payload.get("bankOperationContextSummary") if isinstance(payload.get("bankOperationContextSummary"), dict) else {}
     navigation = payload.get("navigationContextSummary") if isinstance(payload.get("navigationContextSummary"), dict) else {}
     lines.extend(
         [
@@ -596,6 +655,7 @@ def format_human(payload: dict[str, Any]) -> str:
             "Service/process/navigation:",
             f"  service: needed={service.get('serviceNeeded')} best={service.get('best')} ready={service.get('serviceReady')} reason={service.get('serviceReadyReason')}",
             f"  process: needed={process.get('processRequired')} type={process.get('processTypeNeeded')} tinderbox={process.get('tinderboxStatus')}",
+            f"  bank operation: needed={bank_operation.get('operationNeeded')} type={bank_operation.get('operationType')} complete={bank_operation.get('bankingComplete')} reason={bank_operation.get('completionReason')}",
             f"  navigation: reason={navigation.get('navigationReason')} target={navigation.get('destination')} reachability={navigation.get('directReachability')}",
         ]
     )

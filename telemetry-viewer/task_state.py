@@ -21,6 +21,8 @@ class TaskPhase(str, Enum):
     SERVICE_AVAILABLE = "service_available"
     SERVICE_OPEN = "service_open"
     SERVICE_INTERACTION_PENDING = "service_interaction_pending"
+    SERVICE_COMPLETE = "service_complete"
+    RETURN_TO_RESOURCE = "return_to_resource"
     GOAL_COMPLETE = "goal_complete"
     BLOCKED = "blocked"
     NEEDS_MORE_CONTEXT = "needs_more_context"
@@ -41,6 +43,9 @@ class TaskIntent(str, Enum):
     SERVICE_AVAILABLE = "service_available"
     SERVICE_OPEN = "service_open"
     SERVICE_INTERACTION_PENDING = "service_interaction_pending"
+    BANK_OPERATION_PENDING = "bank_operation_pending"
+    PROCESS_SERVICE_INVENTORY = "process_service_inventory"
+    RESUME_RESOURCE_COLLECTION = "resume_resource_collection"
     NEEDS_USER_RESOLUTION = "needs_user_resolution"
     GOAL_COMPLETE = "goal_complete"
     BLOCKED = "blocked"
@@ -204,6 +209,10 @@ def phase_from_brain_decision(decision: dict[str, Any]) -> TaskPhase:
         return TaskPhase.SERVICE_AVAILABLE
     if phase == "service_open":
         return TaskPhase.SERVICE_OPEN
+    if phase == "service_complete":
+        return TaskPhase.SERVICE_COMPLETE
+    if phase == "return_to_resource":
+        return TaskPhase.RETURN_TO_RESOURCE
     if phase == "blocked_or_unreachable":
         return TaskPhase.BLOCKED
     if phase in {"no_context", "stale_context", "no_target_observed", "missing_capability"}:
@@ -229,6 +238,8 @@ def active_intent_for_phase(phase: TaskPhase) -> TaskIntent:
         TaskPhase.SERVICE_AVAILABLE: TaskIntent.SERVICE_AVAILABLE,
         TaskPhase.SERVICE_OPEN: TaskIntent.SERVICE_OPEN,
         TaskPhase.SERVICE_INTERACTION_PENDING: TaskIntent.SERVICE_INTERACTION_PENDING,
+        TaskPhase.SERVICE_COMPLETE: TaskIntent.RESUME_RESOURCE_COLLECTION,
+        TaskPhase.RETURN_TO_RESOURCE: TaskIntent.RESUME_RESOURCE_COLLECTION,
         TaskPhase.GOAL_COMPLETE: TaskIntent.NONE,
         TaskPhase.BLOCKED: TaskIntent.OBSERVE,
         TaskPhase.NEEDS_MORE_CONTEXT: TaskIntent.OBSERVE,
@@ -254,6 +265,14 @@ def default_required_capabilities(phase: TaskPhase, policy: task_policy_module.T
         if policy:
             required.extend(policy.requiredCapabilities)
         return capabilities.normalize_capability_names(required)
+    if phase in {
+        TaskPhase.SERVICE_AVAILABLE,
+        TaskPhase.SERVICE_OPEN,
+        TaskPhase.SERVICE_INTERACTION_PENDING,
+        TaskPhase.SERVICE_COMPLETE,
+        TaskPhase.RETURN_TO_RESOURCE,
+    }:
+        return capabilities.normalize_capability_names(["inventory.items", "bank_ui.telemetry"])
     return []
 
 

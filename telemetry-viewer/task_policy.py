@@ -68,6 +68,8 @@ class TaskPolicy:
     resourceDisposition: ResourceDisposition | str = ResourceDisposition.UNKNOWN
     serviceTypeNeeded: str | None = None
     processTypeNeeded: str | None = None
+    bankOperation: str | None = None
+    completionCondition: str | None = None
     minFreeSlotsPreferred: int | None = None
     requiredCapabilities: list[str] = field(default_factory=list)
     optionalCapabilities: list[str] = field(default_factory=list)
@@ -103,6 +105,8 @@ class TaskPolicy:
             resourceDisposition=data.get("resourceDisposition", ResourceDisposition.UNKNOWN),
             serviceTypeNeeded=data.get("serviceTypeNeeded"),
             processTypeNeeded=data.get("processTypeNeeded"),
+            bankOperation=data.get("bankOperation"),
+            completionCondition=data.get("completionCondition"),
             minFreeSlotsPreferred=data.get("minFreeSlotsPreferred"),
             requiredCapabilities=list(data.get("requiredCapabilities") or []),
             optionalCapabilities=list(data.get("optionalCapabilities") or []),
@@ -118,6 +122,8 @@ class TaskPolicy:
             "resourceDisposition": enum_value(self.resourceDisposition),
             "serviceTypeNeeded": self.serviceTypeNeeded,
             "processTypeNeeded": self.processTypeNeeded,
+            "bankOperation": self.bankOperation,
+            "completionCondition": self.completionCondition,
             "minFreeSlotsPreferred": self.minFreeSlotsPreferred,
             "requiredCapabilities": capabilities.normalize_capability_names(self.requiredCapabilities),
             "optionalCapabilities": capabilities.normalize_capability_names(self.optionalCapabilities),
@@ -132,6 +138,8 @@ BUILTIN_POLICIES: dict[str, dict[str, Any]] = {
         "fullInventoryStrategy": "needs_service",
         "resourceDisposition": "bank",
         "serviceTypeNeeded": "bank_full",
+        "bankOperation": "deposit_inventory",
+        "completionCondition": "no_resource_items_held",
         "minFreeSlotsPreferred": 1,
         "requiredCapabilities": ["inventory.items"],
         "optionalCapabilities": ["target.candidates", "navigation.local_collision_window"],
@@ -143,6 +151,8 @@ BUILTIN_POLICIES: dict[str, dict[str, Any]] = {
         "fullInventoryStrategy": "needs_service",
         "resourceDisposition": "bank",
         "serviceTypeNeeded": "bank_deposit",
+        "bankOperation": "deposit_inventory",
+        "completionCondition": "no_resource_items_held",
         "minFreeSlotsPreferred": 1,
         "requiredCapabilities": ["inventory.items"],
         "optionalCapabilities": ["target.candidates", "navigation.local_collision_window"],

@@ -587,6 +587,8 @@ def target_required_for_intent(active_intent: str) -> bool:
         "navigate_to_service",
         "service_available",
         "service_open",
+        "bank_operation_pending",
+        "resume_resource_collection",
         "service_interaction_pending",
         "needs_user_resolution",
     }:
@@ -595,7 +597,7 @@ def target_required_for_intent(active_intent: str) -> bool:
 
 
 def service_target_intent(active_intent: str) -> bool:
-    return str(active_intent or "").lower() in {"needs_service", "service_available", "service_open", "needs_user_resolution", "hold_service_context"}
+    return str(active_intent or "").lower() in {"needs_service", "service_available", "service_open", "bank_operation_pending", "needs_user_resolution", "hold_service_context"}
 
 
 def candidate_key(candidate: dict) -> str:

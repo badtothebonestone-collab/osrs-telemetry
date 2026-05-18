@@ -21,6 +21,7 @@ import mission_presets
 import runtime_control
 import task_policy as task_policy_module
 from analyzers import activity_analyzer
+from analyzers import bank_operation_analyzer
 from analyzers import bank_ui_analyzer
 from analyzers import brain_context_analyzer
 from analyzers import intent_overlay_analyzer
@@ -679,6 +680,21 @@ class LiveCoreState:
             "inventoryOccupiedSlots",
             "inventoryFreeSlots",
             "inventoryMatchingResourceCount",
+            "bankOperationNeeded",
+            "bankOperationType",
+            "bankResourceItemsHeld",
+            "bankResourceItemSlots",
+            "bankResourceItemQuantity",
+            "bankNonResourceItemsHeld",
+            "bankOperationInventoryFreeSlots",
+            "bankOperationInventoryFull",
+            "bankDepositInventoryAvailable",
+            "bankingComplete",
+            "bankOperationCompletionReason",
+            "bankOperationStatus",
+            "bankOperationReason",
+            "bankOperationMissingCapabilities",
+            "bankOperationWarnings",
             "selectedServiceTargetName",
             "selectedServiceTargetTile",
             "distanceToServiceTarget",
@@ -1096,14 +1112,14 @@ class LiveCoreDaemon:
         raw_best = brain_core.safe_get(decision, "currentContextSummary.bestTarget", {})
         generic_state = decision.get("genericTaskState") if isinstance(decision.get("genericTaskState"), dict) else {}
         phase = str(generic_state.get("activeIntent") or generic_state.get("phase") or decision.get("phase") or "observe")
-        if phase in {"goal_complete", "inventory_full", "stale_context", "no_context", "observe", "none", "needs_service", "process_inventory", "needs_more_context", "navigate_to_service", "service_available", "service_interaction_pending"}:
+        if phase in {"goal_complete", "inventory_full", "stale_context", "no_context", "observe", "none", "needs_service", "process_inventory", "needs_more_context", "navigate_to_service", "service_available", "bank_operation_pending", "resume_resource_collection", "service_interaction_pending"}:
             raw_best = {}
             candidates = []
         if not isinstance(raw_best, dict) or not raw_best:
             raw_best = candidates[0] if decision and candidates else {}
         task = str(decision.get("task") or self.effective_brain_task() or self.args.profile or "")
         priority = intent_stabilizer.PRIORITY_SELECTED_TARGET
-        if phase in {"goal_complete", "inventory_full", "none", "needs_service", "process_inventory", "banking_needed", "navigate_to_service", "service_available", "service_interaction_pending"}:
+        if phase in {"goal_complete", "inventory_full", "none", "needs_service", "process_inventory", "banking_needed", "navigate_to_service", "service_available", "bank_operation_pending", "resume_resource_collection", "service_interaction_pending"}:
             priority = intent_stabilizer.PRIORITY_TASK_TRANSITION
         if decision.get("interrupt") or str(decision.get("interruptReason") or "").lower() in {"threat", "emergency", "escape"}:
             priority = intent_stabilizer.PRIORITY_EMERGENCY
@@ -1471,6 +1487,16 @@ class LiveCoreDaemon:
             )
             bank_ui_context = self.state.analysis_result.bank_ui
             brain_context.decision["bankUiContext"] = bank_ui_context.to_dict()
+            self.state.analysis_result.bank_operation = bank_operation_analyzer.analyze_bank_operation_context(
+                policy,
+                bank_ui_context=bank_ui_context,
+                inventory_context=inventory_context,
+                resource_definition=brain_core.task_resource_group(task),
+                current_task_state=generic_state,
+                source_tick=source_tick,
+            )
+            bank_operation_context = self.state.analysis_result.bank_operation
+            brain_context.decision["bankOperationContext"] = bank_operation_context.to_dict()
             if service_context and service_context.service_ready:
                 service_target = service_context.best_service_candidate if isinstance(service_context.best_service_candidate, dict) else None
                 if bank_ui_context.bank_pin_open is True:
@@ -1489,16 +1515,28 @@ class LiveCoreDaemon:
                     brain_context.decision["phase"] = "blocked"
                     brain_context.decision["genericTaskState"] = generic_state
                 elif bank_ui_context.bank_open is True and bank_ui_context.bank_readable:
-                    generic_state["phase"] = "service_open"
-                    generic_state["activeIntent"] = "service_open"
-                    generic_state["activeIntentTarget"] = service_target
-                    if service_target:
-                        target_type = service_target.get("targetType") or "sceneObject"
-                        generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(service_target, str(target_type))
+                    if bank_operation_context.banking_complete:
+                        generic_state["phase"] = "service_complete"
+                        generic_state["activeIntent"] = "resume_resource_collection"
+                        active_intent_target = None
+                    else:
+                        generic_state["phase"] = "service_open"
+                        generic_state["activeIntent"] = "bank_operation_pending"
+                        active_intent_target = service_target
+                    generic_state["activeIntentTarget"] = active_intent_target
+                    if active_intent_target:
+                        target_type = active_intent_target.get("targetType") or "sceneObject"
+                        generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(active_intent_target, str(target_type))
+                    else:
+                        generic_state["selectedTargetKey"] = None
                     generic_state["bankOpen"] = True
                     generic_state["bankReadable"] = True
                     generic_state["bankUiReason"] = bank_ui_context.reason
-                    brain_context.decision["phase"] = "service_open"
+                    generic_state["bankOperationNeeded"] = bank_operation_context.operation_needed
+                    generic_state["bankOperationType"] = bank_operation_context.operation_type
+                    generic_state["bankingComplete"] = bank_operation_context.banking_complete
+                    generic_state["bankOperationCompletionReason"] = bank_operation_context.completion_reason
+                    brain_context.decision["phase"] = generic_state["phase"]
                     brain_context.decision["genericTaskState"] = generic_state
             pathing_payload = self.state.analysis_result.pathing.to_dict()
             pathing_payload["overlayPredictedPathLimit"] = intent_overlay_analyzer.predicted_path_limit(self.args, self.args.overlay_mode)
@@ -1669,6 +1707,23 @@ class LiveCoreDaemon:
             fields["inventoryFreeSlots"] = inventory_summary.get("freeSlots")
             fields["inventoryOccupiedSlots"] = inventory_summary.get("occupiedSlots")
             fields["inventoryMatchingResourceCount"] = inventory_summary.get("matchingResourceCount")
+        if self.state.analysis_result and self.state.analysis_result.bank_operation:
+            operation = self.state.analysis_result.bank_operation
+            fields["bankOperationNeeded"] = operation.operation_needed
+            fields["bankOperationType"] = operation.operation_type
+            fields["bankResourceItemsHeld"] = operation.resource_items_held
+            fields["bankResourceItemSlots"] = list(operation.resource_item_slots)
+            fields["bankResourceItemQuantity"] = operation.resource_item_quantity
+            fields["bankNonResourceItemsHeld"] = operation.non_resource_items_held
+            fields["bankOperationInventoryFreeSlots"] = operation.inventory_free_slots
+            fields["bankOperationInventoryFull"] = operation.inventory_full
+            fields["bankDepositInventoryAvailable"] = operation.deposit_inventory_available
+            fields["bankingComplete"] = operation.banking_complete
+            fields["bankOperationCompletionReason"] = operation.completion_reason
+            fields["bankOperationStatus"] = operation.status
+            fields["bankOperationReason"] = operation.reason
+            fields["bankOperationMissingCapabilities"] = list(operation.missing_capabilities)
+            fields["bankOperationWarnings"] = list(operation.warnings)
         self.state.source_status.update(fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)
@@ -1882,6 +1937,12 @@ class LiveCoreRequestHandler(BaseHTTPRequestHandler):
         goal_count = payload.get("goalCount") if isinstance(payload, dict) else None
         if goal_count is None:
             goal_count = self.daemon.effective_goal_count()
+        if str(task or default_task) == str(default_task) and goal_count == self.daemon.effective_goal_count():
+            enriched = self.daemon.evaluate_brain_if_enabled(self.daemon.state.latest_result if isinstance(self.daemon.state.latest_result, dict) else {})
+            if enriched:
+                self.daemon.state.brain_decision = enriched
+                self.send_json(enriched)
+                return
         request = dict(self.daemon.default_context_request())
         request["task"] = task
         response = self.daemon.build_context_response(request)
