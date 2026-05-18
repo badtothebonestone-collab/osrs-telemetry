@@ -63,6 +63,10 @@ RuneLite plugin
   closeBankReady, close button visibility/availability, keyboardClosePossible,
   and the close_service_context intent while banking is complete but the bank UI
   is still open.
+- Full Woodcut Bank Cycle QA Harness v1 summarizes the whole woodcut_bank cycle
+  in one stdout-only diagnostic with PASS/WARN/FAIL status and compact stage,
+  inventory, service, pathing, bank, close-bank, post-bank, return, and overlay
+  fields.
 
 ## Current service-memory proof
 
@@ -87,6 +91,8 @@ python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemo
 
 python telemetry-viewer\diagnose_close_bank_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 
+python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
+
 python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 
 ## Verification commands
@@ -99,12 +105,13 @@ python telemetry-viewer\run_stabilization_suite.py
 
 ## Current next milestone
 
-Close-bank Readiness / Return Control Context v1 live QA after RuneLite dev is
-restarted with the current plugin code.
+Full Woodcut Bank Cycle QA Harness v1 live QA with the daily daemon.
 
 Goal:
-bankingComplete=true + bankOpen=true -> report closeBankNeeded and
-close_service_context before world/resource targeting resumes.
+Use one read-only diagnostic to summarize resource collection, full inventory,
+service pathing, serviceReady, bank UI, bank operation, close-bank readiness,
+post-bank reacquisition, return-to-resource, overlay selection, and current
+PASS/WARN/FAIL status.
 
 Implemented scope:
 - `return_to_resource_analyzer.py` reports returnNeeded, returnReady,
@@ -128,6 +135,8 @@ Implemented scope:
   ready, using close button telemetry or keyboardClosePossible when available.
 - `diagnose_close_bank_context.py` reports daemon close-bank state in human and
   JSON modes.
+- `diagnose_woodcut_bank_cycle.py` reports the full live woodcut_bank cycle in
+  human and JSON modes.
 - Task phase integration:
   - bankingComplete + bankOpen=true -> waiting_for_world_view /
     close_service_context, no target candidate failure
@@ -204,12 +213,11 @@ Open-bank view with no visible tree target can produce missing target candidates
 Post-bank reacquisition now represents that state explicitly with
 reason=bank_ui_still_open and resourceTargetReacquisitionAllowed=false.
 
-## Current Next Milestone: Close-bank Readiness / Return Control Context v1 Live QA
+## Current Next Milestone: Full Woodcut Bank Cycle QA Harness v1 Live QA
 
 Goal:
-Restart RuneLite dev with the current plugin code, reopen or keep the bank open
-after bankingComplete=true, and verify closeBankNeeded/closeBankReady and
-keyboardClosePossible live.
+Run the full-cycle diagnostic against the daily daemon and use it as the first
+live QA readout before falling back to more specific diagnostics.
 
 Expected behavior:
 - If bankingComplete=true and bankOpen=true:
@@ -231,6 +239,7 @@ Expected behavior:
 
 Live retest commands:
 ```powershell
+python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_bank_operation_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_return_to_resource_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemon --daemon-url http://127.0.0.1:8890

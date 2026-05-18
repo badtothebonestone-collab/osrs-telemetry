@@ -277,6 +277,7 @@ python telemetry-viewer\diagnose_navigation_intent.py --from-daemon --daemon-url
 python telemetry-viewer\diagnose_service_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
+python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_pathing_matrix.py
 python telemetry-viewer\diagnose_pathing_matrix.py --json
 python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
@@ -304,6 +305,16 @@ The matrix covers not-full woodcutting target selection, full-inventory bank
 policy with service visible/missing, firemaking ready/missing tinderbox, drop
 context, combat with full inventory, and observe-only full inventory. JSON mode
 prints to stdout only.
+
+Full woodcut-bank cycle QA summarizes the current live daemon state in one
+read-only report, from resource collection through service pathing, bank UI,
+bank operation, close-bank readiness, post-bank reacquisition, and return to
+resource targeting:
+
+```text
+python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
+```
 
 `task_policies.json` is static config. The live daemon must not write it or
 create per-tick policy, task-state, analyzer, JSONL, or rolling live output
