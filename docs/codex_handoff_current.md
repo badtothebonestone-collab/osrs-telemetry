@@ -145,3 +145,52 @@ $request = @{
 } | ConvertTo-Json -Depth 10
 
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8893/snapshot" -Body $request -ContentType "application/json"
+
+
+## Current Completed Milestone: Bank Operation + Return-to-Resource
+
+Bank Operation Context v1 works.
+
+Return-to-Resource Context v1 works.
+
+After depositing logs with bank open:
+- bankOperation PASS
+- bankingComplete=true
+- resourceItemsHeld=0
+- phase=needs_more_context or return_to_resource depending visible resource target
+- activeIntent=select_target / resume_resource_collection
+
+Open-bank view with no visible tree target can produce missing target candidates/freshness. This should be treated as expected when the bank UI is still open and the world/resource target view is deferred, not as a bank/service failure.
+
+## Current Next Milestone: Post-bank World Reacquisition Context v1
+
+Goal:
+Distinguish these states after bankingComplete=true:
+1. banking complete but bank UI still open
+2. bank UI closed and world/resource targeting can resume
+3. resource target visible
+4. resource target not visible after world view resumes
+
+Expected behavior:
+- If bankingComplete=true and bankOpen=true:
+  - postBankReacquisitionNeeded=true
+  - bankUiStillOpen=true
+  - resourceTargetReacquisitionAllowed=false
+  - reason=bank_ui_still_open
+  - missing target candidates should not be treated as a resource targeting failure.
+- If bankingComplete=true and bankOpen=false:
+  - worldViewReady=true
+  - resourceTargetReacquisitionAllowed=true
+  - resource target selection resumes normally.
+- If bank closed and resource target visible:
+  - phase should progress toward target_selected / select_target.
+- If bank closed and no resource target visible:
+  - phase should be needs_more_context with reason no_resource_target_observed.
+
+Live retest commands:
+```powershell
+python telemetry-viewer\diagnose_bank_operation_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_return_to_resource_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
+python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
