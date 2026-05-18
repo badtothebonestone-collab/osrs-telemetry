@@ -287,6 +287,7 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
     close_bank = dict_value(brain.get("closeBankContext"))
     post_bank = dict_value(brain.get("postBankReacquisitionContext"))
     return_context = dict_value(brain.get("returnToResourceContext"))
+    history = dict_value(status.get("cycleHistory"))
     policy_payload = dict_value(generic.get("taskPolicy") or brain.get("taskPolicy"))
     progress = progress_from(status, brain)
     inventory = inventory_from(status, brain, bank_operation, return_context)
@@ -328,6 +329,15 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
         "phase": generic.get("phase") or brain.get("phase") or status.get("genericPhase") or status.get("brainPhase"),
         "activeIntent": generic.get("activeIntent") or status.get("activeIntent"),
         "reason": None,
+        "currentCycleStageStableForTicks": first_present(
+            history.get("currentCycleStageStableForTicks"),
+            status.get("currentCycleStageStableForTicks"),
+        ),
+        "previousCycleStage": first_present(history.get("lastCycleStage"), status.get("lastCycleStage")),
+        "lastCycleTransitionReason": first_present(
+            history.get("lastCycleTransitionReason"),
+            status.get("lastCycleTransitionReason"),
+        ),
         "progress": progress,
         "inventory": inventory,
         "inventoryFull": inventory.get("inventoryFull"),
@@ -476,6 +486,9 @@ def format_human(payload: dict[str, Any]) -> str:
         f"  Phase: {payload.get('phase') or 'unknown'}",
         f"  Active intent: {payload.get('activeIntent') or 'unknown'}",
         f"  Reason: {payload.get('reason') or 'unknown'}",
+        f"  Stable for ticks: {value_label(payload.get('currentCycleStageStableForTicks'))}",
+        f"  Previous stage: {payload.get('previousCycleStage') or 'unknown'}",
+        f"  Last transition: {payload.get('lastCycleTransitionReason') or 'unknown'}",
         "",
         "Inventory:",
         f"  Free slots: {value_label(inventory.get('freeSlots'))}",
@@ -502,6 +515,9 @@ def format_human(payload: dict[str, Any]) -> str:
         "Overlay:",
         f"  Selected: {selected.get('label') or selected.get('targetName') or 'none'}",
         f"  Markers/path: markers={value_label(overlay.get('markerCount'))} path={value_label(overlay.get('pathMarkerCount'))}",
+        "",
+        "Cycle history:",
+        "  Run: python telemetry-viewer\\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890",
         "",
         "Warnings:",
     ]

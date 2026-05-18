@@ -65,6 +65,7 @@ Diagnostics and inspectors that are useful when daily output looks wrong:
 - `diagnose_service_context.py`
 - `diagnose_bank_ui_context.py`
 - `diagnose_woodcut_bank_cycle.py`
+- `diagnose_cycle_history.py`
 - `diagnose_target_coverage.py`
 - `run_stabilization_suite.py`
 - visual/perception/tab inspection helpers
@@ -91,6 +92,7 @@ Full woodcut-bank cycle example:
 
 ```text
 python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20
 ```
 
 ## Legacy File Pipeline

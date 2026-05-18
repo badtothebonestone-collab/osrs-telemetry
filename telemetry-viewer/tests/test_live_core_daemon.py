@@ -915,6 +915,33 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertIn("bank_pin_required", generic["blockingConditions"])
         self.assertTrue(status["bankPinOpen"])
 
+    def test_status_exposes_compact_cycle_history_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                core = daemon.LiveCoreDaemon(session, args)
+                core.poll_once()
+                first_count = core.state.status()["cycleHistoryCount"]
+                core.poll_once()
+                status = core.state.status()
+
+        self.assertGreaterEqual(first_count, 1)
+        self.assertEqual(status["cycleHistoryCount"], first_count)
+        self.assertIn("currentCycleStage", status)
+        self.assertIn("currentCycleStageStableForTicks", status)
+        self.assertIn("cycleHistoryTail", status)
+        self.assertLessEqual(len(status["cycleHistoryTail"]), 10)
+
     def test_daemon_passes_in_memory_path_intent_state_to_pathing_analyzer(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"

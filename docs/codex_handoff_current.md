@@ -67,6 +67,9 @@ RuneLite plugin
   in one stdout-only diagnostic with PASS/WARN/FAIL status and compact stage,
   inventory, service, pathing, bank, close-bank, post-bank, return, and overlay
   fields.
+- Cycle History / State Transition Trace v1 keeps a compact rolling in-memory
+  history of meaningful woodcut_bank stage/context changes and exposes a small
+  status tail plus `diagnose_cycle_history.py`.
 
 ## Current service-memory proof
 
@@ -93,6 +96,8 @@ python telemetry-viewer\diagnose_close_bank_context.py --from-daemon --daemon-ur
 
 python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
 
+python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20
+
 python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 
 ## Verification commands
@@ -105,13 +110,13 @@ python telemetry-viewer\run_stabilization_suite.py
 
 ## Current next milestone
 
-Full Woodcut Bank Cycle QA Harness v1 live QA with the daily daemon.
+Cycle History / State Transition Trace v1 live QA with the daily daemon.
 
 Goal:
-Use one read-only diagnostic to summarize resource collection, full inventory,
-service pathing, serviceReady, bank UI, bank operation, close-bank readiness,
-post-bank reacquisition, return-to-resource, overlay selection, and current
-PASS/WARN/FAIL status.
+Use one read-only timeline diagnostic to explain recent woodcut_bank stage
+changes, including stable duration, previous stage, transition reason, selected
+target, inventory/service/bank/return signals, warning counts, and missing
+capability counts.
 
 Implemented scope:
 - `return_to_resource_analyzer.py` reports returnNeeded, returnReady,
@@ -137,6 +142,8 @@ Implemented scope:
   JSON modes.
 - `diagnose_woodcut_bank_cycle.py` reports the full live woodcut_bank cycle in
   human and JSON modes.
+- `diagnose_cycle_history.py` reports the rolling in-memory cycle transition
+  tail in human and JSON modes. It writes no files.
 - Task phase integration:
   - bankingComplete + bankOpen=true -> waiting_for_world_view /
     close_service_context, no target candidate failure
@@ -213,11 +220,11 @@ Open-bank view with no visible tree target can produce missing target candidates
 Post-bank reacquisition now represents that state explicitly with
 reason=bank_ui_still_open and resourceTargetReacquisitionAllowed=false.
 
-## Current Next Milestone: Full Woodcut Bank Cycle QA Harness v1 Live QA
+## Current Next Milestone: Cycle History / State Transition Trace v1 Live QA
 
 Goal:
-Run the full-cycle diagnostic against the daily daemon and use it as the first
-live QA readout before falling back to more specific diagnostics.
+Run the full-cycle and cycle-history diagnostics against the daily daemon and
+use the history tail to confirm how the current state was reached.
 
 Expected behavior:
 - If bankingComplete=true and bankOpen=true:
@@ -240,6 +247,7 @@ Expected behavior:
 Live retest commands:
 ```powershell
 python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20
 python telemetry-viewer\diagnose_bank_operation_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_return_to_resource_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemon --daemon-url http://127.0.0.1:8890

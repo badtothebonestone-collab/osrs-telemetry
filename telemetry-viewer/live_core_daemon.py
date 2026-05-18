@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 import brain_core
 import context_service
+import cycle_history as cycle_history_module
 import intent_stabilizer
 import live_target_processor as live
 import mission_presets
@@ -397,6 +398,7 @@ class LiveCoreState:
     analysis_result: LiveAnalysisResult = field(default_factory=LiveAnalysisResult)
     path_intent_state: pathing_analyzer.PathIntentState = field(default_factory=pathing_analyzer.PathIntentState)
     service_target_state: service_analyzer.ServiceTargetState = field(default_factory=service_analyzer.ServiceTargetState)
+    cycle_history: cycle_history_module.CycleHistoryTracker = field(default_factory=cycle_history_module.CycleHistoryTracker)
     context_retained_previous_count: int = 0
     candidate_retained_previous_count: int = 0
     context_retention_streak: int = 0
@@ -516,6 +518,14 @@ class LiveCoreState:
             self.last_good_tick = status.get("lastProcessedTick") or status.get("latestTickProcessed") or status.get("latestTick")
         if brain_decision:
             self.brain_decision = brain_decision
+
+    def record_cycle_history(self, timestamp: str | None = None) -> bool:
+        if not isinstance(self.brain_decision, dict) or not self.brain_decision:
+            return False
+        status = dict(self.source_status)
+        status["brain"] = self.brain_decision
+        entry = cycle_history_module.entry_from_status(status, timestamp=timestamp or self.generated_at_utc)
+        return self.cycle_history.update(entry)
 
     def context(self) -> dict:
         if self.latest_context:
@@ -849,6 +859,21 @@ class LiveCoreState:
                 "brainProgress": progress or None,
                 "brainBestTree": target if isinstance(target, dict) and target else None,
                 "runtimeControl": self.source_status.get("runtimeControl"),
+            }
+        )
+        cycle_summary = self.cycle_history.summary(tail=10)
+        payload.update(
+            {
+                "currentCycleStage": cycle_summary.get("currentCycleStage"),
+                "currentCycleStageStableForTicks": cycle_summary.get("currentCycleStageStableForTicks"),
+                "lastCycleStage": cycle_summary.get("lastCycleStage"),
+                "lastCycleTransitionReason": cycle_summary.get("lastCycleTransitionReason"),
+                "lastCycleStageChangeTick": cycle_summary.get("lastStageChangeTick"),
+                "cycleHistoryCount": cycle_summary.get("cycleHistoryCount"),
+                "cycleTransitionCount": cycle_summary.get("transitionCount"),
+                "cycleHistoryTail": cycle_summary.get("cycleHistory"),
+                "cycleLastWarningSummary": cycle_summary.get("lastWarningSummary"),
+                "cycleHistory": cycle_summary,
             }
         )
         return payload
@@ -1311,6 +1336,7 @@ class LiveCoreDaemon:
             warning = f"overlay state write failed: {overlay_error}"
             if warning not in self.state.warnings:
                 self.state.warnings.append(warning)
+        self.state.record_cycle_history(timestamp=self.state.generated_at_utc)
         self.publish_runtime_control_status()
         self.brain_state_warning = None
         return result

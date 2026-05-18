@@ -225,9 +225,20 @@ class WoodcutBankCycleDiagnosticTest(unittest.TestCase):
         self.assertIn("bank_pin_required", payload["warnings"])
 
     def test_json_output_includes_expected_schema_and_fields(self):
-        payload = diagnostic.build_from_daemon(status_for())
+        status = status_for()
+        status.update(
+            {
+                "currentCycleStageStableForTicks": 4,
+                "lastCycleStage": "inventory_full",
+                "lastCycleTransitionReason": "service_ready",
+            }
+        )
+        payload = diagnostic.build_from_daemon(status)
         self.assertEqual(payload["schema"], "woodcut_bank_cycle_diagnostic.v1")
         self.assertIn("cycleStage", payload)
+        self.assertEqual(payload["currentCycleStageStableForTicks"], 4)
+        self.assertEqual(payload["previousCycleStage"], "inventory_full")
+        self.assertEqual(payload["lastCycleTransitionReason"], "service_ready")
         self.assertIn("inventory", payload)
         self.assertIn("service", payload)
         self.assertIn("bank", payload)
@@ -250,6 +261,8 @@ class WoodcutBankCycleDiagnosticTest(unittest.TestCase):
         self.assertIn("Bank:", text)
         self.assertIn("Return:", text)
         self.assertIn("Overlay:", text)
+        self.assertIn("Cycle history:", text)
+        self.assertIn("diagnose_cycle_history.py", text)
 
     def test_json_cli_stdout_only_when_daemon_not_reachable(self):
         with tempfile.TemporaryDirectory() as temp:
