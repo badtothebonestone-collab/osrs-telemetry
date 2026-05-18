@@ -69,11 +69,13 @@ public class TickSnapshot
         public Boolean bankContainerVisible;
         public Boolean bankInventoryVisible;
         public Boolean depositInventoryButtonVisible;
+        public Boolean closeButtonVisible;
         public Boolean bankCloseButtonVisible;
         public WidgetSnapshot bankRootWidget;
         public WidgetSnapshot bankContainerWidget;
         public WidgetSnapshot bankInventoryWidget;
         public WidgetSnapshot depositInventoryButtonWidget;
+        public WidgetSnapshot closeButtonWidget;
         public WidgetSnapshot bankPinWidget;
         public InventorySlot[] bankItems;
     }

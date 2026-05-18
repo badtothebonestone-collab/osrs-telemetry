@@ -672,6 +672,7 @@ class LiveCoreState:
             "bankContainerVisible",
             "bankInventoryVisible",
             "depositInventoryButtonVisible",
+            "closeButtonVisible",
             "bankCloseButtonVisible",
             "bankOccupiedSlots",
             "bankUniqueItemCount",
@@ -1661,6 +1662,7 @@ class LiveCoreDaemon:
             fields["bankContainerVisible"] = bank_ui.bank_container_visible
             fields["bankInventoryVisible"] = bank_ui.bank_inventory_visible
             fields["depositInventoryButtonVisible"] = bank_ui.deposit_inventory_button_visible
+            fields["closeButtonVisible"] = bank_ui.bank_close_button_visible
             fields["bankCloseButtonVisible"] = bank_ui.bank_close_button_visible
             fields["bankOccupiedSlots"] = bank_summary.get("occupiedSlots")
             fields["bankUniqueItemCount"] = bank_summary.get("uniqueItemCount")

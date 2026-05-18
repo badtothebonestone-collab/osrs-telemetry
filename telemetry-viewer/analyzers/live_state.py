@@ -590,6 +590,7 @@ class BankUiContext(AnalyzerContractFields):
             "bankContainerVisible": self.bank_container_visible,
             "bankInventoryVisible": self.bank_inventory_visible,
             "depositInventoryButtonVisible": self.deposit_inventory_button_visible,
+            "closeButtonVisible": self.bank_close_button_visible,
             "bankCloseButtonVisible": self.bank_close_button_visible,
             "inventorySummary": dict(self.inventory_summary),
             "bankSummary": dict(self.bank_summary),

@@ -28,6 +28,7 @@ class BankUiDiagnosticTest(unittest.TestCase):
                         "bankContainerVisible": True,
                         "bankInventoryVisible": True,
                         "depositInventoryButtonVisible": True,
+                        "closeButtonVisible": True,
                         "inventorySummary": {"freeSlots": 0, "occupiedSlots": 28},
                         "bankSummary": {"occupiedSlots": 14, "uniqueItemCount": 3},
                     }
@@ -40,9 +41,22 @@ class BankUiDiagnosticTest(unittest.TestCase):
         self.assertTrue(payload["bankReadable"])
         self.assertFalse(payload["bankPinOpen"])
         self.assertEqual(payload["topLevelInterfaceId"], 12)
+        self.assertTrue(payload["closeButtonVisible"])
         self.assertEqual(payload["inventoryOccupiedSlots"], 28)
         self.assertEqual(payload["bankOccupiedSlots"], 14)
         self.assertEqual(payload["bankUniqueItemCount"], 3)
+
+    def test_human_output_names_close_button_field(self):
+        text = diagnostic.format_human(
+            {
+                "source": "daemon-memory",
+                "daemonReachable": True,
+                "bankUiContextPresent": True,
+                "closeButtonVisible": True,
+            }
+        )
+
+        self.assertIn("Close button visible: yes", text)
 
     def test_json_cli_stdout_only_when_daemon_not_reachable(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -2102,11 +2102,13 @@ public class TelemetryPlugin extends Plugin
 		payload.put("bankContainerVisible", bankUi == null ? null : bankUi.bankContainerVisible);
 		payload.put("bankInventoryVisible", bankUi == null ? null : bankUi.bankInventoryVisible);
 		payload.put("depositInventoryButtonVisible", bankUi == null ? null : bankUi.depositInventoryButtonVisible);
+		payload.put("closeButtonVisible", bankUi == null ? null : bankUi.closeButtonVisible);
 		payload.put("bankCloseButtonVisible", bankUi == null ? null : bankUi.bankCloseButtonVisible);
 		payload.put("bankRootWidget", bankUi == null ? null : bankUi.bankRootWidget);
 		payload.put("bankContainerWidget", bankUi == null ? null : bankUi.bankContainerWidget);
 		payload.put("bankInventoryWidget", bankUi == null ? null : bankUi.bankInventoryWidget);
 		payload.put("depositInventoryButtonWidget", bankUi == null ? null : bankUi.depositInventoryButtonWidget);
+		payload.put("closeButtonWidget", bankUi == null ? null : bankUi.closeButtonWidget);
 		payload.put("bankPinWidget", bankUi == null ? null : bankUi.bankPinWidget);
 		payload.put("inventorySummary", itemContainerSnapshot(snapshot == null ? null : snapshot.inventory));
 		payload.put("bankSummary", itemContainerSummary(bankUi == null ? null : bankUi.bankItems));
@@ -3153,12 +3155,14 @@ public class TelemetryPlugin extends Plugin
 		bankUi.bankContainerVisible = bankContainerVisible;
 		bankUi.bankInventoryVisible = bankInventoryVisible;
 		bankUi.depositInventoryButtonVisible = depositButtonVisible;
+		bankUi.closeButtonVisible = null;
 		bankUi.bankCloseButtonVisible = null;
 		bankUi.topLevelInterfaceId = firstVisibleTopLevelId(bankRoot, depositRoot, bankPinRoot);
 		bankUi.bankRootWidget = widgetSnapshot(-1, widgetVisible(bankRoot) ? bankRoot : depositRoot);
 		bankUi.bankContainerWidget = widgetSnapshot(-1, firstVisibleWidget(bankItemsContainer, bankItems, depositContents));
 		bankUi.bankInventoryWidget = widgetSnapshot(-1, firstVisibleWidget(bankItems, depositInventory));
 		bankUi.depositInventoryButtonWidget = widgetSnapshot(-1, firstVisibleWidget(bankDepositInventory, depositInventoryButton));
+		bankUi.closeButtonWidget = null;
 		bankUi.bankPinWidget = widgetSnapshot(-1, bankPinRoot);
 		bankUi.bankItems = itemContainerSlots(client.getItemContainer(InventoryID.BANK), 0);
 		snapshot.bankUi = bankUi;

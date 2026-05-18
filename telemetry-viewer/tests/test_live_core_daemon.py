@@ -414,6 +414,7 @@ class LiveCoreDaemonTest(unittest.TestCase):
                 "bankRootVisible": True,
                 "bankContainerVisible": True,
                 "bankInventoryVisible": True,
+                "closeButtonVisible": True,
                 "inventorySummary": {"freeSlots": 0, "occupiedSlots": 28, "matchingResourceCount": 28},
                 "bankSummary": {"occupiedSlots": 12, "uniqueItemIds": [1511, 1521]},
             }
@@ -466,6 +467,7 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertTrue(status["bankOpen"])
         self.assertTrue(status["bankReadable"])
         self.assertFalse(status["bankPinOpen"])
+        self.assertTrue(status["closeButtonVisible"])
         self.assertEqual(status["bankOccupiedSlots"], 12)
         self.assertEqual(status["bankUniqueItemCount"], 2)
 

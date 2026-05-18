@@ -99,7 +99,7 @@ class BankUiAnalyzerTest(unittest.TestCase):
                 "bankContainerVisible": True,
                 "bankInventoryVisible": True,
                 "depositInventoryButtonVisible": True,
-                "bankCloseButtonVisible": True,
+                "closeButtonVisible": True,
                 "bankSummary": {"occupiedSlots": 42, "uniqueItemIds": [1511, 1521]},
                 "inventorySummary": {"freeSlots": 0, "occupiedSlots": 28, "matchingResourceCount": 28},
             },
@@ -117,6 +117,7 @@ class BankUiAnalyzerTest(unittest.TestCase):
         self.assertTrue(payload["bankInventoryReadable"])
         self.assertTrue(payload["depositInventoryAvailable"])
         self.assertTrue(payload["closeButtonAvailable"])
+        self.assertTrue(payload["closeButtonVisible"])
         self.assertEqual(payload["topLevelInterfaceId"], 12)
         self.assertEqual(payload["bankSummary"]["occupiedSlots"], 42)
         self.assertEqual(payload["bankSummary"]["uniqueItemCount"], 2)

@@ -32,6 +32,9 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
     bank_ui = brain.get("bankUiContext") if isinstance(brain.get("bankUiContext"), dict) else {}
     inventory_summary = bank_ui.get("inventorySummary") if isinstance(bank_ui.get("inventorySummary"), dict) else {}
     bank_summary = bank_ui.get("bankSummary") if isinstance(bank_ui.get("bankSummary"), dict) else {}
+    close_button_visible = bank_ui.get("closeButtonVisible")
+    if close_button_visible is None:
+        close_button_visible = bank_ui.get("bankCloseButtonVisible", status.get("closeButtonVisible", status.get("bankCloseButtonVisible")))
     return {
         "schema": SCHEMA,
         "source": "daemon-memory",
@@ -45,7 +48,8 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
         "bankContainerVisible": bank_ui.get("bankContainerVisible", status.get("bankContainerVisible")),
         "bankInventoryVisible": bank_ui.get("bankInventoryVisible", status.get("bankInventoryVisible")),
         "depositInventoryButtonVisible": bank_ui.get("depositInventoryButtonVisible", status.get("depositInventoryButtonVisible")),
-        "bankCloseButtonVisible": bank_ui.get("bankCloseButtonVisible", status.get("bankCloseButtonVisible")),
+        "closeButtonVisible": close_button_visible,
+        "bankCloseButtonVisible": close_button_visible,
         "inventoryFreeSlots": inventory_summary.get("freeSlots", status.get("inventoryFreeSlots")),
         "inventoryOccupiedSlots": inventory_summary.get("occupiedSlots", status.get("inventoryOccupiedSlots")),
         "inventoryMatchingResourceCount": inventory_summary.get("matchingResourceCount", status.get("inventoryMatchingResourceCount")),
@@ -90,7 +94,7 @@ def format_human(payload: dict[str, Any]) -> str:
         f"Bank container visible: {bool_label(payload.get('bankContainerVisible'))}",
         f"Bank inventory visible: {bool_label(payload.get('bankInventoryVisible'))}",
         f"Deposit inventory button visible: {bool_label(payload.get('depositInventoryButtonVisible'))}",
-        f"Bank close button visible: {bool_label(payload.get('bankCloseButtonVisible'))}",
+        f"Close button visible: {bool_label(payload.get('closeButtonVisible'))}",
         f"Inventory free/occupied: {payload.get('inventoryFreeSlots') if payload.get('inventoryFreeSlots') is not None else 'unknown'}/"
         f"{payload.get('inventoryOccupiedSlots') if payload.get('inventoryOccupiedSlots') is not None else 'unknown'}",
         f"Matching resource count: {payload.get('inventoryMatchingResourceCount') if payload.get('inventoryMatchingResourceCount') is not None else 'unknown'}",

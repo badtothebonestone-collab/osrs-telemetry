@@ -33,6 +33,9 @@ RuneLite plugin
 - Path integrity validation works.
 - Path intent stabilization works.
 - Arrival/serviceReady layer was added.
+- Bank UI / Service State Context v1 is implemented in the plugin snapshot,
+  bank UI analyzer, task phase integration, daemon status fields, and
+  `diagnose_bank_ui_context.py`.
 - Stabilization suite passes.
 
 ## Current service-memory proof
@@ -64,16 +67,19 @@ python telemetry-viewer\run_stabilization_suite.py
 
 ## Current next milestone
 
-Bank UI / Service State Context v1.
+Bank UI / Service State Context v1 live QA.
 
 Goal:
 serviceReady -> bank UI observed -> bankOpen / bankReadable / bankPinOpen / inventory and bank summaries.
 
-Scope:
-- Add bank UI telemetry if needed.
-- Add bank_ui_analyzer.py.
-- Add diagnose_bank_ui_context.py.
-- Integrate task phase:
+Implemented scope:
+- Plugin snapshot/live cache exposes compact bank UI telemetry.
+- `bank_ui_analyzer.py` reports bankOpen, bankReadable, bankPinOpen,
+  bank UI widget visibility, closeButtonVisible, inventory summary, and bank
+  summary.
+- `diagnose_bank_ui_context.py` reports daemon bank UI context in human and
+  JSON modes.
+- Task phase integration:
   - serviceReady + bankOpen=false -> service_available
   - bankOpen=true + bankReadable=true -> service_open
   - bankPinOpen=true -> blocked / bank_pin_required

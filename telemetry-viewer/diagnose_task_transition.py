@@ -260,6 +260,7 @@ def compact_bank_ui_summary(context: BankUiContext) -> dict[str, Any]:
         "bankContainerVisible": payload.get("bankContainerVisible"),
         "bankInventoryVisible": payload.get("bankInventoryVisible"),
         "depositInventoryButtonVisible": payload.get("depositInventoryButtonVisible"),
+        "closeButtonVisible": payload.get("closeButtonVisible"),
         "inventorySummary": payload.get("inventorySummary") or {},
         "bankSummary": payload.get("bankSummary") or {},
         "warnings": payload.get("warnings", []),

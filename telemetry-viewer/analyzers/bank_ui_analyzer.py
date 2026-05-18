@@ -125,7 +125,9 @@ def analyze_bank_ui_context(
     bank_container_visible = _boolish(payload.get("bankContainerVisible"))
     bank_inventory_visible = _boolish(payload.get("bankInventoryVisible"))
     deposit_button_visible = _boolish(payload.get("depositInventoryButtonVisible"))
-    close_button_visible = _boolish(payload.get("bankCloseButtonVisible"))
+    close_button_visible = _boolish(payload.get("closeButtonVisible"))
+    if close_button_visible is None:
+        close_button_visible = _boolish(payload.get("bankCloseButtonVisible"))
 
     bank_open = _boolish(payload.get("bankOpen"))
     if bank_open is None and payload:
