@@ -147,6 +147,35 @@ class ResourceReturnAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["returnDestinationTile"], {"worldX": 3156, "worldY": 3237, "plane": 0})
         self.assertEqual(payload["reason"], "using_remembered_resource_area")
 
+    def test_banking_complete_bank_closed_on_different_plane_keeps_memory_available(self):
+        memory = resource_return_analyzer.ResourceAreaMemoryState()
+        resource_return_analyzer.update_resource_area_memory(
+            "woodcutting_bank",
+            memory,
+            inventory_context=inventory_context(free_slots=23),
+            target_context=TargetContext(raw_best_target=tree_target(), candidates=[tree_target()], profile_candidates=[tree_target()], source_tick=50),
+            bank_ui_context=BankUiContext(bank_open=False, source_tick=50),
+            current_task_state={"phase": "target_selected", "activeIntent": "continue_current_target", "activeIntentTarget": tree_target()},
+            player_context=player_context(plane=0),
+            source_tick=50,
+        )
+
+        context = resource_return_analyzer.analyze_resource_return_context(
+            "woodcutting_bank",
+            bank_operation_context=BankOperationContext(banking_complete=True, inventory_free_slots=15, source_tick=75),
+            bank_ui_context=BankUiContext(bank_open=False, source_tick=75),
+            target_context=TargetContext(raw_best_target=None, candidates=[], candidate_count=0, source_tick=75),
+            resource_memory_state=memory,
+            player_context=player_context(x=3208, y=3219, plane=2),
+            source_tick=75,
+        )
+
+        payload = context.to_dict()
+        self.assertTrue(payload["resourceMemoryValid"])
+        self.assertTrue(payload["returnDestinationAvailable"])
+        self.assertEqual(payload["returnDestinationTile"], {"worldX": 3156, "worldY": 3237, "plane": 0})
+        self.assertEqual(payload["reason"], "using_remembered_resource_area")
+
     def test_banking_complete_bank_closed_visible_target_does_not_use_memory(self):
         visible = tree_target(name="Willow", x=3160, y=3240)
         memory = resource_return_analyzer.ResourceAreaMemoryState(

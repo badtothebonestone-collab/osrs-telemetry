@@ -44,6 +44,7 @@ class ResourceAreaMemoryState:
         source_tick: int | None = None,
         current_plane: int | None = None,
         max_age_ticks: int = DEFAULT_MEMORY_MAX_AGE_TICKS,
+        require_current_plane_match: bool = False,
     ) -> tuple[bool, str | None]:
         if self.last_resource_activity_tick is None:
             return False, "no_resource_memory"
@@ -52,7 +53,7 @@ class ResourceAreaMemoryState:
         age = self.age_ticks(source_tick)
         if age is not None and age > max(0, int(max_age_ticks)):
             return False, "memory_expired"
-        if current_plane is not None and self.last_resource_plane is not None and int(current_plane) != int(self.last_resource_plane):
+        if require_current_plane_match and current_plane is not None and self.last_resource_plane is not None and int(current_plane) != int(self.last_resource_plane):
             return False, "wrong_plane"
         return True, None
 
