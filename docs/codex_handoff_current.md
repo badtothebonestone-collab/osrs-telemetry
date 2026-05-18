@@ -77,7 +77,37 @@ RuneLite plugin
   resource-return destination and the task can use return_to_resource /
   return_to_resource_area instead of treating missing tree candidates as an
   immediate resource-target failure.
+## Current Completed Milestone: Resource Return Destination / Resource Area Memory v1
 
+Resource Return Destination / Resource Area Memory v1 works and has been live-tested.
+
+Live QA:
+- Near trees after daemon restart:
+  - resourceMemoryValid=true
+  - visible target=Oak tree
+  - returnDestinationNeeded=false
+  - cycle stage=collecting_resources
+- First post-bank run exposed a bug:
+  - bankingComplete=true
+  - bankOpen=false
+  - memory was rejected as wrong_plane
+  - cycle fell back to needs_more_context/select_target
+  - gauntlet failed missing target candidates
+- Fix:
+  - remembered resource memory is no longer invalidated solely because current player plane differs
+  - remembered destination plane remains part of the return destination
+  - pathing may still warn if cross-plane routing is limited
+- Second post-bank live run:
+  - bankingComplete=true
+  - bankOpen=false
+  - resourceMemoryValid=true
+  - returnDestinationNeeded=true
+  - returnDestinationAvailable=true
+  - reason=using_remembered_resource_area
+  - phase=return_to_resource
+  - activeIntent=return_to_resource_area
+  - overlay selected=Resource return
+  - gauntlet=WARN, not FAIL, with target candidates optional
 ## Current service-memory proof
 
 Known-good service behavior:
