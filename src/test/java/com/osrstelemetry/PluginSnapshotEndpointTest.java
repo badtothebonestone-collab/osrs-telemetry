@@ -51,6 +51,7 @@ public class PluginSnapshotEndpointTest
 		Map<String, Object> schema = endpoint.schemaPayload();
 		assertEquals("plugin_snapshot_schema.v1", schema.get("schema"));
 		assertTrue(((List<?>) schema.get("supportedNeeds")).contains("projection"));
+		assertTrue(((List<?>) schema.get("supportedNeeds")).contains("bank_ui"));
 		assertTrue(schema.containsKey("configLimits"));
 		assertTrue(((List<?>) schema.get("supportedSchemas")).contains("telemetry_preset_request.v1"));
 		assertTrue(((List<?>) schema.get("supportedPresets")).contains("DAILY_LIVE"));
@@ -151,6 +152,32 @@ public class PluginSnapshotEndpointTest
 		assertTrue(payloads.containsKey("collision_window"));
 		assertFalse(((List<?>) response.get("missingCapabilities")).contains("navigation"));
 		assertFalse(((List<?>) response.get("missingCapabilities")).contains("collision_window"));
+	}
+
+	@Test
+	public void snapshotReturnsBankUiWhenCached()
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		cache.update("live_baseline_packet.v1", 9L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
+		cache.update("live_bank_ui_packet.v1", 9L, "2026-05-11T00:00:00Z", Map.of(
+				"bankOpen", true,
+				"bankReadable", true,
+				"bankContainerVisible", true,
+				"inventorySummary", Map.of("freeSlots", 0, "occupiedSlots", 28),
+				"bankSummary", Map.of("occupiedSlots", 12, "uniqueItemCount", 3)));
+		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
+		JsonObject request = new JsonObject();
+		JsonArray needs = new JsonArray();
+		needs.add("baseline");
+		needs.add("bank_ui");
+		request.add("needs", needs);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		Map<String, JsonElement> payloads = payloads(response);
+
+		assertEquals("PASS", response.get("status"));
+		assertTrue(payloads.containsKey("bank_ui"));
+		assertTrue(payloads.get("bank_ui").getAsJsonObject().get("bankOpen").getAsBoolean());
 	}
 
 	@Test

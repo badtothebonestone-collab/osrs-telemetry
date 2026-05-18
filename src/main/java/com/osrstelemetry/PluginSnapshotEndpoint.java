@@ -47,6 +47,7 @@ public class PluginSnapshotEndpoint implements Closeable
 			"activity",
 			"navigation",
 			"collision_window",
+			"bank_ui",
 			"writer_health",
 			"watch_values");
 	private static final Map<String, String> NEED_TO_PACKET_TYPE = createNeedMap();
@@ -954,6 +955,7 @@ public class PluginSnapshotEndpoint implements Closeable
 				.replace("sceneDelta", "scene_delta")
 				.replace("inventoryDelta", "inventory_delta")
 				.replace("collisionWindow", "collision_window")
+				.replace("bankUi", "bank_ui")
 				.replace("writerHealth", "writer_health")
 				.replace("watchValues", "watch_values")
 				.toLowerCase(Locale.ROOT);
@@ -1377,6 +1379,7 @@ public class PluginSnapshotEndpoint implements Closeable
 		map.put("activity", "live_activity_packet.v1");
 		map.put("navigation", "live_navigation_packet.v1");
 		map.put("collision_window", "live_collision_window_packet.v1");
+		map.put("bank_ui", "live_bank_ui_packet.v1");
 		map.put("writer_health", "live_writer_health_packet.v1");
 		map.put("watch_values", "live_watch_values_packet.v1");
 		return map;

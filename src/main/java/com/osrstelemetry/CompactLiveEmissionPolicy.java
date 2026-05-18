@@ -42,4 +42,11 @@ final class CompactLiveEmissionPolicy
 				&& navigationPacketTypeEnabled
 				&& collisionWindowPacketTypeEnabled;
 	}
+
+	static boolean bankUiEffective(
+			boolean bankUiPacketTypeEnabled,
+			boolean snapshotNoFileLiveCacheOnly)
+	{
+		return bankUiPacketTypeEnabled || snapshotNoFileLiveCacheOnly;
+	}
 }

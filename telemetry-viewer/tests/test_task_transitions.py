@@ -67,6 +67,34 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
         self.assertEqual(payload["serviceContextSummary"]["serviceReadyReason"], "arrived_at_service")
         self.assertEqual(payload["overlaySelectedMarker"]["classId"], "bank_booth")
 
+    def test_service_ready_bank_closed_stays_service_available(self):
+        payload = transitions.evaluate_transition_scenario("woodcutting_bank", "service_ready_bank_closed")
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["actualPhase"], "service_available")
+        self.assertEqual(payload["actualActiveIntent"], "service_available")
+        self.assertTrue(payload["serviceContextSummary"]["serviceReady"])
+        self.assertFalse(payload["bankUiContextSummary"]["bankOpen"])
+        self.assertFalse(payload["bankUiContextSummary"]["bankReadable"])
+
+    def test_service_ready_readable_bank_becomes_service_open(self):
+        payload = transitions.evaluate_transition_scenario("woodcutting_bank", "service_open")
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["actualPhase"], "service_open")
+        self.assertEqual(payload["actualActiveIntent"], "service_open")
+        self.assertTrue(payload["bankUiContextSummary"]["bankOpen"])
+        self.assertTrue(payload["bankUiContextSummary"]["bankReadable"])
+
+    def test_bank_pin_open_becomes_blocked_user_resolution(self):
+        payload = transitions.evaluate_transition_scenario("woodcutting_bank", "bank_pin_required")
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["actualPhase"], "blocked")
+        self.assertEqual(payload["actualActiveIntent"], "needs_user_resolution")
+        self.assertTrue(payload["bankUiContextSummary"]["bankPinOpen"])
+        self.assertIn("bank_pin_required", payload["blockingConditions"])
+
     def test_firemake_ready_reports_process_context_without_service(self):
         payload = transitions.evaluate_transition_scenario("woodcutting_firemake", "firemake_ready")
 

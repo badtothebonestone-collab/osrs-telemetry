@@ -140,7 +140,7 @@
     {
       "name": "analyzers\\*.py",
       "category": "daily",
-      "purpose": "Pure in-memory analyzers used inside live_core_daemon.py for inventory, targets, navigation intent, read-only pathing context, activity, brain context, and intent overlay markers.",
+      "purpose": "Pure in-memory analyzers used inside live_core_daemon.py for inventory, targets, navigation intent, read-only pathing context, service/process context, bank UI context, activity, brain context, and intent overlay markers.",
       "dailyRequired": true,
       "normalCommand": "imported by live_core_daemon.py",
       "input": "already-polled daemon snapshot/context data",
@@ -312,6 +312,18 @@
       "alternateCommand": "python telemetry-viewer\\diagnose_service_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json",
       "input": "live_core_daemon localhost /status endpoint",
       "output": "profile/service candidate counts, service candidate inputs, candidate types, top service-like raw candidates, and tier/cap visibility notes; no file writes",
+      "status": "advanced_debug",
+      "safeToHideInUi": true
+    },
+    {
+      "name": "diagnose_bank_ui_context.py",
+      "category": "advanced_debug",
+      "purpose": "One-shot read-only diagnostic for daemon Bank UI / Service State Context v1. Reads /status only and prints to stdout; JSON mode is stdout-only.",
+      "dailyRequired": false,
+      "normalCommand": "python telemetry-viewer\\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890",
+      "alternateCommand": "python telemetry-viewer\\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json",
+      "input": "live_core_daemon localhost /status endpoint",
+      "output": "bank open/readable/pin state, widget visibility, inventory summary, bank summary, warnings, and missing capabilities; no file writes",
       "status": "advanced_debug",
       "safeToHideInUi": true
     },

@@ -275,11 +275,21 @@ python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_bank --task
 python telemetry-viewer\diagnose_task_policy.py --policy woodcutting_firemake --task woodcutting --inventory-full true --resource-count 28 --goal-count 5 --json
 python telemetry-viewer\diagnose_navigation_intent.py --from-daemon --daemon-url http://127.0.0.1:8890 --task woodcutting --policy woodcutting_bank
 python telemetry-viewer\diagnose_service_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
 python telemetry-viewer\diagnose_pathing_matrix.py
 python telemetry-viewer\diagnose_pathing_matrix.py --json
 python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
 ```
+
+Bank UI / Service State Context v1 begins after service arrival. For
+`woodcutting_bank`, service-ready with no readable bank UI remains
+`service_available`, readable bank UI becomes `service_open`, and a visible
+bank pin becomes `blocked` with reason `bank_pin_required`. The plugin snapshot
+payload is compact bank/interface telemetry in the live cache only; it does not
+open, close, deposit, withdraw, type, click widgets, invoke menus, or add a
+rolling JSON/NDJSON output.
 
 Task transition QA uses synthetic in-memory fixtures, so it does not require
 RuneLite, sessions, compact packets, or live files:

@@ -63,6 +63,7 @@ Diagnostics and inspectors that are useful when daily output looks wrong:
 - `diagnose_pathing_context.py`
 - `diagnose_pathing_matrix.py`
 - `diagnose_service_context.py`
+- `diagnose_bank_ui_context.py`
 - `diagnose_target_coverage.py`
 - `run_stabilization_suite.py`
 - visual/perception/tab inspection helpers
@@ -76,6 +77,13 @@ Pathing matrix examples:
 python telemetry-viewer\diagnose_pathing_matrix.py
 python telemetry-viewer\diagnose_pathing_matrix.py --json
 python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+```
+
+Bank UI / Service State Context examples:
+
+```text
+python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
 ```
 
 ## Legacy File Pipeline

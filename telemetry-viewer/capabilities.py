@@ -39,6 +39,9 @@ CAPABILITY_ALIASES = {
     "watch_values.java_runtime": "plugin_snapshot.watch_values",
     "plugin_snapshot.watch_values": "plugin_snapshot.watch_values",
     "service.actions": "service.actions",
+    "bankUi": "bank_ui.telemetry",
+    "bank_ui": "bank_ui.telemetry",
+    "bank_ui.telemetry": "bank_ui.telemetry",
 }
 
 KNOWN_CAPABILITIES = {
@@ -59,6 +62,7 @@ KNOWN_CAPABILITIES = {
     "plugin_snapshot.watch_values": STATUS_EXPERIMENTAL,
     "movement.run_state": STATUS_OPTIONAL,
     "service.actions": STATUS_OPTIONAL,
+    "bank_ui.telemetry": STATUS_OPTIONAL,
 }
 
 

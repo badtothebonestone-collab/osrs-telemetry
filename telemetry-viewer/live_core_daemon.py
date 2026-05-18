@@ -21,6 +21,7 @@ import mission_presets
 import runtime_control
 import task_policy as task_policy_module
 from analyzers import activity_analyzer
+from analyzers import bank_ui_analyzer
 from analyzers import brain_context_analyzer
 from analyzers import intent_overlay_analyzer
 from analyzers import navigation_analyzer
@@ -492,6 +493,7 @@ class LiveCoreState:
                 "activity": result.get("activity") or {},
                 "events": result.get("events") or [],
                 "navigation": result.get("navigation") or {},
+                "bankUi": result.get("bankUi") or {},
                 "watchValues": result.get("watchValues") or {},
                 "performance": result.get("performance") or {},
                 "candidates": result.get("candidates") or [],
@@ -530,6 +532,7 @@ class LiveCoreState:
             "activity": {},
             "events": [],
             "navigation": {},
+            "bankUi": {},
             "watchValues": {},
             "performance": {},
             "candidates": [],
@@ -657,6 +660,24 @@ class LiveCoreState:
             "serviceReady",
             "serviceReadyReason",
             "serviceReadyStableForTicks",
+            "bankOpen",
+            "bankReadable",
+            "bankPinOpen",
+            "bankUiStatus",
+            "bankUiReason",
+            "bankUiMissingCapabilities",
+            "bankUiWarnings",
+            "bankTopLevelInterfaceId",
+            "bankRootVisible",
+            "bankContainerVisible",
+            "bankInventoryVisible",
+            "depositInventoryButtonVisible",
+            "bankCloseButtonVisible",
+            "bankOccupiedSlots",
+            "bankUniqueItemCount",
+            "inventoryOccupiedSlots",
+            "inventoryFreeSlots",
+            "inventoryMatchingResourceCount",
             "selectedServiceTargetName",
             "selectedServiceTargetTile",
             "distanceToServiceTarget",
@@ -953,6 +974,7 @@ class LiveCoreDaemon:
         candidates = context.get("candidates") if isinstance(context.get("candidates"), list) else []
         loaded_service_scene = context.get("loadedServiceScene") if isinstance(context.get("loadedServiceScene"), list) else []
         navigation = context.get("navigation") if isinstance(context.get("navigation"), dict) else {}
+        bank_ui = context.get("bankUi") if isinstance(context.get("bankUi"), dict) else {}
         activity = context.get("activity") if isinstance(context.get("activity"), dict) else {}
         events = context.get("events") if isinstance(context.get("events"), list) else []
         latest_tick = status.get("lastProcessedTick") or status.get("latestTickProcessed") or status.get("latestTick")
@@ -985,6 +1007,11 @@ class LiveCoreDaemon:
             ),
             navigation=navigation_analyzer.analyze_navigation(navigation, candidates),
             activity=activity_analyzer.analyze_activity(activity, events),
+            bank_ui=bank_ui_analyzer.analyze_bank_ui_context(
+                self.effective_task_policy(),
+                bank_ui_payload=bank_ui,
+                source_tick=latest_tick if isinstance(latest_tick, int) else None,
+            ),
             diagnostics={"contextSource": "memory", "analyzerFileWrites": False},
         )
         self.state.analysis_result = analysis
@@ -1432,6 +1459,46 @@ class LiveCoreDaemon:
                     generic_state["serviceReadyReason"] = pathing.service_ready_reason
                     brain_context.decision["phase"] = "service_available"
                     brain_context.decision["genericTaskState"] = generic_state
+            context_bank_ui = context.get("bankUi") if isinstance(context.get("bankUi"), dict) else {}
+            self.state.analysis_result.bank_ui = bank_ui_analyzer.analyze_bank_ui_context(
+                policy,
+                bank_ui_payload=context_bank_ui,
+                inventory_context=inventory_context,
+                service_context=service_context,
+                pathing_context=self.state.analysis_result.pathing,
+                source_tick=source_tick,
+            )
+            bank_ui_context = self.state.analysis_result.bank_ui
+            brain_context.decision["bankUiContext"] = bank_ui_context.to_dict()
+            if service_context and service_context.service_ready:
+                service_target = service_context.best_service_candidate if isinstance(service_context.best_service_candidate, dict) else None
+                if bank_ui_context.bank_pin_open is True:
+                    generic_state["phase"] = "blocked"
+                    generic_state["activeIntent"] = "needs_user_resolution"
+                    generic_state["activeIntentTarget"] = service_target
+                    if service_target:
+                        target_type = service_target.get("targetType") or "sceneObject"
+                        generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(service_target, str(target_type))
+                    blocking = [str(item) for item in generic_state.get("blockingConditions") or [] if item]
+                    if "bank_pin_required" not in blocking:
+                        blocking.append("bank_pin_required")
+                    generic_state["blockingConditions"] = blocking
+                    generic_state["bankPinOpen"] = True
+                    generic_state["bankUiReason"] = bank_ui_context.reason
+                    brain_context.decision["phase"] = "blocked"
+                    brain_context.decision["genericTaskState"] = generic_state
+                elif bank_ui_context.bank_open is True and bank_ui_context.bank_readable:
+                    generic_state["phase"] = "service_open"
+                    generic_state["activeIntent"] = "service_open"
+                    generic_state["activeIntentTarget"] = service_target
+                    if service_target:
+                        target_type = service_target.get("targetType") or "sceneObject"
+                        generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(service_target, str(target_type))
+                    generic_state["bankOpen"] = True
+                    generic_state["bankReadable"] = True
+                    generic_state["bankUiReason"] = bank_ui_context.reason
+                    brain_context.decision["phase"] = "service_open"
+                    brain_context.decision["genericTaskState"] = generic_state
             pathing_payload = self.state.analysis_result.pathing.to_dict()
             pathing_payload["overlayPredictedPathLimit"] = intent_overlay_analyzer.predicted_path_limit(self.args, self.args.overlay_mode)
             brain_context.decision["pathingContext"] = pathing_payload
@@ -1578,6 +1645,28 @@ class LiveCoreDaemon:
             fields["pathCompleted"] = pathing.path_completed
             fields["pathCompletionReason"] = pathing.path_completion_reason
             fields["retainedPathAfterArrival"] = pathing.retained_path_after_arrival
+        if self.state.analysis_result and self.state.analysis_result.bank_ui:
+            bank_ui = self.state.analysis_result.bank_ui
+            bank_summary = bank_ui.bank_summary if isinstance(bank_ui.bank_summary, dict) else {}
+            inventory_summary = bank_ui.inventory_summary if isinstance(bank_ui.inventory_summary, dict) else {}
+            fields["bankOpen"] = bank_ui.bank_open
+            fields["bankReadable"] = bank_ui.bank_readable
+            fields["bankPinOpen"] = bank_ui.bank_pin_open
+            fields["bankUiStatus"] = bank_ui.status
+            fields["bankUiReason"] = bank_ui.reason
+            fields["bankUiMissingCapabilities"] = list(bank_ui.missing_capabilities)
+            fields["bankUiWarnings"] = list(bank_ui.warnings)
+            fields["bankTopLevelInterfaceId"] = bank_ui.top_level_interface_id
+            fields["bankRootVisible"] = bank_ui.bank_root_visible
+            fields["bankContainerVisible"] = bank_ui.bank_container_visible
+            fields["bankInventoryVisible"] = bank_ui.bank_inventory_visible
+            fields["depositInventoryButtonVisible"] = bank_ui.deposit_inventory_button_visible
+            fields["bankCloseButtonVisible"] = bank_ui.bank_close_button_visible
+            fields["bankOccupiedSlots"] = bank_summary.get("occupiedSlots")
+            fields["bankUniqueItemCount"] = bank_summary.get("uniqueItemCount")
+            fields["inventoryFreeSlots"] = inventory_summary.get("freeSlots")
+            fields["inventoryOccupiedSlots"] = inventory_summary.get("occupiedSlots")
+            fields["inventoryMatchingResourceCount"] = inventory_summary.get("matchingResourceCount")
         self.state.source_status.update(fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)

@@ -85,6 +85,7 @@ COMPACT_PACKET_TYPES = {
     "projection": "live_projection_packet.v1",
     "inventory": "live_inventory_packet.v1",
     "inventoryDelta": "live_inventory_delta_packet.v1",
+    "bankUi": "live_bank_ui_packet.v1",
     "activity": "live_activity_packet.v1",
     "navigation": "live_navigation_packet.v1",
     "collisionWindow": "live_collision_window_packet.v1",
@@ -121,6 +122,7 @@ PLUGIN_SNAPSHOT_NEED_TO_PACKET_TYPE = {
     "projection": COMPACT_PACKET_TYPES["projection"],
     "inventory": COMPACT_PACKET_TYPES["inventory"],
     "inventory_delta": COMPACT_PACKET_TYPES["inventoryDelta"],
+    "bank_ui": COMPACT_PACKET_TYPES["bankUi"],
     "activity": COMPACT_PACKET_TYPES["activity"],
     "navigation": COMPACT_PACKET_TYPES["navigation"],
     "collision_window": COMPACT_PACKET_TYPES["collisionWindow"],
@@ -134,6 +136,7 @@ PLUGIN_SNAPSHOT_DEFAULT_NEEDS = [
     "projection",
     "inventory",
     "inventory_delta",
+    "bank_ui",
     "activity",
     "navigation",
     "collision_window",
@@ -1337,6 +1340,7 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
     projection, projection_diagnostics = normalize_projection_payload(projection if isinstance(projection, dict) else {})
     inventory = by_type.get(COMPACT_PACKET_TYPES["inventory"], {}).get("payload") or {}
     inventory_delta_packet = by_type.get(COMPACT_PACKET_TYPES["inventoryDelta"], {}).get("payload") or {}
+    bank_ui = by_type.get(COMPACT_PACKET_TYPES["bankUi"], {}).get("payload") or {}
     activity = by_type.get(COMPACT_PACKET_TYPES["activity"], {}).get("payload") or {}
     navigation = by_type.get(COMPACT_PACKET_TYPES["navigation"], {}).get("payload") or {}
     collision_window = by_type.get(COMPACT_PACKET_TYPES["collisionWindow"], {}).get("payload") or {}
@@ -1421,6 +1425,8 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
         tick["_inventoryDeltaTrackingAvailable"] = bool(inventory.get("inventoryDeltaTrackingAvailable"))
     if isinstance(inventory_delta_packet, dict) and inventory_delta_packet:
         tick["_inventoryDelta"] = inventory_delta_packet
+    if isinstance(bank_ui, dict) and bank_ui:
+        tick["_bankUi"] = bank_ui
     if isinstance(activity, dict) and activity:
         tick["_activityPacket"] = activity
 
@@ -4075,6 +4081,28 @@ def live_watch_values_state(
         "warnings": sorted(set(warnings)),
         "source": "live_target_processor",
     }
+
+
+def bank_ui_state_for(tick: dict | None, inventory_state: dict | None = None) -> dict:
+    tick = tick if isinstance(tick, dict) else {}
+    bank_ui = tick.get("_bankUi") if isinstance(tick.get("_bankUi"), dict) else {}
+    payload = dict(bank_ui) if bank_ui else {}
+    if isinstance(inventory_state, dict):
+        resource_counts = inventory_state.get("resourceCounts") if isinstance(inventory_state.get("resourceCounts"), dict) else {}
+        woodcutting_logs = resource_counts.get("woodcutting_logs") if isinstance(resource_counts.get("woodcutting_logs"), dict) else {}
+        payload.setdefault(
+            "inventorySummary",
+            {
+                "freeSlots": inventory_state.get("freeSlots"),
+                "occupiedSlots": inventory_state.get("filledSlots"),
+                "slotCount": inventory_state.get("inventorySlotCount"),
+                "matchingResourceCount": woodcutting_logs.get("count"),
+            },
+        )
+    if payload:
+        payload.setdefault("latestTick", tick_id_for(tick))
+        payload.setdefault("source", tick.get("_inputSource"))
+    return payload
 
 
 def overlay_liveness_interpretation(candidate: dict | None, status: dict) -> str:
@@ -7356,9 +7384,11 @@ class LiveTargetProcessor:
             status["pluginSnapshotLoadedServiceSceneCount"] = len(loaded_service_scene)
         status["loadedServiceSceneCount"] = len(loaded_service_scene)
         watch_values = live_watch_values_state(latest_tick_record, inventory_state, activity, status, processed_at)
+        bank_ui = bank_ui_state_for(latest_tick_record, inventory_state)
         status["watchValuesPath"] = str(paths["watchValues"])
         status["watchValueCount"] = len(watch_values.get("valuesByAlias") or {})
         status["watchBudgetExceeded"] = bool(watch_values.get("watchBudgetExceeded"))
+        status["bankUiPacketAvailable"] = bool(bank_ui)
         index = self.index_payload(output_ticks, world_output_records, ui_records, candidates, candidate_stats, processed_at, frame_ticks)
 
         output_bytes = {}
@@ -7563,6 +7593,7 @@ class LiveTargetProcessor:
             "tickSummaries": tick_summaries,
             "baseline": baseline,
             "activity": activity,
+            "bankUi": bank_ui,
             "watchValues": watch_values,
             "events": list(self.event_timeline),
             "overlayDebug": overlay_debug,

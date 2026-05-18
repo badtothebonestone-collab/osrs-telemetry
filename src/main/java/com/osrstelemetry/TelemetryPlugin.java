@@ -101,6 +101,7 @@ import net.runelite.client.util.ImageCapture;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
+import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.widgets.Widget;
 
 @Slf4j
@@ -122,6 +123,7 @@ public class TelemetryPlugin extends Plugin
 	private static final String PACKET_NAVIGATION = "live_navigation_packet.v1";
 	private static final String PACKET_COLLISION_WINDOW = "live_collision_window_packet.v1";
 	private static final String PACKET_COLLISION_GRID = "live_collision_grid_packet.v1";
+	private static final String PACKET_BANK_UI = "live_bank_ui_packet.v1";
 	private static final String PACKET_WRITER_HEALTH = "live_writer_health_packet.v1";
 	private static final int MAX_SERVICE_SCENE_OBJECTS = 32;
 	private static final int SERVICE_SCENE_OBJECT_RADIUS = 48;
@@ -501,6 +503,7 @@ public class TelemetryPlugin extends Plugin
 				safeCapture(captureErrors, "npcs", () -> captureNpcs(snapshot));
 				safeCapture(captureErrors, "players", () -> capturePlayers(snapshot));
 				safeCapture(captureErrors, "widgets", () -> captureWidgets(snapshot));
+				safeCapture(captureErrors, "bankUi", () -> captureBankUi(snapshot));
 				safeCapture(captureErrors, "scene", () -> captureScene(snapshot));
 				safeCapture(captureErrors, "status", () -> captureStatus(snapshot));
 				safeCapture(captureErrors, "activePrayers", () -> captureActivePrayers(snapshot));
@@ -1010,6 +1013,7 @@ public class TelemetryPlugin extends Plugin
 
 		boolean navigationEffective = emitNavigationEffective(currentWriter);
 		boolean collisionWindowEffective = emitCollisionWindowEffective(currentWriter);
+		boolean bankUiEffective = emitBankUiEffective(currentWriter);
 
 		if (navigationEffective)
 		{
@@ -1019,6 +1023,11 @@ public class TelemetryPlugin extends Plugin
 		if (collisionWindowEffective)
 		{
 			currentWriter.enqueueLivePacket(PACKET_COLLISION_WINDOW, snapshot.tickId, snapshot.timestampUtc, collisionWindowPayload(snapshot));
+		}
+
+		if (bankUiEffective)
+		{
+			currentWriter.updateLiveCache(PACKET_BANK_UI, snapshot.tickId, snapshot.timestampUtc, bankUiPayload(snapshot));
 		}
 
 		if (config.emitCompactNavigationPackets()
@@ -1060,6 +1069,13 @@ public class TelemetryPlugin extends Plugin
 				config.compactNavigationEmitCollisionWindow(),
 				compactPacketTypeEnabled("navigation"),
 				compactPacketTypeEnabled("collisionWindow"),
+				snapshotNoFileLiveCacheOnly(currentWriter));
+	}
+
+	private boolean emitBankUiEffective(TelemetryWriter currentWriter)
+	{
+		return CompactLiveEmissionPolicy.bankUiEffective(
+				compactPacketTypeEnabled("bankUi"),
 				snapshotNoFileLiveCacheOnly(currentWriter));
 	}
 
@@ -2072,10 +2088,48 @@ public class TelemetryPlugin extends Plugin
 		return payload;
 	}
 
+	private Map<String, Object> bankUiPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		TickSnapshot.BankUiSnapshot bankUi = snapshot == null ? null : snapshot.bankUi;
+
+		payload.put("schema", "bank_ui_context_payload.v1");
+		payload.put("tick", snapshot == null ? null : snapshot.tickId);
+		payload.put("topLevelInterfaceId", bankUi == null ? null : bankUi.topLevelInterfaceId);
+		payload.put("bankOpen", bankUi == null ? null : bankUi.bankOpen);
+		payload.put("bankPinOpen", bankUi == null ? null : bankUi.bankPinOpen);
+		payload.put("bankRootVisible", bankUi == null ? null : bankUi.bankRootVisible);
+		payload.put("bankContainerVisible", bankUi == null ? null : bankUi.bankContainerVisible);
+		payload.put("bankInventoryVisible", bankUi == null ? null : bankUi.bankInventoryVisible);
+		payload.put("depositInventoryButtonVisible", bankUi == null ? null : bankUi.depositInventoryButtonVisible);
+		payload.put("bankCloseButtonVisible", bankUi == null ? null : bankUi.bankCloseButtonVisible);
+		payload.put("bankRootWidget", bankUi == null ? null : bankUi.bankRootWidget);
+		payload.put("bankContainerWidget", bankUi == null ? null : bankUi.bankContainerWidget);
+		payload.put("bankInventoryWidget", bankUi == null ? null : bankUi.bankInventoryWidget);
+		payload.put("depositInventoryButtonWidget", bankUi == null ? null : bankUi.depositInventoryButtonWidget);
+		payload.put("bankPinWidget", bankUi == null ? null : bankUi.bankPinWidget);
+		payload.put("inventorySummary", itemContainerSnapshot(snapshot == null ? null : snapshot.inventory));
+		payload.put("bankSummary", itemContainerSummary(bankUi == null ? null : bankUi.bankItems));
+		return payload;
+	}
+
 	private Map<String, Object> itemContainerSnapshot(TickSnapshot.InventorySlot[] slots)
+	{
+		return itemContainerPayload(slots, true);
+	}
+
+	private Map<String, Object> itemContainerSummary(TickSnapshot.InventorySlot[] slots)
+	{
+		return itemContainerPayload(slots, false);
+	}
+
+	private Map<String, Object> itemContainerPayload(TickSnapshot.InventorySlot[] slots, boolean includeItems)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
 		List<Map<String, Object>> items = new ArrayList<>();
+		List<Integer> uniqueItemIds = new ArrayList<>();
+		Set<Integer> uniqueSeen = new HashSet<>();
+		Map<Integer, Integer> totalQuantityByItemId = new LinkedHashMap<>();
 		int freeSlots = 0;
 		int filledSlots = 0;
 		int totalItemQuantity = 0;
@@ -2099,21 +2153,36 @@ public class TelemetryPlugin extends Plugin
 			filledSlots++;
 			totalItemQuantity += slot.quantity;
 			signature.append(slot.slot).append(':').append(slot.itemId).append(':').append(slot.quantity).append(';');
+			if (uniqueSeen.add(slot.itemId))
+			{
+				uniqueItemIds.add(slot.itemId);
+			}
+			totalQuantityByItemId.put(slot.itemId, totalQuantityByItemId.getOrDefault(slot.itemId, 0) + slot.quantity);
 
-			Map<String, Object> item = new LinkedHashMap<>();
-			item.put("slot", slot.slot);
-			item.put("itemId", slot.itemId);
-			item.put("quantity", slot.quantity);
-			items.add(item);
+			if (includeItems)
+			{
+				Map<String, Object> item = new LinkedHashMap<>();
+				item.put("slot", slot.slot);
+				item.put("itemId", slot.itemId);
+				item.put("quantity", slot.quantity);
+				items.add(item);
+			}
 		}
 
 		payload.put("known", true);
 		payload.put("freeSlots", freeSlots);
 		payload.put("filledSlots", filledSlots);
+		payload.put("occupiedSlots", filledSlots);
 		payload.put("itemCount", totalItemQuantity);
 		payload.put("totalItemQuantity", totalItemQuantity);
+		payload.put("uniqueItemIds", uniqueItemIds);
+		payload.put("uniqueItemCount", uniqueItemIds.size());
+		payload.put("totalQuantityByItemId", totalQuantityByItemId);
 		payload.put("signature", hashName(signature.toString()));
-		payload.put("items", items);
+		if (includeItems)
+		{
+			payload.put("items", items);
+		}
 		return payload;
 	}
 
@@ -2734,10 +2803,13 @@ public class TelemetryPlugin extends Plugin
 		payload.put("liveCacheHealth", liveCacheHealth);
 		payload.put("navigationCachePresent", liveCachePayloadTypes.contains(PACKET_NAVIGATION));
 		payload.put("collisionWindowCachePresent", liveCachePayloadTypes.contains(PACKET_COLLISION_WINDOW));
+		payload.put("bankUiCachePresent", liveCachePayloadTypes.contains(PACKET_BANK_UI));
 		payload.put("navigationPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_NAVIGATION, snapshot));
 		payload.put("collisionWindowPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_COLLISION_WINDOW, snapshot));
+		payload.put("bankUiPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_BANK_UI, snapshot));
 		payload.put("emitNavigationEffective", emitNavigationEffective(currentWriter));
 		payload.put("emitCollisionWindowEffective", emitCollisionWindowEffective(currentWriter));
+		payload.put("emitBankUiEffective", emitBankUiEffective(currentWriter));
 		payload.put("emitCompactNavigationPacketsConfigured", config.emitCompactNavigationPackets());
 		payload.put("compactNavigationEmitCollisionWindowConfigured", config.compactNavigationEmitCollisionWindow());
 		payload.put("compactLivePacketTypesConfigured", config.compactLivePacketTypes());
@@ -3056,6 +3128,92 @@ public class TelemetryPlugin extends Plugin
 		snapshot.widgets = widgets;
 	}
 
+	private void captureBankUi(TickSnapshot snapshot)
+	{
+		TickSnapshot.BankUiSnapshot bankUi = new TickSnapshot.BankUiSnapshot();
+		Widget bankRoot = client.getWidget(InterfaceID.Bankmain.UNIVERSE);
+		Widget bankItemsContainer = client.getWidget(InterfaceID.Bankmain.ITEMS_CONTAINER);
+		Widget bankItems = client.getWidget(InterfaceID.Bankmain.ITEMS);
+		Widget bankDepositInventory = client.getWidget(InterfaceID.Bankmain.DEPOSITINV);
+		Widget depositRoot = client.getWidget(InterfaceID.BankDepositbox.UNIVERSE);
+		Widget depositContents = client.getWidget(InterfaceID.BankDepositbox.CONTENTS);
+		Widget depositInventory = client.getWidget(InterfaceID.BankDepositbox.INVENTORY);
+		Widget depositInventoryButton = client.getWidget(InterfaceID.BankDepositbox.DEPOSIT_INV);
+		Widget bankPinRoot = client.getWidget(InterfaceID.BankpinKeypad.UNIVERSE);
+		boolean bankRootVisible = widgetVisible(bankRoot);
+		boolean depositRootVisible = widgetVisible(depositRoot);
+		boolean bankContainerVisible = widgetVisible(bankItemsContainer) || widgetVisible(bankItems) || widgetVisible(depositContents);
+		boolean bankInventoryVisible = widgetVisible(bankItems) || widgetVisible(depositInventory);
+		boolean depositButtonVisible = widgetVisible(bankDepositInventory) || widgetVisible(depositInventoryButton);
+		boolean bankPinVisible = widgetVisible(bankPinRoot);
+
+		bankUi.bankRootVisible = bankRootVisible;
+		bankUi.bankOpen = bankRootVisible || depositRootVisible;
+		bankUi.bankPinOpen = bankPinVisible;
+		bankUi.bankContainerVisible = bankContainerVisible;
+		bankUi.bankInventoryVisible = bankInventoryVisible;
+		bankUi.depositInventoryButtonVisible = depositButtonVisible;
+		bankUi.bankCloseButtonVisible = null;
+		bankUi.topLevelInterfaceId = firstVisibleTopLevelId(bankRoot, depositRoot, bankPinRoot);
+		bankUi.bankRootWidget = widgetSnapshot(-1, widgetVisible(bankRoot) ? bankRoot : depositRoot);
+		bankUi.bankContainerWidget = widgetSnapshot(-1, firstVisibleWidget(bankItemsContainer, bankItems, depositContents));
+		bankUi.bankInventoryWidget = widgetSnapshot(-1, firstVisibleWidget(bankItems, depositInventory));
+		bankUi.depositInventoryButtonWidget = widgetSnapshot(-1, firstVisibleWidget(bankDepositInventory, depositInventoryButton));
+		bankUi.bankPinWidget = widgetSnapshot(-1, bankPinRoot);
+		bankUi.bankItems = itemContainerSlots(client.getItemContainer(InventoryID.BANK), 0);
+		snapshot.bankUi = bankUi;
+	}
+
+	private boolean widgetVisible(Widget widget)
+	{
+		return widget != null && !widget.isHidden();
+	}
+
+	private Widget firstVisibleWidget(Widget... widgets)
+	{
+		if (widgets == null)
+		{
+			return null;
+		}
+		for (Widget widget : widgets)
+		{
+			if (widgetVisible(widget))
+			{
+				return widget;
+			}
+		}
+		return null;
+	}
+
+	private Integer firstVisibleTopLevelId(Widget... widgets)
+	{
+		Widget widget = firstVisibleWidget(widgets);
+		return widget == null ? null : widget.getId() >>> 16;
+	}
+
+	private TickSnapshot.WidgetSnapshot widgetSnapshot(int index, Widget widget)
+	{
+		if (!widgetVisible(widget))
+		{
+			return null;
+		}
+
+		TickSnapshot.WidgetSnapshot widgetSnapshot = new TickSnapshot.WidgetSnapshot();
+		widgetSnapshot.index = index;
+		widgetSnapshot.id = widget.getId();
+		widgetSnapshot.type = widget.getType();
+		widgetSnapshot.hidden = widget.isHidden();
+		widgetSnapshot.text = cleanWidgetText(widget.getText());
+		widgetSnapshot.name = cleanWidgetText(widget.getName());
+		widgetSnapshot.x = widget.getCanvasLocation() != null ? widget.getCanvasLocation().getX() : -1;
+		widgetSnapshot.y = widget.getCanvasLocation() != null ? widget.getCanvasLocation().getY() : -1;
+		widgetSnapshot.width = widget.getWidth();
+		widgetSnapshot.height = widget.getHeight();
+		Widget[] children = widget.getChildren();
+		widgetSnapshot.childCount = children == null ? 0 : children.length;
+		return widgetSnapshot;
+	}
+
 	private String cleanWidgetText(String value)
 	{
 		if (value == null)
@@ -3128,6 +3286,32 @@ public class TelemetryPlugin extends Plugin
 			snapshot.inventory[i] = slot;
 		}
 	}
+
+	private TickSnapshot.InventorySlot[] itemContainerSlots(ItemContainer container, int minSlotCount)
+	{
+		if (container == null)
+		{
+			return null;
+		}
+
+		Item[] items = container.getItems();
+		int slotCount = Math.max(Math.max(0, minSlotCount), items.length);
+		TickSnapshot.InventorySlot[] slots = new TickSnapshot.InventorySlot[slotCount];
+
+		for (int i = 0; i < slotCount; i++)
+		{
+			Item item = i < items.length ? items[i] : null;
+			TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
+			slot.slot = i;
+			slot.itemId = item == null ? -1 : item.getId();
+			slot.quantity = item == null ? 0 : item.getQuantity();
+			rememberItem(slot.itemId);
+			slots[i] = slot;
+		}
+
+		return slots;
+	}
+
 	private void captureEquipment(TickSnapshot snapshot)
 	{
 		ItemContainer equipment = client.getItemContainer(InventoryID.EQUIPMENT);

@@ -216,6 +216,8 @@ small in-memory analyzers now keep the responsibilities separated:
 - `analyzers\service_analyzer.py` and
   `analyzers\process_inventory_analyzer.py` report read-only service/process
   context only when the active policy asks for it.
+- `analyzers\bank_ui_analyzer.py` reports read-only Bank UI / Service State
+  Context v1 once a service target is reached.
 
 These analyzers do not poll inputs, call RuneLite, read compact packet files,
 write JSON/NDJSON, or start services. They consume the snapshot/context already
@@ -287,6 +289,28 @@ Service/process context is policy-gated:
 
 These summaries are context, not commands. Diagnostics report read-only context
 fields directly and do not interact with the game.
+
+Bank UI / Service State Context v1 starts after `woodcutting_bank` reaches
+`serviceReady`. The plugin snapshot/live cache exposes a compact cache-only
+`bank_ui` payload with top-level interface ID, bank-open state, bank-pin state,
+bank root and container visibility, deposit-inventory button visibility, widget
+bounds when available, and compact inventory/bank summaries. The Python
+`bank_ui_analyzer.py` turns that into `bankUiContext`:
+
+- service ready with no readable bank UI remains `service_available`
+- readable bank UI becomes `service_open`
+- visible bank pin becomes `blocked` / `needs_user_resolution` with reason
+  `bank_pin_required`
+
+The diagnostic command is:
+
+```text
+python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
+```
+
+This is still telemetry only. It does not open, close, deposit, withdraw, type a
+PIN, click widgets, invoke menus, or add a rolling JSON/NDJSON output.
 
 Navigation intent context is also read-only. When `woodcutting_bank` reaches a
 full-inventory `needs_service` phase and a bank-service candidate is already

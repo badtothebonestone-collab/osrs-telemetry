@@ -61,6 +61,7 @@ Canonical names include:
 - `overlay.intent_markers`
 - `plugin_snapshot.watch_values`
 - `service.actions` (optional read-only context only, never emitted as commands)
+- `bank_ui.telemetry`
 - `movement.run_state` (optional read-only observation only, never emitted as a command)
 
 Legacy aliases such as `inventoryDeltas`, `animationFrame`,
@@ -84,6 +85,7 @@ Generic phases are:
 - `inventory_full`
 - `navigate_to_service`
 - `service_available`
+- `service_open`
 - `service_interaction_pending`
 - `goal_complete`
 - `blocked`
@@ -189,8 +191,8 @@ Inputs: none at runtime beyond constructor values.
 
 Outputs: `LiveInputSnapshot`, `LiveSourceStatus`, `InventoryContext`,
 `TargetContext`, `NavigationContext`, `NavigationIntentContext`, `ActivityContext`,
-`IntentOverlayContext`, `BrainContext`, `LiveAnalysisResult`, and common
-contract helpers.
+`BankUiContext`, `IntentOverlayContext`, `BrainContext`, `LiveAnalysisResult`,
+and common contract helpers.
 
 Forbidden side effects: all I/O, network, processes, and action emission.
 
@@ -198,6 +200,29 @@ Performance expectation: negligible; this module is structure only.
 
 Future expansion: add new shared fields here only when multiple analyzers need
 them.
+
+## `bank_ui_analyzer.py`
+
+Purpose: report read-only Bank UI / Service State Context v1 after a service
+target is reached. It interprets compact plugin snapshot fields for bank root,
+bank container, bank inventory, deposit-inventory button, close button, bank
+pin, inventory summary, and bank container summary.
+
+Inputs: the current in-memory `bank_ui` payload from PluginLiveCache,
+inventory context, service/pathing readiness context, and task policy.
+
+Outputs: `BankUiContext` with `bankOpen`, `bankPinOpen`, `bankReadable`,
+`bankContainerReadable`, `bankInventoryReadable`, `depositInventoryAvailable`,
+`closeButtonAvailable`, `inventorySummary`, `bankSummary`, missing
+capabilities, warnings, source tick, and timing.
+
+Task-state use: for `woodcutting_bank`, `serviceReady=true` with no open bank
+remains `service_available`; readable bank UI becomes `service_open`; visible
+bank pin becomes `blocked` / `needs_user_resolution` with reason
+`bank_pin_required`.
+
+Forbidden side effects: no file I/O, endpoint calls, widget interaction, bank
+actions, menu calls, or client/game mutation.
 
 ## `inventory_analyzer.py`
 

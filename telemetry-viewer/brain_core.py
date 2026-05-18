@@ -606,6 +606,12 @@ def context_domain_summary(
     elif active_intent == "service_available":
         required = ["inventory", "service"]
         optional = ["target.candidates", "navigation.pathing"]
+    elif active_intent == "service_open":
+        required = ["inventory", "service", "bank_ui"]
+        optional = ["target.candidates", "navigation.pathing"]
+    elif active_intent == "needs_user_resolution":
+        required = ["service", "bank_ui"]
+        optional = ["inventory", "target.candidates", "navigation.pathing"]
     elif active_intent in {"select_target", "continue_current_target"} or phase in {"select_target", "target_selected"}:
         required = ["target.candidates", "target.freshness"]
         optional = ["navigation.full_pathfinding"]
@@ -654,6 +660,9 @@ def context_domain_summary(
     service_context = decision.get("serviceContext") if isinstance(decision.get("serviceContext"), dict) else {}
     if "service" in required and service_context and service_context.get("serviceNeeded") is False:
         missing_required.append("service")
+    bank_ui_context = decision.get("bankUiContext") if isinstance(decision.get("bankUiContext"), dict) else {}
+    if "bank_ui" in required and (not bank_ui_context or bank_ui_context.get("bankOpen") is None):
+        missing_required.append("bank_ui")
 
     if "inventory" in optional and inventory_missing:
         optional_missing.append("inventory")
@@ -2196,6 +2205,7 @@ def format_human(decision: dict) -> str:
     process_context = decision.get("processInventoryContext") if isinstance(decision.get("processInventoryContext"), dict) else {}
     navigation_intent_context = decision.get("navigationIntentContext") if isinstance(decision.get("navigationIntentContext"), dict) else {}
     pathing_context = decision.get("pathingContext") if isinstance(decision.get("pathingContext"), dict) else {}
+    bank_ui_context = decision.get("bankUiContext") if isinstance(decision.get("bankUiContext"), dict) else {}
     active_intent = str(generic_state.get("activeIntent") or "")
     active_target = generic_state.get("activeIntentTarget") if isinstance(generic_state.get("activeIntentTarget"), dict) else None
     available_target = generic_state.get("availableTarget") if isinstance(generic_state.get("availableTarget"), dict) else None
@@ -2245,6 +2255,12 @@ def format_human(decision: dict) -> str:
             lines.append(f"  distance to target: {text(service_context.get('distanceToServiceTarget'))}")
         if service_context.get("distanceToFinalApproach") is not None:
             lines.append(f"  distance to final approach: {text(service_context.get('distanceToFinalApproach'))}")
+    if bank_ui_context:
+        lines.extend(["", "Service UI:"])
+        lines.append(f"  service ready: {'yes' if bank_ui_context.get('serviceReady') else 'no'}")
+        lines.append(f"  bank open: {text(bank_ui_context.get('bankOpen'))}")
+        lines.append(f"  bank readable: {text(bank_ui_context.get('bankReadable'))}")
+        lines.append(f"  bank pin open: {text(bank_ui_context.get('bankPinOpen'))}")
     if process_needed:
         lines.append(f"  Process needed: {text(process_needed)}")
         if process_context.get("heldResourceCount") is not None:

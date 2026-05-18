@@ -33,6 +33,7 @@ public class TickSnapshot
     public SceneObjectSnapshot[] sceneObjects;
     public GroundItemSnapshot[] groundItems;
     public StatusSnapshot status;
+    public BankUiSnapshot bankUi;
     public ActivePrayerSnapshot[] activePrayers;
     public String framePath;
     public String frameCaptureStatus;
@@ -58,6 +59,25 @@ public class TickSnapshot
         public int height;
         public int childCount;
     }
+
+    public static class BankUiSnapshot
+    {
+        public Integer topLevelInterfaceId;
+        public Boolean bankOpen;
+        public Boolean bankPinOpen;
+        public Boolean bankRootVisible;
+        public Boolean bankContainerVisible;
+        public Boolean bankInventoryVisible;
+        public Boolean depositInventoryButtonVisible;
+        public Boolean bankCloseButtonVisible;
+        public WidgetSnapshot bankRootWidget;
+        public WidgetSnapshot bankContainerWidget;
+        public WidgetSnapshot bankInventoryWidget;
+        public WidgetSnapshot depositInventoryButtonWidget;
+        public WidgetSnapshot bankPinWidget;
+        public InventorySlot[] bankItems;
+    }
+
     public static class LocalPlayer
     {
         public int worldX;

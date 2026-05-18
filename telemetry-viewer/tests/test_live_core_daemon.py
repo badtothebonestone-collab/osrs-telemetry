@@ -19,7 +19,7 @@ import live_context_format
 import live_target_processor as live
 import test_live_target_processor as fixtures
 import diagnose_brain_progress
-from analyzers.live_state import PathingContext, ServiceContext
+from analyzers.live_state import BankUiContext, PathingContext, ServiceContext
 
 
 def make_args(session: Path, *extra: str):
@@ -403,6 +403,117 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertTrue(status["pathCompleted"])
         self.assertFalse(status["pathingNeeded"])
         self.assertEqual(status["pathCompletionReason"], "arrived_at_service")
+
+    def test_readable_bank_ui_updates_brain_phase_and_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            response["payloads"]["bank_ui"] = {
+                "bankOpen": True,
+                "bankPinOpen": False,
+                "bankRootVisible": True,
+                "bankContainerVisible": True,
+                "bankInventoryVisible": True,
+                "inventorySummary": {"freeSlots": 0, "occupiedSlots": 28, "matchingResourceCount": 28},
+                "bankSummary": {"occupiedSlots": 12, "uniqueItemIds": [1511, 1521]},
+            }
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service_target = {
+                "targetType": "sceneObject",
+                "classId": "bank_booth",
+                "targetName": "Bank booth",
+                "id": 10355,
+                "worldX": 3208,
+                "worldY": 3219,
+                "plane": 0,
+            }
+            service = ServiceContext(
+                service_required=True,
+                service_type_needed="bank_full",
+                best_service_candidate=service_target,
+                candidate_count=1,
+                source_tick=1,
+            )
+            pathing = PathingContext(
+                pathing_needed=False,
+                destination=service_target,
+                destination_tile={"worldX": 3208, "worldY": 3219, "plane": 0},
+                service_ready=True,
+                service_ready_reason="arrived_at_service",
+                service_ready_stable_for_ticks=2,
+                path_completed=True,
+                source_tick=1,
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
+                    with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", return_value=pathing):
+                        core = daemon.LiveCoreDaemon(session, args)
+                        core.poll_once()
+
+        status = core.state.status()
+        generic = core.state.brain_decision["genericTaskState"]
+        self.assertEqual(generic["phase"], "service_open")
+        self.assertEqual(generic["activeIntent"], "service_open")
+        self.assertIn("bankUiContext", core.state.brain_decision)
+        self.assertTrue(status["bankOpen"])
+        self.assertTrue(status["bankReadable"])
+        self.assertFalse(status["bankPinOpen"])
+        self.assertEqual(status["bankOccupiedSlots"], 12)
+        self.assertEqual(status["bankUniqueItemCount"], 2)
+
+    def test_bank_pin_ui_blocks_after_service_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            response["payloads"]["bank_ui"] = {
+                "bankOpen": True,
+                "bankPinOpen": True,
+                "bankRootVisible": True,
+            }
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service = ServiceContext(
+                service_required=True,
+                service_type_needed="bank_full",
+                best_service_candidate={"targetType": "sceneObject", "classId": "bank_booth", "targetName": "Bank booth", "worldX": 3208, "worldY": 3219, "plane": 0},
+                candidate_count=1,
+                source_tick=1,
+            )
+            pathing = PathingContext(
+                pathing_needed=False,
+                service_ready=True,
+                service_ready_reason="arrived_at_service",
+                service_ready_stable_for_ticks=2,
+                path_completed=True,
+                source_tick=1,
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
+                    with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", return_value=pathing):
+                        core = daemon.LiveCoreDaemon(session, args)
+                        core.poll_once()
+
+        status = core.state.status()
+        generic = core.state.brain_decision["genericTaskState"]
+        self.assertEqual(generic["phase"], "blocked")
+        self.assertEqual(generic["activeIntent"], "needs_user_resolution")
+        self.assertIn("bank_pin_required", generic["blockingConditions"])
+        self.assertTrue(status["bankPinOpen"])
 
     def test_daemon_passes_in_memory_path_intent_state_to_pathing_analyzer(self):
         with tempfile.TemporaryDirectory() as tmp:

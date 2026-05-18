@@ -550,6 +550,55 @@ class ProcessInventoryContext(AnalyzerContractFields):
 
 
 @dataclass
+class BankUiContext(AnalyzerContractFields):
+    status: str = "PASS"
+    warnings: list[str] = field(default_factory=list)
+    missing_capabilities: list[str] = field(default_factory=list)
+    source_tick: int | None = None
+    retained_from_previous: bool = False
+    timing_millis: float | None = None
+    bank_open: bool | None = None
+    bank_pin_open: bool | None = None
+    bank_readable: bool = False
+    bank_container_readable: bool = False
+    bank_inventory_readable: bool = False
+    deposit_inventory_available: bool | None = None
+    close_button_available: bool | None = None
+    top_level_interface_id: int | None = None
+    bank_root_visible: bool | None = None
+    bank_container_visible: bool | None = None
+    bank_inventory_visible: bool | None = None
+    deposit_inventory_button_visible: bool | None = None
+    bank_close_button_visible: bool | None = None
+    inventory_summary: dict[str, Any] = field(default_factory=dict)
+    bank_summary: dict[str, Any] = field(default_factory=dict)
+    service_ready: bool = False
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.contract_payload(),
+            "bankOpen": self.bank_open,
+            "bankPinOpen": self.bank_pin_open,
+            "bankReadable": self.bank_readable,
+            "bankContainerReadable": self.bank_container_readable,
+            "bankInventoryReadable": self.bank_inventory_readable,
+            "depositInventoryAvailable": self.deposit_inventory_available,
+            "closeButtonAvailable": self.close_button_available,
+            "topLevelInterfaceId": self.top_level_interface_id,
+            "bankRootVisible": self.bank_root_visible,
+            "bankContainerVisible": self.bank_container_visible,
+            "bankInventoryVisible": self.bank_inventory_visible,
+            "depositInventoryButtonVisible": self.deposit_inventory_button_visible,
+            "bankCloseButtonVisible": self.bank_close_button_visible,
+            "inventorySummary": dict(self.inventory_summary),
+            "bankSummary": dict(self.bank_summary),
+            "serviceReady": self.service_ready,
+            "reason": self.reason,
+        }
+
+
+@dataclass
 class LiveAnalysisResult:
     input_snapshot: LiveInputSnapshot | None = None
     source_status: LiveSourceStatus | None = None
@@ -562,6 +611,7 @@ class LiveAnalysisResult:
     activity: ActivityContext | None = None
     service: ServiceContext | None = None
     process_inventory: ProcessInventoryContext | None = None
+    bank_ui: BankUiContext | None = None
     intent_overlay: IntentOverlayContext | None = None
     brain: BrainContext | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)

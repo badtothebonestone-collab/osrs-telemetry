@@ -22,6 +22,7 @@ public class CompactLiveEmissionPolicyTest
 	{
 		assertTrue(CompactLiveEmissionPolicy.navigationEffective(false, false, true));
 		assertTrue(CompactLiveEmissionPolicy.collisionWindowEffective(false, false, false, false, true));
+		assertTrue(CompactLiveEmissionPolicy.bankUiEffective(false, true));
 	}
 
 	@Test
@@ -34,5 +35,8 @@ public class CompactLiveEmissionPolicyTest
 		assertTrue(CompactLiveEmissionPolicy.collisionWindowEffective(true, true, true, true, false));
 		assertFalse(CompactLiveEmissionPolicy.collisionWindowEffective(true, false, true, true, false));
 		assertFalse(CompactLiveEmissionPolicy.collisionWindowEffective(true, true, true, false, false));
+
+		assertTrue(CompactLiveEmissionPolicy.bankUiEffective(true, false));
+		assertFalse(CompactLiveEmissionPolicy.bankUiEffective(false, false));
 	}
 }

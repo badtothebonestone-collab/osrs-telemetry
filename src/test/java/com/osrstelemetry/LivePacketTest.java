@@ -95,6 +95,29 @@ public class LivePacketTest
 	}
 
 	@Test
+	public void bankUiPacketEnvelopeUsesReadOnlyPacketType()
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("bankOpen", true);
+		payload.put("bankReadable", true);
+		payload.put("bankPinOpen", false);
+		payload.put("bankSummary", Map.of("occupiedSlots", 12, "uniqueItemCount", 3));
+
+		LivePacket packet = new LivePacket(
+				"live_bank_ui_packet.v1",
+				"session-1",
+				126L,
+				4L,
+				"2026-05-09T00:00:03Z",
+				payload);
+
+		assertEquals(LivePacket.ENVELOPE_SCHEMA, packet.schema);
+		assertEquals("live_bank_ui_packet.v1", packet.packetType);
+		assertEquals(126L, packet.tick);
+		assertNotNull(packet.payload);
+	}
+
+	@Test
 	public void livePacketWriterSequencesIncrease()
 	{
 		LivePacketWriter writer = new LivePacketWriter(

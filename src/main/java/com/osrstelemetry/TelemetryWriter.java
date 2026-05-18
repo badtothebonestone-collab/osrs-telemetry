@@ -533,6 +533,12 @@ public class TelemetryWriter implements Closeable
 		return accepted;
 	}
 
+	public boolean updateLiveCache(String packetType, long tick, String timestampUtc, Object payload)
+	{
+		PluginLiveCache cache = liveCache;
+		return cache != null && cache.update(packetType, tick, timestampUtc, payload);
+	}
+
 	public boolean isCompactLivePacketsEnabled()
 	{
 		return livePacketWriter != null || compactLiveStreamPublisher != null || liveCache != null;

@@ -19,6 +19,7 @@ class TaskPhase(str, Enum):
     INVENTORY_FULL = "inventory_full"
     NAVIGATE_TO_SERVICE = "navigate_to_service"
     SERVICE_AVAILABLE = "service_available"
+    SERVICE_OPEN = "service_open"
     SERVICE_INTERACTION_PENDING = "service_interaction_pending"
     GOAL_COMPLETE = "goal_complete"
     BLOCKED = "blocked"
@@ -38,7 +39,9 @@ class TaskIntent(str, Enum):
     PROCESS_INVENTORY = "process_inventory"
     NAVIGATE_TO_SERVICE = "navigate_to_service"
     SERVICE_AVAILABLE = "service_available"
+    SERVICE_OPEN = "service_open"
     SERVICE_INTERACTION_PENDING = "service_interaction_pending"
+    NEEDS_USER_RESOLUTION = "needs_user_resolution"
     GOAL_COMPLETE = "goal_complete"
     BLOCKED = "blocked"
     NEEDS_MORE_CONTEXT = "needs_more_context"
@@ -197,6 +200,10 @@ def phase_from_brain_decision(decision: dict[str, Any]) -> TaskPhase:
         return TaskPhase.GOAL_COMPLETE
     if phase == "inventory_full":
         return TaskPhase.INVENTORY_FULL
+    if phase == "service_available":
+        return TaskPhase.SERVICE_AVAILABLE
+    if phase == "service_open":
+        return TaskPhase.SERVICE_OPEN
     if phase == "blocked_or_unreachable":
         return TaskPhase.BLOCKED
     if phase in {"no_context", "stale_context", "no_target_observed", "missing_capability"}:
@@ -220,6 +227,7 @@ def active_intent_for_phase(phase: TaskPhase) -> TaskIntent:
         TaskPhase.INVENTORY_FULL: TaskIntent.NEEDS_SERVICE,
         TaskPhase.NAVIGATE_TO_SERVICE: TaskIntent.NAVIGATE_TO_SERVICE,
         TaskPhase.SERVICE_AVAILABLE: TaskIntent.SERVICE_AVAILABLE,
+        TaskPhase.SERVICE_OPEN: TaskIntent.SERVICE_OPEN,
         TaskPhase.SERVICE_INTERACTION_PENDING: TaskIntent.SERVICE_INTERACTION_PENDING,
         TaskPhase.GOAL_COMPLETE: TaskIntent.NONE,
         TaskPhase.BLOCKED: TaskIntent.OBSERVE,
