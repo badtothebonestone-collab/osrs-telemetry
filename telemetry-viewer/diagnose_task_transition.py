@@ -13,12 +13,13 @@ import task_policy
 from analyzers import intent_overlay_analyzer
 from analyzers import bank_operation_analyzer
 from analyzers import bank_ui_analyzer
+from analyzers import close_bank_analyzer
 from analyzers import navigation_intent_analyzer
 from analyzers import post_bank_reacquisition_analyzer
 from analyzers import process_inventory_analyzer
 from analyzers import return_to_resource_analyzer
 from analyzers import service_analyzer
-from analyzers.live_state import BankOperationContext, BankUiContext, InventoryContext, NavigationContext, PostBankReacquisitionContext, ProcessInventoryContext, ReturnToResourceContext, ServiceContext, TargetContext
+from analyzers.live_state import BankOperationContext, BankUiContext, CloseBankContext, InventoryContext, NavigationContext, PostBankReacquisitionContext, ProcessInventoryContext, ReturnToResourceContext, ServiceContext, TargetContext
 
 
 SCHEMA = "task_transition_diagnostic.v1"
@@ -206,7 +207,7 @@ def expected_for(policy_name: str, scenario: str, *, tinderbox_present: bool = T
     if scenario == "service_open":
         return {"phase": "service_open", "activeIntent": "bank_operation_pending", "overlay": "selected_service"}
     if scenario in {"service_complete", "service_complete_no_target"}:
-        return {"phase": "waiting_for_world_view", "activeIntent": "wait_for_world_view", "overlay": "none"}
+        return {"phase": "waiting_for_world_view", "activeIntent": "close_service_context", "overlay": "none"}
     if scenario == "bank_pin_required":
         return {"phase": "blocked", "activeIntent": "needs_user_resolution", "overlay": "selected_service"}
     if scenario in {"service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed"}:
@@ -329,6 +330,22 @@ def compact_post_bank_reacquisition_summary(context: PostBankReacquisitionContex
     }
 
 
+def compact_close_bank_summary(context: CloseBankContext) -> dict[str, Any]:
+    payload = context.to_dict()
+    return {
+        "closeBankNeeded": payload.get("closeBankNeeded"),
+        "closeBankReady": payload.get("closeBankReady"),
+        "bankOpen": payload.get("bankOpen"),
+        "bankingComplete": payload.get("bankingComplete"),
+        "closeButtonVisible": payload.get("closeButtonVisible"),
+        "closeButtonAvailable": payload.get("closeButtonAvailable"),
+        "keyboardClosePossible": payload.get("keyboardClosePossible"),
+        "reason": payload.get("reason"),
+        "warnings": payload.get("warnings", []),
+        "missingCapabilities": payload.get("missingCapabilities", []),
+    }
+
+
 def compact_overlay_marker(marker: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(marker, dict) or not marker:
         return None
@@ -416,6 +433,7 @@ def evaluate_transition_scenario(
     bank_operation_context = BankOperationContext(source_tick=42)
     return_context = ReturnToResourceContext(source_tick=42)
     post_bank_context = PostBankReacquisitionContext(source_tick=42)
+    close_bank_context = CloseBankContext(source_tick=42)
     if generic.get("activeIntent") == "needs_service" or scenario in {"service_complete", "service_complete_no_target"}:
         service_context = service_analyzer.analyze_service_context(policy, candidates=candidates, source_tick=42)
         if service_context.best_service_candidate:
@@ -465,6 +483,7 @@ def evaluate_transition_scenario(
                             "bankContainerVisible": True,
                             "bankInventoryVisible": True,
                             "depositInventoryButtonVisible": True,
+                            "closeButtonVisible": True,
                             "bankSummary": {"occupiedSlots": 12, "uniqueItemIds": [1511, 1521]},
                         }
                     )
@@ -532,15 +551,27 @@ def evaluate_transition_scenario(
                     current_task_state=generic,
                     source_tick=42,
                 )
+                close_bank_context = close_bank_analyzer.analyze_close_bank_context(
+                    policy,
+                    bank_ui_context=bank_ui_context,
+                    bank_operation_context=bank_operation_context,
+                    post_bank_reacquisition_context=post_bank_context,
+                    current_task_state=generic,
+                    source_tick=42,
+                )
                 if post_bank_context.post_bank_reacquisition_needed and post_bank_context.bank_ui_still_open:
                     generic["phase"] = "waiting_for_world_view"
-                    generic["activeIntent"] = "wait_for_world_view"
+                    generic["activeIntent"] = "close_service_context" if close_bank_context.close_bank_needed else "wait_for_world_view"
                     generic["activeIntentTarget"] = None
                     generic["selectedTargetKey"] = None
                     generic["returnNeeded"] = return_context.return_needed
                     generic["returnReady"] = False
                     generic["postBankReacquisitionReason"] = post_bank_context.reason
                     generic["resourceTargetReacquisitionAllowed"] = post_bank_context.resource_target_reacquisition_allowed
+                    generic["closeBankNeeded"] = close_bank_context.close_bank_needed
+                    generic["closeBankReady"] = close_bank_context.close_bank_ready
+                    generic["closeBankReason"] = close_bank_context.reason
+                    generic["closeButtonAvailable"] = close_bank_context.close_button_available
                     blocking = [str(item) for item in generic.get("blockingConditions") or [] if item and item != "no_target_observed"]
                     generic["blockingConditions"] = blocking
                     decision["phase"] = "waiting_for_world_view"
@@ -577,6 +608,7 @@ def evaluate_transition_scenario(
     decision["bankOperationContext"] = bank_operation_context.to_dict()
     decision["returnToResourceContext"] = return_context.to_dict()
     decision["postBankReacquisitionContext"] = post_bank_context.to_dict()
+    decision["closeBankContext"] = close_bank_context.to_dict()
     decision.update(brain_core.context_domain_summary(decision, response=response, policy=policy))
     resource_candidates = [candidate for candidate in candidates if candidate.get("classId") == "tree"]
     target_context = TargetContext(
@@ -625,9 +657,10 @@ def evaluate_transition_scenario(
         "expectedAnalyzers": {
             "service": expected["activeIntent"] in {"needs_service", "service_available"},
             "processInventory": expected["activeIntent"] == "process_inventory",
-            "bankOperation": expected["activeIntent"] in {"bank_operation_pending", "resume_resource_collection", "select_target"},
-            "returnToResource": expected["activeIntent"] == "select_target" and bool(return_context.return_needed),
+            "bankOperation": expected["activeIntent"] in {"bank_operation_pending", "resume_resource_collection", "select_target", "close_service_context"},
+            "returnToResource": expected["activeIntent"] in {"select_target", "close_service_context"} and bool(return_context.return_needed),
             "navigation": expected["activeIntent"] in {"needs_service", "target_selected", "continue_current_target", "continue_task", "select_target"},
+            "closeBank": expected["activeIntent"] == "close_service_context",
         },
         "serviceAnalyzerRuns": bool(service_context.service_required),
         "processInventoryAnalyzerRuns": bool(process_context.process_required),
@@ -639,6 +672,7 @@ def evaluate_transition_scenario(
         "bankOperationContextSummary": compact_bank_operation_summary(bank_operation_context),
         "returnToResourceContextSummary": compact_return_to_resource_summary(return_context),
         "postBankReacquisitionContextSummary": compact_post_bank_reacquisition_summary(post_bank_context),
+        "closeBankContextSummary": compact_close_bank_summary(close_bank_context),
         "navigationContextSummary": compact_navigation_summary(navigation_context.to_dict()),
         "freshnessDomains": decision.get("freshnessDomains") if isinstance(decision.get("freshnessDomains"), dict) else {},
         "inventoryFreshness": (decision.get("freshnessDomains") or {}).get("inventoryFreshness") if isinstance(decision.get("freshnessDomains"), dict) else None,
@@ -679,6 +713,7 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
     bank_operation_context = brain.get("bankOperationContext") if isinstance(brain.get("bankOperationContext"), dict) else {}
     return_context = brain.get("returnToResourceContext") if isinstance(brain.get("returnToResourceContext"), dict) else {}
     post_bank_context = brain.get("postBankReacquisitionContext") if isinstance(brain.get("postBankReacquisitionContext"), dict) else {}
+    close_bank_context = brain.get("closeBankContext") if isinstance(brain.get("closeBankContext"), dict) else {}
     navigation_context = brain.get("navigationIntentContext") if isinstance(brain.get("navigationIntentContext"), dict) else {}
     freshness_domains = brain.get("freshnessDomains") if isinstance(brain.get("freshnessDomains"), dict) else {}
     overlay_selected_type = None
@@ -735,6 +770,16 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
             "resourceTargetAvailable": post_bank_context.get("resourceTargetAvailable", status.get("postBankResourceTargetAvailable")),
             "reason": post_bank_context.get("reason", status.get("postBankReacquisitionReason")),
         },
+        "closeBankContextSummary": {
+            "closeBankNeeded": close_bank_context.get("closeBankNeeded", status.get("closeBankNeeded")),
+            "closeBankReady": close_bank_context.get("closeBankReady", status.get("closeBankReady")),
+            "bankOpen": close_bank_context.get("bankOpen", status.get("closeBankOpen")),
+            "bankingComplete": close_bank_context.get("bankingComplete", status.get("closeBankingComplete")),
+            "closeButtonVisible": close_bank_context.get("closeButtonVisible", status.get("closeBankCloseButtonVisible")),
+            "closeButtonAvailable": close_bank_context.get("closeButtonAvailable", status.get("closeBankCloseButtonAvailable")),
+            "keyboardClosePossible": close_bank_context.get("keyboardClosePossible", status.get("closeBankKeyboardClosePossible")),
+            "reason": close_bank_context.get("reason", status.get("closeBankReason")),
+        },
         "navigationContextSummary": compact_navigation_summary(navigation_context),
         "freshnessDomains": freshness_domains,
         "inventoryFreshness": freshness_domains.get("inventoryFreshness"),
@@ -787,6 +832,7 @@ def format_human(payload: dict[str, Any]) -> str:
     bank_operation = payload.get("bankOperationContextSummary") if isinstance(payload.get("bankOperationContextSummary"), dict) else {}
     return_context = payload.get("returnToResourceContextSummary") if isinstance(payload.get("returnToResourceContextSummary"), dict) else {}
     post_bank = payload.get("postBankReacquisitionContextSummary") if isinstance(payload.get("postBankReacquisitionContextSummary"), dict) else {}
+    close_bank = payload.get("closeBankContextSummary") if isinstance(payload.get("closeBankContextSummary"), dict) else {}
     navigation = payload.get("navigationContextSummary") if isinstance(payload.get("navigationContextSummary"), dict) else {}
     lines.extend(
         [
@@ -797,6 +843,7 @@ def format_human(payload: dict[str, Any]) -> str:
             f"  bank operation: needed={bank_operation.get('operationNeeded')} type={bank_operation.get('operationType')} complete={bank_operation.get('bankingComplete')} reason={bank_operation.get('completionReason')}",
             f"  return: needed={return_context.get('returnNeeded')} ready={return_context.get('returnReady')} target={return_context.get('bestResourceTarget')} reason={return_context.get('reason')}",
             f"  post-bank: needed={post_bank.get('postBankReacquisitionNeeded')} bankOpen={post_bank.get('bankUiStillOpen')} worldReady={post_bank.get('worldViewReady')} allowed={post_bank.get('resourceTargetReacquisitionAllowed')} reason={post_bank.get('reason')}",
+            f"  close-bank: needed={close_bank.get('closeBankNeeded')} ready={close_bank.get('closeBankReady')} button={close_bank.get('closeButtonAvailable')} reason={close_bank.get('reason')}",
             f"  navigation: reason={navigation.get('navigationReason')} target={navigation.get('destination')} reachability={navigation.get('directReachability')}",
         ]
     )

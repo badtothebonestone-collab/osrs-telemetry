@@ -94,7 +94,7 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
 
         self.assertEqual(payload["status"], "PASS")
         self.assertEqual(payload["actualPhase"], "waiting_for_world_view")
-        self.assertEqual(payload["actualActiveIntent"], "wait_for_world_view")
+        self.assertEqual(payload["actualActiveIntent"], "close_service_context")
         self.assertTrue(payload["bankUiContextSummary"]["bankReadable"])
         self.assertFalse(payload["bankOperationContextSummary"]["operationNeeded"])
         self.assertTrue(payload["bankOperationContextSummary"]["bankingComplete"])
@@ -102,6 +102,9 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
         self.assertTrue(payload["returnToResourceContextSummary"]["returnNeeded"])
         self.assertEqual(payload["postBankReacquisitionContextSummary"]["reason"], "bank_ui_still_open")
         self.assertFalse(payload["postBankReacquisitionContextSummary"]["resourceTargetReacquisitionAllowed"])
+        self.assertTrue(payload["closeBankContextSummary"]["closeBankNeeded"])
+        self.assertTrue(payload["closeBankContextSummary"]["closeBankReady"])
+        self.assertEqual(payload["closeBankContextSummary"]["reason"], "close_button_available")
         self.assertIsNone(payload["overlaySelectedMarker"])
 
     def test_service_complete_without_tree_target_needs_resource_context(self):
@@ -109,11 +112,14 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
 
         self.assertEqual(payload["status"], "PASS")
         self.assertEqual(payload["actualPhase"], "waiting_for_world_view")
-        self.assertEqual(payload["actualActiveIntent"], "wait_for_world_view")
+        self.assertEqual(payload["actualActiveIntent"], "close_service_context")
         self.assertTrue(payload["bankOperationContextSummary"]["bankingComplete"])
         self.assertTrue(payload["returnToResourceContextSummary"]["returnNeeded"])
         self.assertEqual(payload["postBankReacquisitionContextSummary"]["reason"], "bank_ui_still_open")
         self.assertFalse(payload["postBankReacquisitionContextSummary"]["resourceTargetReacquisitionAllowed"])
+        self.assertTrue(payload["closeBankContextSummary"]["closeBankNeeded"])
+        self.assertTrue(payload["closeBankContextSummary"]["closeBankReady"])
+        self.assertEqual(payload["closeBankContextSummary"]["reason"], "close_button_available")
         self.assertNotIn("target.candidates", payload["missingRequiredContextDomains"])
         self.assertIsNone(payload["overlaySelectedMarker"])
 

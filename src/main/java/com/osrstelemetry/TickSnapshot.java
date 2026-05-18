@@ -71,6 +71,7 @@ public class TickSnapshot
         public Boolean depositInventoryButtonVisible;
         public Boolean closeButtonVisible;
         public Boolean bankCloseButtonVisible;
+        public Boolean keyboardClosePossible;
         public WidgetSnapshot bankRootWidget;
         public WidgetSnapshot bankContainerWidget;
         public WidgetSnapshot bankInventoryWidget;

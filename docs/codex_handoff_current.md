@@ -59,6 +59,10 @@ RuneLite plugin
   wait_for_world_view, bank closed allows resource targeting to resume, and
   missing resource targets are only treated as target context after the world
   view is available.
+- Close-bank Readiness / Return Control Context v1 reports closeBankNeeded,
+  closeBankReady, close button visibility/availability, keyboardClosePossible,
+  and the close_service_context intent while banking is complete but the bank UI
+  is still open.
 
 ## Current service-memory proof
 
@@ -81,6 +85,8 @@ python telemetry-viewer\diagnose_return_to_resource_context.py --from-daemon --d
 
 python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 
+python telemetry-viewer\diagnose_close_bank_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+
 python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 
 ## Verification commands
@@ -93,12 +99,12 @@ python telemetry-viewer\run_stabilization_suite.py
 
 ## Current next milestone
 
-Post-bank World Reacquisition Context v1 live QA.
+Close-bank Readiness / Return Control Context v1 live QA after RuneLite dev is
+restarted with the current plugin code.
 
 Goal:
-bankingComplete=true -> distinguish bank UI still open from world-view resource
-targeting. Missing tree candidates are deferred while bankOpen=true, and only
-become resource-target context after bankOpen=false.
+bankingComplete=true + bankOpen=true -> report closeBankNeeded and
+close_service_context before world/resource targeting resumes.
 
 Implemented scope:
 - `return_to_resource_analyzer.py` reports returnNeeded, returnReady,
@@ -118,9 +124,13 @@ Implemented scope:
   reacquisition is deferred by the open bank UI or allowed after the bank closes.
 - `diagnose_post_bank_reacquisition_context.py` reports daemon post-bank
   reacquisition state in human and JSON modes.
+- `close_bank_analyzer.py` reports whether closing the bank UI is needed and
+  ready, using close button telemetry or keyboardClosePossible when available.
+- `diagnose_close_bank_context.py` reports daemon close-bank state in human and
+  JSON modes.
 - Task phase integration:
   - bankingComplete + bankOpen=true -> waiting_for_world_view /
-    wait_for_world_view, no target candidate failure
+    close_service_context, no target candidate failure
   - bankingComplete + bankOpen=false + resource target visible ->
     target_selected / select_target
   - bankingComplete + bankOpen=false + no resource target ->
@@ -146,6 +156,7 @@ Preferred live QA flow:
    python telemetry-viewer\diagnose_overlay_state.py --latest-session --intent
    python telemetry-viewer\diagnose_return_to_resource_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+   python telemetry-viewer\diagnose_close_bank_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
    python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 
@@ -166,7 +177,7 @@ $request = @{
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8893/snapshot" -Body $request -ContentType "application/json"
 
 
-## Current Completed Milestone: Bank Operation + Return-to-Resource
+## Current Completed Milestone: Bank Operation + Return-to-Resource + Post-bank + Close-bank
 
 Bank Operation Context v1 works.
 
@@ -175,25 +186,30 @@ Return-to-Resource Context v1 works.
 Post-bank World Reacquisition Context v1 works in analyzers, daemon phase
 integration, diagnostics, overlay suppression, and daily gauntlet deferral.
 
+Close-bank Readiness / Return Control Context v1 works in Python analyzers,
+daemon phase integration, diagnostics, status fields, and daily gauntlet
+deferral. Java bank UI telemetry now also reports keyboardClosePossible when a
+top-level bank UI is open.
+
 After depositing logs with bank open:
 - bankOperation PASS
 - bankingComplete=true
 - resourceItemsHeld=0
 - phase=needs_more_context or return_to_resource depending visible resource target
 - activeIntent=select_target / resume_resource_collection
+- if bank UI is still open, phase=waiting_for_world_view and
+  activeIntent=close_service_context
 
 Open-bank view with no visible tree target can produce missing target candidates/freshness. This should be treated as expected when the bank UI is still open and the world/resource target view is deferred, not as a bank/service failure.
 Post-bank reacquisition now represents that state explicitly with
 reason=bank_ui_still_open and resourceTargetReacquisitionAllowed=false.
 
-## Current Next Milestone: Post-bank World Reacquisition Context v1
+## Current Next Milestone: Close-bank Readiness / Return Control Context v1 Live QA
 
 Goal:
-Distinguish these states after bankingComplete=true:
-1. banking complete but bank UI still open
-2. bank UI closed and world/resource targeting can resume
-3. resource target visible
-4. resource target not visible after world view resumes
+Restart RuneLite dev with the current plugin code, reopen or keep the bank open
+after bankingComplete=true, and verify closeBankNeeded/closeBankReady and
+keyboardClosePossible live.
 
 Expected behavior:
 - If bankingComplete=true and bankOpen=true:
@@ -201,6 +217,8 @@ Expected behavior:
   - bankUiStillOpen=true
   - resourceTargetReacquisitionAllowed=false
   - reason=bank_ui_still_open
+  - closeBankNeeded=true
+  - activeIntent=close_service_context
   - missing target candidates should not be treated as a resource targeting failure.
 - If bankingComplete=true and bankOpen=false:
   - worldViewReady=true
@@ -216,5 +234,6 @@ Live retest commands:
 python telemetry-viewer\diagnose_bank_operation_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_return_to_resource_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+python telemetry-viewer\diagnose_close_bank_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
 python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes

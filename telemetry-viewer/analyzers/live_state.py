@@ -570,6 +570,9 @@ class BankUiContext(AnalyzerContractFields):
     bank_inventory_visible: bool | None = None
     deposit_inventory_button_visible: bool | None = None
     bank_close_button_visible: bool | None = None
+    close_button_widget: dict[str, Any] = field(default_factory=dict)
+    close_button_bounds: dict[str, Any] = field(default_factory=dict)
+    keyboard_close_possible: bool | None = None
     inventory_summary: dict[str, Any] = field(default_factory=dict)
     bank_summary: dict[str, Any] = field(default_factory=dict)
     service_ready: bool = False
@@ -592,6 +595,9 @@ class BankUiContext(AnalyzerContractFields):
             "depositInventoryButtonVisible": self.deposit_inventory_button_visible,
             "closeButtonVisible": self.bank_close_button_visible,
             "bankCloseButtonVisible": self.bank_close_button_visible,
+            "closeButtonWidget": dict(self.close_button_widget),
+            "closeButtonBounds": dict(self.close_button_bounds),
+            "keyboardClosePossible": self.keyboard_close_possible,
             "inventorySummary": dict(self.inventory_summary),
             "bankSummary": dict(self.bank_summary),
             "serviceReady": self.service_ready,
@@ -706,6 +712,41 @@ class PostBankReacquisitionContext(AnalyzerContractFields):
 
 
 @dataclass
+class CloseBankContext(AnalyzerContractFields):
+    status: str = "PASS"
+    warnings: list[str] = field(default_factory=list)
+    missing_capabilities: list[str] = field(default_factory=list)
+    source_tick: int | None = None
+    retained_from_previous: bool = False
+    timing_millis: float | None = None
+    close_bank_needed: bool = False
+    close_bank_ready: bool = False
+    bank_open: bool | None = None
+    banking_complete: bool = False
+    close_button_visible: bool | None = None
+    close_button_available: bool | None = None
+    close_button_widget: dict[str, Any] = field(default_factory=dict)
+    close_button_bounds: dict[str, Any] = field(default_factory=dict)
+    keyboard_close_possible: bool | None = None
+    reason: str = "unknown"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.contract_payload(),
+            "closeBankNeeded": self.close_bank_needed,
+            "closeBankReady": self.close_bank_ready,
+            "bankOpen": self.bank_open,
+            "bankingComplete": self.banking_complete,
+            "closeButtonVisible": self.close_button_visible,
+            "closeButtonAvailable": self.close_button_available,
+            "closeButtonWidget": dict(self.close_button_widget),
+            "closeButtonBounds": dict(self.close_button_bounds),
+            "keyboardClosePossible": self.keyboard_close_possible,
+            "reason": self.reason,
+        }
+
+
+@dataclass
 class LiveAnalysisResult:
     input_snapshot: LiveInputSnapshot | None = None
     source_status: LiveSourceStatus | None = None
@@ -722,6 +763,7 @@ class LiveAnalysisResult:
     bank_operation: BankOperationContext | None = None
     return_to_resource: ReturnToResourceContext | None = None
     post_bank_reacquisition: PostBankReacquisitionContext | None = None
+    close_bank: CloseBankContext | None = None
     intent_overlay: IntentOverlayContext | None = None
     brain: BrainContext | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)

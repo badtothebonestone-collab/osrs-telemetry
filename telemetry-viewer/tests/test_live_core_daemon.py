@@ -551,7 +551,7 @@ class LiveCoreDaemonTest(unittest.TestCase):
         status = core.state.status()
         generic = core.state.brain_decision["genericTaskState"]
         self.assertEqual(generic["phase"], "waiting_for_world_view")
-        self.assertEqual(generic["activeIntent"], "wait_for_world_view")
+        self.assertEqual(generic["activeIntent"], "close_service_context")
         self.assertIsNone(generic.get("activeIntentTarget"))
         self.assertTrue(core.state.brain_decision["bankOperationContext"]["bankingComplete"])
         self.assertEqual(core.state.brain_decision["bankOperationContext"]["resourceItemQuantity"], 0)
@@ -560,6 +560,10 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertIn("postBankReacquisitionContext", core.state.brain_decision)
         self.assertEqual(core.state.brain_decision["postBankReacquisitionContext"]["reason"], "bank_ui_still_open")
         self.assertFalse(core.state.brain_decision["postBankReacquisitionContext"]["resourceTargetReacquisitionAllowed"])
+        self.assertIn("closeBankContext", core.state.brain_decision)
+        self.assertTrue(core.state.brain_decision["closeBankContext"]["closeBankNeeded"])
+        self.assertTrue(core.state.brain_decision["closeBankContext"]["closeBankReady"])
+        self.assertEqual(core.state.brain_decision["closeBankContext"]["reason"], "close_button_available")
         self.assertFalse(status["bankOperationNeeded"])
         self.assertTrue(status["bankingComplete"])
         self.assertEqual(status["bankOperationCompletionReason"], "no_resource_items_held")
@@ -567,6 +571,9 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertTrue(status["postBankReacquisitionNeeded"])
         self.assertTrue(status["postBankUiStillOpen"])
         self.assertFalse(status["postBankResourceTargetReacquisitionAllowed"])
+        self.assertTrue(status["closeBankNeeded"])
+        self.assertTrue(status["closeBankReady"])
+        self.assertEqual(status["closeBankReason"], "close_button_available")
 
     def test_readable_bank_ui_with_no_logs_and_no_tree_waits_for_world_view(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -640,13 +647,16 @@ class LiveCoreDaemonTest(unittest.TestCase):
 
         generic = core.state.brain_decision["genericTaskState"]
         self.assertEqual(generic["phase"], "waiting_for_world_view")
-        self.assertEqual(generic["activeIntent"], "wait_for_world_view")
+        self.assertEqual(generic["activeIntent"], "close_service_context")
         self.assertIsNone(generic.get("activeIntentTarget"))
         self.assertTrue(core.state.brain_decision["returnToResourceContext"]["returnNeeded"])
         self.assertIn("postBankReacquisitionContext", core.state.brain_decision)
         self.assertTrue(core.state.brain_decision["postBankReacquisitionContext"]["postBankReacquisitionNeeded"])
         self.assertEqual(core.state.brain_decision["postBankReacquisitionContext"]["reason"], "bank_ui_still_open")
         self.assertFalse(core.state.brain_decision["postBankReacquisitionContext"]["resourceTargetReacquisitionAllowed"])
+        self.assertTrue(core.state.brain_decision["closeBankContext"]["closeBankNeeded"])
+        self.assertTrue(core.state.brain_decision["closeBankContext"]["closeBankReady"])
+        self.assertEqual(core.state.brain_decision["closeBankContext"]["reason"], "close_button_available")
         self.assertNotIn("target.candidates", core.state.brain_decision.get("missingRequiredContextDomains", []))
         self.assertFalse(core.state.source_status["targetCandidatesRequired"])
 
@@ -731,6 +741,7 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(generic["activeIntentTarget"]["classId"], "tree")
         self.assertEqual(core.state.brain_decision["postBankReacquisitionContext"]["reason"], "resource_target_visible")
         self.assertTrue(core.state.brain_decision["postBankReacquisitionContext"]["resourceTargetReacquisitionAllowed"])
+        self.assertFalse(core.state.brain_decision["closeBankContext"]["closeBankNeeded"])
 
     def test_bank_closed_after_banking_complete_without_tree_reports_no_target(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -812,6 +823,7 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(generic["activeIntent"], "select_target")
         self.assertEqual(core.state.brain_decision["postBankReacquisitionContext"]["reason"], "no_resource_target_observed")
         self.assertTrue(core.state.brain_decision["postBankReacquisitionContext"]["resourceTargetReacquisitionAllowed"])
+        self.assertFalse(core.state.brain_decision["closeBankContext"]["closeBankNeeded"])
         self.assertIn("target.candidates", core.state.brain_decision.get("missingRequiredContextDomains", []))
 
     def test_select_target_intent_does_not_stabilize_bank_service_candidate(self):

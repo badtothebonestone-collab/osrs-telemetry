@@ -7,7 +7,7 @@ import urllib.request
 from typing import Any
 
 
-SCHEMA = "post_bank_reacquisition_context_diagnostic.v1"
+SCHEMA = "close_bank_context_diagnostic.v1"
 
 
 def fetch_json(url: str, timeout: float = 3.0) -> dict[str, Any]:
@@ -32,30 +32,31 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
     generic = brain.get("genericTaskState") if isinstance(brain.get("genericTaskState"), dict) else {}
     bank_operation = brain.get("bankOperationContext") if isinstance(brain.get("bankOperationContext"), dict) else {}
     bank_ui = brain.get("bankUiContext") if isinstance(brain.get("bankUiContext"), dict) else {}
-    context = brain.get("postBankReacquisitionContext") if isinstance(brain.get("postBankReacquisitionContext"), dict) else {}
-    close_bank = brain.get("closeBankContext") if isinstance(brain.get("closeBankContext"), dict) else {}
+    context = brain.get("closeBankContext") if isinstance(brain.get("closeBankContext"), dict) else {}
     return {
         "schema": SCHEMA,
         "source": "daemon-memory",
         "daemonReachable": True,
-        "postBankReacquisitionContextPresent": bool(context),
-        "bankingComplete": bank_operation.get("bankingComplete", status.get("bankingComplete")),
-        "bankOpen": bank_ui.get("bankOpen", status.get("bankOpen")),
-        "worldViewReady": context.get("worldViewReady", status.get("postBankWorldViewReady")),
-        "resourceTargetReacquisitionAllowed": context.get(
-            "resourceTargetReacquisitionAllowed",
-            status.get("postBankResourceTargetReacquisitionAllowed"),
+        "closeBankContextPresent": bool(context),
+        "bankOpen": context.get("bankOpen", bank_ui.get("bankOpen", status.get("bankOpen"))),
+        "bankingComplete": context.get("bankingComplete", bank_operation.get("bankingComplete", status.get("bankingComplete"))),
+        "closeBankNeeded": context.get("closeBankNeeded", status.get("closeBankNeeded")),
+        "closeBankReady": context.get("closeBankReady", status.get("closeBankReady")),
+        "closeButtonVisible": context.get(
+            "closeButtonVisible",
+            bank_ui.get("closeButtonVisible", status.get("closeBankCloseButtonVisible", status.get("closeButtonVisible"))),
         ),
-        "resourceTargetAvailable": context.get("resourceTargetAvailable", status.get("postBankResourceTargetAvailable")),
-        "closeBankNeeded": close_bank.get("closeBankNeeded", status.get("closeBankNeeded")),
-        "closeBankReady": close_bank.get("closeBankReady", status.get("closeBankReady")),
-        "closeBankReason": close_bank.get("reason", status.get("closeBankReason")),
-        "reason": context.get("reason", status.get("postBankReacquisitionReason")),
+        "closeButtonAvailable": context.get(
+            "closeButtonAvailable",
+            bank_ui.get("closeButtonAvailable", status.get("closeBankCloseButtonAvailable")),
+        ),
+        "keyboardClosePossible": context.get("keyboardClosePossible", status.get("closeBankKeyboardClosePossible")),
+        "reason": context.get("reason", status.get("closeBankReason")),
         "nextPhase": generic.get("phase", status.get("brainPhase")),
         "activeIntent": generic.get("activeIntent"),
-        "missingCapabilities": list(context.get("missingCapabilities") or status.get("postBankReacquisitionMissingCapabilities") or []),
-        "warnings": list(context.get("warnings") or status.get("postBankReacquisitionWarnings") or []),
-        "status": context.get("status", status.get("postBankReacquisitionStatus")),
+        "missingCapabilities": list(context.get("missingCapabilities") or status.get("closeBankMissingCapabilities") or []),
+        "warnings": list(context.get("warnings") or status.get("closeBankWarnings") or []),
+        "status": context.get("status", status.get("closeBankStatus")),
         "noActionEmitted": brain.get("noActionEmitted", True),
     }
 
@@ -65,7 +66,7 @@ def unavailable_payload(error: Exception | str) -> dict[str, Any]:
         "schema": SCHEMA,
         "source": "daemon-memory",
         "daemonReachable": False,
-        "postBankReacquisitionContextPresent": False,
+        "closeBankContextPresent": False,
         "warnings": [str(error)],
         "missingCapabilities": ["daemon.status"],
         "noActionEmitted": True,
@@ -74,21 +75,20 @@ def unavailable_payload(error: Exception | str) -> dict[str, Any]:
 
 def format_human(payload: dict[str, Any]) -> str:
     lines = [
-        "POST-BANK WORLD REACQUISITION CONTEXT DIAGNOSTIC",
+        "CLOSE-BANK CONTEXT DIAGNOSTIC",
         "",
         f"Source: {payload.get('source')}",
         f"Daemon reachable: {bool_label(payload.get('daemonReachable'))}",
-        f"Post-bank context present: {bool_label(payload.get('postBankReacquisitionContextPresent'))}",
+        f"Close-bank context present: {bool_label(payload.get('closeBankContextPresent'))}",
         f"Status: {payload.get('status') or 'unknown'}",
         f"Reason: {payload.get('reason') or 'unknown'}",
-        f"Banking complete: {bool_label(payload.get('bankingComplete'))}",
         f"Bank open: {bool_label(payload.get('bankOpen'))}",
-        f"World view ready: {bool_label(payload.get('worldViewReady'))}",
-        f"Resource target reacquisition allowed: {bool_label(payload.get('resourceTargetReacquisitionAllowed'))}",
-        f"Resource target available: {bool_label(payload.get('resourceTargetAvailable'))}",
+        f"Banking complete: {bool_label(payload.get('bankingComplete'))}",
         f"Close bank needed: {bool_label(payload.get('closeBankNeeded'))}",
         f"Close bank ready: {bool_label(payload.get('closeBankReady'))}",
-        f"Close bank reason: {payload.get('closeBankReason') or 'unknown'}",
+        f"Close button visible: {bool_label(payload.get('closeButtonVisible'))}",
+        f"Close button available: {bool_label(payload.get('closeButtonAvailable'))}",
+        f"Keyboard close possible: {bool_label(payload.get('keyboardClosePossible'))}",
         f"Next phase: {payload.get('nextPhase') or 'unknown'}",
         f"Active intent: {payload.get('activeIntent') or 'unknown'}",
     ]
@@ -104,7 +104,7 @@ def format_human(payload: dict[str, Any]) -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Read-only post-bank world reacquisition diagnostic. Prints to stdout only.")
+    parser = argparse.ArgumentParser(description="Read-only close-bank readiness diagnostic. Prints to stdout only.")
     parser.add_argument("--from-daemon", action="store_true", help="Read current live daemon memory/status.")
     parser.add_argument("--daemon-url", default="http://127.0.0.1:8890")
     parser.add_argument("--timeout", type=float, default=3.0)
@@ -119,8 +119,8 @@ def main(argv: list[str] | None = None) -> int:
             "schema": SCHEMA,
             "source": "not_requested",
             "daemonReachable": False,
-            "postBankReacquisitionContextPresent": False,
-            "warnings": ["pass --from-daemon to read live daemon post-bank reacquisition context"],
+            "closeBankContextPresent": False,
+            "warnings": ["pass --from-daemon to read live daemon close-bank context"],
             "noActionEmitted": True,
         }
         print(json.dumps(payload, indent=2) if args.json else format_human(payload), end="")

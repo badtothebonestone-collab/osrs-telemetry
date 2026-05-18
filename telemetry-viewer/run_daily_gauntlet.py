@@ -127,6 +127,7 @@ def transition_summary_from(status: dict[str, Any], brain_payload: dict[str, Any
     navigation = brain.get("navigationIntentContext") if isinstance(brain.get("navigationIntentContext"), dict) else {}
     pathing = brain.get("pathingContext") if isinstance(brain.get("pathingContext"), dict) else {}
     post_bank = brain.get("postBankReacquisitionContext") if isinstance(brain.get("postBankReacquisitionContext"), dict) else {}
+    close_bank = brain.get("closeBankContext") if isinstance(brain.get("closeBankContext"), dict) else {}
     return {
         "taskPolicy": status.get("brainTaskPolicy") or status.get("taskPolicy"),
         "genericPhase": generic.get("phase") or status.get("genericPhase"),
@@ -147,6 +148,13 @@ def transition_summary_from(status: dict[str, Any], brain_payload: dict[str, Any
         "postBankResourceTargetReacquisitionAllowed": post_bank.get(
             "resourceTargetReacquisitionAllowed",
             status.get("postBankResourceTargetReacquisitionAllowed"),
+        ),
+        "closeBankNeeded": close_bank.get("closeBankNeeded", status.get("closeBankNeeded")),
+        "closeBankReady": close_bank.get("closeBankReady", status.get("closeBankReady")),
+        "closeBankReason": close_bank.get("reason", status.get("closeBankReason")),
+        "closeBankCloseButtonAvailable": close_bank.get(
+            "closeButtonAvailable",
+            status.get("closeBankCloseButtonAvailable"),
         ),
         "noActionEmitted": brain.get("noActionEmitted") if brain else None,
     }
@@ -172,16 +180,18 @@ def post_bank_target_reacquisition_deferred(*payloads: dict[str, Any] | None) ->
             continue
         brain = payload.get("brain") if isinstance(payload.get("brain"), dict) else payload
         post_bank = brain.get("postBankReacquisitionContext") if isinstance(brain.get("postBankReacquisitionContext"), dict) else {}
+        close_bank = brain.get("closeBankContext") if isinstance(brain.get("closeBankContext"), dict) else {}
         bank_operation = brain.get("bankOperationContext") if isinstance(brain.get("bankOperationContext"), dict) else {}
         bank_ui = brain.get("bankUiContext") if isinstance(brain.get("bankUiContext"), dict) else {}
         reason = post_bank.get("reason") or payload.get("postBankReacquisitionReason")
         banking_complete = bank_operation.get("bankingComplete", payload.get("bankingComplete"))
         bank_open = bank_ui.get("bankOpen", payload.get("bankOpen"))
         allowed = post_bank.get("resourceTargetReacquisitionAllowed", payload.get("postBankResourceTargetReacquisitionAllowed"))
+        close_bank_needed = close_bank.get("closeBankNeeded", payload.get("closeBankNeeded"))
         if (
             banking_complete is True
             and bank_open is True
-            and (reason == "bank_ui_still_open" or allowed is False)
+            and (reason == "bank_ui_still_open" or allowed is False or close_bank_needed is True)
         ):
             return True
     return False
@@ -466,6 +476,10 @@ def build_report(args: argparse.Namespace, processes: list[dict[str, Any]] | Non
         "optionalMissingContextDomains": transition_summary.get("optionalMissingContextDomains") or daemon_status.get("optionalMissingContextDomains") or [],
         "postBankReacquisitionReason": transition_summary.get("postBankReacquisitionReason") or daemon_status.get("postBankReacquisitionReason"),
         "postBankResourceTargetReacquisitionAllowed": transition_summary.get("postBankResourceTargetReacquisitionAllowed"),
+        "closeBankNeeded": transition_summary.get("closeBankNeeded"),
+        "closeBankReady": transition_summary.get("closeBankReady"),
+        "closeBankReason": transition_summary.get("closeBankReason"),
+        "closeBankCloseButtonAvailable": transition_summary.get("closeBankCloseButtonAvailable"),
         "noActionEmitted": transition_summary.get("noActionEmitted"),
         "transitionSummary": transition_summary,
         "livePacketGrowth": packet_growth,
@@ -521,6 +535,10 @@ def format_human(report: dict) -> str:
         f"Optional missing domains: {', '.join(report.get('optionalMissingContextDomains') or []) or 'none'}",
         f"Post-bank reason: {report.get('postBankReacquisitionReason') or 'none'}",
         f"Resource target reacquisition allowed: {str(report.get('postBankResourceTargetReacquisitionAllowed')).lower()}",
+        f"Close bank needed: {str(report.get('closeBankNeeded')).lower()}",
+        f"Close bank ready: {str(report.get('closeBankReady')).lower()}",
+        f"Close button available: {str(report.get('closeBankCloseButtonAvailable')).lower()}",
+        f"Close bank reason: {report.get('closeBankReason') or 'none'}",
         f"noActionEmitted: {str(report.get('noActionEmitted')).lower()}",
         "",
         "Processes:",

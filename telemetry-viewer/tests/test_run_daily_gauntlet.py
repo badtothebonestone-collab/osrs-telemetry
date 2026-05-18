@@ -168,16 +168,21 @@ class RunDailyGauntletTest(unittest.TestCase):
 
     def test_bank_open_after_banking_complete_defers_missing_target_candidates(self):
         brain = {
-            "genericTaskState": {"phase": "waiting_for_world_view", "activeIntent": "wait_for_world_view"},
+            "genericTaskState": {"phase": "waiting_for_world_view", "activeIntent": "close_service_context"},
             "bankOperationContext": {"bankingComplete": True, "completionReason": "no_resource_items_held"},
-            "bankUiContext": {"bankOpen": True},
+            "bankUiContext": {"bankOpen": True, "closeButtonAvailable": True, "closeButtonVisible": True},
             "postBankReacquisitionContext": {
                 "postBankReacquisitionNeeded": True,
                 "bankUiStillOpen": True,
                 "resourceTargetReacquisitionAllowed": False,
                 "reason": "bank_ui_still_open",
             },
-            "requiredContextDomains": ["inventory", "bank_operation", "bank_ui", "post_bank_reacquisition"],
+            "closeBankContext": {
+                "closeBankNeeded": True,
+                "closeBankReady": True,
+                "reason": "close_button_available",
+            },
+            "requiredContextDomains": ["inventory", "bank_operation", "bank_ui", "post_bank_reacquisition", "close_bank"],
             "missingRequiredContextDomains": ["target.candidates", "target.freshness"],
             "optionalMissingContextDomains": [],
             "goalProgress": {},
@@ -197,11 +202,14 @@ class RunDailyGauntletTest(unittest.TestCase):
                 "bankingComplete": True,
                 "bankOpen": True,
                 "postBankReacquisitionReason": "bank_ui_still_open",
+                "closeBankNeeded": True,
+                "closeBankReady": True,
+                "closeBankReason": "close_button_available",
             },
             {
                 "status": "FAIL",
                 "missingCapabilities": ["target.candidates"],
-                "requiredContextDomains": ["inventory", "bank_operation", "bank_ui", "post_bank_reacquisition"],
+                "requiredContextDomains": ["inventory", "bank_operation", "bank_ui", "post_bank_reacquisition", "close_bank"],
                 "missingRequiredContextDomains": ["target.candidates", "target.freshness"],
             },
             brain,
@@ -210,6 +218,23 @@ class RunDailyGauntletTest(unittest.TestCase):
 
         self.assertFalse(any("daily context endpoint returned FAIL" in failure for failure in result["failures"]))
         self.assertTrue(any("bank UI is still open" in warning for warning in result["warnings"]))
+
+    def test_close_bank_needed_defers_missing_target_candidates(self):
+        self.assertTrue(
+            gauntlet.post_bank_target_reacquisition_deferred(
+                {
+                    "brain": {
+                        "bankOperationContext": {"bankingComplete": True},
+                        "bankUiContext": {"bankOpen": True},
+                        "closeBankContext": {
+                            "closeBankNeeded": True,
+                            "closeBankReady": True,
+                            "reason": "close_button_available",
+                        },
+                    }
+                }
+            )
+        )
 
     def test_transition_summary_includes_pathing_context(self):
         brain = {

@@ -616,7 +616,7 @@ def context_domain_summary(
         required = ["inventory", "bank_operation", "return_to_resource"]
         optional = ["service", "bank_ui", "target.candidates"]
     elif active_intent in {"wait_for_world_view", "close_service_context", "resume_resource_collection_pending"} or phase == "waiting_for_world_view":
-        required = ["inventory", "bank_operation", "bank_ui", "post_bank_reacquisition"]
+        required = ["inventory", "bank_operation", "bank_ui", "post_bank_reacquisition", "close_bank"]
         optional = ["service", "target.candidates", "target.freshness"]
     elif active_intent == "needs_user_resolution":
         required = ["service", "bank_ui"]
@@ -692,6 +692,12 @@ def context_domain_summary(
             missing_required.append("post_bank_reacquisition")
         elif post_bank_context.get("postBankReacquisitionNeeded") is not True:
             missing_required.append("post_bank_reacquisition")
+    close_bank_context = decision.get("closeBankContext") if isinstance(decision.get("closeBankContext"), dict) else {}
+    if "close_bank" in required:
+        if not close_bank_context:
+            missing_required.append("close_bank")
+        elif close_bank_context.get("closeBankNeeded") is not True:
+            missing_required.append("close_bank")
 
     if "inventory" in optional and inventory_missing:
         optional_missing.append("inventory")
@@ -2240,6 +2246,7 @@ def format_human(decision: dict) -> str:
     bank_operation_context = decision.get("bankOperationContext") if isinstance(decision.get("bankOperationContext"), dict) else {}
     return_context = decision.get("returnToResourceContext") if isinstance(decision.get("returnToResourceContext"), dict) else {}
     post_bank_context = decision.get("postBankReacquisitionContext") if isinstance(decision.get("postBankReacquisitionContext"), dict) else {}
+    close_bank_context = decision.get("closeBankContext") if isinstance(decision.get("closeBankContext"), dict) else {}
     active_intent = str(generic_state.get("activeIntent") or "")
     active_target = generic_state.get("activeIntentTarget") if isinstance(generic_state.get("activeIntentTarget"), dict) else None
     available_target = generic_state.get("availableTarget") if isinstance(generic_state.get("availableTarget"), dict) else None
@@ -2319,6 +2326,13 @@ def format_human(decision: dict) -> str:
         lines.append(f"  target available: {text(post_bank_context.get('resourceTargetAvailable'))}")
         if post_bank_context.get("reason"):
             lines.append(f"  reason: {text(post_bank_context.get('reason'))}")
+    if close_bank_context and close_bank_context.get("closeBankNeeded"):
+        lines.extend(["", "Close bank:"])
+        lines.append(f"  ready: {text(close_bank_context.get('closeBankReady'))}")
+        lines.append(f"  close button available: {text(close_bank_context.get('closeButtonAvailable'))}")
+        lines.append(f"  keyboard close possible: {text(close_bank_context.get('keyboardClosePossible'))}")
+        if close_bank_context.get("reason"):
+            lines.append(f"  reason: {text(close_bank_context.get('reason'))}")
     if process_needed:
         lines.append(f"  Process needed: {text(process_needed)}")
         if process_context.get("heldResourceCount") is not None:

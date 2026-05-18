@@ -24,6 +24,7 @@ from analyzers import activity_analyzer
 from analyzers import bank_operation_analyzer
 from analyzers import bank_ui_analyzer
 from analyzers import brain_context_analyzer
+from analyzers import close_bank_analyzer
 from analyzers import intent_overlay_analyzer
 from analyzers import navigation_analyzer
 from analyzers import navigation_intent_analyzer
@@ -718,6 +719,17 @@ class LiveCoreState:
             "postBankReacquisitionReason",
             "postBankReacquisitionMissingCapabilities",
             "postBankReacquisitionWarnings",
+            "closeBankNeeded",
+            "closeBankReady",
+            "closeBankStatus",
+            "closeBankReason",
+            "closeBankOpen",
+            "closeBankingComplete",
+            "closeBankCloseButtonVisible",
+            "closeBankCloseButtonAvailable",
+            "closeBankKeyboardClosePossible",
+            "closeBankMissingCapabilities",
+            "closeBankWarnings",
             "selectedServiceTargetName",
             "selectedServiceTargetTile",
             "distanceToServiceTarget",
@@ -1142,14 +1154,14 @@ class LiveCoreDaemon:
             candidates = [candidate for candidate in profile_candidates if isinstance(candidate, dict)]
             if raw_best and raw_best not in candidates:
                 raw_best = {}
-        if phase in {"goal_complete", "inventory_full", "stale_context", "no_context", "observe", "none", "needs_service", "process_inventory", "needs_more_context", "navigate_to_service", "service_available", "bank_operation_pending", "resume_resource_collection", "service_interaction_pending"}:
+        if phase in {"goal_complete", "inventory_full", "stale_context", "no_context", "observe", "none", "needs_service", "process_inventory", "needs_more_context", "navigate_to_service", "service_available", "bank_operation_pending", "resume_resource_collection", "wait_for_world_view", "close_service_context", "resume_resource_collection_pending", "service_interaction_pending"}:
             raw_best = {}
             candidates = []
         if not isinstance(raw_best, dict) or not raw_best:
             raw_best = candidates[0] if decision and candidates else {}
         task = str(decision.get("task") or self.effective_brain_task() or self.args.profile or "")
         priority = intent_stabilizer.PRIORITY_SELECTED_TARGET
-        if phase in {"goal_complete", "inventory_full", "none", "needs_service", "process_inventory", "banking_needed", "navigate_to_service", "service_available", "bank_operation_pending", "resume_resource_collection", "service_interaction_pending"}:
+        if phase in {"goal_complete", "inventory_full", "none", "needs_service", "process_inventory", "banking_needed", "navigate_to_service", "service_available", "bank_operation_pending", "resume_resource_collection", "wait_for_world_view", "close_service_context", "resume_resource_collection_pending", "service_interaction_pending"}:
             priority = intent_stabilizer.PRIORITY_TASK_TRANSITION
         if decision.get("interrupt") or str(decision.get("interruptReason") or "").lower() in {"threat", "emergency", "escape"}:
             priority = intent_stabilizer.PRIORITY_EMERGENCY
@@ -1589,6 +1601,16 @@ class LiveCoreDaemon:
             )
             post_bank_context = self.state.analysis_result.post_bank_reacquisition
             brain_context.decision["postBankReacquisitionContext"] = post_bank_context.to_dict()
+            self.state.analysis_result.close_bank = close_bank_analyzer.analyze_close_bank_context(
+                policy,
+                bank_ui_context=bank_ui_context,
+                bank_operation_context=bank_operation_context,
+                post_bank_reacquisition_context=post_bank_context,
+                current_task_state=generic_state,
+                source_tick=source_tick,
+            )
+            close_bank_context = self.state.analysis_result.close_bank
+            brain_context.decision["closeBankContext"] = close_bank_context.to_dict()
 
             def recompute_navigation_for_generic_state() -> None:
                 self.state.analysis_result.navigation_intent = navigation_intent_analyzer.analyze_navigation_intent(
@@ -1659,7 +1681,7 @@ class LiveCoreDaemon:
                     brain_context.decision["genericTaskState"] = generic_state
             if post_bank_context.post_bank_reacquisition_needed and post_bank_context.bank_ui_still_open:
                 generic_state["phase"] = "waiting_for_world_view"
-                generic_state["activeIntent"] = "wait_for_world_view"
+                generic_state["activeIntent"] = "close_service_context" if close_bank_context.close_bank_needed else "wait_for_world_view"
                 generic_state["activeIntentTarget"] = None
                 generic_state["selectedTargetKey"] = None
                 generic_state["availableTarget"] = None
@@ -1670,6 +1692,10 @@ class LiveCoreDaemon:
                 generic_state["postBankReacquisitionNeeded"] = post_bank_context.post_bank_reacquisition_needed
                 generic_state["postBankReacquisitionReason"] = post_bank_context.reason
                 generic_state["resourceTargetReacquisitionAllowed"] = post_bank_context.resource_target_reacquisition_allowed
+                generic_state["closeBankNeeded"] = close_bank_context.close_bank_needed
+                generic_state["closeBankReady"] = close_bank_context.close_bank_ready
+                generic_state["closeBankReason"] = close_bank_context.reason
+                generic_state["closeButtonAvailable"] = close_bank_context.close_button_available
                 blocking = [str(item) for item in generic_state.get("blockingConditions") or [] if item and item != "no_target_observed"]
                 generic_state["blockingConditions"] = blocking
                 brain_context.decision["phase"] = "waiting_for_world_view"
@@ -1916,6 +1942,19 @@ class LiveCoreDaemon:
             fields["postBankReacquisitionReason"] = post_bank.reason
             fields["postBankReacquisitionMissingCapabilities"] = list(post_bank.missing_capabilities)
             fields["postBankReacquisitionWarnings"] = list(post_bank.warnings)
+        if self.state.analysis_result and self.state.analysis_result.close_bank:
+            close_bank = self.state.analysis_result.close_bank
+            fields["closeBankNeeded"] = close_bank.close_bank_needed
+            fields["closeBankReady"] = close_bank.close_bank_ready
+            fields["closeBankStatus"] = close_bank.status
+            fields["closeBankReason"] = close_bank.reason
+            fields["closeBankOpen"] = close_bank.bank_open
+            fields["closeBankingComplete"] = close_bank.banking_complete
+            fields["closeBankCloseButtonVisible"] = close_bank.close_button_visible
+            fields["closeBankCloseButtonAvailable"] = close_bank.close_button_available
+            fields["closeBankKeyboardClosePossible"] = close_bank.keyboard_close_possible
+            fields["closeBankMissingCapabilities"] = list(close_bank.missing_capabilities)
+            fields["closeBankWarnings"] = list(close_bank.warnings)
         self.state.source_status.update(fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)

@@ -2104,6 +2104,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("depositInventoryButtonVisible", bankUi == null ? null : bankUi.depositInventoryButtonVisible);
 		payload.put("closeButtonVisible", bankUi == null ? null : bankUi.closeButtonVisible);
 		payload.put("bankCloseButtonVisible", bankUi == null ? null : bankUi.bankCloseButtonVisible);
+		payload.put("keyboardClosePossible", bankUi == null ? null : bankUi.keyboardClosePossible);
 		payload.put("bankRootWidget", bankUi == null ? null : bankUi.bankRootWidget);
 		payload.put("bankContainerWidget", bankUi == null ? null : bankUi.bankContainerWidget);
 		payload.put("bankInventoryWidget", bankUi == null ? null : bankUi.bankInventoryWidget);
@@ -3134,13 +3135,17 @@ public class TelemetryPlugin extends Plugin
 	{
 		TickSnapshot.BankUiSnapshot bankUi = new TickSnapshot.BankUiSnapshot();
 		Widget bankRoot = client.getWidget(InterfaceID.Bankmain.UNIVERSE);
+		Widget bankFrame = client.getWidget(InterfaceID.Bankmain.FRAME);
 		Widget bankItemsContainer = client.getWidget(InterfaceID.Bankmain.ITEMS_CONTAINER);
 		Widget bankItems = client.getWidget(InterfaceID.Bankmain.ITEMS);
 		Widget bankDepositInventory = client.getWidget(InterfaceID.Bankmain.DEPOSITINV);
+		Widget bankMenuButton = client.getWidget(InterfaceID.Bankmain.MENU_BUTTON);
 		Widget depositRoot = client.getWidget(InterfaceID.BankDepositbox.UNIVERSE);
+		Widget depositFrame = client.getWidget(InterfaceID.BankDepositbox.FRAME);
 		Widget depositContents = client.getWidget(InterfaceID.BankDepositbox.CONTENTS);
 		Widget depositInventory = client.getWidget(InterfaceID.BankDepositbox.INVENTORY);
 		Widget depositInventoryButton = client.getWidget(InterfaceID.BankDepositbox.DEPOSIT_INV);
+		Widget depositMenuButton = client.getWidget(InterfaceID.BankDepositbox.MENU_BUTTON);
 		Widget bankPinRoot = client.getWidget(InterfaceID.BankpinKeypad.UNIVERSE);
 		boolean bankRootVisible = widgetVisible(bankRoot);
 		boolean depositRootVisible = widgetVisible(depositRoot);
@@ -3148,6 +3153,7 @@ public class TelemetryPlugin extends Plugin
 		boolean bankInventoryVisible = widgetVisible(bankItems) || widgetVisible(depositInventory);
 		boolean depositButtonVisible = widgetVisible(bankDepositInventory) || widgetVisible(depositInventoryButton);
 		boolean bankPinVisible = widgetVisible(bankPinRoot);
+		Widget closeButton = firstVisibleClosableWidget(bankFrame, bankRoot, bankMenuButton, depositFrame, depositRoot, depositMenuButton);
 
 		bankUi.bankRootVisible = bankRootVisible;
 		bankUi.bankOpen = bankRootVisible || depositRootVisible;
@@ -3155,14 +3161,15 @@ public class TelemetryPlugin extends Plugin
 		bankUi.bankContainerVisible = bankContainerVisible;
 		bankUi.bankInventoryVisible = bankInventoryVisible;
 		bankUi.depositInventoryButtonVisible = depositButtonVisible;
-		bankUi.closeButtonVisible = null;
-		bankUi.bankCloseButtonVisible = null;
 		bankUi.topLevelInterfaceId = firstVisibleTopLevelId(bankRoot, depositRoot, bankPinRoot);
+		bankUi.closeButtonVisible = widgetVisible(closeButton);
+		bankUi.bankCloseButtonVisible = bankUi.closeButtonVisible;
+		bankUi.keyboardClosePossible = bankUi.bankOpen && !bankPinVisible && bankUi.topLevelInterfaceId != null;
 		bankUi.bankRootWidget = widgetSnapshot(-1, widgetVisible(bankRoot) ? bankRoot : depositRoot);
 		bankUi.bankContainerWidget = widgetSnapshot(-1, firstVisibleWidget(bankItemsContainer, bankItems, depositContents));
 		bankUi.bankInventoryWidget = widgetSnapshot(-1, firstVisibleWidget(bankItems, depositInventory));
 		bankUi.depositInventoryButtonWidget = widgetSnapshot(-1, firstVisibleWidget(bankDepositInventory, depositInventoryButton));
-		bankUi.closeButtonWidget = null;
+		bankUi.closeButtonWidget = widgetSnapshot(-1, closeButton);
 		bankUi.bankPinWidget = widgetSnapshot(-1, bankPinRoot);
 		bankUi.bankItems = itemContainerSlots(client.getItemContainer(InventoryID.BANK), 0);
 		snapshot.bankUi = bankUi;
@@ -3187,6 +3194,38 @@ public class TelemetryPlugin extends Plugin
 			}
 		}
 		return null;
+	}
+
+	private Widget firstVisibleClosableWidget(Widget... widgets)
+	{
+		if (widgets == null)
+		{
+			return null;
+		}
+		for (Widget widget : widgets)
+		{
+			if (widgetVisible(widget) && widgetHasCloseAction(widget))
+			{
+				return widget;
+			}
+		}
+		return null;
+	}
+
+	private boolean widgetHasCloseAction(Widget widget)
+	{
+		if (!widgetVisible(widget) || widget.getActions() == null)
+		{
+			return false;
+		}
+		for (String action : widget.getActions())
+		{
+			if (action != null && "close".equals(action.trim().toLowerCase(Locale.ROOT)))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private Integer firstVisibleTopLevelId(Widget... widgets)

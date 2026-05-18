@@ -55,6 +55,13 @@ def _context_value(context: Any, snake_key: str, camel_key: str | None = None, d
     return default
 
 
+def _dict_value(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict) and value:
+            return dict(value)
+    return {}
+
+
 def _summary_from_inventory_context(inventory_context: Any) -> dict[str, Any]:
     inventory = _context_value(inventory_context, "inventory", default={})
     if not isinstance(inventory, dict):
@@ -128,6 +135,17 @@ def analyze_bank_ui_context(
     close_button_visible = _boolish(payload.get("closeButtonVisible"))
     if close_button_visible is None:
         close_button_visible = _boolish(payload.get("bankCloseButtonVisible"))
+    close_button_widget = _dict_value(payload.get("closeButtonWidget"), payload.get("bankCloseButtonWidget"))
+    close_button_bounds = _dict_value(
+        payload.get("closeButtonBounds"),
+        payload.get("bankCloseButtonBounds"),
+        close_button_widget.get("bounds") if isinstance(close_button_widget, dict) else None,
+    )
+    keyboard_close_possible = None
+    for key in ("keyboardClosePossible", "escapeClosePossible", "topLevelClosable", "topLevelInterfaceClosable"):
+        keyboard_close_possible = _boolish(payload.get(key))
+        if keyboard_close_possible is not None:
+            break
 
     bank_open = _boolish(payload.get("bankOpen"))
     if bank_open is None and payload:
@@ -184,6 +202,9 @@ def analyze_bank_ui_context(
         bank_inventory_visible=bank_inventory_visible,
         deposit_inventory_button_visible=deposit_button_visible,
         bank_close_button_visible=close_button_visible,
+        close_button_widget=close_button_widget,
+        close_button_bounds=close_button_bounds,
+        keyboard_close_possible=keyboard_close_possible,
         inventory_summary=inventory_summary,
         bank_summary=bank_summary,
         service_ready=service_ready,
