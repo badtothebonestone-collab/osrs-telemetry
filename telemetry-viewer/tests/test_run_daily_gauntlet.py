@@ -166,6 +166,51 @@ class RunDailyGauntletTest(unittest.TestCase):
         self.assertFalse(any("daily context endpoint returned FAIL" in failure for failure in result["failures"]))
         self.assertTrue(any("optional" in warning and "context endpoint returned FAIL" in warning for warning in result["warnings"]))
 
+    def test_bank_open_after_banking_complete_defers_missing_target_candidates(self):
+        brain = {
+            "genericTaskState": {"phase": "waiting_for_world_view", "activeIntent": "wait_for_world_view"},
+            "bankOperationContext": {"bankingComplete": True, "completionReason": "no_resource_items_held"},
+            "bankUiContext": {"bankOpen": True},
+            "postBankReacquisitionContext": {
+                "postBankReacquisitionNeeded": True,
+                "bankUiStillOpen": True,
+                "resourceTargetReacquisitionAllowed": False,
+                "reason": "bank_ui_still_open",
+            },
+            "requiredContextDomains": ["inventory", "bank_operation", "bank_ui", "post_bank_reacquisition"],
+            "missingRequiredContextDomains": ["target.candidates", "target.freshness"],
+            "optionalMissingContextDomains": [],
+            "goalProgress": {},
+            "noActionEmitted": True,
+        }
+        result = gauntlet.evaluate_daemon_payloads(
+            {"status": "PASS"},
+            {
+                "liveCoreDaemonActive": True,
+                "inputSourceActive": "plugin-snapshot",
+                "dailyMode": "snapshot-no-files",
+                "noFileDaily": True,
+                "compactPacketFilesRequired": False,
+                "compactPacketFilesWriting": False,
+                "brainTaskPolicy": "woodcutting_bank",
+                "candidateCount": 0,
+                "bankingComplete": True,
+                "bankOpen": True,
+                "postBankReacquisitionReason": "bank_ui_still_open",
+            },
+            {
+                "status": "FAIL",
+                "missingCapabilities": ["target.candidates"],
+                "requiredContextDomains": ["inventory", "bank_operation", "bank_ui", "post_bank_reacquisition"],
+                "missingRequiredContextDomains": ["target.candidates", "target.freshness"],
+            },
+            brain,
+            daily_mode="snapshot-no-files",
+        )
+
+        self.assertFalse(any("daily context endpoint returned FAIL" in failure for failure in result["failures"]))
+        self.assertTrue(any("bank UI is still open" in warning for warning in result["warnings"]))
+
     def test_transition_summary_includes_pathing_context(self):
         brain = {
             "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},

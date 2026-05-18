@@ -126,6 +126,7 @@ def transition_summary_from(status: dict[str, Any], brain_payload: dict[str, Any
     process = brain.get("processInventoryContext") if isinstance(brain.get("processInventoryContext"), dict) else {}
     navigation = brain.get("navigationIntentContext") if isinstance(brain.get("navigationIntentContext"), dict) else {}
     pathing = brain.get("pathingContext") if isinstance(brain.get("pathingContext"), dict) else {}
+    post_bank = brain.get("postBankReacquisitionContext") if isinstance(brain.get("postBankReacquisitionContext"), dict) else {}
     return {
         "taskPolicy": status.get("brainTaskPolicy") or status.get("taskPolicy"),
         "genericPhase": generic.get("phase") or status.get("genericPhase"),
@@ -142,6 +143,11 @@ def transition_summary_from(status: dict[str, Any], brain_payload: dict[str, Any
         "requiredContextDomains": brain.get("requiredContextDomains", status.get("requiredContextDomains", [])),
         "missingRequiredContextDomains": brain.get("missingRequiredContextDomains", status.get("missingRequiredContextDomains", [])),
         "optionalMissingContextDomains": brain.get("optionalMissingContextDomains", status.get("optionalMissingContextDomains", [])),
+        "postBankReacquisitionReason": post_bank.get("reason", status.get("postBankReacquisitionReason")),
+        "postBankResourceTargetReacquisitionAllowed": post_bank.get(
+            "resourceTargetReacquisitionAllowed",
+            status.get("postBankResourceTargetReacquisitionAllowed"),
+        ),
         "noActionEmitted": brain.get("noActionEmitted") if brain else None,
     }
 
@@ -158,6 +164,27 @@ def context_domain_list(*payloads: dict[str, Any] | None, key: str) -> list[str]
         if isinstance(value, list):
             return [str(item) for item in value if item]
     return []
+
+
+def post_bank_target_reacquisition_deferred(*payloads: dict[str, Any] | None) -> bool:
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        brain = payload.get("brain") if isinstance(payload.get("brain"), dict) else payload
+        post_bank = brain.get("postBankReacquisitionContext") if isinstance(brain.get("postBankReacquisitionContext"), dict) else {}
+        bank_operation = brain.get("bankOperationContext") if isinstance(brain.get("bankOperationContext"), dict) else {}
+        bank_ui = brain.get("bankUiContext") if isinstance(brain.get("bankUiContext"), dict) else {}
+        reason = post_bank.get("reason") or payload.get("postBankReacquisitionReason")
+        banking_complete = bank_operation.get("bankingComplete", payload.get("bankingComplete"))
+        bank_open = bank_ui.get("bankOpen", payload.get("bankOpen"))
+        allowed = post_bank.get("resourceTargetReacquisitionAllowed", payload.get("postBankResourceTargetReacquisitionAllowed"))
+        if (
+            banking_complete is True
+            and bank_open is True
+            and (reason == "bank_ui_still_open" or allowed is False)
+        ):
+            return True
+    return False
 
 
 def evaluate_daemon_payloads(
@@ -242,7 +269,10 @@ def evaluate_daemon_payloads(
                 context_payload,
                 key="requiredContextDomains",
             )
-            if missing_required or not required_domains:
+            target_missing = any(domain in {"target.candidates", "target.freshness"} for domain in missing_required)
+            if target_missing and post_bank_target_reacquisition_deferred(daemon_status, brain_payload, context_payload):
+                warnings.append("target candidates deferred because bank UI is still open after banking complete")
+            elif missing_required or not required_domains:
                 detail = f": missing required context domains: {', '.join(missing_required)}" if missing_required else ""
                 failures.append(f"daily context endpoint returned FAIL{detail}")
             else:
@@ -434,6 +464,8 @@ def build_report(args: argparse.Namespace, processes: list[dict[str, Any]] | Non
         "requiredContextDomains": transition_summary.get("requiredContextDomains") or daemon_status.get("requiredContextDomains") or [],
         "missingRequiredContextDomains": transition_summary.get("missingRequiredContextDomains") or daemon_status.get("missingRequiredContextDomains") or [],
         "optionalMissingContextDomains": transition_summary.get("optionalMissingContextDomains") or daemon_status.get("optionalMissingContextDomains") or [],
+        "postBankReacquisitionReason": transition_summary.get("postBankReacquisitionReason") or daemon_status.get("postBankReacquisitionReason"),
+        "postBankResourceTargetReacquisitionAllowed": transition_summary.get("postBankResourceTargetReacquisitionAllowed"),
         "noActionEmitted": transition_summary.get("noActionEmitted"),
         "transitionSummary": transition_summary,
         "livePacketGrowth": packet_growth,
@@ -487,6 +519,8 @@ def format_human(report: dict) -> str:
         f"Required context domains: {', '.join(report.get('requiredContextDomains') or []) or 'none'}",
         f"Missing required domains: {', '.join(report.get('missingRequiredContextDomains') or []) or 'none'}",
         f"Optional missing domains: {', '.join(report.get('optionalMissingContextDomains') or []) or 'none'}",
+        f"Post-bank reason: {report.get('postBankReacquisitionReason') or 'none'}",
+        f"Resource target reacquisition allowed: {str(report.get('postBankResourceTargetReacquisitionAllowed')).lower()}",
         f"noActionEmitted: {str(report.get('noActionEmitted')).lower()}",
         "",
         "Processes:",

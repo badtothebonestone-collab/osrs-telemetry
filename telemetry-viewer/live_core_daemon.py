@@ -28,11 +28,12 @@ from analyzers import intent_overlay_analyzer
 from analyzers import navigation_analyzer
 from analyzers import navigation_intent_analyzer
 from analyzers import pathing_analyzer
+from analyzers import post_bank_reacquisition_analyzer
 from analyzers import process_inventory_analyzer
 from analyzers import return_to_resource_analyzer
 from analyzers import service_analyzer
 from analyzers import target_analyzer
-from analyzers.live_state import InventoryContext, LiveAnalysisResult, LiveInputSnapshot, LiveSourceStatus, PlayerContext
+from analyzers.live_state import BankOperationContext, InventoryContext, LiveAnalysisResult, LiveInputSnapshot, LiveSourceStatus, PlayerContext
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
 
@@ -708,6 +709,15 @@ class LiveCoreState:
             "returnInventoryFull",
             "returnToResourceMissingCapabilities",
             "returnToResourceWarnings",
+            "postBankReacquisitionNeeded",
+            "postBankUiStillOpen",
+            "postBankWorldViewReady",
+            "postBankResourceTargetReacquisitionAllowed",
+            "postBankResourceTargetAvailable",
+            "postBankReacquisitionStatus",
+            "postBankReacquisitionReason",
+            "postBankReacquisitionMissingCapabilities",
+            "postBankReacquisitionWarnings",
             "selectedServiceTargetName",
             "selectedServiceTargetTile",
             "distanceToServiceTarget",
@@ -1382,6 +1392,7 @@ class LiveCoreDaemon:
         task = self.effective_brain_task()
         goal_count = self.effective_goal_count()
         policy_name = self.effective_task_policy()
+        previous_decision = self.state.brain_decision if isinstance(self.state.brain_decision, dict) else {}
         response = self.build_context_response(self.default_context_request(), annotate=False)
         brain_context = brain_context_analyzer.evaluate_brain_context(
             response,
@@ -1517,6 +1528,47 @@ class LiveCoreDaemon:
             )
             bank_operation_context = self.state.analysis_result.bank_operation
             brain_context.decision["bankOperationContext"] = bank_operation_context.to_dict()
+            previous_post_bank = (
+                previous_decision.get("postBankReacquisitionContext")
+                if isinstance(previous_decision.get("postBankReacquisitionContext"), dict)
+                else {}
+            )
+            previous_bank_operation = (
+                previous_decision.get("bankOperationContext")
+                if isinstance(previous_decision.get("bankOperationContext"), dict)
+                else {}
+            )
+            previous_banking_complete = (
+                previous_bank_operation.get("bankingComplete") is True
+                or (
+                    previous_post_bank.get("postBankReacquisitionNeeded") is True
+                    and previous_post_bank.get("reason") == "bank_ui_still_open"
+                )
+            )
+            if (
+                not bank_operation_context.banking_complete
+                and previous_banking_complete
+                and bank_ui_context.bank_open is False
+            ):
+                bank_operation_context = BankOperationContext(
+                    status="PASS",
+                    source_tick=source_tick,
+                    operation_needed=False,
+                    operation_type="none",
+                    resource_items_held=0,
+                    resource_item_slots=[],
+                    resource_item_quantity=0,
+                    non_resource_items_held=bank_operation_context.non_resource_items_held,
+                    inventory_free_slots=bank_operation_context.inventory_free_slots,
+                    inventory_full=bank_operation_context.inventory_full,
+                    deposit_inventory_available=bank_operation_context.deposit_inventory_available,
+                    bank_readable=False,
+                    banking_complete=True,
+                    completion_reason=str(previous_bank_operation.get("completionReason") or "no_resource_items_held"),
+                    reason="banking completion retained while bank UI closed and world view resumes",
+                )
+                self.state.analysis_result.bank_operation = bank_operation_context
+                brain_context.decision["bankOperationContext"] = bank_operation_context.to_dict()
             self.state.analysis_result.return_to_resource = return_to_resource_analyzer.analyze_return_to_resource_context(
                 policy,
                 bank_operation_context=bank_operation_context,
@@ -1527,6 +1579,43 @@ class LiveCoreDaemon:
             )
             return_context = self.state.analysis_result.return_to_resource
             brain_context.decision["returnToResourceContext"] = return_context.to_dict()
+            self.state.analysis_result.post_bank_reacquisition = post_bank_reacquisition_analyzer.analyze_post_bank_reacquisition_context(
+                policy,
+                bank_operation_context=bank_operation_context,
+                bank_ui_context=bank_ui_context,
+                target_context=self.state.analysis_result.targets,
+                current_task_state=generic_state,
+                source_tick=source_tick,
+            )
+            post_bank_context = self.state.analysis_result.post_bank_reacquisition
+            brain_context.decision["postBankReacquisitionContext"] = post_bank_context.to_dict()
+
+            def recompute_navigation_for_generic_state() -> None:
+                self.state.analysis_result.navigation_intent = navigation_intent_analyzer.analyze_navigation_intent(
+                    policy,
+                    player_context=self.state.analysis_result.player,
+                    target_context=self.state.analysis_result.targets,
+                    service_context=service_context,
+                    process_inventory_context=process_context,
+                    navigation_context=self.state.analysis_result.navigation,
+                    generic_task_state=generic_state,
+                    source_tick=source_tick,
+                )
+                brain_context.decision["navigationIntentContext"] = self.state.analysis_result.navigation_intent.to_dict()
+                self.state.analysis_result.pathing = pathing_analyzer.analyze_pathing_context(
+                    player_context=self.state.analysis_result.player,
+                    navigation_context=self.state.analysis_result.navigation,
+                    navigation_intent_context=self.state.analysis_result.navigation_intent,
+                    service_context=service_context,
+                    process_inventory_context=process_context,
+                    target_context=self.state.analysis_result.targets,
+                    activity_context=self.state.analysis_result.activity,
+                    generic_task_state=generic_state,
+                    path_intent_state=self.state.path_intent_state,
+                    source_tick=source_tick,
+                    movement_model="osrs_like_predicted",
+                )
+
             if service_context and service_context.service_ready:
                 service_target = service_context.best_service_candidate if isinstance(service_context.best_service_candidate, dict) else None
                 if bank_ui_context.bank_pin_open is True:
@@ -1568,7 +1657,25 @@ class LiveCoreDaemon:
                     generic_state["bankOperationCompletionReason"] = bank_operation_context.completion_reason
                     brain_context.decision["phase"] = generic_state["phase"]
                     brain_context.decision["genericTaskState"] = generic_state
-            if return_context.return_needed:
+            if post_bank_context.post_bank_reacquisition_needed and post_bank_context.bank_ui_still_open:
+                generic_state["phase"] = "waiting_for_world_view"
+                generic_state["activeIntent"] = "wait_for_world_view"
+                generic_state["activeIntentTarget"] = None
+                generic_state["selectedTargetKey"] = None
+                generic_state["availableTarget"] = None
+                generic_state["returnNeeded"] = return_context.return_needed
+                generic_state["returnReady"] = False
+                generic_state["returnToResourceReason"] = return_context.reason
+                generic_state["bankingComplete"] = bank_operation_context.banking_complete
+                generic_state["postBankReacquisitionNeeded"] = post_bank_context.post_bank_reacquisition_needed
+                generic_state["postBankReacquisitionReason"] = post_bank_context.reason
+                generic_state["resourceTargetReacquisitionAllowed"] = post_bank_context.resource_target_reacquisition_allowed
+                blocking = [str(item) for item in generic_state.get("blockingConditions") or [] if item and item != "no_target_observed"]
+                generic_state["blockingConditions"] = blocking
+                brain_context.decision["phase"] = "waiting_for_world_view"
+                brain_context.decision["genericTaskState"] = generic_state
+                recompute_navigation_for_generic_state()
+            elif return_context.return_needed:
                 resource_target = return_context.best_resource_target if isinstance(return_context.best_resource_target, dict) else None
                 generic_state["returnNeeded"] = return_context.return_needed
                 generic_state["returnReady"] = return_context.return_ready
@@ -1596,30 +1703,7 @@ class LiveCoreDaemon:
                     generic_state["blockingConditions"] = blocking
                     brain_context.decision["phase"] = "no_target_observed"
                 brain_context.decision["genericTaskState"] = generic_state
-                self.state.analysis_result.navigation_intent = navigation_intent_analyzer.analyze_navigation_intent(
-                    policy,
-                    player_context=self.state.analysis_result.player,
-                    target_context=self.state.analysis_result.targets,
-                    service_context=service_context,
-                    process_inventory_context=process_context,
-                    navigation_context=self.state.analysis_result.navigation,
-                    generic_task_state=generic_state,
-                    source_tick=source_tick,
-                )
-                brain_context.decision["navigationIntentContext"] = self.state.analysis_result.navigation_intent.to_dict()
-                self.state.analysis_result.pathing = pathing_analyzer.analyze_pathing_context(
-                    player_context=self.state.analysis_result.player,
-                    navigation_context=self.state.analysis_result.navigation,
-                    navigation_intent_context=self.state.analysis_result.navigation_intent,
-                    service_context=service_context,
-                    process_inventory_context=process_context,
-                    target_context=self.state.analysis_result.targets,
-                    activity_context=self.state.analysis_result.activity,
-                    generic_task_state=generic_state,
-                    path_intent_state=self.state.path_intent_state,
-                    source_tick=source_tick,
-                    movement_model="osrs_like_predicted",
-                )
+                recompute_navigation_for_generic_state()
             pathing_payload = self.state.analysis_result.pathing.to_dict()
             pathing_payload["overlayPredictedPathLimit"] = intent_overlay_analyzer.predicted_path_limit(self.args, self.args.overlay_mode)
             brain_context.decision["pathingContext"] = pathing_payload
@@ -1821,6 +1905,17 @@ class LiveCoreDaemon:
             fields["returnInventoryFull"] = return_context.inventory_full
             fields["returnToResourceMissingCapabilities"] = list(return_context.missing_capabilities)
             fields["returnToResourceWarnings"] = list(return_context.warnings)
+        if self.state.analysis_result and self.state.analysis_result.post_bank_reacquisition:
+            post_bank = self.state.analysis_result.post_bank_reacquisition
+            fields["postBankReacquisitionNeeded"] = post_bank.post_bank_reacquisition_needed
+            fields["postBankUiStillOpen"] = post_bank.bank_ui_still_open
+            fields["postBankWorldViewReady"] = post_bank.world_view_ready
+            fields["postBankResourceTargetReacquisitionAllowed"] = post_bank.resource_target_reacquisition_allowed
+            fields["postBankResourceTargetAvailable"] = post_bank.resource_target_available
+            fields["postBankReacquisitionStatus"] = post_bank.status
+            fields["postBankReacquisitionReason"] = post_bank.reason
+            fields["postBankReacquisitionMissingCapabilities"] = list(post_bank.missing_capabilities)
+            fields["postBankReacquisitionWarnings"] = list(post_bank.warnings)
         self.state.source_status.update(fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)

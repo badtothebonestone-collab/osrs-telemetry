@@ -591,6 +591,9 @@ def target_required_for_intent(active_intent: str) -> bool:
         "resume_resource_collection",
         "service_interaction_pending",
         "needs_user_resolution",
+        "wait_for_world_view",
+        "close_service_context",
+        "resume_resource_collection_pending",
     }:
         return False
     return True
@@ -684,10 +687,17 @@ def build_intent_overlay_state(
     navigation_intent_context = brain_decision.get("navigationIntentContext") if isinstance(brain_decision.get("navigationIntentContext"), dict) else {}
     pathing_context = brain_decision.get("pathingContext") if isinstance(brain_decision.get("pathingContext"), dict) else {}
     return_context = brain_decision.get("returnToResourceContext") if isinstance(brain_decision.get("returnToResourceContext"), dict) else {}
+    post_bank_context = brain_decision.get("postBankReacquisitionContext") if isinstance(brain_decision.get("postBankReacquisitionContext"), dict) else {}
     if (
         return_context.get("returnNeeded") is True
         and str(pathing_context.get("pathCompletionReason") or "").lower() == "arrived_at_service"
         and active_intent in {"select_target", "target_selected", "resume_resource_collection"}
+    ):
+        pathing_context = {}
+    if (
+        post_bank_context.get("postBankReacquisitionNeeded") is True
+        and post_bank_context.get("bankUiStillOpen") is True
+        and str(pathing_context.get("pathCompletionReason") or "").lower() == "arrived_at_service"
     ):
         pathing_context = {}
     service_candidates = service_context.get("serviceCandidates") if isinstance(service_context.get("serviceCandidates"), list) else []

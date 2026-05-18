@@ -89,32 +89,32 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
         self.assertEqual(payload["bankOperationContextSummary"]["operationType"], "deposit_inventory")
         self.assertEqual(payload["bankOperationContextSummary"]["resourceItemQuantity"], 28)
 
-    def test_service_ready_readable_bank_without_logs_returns_to_tree_target(self):
+    def test_service_ready_readable_bank_without_logs_waits_for_world_view(self):
         payload = transitions.evaluate_transition_scenario("woodcutting_bank", "service_complete")
 
         self.assertEqual(payload["status"], "PASS")
-        self.assertEqual(payload["actualPhase"], "target_selected")
-        self.assertEqual(payload["actualActiveIntent"], "select_target")
+        self.assertEqual(payload["actualPhase"], "waiting_for_world_view")
+        self.assertEqual(payload["actualActiveIntent"], "wait_for_world_view")
         self.assertTrue(payload["bankUiContextSummary"]["bankReadable"])
         self.assertFalse(payload["bankOperationContextSummary"]["operationNeeded"])
         self.assertTrue(payload["bankOperationContextSummary"]["bankingComplete"])
         self.assertEqual(payload["bankOperationContextSummary"]["completionReason"], "no_resource_items_held")
         self.assertTrue(payload["returnToResourceContextSummary"]["returnNeeded"])
-        self.assertTrue(payload["returnToResourceContextSummary"]["returnReady"])
-        self.assertTrue(payload["returnToResourceContextSummary"]["resourceTargetAvailable"])
-        self.assertEqual(payload["overlaySelectedMarker"]["classId"], "tree")
+        self.assertEqual(payload["postBankReacquisitionContextSummary"]["reason"], "bank_ui_still_open")
+        self.assertFalse(payload["postBankReacquisitionContextSummary"]["resourceTargetReacquisitionAllowed"])
+        self.assertIsNone(payload["overlaySelectedMarker"])
 
     def test_service_complete_without_tree_target_needs_resource_context(self):
         payload = transitions.evaluate_transition_scenario("woodcutting_bank", "service_complete_no_target")
 
         self.assertEqual(payload["status"], "PASS")
-        self.assertEqual(payload["actualPhase"], "needs_more_context")
-        self.assertEqual(payload["actualActiveIntent"], "select_target")
+        self.assertEqual(payload["actualPhase"], "waiting_for_world_view")
+        self.assertEqual(payload["actualActiveIntent"], "wait_for_world_view")
         self.assertTrue(payload["bankOperationContextSummary"]["bankingComplete"])
         self.assertTrue(payload["returnToResourceContextSummary"]["returnNeeded"])
-        self.assertFalse(payload["returnToResourceContextSummary"]["returnReady"])
-        self.assertFalse(payload["returnToResourceContextSummary"]["resourceTargetAvailable"])
-        self.assertIn("target.candidates", payload["missingRequiredContextDomains"])
+        self.assertEqual(payload["postBankReacquisitionContextSummary"]["reason"], "bank_ui_still_open")
+        self.assertFalse(payload["postBankReacquisitionContextSummary"]["resourceTargetReacquisitionAllowed"])
+        self.assertNotIn("target.candidates", payload["missingRequiredContextDomains"])
         self.assertIsNone(payload["overlaySelectedMarker"])
 
     def test_bank_pin_open_becomes_blocked_user_resolution(self):

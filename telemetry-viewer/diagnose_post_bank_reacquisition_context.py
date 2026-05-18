@@ -7,7 +7,7 @@ import urllib.request
 from typing import Any
 
 
-SCHEMA = "return_to_resource_context_diagnostic.v1"
+SCHEMA = "post_bank_reacquisition_context_diagnostic.v1"
 
 
 def fetch_json(url: str, timeout: float = 3.0) -> dict[str, Any]:
@@ -27,46 +27,31 @@ def bool_label(value: Any) -> str:
     return "unknown"
 
 
-def value_or_unknown(value: Any) -> Any:
-    return value if value is not None else "unknown"
-
-
-def target_label(target: Any) -> str:
-    if not isinstance(target, dict) or not target:
-        return "none"
-    return str(target.get("targetName") or target.get("name") or target.get("classId") or target.get("objectKey") or "target")
-
-
 def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
     brain = status.get("brain") if isinstance(status.get("brain"), dict) else {}
     generic = brain.get("genericTaskState") if isinstance(brain.get("genericTaskState"), dict) else {}
     bank_operation = brain.get("bankOperationContext") if isinstance(brain.get("bankOperationContext"), dict) else {}
-    context = brain.get("returnToResourceContext") if isinstance(brain.get("returnToResourceContext"), dict) else {}
-    post_bank = brain.get("postBankReacquisitionContext") if isinstance(brain.get("postBankReacquisitionContext"), dict) else {}
-    best_target = context.get("bestResourceTarget", status.get("returnBestResourceTarget"))
+    bank_ui = brain.get("bankUiContext") if isinstance(brain.get("bankUiContext"), dict) else {}
+    context = brain.get("postBankReacquisitionContext") if isinstance(brain.get("postBankReacquisitionContext"), dict) else {}
     return {
         "schema": SCHEMA,
         "source": "daemon-memory",
         "daemonReachable": True,
-        "returnToResourceContextPresent": bool(context),
+        "postBankReacquisitionContextPresent": bool(context),
         "bankingComplete": bank_operation.get("bankingComplete", status.get("bankingComplete")),
-        "inventoryFreeSlots": context.get("inventoryFreeSlots", status.get("returnInventoryFreeSlots", status.get("inventoryFreeSlots"))),
-        "resourceTargetAvailable": context.get("resourceTargetAvailable", status.get("returnResourceTargetAvailable")),
-        "bestResourceTarget": target_label(best_target),
-        "resourcePathingNeeded": context.get("resourcePathingNeeded", status.get("returnResourcePathingNeeded")),
-        "returnNeeded": context.get("returnNeeded", status.get("returnToResourceNeeded")),
-        "returnReady": context.get("returnReady", status.get("returnToResourceReady")),
-        "postBankReacquisitionReason": post_bank.get("reason", status.get("postBankReacquisitionReason")),
-        "resourceTargetReacquisitionAllowed": post_bank.get(
+        "bankOpen": bank_ui.get("bankOpen", status.get("bankOpen")),
+        "worldViewReady": context.get("worldViewReady", status.get("postBankWorldViewReady")),
+        "resourceTargetReacquisitionAllowed": context.get(
             "resourceTargetReacquisitionAllowed",
             status.get("postBankResourceTargetReacquisitionAllowed"),
         ),
+        "resourceTargetAvailable": context.get("resourceTargetAvailable", status.get("postBankResourceTargetAvailable")),
+        "reason": context.get("reason", status.get("postBankReacquisitionReason")),
         "nextPhase": generic.get("phase", status.get("brainPhase")),
         "activeIntent": generic.get("activeIntent"),
-        "missingCapabilities": list(context.get("missingCapabilities") or status.get("returnToResourceMissingCapabilities") or []),
-        "warnings": list(context.get("warnings") or status.get("returnToResourceWarnings") or []),
-        "status": context.get("status", status.get("returnToResourceStatus")),
-        "reason": context.get("reason", status.get("returnToResourceReason")),
+        "missingCapabilities": list(context.get("missingCapabilities") or status.get("postBankReacquisitionMissingCapabilities") or []),
+        "warnings": list(context.get("warnings") or status.get("postBankReacquisitionWarnings") or []),
+        "status": context.get("status", status.get("postBankReacquisitionStatus")),
         "noActionEmitted": brain.get("noActionEmitted", True),
     }
 
@@ -76,7 +61,7 @@ def unavailable_payload(error: Exception | str) -> dict[str, Any]:
         "schema": SCHEMA,
         "source": "daemon-memory",
         "daemonReachable": False,
-        "returnToResourceContextPresent": False,
+        "postBankReacquisitionContextPresent": False,
         "warnings": [str(error)],
         "missingCapabilities": ["daemon.status"],
         "noActionEmitted": True,
@@ -85,22 +70,18 @@ def unavailable_payload(error: Exception | str) -> dict[str, Any]:
 
 def format_human(payload: dict[str, Any]) -> str:
     lines = [
-        "RETURN-TO-RESOURCE CONTEXT DIAGNOSTIC",
+        "POST-BANK WORLD REACQUISITION CONTEXT DIAGNOSTIC",
         "",
         f"Source: {payload.get('source')}",
         f"Daemon reachable: {bool_label(payload.get('daemonReachable'))}",
-        f"Return context present: {bool_label(payload.get('returnToResourceContextPresent'))}",
+        f"Post-bank context present: {bool_label(payload.get('postBankReacquisitionContextPresent'))}",
         f"Status: {payload.get('status') or 'unknown'}",
         f"Reason: {payload.get('reason') or 'unknown'}",
         f"Banking complete: {bool_label(payload.get('bankingComplete'))}",
-        f"Inventory free slots: {value_or_unknown(payload.get('inventoryFreeSlots'))}",
-        f"Resource target available: {bool_label(payload.get('resourceTargetAvailable'))}",
-        f"Best resource target: {payload.get('bestResourceTarget') or 'none'}",
-        f"Resource pathing needed: {bool_label(payload.get('resourcePathingNeeded'))}",
-        f"Return needed: {bool_label(payload.get('returnNeeded'))}",
-        f"Return ready: {bool_label(payload.get('returnReady'))}",
-        f"Post-bank reason: {payload.get('postBankReacquisitionReason') or 'unknown'}",
+        f"Bank open: {bool_label(payload.get('bankOpen'))}",
+        f"World view ready: {bool_label(payload.get('worldViewReady'))}",
         f"Resource target reacquisition allowed: {bool_label(payload.get('resourceTargetReacquisitionAllowed'))}",
+        f"Resource target available: {bool_label(payload.get('resourceTargetAvailable'))}",
         f"Next phase: {payload.get('nextPhase') or 'unknown'}",
         f"Active intent: {payload.get('activeIntent') or 'unknown'}",
     ]
@@ -116,7 +97,7 @@ def format_human(payload: dict[str, Any]) -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Read-only return-to-resource context diagnostic. Prints to stdout only.")
+    parser = argparse.ArgumentParser(description="Read-only post-bank world reacquisition diagnostic. Prints to stdout only.")
     parser.add_argument("--from-daemon", action="store_true", help="Read current live daemon memory/status.")
     parser.add_argument("--daemon-url", default="http://127.0.0.1:8890")
     parser.add_argument("--timeout", type=float, default=3.0)
@@ -131,8 +112,8 @@ def main(argv: list[str] | None = None) -> int:
             "schema": SCHEMA,
             "source": "not_requested",
             "daemonReachable": False,
-            "returnToResourceContextPresent": False,
-            "warnings": ["pass --from-daemon to read live daemon return-to-resource context"],
+            "postBankReacquisitionContextPresent": False,
+            "warnings": ["pass --from-daemon to read live daemon post-bank reacquisition context"],
             "noActionEmitted": True,
         }
         print(json.dumps(payload, indent=2) if args.json else format_human(payload), end="")

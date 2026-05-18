@@ -54,6 +54,11 @@ RuneLite plugin
 - After bankingComplete=true with no visible resource target, woodcut_bank
   reports needs_more_context/select_target for resource target context rather
   than keeping bank service intent active.
+- Post-bank World Reacquisition Context v1 distinguishes bank-complete states:
+  bank UI still open defers resource targeting as waiting_for_world_view /
+  wait_for_world_view, bank closed allows resource targeting to resume, and
+  missing resource targets are only treated as target context after the world
+  view is available.
 
 ## Current service-memory proof
 
@@ -74,6 +79,8 @@ python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url h
 
 python telemetry-viewer\diagnose_return_to_resource_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 
+python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+
 python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 
 ## Verification commands
@@ -86,12 +93,12 @@ python telemetry-viewer\run_stabilization_suite.py
 
 ## Current next milestone
 
-Return-to-Resource Context v1 live QA.
+Post-bank World Reacquisition Context v1 live QA.
 
 Goal:
-bankingComplete=true -> free inventory slots -> resource target selection and
-resource overlay/pathing resume without keeping bank service path as the active
-intent.
+bankingComplete=true -> distinguish bank UI still open from world-view resource
+targeting. Missing tree candidates are deferred while bankOpen=true, and only
+become resource-target context after bankOpen=false.
 
 Implemented scope:
 - `return_to_resource_analyzer.py` reports returnNeeded, returnReady,
@@ -107,6 +114,17 @@ Implemented scope:
     select_target
 - Intent overlay suppresses stale completed bank service path markers during
   return-to-resource and selects the resource target when available.
+- `post_bank_reacquisition_analyzer.py` reports whether resource target
+  reacquisition is deferred by the open bank UI or allowed after the bank closes.
+- `diagnose_post_bank_reacquisition_context.py` reports daemon post-bank
+  reacquisition state in human and JSON modes.
+- Task phase integration:
+  - bankingComplete + bankOpen=true -> waiting_for_world_view /
+    wait_for_world_view, no target candidate failure
+  - bankingComplete + bankOpen=false + resource target visible ->
+    target_selected / select_target
+  - bankingComplete + bankOpen=false + no resource target ->
+    needs_more_context / select_target
 - Do not change pathing, service ranking, service memory, or plugin telemetry
   unless the return-to-resource work truly requires it.
 
@@ -127,6 +145,7 @@ Preferred live QA flow:
    python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_overlay_state.py --latest-session --intent
    python telemetry-viewer\diagnose_return_to_resource_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+   python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
    python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 
@@ -153,6 +172,9 @@ Bank Operation Context v1 works.
 
 Return-to-Resource Context v1 works.
 
+Post-bank World Reacquisition Context v1 works in analyzers, daemon phase
+integration, diagnostics, overlay suppression, and daily gauntlet deferral.
+
 After depositing logs with bank open:
 - bankOperation PASS
 - bankingComplete=true
@@ -161,6 +183,8 @@ After depositing logs with bank open:
 - activeIntent=select_target / resume_resource_collection
 
 Open-bank view with no visible tree target can produce missing target candidates/freshness. This should be treated as expected when the bank UI is still open and the world/resource target view is deferred, not as a bank/service failure.
+Post-bank reacquisition now represents that state explicitly with
+reason=bank_ui_still_open and resourceTargetReacquisitionAllowed=false.
 
 ## Current Next Milestone: Post-bank World Reacquisition Context v1
 

@@ -168,6 +168,53 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertEqual(result["activeIntent"], "needs_service")
         self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "selected_target"])
 
+    def test_wait_for_world_view_does_not_retain_bank_marker(self):
+        bank_target = {
+            "objectKey": "bank-booth-1",
+            "targetName": "Bank booth",
+            "targetType": "sceneObject",
+            "classId": "bank_related",
+            "id": 10355,
+            "worldX": 3208,
+            "worldY": 3219,
+            "plane": 0,
+            "sceneX": 20,
+            "sceneY": 21,
+            "qualityScore": 95,
+            "distanceTiles": 1,
+            "navigation": {"directReachability": "reachable"},
+        }
+        state = intent_stabilizer.IntentState()
+        stable = intent_stabilizer.choose_stable_intent(
+            state,
+            [bank_target],
+            {"activeTask": "woodcutting", "activeIntent": "select_target", "profile": "woodcutting", "latestTick": 1, "rawBestTarget": bank_target},
+        )
+
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 2}, "candidates": [bank_target]},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {"phase": "waiting_for_world_view", "activeIntent": "wait_for_world_view"},
+                "postBankReacquisitionContext": {
+                    "postBankReacquisitionNeeded": True,
+                    "bankUiStillOpen": True,
+                    "reason": "bank_ui_still_open",
+                },
+                "pathingContext": {
+                    "pathCompletionReason": "arrived_at_service",
+                    "predictedPathTiles": [{"worldX": 3208, "worldY": 3219, "plane": 0}],
+                },
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2),
+            "2026-01-01T00:00:00Z",
+            stable,
+        )
+
+        self.assertEqual(result["activeIntent"], "wait_for_world_view")
+        self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "selected_target"])
+        self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "predicted_path_tile"])
+
     def test_bank_policy_overlay_selects_service_target_when_available(self):
         tree = candidate("selected")
         service_target = {

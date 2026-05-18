@@ -679,6 +679,33 @@ class ReturnToResourceContext(AnalyzerContractFields):
 
 
 @dataclass
+class PostBankReacquisitionContext(AnalyzerContractFields):
+    status: str = "PASS"
+    warnings: list[str] = field(default_factory=list)
+    missing_capabilities: list[str] = field(default_factory=list)
+    source_tick: int | None = None
+    retained_from_previous: bool = False
+    timing_millis: float | None = None
+    post_bank_reacquisition_needed: bool = False
+    bank_ui_still_open: bool = False
+    world_view_ready: bool | None = None
+    resource_target_reacquisition_allowed: bool = False
+    resource_target_available: bool = False
+    reason: str = "not_applicable"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.contract_payload(),
+            "postBankReacquisitionNeeded": self.post_bank_reacquisition_needed,
+            "bankUiStillOpen": self.bank_ui_still_open,
+            "worldViewReady": self.world_view_ready,
+            "resourceTargetReacquisitionAllowed": self.resource_target_reacquisition_allowed,
+            "resourceTargetAvailable": self.resource_target_available,
+            "reason": self.reason,
+        }
+
+
+@dataclass
 class LiveAnalysisResult:
     input_snapshot: LiveInputSnapshot | None = None
     source_status: LiveSourceStatus | None = None
@@ -694,6 +721,7 @@ class LiveAnalysisResult:
     bank_ui: BankUiContext | None = None
     bank_operation: BankOperationContext | None = None
     return_to_resource: ReturnToResourceContext | None = None
+    post_bank_reacquisition: PostBankReacquisitionContext | None = None
     intent_overlay: IntentOverlayContext | None = None
     brain: BrainContext | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)

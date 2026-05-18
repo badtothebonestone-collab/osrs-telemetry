@@ -615,6 +615,9 @@ def context_domain_summary(
     elif active_intent == "resume_resource_collection" or phase in {"service_complete", "return_to_resource"}:
         required = ["inventory", "bank_operation", "return_to_resource"]
         optional = ["service", "bank_ui", "target.candidates"]
+    elif active_intent in {"wait_for_world_view", "close_service_context", "resume_resource_collection_pending"} or phase == "waiting_for_world_view":
+        required = ["inventory", "bank_operation", "bank_ui", "post_bank_reacquisition"]
+        optional = ["service", "target.candidates", "target.freshness"]
     elif active_intent == "needs_user_resolution":
         required = ["service", "bank_ui"]
         optional = ["inventory", "target.candidates", "navigation.pathing"]
@@ -683,6 +686,12 @@ def context_domain_summary(
             missing_required.append("return_to_resource")
         elif return_context.get("returnNeeded") is not True:
             missing_required.append("return_to_resource")
+    post_bank_context = decision.get("postBankReacquisitionContext") if isinstance(decision.get("postBankReacquisitionContext"), dict) else {}
+    if "post_bank_reacquisition" in required:
+        if not post_bank_context:
+            missing_required.append("post_bank_reacquisition")
+        elif post_bank_context.get("postBankReacquisitionNeeded") is not True:
+            missing_required.append("post_bank_reacquisition")
 
     if "inventory" in optional and inventory_missing:
         optional_missing.append("inventory")
@@ -2230,6 +2239,7 @@ def format_human(decision: dict) -> str:
     bank_ui_context = decision.get("bankUiContext") if isinstance(decision.get("bankUiContext"), dict) else {}
     bank_operation_context = decision.get("bankOperationContext") if isinstance(decision.get("bankOperationContext"), dict) else {}
     return_context = decision.get("returnToResourceContext") if isinstance(decision.get("returnToResourceContext"), dict) else {}
+    post_bank_context = decision.get("postBankReacquisitionContext") if isinstance(decision.get("postBankReacquisitionContext"), dict) else {}
     active_intent = str(generic_state.get("activeIntent") or "")
     active_target = generic_state.get("activeIntentTarget") if isinstance(generic_state.get("activeIntentTarget"), dict) else None
     available_target = generic_state.get("availableTarget") if isinstance(generic_state.get("availableTarget"), dict) else None
@@ -2301,6 +2311,14 @@ def format_human(decision: dict) -> str:
         lines.append(f"  inventory free slots: {text(return_context.get('inventoryFreeSlots'))}")
         if return_context.get("reason"):
             lines.append(f"  reason: {text(return_context.get('reason'))}")
+    if post_bank_context and post_bank_context.get("postBankReacquisitionNeeded"):
+        lines.extend(["", "Post-bank world view:"])
+        lines.append(f"  bank UI open: {text(post_bank_context.get('bankUiStillOpen'))}")
+        lines.append(f"  world ready: {text(post_bank_context.get('worldViewReady'))}")
+        lines.append(f"  target reacquisition allowed: {text(post_bank_context.get('resourceTargetReacquisitionAllowed'))}")
+        lines.append(f"  target available: {text(post_bank_context.get('resourceTargetAvailable'))}")
+        if post_bank_context.get("reason"):
+            lines.append(f"  reason: {text(post_bank_context.get('reason'))}")
     if process_needed:
         lines.append(f"  Process needed: {text(process_needed)}")
         if process_context.get("heldResourceCount") is not None:
