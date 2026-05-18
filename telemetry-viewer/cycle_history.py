@@ -80,6 +80,7 @@ def entry_from_cycle_payload(
     close_bank = _dict(payload.get("closeBank"))
     post_bank = _dict(payload.get("postBank"))
     return_context = _dict(payload.get("returnToResource"))
+    resource_return = _dict(payload.get("resourceReturn"))
     overlay = _dict(payload.get("overlay"))
     selected = _dict(overlay.get("selected"))
     return {
@@ -100,7 +101,7 @@ def entry_from_cycle_payload(
         "bankingComplete": operation.get("bankingComplete"),
         "closeBankNeeded": payload.get("closeBankNeeded", close_bank.get("closeBankNeeded")),
         "postBankReason": post_bank.get("reason"),
-        "returnReason": return_context.get("reason"),
+        "returnReason": resource_return.get("reason") or return_context.get("reason"),
         "resourceTargetAvailable": return_context.get("resourceTargetAvailable", post_bank.get("resourceTargetAvailable")),
         "warningCount": len(_list(payload.get("warnings"))),
         "missingCapabilityCount": len(_list(payload.get("missingCapabilities"))),

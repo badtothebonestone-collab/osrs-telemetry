@@ -720,6 +720,11 @@ def build_intent_overlay_state(
         selected_key = intent_stabilizer.build_target_key(active_target, target_type_for_candidate(active_target))
         selected_target_type = None
         selected_class_id = None
+    elif active_intent in {"return_to_resource_area", "navigate_to_resource_area"} and active_target:
+        selected = active_target
+        selected_key = intent_stabilizer.build_target_key(active_target, target_type_for_candidate(active_target))
+        selected_target_type = target_type_for_candidate(active_target)
+        selected_class_id = active_target.get("classId")
     elif not target_required_for_intent(active_intent):
         selected = None
         selected_key = None

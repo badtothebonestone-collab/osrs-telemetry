@@ -123,6 +123,19 @@ class TaskTransitionDiagnosticTest(unittest.TestCase):
         self.assertNotIn("target.candidates", payload["missingRequiredContextDomains"])
         self.assertIsNone(payload["overlaySelectedMarker"])
 
+    def test_bank_closed_after_service_complete_uses_remembered_resource_area(self):
+        payload = transitions.evaluate_transition_scenario("woodcutting_bank", "service_complete_bank_closed_with_memory")
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["actualPhase"], "return_to_resource")
+        self.assertEqual(payload["actualActiveIntent"], "return_to_resource_area")
+        self.assertTrue(payload["resourceReturnContextSummary"]["returnDestinationAvailable"])
+        self.assertEqual(payload["resourceReturnContextSummary"]["reason"], "using_remembered_resource_area")
+        self.assertEqual(payload["navigationContextSummary"]["targetKind"], "resource")
+        self.assertEqual(payload["navigationContextSummary"]["destination"], "Resource return")
+        self.assertEqual(payload["overlaySelectedMarker"]["classId"], "resource_return")
+        self.assertEqual(payload["overlaySelectedMarkerExpectation"], "resource_return")
+
     def test_bank_pin_open_becomes_blocked_user_resolution(self):
         payload = transitions.evaluate_transition_scenario("woodcutting_bank", "bank_pin_required")
 

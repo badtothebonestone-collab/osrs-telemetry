@@ -328,6 +328,18 @@
       "safeToHideInUi": true
     },
     {
+      "name": "diagnose_resource_return_context.py",
+      "category": "advanced_debug",
+      "purpose": "One-shot read-only diagnostic for remembered resource return destination state after banking. Reads /status only and prints to stdout; JSON mode is stdout-only.",
+      "dailyRequired": false,
+      "normalCommand": "python telemetry-viewer\\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890",
+      "alternateCommand": "python telemetry-viewer\\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json",
+      "input": "live_core_daemon localhost /status endpoint",
+      "output": "resource memory validity, return destination tile/source, target visibility, phase/intent, warnings, and missing capabilities; no file writes",
+      "status": "advanced_debug",
+      "safeToHideInUi": true
+    },
+    {
       "name": "diagnose_target_coverage.py",
       "category": "advanced_debug",
       "purpose": "Audits target/profile coverage from recorded sessions.",

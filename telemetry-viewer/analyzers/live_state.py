@@ -685,6 +685,45 @@ class ReturnToResourceContext(AnalyzerContractFields):
 
 
 @dataclass
+class ResourceReturnContext(AnalyzerContractFields):
+    status: str = "PASS"
+    warnings: list[str] = field(default_factory=list)
+    missing_capabilities: list[str] = field(default_factory=list)
+    source_tick: int | None = None
+    retained_from_previous: bool = False
+    timing_millis: float | None = None
+    return_destination_needed: bool = False
+    return_destination_available: bool = False
+    return_destination_tile: dict[str, Any] | None = None
+    return_destination_source: str = "none"
+    resource_memory_valid: bool = False
+    resource_memory_age_ticks: int | None = None
+    resource_memory_invalid_reason: str | None = None
+    resource_target_currently_visible: bool = False
+    reason: str = "not_applicable"
+    destination_target: dict[str, Any] | None = None
+    banking_complete: bool = False
+    bank_open: bool | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.contract_payload(),
+            "returnDestinationNeeded": self.return_destination_needed,
+            "returnDestinationAvailable": self.return_destination_available,
+            "returnDestinationTile": self.return_destination_tile,
+            "returnDestinationSource": self.return_destination_source,
+            "resourceMemoryValid": self.resource_memory_valid,
+            "resourceMemoryAgeTicks": self.resource_memory_age_ticks,
+            "resourceMemoryInvalidReason": self.resource_memory_invalid_reason,
+            "resourceTargetCurrentlyVisible": self.resource_target_currently_visible,
+            "reason": self.reason,
+            "destinationTarget": self.destination_target,
+            "bankingComplete": self.banking_complete,
+            "bankOpen": self.bank_open,
+        }
+
+
+@dataclass
 class PostBankReacquisitionContext(AnalyzerContractFields):
     status: str = "PASS"
     warnings: list[str] = field(default_factory=list)
@@ -762,6 +801,7 @@ class LiveAnalysisResult:
     bank_ui: BankUiContext | None = None
     bank_operation: BankOperationContext | None = None
     return_to_resource: ReturnToResourceContext | None = None
+    resource_return: ResourceReturnContext | None = None
     post_bank_reacquisition: PostBankReacquisitionContext | None = None
     close_bank: CloseBankContext | None = None
     intent_overlay: IntentOverlayContext | None = None

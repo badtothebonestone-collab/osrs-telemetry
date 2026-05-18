@@ -35,6 +35,7 @@ def status_for(
     close_bank: dict | None = None,
     post_bank: dict | None = None,
     return_context: dict | None = None,
+    resource_return: dict | None = None,
     blocking: list[str] | None = None,
     overlay_target: dict | None = None,
 ) -> dict:
@@ -61,6 +62,7 @@ def status_for(
         "closeBankContext": close_bank or {},
         "postBankReacquisitionContext": post_bank or {},
         "returnToResourceContext": return_context or {},
+        "resourceReturnContext": resource_return or {},
         "requiredContextDomains": [],
         "missingRequiredContextDomains": [],
         "optionalMissingContextDomains": [],
@@ -198,6 +200,35 @@ class WoodcutBankCycleDiagnosticTest(unittest.TestCase):
             active_target=None,
         )
 
+    def test_banking_complete_with_bank_closed_and_resource_memory_returns_to_area(self):
+        payload = self.assert_stage(
+            "return_to_resource",
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+            free_slots=15,
+            resource_held=0,
+            bank_ui={"bankOpen": False},
+            bank_operation={"bankingComplete": True, "resourceItemsHeld": 0},
+            post_bank={"resourceTargetReacquisitionAllowed": True, "reason": "no_resource_target_observed"},
+            return_context={"returnNeeded": True, "returnReady": False, "resourceTargetAvailable": False},
+            resource_return={
+                "returnDestinationNeeded": True,
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3156, "worldY": 3237, "plane": 0},
+                "returnDestinationSource": "last_resource_target",
+                "reason": "using_remembered_resource_area",
+            },
+            pathing={
+                "pathingNeeded": True,
+                "destination": {"targetName": "Resource return", "classId": "resource_return", "worldX": 3156, "worldY": 3237, "plane": 0},
+                "destinationTile": {"worldX": 3156, "worldY": 3237, "plane": 0},
+            },
+            active_target={"targetName": "Resource return", "classId": "resource_return", "worldX": 3156, "worldY": 3237, "plane": 0},
+        )
+        self.assertEqual(payload["activeIntent"], "return_to_resource_area")
+        self.assertTrue(payload["resourceReturn"]["returnDestinationAvailable"])
+        self.assertEqual(payload["reason"], "using_remembered_resource_area")
+
     def test_resource_target_selected_after_banking_complete(self):
         payload = self.assert_stage(
             "resource_target_selected",
@@ -243,6 +274,7 @@ class WoodcutBankCycleDiagnosticTest(unittest.TestCase):
         self.assertIn("service", payload)
         self.assertIn("bank", payload)
         self.assertIn("returnToResource", payload)
+        self.assertIn("resourceReturn", payload)
         self.assertIn("overlay", payload)
 
     def test_task_policy_falls_back_to_generic_task_policy_name(self):

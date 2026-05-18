@@ -17,9 +17,10 @@ from analyzers import close_bank_analyzer
 from analyzers import navigation_intent_analyzer
 from analyzers import post_bank_reacquisition_analyzer
 from analyzers import process_inventory_analyzer
+from analyzers import resource_return_analyzer
 from analyzers import return_to_resource_analyzer
 from analyzers import service_analyzer
-from analyzers.live_state import BankOperationContext, BankUiContext, CloseBankContext, InventoryContext, NavigationContext, PostBankReacquisitionContext, ProcessInventoryContext, ReturnToResourceContext, ServiceContext, TargetContext
+from analyzers.live_state import BankOperationContext, BankUiContext, CloseBankContext, InventoryContext, NavigationContext, PostBankReacquisitionContext, ProcessInventoryContext, ResourceReturnContext, ReturnToResourceContext, ServiceContext, TargetContext
 
 
 SCHEMA = "task_transition_diagnostic.v1"
@@ -35,6 +36,7 @@ SCENARIOS = (
     "service_open",
     "service_complete",
     "service_complete_no_target",
+    "service_complete_bank_closed_with_memory",
     "bank_pin_required",
     "service_missing",
     "firemake_ready",
@@ -134,7 +136,7 @@ def inventory_for_scenario(scenario: str, *, tinderbox_present: bool = True) -> 
         else:
             items.append(log_item(27))
         return inventory_from_items(items)
-    if scenario in {"service_complete", "service_complete_no_target"}:
+    if scenario in {"service_complete", "service_complete_no_target", "service_complete_bank_closed_with_memory"}:
         return inventory_from_items([{"slot": slot, "itemId": 995, "quantity": 100} for slot in range(13)])
     return inventory_from_items([log_item(slot) for slot in range(28)])
 
@@ -142,7 +144,7 @@ def inventory_for_scenario(scenario: str, *, tinderbox_present: bool = True) -> 
 def candidates_for_scenario(scenario: str) -> list[dict[str, Any]]:
     if scenario in {"firemake_no_tree_candidates", "firemake_full_inventory_no_candidates_live_style", "drop_no_tree_candidates"}:
         return []
-    if scenario == "service_complete_no_target":
+    if scenario in {"service_complete_no_target", "service_complete_bank_closed_with_memory"}:
         return [bank_booth_candidate()]
     candidates = [tree_candidate()]
     if scenario in {"service_visible", "service_visible_not_arrived", "service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed", "service_open", "service_complete", "bank_pin_required"}:
@@ -208,6 +210,8 @@ def expected_for(policy_name: str, scenario: str, *, tinderbox_present: bool = T
         return {"phase": "service_open", "activeIntent": "bank_operation_pending", "overlay": "selected_service"}
     if scenario in {"service_complete", "service_complete_no_target"}:
         return {"phase": "waiting_for_world_view", "activeIntent": "close_service_context", "overlay": "none"}
+    if scenario == "service_complete_bank_closed_with_memory":
+        return {"phase": "return_to_resource", "activeIntent": "return_to_resource_area", "overlay": "resource_return"}
     if scenario == "bank_pin_required":
         return {"phase": "blocked", "activeIntent": "needs_user_resolution", "overlay": "selected_service"}
     if scenario in {"service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed"}:
@@ -346,6 +350,22 @@ def compact_close_bank_summary(context: CloseBankContext) -> dict[str, Any]:
     }
 
 
+def compact_resource_return_summary(context: ResourceReturnContext) -> dict[str, Any]:
+    payload = context.to_dict()
+    return {
+        "returnDestinationNeeded": payload.get("returnDestinationNeeded"),
+        "returnDestinationAvailable": payload.get("returnDestinationAvailable"),
+        "returnDestinationTile": payload.get("returnDestinationTile"),
+        "returnDestinationSource": payload.get("returnDestinationSource"),
+        "resourceMemoryValid": payload.get("resourceMemoryValid"),
+        "resourceMemoryAgeTicks": payload.get("resourceMemoryAgeTicks"),
+        "resourceTargetCurrentlyVisible": payload.get("resourceTargetCurrentlyVisible"),
+        "reason": payload.get("reason"),
+        "warnings": payload.get("warnings", []),
+        "missingCapabilities": payload.get("missingCapabilities", []),
+    }
+
+
 def compact_overlay_marker(marker: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(marker, dict) or not marker:
         return None
@@ -373,7 +393,7 @@ def compact_overlay_marker(marker: dict[str, Any] | None) -> dict[str, Any] | No
 
 def stable_intent_for(generic_state: dict[str, Any], candidates: list[dict[str, Any]]) -> intent_stabilizer.IntentResult | None:
     active_intent = str(generic_state.get("activeIntent") or "")
-    if active_intent not in {"target_selected", "continue_current_target", "continue_task", "select_target", "wait_for_result"}:
+    if active_intent not in {"target_selected", "continue_current_target", "continue_task", "select_target", "wait_for_result", "return_to_resource_area", "navigate_to_resource_area"}:
         return None
     active_target = generic_state.get("activeIntentTarget") if isinstance(generic_state.get("activeIntentTarget"), dict) else None
     stabilizer = intent_stabilizer.IntentStabilizer()
@@ -434,14 +454,15 @@ def evaluate_transition_scenario(
     return_context = ReturnToResourceContext(source_tick=42)
     post_bank_context = PostBankReacquisitionContext(source_tick=42)
     close_bank_context = CloseBankContext(source_tick=42)
-    if generic.get("activeIntent") == "needs_service" or scenario in {"service_complete", "service_complete_no_target"}:
+    resource_return_context = ResourceReturnContext(source_tick=42)
+    if generic.get("activeIntent") == "needs_service" or scenario in {"service_complete", "service_complete_no_target", "service_complete_bank_closed_with_memory"}:
         service_context = service_analyzer.analyze_service_context(policy, candidates=candidates, source_tick=42)
         if service_context.best_service_candidate:
             active_target = dict(service_context.best_service_candidate)
             generic["activeIntentTarget"] = active_target
             generic["selectedTargetKey"] = intent_stabilizer.build_target_key(active_target, str(active_target.get("targetType") or "sceneObject"))
             decision["genericTaskState"] = generic
-        if scenario in {"service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed", "service_open", "service_complete", "service_complete_no_target", "bank_pin_required"} and service_context.best_service_candidate:
+        if scenario in {"service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed", "service_open", "service_complete", "service_complete_no_target", "service_complete_bank_closed_with_memory", "bank_pin_required"} and service_context.best_service_candidate:
             active_target = dict(service_context.best_service_candidate)
             service_context.service_ready = True
             service_context.service_ready_reason = "arrived_at_service"
@@ -464,14 +485,14 @@ def evaluate_transition_scenario(
             generic["serviceReadyReason"] = "arrived_at_service"
             decision["phase"] = "service_available"
             decision["genericTaskState"] = generic
-            if scenario in {"service_ready_bank_closed", "service_open", "service_complete", "service_complete_no_target", "bank_pin_required"}:
+            if scenario in {"service_ready_bank_closed", "service_open", "service_complete", "service_complete_no_target", "service_complete_bank_closed_with_memory", "bank_pin_required"}:
                 bank_payload = {
                     "bankOpen": False,
                     "bankPinOpen": False,
                     "bankRootVisible": False,
                     "inventorySummary": (
                         {"freeSlots": 15, "occupiedSlots": 13, "matchingResourceCount": 0}
-                        if scenario in {"service_complete", "service_complete_no_target"}
+                        if scenario in {"service_complete", "service_complete_no_target", "service_complete_bank_closed_with_memory"}
                         else {"freeSlots": 0, "occupiedSlots": 28, "matchingResourceCount": 28}
                     ),
                 }
@@ -504,6 +525,23 @@ def evaluate_transition_scenario(
                     current_task_state=generic,
                     source_tick=42,
                 )
+                if scenario == "service_complete_bank_closed_with_memory":
+                    bank_operation_context = BankOperationContext(
+                        status="PASS",
+                        source_tick=42,
+                        operation_needed=False,
+                        operation_type="none",
+                        resource_items_held=0,
+                        resource_item_slots=[],
+                        resource_item_quantity=0,
+                        non_resource_items_held=13,
+                        inventory_free_slots=15,
+                        inventory_full=False,
+                        bank_readable=False,
+                        banking_complete=True,
+                        completion_reason="no_resource_items_held",
+                        reason="synthetic banking complete retained after bank close",
+                    )
                 if bank_ui_context.bank_pin_open:
                     generic["phase"] = "blocked"
                     generic["activeIntent"] = "needs_user_resolution"
@@ -559,6 +597,33 @@ def evaluate_transition_scenario(
                     current_task_state=generic,
                     source_tick=42,
                 )
+                memory_state = resource_return_analyzer.ResourceAreaMemoryState(
+                    last_resource_activity_tick=20,
+                    last_resource_player_tile={"worldX": 3155, "worldY": 3236, "plane": 0},
+                    last_resource_target_tile={"worldX": 3156, "worldY": 3237, "plane": 0},
+                    last_resource_target_name="Tree",
+                    last_resource_target_id=1278,
+                    last_resource_target_class="tree",
+                    last_resource_cluster_center={"worldX": 3156, "worldY": 3237, "plane": 0},
+                    last_resource_plane=0,
+                    last_resource_profile="woodcutting",
+                    last_resource_target=tree_candidate(),
+                )
+                resource_return_context = resource_return_analyzer.analyze_resource_return_context(
+                    policy,
+                    bank_operation_context=bank_operation_context,
+                    bank_ui_context=bank_ui_context,
+                    target_context=TargetContext(
+                        candidates=[] if scenario == "service_complete_bank_closed_with_memory" else [candidate for candidate in candidates if candidate.get("classId") == "tree"],
+                        raw_best_target=None if scenario == "service_complete_bank_closed_with_memory" else (tree_candidate() if scenario == "service_complete" else None),
+                        candidate_count=0 if scenario == "service_complete_bank_closed_with_memory" else (1 if scenario == "service_complete" else 0),
+                        source_tick=42,
+                    ),
+                    resource_memory_state=memory_state,
+                    player_context={"worldX": 3208, "worldY": 3219, "plane": 0},
+                    current_task_state=generic,
+                    source_tick=42,
+                )
                 if post_bank_context.post_bank_reacquisition_needed and post_bank_context.bank_ui_still_open:
                     generic["phase"] = "waiting_for_world_view"
                     generic["activeIntent"] = "close_service_context" if close_bank_context.close_bank_needed else "wait_for_world_view"
@@ -578,10 +643,14 @@ def evaluate_transition_scenario(
                     decision["genericTaskState"] = generic
                 elif return_context.return_needed:
                     resource_target = return_context.best_resource_target if isinstance(return_context.best_resource_target, dict) else None
+                    resource_return_target = resource_return_context.destination_target if isinstance(resource_return_context.destination_target, dict) else None
                     generic["returnNeeded"] = return_context.return_needed
                     generic["returnReady"] = return_context.return_ready
                     generic["returnToResourceReason"] = return_context.reason
                     generic["resourceTargetAvailable"] = return_context.resource_target_available
+                    generic["resourceReturnDestinationNeeded"] = resource_return_context.return_destination_needed
+                    generic["resourceReturnDestinationAvailable"] = resource_return_context.return_destination_available
+                    generic["resourceReturnReason"] = resource_return_context.reason
                     if return_context.return_ready and resource_target:
                         generic["phase"] = "target_selected"
                         generic["activeIntent"] = "select_target"
@@ -589,6 +658,15 @@ def evaluate_transition_scenario(
                         generic["selectedTargetKey"] = intent_stabilizer.build_target_key(resource_target, str(resource_target.get("targetType") or "sceneObject"))
                         generic.pop("blockingConditions", None)
                         decision["phase"] = "target_selected"
+                    elif resource_return_context.return_destination_available and resource_return_target:
+                        generic["phase"] = "return_to_resource"
+                        generic["activeIntent"] = "return_to_resource_area"
+                        generic["activeIntentTarget"] = resource_return_target
+                        generic["selectedTargetKey"] = intent_stabilizer.build_target_key(resource_return_target, str(resource_return_target.get("targetType") or "tile"))
+                        generic["pathingNeeded"] = True
+                        blocking = [str(item) for item in generic.get("blockingConditions") or [] if item and item != "no_target_observed"]
+                        generic["blockingConditions"] = blocking
+                        decision["phase"] = "return_to_resource"
                     else:
                         generic["phase"] = "needs_more_context"
                         generic["activeIntent"] = "select_target"
@@ -609,6 +687,7 @@ def evaluate_transition_scenario(
     decision["returnToResourceContext"] = return_context.to_dict()
     decision["postBankReacquisitionContext"] = post_bank_context.to_dict()
     decision["closeBankContext"] = close_bank_context.to_dict()
+    decision["resourceReturnContext"] = resource_return_context.to_dict()
     decision.update(brain_core.context_domain_summary(decision, response=response, policy=policy))
     resource_candidates = [candidate for candidate in candidates if candidate.get("classId") == "tree"]
     target_context = TargetContext(
@@ -629,7 +708,7 @@ def evaluate_transition_scenario(
         source_tick=42,
     )
     decision["navigationIntentContext"] = navigation_context.to_dict()
-    overlay_candidates = resource_candidates if generic.get("activeIntent") in {"select_target", "target_selected", "continue_current_target"} else candidates
+    overlay_candidates = resource_candidates if generic.get("activeIntent") in {"select_target", "target_selected", "continue_current_target", "return_to_resource_area", "navigate_to_resource_area"} else candidates
     stable = stable_intent_for(generic, overlay_candidates)
     overlay = build_overlay(decision, overlay_candidates, stable)
     selected_marker = compact_overlay_marker(next((marker for marker in overlay.get("markers", []) if isinstance(marker, dict) and marker.get("markerType") == "selected_target"), None))
@@ -644,6 +723,8 @@ def evaluate_transition_scenario(
         failures.append("expected selected tree marker")
     if overlay_expectation == "selected_service" and (not selected_marker or selected_marker.get("classId") not in {"bank_service", "banker", "bank_booth", "bank_chest", "deposit_box", "deposit_chest"}):
         failures.append("expected selected service marker")
+    if overlay_expectation == "resource_return" and (not selected_marker or selected_marker.get("classId") != "resource_return"):
+        failures.append("expected resource return marker")
     if overlay_expectation == "none" and selected_marker:
         failures.append("expected no selected overlay marker")
     payload = {
@@ -659,8 +740,9 @@ def evaluate_transition_scenario(
             "processInventory": expected["activeIntent"] == "process_inventory",
             "bankOperation": expected["activeIntent"] in {"bank_operation_pending", "resume_resource_collection", "select_target", "close_service_context"},
             "returnToResource": expected["activeIntent"] in {"select_target", "close_service_context"} and bool(return_context.return_needed),
-            "navigation": expected["activeIntent"] in {"needs_service", "target_selected", "continue_current_target", "continue_task", "select_target"},
+            "navigation": expected["activeIntent"] in {"needs_service", "target_selected", "continue_current_target", "continue_task", "select_target", "return_to_resource_area"},
             "closeBank": expected["activeIntent"] == "close_service_context",
+            "resourceReturn": expected["activeIntent"] == "return_to_resource_area",
         },
         "serviceAnalyzerRuns": bool(service_context.service_required),
         "processInventoryAnalyzerRuns": bool(process_context.process_required),
@@ -673,6 +755,7 @@ def evaluate_transition_scenario(
         "returnToResourceContextSummary": compact_return_to_resource_summary(return_context),
         "postBankReacquisitionContextSummary": compact_post_bank_reacquisition_summary(post_bank_context),
         "closeBankContextSummary": compact_close_bank_summary(close_bank_context),
+        "resourceReturnContextSummary": compact_resource_return_summary(resource_return_context),
         "navigationContextSummary": compact_navigation_summary(navigation_context.to_dict()),
         "freshnessDomains": decision.get("freshnessDomains") if isinstance(decision.get("freshnessDomains"), dict) else {},
         "inventoryFreshness": (decision.get("freshnessDomains") or {}).get("inventoryFreshness") if isinstance(decision.get("freshnessDomains"), dict) else None,
@@ -714,6 +797,7 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
     return_context = brain.get("returnToResourceContext") if isinstance(brain.get("returnToResourceContext"), dict) else {}
     post_bank_context = brain.get("postBankReacquisitionContext") if isinstance(brain.get("postBankReacquisitionContext"), dict) else {}
     close_bank_context = brain.get("closeBankContext") if isinstance(brain.get("closeBankContext"), dict) else {}
+    resource_return_context = brain.get("resourceReturnContext") if isinstance(brain.get("resourceReturnContext"), dict) else {}
     navigation_context = brain.get("navigationIntentContext") if isinstance(brain.get("navigationIntentContext"), dict) else {}
     freshness_domains = brain.get("freshnessDomains") if isinstance(brain.get("freshnessDomains"), dict) else {}
     overlay_selected_type = None
@@ -780,6 +864,16 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
             "keyboardClosePossible": close_bank_context.get("keyboardClosePossible", status.get("closeBankKeyboardClosePossible")),
             "reason": close_bank_context.get("reason", status.get("closeBankReason")),
         },
+        "resourceReturnContextSummary": {
+            "returnDestinationNeeded": resource_return_context.get("returnDestinationNeeded", status.get("resourceReturnDestinationNeeded")),
+            "returnDestinationAvailable": resource_return_context.get("returnDestinationAvailable", status.get("resourceReturnDestinationAvailable")),
+            "returnDestinationTile": resource_return_context.get("returnDestinationTile", status.get("resourceReturnDestinationTile")),
+            "returnDestinationSource": resource_return_context.get("returnDestinationSource", status.get("resourceReturnDestinationSource")),
+            "resourceMemoryValid": resource_return_context.get("resourceMemoryValid", status.get("resourceMemoryValid")),
+            "resourceMemoryAgeTicks": resource_return_context.get("resourceMemoryAgeTicks", status.get("resourceMemoryAgeTicks")),
+            "resourceTargetCurrentlyVisible": resource_return_context.get("resourceTargetCurrentlyVisible", status.get("resourceReturnTargetCurrentlyVisible")),
+            "reason": resource_return_context.get("reason", status.get("resourceReturnReason")),
+        },
         "navigationContextSummary": compact_navigation_summary(navigation_context),
         "freshnessDomains": freshness_domains,
         "inventoryFreshness": freshness_domains.get("inventoryFreshness"),
@@ -833,6 +927,7 @@ def format_human(payload: dict[str, Any]) -> str:
     return_context = payload.get("returnToResourceContextSummary") if isinstance(payload.get("returnToResourceContextSummary"), dict) else {}
     post_bank = payload.get("postBankReacquisitionContextSummary") if isinstance(payload.get("postBankReacquisitionContextSummary"), dict) else {}
     close_bank = payload.get("closeBankContextSummary") if isinstance(payload.get("closeBankContextSummary"), dict) else {}
+    resource_return = payload.get("resourceReturnContextSummary") if isinstance(payload.get("resourceReturnContextSummary"), dict) else {}
     navigation = payload.get("navigationContextSummary") if isinstance(payload.get("navigationContextSummary"), dict) else {}
     lines.extend(
         [
@@ -844,6 +939,7 @@ def format_human(payload: dict[str, Any]) -> str:
             f"  return: needed={return_context.get('returnNeeded')} ready={return_context.get('returnReady')} target={return_context.get('bestResourceTarget')} reason={return_context.get('reason')}",
             f"  post-bank: needed={post_bank.get('postBankReacquisitionNeeded')} bankOpen={post_bank.get('bankUiStillOpen')} worldReady={post_bank.get('worldViewReady')} allowed={post_bank.get('resourceTargetReacquisitionAllowed')} reason={post_bank.get('reason')}",
             f"  close-bank: needed={close_bank.get('closeBankNeeded')} ready={close_bank.get('closeBankReady')} button={close_bank.get('closeButtonAvailable')} reason={close_bank.get('reason')}",
+            f"  resource-return: needed={resource_return.get('returnDestinationNeeded')} available={resource_return.get('returnDestinationAvailable')} source={resource_return.get('returnDestinationSource')} reason={resource_return.get('reason')}",
             f"  navigation: reason={navigation.get('navigationReason')} target={navigation.get('destination')} reachability={navigation.get('directReachability')}",
         ]
     )

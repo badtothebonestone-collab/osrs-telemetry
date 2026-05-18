@@ -219,6 +219,7 @@ def classify_cycle_stage(payload: dict[str, Any]) -> str:
     close_bank = dict_value(payload.get("closeBank"))
     post_bank = dict_value(payload.get("postBank"))
     return_context = dict_value(payload.get("returnToResource"))
+    resource_return = dict_value(payload.get("resourceReturn"))
     overlay = dict_value(payload.get("overlay"))
     selected_overlay = dict_value(overlay.get("selected"))
 
@@ -251,10 +252,13 @@ def classify_cycle_stage(payload: dict[str, Any]) -> str:
         return "waiting_for_world_view"
     if banking_complete and bank_open is False:
         target_available = as_bool(return_context.get("resourceTargetAvailable")) is True
+        return_destination_available = as_bool(resource_return.get("returnDestinationAvailable")) is True
         active_target = dict_value(generic.get("activeIntentTarget"))
         selected_resource = (selected_overlay.get("classId") or active_target.get("classId")) in {"tree", "woodcutting_tree"}
         if target_available or selected_resource:
             return "resource_target_selected"
+        if return_destination_available:
+            return "return_to_resource"
         return "return_to_resource"
 
     service_ready = as_bool(service.get("serviceReady")) is True or as_bool(pathing.get("serviceReady")) is True
@@ -287,6 +291,7 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
     close_bank = dict_value(brain.get("closeBankContext"))
     post_bank = dict_value(brain.get("postBankReacquisitionContext"))
     return_context = dict_value(brain.get("returnToResourceContext"))
+    resource_return = dict_value(brain.get("resourceReturnContext"))
     history = dict_value(status.get("cycleHistory"))
     policy_payload = dict_value(generic.get("taskPolicy") or brain.get("taskPolicy"))
     progress = progress_from(status, brain)
@@ -295,6 +300,11 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
     overlay = selected_overlay_from(brain, status)
     missing_required = list_strings(brain.get("missingRequiredContextDomains") or status.get("missingRequiredContextDomains"))
     optional_missing = list_strings(brain.get("optionalMissingContextDomains") or status.get("optionalMissingContextDomains"))
+    if as_bool(resource_return.get("returnDestinationAvailable")) is True:
+        missing_required = [domain for domain in missing_required if domain not in {"target.candidates", "target.freshness"}]
+        for domain in ("target.candidates", "target.freshness"):
+            if domain not in optional_missing:
+                optional_missing.append(domain)
     missing_capabilities = sorted(
         set(
             missing_required
@@ -304,10 +314,11 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
             + list_strings(close_bank.get("missingCapabilities"))
             + list_strings(post_bank.get("missingCapabilities"))
             + list_strings(return_context.get("missingCapabilities"))
+            + list_strings(resource_return.get("missingCapabilities"))
         )
     )
     warnings = list_strings(status.get("warnings")) + list_strings(brain.get("warnings"))
-    for context in (service_context, bank_ui, bank_operation, close_bank, post_bank, return_context):
+    for context in (service_context, bank_ui, bank_operation, close_bank, post_bank, return_context, resource_return):
         warnings.extend(list_strings(context.get("warnings")))
     if as_bool(bank_ui.get("bankPinOpen")) is True and "bank_pin_required" not in warnings:
         warnings.append("bank_pin_required")
@@ -403,6 +414,15 @@ def build_from_daemon(status: dict[str, Any]) -> dict[str, Any]:
             "resourcePathingNeeded": first_present(return_context.get("resourcePathingNeeded"), status.get("returnResourcePathingNeeded")),
             "reason": first_present(return_context.get("reason"), status.get("returnToResourceReason")),
         },
+        "resourceReturn": {
+            "returnDestinationNeeded": first_present(resource_return.get("returnDestinationNeeded"), status.get("resourceReturnDestinationNeeded")),
+            "returnDestinationAvailable": first_present(resource_return.get("returnDestinationAvailable"), status.get("resourceReturnDestinationAvailable")),
+            "returnDestinationTile": first_present(resource_return.get("returnDestinationTile"), status.get("resourceReturnDestinationTile")),
+            "returnDestinationSource": first_present(resource_return.get("returnDestinationSource"), status.get("resourceReturnDestinationSource")),
+            "resourceMemoryValid": first_present(resource_return.get("resourceMemoryValid"), status.get("resourceMemoryValid")),
+            "resourceMemoryAgeTicks": first_present(resource_return.get("resourceMemoryAgeTicks"), status.get("resourceMemoryAgeTicks")),
+            "reason": first_present(resource_return.get("reason"), status.get("resourceReturnReason")),
+        },
         "overlay": overlay,
         "generic": {
             "activeIntentTarget": compact_target(generic.get("activeIntentTarget")),
@@ -433,7 +453,12 @@ def cycle_reason(payload: dict[str, Any]) -> str:
     if stage == "waiting_for_world_view":
         return str(dict_value(payload.get("postBank")).get("reason") or "waiting_for_world_view")
     if stage == "return_to_resource":
-        return str(dict_value(payload.get("returnToResource")).get("reason") or dict_value(payload.get("postBank")).get("reason") or "return_to_resource")
+        return str(
+            dict_value(payload.get("resourceReturn")).get("reason")
+            or dict_value(payload.get("returnToResource")).get("reason")
+            or dict_value(payload.get("postBank")).get("reason")
+            or "return_to_resource"
+        )
     if stage == "resource_target_selected":
         return "resource_target_available"
     if stage == "service_ready":
@@ -475,6 +500,7 @@ def format_human(payload: dict[str, Any]) -> str:
     close_bank = dict_value(payload.get("closeBank"))
     post_bank = dict_value(payload.get("postBank"))
     return_context = dict_value(payload.get("returnToResource"))
+    resource_return = dict_value(payload.get("resourceReturn"))
     overlay = dict_value(payload.get("overlay"))
     selected = dict_value(overlay.get("selected"))
     progress = dict_value(payload.get("progress"))
@@ -511,6 +537,7 @@ def format_human(payload: dict[str, Any]) -> str:
         f"  World ready: {bool_label(post_bank.get('worldViewReady'))}",
         f"  Resource target: {return_context.get('bestResourceTarget') or 'none'} available={bool_label(return_context.get('resourceTargetAvailable'))}",
         f"  Reacquisition: allowed={bool_label(post_bank.get('resourceTargetReacquisitionAllowed'))} reason={post_bank.get('reason') or 'unknown'}",
+        f"  Return destination: available={bool_label(resource_return.get('returnDestinationAvailable'))} source={resource_return.get('returnDestinationSource') or 'none'} tile={value_label(resource_return.get('returnDestinationTile'))}",
         "",
         "Overlay:",
         f"  Selected: {selected.get('label') or selected.get('targetName') or 'none'}",

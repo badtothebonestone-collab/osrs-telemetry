@@ -128,6 +128,7 @@ def transition_summary_from(status: dict[str, Any], brain_payload: dict[str, Any
     pathing = brain.get("pathingContext") if isinstance(brain.get("pathingContext"), dict) else {}
     post_bank = brain.get("postBankReacquisitionContext") if isinstance(brain.get("postBankReacquisitionContext"), dict) else {}
     close_bank = brain.get("closeBankContext") if isinstance(brain.get("closeBankContext"), dict) else {}
+    resource_return = brain.get("resourceReturnContext") if isinstance(brain.get("resourceReturnContext"), dict) else {}
     return {
         "taskPolicy": status.get("brainTaskPolicy") or status.get("taskPolicy"),
         "genericPhase": generic.get("phase") or status.get("genericPhase"),
@@ -156,6 +157,11 @@ def transition_summary_from(status: dict[str, Any], brain_payload: dict[str, Any
             "closeButtonAvailable",
             status.get("closeBankCloseButtonAvailable"),
         ),
+        "resourceReturnDestinationAvailable": resource_return.get(
+            "returnDestinationAvailable",
+            status.get("resourceReturnDestinationAvailable"),
+        ),
+        "resourceReturnReason": resource_return.get("reason", status.get("resourceReturnReason")),
         "noActionEmitted": brain.get("noActionEmitted") if brain else None,
     }
 
@@ -174,7 +180,7 @@ def context_domain_list(*payloads: dict[str, Any] | None, key: str) -> list[str]
     return []
 
 
-def post_bank_target_reacquisition_deferred(*payloads: dict[str, Any] | None) -> bool:
+def post_bank_target_reacquisition_deferred_reason(*payloads: dict[str, Any] | None) -> str | None:
     for payload in payloads:
         if not isinstance(payload, dict):
             continue
@@ -183,6 +189,7 @@ def post_bank_target_reacquisition_deferred(*payloads: dict[str, Any] | None) ->
         close_bank = brain.get("closeBankContext") if isinstance(brain.get("closeBankContext"), dict) else {}
         bank_operation = brain.get("bankOperationContext") if isinstance(brain.get("bankOperationContext"), dict) else {}
         bank_ui = brain.get("bankUiContext") if isinstance(brain.get("bankUiContext"), dict) else {}
+        resource_return = brain.get("resourceReturnContext") if isinstance(brain.get("resourceReturnContext"), dict) else {}
         reason = post_bank.get("reason") or payload.get("postBankReacquisitionReason")
         banking_complete = bank_operation.get("bankingComplete", payload.get("bankingComplete"))
         bank_open = bank_ui.get("bankOpen", payload.get("bankOpen"))
@@ -193,8 +200,24 @@ def post_bank_target_reacquisition_deferred(*payloads: dict[str, Any] | None) ->
             and bank_open is True
             and (reason == "bank_ui_still_open" or allowed is False or close_bank_needed is True)
         ):
-            return True
-    return False
+            return "target candidates deferred because bank UI is still open after banking complete"
+        return_destination_available = resource_return.get(
+            "returnDestinationAvailable",
+            payload.get("resourceReturnDestinationAvailable"),
+        )
+        resource_return_reason = resource_return.get("reason", payload.get("resourceReturnReason"))
+        if (
+            banking_complete is True
+            and bank_open is False
+            and return_destination_available is True
+            and resource_return_reason == "using_remembered_resource_area"
+        ):
+            return "target candidates absent, using remembered resource return destination"
+    return None
+
+
+def post_bank_target_reacquisition_deferred(*payloads: dict[str, Any] | None) -> bool:
+    return post_bank_target_reacquisition_deferred_reason(*payloads) is not None
 
 
 def evaluate_daemon_payloads(
@@ -280,8 +303,9 @@ def evaluate_daemon_payloads(
                 key="requiredContextDomains",
             )
             target_missing = any(domain in {"target.candidates", "target.freshness"} for domain in missing_required)
-            if target_missing and post_bank_target_reacquisition_deferred(daemon_status, brain_payload, context_payload):
-                warnings.append("target candidates deferred because bank UI is still open after banking complete")
+            deferred_reason = post_bank_target_reacquisition_deferred_reason(daemon_status, brain_payload, context_payload)
+            if target_missing and deferred_reason:
+                warnings.append(deferred_reason)
             elif missing_required or not required_domains:
                 detail = f": missing required context domains: {', '.join(missing_required)}" if missing_required else ""
                 failures.append(f"daily context endpoint returned FAIL{detail}")

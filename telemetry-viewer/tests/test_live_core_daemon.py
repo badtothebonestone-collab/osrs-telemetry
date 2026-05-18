@@ -19,6 +19,7 @@ import live_context_format
 import live_target_processor as live
 import test_live_target_processor as fixtures
 import diagnose_brain_progress
+from analyzers import resource_return_analyzer
 from analyzers.live_state import BankUiContext, PathingContext, ServiceContext, TargetContext
 
 
@@ -825,6 +826,98 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertTrue(core.state.brain_decision["postBankReacquisitionContext"]["resourceTargetReacquisitionAllowed"])
         self.assertFalse(core.state.brain_decision["closeBankContext"]["closeBankNeeded"])
         self.assertIn("target.candidates", core.state.brain_decision.get("missingRequiredContextDomains", []))
+
+    def test_bank_closed_after_banking_complete_without_tree_uses_resource_memory_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 2, [], objects=[])
+            coin_items = [{"slot": slot, "itemId": 995, "quantity": 100} for slot in range(13)]
+            coin_signature = "|".join(f"{item['slot']}:{item['itemId']}:{item['quantity']}" for item in coin_items)
+            response["payloads"]["inventory"]["inventory"] = {
+                "known": True,
+                "freeSlots": 15,
+                "filledSlots": 13,
+                "itemCount": 1300,
+                "inventoryFull": False,
+                "inventorySlotCount": 28,
+                "slotCount": 28,
+                "signature": coin_signature,
+                "inventorySignature": coin_signature,
+                "items": coin_items,
+            }
+            response["payloads"]["bank_ui"] = {
+                "bankOpen": False,
+                "bankPinOpen": False,
+                "bankRootVisible": False,
+                "bankContainerVisible": False,
+                "bankInventoryVisible": False,
+                "depositInventoryButtonVisible": False,
+                "closeButtonVisible": False,
+                "inventorySummary": {"freeSlots": 15, "occupiedSlots": 13, "matchingResourceCount": 0},
+            }
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            no_service = ServiceContext(service_required=False, source_tick=2)
+            pathing_generic_states: list[dict] = []
+
+            def fake_pathing_context(**kwargs):
+                generic = dict(kwargs.get("generic_task_state") or {})
+                pathing_generic_states.append(generic)
+                active_target = generic.get("activeIntentTarget") if isinstance(generic.get("activeIntentTarget"), dict) else None
+                tile = (
+                    {"worldX": active_target.get("worldX"), "worldY": active_target.get("worldY"), "plane": active_target.get("plane")}
+                    if active_target
+                    else None
+                )
+                return PathingContext(
+                    pathing_needed=bool(active_target and generic.get("activeIntent") == "return_to_resource_area"),
+                    destination=active_target,
+                    destination_tile=tile,
+                    local_reachability="unknown" if active_target else "unknown",
+                    reason="resource_return_destination" if active_target else "not_needed_for_current_phase",
+                    source_tick=2,
+                )
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=no_service):
+                    with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", side_effect=fake_pathing_context):
+                        core = daemon.LiveCoreDaemon(session, args)
+                        core.state.brain_decision = {
+                            "bankOperationContext": {"bankingComplete": True, "completionReason": "no_resource_items_held"},
+                            "postBankReacquisitionContext": {"postBankReacquisitionNeeded": True, "reason": "bank_ui_still_open"},
+                        }
+                        core.state.resource_area_memory = resource_return_analyzer.ResourceAreaMemoryState(
+                            last_resource_activity_tick=1,
+                            last_resource_player_tile={"worldX": 3155, "worldY": 3236, "plane": 0},
+                            last_resource_target_tile={"worldX": 3156, "worldY": 3237, "plane": 0},
+                            last_resource_target_name="Oak tree",
+                            last_resource_target_id=10820,
+                            last_resource_target_class="tree",
+                            last_resource_cluster_center={"worldX": 3156, "worldY": 3237, "plane": 0},
+                            last_resource_plane=0,
+                            last_resource_profile="woodcutting",
+                        )
+                        core.poll_once()
+
+        generic = core.state.brain_decision["genericTaskState"]
+        status = core.state.status()
+        self.assertEqual(generic["phase"], "return_to_resource")
+        self.assertEqual(generic["activeIntent"], "return_to_resource_area")
+        self.assertEqual(generic["activeIntentTarget"]["classId"], "resource_return")
+        self.assertEqual(generic["activeIntentTarget"]["targetName"], "Resource return")
+        self.assertTrue(core.state.brain_decision["resourceReturnContext"]["returnDestinationAvailable"])
+        self.assertEqual(core.state.brain_decision["resourceReturnContext"]["reason"], "using_remembered_resource_area")
+        self.assertTrue(core.state.brain_decision["pathingContext"]["pathingNeeded"])
+        self.assertEqual(core.state.brain_decision["pathingContext"]["destination"]["classId"], "resource_return")
+        self.assertEqual(status["resourceReturnDestinationAvailable"], True)
+        self.assertTrue(any(state.get("activeIntent") == "return_to_resource_area" for state in pathing_generic_states))
 
     def test_select_target_intent_does_not_stabilize_bank_service_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:

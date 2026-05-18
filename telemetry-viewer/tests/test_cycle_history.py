@@ -129,6 +129,25 @@ class CycleHistoryTest(unittest.TestCase):
         self.assertEqual(row["warningCount"], 1)
         self.assertEqual(row["missingCapabilityCount"], 1)
 
+    def test_history_records_return_to_resource_area_transition_reason(self):
+        row = cycle_history.entry_from_cycle_payload(
+            {
+                "cycleStage": "return_to_resource",
+                "phase": "return_to_resource",
+                "activeIntent": "return_to_resource_area",
+                "reason": "using_remembered_resource_area",
+                "bankOpen": False,
+                "bankOperation": {"bankingComplete": True},
+                "resourceReturn": {"reason": "using_remembered_resource_area"},
+                "returnToResource": {"reason": "no_resource_target_observed", "resourceTargetAvailable": False},
+                "inventory": {"freeSlots": 15, "inventoryFull": False},
+            },
+            tick=51,
+        )
+
+        self.assertEqual(row["activeIntent"], "return_to_resource_area")
+        self.assertEqual(row["returnReason"], "using_remembered_resource_area")
+
     def test_diagnostic_prints_transition_tail(self):
         payload = {
             "schema": "cycle_history_diagnostic.v1",

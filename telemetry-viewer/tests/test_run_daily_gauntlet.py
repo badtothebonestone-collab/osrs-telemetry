@@ -236,6 +236,60 @@ class RunDailyGauntletTest(unittest.TestCase):
             )
         )
 
+    def test_resource_return_destination_defers_missing_target_candidates_after_bank_closes(self):
+        brain = {
+            "genericTaskState": {"phase": "return_to_resource", "activeIntent": "return_to_resource_area"},
+            "bankOperationContext": {"bankingComplete": True, "completionReason": "no_resource_items_held"},
+            "bankUiContext": {"bankOpen": False},
+            "postBankReacquisitionContext": {
+                "postBankReacquisitionNeeded": True,
+                "bankUiStillOpen": False,
+                "resourceTargetReacquisitionAllowed": True,
+                "reason": "no_resource_target_observed",
+            },
+            "resourceReturnContext": {
+                "returnDestinationNeeded": True,
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3156, "worldY": 3237, "plane": 0},
+                "returnDestinationSource": "last_resource_target",
+                "reason": "using_remembered_resource_area",
+            },
+            "requiredContextDomains": ["inventory", "bank_operation", "resource_return"],
+            "missingRequiredContextDomains": ["target.candidates", "target.freshness"],
+            "optionalMissingContextDomains": [],
+            "goalProgress": {},
+            "noActionEmitted": True,
+        }
+
+        result = gauntlet.evaluate_daemon_payloads(
+            {"status": "PASS"},
+            {
+                "liveCoreDaemonActive": True,
+                "inputSourceActive": "plugin-snapshot",
+                "dailyMode": "snapshot-no-files",
+                "noFileDaily": True,
+                "compactPacketFilesRequired": False,
+                "compactPacketFilesWriting": False,
+                "brainTaskPolicy": "woodcutting_bank",
+                "candidateCount": 0,
+                "bankingComplete": True,
+                "bankOpen": False,
+                "resourceReturnDestinationAvailable": True,
+                "resourceReturnReason": "using_remembered_resource_area",
+            },
+            {
+                "status": "FAIL",
+                "missingCapabilities": ["target.candidates"],
+                "requiredContextDomains": ["inventory", "bank_operation", "resource_return"],
+                "missingRequiredContextDomains": ["target.candidates", "target.freshness"],
+            },
+            brain,
+            daily_mode="snapshot-no-files",
+        )
+
+        self.assertFalse(any("daily context endpoint returned FAIL" in failure for failure in result["failures"]))
+        self.assertTrue(any("remembered resource return destination" in warning for warning in result["warnings"]))
+
     def test_transition_summary_includes_pathing_context(self):
         brain = {
             "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},

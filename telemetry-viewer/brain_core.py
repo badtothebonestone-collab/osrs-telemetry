@@ -612,9 +612,12 @@ def context_domain_summary(
     elif active_intent == "bank_operation_pending":
         required = ["inventory", "service", "bank_ui", "bank_operation"]
         optional = ["target.candidates", "navigation.pathing"]
-    elif active_intent == "resume_resource_collection" or phase in {"service_complete", "return_to_resource"}:
+    elif active_intent == "resume_resource_collection" or phase == "service_complete":
         required = ["inventory", "bank_operation", "return_to_resource"]
         optional = ["service", "bank_ui", "target.candidates"]
+    elif active_intent in {"return_to_resource_area", "navigate_to_resource_area"} or phase == "return_to_resource":
+        required = ["inventory", "bank_operation", "return_to_resource", "resource_return"]
+        optional = ["service", "bank_ui", "target.candidates", "target.freshness", "navigation.pathing"]
     elif active_intent in {"wait_for_world_view", "close_service_context", "resume_resource_collection_pending"} or phase == "waiting_for_world_view":
         required = ["inventory", "bank_operation", "bank_ui", "post_bank_reacquisition", "close_bank"]
         optional = ["service", "target.candidates", "target.freshness"]
@@ -678,7 +681,7 @@ def context_domain_summary(
             missing_required.append("bank_operation")
         elif active_intent == "bank_operation_pending" and bank_operation_context.get("operationNeeded") is not True:
             missing_required.append("bank_operation")
-        elif active_intent == "resume_resource_collection" and bank_operation_context.get("bankingComplete") is not True:
+        elif active_intent in {"resume_resource_collection", "return_to_resource_area", "navigate_to_resource_area"} and bank_operation_context.get("bankingComplete") is not True:
             missing_required.append("bank_operation")
     return_context = decision.get("returnToResourceContext") if isinstance(decision.get("returnToResourceContext"), dict) else {}
     if "return_to_resource" in required:
@@ -698,6 +701,12 @@ def context_domain_summary(
             missing_required.append("close_bank")
         elif close_bank_context.get("closeBankNeeded") is not True:
             missing_required.append("close_bank")
+    resource_return_context = decision.get("resourceReturnContext") if isinstance(decision.get("resourceReturnContext"), dict) else {}
+    if "resource_return" in required:
+        if not resource_return_context:
+            missing_required.append("resource_return")
+        elif resource_return_context.get("returnDestinationAvailable") is not True:
+            missing_required.append("resource_return")
 
     if "inventory" in optional and inventory_missing:
         optional_missing.append("inventory")

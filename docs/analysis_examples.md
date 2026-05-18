@@ -277,6 +277,7 @@ python telemetry-viewer\diagnose_navigation_intent.py --from-daemon --daemon-url
 python telemetry-viewer\diagnose_service_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
+python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20
 python telemetry-viewer\diagnose_pathing_matrix.py
@@ -309,10 +310,11 @@ prints to stdout only.
 
 Full woodcut-bank cycle QA summarizes the current live daemon state in one
 read-only report, from resource collection through service pathing, bank UI,
-bank operation, close-bank readiness, post-bank reacquisition, and return to
-resource targeting:
+bank operation, close-bank readiness, post-bank reacquisition, remembered
+resource-return destination, and return to resource targeting:
 
 ```text
+python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
 python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20

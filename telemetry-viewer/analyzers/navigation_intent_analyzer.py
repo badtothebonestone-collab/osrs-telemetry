@@ -290,7 +290,7 @@ def analyze_navigation_intent(
             navigation_needed=False,
         )
 
-    if active_intent in {"target_selected", "continue_current_target", "continue_task", "select_target", "wait_for_result"}:
+    if active_intent in {"target_selected", "continue_current_target", "continue_task", "select_target", "wait_for_result", "return_to_resource_area", "navigate_to_resource_area"}:
         return resource_navigation_context(
             policy=resolved_policy,
             destination=active_target_from(generic_task_state, target_context),

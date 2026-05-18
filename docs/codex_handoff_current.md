@@ -70,6 +70,13 @@ RuneLite plugin
 - Cycle History / State Transition Trace v1 keeps a compact rolling in-memory
   history of meaningful woodcut_bank stage/context changes and exposes a small
   status tail plus `diagnose_cycle_history.py`.
+- Resource Return Destination / Resource Area Memory v1 remembers the last
+  productive woodcutting area while resources are visible and inventory has
+  space. After bankingComplete=true and bankOpen=false, if no resource target
+  is currently visible, `resourceReturnContext` can provide a remembered
+  resource-return destination and the task can use return_to_resource /
+  return_to_resource_area instead of treating missing tree candidates as an
+  immediate resource-target failure.
 
 ## Current service-memory proof
 
@@ -98,6 +105,8 @@ python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-ur
 
 python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20
 
+python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+
 python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 
 ## Verification commands
@@ -110,13 +119,13 @@ python telemetry-viewer\run_stabilization_suite.py
 
 ## Current next milestone
 
-Cycle History / State Transition Trace v1 live QA with the daily daemon.
+Resource Return Destination / Resource Area Memory v1 live QA with the daily
+daemon.
 
 Goal:
-Use one read-only timeline diagnostic to explain recent woodcut_bank stage
-changes, including stable duration, previous stage, transition reason, selected
-target, inventory/service/bank/return signals, warning counts, and missing
-capability counts.
+Confirm that the daemon remembers the last productive woodcutting area before
+banking, then after bankingComplete=true and bankOpen=false uses that remembered
+area as a resource-return destination when no tree target is currently visible.
 
 Implemented scope:
 - `return_to_resource_analyzer.py` reports returnNeeded, returnReady,
@@ -144,13 +153,21 @@ Implemented scope:
   human and JSON modes.
 - `diagnose_cycle_history.py` reports the rolling in-memory cycle transition
   tail in human and JSON modes. It writes no files.
+- `resource_return_analyzer.py` keeps in-memory resource-area memory and reports
+  `resourceReturnContext` with destination needed/available, destination tile,
+  destination source, memory validity, age, visible-target state, reason,
+  warnings, and missing capabilities.
+- `diagnose_resource_return_context.py` reports daemon resource-return context
+  in human and JSON modes. It writes no files.
 - Task phase integration:
   - bankingComplete + bankOpen=true -> waiting_for_world_view /
     close_service_context, no target candidate failure
   - bankingComplete + bankOpen=false + resource target visible ->
     target_selected / select_target
-  - bankingComplete + bankOpen=false + no resource target ->
-    needs_more_context / select_target
+  - bankingComplete + bankOpen=false + no resource target + valid remembered
+    resource area -> return_to_resource / return_to_resource_area
+  - bankingComplete + bankOpen=false + no resource target + no resource memory
+    -> needs_more_context / select_target
 - Do not change pathing, service ranking, service memory, or plugin telemetry
   unless the return-to-resource work truly requires it.
 
@@ -173,6 +190,7 @@ Preferred live QA flow:
    python telemetry-viewer\diagnose_return_to_resource_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_close_bank_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+   python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
    python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 
@@ -220,11 +238,14 @@ Open-bank view with no visible tree target can produce missing target candidates
 Post-bank reacquisition now represents that state explicitly with
 reason=bank_ui_still_open and resourceTargetReacquisitionAllowed=false.
 
-## Current Next Milestone: Cycle History / State Transition Trace v1 Live QA
+## Current Next Milestone: Resource Return Destination / Resource Area Memory v1 Live QA
 
 Goal:
-Run the full-cycle and cycle-history diagnostics against the daily daemon and
-use the history tail to confirm how the current state was reached.
+Run the resource-return, full-cycle, and cycle-history diagnostics against the
+daily daemon. Confirm resource memory is populated near trees and that, after
+bankingComplete=true with the bank closed and no visible tree, the system uses
+a remembered resource return destination instead of failing missing
+target.candidates immediately.
 
 Expected behavior:
 - If bankingComplete=true and bankOpen=true:
@@ -242,10 +263,14 @@ Expected behavior:
 - If bank closed and resource target visible:
   - phase should progress toward target_selected / select_target.
 - If bank closed and no resource target visible:
-  - phase should be needs_more_context with reason no_resource_target_observed.
+  - if valid resource memory exists, phase should be return_to_resource and
+    activeIntent should be return_to_resource_area
+  - if no valid resource memory exists, phase should be needs_more_context with
+    reason no_resource_memory or no_resource_target_observed.
 
 Live retest commands:
 ```powershell
+python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20
 python telemetry-viewer\diagnose_bank_operation_context.py --from-daemon --daemon-url http://127.0.0.1:8890
