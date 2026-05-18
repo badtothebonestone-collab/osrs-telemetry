@@ -139,6 +139,8 @@ python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daem
 
 python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 
+python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
+
 ## Verification commands
 
 python telemetry-viewer\run_stabilization_suite.py
@@ -149,13 +151,16 @@ python telemetry-viewer\run_stabilization_suite.py
 
 ## Current next milestone
 
-Resource Return Destination / Resource Area Memory v1 live QA with the daily
-daemon.
+Full Cycle Live QA Runner v1 with the daily daemon.
 
 Goal:
-Confirm that the daemon remembers the last productive woodcutting area before
-banking, then after bankingComplete=true and bankOpen=false uses that remembered
-area as a resource-return destination when no tree target is currently visible.
+Use one stdout-only command to check plugin snapshot login, daemon health, full
+woodcut_bank cycle context, cycle history, service/path state, bank
+UI/operation state, return/resource-return state, overlay selection, and
+gauntlet-style semantic deferrals.
+
+Command:
+python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
 
 Implemented scope:
 - `return_to_resource_analyzer.py` reports returnNeeded, returnReady,
@@ -189,6 +194,9 @@ Implemented scope:
   warnings, and missing capabilities.
 - `diagnose_resource_return_context.py` reports daemon resource-return context
   in human and JSON modes. It writes no files.
+- `run_woodcut_bank_live_qa.py` runs the key live QA checks in one command and
+  reports PASS/WARN/FAIL with endpoint, cycle, inventory/resource,
+  service/path, bank, return, overlay, gauntlet, and history sections.
 - Task phase integration:
   - bankingComplete + bankOpen=true -> waiting_for_world_view /
     close_service_context, no target candidate failure
@@ -221,6 +229,7 @@ Preferred live QA flow:
    python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_close_bank_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+   python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
    python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
    python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 

@@ -30,6 +30,7 @@ These are the only tools that belong in the main daily view.
 | `mission_snapshot.py` | One-shot Mission Snapshot diagnostic for bug reports and before/after comparisons. Reads `/health`, `/status`, and `/control` once, prints to stdout by default, and writes one JSON file only when `--output` is explicit. | `python telemetry-viewer\mission_snapshot.py --daemon-url http://127.0.0.1:8890` |
 | `live_config_doctor.py` | Preset-aware PASS/WARN/FAIL check for daily settings. | `python telemetry-viewer\live_config_doctor.py --latest-session --mode daily --fix-suggestions` or `--mode snapshot_no_file` |
 | `run_daily_gauntlet.py` | Strict daily sanity check for daemon health, process conflicts, progress invariants, and required context domains. | `python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode compact-packets --strict --check-processes` |
+| `run_woodcut_bank_live_qa.py` | One-command woodcut_bank live QA runner. Checks plugin snapshot login, daemon health, full cycle context, history, resource-return state, and gauntlet-style semantic deferrals. | `python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20` |
 
 Daily support modules are hidden from the UI but remain part of the daily lane:
 
@@ -67,6 +68,7 @@ Diagnostics and inspectors that are useful when daily output looks wrong:
 - `diagnose_resource_return_context.py`
 - `diagnose_woodcut_bank_cycle.py`
 - `diagnose_cycle_history.py`
+- `run_woodcut_bank_live_qa.py`
 - `diagnose_target_coverage.py`
 - `run_stabilization_suite.py`
 - visual/perception/tab inspection helpers
@@ -95,6 +97,7 @@ Full woodcut-bank cycle example:
 python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20
+python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
 ```
 
 ## Legacy File Pipeline

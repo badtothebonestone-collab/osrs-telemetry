@@ -280,6 +280,7 @@ python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url h
 python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20
+python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
 python telemetry-viewer\diagnose_pathing_matrix.py
 python telemetry-viewer\diagnose_pathing_matrix.py --json
 python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
@@ -319,7 +320,15 @@ python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-ur
 python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
 python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20
 python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20 --json
+python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
+python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20 --json
 ```
+
+Use `run_woodcut_bank_live_qa.py` for one-command live QA after future
+woodcut_bank changes. It checks the plugin snapshot login state, daemon
+health, full-cycle context, cycle history, service/path, bank UI/operation,
+return/resource-return state, overlay selection, and gauntlet-style semantic
+deferrals without writing files.
 
 `task_policies.json` is static config. The live daemon must not write it or
 create per-tick policy, task-state, analyzer, JSONL, or rolling live output

@@ -83,6 +83,18 @@
       "safeToHideInUi": false
     },
     {
+      "name": "run_woodcut_bank_live_qa.py",
+      "category": "daily",
+      "purpose": "One-command woodcut_bank live QA runner for plugin snapshot login, daemon health, full-cycle context, history, resource-return state, overlay selection, and gauntlet-style semantic deferrals.",
+      "dailyRequired": false,
+      "normalCommand": "python telemetry-viewer\\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20",
+      "alternateCommand": "python telemetry-viewer\\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20 --json",
+      "input": "plugin snapshot endpoint and live_core_daemon localhost endpoints",
+      "output": "woodcut_bank_live_qa.v1 PASS/WARN/FAIL report; no file writes",
+      "status": "daily",
+      "safeToHideInUi": false
+    },
+    {
       "name": "resource_progress.py",
       "category": "daily",
       "purpose": "Single source of truth for daily woodcutting held-vs-baseline progress.",
