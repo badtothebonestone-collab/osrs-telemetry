@@ -37,6 +37,11 @@ RuneLite plugin
   bank UI analyzer, task phase integration, daemon status fields, and
   `diagnose_bank_ui_context.py`.
 - Stabilization suite passes.
+- Bank UI / Service State Context v1 works.
+- Bank Operation Context v1 works.
+- Bank operation reports operationNeeded, operationType, resourceItemsHeld, resourceItemSlots, resourceItemQuantity, nonResourceItemsHeld, inventoryFreeSlots, depositInventoryAvailable, depositWouldClearResourceInventory, bankingComplete, and completionReason.
+- With bank open after logs are deposited: bankOperation PASS, operationNeeded=no, operationType=none, resourceItemsHeld=0, bankingComplete=yes, completionReason=no_resource_items_held.
+- Task transition after deposit: phase=service_complete, activeIntent=resume_resource_collection.
 
 ## Current service-memory proof
 
