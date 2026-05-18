@@ -78,3 +78,38 @@ Scope:
   - bankOpen=true + bankReadable=true -> service_open
   - bankPinOpen=true -> blocked / bank_pin_required
 - Do not change pathing, service ranking, service memory, or path overlay unless the Bank UI work truly requires it.
+
+## Live QA / Computer Use workflow
+
+Codex may run terminal commands needed for live QA.
+
+Preferred live QA flow:
+1. Launch RuneLite dev when needed:
+   .\gradlew.bat run
+2. Wait for the RuneLite dev client to open.
+3. If RuneLite requires user login or account confirmation, stop and ask the user to handle it.
+4. Once the user is logged in and the plugin endpoint is available, continue automatically.
+5. Wait until plugin snapshot endpoint reports LOGGED_IN.
+6. Start/restart live_core_daemon.py.
+7. Run live diagnostics:
+   python telemetry-viewer\diagnose_service_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+   python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+   python telemetry-viewer\diagnose_overlay_state.py --latest-session --intent
+   python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
+   python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
+
+If Codex Computer Use can operate the RuneLite dev window, it may click simple already-authenticated buttons such as Play / Log in / Continue, but it should not handle credentials or account settings. If Computer Use cannot access the RuneLite window, ask the user to click/log in manually, then continue with endpoint and diagnostics.
+
+For preferred window placement:
+- If the RuneLite dev client opens on the wrong monitor, try moving the active window to the other monitor with Windows+Shift+Left or Windows+Shift+Right.
+- If this cannot be done reliably, ask the user to move the window manually.
+
+Useful endpoint check:
+$request = @{
+  schema = "plugin_snapshot_request.v1"
+  needs = @("baseline", "writer_health")
+  maxAgeTicks = 5
+  responseMode = "compact"
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8893/snapshot" -Body $request -ContentType "application/json"
