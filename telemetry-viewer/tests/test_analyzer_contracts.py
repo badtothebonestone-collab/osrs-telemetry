@@ -44,6 +44,7 @@ class AnalyzerContractsTest(unittest.TestCase):
             live_state.ProcessInventoryContext,
             live_state.BankUiContext,
             live_state.BankOperationContext,
+            live_state.ReturnToResourceContext,
             live_state.PathingContext,
         ]
         for context_class in context_classes:

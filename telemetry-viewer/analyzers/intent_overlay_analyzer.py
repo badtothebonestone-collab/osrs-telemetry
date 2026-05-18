@@ -683,6 +683,13 @@ def build_intent_overlay_state(
     service_context = brain_decision.get("serviceContext") if isinstance(brain_decision.get("serviceContext"), dict) else {}
     navigation_intent_context = brain_decision.get("navigationIntentContext") if isinstance(brain_decision.get("navigationIntentContext"), dict) else {}
     pathing_context = brain_decision.get("pathingContext") if isinstance(brain_decision.get("pathingContext"), dict) else {}
+    return_context = brain_decision.get("returnToResourceContext") if isinstance(brain_decision.get("returnToResourceContext"), dict) else {}
+    if (
+        return_context.get("returnNeeded") is True
+        and str(pathing_context.get("pathCompletionReason") or "").lower() == "arrived_at_service"
+        and active_intent in {"select_target", "target_selected", "resume_resource_collection"}
+    ):
+        pathing_context = {}
     service_candidates = service_context.get("serviceCandidates") if isinstance(service_context.get("serviceCandidates"), list) else []
     markers: list[dict] = []
     selected = None

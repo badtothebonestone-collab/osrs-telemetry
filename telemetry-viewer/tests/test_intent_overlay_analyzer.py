@@ -724,6 +724,56 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertNotIn("predicted_path_tile", marker_types)
         self.assertTrue(result["pathingOverlaySummary"]["pathCompleted"])
 
+    def test_return_to_resource_overlay_suppresses_completed_service_path(self):
+        tree = candidate("oak-1")
+        state = intent_stabilizer.IntentState()
+        stable = intent_stabilizer.choose_stable_intent(
+            state,
+            [tree],
+            {"activeTask": "woodcutting", "activeIntent": "select_target", "profile": "woodcutting", "latestTick": 9, "rawBestTarget": tree},
+        )
+
+        result = overlay.build_intent_overlay_state(
+            {"status": {"lastProcessedTick": 9}, "candidates": [tree]},
+            {
+                "task": "woodcutting",
+                "genericTaskState": {
+                    "phase": "target_selected",
+                    "activeIntent": "select_target",
+                    "activeIntentTarget": tree,
+                },
+                "returnToResourceContext": {
+                    "returnNeeded": True,
+                    "returnReady": True,
+                    "resourceTargetAvailable": True,
+                    "bestResourceTarget": tree,
+                },
+                "pathingContext": {
+                    "pathingNeeded": False,
+                    "pathCompleted": True,
+                    "pathCompletionReason": "arrived_at_service",
+                    "destinationTarget": {"targetName": "Bank booth", "classId": "bank_booth"},
+                    "destinationTile": {"worldX": 3208, "worldY": 3221, "plane": 2},
+                    "finalApproachTile": {"worldX": 3207, "worldY": 3221, "plane": 2},
+                    "predictedPathTiles": [
+                        {"worldX": 3206, "worldY": 3221, "plane": 2},
+                        {"worldX": 3207, "worldY": 3221, "plane": 2},
+                    ],
+                },
+                "confidence": 0.9,
+            },
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent", overlay_predicted_path_limit=None),
+            "2026-01-01T00:00:00Z",
+            stable,
+        )
+
+        marker_types = [marker.get("markerType") for marker in result["markers"]]
+        selected = next(marker for marker in result["markers"] if marker.get("markerType") == "selected_target")
+        self.assertEqual(selected["classId"], "tree")
+        self.assertNotIn("final_approach_tile", marker_types)
+        self.assertNotIn("predicted_path_tile", marker_types)
+        self.assertFalse(result["pathingOverlaySummary"]["pathCompleted"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,7 +41,19 @@ RuneLite plugin
 - Bank Operation Context v1 works.
 - Bank operation reports operationNeeded, operationType, resourceItemsHeld, resourceItemSlots, resourceItemQuantity, nonResourceItemsHeld, inventoryFreeSlots, depositInventoryAvailable, depositWouldClearResourceInventory, bankingComplete, and completionReason.
 - With bank open after logs are deposited: bankOperation PASS, operationNeeded=no, operationType=none, resourceItemsHeld=0, bankingComplete=yes, completionReason=no_resource_items_held.
-- Task transition after deposit: phase=service_complete, activeIntent=resume_resource_collection.
+- Previous Bank Operation baseline after deposit was phase=service_complete,
+  activeIntent=resume_resource_collection; Return-to-Resource Context v1 now
+  advances that state back toward resource selection when free slots and target
+  context are available.
+- Return-to-Resource Context v1 is implemented in Python analyzers,
+  daemon status fields, task transition diagnostics, intent overlay behavior,
+  and `diagnose_return_to_resource_context.py`.
+- After bankingComplete=true with free inventory slots and a visible resource
+  target, woodcut_bank transitions back to resource targeting:
+  phase=target_selected, activeIntent=select_target.
+- After bankingComplete=true with no visible resource target, woodcut_bank
+  reports needs_more_context/select_target for resource target context rather
+  than keeping bank service intent active.
 
 ## Current service-memory proof
 
@@ -60,6 +72,8 @@ python telemetry-viewer\diagnose_overlay_state.py --latest-session --intent
 
 python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
 
+python telemetry-viewer\diagnose_return_to_resource_context.py --from-daemon --daemon-url http://127.0.0.1:8890
+
 python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 
 ## Verification commands
@@ -72,23 +86,29 @@ python telemetry-viewer\run_stabilization_suite.py
 
 ## Current next milestone
 
-Bank UI / Service State Context v1 live QA.
+Return-to-Resource Context v1 live QA.
 
 Goal:
-serviceReady -> bank UI observed -> bankOpen / bankReadable / bankPinOpen / inventory and bank summaries.
+bankingComplete=true -> free inventory slots -> resource target selection and
+resource overlay/pathing resume without keeping bank service path as the active
+intent.
 
 Implemented scope:
-- Plugin snapshot/live cache exposes compact bank UI telemetry.
-- `bank_ui_analyzer.py` reports bankOpen, bankReadable, bankPinOpen,
-  bank UI widget visibility, closeButtonVisible, inventory summary, and bank
-  summary.
-- `diagnose_bank_ui_context.py` reports daemon bank UI context in human and
-  JSON modes.
+- `return_to_resource_analyzer.py` reports returnNeeded, returnReady,
+  serviceComplete, resourceTargetAvailable, bestResourceTarget,
+  resourcePathingNeeded, inventory free/full state, warnings, and missing
+  capabilities.
+- `diagnose_return_to_resource_context.py` reports daemon return-to-resource
+  context in human and JSON modes.
 - Task phase integration:
-  - serviceReady + bankOpen=false -> service_available
-  - bankOpen=true + bankReadable=true -> service_open
-  - bankPinOpen=true -> blocked / bank_pin_required
-- Do not change pathing, service ranking, service memory, or path overlay unless the Bank UI work truly requires it.
+  - bankingComplete + free slots + resource target visible -> target_selected /
+    select_target
+  - bankingComplete + free slots + no resource target -> needs_more_context /
+    select_target
+- Intent overlay suppresses stale completed bank service path markers during
+  return-to-resource and selects the resource target when available.
+- Do not change pathing, service ranking, service memory, or plugin telemetry
+  unless the return-to-resource work truly requires it.
 
 ## Live QA / Computer Use workflow
 
@@ -106,6 +126,7 @@ Preferred live QA flow:
    python telemetry-viewer\diagnose_service_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_overlay_state.py --latest-session --intent
+   python telemetry-viewer\diagnose_return_to_resource_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
    python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 

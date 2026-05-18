@@ -15,8 +15,9 @@ from analyzers import bank_operation_analyzer
 from analyzers import bank_ui_analyzer
 from analyzers import navigation_intent_analyzer
 from analyzers import process_inventory_analyzer
+from analyzers import return_to_resource_analyzer
 from analyzers import service_analyzer
-from analyzers.live_state import BankOperationContext, BankUiContext, InventoryContext, NavigationContext, ProcessInventoryContext, ServiceContext, TargetContext
+from analyzers.live_state import BankOperationContext, BankUiContext, InventoryContext, NavigationContext, ProcessInventoryContext, ReturnToResourceContext, ServiceContext, TargetContext
 
 
 SCHEMA = "task_transition_diagnostic.v1"
@@ -31,6 +32,7 @@ SCENARIOS = (
     "service_ready_bank_closed",
     "service_open",
     "service_complete",
+    "service_complete_no_target",
     "bank_pin_required",
     "service_missing",
     "firemake_ready",
@@ -130,14 +132,16 @@ def inventory_for_scenario(scenario: str, *, tinderbox_present: bool = True) -> 
         else:
             items.append(log_item(27))
         return inventory_from_items(items)
-    if scenario == "service_complete":
-        return inventory_from_items([{"slot": slot, "itemId": 995, "quantity": 100} for slot in range(28)])
+    if scenario in {"service_complete", "service_complete_no_target"}:
+        return inventory_from_items([{"slot": slot, "itemId": 995, "quantity": 100} for slot in range(13)])
     return inventory_from_items([log_item(slot) for slot in range(28)])
 
 
 def candidates_for_scenario(scenario: str) -> list[dict[str, Any]]:
     if scenario in {"firemake_no_tree_candidates", "firemake_full_inventory_no_candidates_live_style", "drop_no_tree_candidates"}:
         return []
+    if scenario == "service_complete_no_target":
+        return [bank_booth_candidate()]
     candidates = [tree_candidate()]
     if scenario in {"service_visible", "service_visible_not_arrived", "service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed", "service_open", "service_complete", "bank_pin_required"}:
         candidates.append(bank_booth_candidate())
@@ -201,7 +205,9 @@ def expected_for(policy_name: str, scenario: str, *, tinderbox_present: bool = T
     if scenario == "service_open":
         return {"phase": "service_open", "activeIntent": "bank_operation_pending", "overlay": "selected_service"}
     if scenario == "service_complete":
-        return {"phase": "service_complete", "activeIntent": "resume_resource_collection", "overlay": "none"}
+        return {"phase": "target_selected", "activeIntent": "select_target", "overlay": "selected_tree"}
+    if scenario == "service_complete_no_target":
+        return {"phase": "needs_more_context", "activeIntent": "select_target", "overlay": "none"}
     if scenario == "bank_pin_required":
         return {"phase": "blocked", "activeIntent": "needs_user_resolution", "overlay": "selected_service"}
     if scenario in {"service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed"}:
@@ -292,6 +298,24 @@ def compact_bank_operation_summary(context: BankOperationContext) -> dict[str, A
     }
 
 
+def compact_return_to_resource_summary(context: ReturnToResourceContext) -> dict[str, Any]:
+    payload = context.to_dict()
+    return {
+        "returnNeeded": payload.get("returnNeeded"),
+        "returnReady": payload.get("returnReady"),
+        "serviceComplete": payload.get("serviceComplete"),
+        "reason": payload.get("reason"),
+        "resourceTargetAvailable": payload.get("resourceTargetAvailable"),
+        "bestResourceTarget": target_label(payload.get("bestResourceTarget")),
+        "resourcePathingNeeded": payload.get("resourcePathingNeeded"),
+        "inventoryFreeSlots": payload.get("inventoryFreeSlots"),
+        "inventoryFull": payload.get("inventoryFull"),
+        "bankingComplete": payload.get("bankingComplete"),
+        "warnings": payload.get("warnings", []),
+        "missingCapabilities": payload.get("missingCapabilities", []),
+    }
+
+
 def compact_overlay_marker(marker: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(marker, dict) or not marker:
         return None
@@ -377,14 +401,15 @@ def evaluate_transition_scenario(
     process_context = ProcessInventoryContext(source_tick=42)
     bank_ui_context = BankUiContext(source_tick=42)
     bank_operation_context = BankOperationContext(source_tick=42)
-    if generic.get("activeIntent") == "needs_service":
+    return_context = ReturnToResourceContext(source_tick=42)
+    if generic.get("activeIntent") == "needs_service" or scenario in {"service_complete", "service_complete_no_target"}:
         service_context = service_analyzer.analyze_service_context(policy, candidates=candidates, source_tick=42)
         if service_context.best_service_candidate:
             active_target = dict(service_context.best_service_candidate)
             generic["activeIntentTarget"] = active_target
             generic["selectedTargetKey"] = intent_stabilizer.build_target_key(active_target, str(active_target.get("targetType") or "sceneObject"))
             decision["genericTaskState"] = generic
-        if scenario in {"service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed", "service_open", "service_complete", "bank_pin_required"} and service_context.best_service_candidate:
+        if scenario in {"service_visible_arrived", "service_ready_from_daemon", "service_ready_bank_closed", "service_open", "service_complete", "service_complete_no_target", "bank_pin_required"} and service_context.best_service_candidate:
             active_target = dict(service_context.best_service_candidate)
             service_context.service_ready = True
             service_context.service_ready_reason = "arrived_at_service"
@@ -407,14 +432,18 @@ def evaluate_transition_scenario(
             generic["serviceReadyReason"] = "arrived_at_service"
             decision["phase"] = "service_available"
             decision["genericTaskState"] = generic
-            if scenario in {"service_ready_bank_closed", "service_open", "service_complete", "bank_pin_required"}:
+            if scenario in {"service_ready_bank_closed", "service_open", "service_complete", "service_complete_no_target", "bank_pin_required"}:
                 bank_payload = {
                     "bankOpen": False,
                     "bankPinOpen": False,
                     "bankRootVisible": False,
-                    "inventorySummary": {"freeSlots": 0, "occupiedSlots": 28, "matchingResourceCount": 0 if scenario == "service_complete" else 28},
+                    "inventorySummary": (
+                        {"freeSlots": 15, "occupiedSlots": 13, "matchingResourceCount": 0}
+                        if scenario in {"service_complete", "service_complete_no_target"}
+                        else {"freeSlots": 0, "occupiedSlots": 28, "matchingResourceCount": 28}
+                    ),
                 }
-                if scenario in {"service_open", "service_complete"}:
+                if scenario in {"service_open", "service_complete", "service_complete_no_target"}:
                     bank_payload.update(
                         {
                             "bankOpen": True,
@@ -463,17 +492,58 @@ def evaluate_transition_scenario(
                     generic["bankOperationCompletionReason"] = bank_operation_context.completion_reason
                     decision["phase"] = generic["phase"]
                     decision["genericTaskState"] = generic
+                return_context = return_to_resource_analyzer.analyze_return_to_resource_context(
+                    policy,
+                    bank_operation_context=bank_operation_context,
+                    inventory_context=inventory_context,
+                    target_context=TargetContext(
+                        candidates=[candidate for candidate in candidates if candidate.get("classId") == "tree"],
+                        raw_best_target=tree_candidate() if scenario == "service_complete" else None,
+                        candidate_count=1 if scenario == "service_complete" else 0,
+                        source_tick=42,
+                    ),
+                    current_task_state=generic,
+                    source_tick=42,
+                )
+                if return_context.return_needed:
+                    resource_target = return_context.best_resource_target if isinstance(return_context.best_resource_target, dict) else None
+                    generic["returnNeeded"] = return_context.return_needed
+                    generic["returnReady"] = return_context.return_ready
+                    generic["returnToResourceReason"] = return_context.reason
+                    generic["resourceTargetAvailable"] = return_context.resource_target_available
+                    if return_context.return_ready and resource_target:
+                        generic["phase"] = "target_selected"
+                        generic["activeIntent"] = "select_target"
+                        generic["activeIntentTarget"] = resource_target
+                        generic["selectedTargetKey"] = intent_stabilizer.build_target_key(resource_target, str(resource_target.get("targetType") or "sceneObject"))
+                        generic.pop("blockingConditions", None)
+                        decision["phase"] = "target_selected"
+                    else:
+                        generic["phase"] = "needs_more_context"
+                        generic["activeIntent"] = "select_target"
+                        generic["activeIntentTarget"] = None
+                        generic["selectedTargetKey"] = None
+                        blocking = [str(item) for item in generic.get("blockingConditions") or [] if item]
+                        if "no_target_observed" not in blocking:
+                            blocking.append("no_target_observed")
+                        generic["blockingConditions"] = blocking
+                        decision["phase"] = "no_target_observed"
+                    decision["genericTaskState"] = generic
     if generic.get("activeIntent") == "process_inventory":
         process_context = process_inventory_analyzer.analyze_process_inventory_context(policy, inventory_context, source_tick=42)
     decision["serviceContext"] = service_context.to_dict()
     decision["processInventoryContext"] = process_context.to_dict()
     decision["bankUiContext"] = bank_ui_context.to_dict()
     decision["bankOperationContext"] = bank_operation_context.to_dict()
+    decision["returnToResourceContext"] = return_context.to_dict()
     decision.update(brain_core.context_domain_summary(decision, response=response, policy=policy))
+    resource_candidates = [candidate for candidate in candidates if candidate.get("classId") == "tree"]
     target_context = TargetContext(
-        candidates=candidates,
-        raw_best_target=generic.get("activeIntentTarget") if isinstance(generic.get("activeIntentTarget"), dict) else (candidates[0] if candidates else None),
-        candidate_count=len(candidates),
+        candidates=resource_candidates,
+        profile_candidates=resource_candidates,
+        broad_candidates=candidates,
+        raw_best_target=generic.get("activeIntentTarget") if isinstance(generic.get("activeIntentTarget"), dict) else (resource_candidates[0] if resource_candidates else None),
+        candidate_count=len(resource_candidates),
         source_tick=42,
     )
     navigation_context = navigation_intent_analyzer.analyze_navigation_intent(
@@ -486,8 +556,9 @@ def evaluate_transition_scenario(
         source_tick=42,
     )
     decision["navigationIntentContext"] = navigation_context.to_dict()
-    stable = stable_intent_for(generic, candidates)
-    overlay = build_overlay(decision, candidates, stable)
+    overlay_candidates = resource_candidates if generic.get("activeIntent") in {"select_target", "target_selected", "continue_current_target"} else candidates
+    stable = stable_intent_for(generic, overlay_candidates)
+    overlay = build_overlay(decision, overlay_candidates, stable)
     selected_marker = compact_overlay_marker(next((marker for marker in overlay.get("markers", []) if isinstance(marker, dict) and marker.get("markerType") == "selected_target"), None))
     expected = expected_for(policy_name, scenario, tinderbox_present=tinderbox_present)
     failures: list[str] = []
@@ -513,8 +584,9 @@ def evaluate_transition_scenario(
         "expectedAnalyzers": {
             "service": expected["activeIntent"] in {"needs_service", "service_available"},
             "processInventory": expected["activeIntent"] == "process_inventory",
-            "bankOperation": expected["activeIntent"] in {"bank_operation_pending", "resume_resource_collection"},
-            "navigation": expected["activeIntent"] in {"needs_service", "target_selected", "continue_current_target", "continue_task"},
+            "bankOperation": expected["activeIntent"] in {"bank_operation_pending", "resume_resource_collection", "select_target"},
+            "returnToResource": expected["activeIntent"] == "select_target" and bool(return_context.return_needed),
+            "navigation": expected["activeIntent"] in {"needs_service", "target_selected", "continue_current_target", "continue_task", "select_target"},
         },
         "serviceAnalyzerRuns": bool(service_context.service_required),
         "processInventoryAnalyzerRuns": bool(process_context.process_required),
@@ -524,6 +596,7 @@ def evaluate_transition_scenario(
         "processContextSummary": compact_process_summary(process_context),
         "bankUiContextSummary": compact_bank_ui_summary(bank_ui_context),
         "bankOperationContextSummary": compact_bank_operation_summary(bank_operation_context),
+        "returnToResourceContextSummary": compact_return_to_resource_summary(return_context),
         "navigationContextSummary": compact_navigation_summary(navigation_context.to_dict()),
         "freshnessDomains": decision.get("freshnessDomains") if isinstance(decision.get("freshnessDomains"), dict) else {},
         "inventoryFreshness": (decision.get("freshnessDomains") or {}).get("inventoryFreshness") if isinstance(decision.get("freshnessDomains"), dict) else None,
@@ -562,6 +635,7 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
     service_context = brain.get("serviceContext") if isinstance(brain.get("serviceContext"), dict) else {}
     process_context = brain.get("processInventoryContext") if isinstance(brain.get("processInventoryContext"), dict) else {}
     bank_operation_context = brain.get("bankOperationContext") if isinstance(brain.get("bankOperationContext"), dict) else {}
+    return_context = brain.get("returnToResourceContext") if isinstance(brain.get("returnToResourceContext"), dict) else {}
     navigation_context = brain.get("navigationIntentContext") if isinstance(brain.get("navigationIntentContext"), dict) else {}
     freshness_domains = brain.get("freshnessDomains") if isinstance(brain.get("freshnessDomains"), dict) else {}
     overlay_selected_type = None
@@ -597,6 +671,15 @@ def build_from_daemon(status: dict[str, Any], *, policy_name: str) -> dict[str, 
             "depositInventoryAvailable": bank_operation_context.get("depositInventoryAvailable", status.get("bankDepositInventoryAvailable")),
             "bankingComplete": bank_operation_context.get("bankingComplete", status.get("bankingComplete")),
             "completionReason": bank_operation_context.get("completionReason", status.get("bankOperationCompletionReason")),
+        },
+        "returnToResourceContextSummary": {
+            "returnNeeded": return_context.get("returnNeeded", status.get("returnToResourceNeeded")),
+            "returnReady": return_context.get("returnReady", status.get("returnToResourceReady")),
+            "resourceTargetAvailable": return_context.get("resourceTargetAvailable", status.get("returnResourceTargetAvailable")),
+            "bestResourceTarget": target_label(return_context.get("bestResourceTarget") if isinstance(return_context.get("bestResourceTarget"), dict) else status.get("returnBestResourceTarget")),
+            "resourcePathingNeeded": return_context.get("resourcePathingNeeded", status.get("returnResourcePathingNeeded")),
+            "inventoryFreeSlots": return_context.get("inventoryFreeSlots", status.get("returnInventoryFreeSlots")),
+            "reason": return_context.get("reason", status.get("returnToResourceReason")),
         },
         "navigationContextSummary": compact_navigation_summary(navigation_context),
         "freshnessDomains": freshness_domains,
@@ -648,6 +731,7 @@ def format_human(payload: dict[str, Any]) -> str:
     service = payload.get("serviceContextSummary") if isinstance(payload.get("serviceContextSummary"), dict) else {}
     process = payload.get("processContextSummary") if isinstance(payload.get("processContextSummary"), dict) else {}
     bank_operation = payload.get("bankOperationContextSummary") if isinstance(payload.get("bankOperationContextSummary"), dict) else {}
+    return_context = payload.get("returnToResourceContextSummary") if isinstance(payload.get("returnToResourceContextSummary"), dict) else {}
     navigation = payload.get("navigationContextSummary") if isinstance(payload.get("navigationContextSummary"), dict) else {}
     lines.extend(
         [
@@ -656,6 +740,7 @@ def format_human(payload: dict[str, Any]) -> str:
             f"  service: needed={service.get('serviceNeeded')} best={service.get('best')} ready={service.get('serviceReady')} reason={service.get('serviceReadyReason')}",
             f"  process: needed={process.get('processRequired')} type={process.get('processTypeNeeded')} tinderbox={process.get('tinderboxStatus')}",
             f"  bank operation: needed={bank_operation.get('operationNeeded')} type={bank_operation.get('operationType')} complete={bank_operation.get('bankingComplete')} reason={bank_operation.get('completionReason')}",
+            f"  return: needed={return_context.get('returnNeeded')} ready={return_context.get('returnReady')} target={return_context.get('bestResourceTarget')} reason={return_context.get('reason')}",
             f"  navigation: reason={navigation.get('navigationReason')} target={navigation.get('destination')} reachability={navigation.get('directReachability')}",
         ]
     )

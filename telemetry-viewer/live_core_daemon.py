@@ -29,6 +29,7 @@ from analyzers import navigation_analyzer
 from analyzers import navigation_intent_analyzer
 from analyzers import pathing_analyzer
 from analyzers import process_inventory_analyzer
+from analyzers import return_to_resource_analyzer
 from analyzers import service_analyzer
 from analyzers import target_analyzer
 from analyzers.live_state import InventoryContext, LiveAnalysisResult, LiveInputSnapshot, LiveSourceStatus, PlayerContext
@@ -695,6 +696,18 @@ class LiveCoreState:
             "bankOperationReason",
             "bankOperationMissingCapabilities",
             "bankOperationWarnings",
+            "returnToResourceNeeded",
+            "returnToResourceReady",
+            "returnToResourceStatus",
+            "returnToResourceReason",
+            "returnResourceTargetAvailable",
+            "returnBestResourceTarget",
+            "returnResourcePathingNeeded",
+            "returnServiceComplete",
+            "returnInventoryFreeSlots",
+            "returnInventoryFull",
+            "returnToResourceMissingCapabilities",
+            "returnToResourceWarnings",
             "selectedServiceTargetName",
             "selectedServiceTargetTile",
             "distanceToServiceTarget",
@@ -1112,6 +1125,13 @@ class LiveCoreDaemon:
         raw_best = brain_core.safe_get(decision, "currentContextSummary.bestTarget", {})
         generic_state = decision.get("genericTaskState") if isinstance(decision.get("genericTaskState"), dict) else {}
         phase = str(generic_state.get("activeIntent") or generic_state.get("phase") or decision.get("phase") or "observe")
+        if phase in {"select_target", "target_selected", "continue_current_target", "continue_task", "wait_for_result"}:
+            profile_candidates = context.get("profileCandidates") if isinstance(context.get("profileCandidates"), list) else []
+            if not profile_candidates and self.state.analysis_result and self.state.analysis_result.targets:
+                profile_candidates = list(self.state.analysis_result.targets.profile_candidates)
+            candidates = [candidate for candidate in profile_candidates if isinstance(candidate, dict)]
+            if raw_best and raw_best not in candidates:
+                raw_best = {}
         if phase in {"goal_complete", "inventory_full", "stale_context", "no_context", "observe", "none", "needs_service", "process_inventory", "needs_more_context", "navigate_to_service", "service_available", "bank_operation_pending", "resume_resource_collection", "service_interaction_pending"}:
             raw_best = {}
             candidates = []
@@ -1497,6 +1517,16 @@ class LiveCoreDaemon:
             )
             bank_operation_context = self.state.analysis_result.bank_operation
             brain_context.decision["bankOperationContext"] = bank_operation_context.to_dict()
+            self.state.analysis_result.return_to_resource = return_to_resource_analyzer.analyze_return_to_resource_context(
+                policy,
+                bank_operation_context=bank_operation_context,
+                inventory_context=inventory_context,
+                target_context=self.state.analysis_result.targets,
+                current_task_state=generic_state,
+                source_tick=source_tick,
+            )
+            return_context = self.state.analysis_result.return_to_resource
+            brain_context.decision["returnToResourceContext"] = return_context.to_dict()
             if service_context and service_context.service_ready:
                 service_target = service_context.best_service_candidate if isinstance(service_context.best_service_candidate, dict) else None
                 if bank_ui_context.bank_pin_open is True:
@@ -1538,6 +1568,58 @@ class LiveCoreDaemon:
                     generic_state["bankOperationCompletionReason"] = bank_operation_context.completion_reason
                     brain_context.decision["phase"] = generic_state["phase"]
                     brain_context.decision["genericTaskState"] = generic_state
+            if return_context.return_needed:
+                resource_target = return_context.best_resource_target if isinstance(return_context.best_resource_target, dict) else None
+                generic_state["returnNeeded"] = return_context.return_needed
+                generic_state["returnReady"] = return_context.return_ready
+                generic_state["returnToResourceReason"] = return_context.reason
+                generic_state["resourceTargetAvailable"] = return_context.resource_target_available
+                generic_state["bankingComplete"] = return_context.banking_complete
+                if return_context.return_ready and resource_target:
+                    target_type = resource_target.get("targetType") or "sceneObject"
+                    generic_state["phase"] = "target_selected"
+                    generic_state["activeIntent"] = "select_target"
+                    generic_state["activeIntentTarget"] = resource_target
+                    generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(resource_target, str(target_type))
+                    generic_state["availableTarget"] = resource_target
+                    generic_state.pop("blockingConditions", None)
+                    brain_context.decision["phase"] = "target_selected"
+                else:
+                    generic_state["phase"] = "needs_more_context"
+                    generic_state["activeIntent"] = "select_target"
+                    generic_state["activeIntentTarget"] = None
+                    generic_state["selectedTargetKey"] = None
+                    generic_state["availableTarget"] = None
+                    blocking = [str(item) for item in generic_state.get("blockingConditions") or [] if item]
+                    if "no_target_observed" not in blocking:
+                        blocking.append("no_target_observed")
+                    generic_state["blockingConditions"] = blocking
+                    brain_context.decision["phase"] = "no_target_observed"
+                brain_context.decision["genericTaskState"] = generic_state
+                self.state.analysis_result.navigation_intent = navigation_intent_analyzer.analyze_navigation_intent(
+                    policy,
+                    player_context=self.state.analysis_result.player,
+                    target_context=self.state.analysis_result.targets,
+                    service_context=service_context,
+                    process_inventory_context=process_context,
+                    navigation_context=self.state.analysis_result.navigation,
+                    generic_task_state=generic_state,
+                    source_tick=source_tick,
+                )
+                brain_context.decision["navigationIntentContext"] = self.state.analysis_result.navigation_intent.to_dict()
+                self.state.analysis_result.pathing = pathing_analyzer.analyze_pathing_context(
+                    player_context=self.state.analysis_result.player,
+                    navigation_context=self.state.analysis_result.navigation,
+                    navigation_intent_context=self.state.analysis_result.navigation_intent,
+                    service_context=service_context,
+                    process_inventory_context=process_context,
+                    target_context=self.state.analysis_result.targets,
+                    activity_context=self.state.analysis_result.activity,
+                    generic_task_state=generic_state,
+                    path_intent_state=self.state.path_intent_state,
+                    source_tick=source_tick,
+                    movement_model="osrs_like_predicted",
+                )
             pathing_payload = self.state.analysis_result.pathing.to_dict()
             pathing_payload["overlayPredictedPathLimit"] = intent_overlay_analyzer.predicted_path_limit(self.args, self.args.overlay_mode)
             brain_context.decision["pathingContext"] = pathing_payload
@@ -1724,6 +1806,21 @@ class LiveCoreDaemon:
             fields["bankOperationReason"] = operation.reason
             fields["bankOperationMissingCapabilities"] = list(operation.missing_capabilities)
             fields["bankOperationWarnings"] = list(operation.warnings)
+        if self.state.analysis_result and self.state.analysis_result.return_to_resource:
+            return_context = self.state.analysis_result.return_to_resource
+            best_target = return_context.best_resource_target if isinstance(return_context.best_resource_target, dict) else None
+            fields["returnToResourceNeeded"] = return_context.return_needed
+            fields["returnToResourceReady"] = return_context.return_ready
+            fields["returnToResourceStatus"] = return_context.status
+            fields["returnToResourceReason"] = return_context.reason
+            fields["returnResourceTargetAvailable"] = return_context.resource_target_available
+            fields["returnBestResourceTarget"] = best_target
+            fields["returnResourcePathingNeeded"] = return_context.resource_pathing_needed
+            fields["returnServiceComplete"] = return_context.service_complete
+            fields["returnInventoryFreeSlots"] = return_context.inventory_free_slots
+            fields["returnInventoryFull"] = return_context.inventory_full
+            fields["returnToResourceMissingCapabilities"] = list(return_context.missing_capabilities)
+            fields["returnToResourceWarnings"] = list(return_context.warnings)
         self.state.source_status.update(fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(fields)

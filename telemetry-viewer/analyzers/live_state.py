@@ -644,6 +644,41 @@ class BankOperationContext(AnalyzerContractFields):
 
 
 @dataclass
+class ReturnToResourceContext(AnalyzerContractFields):
+    status: str = "PASS"
+    warnings: list[str] = field(default_factory=list)
+    missing_capabilities: list[str] = field(default_factory=list)
+    source_tick: int | None = None
+    retained_from_previous: bool = False
+    timing_millis: float | None = None
+    return_needed: bool = False
+    return_ready: bool = False
+    service_complete: bool = False
+    reason: str | None = None
+    resource_target_available: bool = False
+    best_resource_target: dict[str, Any] | None = None
+    resource_pathing_needed: bool = False
+    inventory_free_slots: int | None = None
+    inventory_full: bool | None = None
+    banking_complete: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.contract_payload(),
+            "returnNeeded": self.return_needed,
+            "returnReady": self.return_ready,
+            "serviceComplete": self.service_complete,
+            "reason": self.reason,
+            "resourceTargetAvailable": self.resource_target_available,
+            "bestResourceTarget": self.best_resource_target,
+            "resourcePathingNeeded": self.resource_pathing_needed,
+            "inventoryFreeSlots": self.inventory_free_slots,
+            "inventoryFull": self.inventory_full,
+            "bankingComplete": self.banking_complete,
+        }
+
+
+@dataclass
 class LiveAnalysisResult:
     input_snapshot: LiveInputSnapshot | None = None
     source_status: LiveSourceStatus | None = None
@@ -658,6 +693,7 @@ class LiveAnalysisResult:
     process_inventory: ProcessInventoryContext | None = None
     bank_ui: BankUiContext | None = None
     bank_operation: BankOperationContext | None = None
+    return_to_resource: ReturnToResourceContext | None = None
     intent_overlay: IntentOverlayContext | None = None
     brain: BrainContext | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
