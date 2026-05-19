@@ -86,6 +86,7 @@ class StartupButtonCandidate:
             "canvasPoint": self.canvas_point,
             "confidence": self.confidence,
             "reason": self.reason,
+            "candidateMethod": candidate_method(self.source),
         }
 
 
@@ -116,6 +117,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fallback-win-shift-arrow", action="store_true")
     parser.add_argument("--print-candidates", action="store_true")
     parser.add_argument("--save-debug-screenshot", action="store_true")
+    parser.add_argument("--template-confidence", type=float, default=0.85)
+    parser.add_argument("--template-dir", default=str(BOOTSTRAP_TEMPLATE_DIR))
     parser.add_argument("--start-daemon", action="store_true")
     parser.add_argument("--run-live-qa", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -379,6 +382,14 @@ def candidates_from_window(window: dict[str, Any] | None) -> list[StartupButtonC
     ]
 
 
+def candidate_method(source: str) -> str:
+    if source == "template":
+        return "template"
+    if source in {"canvas_percent", "calibrated_screen"}:
+        return "percent_fallback"
+    return "heuristic"
+
+
 def candidate_from_vision(candidate: bootstrap_vision.VisionButtonCandidate) -> StartupButtonCandidate:
     return StartupButtonCandidate(
         name=candidate.name,
@@ -395,10 +406,14 @@ def button_candidates(
     window: dict[str, Any] | None,
     *,
     save_debug_screenshot: bool = False,
+    template_dir: Path = BOOTSTRAP_TEMPLATE_DIR,
+    template_confidence: float = 0.85,
+    vision_candidate_func: Callable[..., tuple[list[Any], list[str]]] = bootstrap_vision.template_candidates,
 ) -> tuple[list[StartupButtonCandidate], list[str]]:
-    vision_candidates, vision_warnings = bootstrap_vision.template_candidates(
-        BOOTSTRAP_TEMPLATE_DIR,
+    vision_candidates, vision_warnings = vision_candidate_func(
+        template_dir,
         save_debug_screenshot=save_debug_screenshot,
+        confidence=template_confidence,
     )
     if vision_candidates:
         return [candidate_from_vision(candidate) for candidate in vision_candidates], vision_warnings
@@ -545,6 +560,7 @@ def run_bootstrap(
     live_qa_func: Callable[..., dict[str, Any]] = run_live_qa,
     launch_func: Callable[..., dict[str, Any]] = launch_runelite,
     stop_existing_func: Callable[..., dict[str, Any]] = stop_existing_runelite_dev_clients,
+    vision_candidate_func: Callable[..., tuple[list[Any], list[str]]] = bootstrap_vision.template_candidates,
     sleep_func: Callable[[float], None] = time.sleep,
     monotonic_func: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
@@ -601,6 +617,8 @@ def run_bootstrap(
     snapshot_error: str | None = None
     startup_stage = "waiting_for_snapshot"
     clicks_remaining = max(0, int(args.max_startup_clicks))
+    template_dir = Path(str(args.template_dir))
+    template_status = bootstrap_vision.template_status(template_dir, confidence=float(args.template_confidence))
 
     while True:
         refreshed_window = (
@@ -645,6 +663,9 @@ def run_bootstrap(
             snapshot_payload,
             window,
             save_debug_screenshot=bool(args.save_debug_screenshot),
+            template_dir=template_dir,
+            template_confidence=float(args.template_confidence),
+            vision_candidate_func=vision_candidate_func,
         )
         warnings.extend(str(item) for item in candidate_warnings)
         if not execute:
@@ -755,6 +776,7 @@ def run_bootstrap(
         "launch": launch_summary,
         "window": window,
         "snapshot": snapshot_out,
+        "templateStatus": template_status,
         "buttonCandidates": [candidate.to_dict() for candidate in candidates],
         "clickedCandidates": clicked,
         "daemon": daemon_summary,
@@ -770,6 +792,7 @@ def format_human(payload: dict[str, Any]) -> str:
     snapshot = dict_value(payload.get("snapshot"))
     daemon = dict_value(payload.get("daemon"))
     live_qa = dict_value(payload.get("liveQa"))
+    template_status = dict_value(payload.get("templateStatus"))
     candidates = payload.get("buttonCandidates") if isinstance(payload.get("buttonCandidates"), list) else []
     clicked = payload.get("clickedCandidates") if isinstance(payload.get("clickedCandidates"), list) else []
     placement = dict_value(window.get("placement"))
@@ -796,12 +819,15 @@ def format_human(payload: dict[str, Any]) -> str:
         f"  clicks attempted: {len(clicked)}",
         f"  last clicked: {(clicked[-1].get('name') if clicked else 'none')}",
         f"  logged in: {snapshot.get('loggedIn')}",
+        f"  template dir: {template_status.get('templateDir') or 'unknown'}",
+        f"  templates found: {', '.join(template_status.get('found') or []) if template_status else 'unknown'}",
+        f"  templates missing: {', '.join(template_status.get('missing') or []) if template_status else 'unknown'}",
     ]
     if candidates:
         lines.extend(["", "Candidates:"])
         for candidate in candidates[:5]:
             lines.append(
-                f"  {candidate.get('name')} {candidate.get('source')} screen={candidate.get('screenPoint')} confidence={candidate.get('confidence')}"
+                f"  {candidate.get('name')} {candidate.get('candidateMethod') or candidate.get('source')} screen={candidate.get('screenPoint')} confidence={candidate.get('confidence')}"
             )
     lines.extend(
         [

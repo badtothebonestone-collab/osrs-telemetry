@@ -42,8 +42,33 @@ class BootstrapVisionTest(unittest.TestCase):
             )
 
         self.assertEqual([candidate.name for candidate in candidates], ["play_now", "continue", "click_here_to_play"])
+        self.assertEqual([candidate.source for candidate in candidates], ["template", "template", "template"])
         self.assertEqual([candidate.screen_point for candidate in candidates], [{"x": 100, "y": 200}, {"x": 110, "y": 210}, {"x": 120, "y": 220}])
         self.assertEqual(warnings, [])
+
+    def test_template_candidates_pass_configured_confidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            Path(temp, "play_now.png").write_bytes(b"not-a-real-png")
+            seen_confidences = []
+
+            bootstrap_vision.template_candidates(
+                Path(temp),
+                screenshot_func=lambda: object(),
+                locate_func=lambda _template, _screenshot, **kwargs: seen_confidences.append(kwargs.get("confidence")) or (10, 20),
+                confidence=0.91,
+            )
+
+        self.assertEqual(seen_confidences, [0.91])
+
+    def test_template_status_reports_found_and_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            Path(temp, "play_now.png").write_bytes(b"not-a-real-png")
+            status = bootstrap_vision.template_status(Path(temp), confidence=0.85)
+
+        self.assertEqual(status["templateDir"], temp)
+        self.assertEqual(status["found"], ["play_now"])
+        self.assertIn("continue", status["missing"])
+        self.assertEqual(status["confidence"], 0.85)
 
     def test_no_files_written_without_debug_screenshot(self):
         with tempfile.TemporaryDirectory() as temp:

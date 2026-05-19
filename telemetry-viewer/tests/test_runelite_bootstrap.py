@@ -170,7 +170,32 @@ class RuneLiteBootstrapTest(unittest.TestCase):
 
         self.assertTrue(payload["buttonCandidates"])
         self.assertEqual(payload["buttonCandidates"][0]["source"], "canvas_percent")
+        self.assertEqual(payload["buttonCandidates"][0]["candidateMethod"], "percent_fallback")
         self.assertEqual(payload["buttonCandidates"][0]["screenPoint"], {"x": 1400, "y": 2342})
+        self.assertIn("templateStatus", payload)
+
+    def test_template_dir_and_confidence_are_passed_to_vision(self):
+        args = bootstrap.parse_args([
+            "--skip-runelite-launch",
+            "--dry-run",
+            "--template-dir",
+            "custom_templates",
+            "--template-confidence",
+            "0.91",
+        ])
+        seen = []
+
+        payload = bootstrap.run_bootstrap(
+            args,
+            fetch_snapshot_func=lambda *_args, **_kwargs: snapshot("LOGIN_SCREEN"),
+            backend=FakeBackend(),
+            window_finder=FakeWindowFinder(),
+            vision_candidate_func=lambda template_dir, **kwargs: seen.append((str(template_dir), kwargs.get("confidence"))) or ([], []),
+            sleep_func=lambda _seconds: None,
+        )
+
+        self.assertEqual(seen, [("custom_templates", 0.91)])
+        self.assertEqual(payload["templateStatus"]["confidence"], 0.91)
 
     def test_tiny_window_without_geometry_waits_instead_of_clicking_percent_fallback(self):
         backend = FakeBackend()

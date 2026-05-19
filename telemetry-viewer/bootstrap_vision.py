@@ -29,6 +29,7 @@ class VisionButtonCandidate:
             "canvasPoint": self.canvas_point,
             "confidence": self.confidence,
             "reason": self.reason,
+            "candidateMethod": "template" if self.source == "template" else self.source,
         }
 
 
@@ -56,12 +57,30 @@ def _point_from_located(value: Any) -> dict[str, int] | None:
     return None
 
 
+def template_status(template_dir: Path, *, confidence: float = 0.8) -> dict[str, Any]:
+    found: list[str] = []
+    missing: list[str] = []
+    for name, filename in SUPPORTED_TEMPLATE_FILES.items():
+        if (template_dir / filename).exists():
+            found.append(name)
+        else:
+            missing.append(name)
+    return {
+        "templateDir": str(template_dir),
+        "supported": list(SUPPORTED_TEMPLATE_FILES),
+        "found": found,
+        "missing": missing,
+        "confidence": float(confidence),
+    }
+
+
 def template_candidates(
     template_dir: Path,
     *,
     screenshot_func: Callable[[], Any] | None = None,
     locate_func: Callable[..., Any] | None = None,
     save_debug_screenshot: bool = False,
+    confidence: float = 0.8,
 ) -> tuple[list[VisionButtonCandidate], list[str]]:
     warnings: list[str] = []
     existing: list[tuple[str, Path]] = []
@@ -82,8 +101,8 @@ def template_candidates(
     candidates: list[VisionButtonCandidate] = []
     for name, path in existing:
         try:
-            located = locate(str(path), screenshot, confidence=0.8)
-        except TypeError:
+            located = locate(str(path), screenshot, confidence=float(confidence))
+        except (TypeError, NotImplementedError):
             located = locate(str(path), screenshot)
         except Exception as error:  # noqa: BLE001
             warnings.append(f"template match failed for {path.name}: {type(error).__name__}: {error}")
@@ -93,10 +112,10 @@ def template_candidates(
             candidates.append(
                 VisionButtonCandidate(
                     name=name,
-                    source="template_match",
+                    source="template",
                     screen_point=point,
                     canvas_point=None,
-                    confidence=0.9,
+                    confidence=float(confidence),
                     reason=f"matched template {path.name}",
                 )
             )
