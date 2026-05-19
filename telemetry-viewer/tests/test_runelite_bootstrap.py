@@ -41,6 +41,10 @@ def unusable_snapshot():
     return {"status": "FAIL", "latestTick": -1, "payloads": {"baseline": {}}}
 
 
+def geometry_only_snapshot():
+    return {"status": "PASS", "latestTick": 42, "payloads": {"baseline": {"inputGeometry": {"geometryAvailable": True}}}}
+
+
 class FakeBackend:
     name = "fake"
 
@@ -75,6 +79,15 @@ class FakeWindowFinder:
 
 
 class RuneLiteBootstrapTest(unittest.TestCase):
+    def setUp(self):
+        self.template_dir = tempfile.TemporaryDirectory()
+        self._old_template_dir = bootstrap.BOOTSTRAP_TEMPLATE_DIR
+        bootstrap.BOOTSTRAP_TEMPLATE_DIR = Path(self.template_dir.name)
+
+    def tearDown(self):
+        bootstrap.BOOTSTRAP_TEMPLATE_DIR = self._old_template_dir
+        self.template_dir.cleanup()
+
     def test_no_world_switching_candidates_generated(self):
         payload = bootstrap.run_bootstrap(
             bootstrap.parse_args(["--skip-runelite-launch", "--dry-run", "--print-candidates"]),
@@ -293,7 +306,7 @@ class RuneLiteBootstrapTest(unittest.TestCase):
 
     def test_execute_clicks_play_now_when_snapshot_reachable_but_not_game_ready(self):
         backend = FakeBackend()
-        snapshots = [unusable_snapshot(), snapshot("LOGGED_IN"), snapshot("LOGGED_IN"), snapshot("LOGGED_IN")]
+        snapshots = [geometry_only_snapshot(), snapshot("LOGGED_IN"), snapshot("LOGGED_IN"), snapshot("LOGGED_IN")]
 
         payload = bootstrap.run_bootstrap(
             bootstrap.parse_args(["--skip-runelite-launch", "--execute", "--max-startup-clicks", "3"]),

@@ -34,15 +34,29 @@ class VisionButtonCandidate:
 
 
 def _default_screenshot() -> Any:
+    try:
+        from PIL import ImageGrab
+
+        return ImageGrab.grab(all_screens=True)
+    except Exception:  # noqa: BLE001
+        pass
     import pyautogui  # type: ignore
 
     return pyautogui.screenshot()
 
 
 def _default_locate(template: str, screenshot: Any, **kwargs: Any) -> Any:
-    import pyautogui  # type: ignore
+    if screenshot is None:
+        import pyautogui  # type: ignore
 
-    return pyautogui.locateCenterOnScreen(template, **kwargs) if screenshot is None else pyautogui.locateCenter(template, screenshot, **kwargs)
+        return pyautogui.locateCenterOnScreen(template, **kwargs)
+    import pyscreeze  # type: ignore
+
+    try:
+        located = pyscreeze.locate(template, screenshot, **kwargs)
+    except getattr(pyscreeze, "ImageNotFoundException", Exception):
+        return None
+    return pyscreeze.center(located) if located else None
 
 
 def _point_from_located(value: Any) -> dict[str, int] | None:

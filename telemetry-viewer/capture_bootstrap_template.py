@@ -28,6 +28,12 @@ def parse_region(value: str) -> tuple[int, int, int, int]:
 
 
 def _default_screenshot() -> Any:
+    try:
+        from PIL import ImageGrab
+
+        return ImageGrab.grab(all_screens=True)
+    except Exception:  # noqa: BLE001
+        pass
     import pyautogui  # type: ignore
 
     return pyautogui.screenshot()

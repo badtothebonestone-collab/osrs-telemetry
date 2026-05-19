@@ -443,13 +443,8 @@ def snapshot_has_game_context(snapshot_payload: dict[str, Any] | None) -> bool:
     if not isinstance(snapshot_payload, dict):
         return False
     summary = snapshot_summary(snapshot_payload, reachable=True)
-    if summary.get("loggedIn") or summary.get("gameState"):
-        return True
-    if dict_value(snapshot_baseline(snapshot_payload).get("inputGeometry")).get("geometryAvailable"):
-        return True
-    status = str(snapshot_payload.get("status") or "").upper()
-    latest_tick = snapshot_payload.get("latestTick")
-    return status == "PASS" and isinstance(latest_tick, int) and latest_tick >= 0
+    game_state = str(summary.get("gameState") or "").upper()
+    return bool(game_state and game_state != "UNKNOWN")
 
 
 def choose_candidate(
