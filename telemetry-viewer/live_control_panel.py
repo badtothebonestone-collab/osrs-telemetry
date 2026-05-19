@@ -378,6 +378,11 @@ def _action_lifecycle_summary(status: dict[str, Any]) -> dict[str, Any]:
             "lifecycleVerification": "unknown",
             "lifecycleAttempts": "unknown",
             "lifecycleReason": f"lifecycle unavailable: {type(error).__name__}",
+            "lifecycleWaitingFor": "unknown",
+            "lifecycleObservedSignals": "none",
+            "lifecycleElapsed": "unknown",
+            "lifecycleResultOutcome": "unknown",
+            "lifecycleNextActionAllowed": "unknown",
         }
     lifecycle = payload.get("lifecycleState") if isinstance(payload.get("lifecycleState"), dict) else {}
     observed = payload.get("observedResult") if isinstance(payload.get("observedResult"), dict) else {}
@@ -389,6 +394,11 @@ def _action_lifecycle_summary(status: dict[str, Any]) -> dict[str, Any]:
         "lifecycleVerification": observed.get("verificationStatus") or "unknown",
         "lifecycleAttempts": payload.get("attempts") if payload.get("attempts") is not None else lifecycle.get("attempts", "unknown"),
         "lifecycleReason": payload.get("reason") or lifecycle.get("reason") or "unknown",
+        "lifecycleWaitingFor": payload.get("expectedSignal") or lifecycle.get("expectedSignal") or observed.get("expectedSignal") or "unknown",
+        "lifecycleObservedSignals": ", ".join(str(item) for item in (payload.get("observedSignals") or lifecycle.get("observedSignals") or observed.get("observedSignals") or [])) or "none",
+        "lifecycleElapsed": f"{payload.get('elapsedTicks') if payload.get('elapsedTicks') is not None else lifecycle.get('elapsedTicks')} ticks / {payload.get('elapsedMillis') if payload.get('elapsedMillis') is not None else lifecycle.get('elapsedMillis')} ms",
+        "lifecycleResultOutcome": payload.get("resultOutcome") or lifecycle.get("resultOutcome") or observed.get("resultOutcome") or "unknown",
+        "lifecycleNextActionAllowed": payload.get("nextActionAllowed") if payload.get("nextActionAllowed") is not None else lifecycle.get("nextActionAllowed", "unknown"),
     }
 
 
@@ -527,6 +537,11 @@ def build_mission_control_status(
             "lifecycleVerification": "unknown",
             "lifecycleAttempts": "unknown",
             "lifecycleReason": "daemon unavailable",
+            "lifecycleWaitingFor": "unknown",
+            "lifecycleObservedSignals": "none",
+            "lifecycleElapsed": "unknown",
+            "lifecycleResultOutcome": "unknown",
+            "lifecycleNextActionAllowed": "unknown",
             "latestWarningCount": 0,
             "missingCapabilityCount": 0,
             "noFileStatus": "WARN",
@@ -670,6 +685,8 @@ def format_mission_control_status(mission: dict[str, Any]) -> str:
             f"  Movement: {mission.get('actionMovementProfile')} | last result: {mission.get('lastExecutionResult')}",
             "Action Lifecycle:",
             f"  State: {mission.get('lifecycleState')} | last: {mission.get('lifecycleLastAction')} | verification: {mission.get('lifecycleVerification')}",
+            f"  Waiting for: {mission.get('lifecycleWaitingFor')} | signals: {mission.get('lifecycleObservedSignals')}",
+            f"  Outcome: {mission.get('lifecycleResultOutcome')} | elapsed: {mission.get('lifecycleElapsed')} | next allowed: {mission.get('lifecycleNextActionAllowed')}",
             f"  Cooldown: {mission.get('lifecycleCooldown')} | attempts: {mission.get('lifecycleAttempts')} | reason: {mission.get('lifecycleReason')}",
             "Health:",
             f"  Overlay: {mission.get('overlayStatus')} | live QA: {mission.get('liveQaStatus')} | gauntlet: {mission.get('gauntletStatus')}",

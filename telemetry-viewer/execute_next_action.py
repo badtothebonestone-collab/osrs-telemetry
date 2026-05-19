@@ -27,6 +27,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-runtime-seconds", type=float, default=30.0)
     parser.add_argument("--cooldown-ms", type=int, default=1200)
     parser.add_argument("--action-timeout-ms", type=int, default=5000)
+    parser.add_argument("--result-timeout-ms", type=int, default=15000)
+    parser.add_argument("--poll-interval-ms", type=int, default=250)
     parser.add_argument("--stop-on-warn", action="store_true")
     parser.add_argument("--stop-on-fail", action="store_true")
     return parser.parse_args(argv)
@@ -56,6 +58,7 @@ def format_human(payload: dict[str, Any]) -> str:
                         f"     command: {commands[0] if commands else 'none'}",
                         f"     expected: {(action_result.get('expectedResult') or {}).get('resultType') if isinstance(action_result.get('expectedResult'), dict) else 'unknown'}",
                         f"     observed: {observed.get('observedResult') or 'unknown'}",
+                        f"     outcome: {observed.get('resultOutcome') or lifecycle.get('resultOutcome') or 'unknown'} complete={observed.get('resultComplete') if observed.get('resultComplete') is not None else lifecycle.get('resultComplete')}",
                         f"     lifecycle: {lifecycle.get('currentState') or 'unknown'} reason={lifecycle.get('reason') or 'unknown'}",
                     ]
                 )
@@ -96,6 +99,9 @@ def format_human(payload: dict[str, Any]) -> str:
         f"  State: {lifecycle.get('currentState') or 'unknown'}",
         f"  Expected: {(payload.get('expectedResult') or {}).get('resultType') if isinstance(payload.get('expectedResult'), dict) else 'unknown'}",
         f"  Observed: {observed.get('observedResult') or 'unknown'}",
+        f"  Signals: {', '.join(str(item) for item in (observed.get('observedSignals') or lifecycle.get('observedSignals') or [])) or 'none'}",
+        f"  Outcome: {observed.get('resultOutcome') or lifecycle.get('resultOutcome') or 'unknown'} | complete={observed.get('resultComplete') if observed.get('resultComplete') is not None else lifecycle.get('resultComplete')}",
+        f"  Next action allowed: {observed.get('nextActionAllowed') if observed.get('nextActionAllowed') is not None else lifecycle.get('nextActionAllowed')}",
         f"  Verification: {payload.get('verificationStatus') or 'unknown'}",
         f"  Next allowed: {payload.get('nextAllowedAt') or 'unknown'}",
         "",

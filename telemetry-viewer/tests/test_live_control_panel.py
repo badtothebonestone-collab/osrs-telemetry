@@ -305,7 +305,12 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                         "phase": "wait_for_result",
                         "activeIntent": "wait_for_result",
                     },
-                    "inventoryContext": {"inventoryFull": False, "freeSlots": 12},
+                    "inventoryContext": {
+                        "inventoryFull": False,
+                        "freeSlots": 12,
+                        "progress": {"currentHeldCount": 0, "displayedGoalProgress": 0},
+                    },
+                    "activityContext": {"currentActivity": "animating", "recentTaskSignals": []},
                     "bankUiContext": {"bankOpen": False},
                 },
             },
@@ -315,8 +320,11 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
 
         self.assertEqual(mission["lifecycleState"], "waiting_for_result")
         self.assertEqual(mission["lifecycleReason"], "client_processing_previous_action")
+        self.assertEqual(mission["lifecycleResultOutcome"], "progress")
+        self.assertIn("activity_animating", mission["lifecycleObservedSignals"])
         self.assertIn("Action Lifecycle:", text)
         self.assertIn("State: waiting_for_result", text)
+        self.assertIn("Outcome: progress", text)
 
     def test_mission_control_cycle_summary_writes_no_files(self):
         with tempfile.TemporaryDirectory() as temp:

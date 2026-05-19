@@ -132,7 +132,14 @@ def _cooldown_ms(options: Any) -> int:
 
 
 def _action_timeout_seconds(options: Any) -> float:
-    return max(0.001, float(getattr(options, "action_timeout_ms", 3000) or 3000) / 1000.0)
+    timeout_ms = getattr(options, "result_timeout_ms", None)
+    if timeout_ms is None:
+        timeout_ms = getattr(options, "action_timeout_ms", 3000)
+    return max(0.001, float(timeout_ms or 3000) / 1000.0)
+
+
+def _poll_interval_seconds(options: Any) -> float:
+    return max(0.01, float(getattr(options, "poll_interval_ms", 250) or 250) / 1000.0)
 
 
 def _status_from_lifecycle(lifecycle: ActionLifecycleState) -> str:
@@ -159,6 +166,18 @@ def _apply_lifecycle(
     )
     result.next_allowed_at = lifecycle.cooldown_until_utc
     result.cooldown_remaining_ms = max(0, int(cooldown_remaining_ms))
+
+
+def _sync_lifecycle_observation(lifecycle: ActionLifecycleState, observed: dict[str, Any]) -> None:
+    lifecycle.observed_result = observed
+    lifecycle.observed_signals = [str(signal) for signal in observed.get("observedSignals") or []]
+    lifecycle.result_complete = bool(observed.get("resultComplete"))
+    lifecycle.result_outcome = str(observed.get("resultOutcome") or "unknown")
+    lifecycle.elapsed_ticks = observed.get("elapsedTicks") if isinstance(observed.get("elapsedTicks"), int) else None
+    lifecycle.elapsed_millis = observed.get("elapsedMillis") if isinstance(observed.get("elapsedMillis"), int) else None
+    lifecycle.timeout_ticks = observed.get("timeoutTicks") if isinstance(observed.get("timeoutTicks"), int) else None
+    lifecycle.timeout_millis = observed.get("timeoutMillis") if isinstance(observed.get("timeoutMillis"), int) else None
+    lifecycle.next_action_allowed = bool(observed.get("nextActionAllowed"))
 
 
 def _backend_position(backend: Any) -> tuple[int, int]:
@@ -374,7 +393,13 @@ def execute_next_action(
             time.sleep(wait_ms / 1000.0)
         try:
             result.verification = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
-            observed = verify_expected_result(result.proposed_action, status, result.verification)
+            observed = verify_expected_result(
+                result.proposed_action,
+                status,
+                result.verification,
+                elapsed_ms=wait_ms,
+                timeout_ms=int(_action_timeout_seconds(options) * 1000),
+            )
             result.observed_result = observed
             result.verification_status = str(observed.get("verificationStatus") or "UNKNOWN")
             if result.executed:
@@ -385,6 +410,8 @@ def execute_next_action(
                     before_status=status,
                     after_status=result.verification,
                     cooldown_ms=_cooldown_ms(options),
+                    elapsed_ms=wait_ms,
+                    timeout_ms=int(_action_timeout_seconds(options) * 1000),
                 )
                 _apply_lifecycle(result, lifecycle, cooldown_remaining_ms=_cooldown_ms(options))
         except Exception as error:  # noqa: BLE001
@@ -443,30 +470,53 @@ def execute_action_loop(
                 status_value = "WARN"
                 reason = "daemon_unavailable"
                 break
-            observed = verify_expected_result(lifecycle.last_action or "none", wait_before_status, latest_status)
-            lifecycle.observed_result = observed
-            if lifecycle.last_action == "select_resource_target" and is_waiting_for_result(latest_status):
-                elapsed = now - (wait_started if wait_started is not None else started)
-                if elapsed >= _action_timeout_seconds(options):
-                    lifecycle.current_state = "timed_out"
-                    lifecycle.reason = "action_timeout"
-                    status_value = "FAIL"
-                    reason = "action_timeout"
-                    break
-                sleep_func(max(0.0, min(0.25, _cooldown_ms(options) / 1000.0 if _cooldown_ms(options) else 0.05)))
-                continue
-            if observed.get("verificationStatus") == "PASS":
+            if not lifecycle.last_action:
+                if is_waiting_for_result(latest_status):
+                    sleep_func(_poll_interval_seconds(options))
+                    continue
                 lifecycle.current_state = "verified"
-                lifecycle.reason = str(observed.get("observedResult") or "expected_result_verified")
+                lifecycle.reason = "external_wait_cleared"
+                lifecycle.next_action_allowed = True
+                continue
+            elapsed = now - (wait_started if wait_started is not None else started)
+            timeout_seconds = _action_timeout_seconds(options)
+            observed = verify_expected_result(
+                lifecycle.last_action or "none",
+                wait_before_status,
+                latest_status,
+                elapsed_ms=int(max(0.0, elapsed) * 1000),
+                timeout_ms=int(timeout_seconds * 1000),
+                wait_started_tick=lifecycle.wait_started_tick,
+            )
+            _sync_lifecycle_observation(lifecycle, observed)
+            if results:
+                latest_result = results[-1]
+                latest_result.observed_result = observed
+                latest_result.verification_status = str(observed.get("verificationStatus") or "UNKNOWN")
+                _apply_lifecycle(latest_result, lifecycle, cooldown_remaining_ms=_cooldown_ms(options))
+            if observed.get("resultComplete") and observed.get("resultOutcome") in {"success", "progress", "depleted"}:
+                lifecycle.current_state = "verified"
+                lifecycle.reason = str(observed.get("resultOutcome") or observed.get("observedResult") or "expected_result_verified")
+                if results:
+                    _apply_lifecycle(results[-1], lifecycle, cooldown_remaining_ms=0)
+            elif observed.get("resultOutcome") == "no_change_timeout":
+                lifecycle.current_state = "timed_out"
+                lifecycle.reason = "action_timeout"
+                if results:
+                    _apply_lifecycle(results[-1], lifecycle, cooldown_remaining_ms=0)
+                status_value = "FAIL"
+                reason = "action_timeout"
+                break
+            elif observed.get("resultOutcome") == "interrupted":
+                lifecycle.current_state = "blocked"
+                lifecycle.reason = "interrupted"
+                if results:
+                    _apply_lifecycle(results[-1], lifecycle, cooldown_remaining_ms=0)
+                status_value = "FAIL"
+                reason = "action_interrupted"
+                break
             else:
-                elapsed = now - (wait_started if wait_started is not None else started)
-                if elapsed >= _action_timeout_seconds(options):
-                    lifecycle.current_state = "timed_out"
-                    lifecycle.reason = "action_timeout"
-                    status_value = "FAIL"
-                    reason = "action_timeout"
-                    break
-                sleep_func(max(0.0, min(0.25, _cooldown_ms(options) / 1000.0 if _cooldown_ms(options) else 0.05)))
+                sleep_func(_poll_interval_seconds(options))
                 continue
 
         try:
@@ -476,12 +526,13 @@ def execute_action_loop(
             status_value = "FAIL"
             reason = "daemon_unavailable"
             break
-        if is_waiting_for_result(before_status):
+        if is_waiting_for_result(before_status) and not lifecycle.next_action_allowed:
             lifecycle = ActionLifecycleState(
                 current_state="waiting_for_result",
                 last_action=None,
                 last_action_tick=before_status.get("latestTick") if isinstance(before_status.get("latestTick"), int) else None,
                 expected_result=expected_result_for_action("select_resource_target"),
+                expected_signal=expected_result_for_action("select_resource_target").get("expectedSignal"),
                 attempts=len(results),
                 max_attempts=max_actions,
                 reason="client_processing_previous_action",
@@ -489,14 +540,14 @@ def execute_action_loop(
             )
             status_value = "WARN" if status_value == "PASS" else status_value
             reason = "already_waiting_for_result"
-            sleep_func(max(0.0, min(0.25, _cooldown_ms(options) / 1000.0 if _cooldown_ms(options) else 0.05)))
+            sleep_func(_poll_interval_seconds(options))
             continue
         proposal = build_action_proposal(before_status)
         if proposal.proposed_action in {"none", "wait_for_context"} or not proposal.executable:
             lifecycle = lifecycle_state_for_proposal(proposal, max_attempts=max_actions)
             status_value = "WARN" if status_value == "PASS" else status_value
             reason = proposal.reason
-            sleep_func(max(0.0, min(0.25, _cooldown_ms(options) / 1000.0 if _cooldown_ms(options) else 0.05)))
+            sleep_func(_poll_interval_seconds(options))
             continue
         action_result = execute_action(
             proposal,
@@ -541,6 +592,8 @@ def execute_action_loop(
                     before_status=before_status,
                     after_status=after_status,
                     cooldown_ms=_cooldown_ms(options),
+                    elapsed_ms=wait_ms,
+                    timeout_ms=int(_action_timeout_seconds(options) * 1000),
                     attempts=len(results),
                     max_attempts=max_actions,
                 )
@@ -548,11 +601,16 @@ def execute_action_loop(
                 wait_before_status = before_status
                 wait_started = now
         else:
+            expected = expected_result_for_action(proposal.proposed_action)
             lifecycle = ActionLifecycleState(
                 current_state="waiting_for_result" if action_result.executed else "proposed",
                 last_action=proposal.proposed_action,
                 last_action_tick=proposal.source_tick,
-                expected_result=expected_result_for_action(proposal.proposed_action),
+                wait_started_tick=proposal.source_tick if action_result.executed else None,
+                wait_started_utc=None,
+                wait_reason="awaiting_expected_result" if action_result.executed else None,
+                expected_result=expected,
+                expected_signal=expected.get("expectedSignal"),
                 attempts=len(results),
                 max_attempts=max_actions,
                 reason="awaiting_expected_result" if action_result.executed else "dry_run",

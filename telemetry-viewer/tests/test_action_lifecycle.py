@@ -17,13 +17,25 @@ from input_control.action_lifecycle import (
     verify_expected_result,
 )
 from input_control.executor import execute_action_loop, execute_next_action
+from diagnose_action_lifecycle import format_human as format_lifecycle_human
 
 
 def aim(x=100, y=120):
     return {"canvasX": x, "canvasY": y}
 
 
-def resource_status(*, phase="target_selected", active_intent="select_target", tick=1):
+def resource_status(
+    *,
+    phase="target_selected",
+    active_intent="select_target",
+    tick=1,
+    free_slots=12,
+    held_count=0,
+    progress_count=0,
+    current_activity="idle",
+    recent_task_signals=None,
+    blocking_conditions=None,
+):
     return {
         "latestTick": tick,
         "currentCycleStage": "collecting_resources",
@@ -31,14 +43,34 @@ def resource_status(*, phase="target_selected", active_intent="select_target", t
             "genericTaskState": {
                 "phase": phase,
                 "activeIntent": active_intent,
+                "blockingConditions": list(blocking_conditions or []),
                 "activeIntentTarget": {
                     "targetName": "Oak tree",
                     "classId": "tree",
                     "aimPoint": aim(110, 130),
                 },
             },
-            "inventoryContext": {"inventoryFull": False, "freeSlots": 12},
+            "inventoryContext": {
+                "inventoryFull": False,
+                "freeSlots": free_slots,
+                "progress": {
+                    "currentHeldCount": held_count,
+                    "displayedGoalProgress": progress_count,
+                    "currentInventorySignature": f"slots={free_slots};held={held_count}",
+                },
+            },
+            "activityContext": {
+                "currentActivity": current_activity,
+                "recentTaskSignals": list(recent_task_signals or []),
+            },
             "bankUiContext": {"bankOpen": False},
+        },
+        "inventoryFreeSlots": free_slots,
+        "brainCurrentHeldCount": held_count,
+        "brainProgress": {
+            "currentHeldCount": held_count,
+            "displayedGoalProgress": progress_count,
+            "currentInventorySignature": f"slots={free_slots};held={held_count}",
         },
     }
 
@@ -139,7 +171,7 @@ class ActionLifecycleTest(unittest.TestCase):
             cooldown_ms=1000,
             action_timeout_ms=5000,
             max_actions=2,
-            max_runtime_seconds=0.2,
+            max_runtime_seconds=0.5,
             stop_on_warn=False,
             stop_on_fail=True,
             seed=None,
@@ -187,7 +219,7 @@ class ActionLifecycleTest(unittest.TestCase):
             fetch_json_func=lambda *_args, **_kwargs: resource_status(phase="wait_for_result", active_intent="wait_for_result"),
             backend=backend,
             sleep_func=lambda _seconds: None,
-            monotonic_func=iter([0.0, 0.01, 0.21]).__next__,
+            monotonic_func=iter([0.0, 0.01, 0.02, 0.03, 0.51]).__next__,
         )
 
         payload = result.to_dict()
@@ -214,6 +246,90 @@ class ActionLifecycleTest(unittest.TestCase):
 
         self.assertEqual(observed["verificationStatus"], "PASS")
         self.assertEqual(observed["observedResult"], "banking_complete")
+
+    def test_inventory_change_completes_select_resource_target_wait(self):
+        observed = verify_expected_result(
+            "select_resource_target",
+            resource_status(free_slots=12, held_count=0, progress_count=0),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result", free_slots=11, held_count=1, progress_count=1),
+        )
+
+        self.assertTrue(observed["resultComplete"])
+        self.assertEqual(observed["resultOutcome"], "success")
+        self.assertTrue(observed["nextActionAllowed"])
+        self.assertIn("inventory_changed", observed["observedSignals"])
+        self.assertIn("held_resource_count_increased", observed["observedSignals"])
+
+    def test_progress_increase_completes_select_resource_target_wait(self):
+        observed = verify_expected_result(
+            "select_resource_target",
+            resource_status(progress_count=1),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result", progress_count=2),
+        )
+
+        self.assertTrue(observed["resultComplete"])
+        self.assertEqual(observed["resultOutcome"], "progress")
+        self.assertIn("resource_progress_increased", observed["observedSignals"])
+
+    def test_chopping_activity_signal_marks_progress(self):
+        observed = verify_expected_result(
+            "select_resource_target",
+            resource_status(current_activity="idle"),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result", current_activity="animating"),
+        )
+
+        self.assertTrue(observed["resultComplete"])
+        self.assertEqual(observed["resultOutcome"], "progress")
+        self.assertIn("activity_animating", observed["observedSignals"])
+
+    def test_depletion_signal_completes_with_depleted_outcome(self):
+        observed = verify_expected_result(
+            "select_resource_target",
+            resource_status(),
+            resource_status(recent_task_signals=["target depleted recently"]),
+        )
+
+        self.assertTrue(observed["resultComplete"])
+        self.assertEqual(observed["resultOutcome"], "depleted")
+        self.assertIn("target_depleted_recently", observed["observedSignals"])
+
+    def test_no_change_before_timeout_remains_still_waiting(self):
+        observed = verify_expected_result(
+            "select_resource_target",
+            resource_status(),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result"),
+            elapsed_ms=250,
+            timeout_ms=1000,
+        )
+
+        self.assertFalse(observed["resultComplete"])
+        self.assertEqual(observed["resultOutcome"], "still_waiting")
+        self.assertFalse(observed["nextActionAllowed"])
+
+    def test_no_change_after_timeout_becomes_timed_out(self):
+        observed = verify_expected_result(
+            "select_resource_target",
+            resource_status(),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result"),
+            elapsed_ms=1250,
+            timeout_ms=1000,
+        )
+
+        self.assertTrue(observed["resultComplete"])
+        self.assertEqual(observed["resultOutcome"], "no_change_timeout")
+        self.assertFalse(observed["nextActionAllowed"])
+
+    def test_blocked_phase_interrupts_select_resource_target_wait(self):
+        observed = verify_expected_result(
+            "select_resource_target",
+            resource_status(),
+            resource_status(phase="blocked", active_intent="needs_user_resolution", blocking_conditions=["bank_pin_required"]),
+        )
+
+        self.assertTrue(observed["resultComplete"])
+        self.assertEqual(observed["resultOutcome"], "interrupted")
+        self.assertFalse(observed["nextActionAllowed"])
+        self.assertIn("blocked_phase", observed["observedSignals"])
 
     def test_timeout_transitions_to_timed_out(self):
         backend = FakeBackend()
@@ -247,6 +363,45 @@ class ActionLifecycleTest(unittest.TestCase):
         )
 
         self.assertEqual(result.to_dict()["lifecycleState"]["currentState"], "timed_out")
+
+    def test_loop_continues_after_select_resource_result_completes(self):
+        backend = FakeBackend()
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            execute=True,
+            verify_after_action=True,
+            after_action_wait_ms=0,
+            cooldown_ms=0,
+            action_timeout_ms=5000,
+            max_actions=2,
+            max_runtime_seconds=5.0,
+            stop_on_warn=False,
+            stop_on_fail=True,
+            seed=None,
+        )
+        statuses = [
+            resource_status(tick=1, held_count=0, progress_count=0),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result", tick=2, held_count=0, progress_count=0),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result", tick=3, held_count=1, progress_count=1),
+            resource_status(phase="target_selected", active_intent="select_target", tick=4, held_count=1, progress_count=1),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result", tick=5, held_count=1, progress_count=1),
+        ]
+
+        result = execute_action_loop(
+            "http://daemon",
+            options,
+            fetch_json_func=lambda *_args, **_kwargs: statuses.pop(0),
+            backend=backend,
+            sleep_func=lambda _seconds: None,
+            monotonic_func=iter([0.0, 0.01, 0.02, 0.03, 0.04, 0.05]).__next__,
+        )
+
+        payload = result.to_dict()
+        self.assertEqual(payload["executedActionCount"], 2)
+        self.assertEqual(len(backend.calls), 2)
+        self.assertEqual(payload["actionResults"][0]["observedResult"]["resultOutcome"], "success")
 
     def test_loop_stops_at_max_actions(self):
         backend = FakeBackend()
@@ -364,6 +519,27 @@ class ActionLifecycleTest(unittest.TestCase):
 
         self.assertEqual(payload["schema"], "action_lifecycle_diagnostic.v1")
         self.assertEqual(payload["lifecycleState"]["currentState"], "waiting_for_result")
+        self.assertIn("observedSignals", payload)
+        self.assertEqual(payload["resultOutcome"], "still_waiting")
+
+    def test_lifecycle_diagnostic_prints_observed_signals(self):
+        observed = verify_expected_result(
+            "select_resource_target",
+            resource_status(),
+            resource_status(free_slots=11, held_count=1, progress_count=1),
+        )
+        payload = build_lifecycle_diagnostic(resource_status(phase="wait_for_result", active_intent="wait_for_result"))
+        payload["observedResult"] = observed
+        payload["observedSignals"] = observed["observedSignals"]
+        payload["resultComplete"] = observed["resultComplete"]
+        payload["resultOutcome"] = observed["resultOutcome"]
+        payload["nextActionAllowed"] = observed["nextActionAllowed"]
+
+        text = format_lifecycle_human(payload)
+
+        self.assertIn("observed signals:", text)
+        self.assertIn("held_resource_count_increased", text)
+        self.assertIn("result outcome: success", text)
 
     def test_diagnostic_cli_writes_no_files(self):
         with tempfile.TemporaryDirectory() as temp:
