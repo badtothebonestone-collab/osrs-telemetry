@@ -1388,6 +1388,8 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
         tick["frameCaptureStatus"] = baseline.get("frameCaptureStatus")
     if isinstance(baseline.get("source"), dict):
         tick["_sourceCompleteness"] = baseline.get("source")
+    if isinstance(baseline.get("inputGeometry"), dict):
+        tick["inputGeometry"] = baseline.get("inputGeometry")
 
     scene_capture = scene_delta.get("sceneCaptureSummary") if isinstance(scene_delta.get("sceneCaptureSummary"), dict) else None
     if not scene_capture:
@@ -4949,7 +4951,7 @@ def baseline_state_for(session: Path, args, latest_tick: dict | None, ticks: lis
     projection = latest_tick.get("sceneProjectionSummary") if isinstance(latest_tick.get("sceneProjectionSummary"), dict) else {}
     latest_frame, latest_frame_path, _frame_ticks = latest_frame_tick(session, ticks)
     counts = counts_for_candidates(candidates)
-    return {
+    payload = {
         "schema": LIVE_BASELINE_SCHEMA,
         "sessionPath": str(session),
         "generatedAtUtc": processed_at,
@@ -5010,6 +5012,9 @@ def baseline_state_for(session: Path, args, latest_tick: dict | None, ticks: lis
             "budgetExceeded": budget_exceeded,
         },
     }
+    if isinstance(latest_tick.get("inputGeometry"), dict):
+        payload["inputGeometry"] = latest_tick.get("inputGeometry")
+    return payload
 
 
 def navigation_summary_for(tick: dict | None, processed_at: str) -> dict:

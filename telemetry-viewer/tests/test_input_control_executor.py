@@ -32,6 +32,11 @@ class FakeBackend:
         self.calls.append(("press", key))
 
 
+class FailingCanvasBackend(FakeBackend):
+    def canvas_to_screen_point(self, point):
+        raise AssertionError("dynamic geometry should avoid backend fallback conversion")
+
+
 class InputControlExecutorTest(unittest.TestCase):
     def test_dry_run_never_calls_backend_execute(self):
         backend = FakeBackend()
@@ -77,6 +82,60 @@ class InputControlExecutorTest(unittest.TestCase):
         )
 
         self.assertEqual(point, {"x": 6443, "y": 293})
+
+    def test_dynamic_geometry_is_used_before_backend_fallback(self):
+        backend = FailingCanvasBackend()
+        proposal = ActionProposal(
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Oak tree",
+            suggested_click_point={"x": 200, "y": 150},
+            click_point_space="canvas",
+            input_geometry={
+                "inputGeometryAvailable": True,
+                "canvasScreenOrigin": {"x": 1000, "y": 2000},
+                "canvasSize": {"width": 800, "height": 600},
+                "displayScale": {"x": 2.0, "y": 2.0},
+            },
+            click_point_resolution={
+                "status": "PASS",
+                "method": "dynamic_input_geometry",
+                "screenClickPoint": {"x": 1400, "y": 2300},
+            },
+            resolved_screen_click_point={"x": 1400, "y": 2300},
+            confidence=0.9,
+        )
+
+        result = execute_action(proposal, backend=backend, movement_profile="instant_test", dry_run=True)
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.commands[0]["clickPoint"]["x"], 1400)
+        self.assertEqual(result.commands[0]["clickPoint"]["y"], 2300)
+        self.assertEqual(result.click_point_resolution["method"], "dynamic_input_geometry")
+
+    def test_offscreen_dynamic_geometry_blocks_execution(self):
+        backend = FailingCanvasBackend()
+        proposal = ActionProposal(
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Oak tree",
+            suggested_click_point={"x": 900, "y": 150},
+            click_point_space="canvas",
+            click_point_resolution={
+                "status": "FAIL",
+                "method": "dynamic_input_geometry",
+                "screenClickPoint": {"x": 1900, "y": 2150},
+                "warnings": ["resolved screen click point outside canvas bounds"],
+                "missingCapabilities": ["screen_click_point"],
+            },
+            confidence=0.9,
+        )
+
+        result = execute_action(proposal, backend=backend, movement_profile="instant_test", dry_run=False)
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.executed)
+        self.assertIn("screen_click_point", result.missing_capabilities)
 
     def test_no_click_point_prevents_execution(self):
         backend = FakeBackend()

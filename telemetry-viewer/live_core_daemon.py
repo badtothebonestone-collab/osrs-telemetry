@@ -37,6 +37,7 @@ from analyzers import return_to_resource_analyzer
 from analyzers import service_analyzer
 from analyzers import target_analyzer
 from analyzers.live_state import BankOperationContext, InventoryContext, LiveAnalysisResult, LiveInputSnapshot, LiveSourceStatus, PlayerContext
+from input_control.input_geometry import input_geometry_from_status
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
 
@@ -588,6 +589,8 @@ class LiveCoreState:
     def status(self) -> dict:
         context = self.context()
         payload = context_service.status_payload(context)
+        baseline = context.get("baseline") if isinstance(context.get("baseline"), dict) else {}
+        input_geometry = input_geometry_from_status({"baseline": baseline})
         brain = self.brain_decision if isinstance(self.brain_decision, dict) else {}
         progress = brain.get("goalProgress") if isinstance(brain.get("goalProgress"), dict) else {}
         target = brain_core.safe_get(brain, "currentContextSummary.bestTarget", {}) if brain else {}
@@ -856,6 +859,14 @@ class LiveCoreState:
             "brainGoalCount",
             "observeOnly",
             "brainEnabled",
+            "inputGeometry",
+            "inputGeometryAvailable",
+            "canvasScreenOrigin",
+            "canvasSize",
+            "sourceCanvasSize",
+            "clientWindowBounds",
+            "displayScale",
+            "inputGeometryReason",
         )
         for key in passthrough_status_keys:
             if key in self.source_status:
@@ -873,6 +884,14 @@ class LiveCoreState:
                 "brainProgress": progress or None,
                 "brainBestTree": target if isinstance(target, dict) and target else None,
                 "runtimeControl": self.source_status.get("runtimeControl"),
+                "inputGeometry": input_geometry,
+                "inputGeometryAvailable": input_geometry.get("inputGeometryAvailable"),
+                "canvasScreenOrigin": input_geometry.get("canvasScreenOrigin"),
+                "canvasSize": input_geometry.get("canvasSize"),
+                "sourceCanvasSize": input_geometry.get("sourceCanvasSize"),
+                "clientWindowBounds": input_geometry.get("clientWindowBounds"),
+                "displayScale": input_geometry.get("displayScale"),
+                "inputGeometryReason": input_geometry.get("reason"),
             }
         )
         cycle_summary = self.cycle_history.summary(tail=10)

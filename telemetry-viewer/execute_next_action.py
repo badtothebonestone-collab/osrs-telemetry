@@ -28,6 +28,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def format_human(payload: dict[str, Any]) -> str:
     proposal = payload.get("proposal") if isinstance(payload.get("proposal"), dict) else {}
     movement = payload.get("movementPlan") if isinstance(payload.get("movementPlan"), dict) else {}
+    resolution = payload.get("clickPointResolution") if isinstance(payload.get("clickPointResolution"), dict) else {}
     lines = [
         f"EXECUTE NEXT ACTION - {payload.get('status') or 'UNKNOWN'}",
         "",
@@ -39,7 +40,10 @@ def format_human(payload: dict[str, Any]) -> str:
         f"  Action: {proposal.get('proposedAction') or payload.get('proposedAction')}",
         f"  Target: {proposal.get('targetName') or 'none'}",
         f"  Reason: {proposal.get('reason') or 'unknown'}",
-        f"  Click point: {proposal.get('suggestedClickPoint') or 'none'}",
+        f"  Click point space: {proposal.get('clickPointSpace') or 'unknown'}",
+        f"  Canvas click point: {proposal.get('suggestedClickPoint') or 'none'}",
+        f"  Screen click point: {proposal.get('resolvedScreenClickPoint') or resolution.get('screenClickPoint') or 'none'}",
+        f"  Conversion: {resolution.get('method') or 'unknown'}",
         f"  Key action: {proposal.get('keyAction') or 'none'}",
         "",
         "Movement:",

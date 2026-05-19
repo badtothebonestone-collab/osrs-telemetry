@@ -27,12 +27,21 @@ class DiagnoseActionProposalTest(unittest.TestCase):
                     "inventoryContext": {"inventoryFull": False, "freeSlots": 15},
                     "bankUiContext": {"bankOpen": False},
                 }
+                ,
+                "inputGeometry": {
+                    "inputGeometryAvailable": True,
+                    "canvasScreenOrigin": {"x": 1000, "y": 2000},
+                    "canvasSize": {"width": 800, "height": 600},
+                    "displayScale": {"x": 2.0, "y": 2.0},
+                },
             }
         )
 
         self.assertEqual(payload["schema"], "action_proposal_diagnostic.v1")
         self.assertEqual(payload["proposedAction"], "select_resource_target")
         self.assertEqual(payload["suggestedClickPoint"], {"x": 100, "y": 120})
+        self.assertEqual(payload["clickPointSpace"], "canvas")
+        self.assertEqual(payload["resolvedScreenClickPoint"], {"x": 1200, "y": 2240})
 
     def test_human_output_prints_expected_fields(self):
         text = diagnostic.format_human(
@@ -43,6 +52,14 @@ class DiagnoseActionProposalTest(unittest.TestCase):
                 "targetName": "Oak tree",
                 "confidence": 0.9,
                 "suggestedClickPoint": {"x": 100, "y": 120},
+                "clickPointSpace": "canvas",
+                "resolvedScreenClickPoint": {"x": 1200, "y": 2240},
+                "clickPointResolution": {"method": "dynamic_input_geometry"},
+                "inputGeometry": {
+                    "inputGeometryAvailable": True,
+                    "canvasScreenOrigin": {"x": 1000, "y": 2000},
+                    "canvasSize": {"width": 800, "height": 600},
+                },
                 "reason": "resource_target_visible",
                 "warnings": [],
                 "missingCapabilities": [],
@@ -51,7 +68,9 @@ class DiagnoseActionProposalTest(unittest.TestCase):
 
         self.assertIn("ACTION PROPOSAL - PASS", text)
         self.assertIn("Proposed action: select_resource_target", text)
-        self.assertIn("Click point: 100,120", text)
+        self.assertIn("Canvas click point: 100,120", text)
+        self.assertIn("Resolved screen click point: 1200,2240", text)
+        self.assertIn("Input geometry available: yes", text)
 
     def test_json_cli_stdout_only_when_daemon_not_reachable(self):
         with tempfile.TemporaryDirectory() as temp:

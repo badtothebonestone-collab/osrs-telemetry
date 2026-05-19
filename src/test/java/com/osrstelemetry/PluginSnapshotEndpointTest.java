@@ -181,6 +181,40 @@ public class PluginSnapshotEndpointTest
 	}
 
 	@Test
+	public void snapshotReturnsInputGeometryInsideBaselineWhenCached()
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		cache.update("live_baseline_packet.v1", 10L, "2026-05-11T00:00:00Z", Map.of(
+				"gameState", "LOGGED_IN",
+				"inputGeometry", Map.of(
+						"schema", "input_geometry.v1",
+						"geometryAvailable", true,
+						"canvasWidth", 800,
+						"canvasHeight", 600,
+						"sourceCanvasWidth", 400,
+						"sourceCanvasHeight", 300,
+						"canvasScreenX", 1000,
+						"canvasScreenY", 2000,
+						"displayScaleX", 2.0,
+						"displayScaleY", 2.0)));
+		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
+		JsonObject request = new JsonObject();
+		JsonArray needs = new JsonArray();
+		needs.add("baseline");
+		request.add("needs", needs);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		JsonObject baseline = payloads(response).get("baseline").getAsJsonObject();
+		JsonObject inputGeometry = baseline.getAsJsonObject("inputGeometry");
+
+		assertEquals("PASS", response.get("status"));
+		assertTrue(inputGeometry.get("geometryAvailable").getAsBoolean());
+		assertEquals(800, inputGeometry.get("canvasWidth").getAsInt());
+		assertEquals(400, inputGeometry.get("sourceCanvasWidth").getAsInt());
+		assertEquals(1000, inputGeometry.get("canvasScreenX").getAsInt());
+	}
+
+	@Test
 	public void missingPayloadReturnsMissingCapabilities()
 	{
 		PluginSnapshotEndpoint endpoint = endpoint(new PluginLiveCache(gson), 50, 1024 * 1024);

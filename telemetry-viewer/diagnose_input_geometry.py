@@ -6,11 +6,10 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from input_control.action_proposal import build_action_proposal
-from input_control.diagnostics import point_label, tile_label
+from input_control.input_geometry import input_geometry_from_status
 
 
-SCHEMA = "action_proposal_diagnostic.v1"
+SCHEMA = "input_geometry_diagnostic.v1"
 
 
 def fetch_json(url: str, timeout: float = 3.0) -> dict[str, Any]:
@@ -25,63 +24,46 @@ def daemon_status_url(daemon_url: str) -> str:
 
 
 def build_from_status(status: dict[str, Any]) -> dict[str, Any]:
-    proposal = build_action_proposal(status).to_dict()
-    proposal["schema"] = SCHEMA
-    return proposal
+    geometry = input_geometry_from_status(status)
+    payload = dict(geometry)
+    payload["schema"] = SCHEMA
+    return payload
 
 
 def unavailable_payload(error: Exception | str) -> dict[str, Any]:
     return {
         "schema": SCHEMA,
         "status": "FAIL",
-        "proposedAction": "none",
-        "targetKind": "none",
-        "targetName": None,
+        "inputGeometryAvailable": False,
         "reason": "daemon_unavailable",
-        "confidence": 0.0,
         "warnings": [str(error)],
         "missingCapabilities": ["daemon.status"],
     }
 
 
 def format_human(payload: dict[str, Any]) -> str:
-    input_geometry = payload.get("inputGeometry") if isinstance(payload.get("inputGeometry"), dict) else {}
-    resolution = payload.get("clickPointResolution") if isinstance(payload.get("clickPointResolution"), dict) else {}
-    geometry_available = input_geometry.get("inputGeometryAvailable")
     lines = [
-        f"ACTION PROPOSAL - {payload.get('status') or 'UNKNOWN'}",
-        "",
-        f"Proposed action: {payload.get('proposedAction') or 'none'}",
-        f"Target kind: {payload.get('targetKind') or 'none'}",
-        f"Target: {payload.get('targetName') or 'none'}",
-        f"Confidence: {payload.get('confidence') if payload.get('confidence') is not None else 'unknown'}",
-        f"Reason: {payload.get('reason') or 'unknown'}",
-        f"Click point space: {payload.get('clickPointSpace') or 'unknown'}",
-        f"Canvas click point: {point_label(payload.get('suggestedClickPoint'))}",
-        f"Resolved screen click point: {point_label(payload.get('resolvedScreenClickPoint'))}",
-        f"Input geometry available: {'yes' if geometry_available else 'no'}",
-        f"Canvas origin: {point_label(input_geometry.get('canvasScreenOrigin'))}",
-        f"Canvas size: {input_geometry.get('canvasSize') or 'unknown'}",
-        f"Source canvas size: {input_geometry.get('sourceCanvasSize') or 'unknown'}",
-        f"Geometry source/fallback: {resolution.get('method') or 'unknown'}",
-        f"World tile: {tile_label(payload.get('suggestedWorldTile') or payload.get('targetTile'))}",
-        f"Key action: {payload.get('keyAction') or 'none'}",
-        f"Executable: {payload.get('executable')}",
-        "",
-        "Warnings:",
+        f"INPUT GEOMETRY - {payload.get('status') or 'UNKNOWN'}",
+        f"  available: {'yes' if payload.get('inputGeometryAvailable') else 'no'}",
+        f"  canvas origin: {payload.get('canvasScreenOrigin') or 'unknown'}",
+        f"  canvas size: {payload.get('canvasSize') or 'unknown'}",
+        f"  source canvas size: {payload.get('sourceCanvasSize') or 'unknown'}",
+        f"  client window: {payload.get('clientWindowBounds') or 'unknown'}",
+        f"  display scale: {payload.get('displayScale') or 'unknown'}",
+        f"  reason: {payload.get('reason') or 'unknown'}",
     ]
     warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
     if warnings:
-        lines.extend(f"  WARN: {warning}" for warning in warnings)
-    else:
-        lines.append("  none")
+        lines.append("  warnings:")
+        lines.extend(f"    WARN: {warning}" for warning in warnings)
     missing = payload.get("missingCapabilities") if isinstance(payload.get("missingCapabilities"), list) else []
-    lines.extend(["", f"Missing capabilities: {', '.join(str(item) for item in missing) if missing else 'none'}"])
+    if missing:
+        lines.append(f"  missing capabilities: {', '.join(str(item) for item in missing)}")
     return "\n".join(lines).rstrip() + "\n"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Read-only action proposal diagnostic. Prints to stdout only.")
+    parser = argparse.ArgumentParser(description="Read-only input geometry diagnostic. Prints to stdout only.")
     parser.add_argument("--from-daemon", action="store_true")
     parser.add_argument("--daemon-url", default="http://127.0.0.1:8890")
     parser.add_argument("--timeout", type=float, default=3.0)
@@ -95,8 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = {
             "schema": SCHEMA,
             "status": "FAIL",
-            "proposedAction": "none",
-            "targetKind": "none",
+            "inputGeometryAvailable": False,
             "reason": "from_daemon_required",
             "warnings": ["pass --from-daemon to read live daemon status"],
             "missingCapabilities": ["daemon.status"],

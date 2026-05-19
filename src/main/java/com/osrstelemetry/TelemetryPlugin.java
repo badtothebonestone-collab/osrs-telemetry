@@ -4,12 +4,16 @@ import com.google.gson.Gson;
 import com.google.inject.Provides;
 import java.awt.Canvas;
 import java.awt.Dimension;
+import java.awt.GraphicsConfiguration;
 import java.awt.Image;
+import java.awt.IllegalComponentStateException;
 import java.awt.Polygon;
 import java.awt.Rectangle;
 import java.awt.Robot;
 import java.awt.Shape;
+import java.awt.Window;
 import java.awt.geom.PathIterator;
+import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -25,6 +29,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import javax.inject.Inject;
+import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
 import net.runelite.api.Client;
@@ -1118,6 +1123,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("gameState", snapshot.gameState);
 		payload.put("player", playerPayload(snapshot));
 		payload.put("cameraViewport", cameraViewportPayload(snapshot));
+		payload.put("inputGeometry", inputGeometryPayload(snapshot));
 		payload.put("latestFramePath", snapshot.framePath);
 		payload.put("frameCaptureStatus", snapshot.frameCaptureStatus);
 		payload.put("sceneCaptureMode", snapshot.sceneCaptureSummary == null ? null : snapshot.sceneCaptureSummary.sceneCaptureMode);
@@ -1187,6 +1193,31 @@ public class TelemetryPlugin extends Plugin
 		camera.put("canvasHeight", snapshot.canvasHeight);
 		camera.put("projectionStateHash", snapshot.sceneProjectionSummary == null ? null : snapshot.sceneProjectionSummary.projectionStateHash);
 		return camera;
+	}
+
+	private Map<String, Object> inputGeometryPayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		TickSnapshot.InputGeometrySnapshot geometry = snapshot == null ? null : snapshot.inputGeometry;
+		payload.put("schema", "input_geometry.v1");
+		payload.put("sourceTick", geometry == null ? (snapshot == null ? null : snapshot.tickId) : geometry.sourceTick);
+		payload.put("geometryAvailable", geometry == null ? false : geometry.geometryAvailable);
+		payload.put("reason", geometry == null ? "geometry_unavailable" : geometry.reason);
+		payload.put("canvasWidth", geometry == null ? null : geometry.canvasWidth);
+		payload.put("canvasHeight", geometry == null ? null : geometry.canvasHeight);
+		payload.put("sourceCanvasWidth", geometry == null ? null : geometry.sourceCanvasWidth);
+		payload.put("sourceCanvasHeight", geometry == null ? null : geometry.sourceCanvasHeight);
+		payload.put("canvasScreenX", geometry == null ? null : geometry.canvasScreenX);
+		payload.put("canvasScreenY", geometry == null ? null : geometry.canvasScreenY);
+		payload.put("clientWindowX", geometry == null ? null : geometry.clientWindowX);
+		payload.put("clientWindowY", geometry == null ? null : geometry.clientWindowY);
+		payload.put("clientWindowWidth", geometry == null ? null : geometry.clientWindowWidth);
+		payload.put("clientWindowHeight", geometry == null ? null : geometry.clientWindowHeight);
+		payload.put("displayScaleX", geometry == null ? null : geometry.displayScaleX);
+		payload.put("displayScaleY", geometry == null ? null : geometry.displayScaleY);
+		payload.put("isCanvasShowing", geometry == null ? null : geometry.isCanvasShowing);
+		payload.put("isClientFocused", geometry == null ? null : geometry.isClientFocused);
+		return payload;
 	}
 
 	private Map<String, Object> sourceCompletenessPayload(TickSnapshot snapshot)
@@ -3087,6 +3118,84 @@ public class TelemetryPlugin extends Plugin
 				snapshot.canvasHeight = size.height;
 			}
 		}
+
+		snapshot.inputGeometry = captureInputGeometry(snapshot, canvas);
+	}
+
+	private TickSnapshot.InputGeometrySnapshot captureInputGeometry(TickSnapshot snapshot, Canvas canvas)
+	{
+		TickSnapshot.InputGeometrySnapshot geometry = new TickSnapshot.InputGeometrySnapshot();
+		geometry.sourceTick = snapshot == null ? null : snapshot.tickId;
+		geometry.geometryAvailable = false;
+		geometry.reason = "canvas_unavailable";
+		geometry.canvasWidth = snapshot == null ? null : snapshot.canvasWidth;
+		geometry.canvasHeight = snapshot == null ? null : snapshot.canvasHeight;
+		geometry.sourceCanvasWidth = snapshot == null ? null : snapshot.canvasWidth;
+		geometry.sourceCanvasHeight = snapshot == null ? null : snapshot.canvasHeight;
+
+		if (canvas == null)
+		{
+			return geometry;
+		}
+
+		Dimension size = canvas.getSize();
+		if (size != null)
+		{
+			geometry.canvasWidth = size.width;
+			geometry.canvasHeight = size.height;
+		}
+		geometry.isCanvasShowing = canvas.isShowing();
+		geometry.isClientFocused = canvas.isFocusOwner();
+
+		GraphicsConfiguration graphicsConfiguration = canvas.getGraphicsConfiguration();
+		if (graphicsConfiguration != null)
+		{
+			AffineTransform transform = graphicsConfiguration.getDefaultTransform();
+			if (transform != null)
+			{
+				geometry.displayScaleX = transform.getScaleX();
+				geometry.displayScaleY = transform.getScaleY();
+			}
+		}
+
+		Window window = SwingUtilities.getWindowAncestor(canvas);
+		if (window != null)
+		{
+			Rectangle bounds = window.getBounds();
+			if (bounds != null)
+			{
+				geometry.clientWindowX = bounds.x;
+				geometry.clientWindowY = bounds.y;
+				geometry.clientWindowWidth = bounds.width;
+				geometry.clientWindowHeight = bounds.height;
+			}
+			geometry.isClientFocused = window.isFocused();
+		}
+
+		try
+		{
+			java.awt.Point location = canvas.getLocationOnScreen();
+			if (location != null)
+			{
+				geometry.canvasScreenX = location.x;
+				geometry.canvasScreenY = location.y;
+				geometry.geometryAvailable = geometry.canvasWidth != null && geometry.canvasHeight != null
+						&& geometry.canvasWidth > 0 && geometry.canvasHeight > 0;
+				geometry.reason = geometry.geometryAvailable ? "available" : "canvas_size_unavailable";
+			}
+		}
+		catch (IllegalComponentStateException e)
+		{
+			geometry.geometryAvailable = false;
+			geometry.reason = "canvas_not_showing";
+		}
+		catch (RuntimeException e)
+		{
+			geometry.geometryAvailable = false;
+			geometry.reason = "canvas_location_unavailable";
+		}
+
+		return geometry;
 	}
 
 	private void captureWidgets(TickSnapshot snapshot)

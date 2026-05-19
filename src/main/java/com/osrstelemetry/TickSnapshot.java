@@ -17,6 +17,7 @@ public class TickSnapshot
     public Integer viewportYOffset;
     public Integer canvasWidth;
     public Integer canvasHeight;
+    public InputGeometrySnapshot inputGeometry;
 
     public LocalPlayer localPlayer;
     public InventorySlot[] inventory;
@@ -79,6 +80,27 @@ public class TickSnapshot
         public WidgetSnapshot closeButtonWidget;
         public WidgetSnapshot bankPinWidget;
         public InventorySlot[] bankItems;
+    }
+
+    public static class InputGeometrySnapshot
+    {
+        public Boolean geometryAvailable;
+        public String reason;
+        public Integer canvasWidth;
+        public Integer canvasHeight;
+        public Integer sourceCanvasWidth;
+        public Integer sourceCanvasHeight;
+        public Integer canvasScreenX;
+        public Integer canvasScreenY;
+        public Integer clientWindowX;
+        public Integer clientWindowY;
+        public Integer clientWindowWidth;
+        public Integer clientWindowHeight;
+        public Double displayScaleX;
+        public Double displayScaleY;
+        public Boolean isCanvasShowing;
+        public Boolean isClientFocused;
+        public Long sourceTick;
     }
 
     public static class LocalPlayer

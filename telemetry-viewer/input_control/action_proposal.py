@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .input_geometry import input_geometry_from_status, resolve_screen_click_point, source_canvas_size_from_status
+
 
 SCHEMA = "action_proposal.v1"
 
@@ -28,6 +30,9 @@ class ActionProposal:
     target_tile: dict[str, Any] | None = None
     suggested_click_point: dict[str, int] | None = None
     click_point_space: str = "screen"
+    resolved_screen_click_point: dict[str, int] | None = None
+    click_point_resolution: dict[str, Any] | None = None
+    input_geometry: dict[str, Any] | None = None
     suggested_world_tile: dict[str, Any] | None = None
     key_action: dict[str, str] | None = None
     reason: str = "not_applicable"
@@ -54,6 +59,9 @@ class ActionProposal:
             "targetTile": self.target_tile,
             "suggestedClickPoint": self.suggested_click_point,
             "clickPointSpace": self.click_point_space,
+            "resolvedScreenClickPoint": self.resolved_screen_click_point,
+            "clickPointResolution": self.click_point_resolution,
+            "inputGeometry": self.input_geometry,
             "suggestedWorldTile": self.suggested_world_tile,
             "keyAction": self.key_action,
             "reason": self.reason,
@@ -291,15 +299,29 @@ def _proposal(
     warnings: list[str] | None = None,
     missing: list[str] | None = None,
     source_tick: int | None = None,
+    input_geometry: dict[str, Any] | None = None,
+    source_canvas_size: dict[str, Any] | None = None,
 ) -> ActionProposal:
     target = target if isinstance(target, dict) else {}
+    click = click_point or _click_point_from(target)
+    click_space = "screen" if click_point else _click_point_space_from(target)
+    resolution = resolve_screen_click_point(
+        click,
+        click_point_space=click_space,
+        input_geometry=input_geometry,
+        source_canvas_size=source_canvas_size,
+    ) if click else None
+    resolved_screen = resolution.get("screenClickPoint") if isinstance(resolution, dict) and isinstance(resolution.get("screenClickPoint"), dict) else None
     proposal = ActionProposal(
         proposed_action=action if action in KNOWN_ACTIONS else "none",
         target_kind=target_kind,
         target_name=_target_name(target),
         target_tile=_tile_from(target),
-        suggested_click_point=click_point or _click_point_from(target),
-        click_point_space="screen" if click_point else _click_point_space_from(target),
+        suggested_click_point=click,
+        click_point_space=click_space,
+        resolved_screen_click_point=resolved_screen,
+        click_point_resolution=resolution,
+        input_geometry=input_geometry,
         suggested_world_tile=_tile_from(target),
         key_action=key_action,
         reason=reason,
@@ -309,7 +331,11 @@ def _proposal(
         warnings=warnings or [],
         source_tick=source_tick,
     )
-    if proposal.proposed_action not in {"none", "wait_for_context"} and not proposal.executable:
+    if resolution and resolution.get("status") == "FAIL":
+        proposal.status = "FAIL"
+        proposal.missing_capabilities.extend(str(item) for item in resolution.get("missingCapabilities") or [])
+        proposal.warnings.extend(str(item) for item in resolution.get("warnings") or [])
+    elif proposal.proposed_action not in {"none", "wait_for_context"} and not proposal.executable:
         proposal.status = "WARN"
         if "click_point" not in proposal.missing_capabilities:
             proposal.missing_capabilities.append("click_point")
@@ -377,6 +403,8 @@ def _path_target(pathing: dict[str, Any], fallback: dict[str, Any], name: str) -
 
 def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
     status, brain = _status_context(status_or_context)
+    input_geometry = input_geometry_from_status(status)
+    source_canvas_size = source_canvas_size_from_status(status)
     generic = _dict(brain.get("genericTaskState"))
     inventory = _dict(brain.get("inventoryContext"))
     service = _dict(brain.get("serviceContext"))
@@ -398,6 +426,8 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
             warnings=["bank_pin_required"],
             required_context=["bank_ui"],
             source_tick=source_tick,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
         )
 
     if _bool(bank_operation.get("bankingComplete")) is True and _bool(close_bank.get("closeBankReady")) is True:
@@ -411,6 +441,8 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
             confidence=0.95,
             required_context=["bank_operation", "close_bank"],
             source_tick=source_tick,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
         )
 
     if _bool(bank_ui.get("bankReadable")) is True and _int(bank_operation.get("resourceItemsHeld")) > 0:
@@ -424,6 +456,8 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 confidence=0.9,
                 required_context=["bank_ui", "bank_operation"],
                 source_tick=source_tick,
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
             )
         return _proposal(
             "deposit_resources",
@@ -433,6 +467,8 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
             confidence=0.72,
             required_context=["bank_ui", "bank_operation"],
             source_tick=source_tick,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
         )
 
     if _bool(resource_return.get("returnDestinationAvailable")) is True:
@@ -445,6 +481,8 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
             confidence=0.78,
             required_context=["resource_return", "pathing"],
             source_tick=source_tick,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
         )
 
     if _bool(_first_present(service.get("serviceReady"), pathing.get("serviceReady"))) is True and _bool(bank_ui.get("bankOpen")) is not True:
@@ -456,6 +494,8 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
             confidence=0.86,
             required_context=["service", "bank_ui"],
             source_tick=source_tick,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
         )
 
     if _bool(pathing.get("pathingNeeded")) is True:
@@ -467,6 +507,8 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
             confidence=0.72,
             required_context=["pathing"],
             source_tick=source_tick,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
         )
 
     inventory_full = _bool(_first_present(inventory.get("inventoryFull"), status.get("inventoryFull")))
@@ -482,6 +524,8 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
             confidence=0.82,
             required_context=["target", "inventory"],
             source_tick=source_tick,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
         )
 
     return _proposal(
@@ -491,4 +535,6 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
         confidence=0.2,
         warnings=["no executable action from current context"],
         source_tick=source_tick,
+        input_geometry=input_geometry,
+        source_canvas_size=source_canvas_size,
     )

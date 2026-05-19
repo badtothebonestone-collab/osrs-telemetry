@@ -114,6 +114,35 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(args.overlay_mode, "intent")
         self.assertEqual(args.task_policy, "woodcutting_bank")
 
+    def test_status_exposes_input_geometry_from_snapshot_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = synthetic_snapshot(session, 1)
+            response["payloads"]["baseline"]["inputGeometry"] = {
+                "geometryAvailable": True,
+                "canvasScreenX": 1000,
+                "canvasScreenY": 2000,
+                "canvasWidth": 800,
+                "canvasHeight": 600,
+                "sourceCanvasWidth": 400,
+                "sourceCanvasHeight": 300,
+                "displayScaleX": 2.0,
+                "displayScaleY": 2.0,
+                "sourceTick": 1,
+            }
+            args = make_args(session, "--input-source", "plugin-snapshot")
+            core = daemon.LiveCoreDaemon(session, args)
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                core.poll_once()
+                status = core.state.status()
+
+        self.assertTrue(status["inputGeometryAvailable"])
+        self.assertEqual(status["canvasScreenOrigin"], {"x": 1000, "y": 2000})
+        self.assertEqual(status["canvasSize"], {"width": 800, "height": 600})
+        self.assertEqual(status["sourceCanvasSize"], {"width": 400, "height": 300})
+        self.assertEqual(status["displayScale"], {"x": 2.0, "y": 2.0})
+
     def test_task_policy_argument_is_preserved_for_brain_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"

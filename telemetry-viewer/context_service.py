@@ -696,7 +696,7 @@ def compact_baseline(baseline: dict, mode: str) -> dict:
         return baseline
     player = baseline.get("player") if isinstance(baseline.get("player"), dict) else {}
     viewport = baseline.get("cameraViewport") if isinstance(baseline.get("cameraViewport"), dict) else {}
-    return {
+    compact = {
         "schema": baseline.get("schema"),
         "generatedAtUtc": baseline.get("generatedAtUtc"),
         "latestTick": baseline.get("latestTick"),
@@ -735,6 +735,9 @@ def compact_baseline(baseline: dict, mode: str) -> dict:
             )
         },
     }
+    if isinstance(baseline.get("inputGeometry"), dict):
+        compact["inputGeometry"] = baseline.get("inputGeometry")
+    return compact
 
 
 def compact_candidate_answer(answer: dict | None, mode: str) -> dict | None:

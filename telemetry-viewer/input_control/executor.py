@@ -25,6 +25,7 @@ class ExecutionResult:
     movement_profile: str | None = None
     proposal: dict[str, Any] | None = None
     movement_plan: dict[str, Any] | None = None
+    click_point_resolution: dict[str, Any] | None = None
     commands: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     missing_capabilities: list[str] = field(default_factory=list)
@@ -41,6 +42,7 @@ class ExecutionResult:
             "movementProfile": self.movement_profile,
             "proposal": self.proposal,
             "movementPlan": self.movement_plan,
+            "clickPointResolution": self.click_point_resolution,
             "commands": list(self.commands),
             "warnings": list(self.warnings),
             "missingCapabilities": list(self.missing_capabilities),
@@ -78,9 +80,15 @@ def _target_from_click(point: dict[str, Any]) -> MouseTarget:
     return MouseTarget(x=int(point["x"]), y=int(point["y"]), radius_px=4, label="action target", source="action_proposal")
 
 
-def _screen_click_point(proposal: ActionProposal, backend: Any) -> tuple[dict[str, int] | None, list[str]]:
+def _screen_click_point(proposal: ActionProposal, backend: Any) -> tuple[dict[str, int] | None, list[str], dict[str, Any] | None]:
     if not proposal.suggested_click_point:
-        return None, []
+        return None, [], None
+    if isinstance(proposal.click_point_resolution, dict) and proposal.click_point_resolution.get("status") == "FAIL":
+        warnings = [str(item) for item in proposal.click_point_resolution.get("warnings") or []]
+        return None, warnings or ["resolved click point failed validation"], proposal.click_point_resolution
+    if isinstance(proposal.resolved_screen_click_point, dict):
+        point = proposal.resolved_screen_click_point
+        return {"x": int(round(float(point["x"]))), "y": int(round(float(point["y"])))}, [], proposal.click_point_resolution
     point = dict(proposal.suggested_click_point)
     if proposal.click_point_space == "canvas":
         converter = getattr(backend, "canvas_to_screen_point", None)
@@ -88,11 +96,25 @@ def _screen_click_point(proposal: ActionProposal, backend: Any) -> tuple[dict[st
             try:
                 converted = converter(point)
                 if isinstance(converted, dict) and converted.get("x") is not None and converted.get("y") is not None:
-                    return {"x": int(round(float(converted["x"]))), "y": int(round(float(converted["y"])))}, []
+                    resolution = {
+                        "status": "PASS",
+                        "method": "backend_fallback_window_geometry",
+                        "screenClickPoint": {"x": int(round(float(converted["x"]))), "y": int(round(float(converted["y"])))},
+                        "warnings": ["dynamic input geometry unavailable; used backend fallback window geometry"],
+                        "missingCapabilities": [],
+                    }
+                    return dict(resolution["screenClickPoint"]), list(resolution["warnings"]), resolution
             except Exception as error:  # noqa: BLE001
-                return None, [f"canvas coordinate conversion failed: {type(error).__name__}: {error}"]
-        return None, ["canvas click point requires backend window coordinate conversion"]
-    return {"x": int(point["x"]), "y": int(point["y"])}, []
+                return None, [f"canvas coordinate conversion failed: {type(error).__name__}: {error}"], None
+        return None, ["canvas click point requires backend window coordinate conversion"], None
+    resolution = {
+        "status": "PASS",
+        "method": "screen_direct",
+        "screenClickPoint": {"x": int(point["x"]), "y": int(point["y"])},
+        "warnings": [],
+        "missingCapabilities": [],
+    }
+    return dict(resolution["screenClickPoint"]), [], resolution
 
 
 def execute_action(
@@ -112,6 +134,7 @@ def execute_action(
         backend_name=backend_name,
         movement_profile=movement_profile.name if isinstance(movement_profile, MouseMovementProfile) else str(movement_profile),
         proposal=proposal.to_dict(),
+        click_point_resolution=proposal.click_point_resolution,
         warnings=warnings,
         missing_capabilities=missing,
     )
@@ -127,13 +150,17 @@ def execute_action(
             backend.press(key)
             result.executed = True
         return result
-    screen_point, coordinate_warnings = _screen_click_point(proposal, backend)
+    screen_point, coordinate_warnings, click_resolution = _screen_click_point(proposal, backend)
+    if click_resolution:
+        result.click_point_resolution = click_resolution
     if coordinate_warnings:
-        result.status = "FAIL"
+        if not click_resolution or click_resolution.get("status") == "FAIL":
+            result.status = "FAIL"
         result.warnings.extend(coordinate_warnings)
-        if "screen_click_point" not in result.missing_capabilities:
+        if result.status == "FAIL" and "screen_click_point" not in result.missing_capabilities:
             result.missing_capabilities.append("screen_click_point")
-        return result
+        if result.status == "FAIL":
+            return result
     if not screen_point:
         result.status = "FAIL"
         if "click_point" not in result.missing_capabilities:
