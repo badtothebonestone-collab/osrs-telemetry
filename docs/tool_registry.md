@@ -67,6 +67,7 @@ Diagnostics and inspectors that are useful when daily output looks wrong:
 - `diagnose_bank_ui_context.py`
 - `diagnose_resource_return_context.py`
 - `diagnose_woodcut_bank_cycle.py`
+- `diagnose_woodcut_bank_scenarios.py`
 - `diagnose_cycle_history.py`
 - `run_woodcut_bank_live_qa.py`
 - `diagnose_target_coverage.py`
@@ -98,6 +99,9 @@ python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daem
 python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20
 python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --scenario bank_closed_return_memory
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --json
 ```
 
 ## Legacy File Pipeline

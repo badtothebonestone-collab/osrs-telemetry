@@ -352,6 +352,18 @@
       "safeToHideInUi": true
     },
     {
+      "name": "diagnose_woodcut_bank_scenarios.py",
+      "category": "advanced_debug",
+      "purpose": "Synthetic in-memory woodcut_bank state-machine scenario suite covering collection, service, bank, return, retained booth fallback blocking, and remembered return destination states. Prints to stdout only.",
+      "dailyRequired": false,
+      "normalCommand": "python telemetry-viewer\\diagnose_woodcut_bank_scenarios.py",
+      "alternateCommand": "python telemetry-viewer\\diagnose_woodcut_bank_scenarios.py --scenario bank_closed_return_memory --json",
+      "input": "built-in synthetic daemon-shaped contexts and existing analyzer/classifier helpers",
+      "output": "woodcut_bank_scenario_suite.v1 PASS/WARN/FAIL report; no file writes",
+      "status": "advanced_debug",
+      "safeToHideInUi": true
+    },
+    {
       "name": "diagnose_target_coverage.py",
       "category": "advanced_debug",
       "purpose": "Audits target/profile coverage from recorded sessions.",

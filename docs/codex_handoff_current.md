@@ -77,6 +77,10 @@ RuneLite plugin
   resource-return destination and the task can use return_to_resource /
   return_to_resource_area instead of treating missing tree candidates as an
   immediate resource-target failure.
+- Full Cycle Live QA Runner v1 works via `run_woodcut_bank_live_qa.py`.
+- Full Cycle Synthetic Scenario Suite v1 works via
+  `diagnose_woodcut_bank_scenarios.py` and validates fixed in-memory
+  woodcut_bank states without RuneLite or daemon state.
 ## Current Completed Milestone: Resource Return Destination / Resource Area Memory v1
 
 Resource Return Destination / Resource Area Memory v1 works and has been live-tested.
@@ -141,6 +145,12 @@ python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http
 
 python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
 
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py
+
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --scenario bank_closed_return_memory
+
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --json
+
 ## Verification commands
 
 python telemetry-viewer\run_stabilization_suite.py
@@ -149,18 +159,17 @@ python telemetry-viewer\run_stabilization_suite.py
 
 .\gradlew.bat build
 
-## Current next milestone
-
-Full Cycle Live QA Runner v1 with the daily daemon.
+## Current completed milestone: Full Cycle Synthetic Scenario Suite v1
 
 Goal:
-Use one stdout-only command to check plugin snapshot login, daemon health, full
-woodcut_bank cycle context, cycle history, service/path state, bank
-UI/operation state, return/resource-return state, overlay selection, and
-gauntlet-style semantic deferrals.
+Use one stdout-only command to validate the woodcut_bank state machine against
+fixed in-memory states without RuneLite, a live daemon, sessions, compact
+packets, or rolling files.
 
-Command:
-python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
+Commands:
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --scenario bank_closed_return_memory
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --json
 
 Implemented scope:
 - `return_to_resource_analyzer.py` reports returnNeeded, returnReady,
@@ -197,6 +206,14 @@ Implemented scope:
 - `run_woodcut_bank_live_qa.py` runs the key live QA checks in one command and
   reports PASS/WARN/FAIL with endpoint, cycle, inventory/resource,
   service/path, bank, return, overlay, gauntlet, and history sections.
+- `diagnose_woodcut_bank_scenarios.py` runs synthetic scenarios for
+  collecting_resources, inventory_full_needs_service, pathing_to_service,
+  service_ready_bank_closed, bank_open_resources_held, bank_open_after_deposit,
+  bank_closed_return_memory, bank_closed_tree_visible,
+  bank_closed_no_memory_no_target, bank_pin_blocked,
+  retained_booth_blocks_deposit, and remembered_return_cross_plane.
+- The scenario suite reuses `diagnose_woodcut_bank_cycle.py` classification and
+  calls `service_analyzer.py` for the retained-booth/deposit fallback case.
 - Task phase integration:
   - bankingComplete + bankOpen=true -> waiting_for_world_view /
     close_service_context, no target candidate failure
@@ -230,6 +247,7 @@ Preferred live QA flow:
    python telemetry-viewer\diagnose_close_bank_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890
    python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
+   python telemetry-viewer\diagnose_woodcut_bank_scenarios.py
    python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
    python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
 
@@ -277,12 +295,11 @@ Open-bank view with no visible tree target can produce missing target candidates
 Post-bank reacquisition now represents that state explicitly with
 reason=bank_ui_still_open and resourceTargetReacquisitionAllowed=false.
 
-## Current Next Milestone: Resource Return Destination / Resource Area Memory v1 Live QA
+## Historical Live QA Note: Resource Return Destination / Resource Area Memory v1
 
-Goal:
-Run the resource-return, full-cycle, and cycle-history diagnostics against the
-daily daemon. Confirm resource memory is populated near trees and that, after
-bankingComplete=true with the bank closed and no visible tree, the system uses
+This live QA was completed and is retained here as evidence for the current
+baseline. Resource memory was populated near visible trees and, after
+bankingComplete=true with the bank closed and no visible tree, the system used
 a remembered resource return destination instead of failing missing
 target.candidates immediately.
 
@@ -318,3 +335,4 @@ python telemetry-viewer\diagnose_post_bank_reacquisition_context.py --from-daemo
 python telemetry-viewer\diagnose_close_bank_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_task_transition.py --from-daemon --daemon-url http://127.0.0.1:8890 --policy woodcutting_bank
 python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes
+```
