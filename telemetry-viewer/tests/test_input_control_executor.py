@@ -8,6 +8,7 @@ sys.path.insert(0, str(VIEWER_DIR))
 
 from argparse import Namespace
 
+import execute_next_action as execute_cli
 from input_control.action_proposal import ActionProposal
 from input_control.backend_pyautogui import scale_canvas_point_to_screen
 from input_control.executor import execute_action, execute_next_action
@@ -184,6 +185,28 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(result.proposed_action, "none")
         self.assertIn("daemon.status", result.missing_capabilities)
         self.assertEqual(backend.calls, [])
+
+    def test_cli_execute_focuses_runelite_by_default(self):
+        args = execute_cli.parse_args(["--execute", "--backend", "pyautogui"])
+
+        execute_cli.apply_focus_default(args)
+
+        self.assertTrue(args.focus_runelite)
+
+    def test_cli_dry_run_does_not_focus_runelite_by_default(self):
+        args = execute_cli.parse_args(["--dry-run", "--backend", "pyautogui"])
+        args.execute = False
+
+        execute_cli.apply_focus_default(args)
+
+        self.assertFalse(args.focus_runelite)
+
+    def test_cli_focus_default_can_be_disabled(self):
+        args = execute_cli.parse_args(["--execute", "--backend", "pyautogui", "--no-focus-runelite"])
+
+        execute_cli.apply_focus_default(args)
+
+        self.assertFalse(args.focus_runelite)
 
 
 if __name__ == "__main__":

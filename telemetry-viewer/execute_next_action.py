@@ -15,7 +15,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--movement-profile", choices=["instant_test", "linear_debug", "smooth_bezier", "fitts_guided", "wind_mouse"], default="linear_debug")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--focus-runelite", action="store_true")
+    parser.add_argument("--focus-runelite", dest="focus_runelite", action="store_true")
+    parser.add_argument("--no-focus-runelite", dest="focus_runelite", action="store_false")
+    parser.set_defaults(focus_runelite=None)
     parser.add_argument("--window-title-filter", default="RuneLite")
     parser.add_argument("--verify-after-action", action="store_true")
     parser.add_argument("--after-action-wait-ms", type=int, default=500)
@@ -32,6 +34,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stop-on-warn", action="store_true")
     parser.add_argument("--stop-on-fail", action="store_true")
     return parser.parse_args(argv)
+
+
+def apply_focus_default(args: argparse.Namespace) -> argparse.Namespace:
+    if args.focus_runelite is None:
+        args.focus_runelite = bool(args.execute and args.backend == "pyautogui")
+    return args
 
 
 def format_human(payload: dict[str, Any]) -> str:
@@ -119,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.dry_run:
         args.execute = False
+    apply_focus_default(args)
     backend = backend_from_name(
         args.backend,
         focus_runelite=args.focus_runelite,
