@@ -348,6 +348,17 @@ def _compact_target_from(*targets: Any) -> str:
     return "none"
 
 
+def _target_name_from(*targets: Any) -> str:
+    for candidate in targets:
+        if isinstance(candidate, dict) and candidate:
+            value = candidate.get("targetName") or candidate.get("name") or candidate.get("classId") or candidate.get("targetType")
+            if value:
+                return str(value)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return "none"
+
+
 def _collect_string_list(value: Any) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
@@ -363,7 +374,7 @@ def _warning_count(status: dict[str, Any], brain: dict[str, Any], contexts: list
 
 def _missing_capability_count(status: dict[str, Any], brain: dict[str, Any], contexts: list[dict[str, Any]]) -> int:
     missing: list[str] = []
-    for key in ("missingCapabilities", "missingRequiredContextDomains", "optionalMissingContextDomains"):
+    for key in ("missingRequiredContextDomains", "optionalMissingContextDomains"):
         missing.extend(_collect_string_list(status.get(key)))
         missing.extend(_collect_string_list(brain.get(key)))
     for context in contexts:
@@ -500,7 +511,7 @@ def build_mission_control_status(
         status.get("returnInventoryFreeSlots"),
         status.get("bankOperationInventoryFreeSlots"),
     )
-    service_target = _compact_target_from(
+    service_target = _target_name_from(
         service.get("bestServiceCandidate"),
         service.get("bestServiceTarget"),
         service.get("target"),
@@ -704,6 +715,10 @@ def localhost_port_is_listening(port: int, timeout: float = 0.2) -> bool:
             return True
     except OSError:
         return False
+
+
+def should_poll_daemon_status(context_service_running: bool, live_core_daemon_running: bool, daemon_port_listening: bool) -> bool:
+    return bool(context_service_running or live_core_daemon_running or daemon_port_listening)
 
 
 def build_dashboard_command(interval: float) -> list[str]:
@@ -1908,7 +1923,12 @@ class LiveControlPanel:
             + (f"; warning={stream_warning}" if stream_warning else "")
             + (f"; warning={stale_warning}" if stale_warning else "")
         )
-        if self.is_process_running("Context Service") or self.is_process_running("Live Core Daemon"):
+        port = self.options().port
+        if should_poll_daemon_status(
+            self.is_process_running("Context Service"),
+            self.is_process_running("Live Core Daemon"),
+            localhost_port_is_listening(port),
+        ):
             if not self.context_poll_inflight:
                 self.context_poll_inflight = True
                 threading.Thread(target=self._context_status_worker, daemon=True).start()

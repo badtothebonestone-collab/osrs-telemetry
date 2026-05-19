@@ -195,18 +195,18 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                     },
                     "goalProgress": {"displayedGoalProgress": 5, "goalCount": 5},
                     "inventoryContext": {"inventoryFull": False, "freeSlots": 28},
-                    "serviceContext": {"serviceNeeded": True, "serviceReady": True, "bestServiceCandidate": {"targetName": "Bank booth", "classId": "bank_booth"}},
+                    "serviceContext": {"serviceNeeded": True, "serviceReady": True, "bestServiceCandidate": {"targetName": "Bank booth", "classId": "bank_booth", "id": 18491}},
                     "pathingContext": {"pathingNeeded": False, "pathCompleted": True},
-                    "bankUiContext": {"bankOpen": True, "bankReadable": True, "bankPinOpen": False},
+                    "bankUiContext": {"bankOpen": True, "bankReadable": True, "bankPinOpen": False, "missingCapabilities": ["bank.widgets"]},
                     "bankOperationContext": {"operationNeeded": False, "operationType": "none", "bankingComplete": True},
                     "closeBankContext": {"closeBankNeeded": True, "closeBankReady": True},
                     "postBankReacquisitionContext": {"reason": "bank_ui_still_open"},
                     "returnToResourceContext": {"reason": "no_resource_target_observed"},
                     "resourceReturnContext": {"reason": "not_applicable", "returnDestinationAvailable": False},
+                    "missingCapabilities": ["activity.animation_frame", "navigation.full_pathfinding"],
                     "warnings": ["target candidates deferred"],
                     "noActionEmitted": True,
                 },
-                "missingCapabilities": ["target.candidates"],
             },
             control={"state": {"activeTask": "woodcutting", "activeMissionPreset": "woodcut_bank", "taskPolicy": "woodcutting_bank", "goalCount": 5}},
             gauntlet_status="WARN",
@@ -277,6 +277,12 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
             after = set(os.listdir(temp))
 
         self.assertEqual(before, after)
+
+    def test_mission_control_polls_external_daemon_when_port_is_listening(self):
+        self.assertTrue(panel.should_poll_daemon_status(False, False, True))
+        self.assertTrue(panel.should_poll_daemon_status(True, False, False))
+        self.assertTrue(panel.should_poll_daemon_status(False, True, False))
+        self.assertFalse(panel.should_poll_daemon_status(False, False, False))
 
     def test_mission_status_handles_daemon_unavailable(self):
         mission = panel.build_mission_control_status(health=None, status=None, control=None, error="connection refused")
