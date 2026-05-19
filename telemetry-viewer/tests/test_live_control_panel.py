@@ -260,6 +260,41 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertIn("Stage: unknown", text)
         self.assertIn("Warnings/missing: 0 / 0", text)
 
+    def test_mission_control_renders_action_proposal_section(self):
+        mission = panel.build_mission_control_status(
+            health={"liveCoreDaemonActive": True, "overlayStateWritten": True},
+            status={
+                "dailyMode": "snapshot-no-files",
+                "inputSourceActive": "plugin-snapshot",
+                "noFileDaily": True,
+                "brain": {
+                    "task": "woodcutting",
+                    "genericTaskState": {
+                        "phase": "target_selected",
+                        "activeIntent": "select_target",
+                        "activeIntentTarget": {
+                            "targetName": "Oak tree",
+                            "classId": "tree",
+                            "aimPoint": {"canvasX": 100, "canvasY": 120},
+                        },
+                    },
+                    "inventoryContext": {"inventoryFull": False, "freeSlots": 15},
+                    "bankUiContext": {"bankOpen": False},
+                    "warnings": [],
+                    "noActionEmitted": True,
+                },
+            },
+            control={"state": {"taskPolicy": "woodcutting_bank"}},
+        )
+        text = panel.format_mission_control_status(mission)
+
+        self.assertEqual(mission["actionProposalStatus"], "PASS")
+        self.assertEqual(mission["proposedAction"], "select_resource_target")
+        self.assertEqual(mission["actionTarget"], "Oak tree")
+        self.assertEqual(mission["actionClickPoint"], "100,120")
+        self.assertIn("Action Proposal:", text)
+        self.assertIn("Action: select_resource_target", text)
+
     def test_mission_control_cycle_summary_writes_no_files(self):
         with tempfile.TemporaryDirectory() as temp:
             before = set(os.listdir(temp))

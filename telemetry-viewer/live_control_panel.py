@@ -22,6 +22,8 @@ from tkinter import messagebox, ttk
 
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
+from input_control.action_proposal import build_action_proposal
+from input_control.diagnostics import point_label
 import live_config_doctor
 import mission_presets
 import task_policy
@@ -338,6 +340,32 @@ def _value_or_unknown(value: Any) -> Any:
     return value if value is not None else "unknown"
 
 
+def _action_proposal_summary(status: dict[str, Any]) -> dict[str, Any]:
+    try:
+        proposal = build_action_proposal(status).to_dict()
+    except Exception as error:  # noqa: BLE001
+        return {
+            "actionProposalStatus": "WARN",
+            "proposedAction": "unknown",
+            "actionTarget": "none",
+            "actionConfidence": "unknown",
+            "actionReason": f"proposal unavailable: {type(error).__name__}",
+            "actionClickPoint": "none",
+            "actionMovementProfile": "linear_debug",
+            "lastExecutionResult": "unknown",
+        }
+    return {
+        "actionProposalStatus": proposal.get("status") or "unknown",
+        "proposedAction": proposal.get("proposedAction") or "none",
+        "actionTarget": proposal.get("targetName") or "none",
+        "actionConfidence": _value_or_unknown(proposal.get("confidence")),
+        "actionReason": proposal.get("reason") or "unknown",
+        "actionClickPoint": point_label(proposal.get("suggestedClickPoint")),
+        "actionMovementProfile": status.get("inputControlMovementProfile") or "linear_debug",
+        "lastExecutionResult": status.get("lastInputControlStatus") or "unknown",
+    }
+
+
 def _compact_target_from(*targets: Any) -> str:
     for candidate in targets:
         label = _compact_target_label(candidate if isinstance(candidate, dict) else None)
@@ -459,6 +487,14 @@ def build_mission_control_status(
             "resourceReturnReason": "unknown",
             "returnDestinationAvailable": "unknown",
             "liveQaStatus": "unknown",
+            "actionProposalStatus": "unknown",
+            "proposedAction": "unknown",
+            "actionTarget": "none",
+            "actionConfidence": "unknown",
+            "actionReason": "daemon unavailable",
+            "actionClickPoint": "none",
+            "actionMovementProfile": "linear_debug",
+            "lastExecutionResult": "unknown",
             "latestWarningCount": 0,
             "missingCapabilityCount": 0,
             "noFileStatus": "WARN",
@@ -517,7 +553,8 @@ def build_mission_control_status(
         service.get("target"),
         status.get("selectedServiceTargetName"),
     )
-    return {
+    action_summary = _action_proposal_summary(status)
+    mission = {
         "daemonHealth": "PASS" if health.get("liveCoreDaemonActive") else "WARN",
         "daemonStatus": "running" if health.get("liveCoreDaemonActive") else "stopped",
         "dailyMode": daily_mode,
@@ -565,6 +602,8 @@ def build_mission_control_status(
         "gauntletStatus": gauntlet_status or "unknown",
         "suggestedNextStep": "",
     }
+    mission.update(action_summary)
+    return mission
 
 
 def format_mission_control_status(mission: dict[str, Any]) -> str:
@@ -591,6 +630,10 @@ def format_mission_control_status(mission: dict[str, Any]) -> str:
             f"  Post-bank: {mission.get('postBankReason')}",
             f"  Return-to-resource: {mission.get('returnToResourceReason')}",
             f"  Resource return: {mission.get('resourceReturnReason')} | destination available={mission.get('returnDestinationAvailable')}",
+            "Action Proposal:",
+            f"  Action: {mission.get('proposedAction')} | target: {mission.get('actionTarget')} | confidence: {mission.get('actionConfidence')}",
+            f"  Reason: {mission.get('actionReason')} | click: {mission.get('actionClickPoint')}",
+            f"  Movement: {mission.get('actionMovementProfile')} | last result: {mission.get('lastExecutionResult')}",
             "Health:",
             f"  Overlay: {mission.get('overlayStatus')} | live QA: {mission.get('liveQaStatus')} | gauntlet: {mission.get('gauntletStatus')}",
             f"  Warnings/missing: {mission.get('latestWarningCount')} / {mission.get('missingCapabilityCount')} | noActionEmitted: {mission.get('noActionEmitted')}",
