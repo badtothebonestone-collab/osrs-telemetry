@@ -175,6 +175,109 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertEqual(mission["processNeeded"], "yes")
         self.assertEqual(mission["latestWarningCount"], 1)
 
+    def test_mission_control_renders_cycle_summary_fields_from_status(self):
+        mission = panel.build_mission_control_status(
+            health={"liveCoreDaemonActive": True, "overlayStateWritten": True},
+            status={
+                "dailyMode": "snapshot-no-files",
+                "inputSourceActive": "plugin-snapshot",
+                "noFileDaily": True,
+                "currentCycleStage": "close_bank_needed",
+                "currentCycleStageStableForTicks": 7,
+                "lastCycleTransitionReason": "bank_ui_still_open",
+                "woodcutBankLiveQaStatus": "WARN",
+                "brain": {
+                    "task": "woodcutting",
+                    "genericTaskState": {
+                        "phase": "waiting_for_world_view",
+                        "activeIntent": "close_service_context",
+                        "activeIntentTarget": {"targetName": "Bank booth", "classId": "bank_booth", "id": 10355},
+                    },
+                    "goalProgress": {"displayedGoalProgress": 5, "goalCount": 5},
+                    "inventoryContext": {"inventoryFull": False, "freeSlots": 28},
+                    "serviceContext": {"serviceNeeded": True, "serviceReady": True, "bestServiceCandidate": {"targetName": "Bank booth", "classId": "bank_booth"}},
+                    "pathingContext": {"pathingNeeded": False, "pathCompleted": True},
+                    "bankUiContext": {"bankOpen": True, "bankReadable": True, "bankPinOpen": False},
+                    "bankOperationContext": {"operationNeeded": False, "operationType": "none", "bankingComplete": True},
+                    "closeBankContext": {"closeBankNeeded": True, "closeBankReady": True},
+                    "postBankReacquisitionContext": {"reason": "bank_ui_still_open"},
+                    "returnToResourceContext": {"reason": "no_resource_target_observed"},
+                    "resourceReturnContext": {"reason": "not_applicable", "returnDestinationAvailable": False},
+                    "warnings": ["target candidates deferred"],
+                    "noActionEmitted": True,
+                },
+                "missingCapabilities": ["target.candidates"],
+            },
+            control={"state": {"activeTask": "woodcutting", "activeMissionPreset": "woodcut_bank", "taskPolicy": "woodcutting_bank", "goalCount": 5}},
+            gauntlet_status="WARN",
+        )
+        text = panel.format_mission_control_status(mission)
+
+        self.assertEqual(mission["cycleStage"], "close_bank_needed")
+        self.assertEqual(mission["cycleStableForTicks"], 7)
+        self.assertEqual(mission["lastTransitionReason"], "bank_ui_still_open")
+        self.assertEqual(mission["selectedTargetSummary"], "Bank booth 10355")
+        self.assertEqual(mission["inventoryFull"], "no")
+        self.assertEqual(mission["inventoryFreeSlots"], 28)
+        self.assertEqual(mission["serviceTarget"], "Bank booth")
+        self.assertEqual(mission["serviceReady"], "yes")
+        self.assertEqual(mission["pathingNeeded"], "no")
+        self.assertEqual(mission["pathCompleted"], "yes")
+        self.assertEqual(mission["bankOpen"], "yes")
+        self.assertEqual(mission["bankReadable"], "yes")
+        self.assertEqual(mission["bankPinOpen"], "no")
+        self.assertEqual(mission["operationNeeded"], "no")
+        self.assertEqual(mission["operationType"], "none")
+        self.assertEqual(mission["bankingComplete"], "yes")
+        self.assertEqual(mission["closeBankNeeded"], "yes")
+        self.assertEqual(mission["closeBankReady"], "yes")
+        self.assertEqual(mission["postBankReason"], "bank_ui_still_open")
+        self.assertEqual(mission["returnToResourceReason"], "no_resource_target_observed")
+        self.assertEqual(mission["resourceReturnReason"], "not_applicable")
+        self.assertEqual(mission["returnDestinationAvailable"], "no")
+        self.assertEqual(mission["liveQaStatus"], "WARN")
+        self.assertEqual(mission["latestWarningCount"], 1)
+        self.assertEqual(mission["missingCapabilityCount"], 1)
+        self.assertIn("Cycle:", text)
+        self.assertIn("Stage: close_bank_needed", text)
+        self.assertIn("Service / Path:", text)
+        self.assertIn("Bank:", text)
+        self.assertIn("Return:", text)
+        self.assertIn("Health:", text)
+
+    def test_mission_control_cycle_summary_missing_optional_fields_do_not_crash(self):
+        mission = panel.build_mission_control_status(
+            health={"liveCoreDaemonActive": True},
+            status={"dailyMode": "snapshot-no-files", "inputSourceActive": "plugin-snapshot", "brain": {"genericTaskState": {}}},
+            control={"state": {"taskPolicy": "woodcutting_bank"}},
+        )
+        text = panel.format_mission_control_status(mission)
+
+        self.assertEqual(mission["cycleStage"], "unknown")
+        self.assertEqual(mission["inventoryFreeSlots"], "unknown")
+        self.assertEqual(mission["serviceTarget"], "none")
+        self.assertEqual(mission["bankOpen"], "unknown")
+        self.assertIn("Stage: unknown", text)
+        self.assertIn("Warnings/missing: 0 / 0", text)
+
+    def test_mission_control_cycle_summary_writes_no_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            before = set(os.listdir(temp))
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(temp)
+                mission = panel.build_mission_control_status(
+                    health={"liveCoreDaemonActive": True},
+                    status={"currentCycleStage": "collecting_resources", "brain": {"genericTaskState": {"phase": "target_selected"}}},
+                    control={"state": {"taskPolicy": "woodcutting_bank"}},
+                )
+                panel.format_mission_control_status(mission)
+            finally:
+                os.chdir(previous_cwd)
+            after = set(os.listdir(temp))
+
+        self.assertEqual(before, after)
+
     def test_mission_status_handles_daemon_unavailable(self):
         mission = panel.build_mission_control_status(health=None, status=None, control=None, error="connection refused")
 

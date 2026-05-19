@@ -323,6 +323,63 @@ def _compact_target_label(target: dict | None) -> str | None:
     return f"{name} {target_id}" if target_id is not None else str(name)
 
 
+def _dict_value(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _value_or_unknown(value: Any) -> Any:
+    return value if value is not None else "unknown"
+
+
+def _compact_target_from(*targets: Any) -> str:
+    for candidate in targets:
+        label = _compact_target_label(candidate if isinstance(candidate, dict) else None)
+        if label:
+            return label
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return "none"
+
+
+def _collect_string_list(value: Any) -> list[str]:
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _warning_count(status: dict[str, Any], brain: dict[str, Any], contexts: list[dict[str, Any]]) -> int:
+    warnings: list[str] = []
+    for source in (status.get("warnings"), brain.get("warnings")):
+        warnings.extend(_collect_string_list(source))
+    for context in contexts:
+        warnings.extend(_collect_string_list(context.get("warnings")))
+    return len(list(dict.fromkeys(warnings)))
+
+
+def _missing_capability_count(status: dict[str, Any], brain: dict[str, Any], contexts: list[dict[str, Any]]) -> int:
+    missing: list[str] = []
+    for key in ("missingCapabilities", "missingRequiredContextDomains", "optionalMissingContextDomains"):
+        missing.extend(_collect_string_list(status.get(key)))
+        missing.extend(_collect_string_list(brain.get(key)))
+    for context in contexts:
+        missing.extend(_collect_string_list(context.get("missingCapabilities")))
+    for key in (
+        "bankUiMissingCapabilities",
+        "bankOperationMissingCapabilities",
+        "closeBankMissingCapabilities",
+        "postBankReacquisitionMissingCapabilities",
+        "returnToResourceMissingCapabilities",
+        "resourceReturnMissingCapabilities",
+    ):
+        missing.extend(_collect_string_list(status.get(key)))
+    return len(list(dict.fromkeys(missing)))
+
+
 def _progress_label(brain: dict, status: dict, control_state: dict) -> str:
     progress = brain.get("goalProgress") if isinstance(brain.get("goalProgress"), dict) else {}
     if not progress:
@@ -369,7 +426,30 @@ def build_mission_control_status(
             "processNeeded": "unknown",
             "navigationNeeded": "unknown",
             "selectedOverlayMarker": "none",
+            "selectedTargetSummary": "none",
+            "cycleStage": "unknown",
+            "cycleStableForTicks": "unknown",
+            "lastTransitionReason": "unknown",
+            "inventoryFreeSlots": "unknown",
+            "serviceTarget": "none",
+            "serviceReady": "unknown",
+            "pathingNeeded": "unknown",
+            "pathCompleted": "unknown",
+            "bankOpen": "unknown",
+            "bankReadable": "unknown",
+            "bankPinOpen": "unknown",
+            "operationNeeded": "unknown",
+            "operationType": "unknown",
+            "bankingComplete": "unknown",
+            "closeBankNeeded": "unknown",
+            "closeBankReady": "unknown",
+            "postBankReason": "unknown",
+            "returnToResourceReason": "unknown",
+            "resourceReturnReason": "unknown",
+            "returnDestinationAvailable": "unknown",
+            "liveQaStatus": "unknown",
             "latestWarningCount": 0,
+            "missingCapabilityCount": 0,
             "noFileStatus": "WARN",
             "policyStatus": "WARN",
             "overlayStatus": "unknown",
@@ -383,20 +463,49 @@ def build_mission_control_status(
     brain = status.get("brain") if isinstance(status.get("brain"), dict) else {}
     generic = brain.get("genericTaskState") if isinstance(brain.get("genericTaskState"), dict) else {}
     context = brain.get("currentContextSummary") if isinstance(brain.get("currentContextSummary"), dict) else {}
-    inventory = context.get("inventory") if isinstance(context.get("inventory"), dict) else {}
-    service = brain.get("serviceContext") if isinstance(brain.get("serviceContext"), dict) else {}
-    process = brain.get("processInventoryContext") if isinstance(brain.get("processInventoryContext"), dict) else {}
-    navigation = brain.get("navigationIntentContext") if isinstance(brain.get("navigationIntentContext"), dict) else {}
+    inventory_summary = _dict_value(context.get("inventory"))
+    inventory_context = _dict_value(brain.get("inventoryContext"))
+    raw_inventory = _dict_value(inventory_context.get("inventory"))
+    service = _dict_value(brain.get("serviceContext"))
+    pathing = _dict_value(brain.get("pathingContext"))
+    bank_ui = _dict_value(brain.get("bankUiContext"))
+    bank_operation = _dict_value(brain.get("bankOperationContext"))
+    close_bank = _dict_value(brain.get("closeBankContext"))
+    post_bank = _dict_value(brain.get("postBankReacquisitionContext"))
+    return_context = _dict_value(brain.get("returnToResourceContext"))
+    resource_return = _dict_value(brain.get("resourceReturnContext"))
+    process = _dict_value(brain.get("processInventoryContext"))
+    navigation = _dict_value(brain.get("navigationIntentContext"))
     active_target = generic.get("activeIntentTarget") if isinstance(generic.get("activeIntentTarget"), dict) else None
     selected_marker = status.get("stabilizedIntentTargetLabel") or _compact_target_label(active_target) or status.get("stabilizedIntentTarget") or "none"
-    warnings = []
-    for source in (status.get("warnings"), brain.get("warnings")):
-        if isinstance(source, list):
-            warnings.extend(source)
+    contexts = [service, pathing, bank_ui, bank_operation, close_bank, post_bank, return_context, resource_return, process, navigation]
     daily_mode = status.get("dailyMode") or health.get("dailyMode") or "unknown"
     input_source = status.get("inputSourceActive") or health.get("inputSourceActive") or "unknown"
     no_file_ok = daily_mode == "snapshot-no-files" and input_source == "plugin-snapshot" and status.get("noFileDaily") is not False
     policy_name = control_state.get("taskPolicy") or status.get("brainTaskPolicy") or "unknown"
+    cycle_history = _dict_value(status.get("cycleHistory"))
+    inventory_full = _first_present(
+        inventory_context.get("inventoryFull"),
+        raw_inventory.get("inventoryFull"),
+        inventory_summary.get("inventoryFull"),
+        status.get("inventoryFull"),
+        status.get("returnInventoryFull"),
+    )
+    inventory_free_slots = _first_present(
+        inventory_context.get("freeSlots"),
+        inventory_context.get("inventoryFreeSlots"),
+        raw_inventory.get("freeSlots"),
+        inventory_summary.get("freeSlots"),
+        status.get("inventoryFreeSlots"),
+        status.get("returnInventoryFreeSlots"),
+        status.get("bankOperationInventoryFreeSlots"),
+    )
+    service_target = _compact_target_from(
+        service.get("bestServiceCandidate"),
+        service.get("bestServiceTarget"),
+        service.get("target"),
+        status.get("selectedServiceTargetName"),
+    )
     return {
         "daemonHealth": "PASS" if health.get("liveCoreDaemonActive") else "WARN",
         "daemonStatus": "running" if health.get("liveCoreDaemonActive") else "stopped",
@@ -410,12 +519,35 @@ def build_mission_control_status(
         "activeIntent": generic.get("activeIntent") or "unknown",
         "noActionEmitted": _bool_label(brain.get("noActionEmitted")),
         "progress": _progress_label(brain, status, control_state),
-        "inventoryFull": _bool_label(inventory.get("inventoryFull")),
+        "inventoryFull": _bool_label(inventory_full),
+        "inventoryFreeSlots": _value_or_unknown(inventory_free_slots),
         "serviceNeeded": _bool_label(service.get("serviceNeeded") if "serviceNeeded" in service else status.get("serviceNeeded")),
+        "serviceTarget": service_target,
+        "serviceReady": _bool_label(_first_present(service.get("serviceReady"), pathing.get("serviceReady"), status.get("serviceReady"))),
+        "pathingNeeded": _bool_label(_first_present(pathing.get("pathingNeeded"), status.get("pathingNeeded"))),
+        "pathCompleted": _bool_label(_first_present(pathing.get("pathCompleted"), status.get("pathingCompleted"), status.get("pathCompleted"))),
+        "bankOpen": _bool_label(_first_present(bank_ui.get("bankOpen"), close_bank.get("bankOpen"), status.get("bankOpen"))),
+        "bankReadable": _bool_label(_first_present(bank_ui.get("bankReadable"), status.get("bankReadable"))),
+        "bankPinOpen": _bool_label(_first_present(bank_ui.get("bankPinOpen"), status.get("bankPinOpen"))),
+        "operationNeeded": _bool_label(_first_present(bank_operation.get("operationNeeded"), status.get("bankOperationNeeded"))),
+        "operationType": _value_or_unknown(_first_present(bank_operation.get("operationType"), status.get("bankOperationType"))),
+        "bankingComplete": _bool_label(_first_present(bank_operation.get("bankingComplete"), status.get("bankingComplete"))),
+        "closeBankNeeded": _bool_label(_first_present(close_bank.get("closeBankNeeded"), status.get("closeBankNeeded"))),
+        "closeBankReady": _bool_label(_first_present(close_bank.get("closeBankReady"), status.get("closeBankReady"))),
+        "postBankReason": _value_or_unknown(_first_present(post_bank.get("reason"), status.get("postBankReacquisitionReason"))),
+        "returnToResourceReason": _value_or_unknown(_first_present(return_context.get("reason"), status.get("returnToResourceReason"))),
+        "resourceReturnReason": _value_or_unknown(_first_present(resource_return.get("reason"), status.get("resourceReturnReason"))),
+        "returnDestinationAvailable": _bool_label(_first_present(resource_return.get("returnDestinationAvailable"), status.get("resourceReturnDestinationAvailable"))),
         "processNeeded": _bool_label(process.get("processRequired") if "processRequired" in process else status.get("processInventoryNeeded")),
         "navigationNeeded": _bool_label(navigation.get("navigationNeeded") if "navigationNeeded" in navigation else status.get("navigationIntentNeeded")),
         "selectedOverlayMarker": selected_marker,
-        "latestWarningCount": len(warnings),
+        "selectedTargetSummary": selected_marker,
+        "cycleStage": _value_or_unknown(_first_present(status.get("currentCycleStage"), cycle_history.get("currentCycleStage"))),
+        "cycleStableForTicks": _value_or_unknown(_first_present(status.get("currentCycleStageStableForTicks"), cycle_history.get("currentCycleStageStableForTicks"))),
+        "lastTransitionReason": _value_or_unknown(_first_present(status.get("lastCycleTransitionReason"), cycle_history.get("lastCycleTransitionReason"))),
+        "liveQaStatus": _value_or_unknown(_first_present(status.get("woodcutBankLiveQaStatus"), status.get("liveQaStatus"), status.get("cycleDiagnosticStatus"))),
+        "latestWarningCount": _warning_count(status, brain, contexts),
+        "missingCapabilityCount": _missing_capability_count(status, brain, contexts),
         "noFileStatus": "PASS" if no_file_ok else ("WARN" if daily_mode == "snapshot-no-files" else "n/a"),
         "policyStatus": "PASS" if policy_name in task_policy.policy_names() else "WARN",
         "overlayStatus": "PASS" if health.get("overlayStateWritten") or status.get("overlayStateWritten") else "off",
@@ -430,10 +562,27 @@ def format_mission_control_status(mission: dict[str, Any]) -> str:
             f"Daemon: {mission.get('daemonHealth')} - {mission.get('daemonStatus')}",
             f"Daily mode: {mission.get('dailyMode')} | input: {mission.get('inputSource')} | no-file: {mission.get('noFileStatus')}",
             f"Task: {mission.get('activeTask')} | preset: {mission.get('activeMissionPreset')} | policy: {mission.get('taskPolicy')} | goal: {mission.get('goalCount')}",
-            f"Phase: {mission.get('genericPhase')} | intent: {mission.get('activeIntent')} | progress: {mission.get('progress')}",
-            f"Inventory full: {mission.get('inventoryFull')} | service: {mission.get('serviceNeeded')} | process: {mission.get('processNeeded')} | navigation: {mission.get('navigationNeeded')}",
-            f"Overlay: {mission.get('overlayStatus')} | selected: {mission.get('selectedOverlayMarker')} | warnings: {mission.get('latestWarningCount')}",
-            f"noActionEmitted: {mission.get('noActionEmitted')} | gauntlet: {mission.get('gauntletStatus')}",
+            "Cycle:",
+            f"  Stage: {mission.get('cycleStage')} | phase: {mission.get('genericPhase')} | intent: {mission.get('activeIntent')}",
+            f"  Stable for ticks: {mission.get('cycleStableForTicks')} | last transition: {mission.get('lastTransitionReason')}",
+            f"  Selected: {mission.get('selectedTargetSummary')}",
+            "Inventory:",
+            f"  Full/free: {mission.get('inventoryFull')} / {mission.get('inventoryFreeSlots')} | progress: {mission.get('progress')}",
+            f"  Process: {mission.get('processNeeded')} | navigation: {mission.get('navigationNeeded')}",
+            "Service / Path:",
+            f"  Target: {mission.get('serviceTarget')} | needed: {mission.get('serviceNeeded')} | ready: {mission.get('serviceReady')}",
+            f"  Pathing: needed={mission.get('pathingNeeded')} complete={mission.get('pathCompleted')}",
+            "Bank:",
+            f"  Open/readable/pin: {mission.get('bankOpen')} / {mission.get('bankReadable')} / {mission.get('bankPinOpen')}",
+            f"  Operation: needed={mission.get('operationNeeded')} type={mission.get('operationType')} complete={mission.get('bankingComplete')}",
+            f"  Close: needed={mission.get('closeBankNeeded')} ready={mission.get('closeBankReady')}",
+            "Return:",
+            f"  Post-bank: {mission.get('postBankReason')}",
+            f"  Return-to-resource: {mission.get('returnToResourceReason')}",
+            f"  Resource return: {mission.get('resourceReturnReason')} | destination available={mission.get('returnDestinationAvailable')}",
+            "Health:",
+            f"  Overlay: {mission.get('overlayStatus')} | live QA: {mission.get('liveQaStatus')} | gauntlet: {mission.get('gauntletStatus')}",
+            f"  Warnings/missing: {mission.get('latestWarningCount')} / {mission.get('missingCapabilityCount')} | noActionEmitted: {mission.get('noActionEmitted')}",
             mission.get("suggestedNextStep") or "",
         ]
     ).strip()
