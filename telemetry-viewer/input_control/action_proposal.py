@@ -27,6 +27,7 @@ class ActionProposal:
     target_name: str | None = None
     target_tile: dict[str, Any] | None = None
     suggested_click_point: dict[str, int] | None = None
+    click_point_space: str = "screen"
     suggested_world_tile: dict[str, Any] | None = None
     key_action: dict[str, str] | None = None
     reason: str = "not_applicable"
@@ -52,6 +53,7 @@ class ActionProposal:
             "targetName": self.target_name,
             "targetTile": self.target_tile,
             "suggestedClickPoint": self.suggested_click_point,
+            "clickPointSpace": self.click_point_space,
             "suggestedWorldTile": self.suggested_world_tile,
             "keyAction": self.key_action,
             "reason": self.reason,
@@ -146,6 +148,16 @@ def _point_from_aim(value: Any) -> dict[str, int] | None:
     return None
 
 
+def _point_space_from_aim(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    if value.get("canvasX") is not None or value.get("canvasY") is not None or str(value.get("source") or "").lower().startswith("canvas"):
+        return "canvas"
+    if value.get("screenX") is not None or value.get("screenY") is not None:
+        return "screen"
+    return None
+
+
 def _point_from_bounds(value: Any) -> dict[str, int] | None:
     if not isinstance(value, dict):
         return None
@@ -163,6 +175,21 @@ def _point_from_bounds(value: Any) -> dict[str, int] | None:
         if isinstance(width, (int, float)) and isinstance(height, (int, float)):
             return {"x": int(round(float(x) + float(width) / 2.0)), "y": int(round(float(y) + float(height) / 2.0))}
         return {"x": int(round(float(x))), "y": int(round(float(y)))}
+    return None
+
+
+def _point_space_from_bounds(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    if isinstance(value.get("bounds"), dict):
+        return _point_space_from_bounds(value.get("bounds"))
+    if any(key in value for key in ("canvasX", "canvasY", "canvasMinX", "canvasMinY")):
+        return "canvas"
+    if any(key in value for key in ("screenX", "screenY", "screenMinX", "screenMinY")):
+        return "screen"
+    source = str(value.get("source") or "").lower()
+    if "canvas" in source or "clickbox" in source or "convex" in source:
+        return "canvas"
     return None
 
 
@@ -196,6 +223,42 @@ def _click_point_from(target: Any) -> dict[str, int] | None:
     if geometry:
         return _click_point_from(geometry)
     return None
+
+
+def _click_point_space_from(target: Any) -> str:
+    if not isinstance(target, dict):
+        return "screen"
+    for key in (
+        "suggestedClickPoint",
+        "clickPoint",
+        "aimPoint",
+        "aimPointContext",
+        "canvasPoint",
+        "canvasLocation",
+        "canvasCenter",
+    ):
+        space = _point_space_from_aim(target.get(key))
+        if space:
+            return space
+        if key.startswith("canvas") and isinstance(target.get(key), dict):
+            return "canvas"
+    for key in (
+        "bounds",
+        "clickboxBounds",
+        "convexHullBounds",
+        "geometrySummary",
+        "closeButtonBounds",
+        "depositInventoryButtonBounds",
+    ):
+        space = _point_space_from_bounds(target.get(key))
+        if space:
+            return space
+        if key in {"clickboxBounds", "convexHullBounds"} and isinstance(target.get(key), dict):
+            return "canvas"
+    geometry = _dict(target.get("geometry"))
+    if geometry:
+        return _click_point_space_from(geometry)
+    return "screen"
 
 
 def _overlay_selected(brain: dict[str, Any]) -> dict[str, Any]:
@@ -236,6 +299,7 @@ def _proposal(
         target_name=_target_name(target),
         target_tile=_tile_from(target),
         suggested_click_point=click_point or _click_point_from(target),
+        click_point_space="screen" if click_point else _click_point_space_from(target),
         suggested_world_tile=_tile_from(target),
         key_action=key_action,
         reason=reason,

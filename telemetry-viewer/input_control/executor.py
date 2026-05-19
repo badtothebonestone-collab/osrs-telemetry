@@ -78,6 +78,23 @@ def _target_from_click(point: dict[str, Any]) -> MouseTarget:
     return MouseTarget(x=int(point["x"]), y=int(point["y"]), radius_px=4, label="action target", source="action_proposal")
 
 
+def _screen_click_point(proposal: ActionProposal, backend: Any) -> tuple[dict[str, int] | None, list[str]]:
+    if not proposal.suggested_click_point:
+        return None, []
+    point = dict(proposal.suggested_click_point)
+    if proposal.click_point_space == "canvas":
+        converter = getattr(backend, "canvas_to_screen_point", None)
+        if callable(converter):
+            try:
+                converted = converter(point)
+                if isinstance(converted, dict) and converted.get("x") is not None and converted.get("y") is not None:
+                    return {"x": int(round(float(converted["x"]))), "y": int(round(float(converted["y"])))}, []
+            except Exception as error:  # noqa: BLE001
+                return None, [f"canvas coordinate conversion failed: {type(error).__name__}: {error}"]
+        return None, ["canvas click point requires backend window coordinate conversion"]
+    return {"x": int(point["x"]), "y": int(point["y"])}, []
+
+
 def execute_action(
     proposal: ActionProposal,
     *,
@@ -110,14 +127,21 @@ def execute_action(
             backend.press(key)
             result.executed = True
         return result
-    if not proposal.suggested_click_point:
+    screen_point, coordinate_warnings = _screen_click_point(proposal, backend)
+    if coordinate_warnings:
+        result.status = "FAIL"
+        result.warnings.extend(coordinate_warnings)
+        if "screen_click_point" not in result.missing_capabilities:
+            result.missing_capabilities.append("screen_click_point")
+        return result
+    if not screen_point:
         result.status = "FAIL"
         if "click_point" not in result.missing_capabilities:
             result.missing_capabilities.append("click_point")
         result.warnings.append("no click point available; execution blocked")
         return result
     start = MousePoint(*_backend_position(backend))
-    plan = plan_mouse_movement(start, _target_from_click(proposal.suggested_click_point), movement_profile)
+    plan = plan_mouse_movement(start, _target_from_click(screen_point), movement_profile)
     result.movement_plan = plan.to_dict(include_points=False)
     result.commands.append(
         {
