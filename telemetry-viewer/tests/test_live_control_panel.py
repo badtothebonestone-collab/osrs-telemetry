@@ -295,6 +295,29 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertIn("Action Proposal:", text)
         self.assertIn("Action: select_resource_target", text)
 
+    def test_mission_control_renders_action_lifecycle_section(self):
+        mission = panel.build_mission_control_status(
+            health={"liveCoreDaemonActive": True},
+            status={
+                "currentCycleStage": "collecting_resources",
+                "brain": {
+                    "genericTaskState": {
+                        "phase": "wait_for_result",
+                        "activeIntent": "wait_for_result",
+                    },
+                    "inventoryContext": {"inventoryFull": False, "freeSlots": 12},
+                    "bankUiContext": {"bankOpen": False},
+                },
+            },
+            control={"state": {"taskPolicy": "woodcutting_bank"}},
+        )
+        text = panel.format_mission_control_status(mission)
+
+        self.assertEqual(mission["lifecycleState"], "waiting_for_result")
+        self.assertEqual(mission["lifecycleReason"], "client_processing_previous_action")
+        self.assertIn("Action Lifecycle:", text)
+        self.assertIn("State: waiting_for_result", text)
+
     def test_mission_control_cycle_summary_writes_no_files(self):
         with tempfile.TemporaryDirectory() as temp:
             before = set(os.listdir(temp))

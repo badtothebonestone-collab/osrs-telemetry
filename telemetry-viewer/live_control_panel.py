@@ -23,6 +23,7 @@ from tkinter import messagebox, ttk
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
 from input_control.action_proposal import build_action_proposal
+from input_control.action_lifecycle import build_lifecycle_diagnostic
 from input_control.diagnostics import point_label
 import live_config_doctor
 import mission_presets
@@ -366,6 +367,31 @@ def _action_proposal_summary(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _action_lifecycle_summary(status: dict[str, Any]) -> dict[str, Any]:
+    try:
+        payload = build_lifecycle_diagnostic(status)
+    except Exception as error:  # noqa: BLE001
+        return {
+            "lifecycleState": "unknown",
+            "lifecycleLastAction": "none",
+            "lifecycleCooldown": "unknown",
+            "lifecycleVerification": "unknown",
+            "lifecycleAttempts": "unknown",
+            "lifecycleReason": f"lifecycle unavailable: {type(error).__name__}",
+        }
+    lifecycle = payload.get("lifecycleState") if isinstance(payload.get("lifecycleState"), dict) else {}
+    observed = payload.get("observedResult") if isinstance(payload.get("observedResult"), dict) else {}
+    cooldown = payload.get("cooldown") if isinstance(payload.get("cooldown"), dict) else {}
+    return {
+        "lifecycleState": lifecycle.get("currentState") or "unknown",
+        "lifecycleLastAction": payload.get("lastAction") or lifecycle.get("lastAction") or "none",
+        "lifecycleCooldown": cooldown.get("cooldownUntilUtc") or cooldown.get("cooldownUntilTick") or "none",
+        "lifecycleVerification": observed.get("verificationStatus") or "unknown",
+        "lifecycleAttempts": payload.get("attempts") if payload.get("attempts") is not None else lifecycle.get("attempts", "unknown"),
+        "lifecycleReason": payload.get("reason") or lifecycle.get("reason") or "unknown",
+    }
+
+
 def _compact_target_from(*targets: Any) -> str:
     for candidate in targets:
         label = _compact_target_label(candidate if isinstance(candidate, dict) else None)
@@ -495,6 +521,12 @@ def build_mission_control_status(
             "actionClickPoint": "none",
             "actionMovementProfile": "linear_debug",
             "lastExecutionResult": "unknown",
+            "lifecycleState": "unknown",
+            "lifecycleLastAction": "none",
+            "lifecycleCooldown": "unknown",
+            "lifecycleVerification": "unknown",
+            "lifecycleAttempts": "unknown",
+            "lifecycleReason": "daemon unavailable",
             "latestWarningCount": 0,
             "missingCapabilityCount": 0,
             "noFileStatus": "WARN",
@@ -554,6 +586,7 @@ def build_mission_control_status(
         status.get("selectedServiceTargetName"),
     )
     action_summary = _action_proposal_summary(status)
+    lifecycle_summary = _action_lifecycle_summary(status)
     mission = {
         "daemonHealth": "PASS" if health.get("liveCoreDaemonActive") else "WARN",
         "daemonStatus": "running" if health.get("liveCoreDaemonActive") else "stopped",
@@ -603,6 +636,7 @@ def build_mission_control_status(
         "suggestedNextStep": "",
     }
     mission.update(action_summary)
+    mission.update(lifecycle_summary)
     return mission
 
 
@@ -634,6 +668,9 @@ def format_mission_control_status(mission: dict[str, Any]) -> str:
             f"  Action: {mission.get('proposedAction')} | target: {mission.get('actionTarget')} | confidence: {mission.get('actionConfidence')}",
             f"  Reason: {mission.get('actionReason')} | click: {mission.get('actionClickPoint')}",
             f"  Movement: {mission.get('actionMovementProfile')} | last result: {mission.get('lastExecutionResult')}",
+            "Action Lifecycle:",
+            f"  State: {mission.get('lifecycleState')} | last: {mission.get('lifecycleLastAction')} | verification: {mission.get('lifecycleVerification')}",
+            f"  Cooldown: {mission.get('lifecycleCooldown')} | attempts: {mission.get('lifecycleAttempts')} | reason: {mission.get('lifecycleReason')}",
             "Health:",
             f"  Overlay: {mission.get('overlayStatus')} | live QA: {mission.get('liveQaStatus')} | gauntlet: {mission.get('gauntletStatus')}",
             f"  Warnings/missing: {mission.get('latestWarningCount')} / {mission.get('missingCapabilityCount')} | noActionEmitted: {mission.get('noActionEmitted')}",
