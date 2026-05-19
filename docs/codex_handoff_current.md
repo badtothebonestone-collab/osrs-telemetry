@@ -83,6 +83,16 @@ RuneLite plugin
   woodcut_bank states without RuneLite or daemon state.
 ## Current Completed Milestone: Resource Return Destination / Resource Area Memory v1
 
+## Current Completed Milestone: Full Cycle Synthetic Scenario Suite v1
+
+Full Cycle Synthetic Scenario Suite v1 works.
+
+Diagnostic commands:
+```powershell
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --scenario bank_closed_return_memory
+python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --json
+
 Resource Return Destination / Resource Area Memory v1 works and has been live-tested.
 
 Live QA:
