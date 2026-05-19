@@ -336,6 +336,24 @@ health, full-cycle context, cycle history, service/path, bank UI/operation,
 return/resource-return state, overlay selection, and gauntlet-style semantic
 deferrals without writing files.
 
+RuneLite dev bootstrap helper for already-authenticated startup flow:
+
+```text
+python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --dry-run
+python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --start-daemon --run-live-qa
+python telemetry-viewer\run_runelite_bootstrap.py --skip-runelite-launch --execute --start-daemon --run-live-qa
+python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --move-to-secondary-monitor --start-daemon --run-live-qa --print-candidates --timeout-seconds 180
+```
+
+The bootstrap helper may launch `.\gradlew.bat run`, focus a matching
+RuneLite/Jagex/Java window, click one deterministic Play/Continue/CLICK HERE TO
+PLAY-style candidate at a time, optionally move the client to the secondary
+monitor, wait for the plugin snapshot endpoint to report `LOGGED_IN`, start or
+reuse the daily daemon, and run the woodcut-bank live QA runner. It never types
+passwords, changes account settings, stores credentials, selects worlds, or
+writes JSON/NDJSON files; if a credential/account prompt is detected or
+suspected it stops with `blocked_user_login_required`.
+
 Use `diagnose_woodcut_bank_scenarios.py` for fixed synthetic state-machine
 coverage without RuneLite or live daemon state. It reuses the existing
 woodcut-bank cycle classifier and service analyzer logic and prints to stdout

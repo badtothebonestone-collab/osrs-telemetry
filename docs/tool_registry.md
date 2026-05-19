@@ -31,6 +31,7 @@ These are the only tools that belong in the main daily view.
 | `live_config_doctor.py` | Preset-aware PASS/WARN/FAIL check for daily settings. | `python telemetry-viewer\live_config_doctor.py --latest-session --mode daily --fix-suggestions` or `--mode snapshot_no_file` |
 | `run_daily_gauntlet.py` | Strict daily sanity check for daemon health, process conflicts, progress invariants, and required context domains. | `python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode compact-packets --strict --check-processes` |
 | `run_woodcut_bank_live_qa.py` | One-command woodcut_bank live QA runner. Checks plugin snapshot login, daemon health, full cycle context, history, resource-return state, and gauntlet-style semantic deferrals. | `python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20` |
+| `run_runelite_bootstrap.py` | RuneLite dev bootstrap helper for already-authenticated Play/Continue/CLICK HERE TO PLAY startup flow. It launches/focuses RuneLite when requested, can move it to a secondary monitor, waits for `LOGGED_IN`, starts/reuses the daemon, and can run live QA. It does not type credentials, change account settings, or select worlds. | `python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --move-to-secondary-monitor --start-daemon --run-live-qa --print-candidates --timeout-seconds 180` |
 
 Daily support modules are hidden from the UI but remain part of the daily lane:
 
@@ -102,6 +103,10 @@ python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.
 python telemetry-viewer\diagnose_woodcut_bank_scenarios.py
 python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --scenario bank_closed_return_memory
 python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --json
+python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --dry-run
+python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --start-daemon --run-live-qa
+python telemetry-viewer\run_runelite_bootstrap.py --skip-runelite-launch --execute --start-daemon --run-live-qa
+python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --move-to-secondary-monitor --start-daemon --run-live-qa --print-candidates --timeout-seconds 180
 ```
 
 ## Legacy File Pipeline

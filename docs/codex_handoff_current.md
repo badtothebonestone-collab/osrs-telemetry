@@ -56,7 +56,15 @@ RuneLite plugin
 - Full Cycle Synthetic Scenario Suite v1 works.
 - Full Cycle Live QA Runner v1 works.
 - Mission Control Cycle Summary v1 works and has live panel QA.
-- Stabilization suite currently passes 102/102.
+- Unified Input Control Package v1 works.
+- Dynamic RuneLite Canvas Geometry v1 works.
+- Action Lifecycle Cooldown / Single-Action Loop v1 works.
+- RuneLite Dev Bootstrap / Login Flow Helper v2 is implemented. Current live
+  run confirms launch, secondary-monitor placement, bounded startup clicks,
+  `LOGGED_IN` detection, daemon start/reuse, and live QA handoff. The bootstrap
+  waits after `Play Now` for the server transition before clicking the final
+  `CLICK HERE TO PLAY` panel.
+- Stabilization suite currently passes 130/130.
 
 ## Woodcut Bank Cycle Summary
 
@@ -92,6 +100,23 @@ One-command live QA:
 ```powershell
 python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
 ```
+
+RuneLite dev bootstrap:
+
+```powershell
+python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --dry-run
+python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --start-daemon --run-live-qa
+python telemetry-viewer\run_runelite_bootstrap.py --skip-runelite-launch --execute --start-daemon --run-live-qa
+python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --move-to-secondary-monitor --start-daemon --run-live-qa --print-candidates --timeout-seconds 180
+```
+
+The bootstrap helper is only for already-authenticated startup flow. It may
+launch `.\gradlew.bat run`, focus a RuneLite/Jagex/Java window, optionally move
+the client to the secondary monitor, click deterministic Play/Continue/CLICK
+HERE TO PLAY candidates, wait for `LOGGED_IN`, start/reuse the daily daemon,
+and run the live QA runner. It must not type passwords, change account settings,
+store credentials, select worlds, or change worlds; if a real login/account
+confirmation prompt appears, stop and let the user handle it.
 
 Synthetic scenario suite:
 
@@ -192,6 +217,12 @@ Preferred live QA flow:
 
    ```powershell
    .\gradlew.bat run
+   ```
+
+   Or use the bootstrap helper:
+
+   ```powershell
+   python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --move-to-secondary-monitor --start-daemon --run-live-qa --print-candidates --timeout-seconds 180
    ```
 
 2. If RuneLite requires login, account confirmation, or anything
