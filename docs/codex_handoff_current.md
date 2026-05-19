@@ -1,4 +1,4 @@
-# Current Codex Handoff
+﻿# Current Codex Handoff
 
 Repo:
 `C:\Users\stone\osrs-telemetry\example-plugin`
@@ -224,7 +224,12 @@ Preferred live QA flow:
    ```powershell
    python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --move-to-secondary-monitor --start-daemon --run-live-qa --print-candidates --timeout-seconds 180
    ```
+## Current Live QA Entry Point
 
+Preferred full live QA/bootstrap command:
+
+```powershell
+python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --move-to-secondary-monitor --start-daemon --run-live-qa --print-candidates --template-confidence 0.85 --timeout-seconds 180
 2. If RuneLite requires login, account confirmation, or anything
    credential-related, stop and ask the user to handle it.
 3. Once the user confirms the client is logged in, continue automatically.
