@@ -92,15 +92,30 @@ def _best_resource_target(target_context: TargetContext | dict[str, Any] | None)
         ("nearest_target", "nearestTarget"),
     ):
         target = _context_value(target_context, key_pair[0], key_pair[1])
-        if isinstance(target, dict) and target:
+        if isinstance(target, dict) and target and _is_resource_target(target):
             return dict(target)
     for key in ("top_candidates", "topCandidates", "profile_candidates", "profileCandidates"):
         candidates = _context_value(target_context, key, key)
         if isinstance(candidates, list):
             for candidate in candidates:
-                if isinstance(candidate, dict) and candidate:
+                if isinstance(candidate, dict) and candidate and _is_resource_target(candidate):
                     return dict(candidate)
     return None
+
+
+def _is_resource_target(target: dict[str, Any] | None) -> bool:
+    if not isinstance(target, dict):
+        return False
+    class_id = str(target.get("classId") or target.get("targetClass") or "").strip().lower()
+    target_type = str(target.get("targetType") or target.get("type") or "").strip().lower()
+    name = str(target.get("targetName") or target.get("name") or "").strip().lower()
+    if class_id in {"resource_return", "service_route_anchor", "path_tile", "destination", "unknown"}:
+        return False
+    if target_type in {"tile", "path_tile", "service_route_anchor", "resource_return"}:
+        return False
+    if class_id in {"tree", "woodcutting_tree"}:
+        return True
+    return target_type == "sceneobject" and "tree" in name
 
 
 def _target_reachability(target: dict[str, Any] | None) -> str | None:

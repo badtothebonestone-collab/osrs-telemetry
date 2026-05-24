@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import capabilities
 import intent_stabilizer
+import safe_aimpoint_core
 
 from analyzers.live_state import IntentOverlayContext
 
@@ -15,6 +17,7 @@ OVERLAY_DEBUG_SCHEMA = "telemetry_overlay_debug_state.v1"
 OVERLAY_MODES = {"intent", "candidates", "debug"}
 DAILY_PREDICTED_PATH_LIMIT = 24
 DEBUG_PREDICTED_PATH_LIMIT = 24
+MAX_REASONABLE_CANVAS_COORDINATE = 100000.0
 
 
 def candidate_identity(candidate: dict | None) -> tuple:
@@ -120,11 +123,61 @@ def best_marker_geometry_source(marker: dict) -> str:
     return "none"
 
 
+def marker_raw_aimpoint_invalid(safe_aimpoint: dict | None) -> bool:
+    if not isinstance(safe_aimpoint, dict):
+        return False
+    raw = safe_aimpoint.get("rawAimPoint")
+    if not isinstance(raw, dict):
+        return False
+    for axis in ("x", "y"):
+        value = raw.get(axis)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or abs(float(value)) > MAX_REASONABLE_CANVAS_COORDINATE:
+            return True
+    return False
+
+
+def marker_should_have_safe_aimpoint(marker: dict, geometry_source: str) -> bool:
+    if marker.get("markerType") not in {"selected_target", "backup_candidate"}:
+        return False
+    return (
+        geometry_source != "none"
+        or isinstance(marker.get("aimPoint"), dict)
+        or any(marker.get(key) is not None for key in ("worldX", "worldY", "sceneX", "sceneY", "localX", "localY"))
+    )
+
+
+def attach_marker_safe_aimpoint(marker: dict, geometry_source: str) -> None:
+    if not marker_should_have_safe_aimpoint(marker, geometry_source):
+        return
+    safe = safe_aimpoint_core.safe_aimpoint_for_target(marker)
+    actionable = safe.get("status") == "PASS"
+    marker["safeAimPoint"] = safe
+    marker["actionable"] = actionable
+    marker["validButUnsafe"] = not actionable
+    if marker_raw_aimpoint_invalid(safe):
+        marker["validButUnsafeReason"] = "invalidAimPoint"
+    elif not actionable:
+        marker["validButUnsafeReason"] = safe.get("rejectionReason") or "noSafeVisibleAimPoint"
+
+
+def attach_marker_resource_projection_status(marker: dict) -> None:
+    if not isinstance(marker.get("safeAimPoint"), dict):
+        return
+    projection = safe_aimpoint_core.resource_projection_status(
+        marker,
+        safe_aimpoint=marker.get("safeAimPoint"),
+        stale_projection=marker.get("projectionStale"),
+    )
+    marker["resourceProjectionStatus"] = projection
+    marker["recoverySuggested"] = bool(projection.get("recoverySuggested"))
+
+
 def finalize_intent_marker(marker: dict) -> dict:
     source = best_marker_geometry_source(marker)
     if source != "none" and (source != "aimPoint" or not marker.get("geometrySource")):
         marker["geometrySource"] = source
     marker["clickableHullAvailable"] = source in {"clickableHull", "clickboxPolygon"}
+    attach_marker_safe_aimpoint(marker, source)
     has_projection_identity = any(marker.get(key) is not None for key in ("worldX", "worldY", "sceneX", "sceneY", "localX", "localY"))
     target_type = marker.get("targetType")
     if target_type == "sceneObject" and has_projection_identity:
@@ -147,6 +200,7 @@ def finalize_intent_marker(marker: dict) -> dict:
         marker["projectionMode"] = "label_only"
         marker["projectionStale"] = True
         marker["projectionFallbackReason"] = "stable world/scene/local identity unavailable"
+    attach_marker_resource_projection_status(marker)
     if marker.get("objectKey"):
         marker["markerId"] = marker.get("objectKey")
     return marker
@@ -558,6 +612,12 @@ def overlay_target_from_intent_marker(marker: dict) -> dict:
         "overlayLabel": marker.get("label"),
         "aimPoint": marker.get("aimPoint"),
         "bounds": marker.get("bounds"),
+        "safeAimPoint": marker.get("safeAimPoint"),
+        "resourceProjectionStatus": marker.get("resourceProjectionStatus"),
+        "recoverySuggested": marker.get("recoverySuggested"),
+        "actionable": marker.get("actionable"),
+        "validButUnsafe": marker.get("validButUnsafe"),
+        "validButUnsafeReason": marker.get("validButUnsafeReason"),
         "clickableHullAvailable": marker.get("clickableHullAvailable"),
         "clickableHull": marker.get("clickableHull"),
         "clickboxPolygon": marker.get("clickboxPolygon"),
@@ -565,6 +625,55 @@ def overlay_target_from_intent_marker(marker: dict) -> dict:
         "canvasTilePolygon": marker.get("canvasTilePolygon"),
     }
     return {key: value for key, value in target.items() if value is not None}
+
+
+def marker_projection_status(marker: dict) -> dict:
+    value = marker.get("resourceProjectionStatus")
+    return value if isinstance(value, dict) else {}
+
+
+def invalid_aimpoint_reason_counts(markers: list[dict]) -> dict:
+    reasons: Counter[str] = Counter()
+    for marker in markers:
+        if marker.get("actionable"):
+            continue
+        projection = marker_projection_status(marker)
+        reason = projection.get("classification") or marker.get("validButUnsafeReason") or "unknown"
+        reasons[str(reason)] += 1
+    return dict(sorted(reasons.items()))
+
+
+def marker_is_projection_sentinel(marker: dict) -> bool:
+    return marker_projection_status(marker).get("projectionSentinel") is True
+
+
+def marker_is_edge_clipped(marker: dict) -> bool:
+    safe = marker.get("safeAimPoint") if isinstance(marker.get("safeAimPoint"), dict) else {}
+    if not safe or marker_is_projection_sentinel(marker):
+        return False
+    ratio = safe.get("clippedVisibleAreaRatio")
+    return (
+        "centerOffViewport" in (safe.get("unsafeReasons") or [])
+        or (isinstance(ratio, (int, float)) and float(ratio) < 1.0)
+    )
+
+
+def compact_resource_target(marker: dict | None) -> dict | None:
+    if not isinstance(marker, dict) or not marker:
+        return None
+    projection = marker_projection_status(marker)
+    return {
+        key: value
+        for key, value in {
+            "name": marker.get("name"),
+            "id": marker.get("id"),
+            "worldX": marker.get("worldX"),
+            "worldY": marker.get("worldY"),
+            "plane": marker.get("plane"),
+            "projectionClassification": projection.get("classification"),
+        }.items()
+        if value is not None
+    }
 
 
 def marker_label_for_candidate(candidate: dict, prefix: str = "Target") -> str:
@@ -730,6 +839,11 @@ def build_intent_overlay_state(
         selected_key = None
         selected_target_type = None
         selected_class_id = None
+    if active_task and active_task not in {"woodcutting", "combat"} and str(selected_class_id or "").lower() in {"tree", "woodcutting_tree"}:
+        selected = None
+        selected_key = None
+        selected_target_type = None
+        selected_class_id = None
     if isinstance(selected, dict) and selected:
         label_prefix = "Service" if service_target_intent(active_intent) else "Target"
         reason = (
@@ -868,6 +982,21 @@ def build_overlay_state_for_mode(
     targets = [overlay_target_from_intent_marker(marker) for marker in markers if marker.get("markerType") != "warning"]
     candidate_marker_count = sum(1 for marker in markers if marker.get("markerType") in {"selected_target", "backup_candidate"})
     selected_marker = next((marker for marker in markers if marker.get("markerType") == "selected_target"), None)
+    selected_target = next((target for target in targets if target.get("markerType") == "selected_target"), None)
+    executable_resource_target = next((target for target in targets if target.get("actionable")), None)
+    recovery_target = next(
+        (
+            target
+            for target in targets
+            if isinstance(target.get("resourceProjectionStatus"), dict)
+            and target["resourceProjectionStatus"].get("recoverySuggested") is True
+        ),
+        None,
+    )
+    service_context = brain_decision.get("serviceContext") if isinstance(brain_decision, dict) and isinstance(brain_decision.get("serviceContext"), dict) else {}
+    service_route_context = brain_decision.get("serviceRouteContext") if isinstance(brain_decision, dict) and isinstance(brain_decision.get("serviceRouteContext"), dict) else {}
+    if not service_route_context and isinstance(service_context.get("serviceRouteContext"), dict):
+        service_route_context = service_context["serviceRouteContext"]
     summary.update(
         {
             "overlayMode": "intent",
@@ -883,7 +1012,39 @@ def build_overlay_state_for_mode(
             "boundsOnlyTargets": sum(1 for marker in targets if best_marker_geometry_source(marker) == "bounds"),
             "aimOnlyTargets": sum(1 for marker in targets if best_marker_geometry_source(marker) == "aimPoint"),
             "selectedTargetAvailable": bool(selected_marker),
+            "selectedTargetPresent": bool(selected_marker),
             "selectedTargetHasClickableHull": bool(selected_marker and best_marker_geometry_source(selected_marker) in {"clickableHull", "clickboxPolygon"}),
+            "selectedSafeAimPoint": bool(selected_marker and selected_marker.get("actionable")),
+            "safeAimpoints": sum(1 for marker in targets if isinstance(marker.get("safeAimPoint"), dict) and marker["safeAimPoint"].get("status") == "PASS"),
+            "executableTargets": sum(1 for marker in targets if marker.get("actionable")),
+            "invalidAimpointTargets": sum(1 for marker in targets if marker.get("validButUnsafeReason") == "invalidAimPoint"),
+            "invalidAimpointTargetsByReason": invalid_aimpoint_reason_counts(targets),
+            "projectionSentinelTargets": sum(1 for marker in targets if marker_is_projection_sentinel(marker)),
+            "edgeClippedCandidates": sum(1 for marker in targets if marker_is_edge_clipped(marker)),
+            "projectionCapHit": bool(status.get("compactLiveGeometryCapHit")),
+            "sourceCapHit": bool(status.get("sourceCapHit")),
+            "recoverySuggested": any(
+                isinstance(marker.get("resourceProjectionStatus"), dict)
+                and marker["resourceProjectionStatus"].get("recoverySuggested") is True
+                for marker in targets
+            ),
+            "recoveryActionReady": bool(recovery_target and not executable_resource_target),
+            "cameraReacquireRecommended": bool(recovery_target),
+            "selectedRecoveryTarget": compact_resource_target(recovery_target),
+            "bestLogicalResourceTarget": compact_resource_target(selected_target),
+            "selectedExecutableResourceTarget": compact_resource_target(executable_resource_target),
+            "legacyEdgeClippedCandidateCount": sum(
+                1
+                for marker in targets
+                if isinstance(marker.get("safeAimPoint"), dict)
+                and (
+                    "centerOffViewport" in (marker["safeAimPoint"].get("unsafeReasons") or [])
+                    or (
+                        isinstance(marker["safeAimPoint"].get("clippedVisibleAreaRatio"), (int, float))
+                        and marker["safeAimPoint"].get("clippedVisibleAreaRatio") < 1.0
+                    )
+                )
+            ),
             "backupMarkerCount": sum(1 for marker in markers if marker.get("markerType") == "backup_candidate"),
             "rawBestTarget": stable_intent.rawBestTargetKey if stable_intent else summary.get("rawBestTarget"),
             "stabilizedIntentTarget": stable_intent.selectedTargetKey if stable_intent else summary.get("stabilizedIntentTarget"),
@@ -891,6 +1052,31 @@ def build_overlay_state_for_mode(
             "intentSwitchReason": stable_intent.switchReason if stable_intent else None,
             "intentRetainedDueToGrace": stable_intent.retainedDueToGrace if stable_intent else False,
             "intentCurrentMissingTicks": stable_intent.currentMissingTicks if stable_intent else 0,
+            "routeObjectsVisible": service_route_context.get("routeObjectsVisible"),
+            "routeObjectsActionable": service_route_context.get("routeObjectsActionable"),
+            "routeRelevantObjects": service_route_context.get("routeRelevantObjects"),
+            "routeRelevantActionableObjects": service_route_context.get("routeRelevantActionableObjects"),
+            "visibleButRouteIrrelevantObjects": service_route_context.get("visibleButRouteIrrelevantObjects"),
+            "selectedRouteObjectPresent": service_route_context.get("selectedRouteObjectPresent"),
+            "selectedRouteObjectAction": service_route_context.get("selectedRouteObjectAction"),
+            "selectedRouteObjectRelevance": service_route_context.get("selectedRouteObjectRelevance"),
+            "routeObjectRejectedReason": service_route_context.get("routeObjectRejectedReason"),
+            "routeObjectInterceptReady": service_route_context.get("routeObjectInterceptReady"),
+            "serviceObjectCandidates": (service_route_context.get("serviceObjectCensus") or {}).get("serviceObjectCandidatesTotal")
+            if isinstance(service_route_context.get("serviceObjectCensus"), dict)
+            else None,
+            "serviceObjectsVisible": service_route_context.get("serviceObjectsVisible"),
+            "serviceObjectsActionable": service_route_context.get("serviceObjectsActionable"),
+            "routeRelevantServiceObjects": service_route_context.get("routeRelevantServiceObjects"),
+            "routeRelevantActionableServiceObjects": service_route_context.get("routeRelevantActionableServiceObjects"),
+            "selectedServiceObject": service_route_context.get("selectedServiceObject"),
+            "selectedServiceAction": service_route_context.get("selectedServiceAction"),
+            "selectedServiceObjectRelevance": service_route_context.get("selectedServiceObjectRelevance"),
+            "serviceObjectRejectedReason": service_route_context.get("serviceObjectRejectedReason"),
+            "serviceObjectInterceptReady": service_route_context.get("serviceObjectInterceptReady"),
+            "currentRouteNode": service_route_context.get("currentNodeId"),
+            "currentRouteEdge": (service_route_context.get("nextEdge") or {}).get("type") if isinstance(service_route_context.get("nextEdge"), dict) else None,
+            "routeWallLoopDetected": service_route_context.get("routeWallLoopDetected"),
             "pathingMarkerCount": sum(1 for marker in markers if marker.get("source") == "pathing_context"),
             **intent.get("pathingOverlaySummary", {}),
         }

@@ -140,7 +140,7 @@ class PyAutoGuiBackend:
         point = pyautogui.position()
         return int(point.x), int(point.y)
 
-    def move_and_click(self, plan: Any, *, button: str = "left") -> None:
+    def move(self, plan: Any) -> None:
         pyautogui = self._load_pyautogui()
         self.focus_window()
         last_time = 0
@@ -148,12 +148,47 @@ class PyAutoGuiBackend:
             duration = max(0.0, (int(point.timestamp_ms or 0) - last_time) / 1000.0)
             pyautogui.moveTo(int(point.x), int(point.y), duration=duration)
             last_time = int(point.timestamp_ms or 0)
-        pyautogui.click(int(plan.click_point.x), int(plan.click_point.y), button=button)
+
+    def click_at(self, x: int, y: int, *, button: str = "left", hold_ms: int = 0) -> None:
+        pyautogui = self._load_pyautogui()
+        pyautogui.moveTo(int(x), int(y), duration=0)
+        if hold_ms > 0:
+            pyautogui.mouseDown(button=button)
+            time.sleep(max(0.0, float(hold_ms) / 1000.0))
+            pyautogui.mouseUp(button=button)
+            return
+        pyautogui.click(button=button)
+
+    def move_and_click(self, plan: Any, *, button: str = "left") -> None:
+        self.move(plan)
+        self.click_at(int(plan.click_point.x), int(plan.click_point.y), button=button)
 
     def press(self, key: str) -> None:
         pyautogui = self._load_pyautogui()
         self.focus_window()
         pyautogui.press(key)
+
+    def key_down(self, key: str) -> None:
+        pyautogui = self._load_pyautogui()
+        self.focus_window()
+        pyautogui.keyDown(key)
+
+    def key_up(self, key: str) -> None:
+        pyautogui = self._load_pyautogui()
+        pyautogui.keyUp(key)
+
+    def mouse_down(self, *, button: str = "left") -> None:
+        pyautogui = self._load_pyautogui()
+        self.focus_window()
+        pyautogui.mouseDown(button=button)
+
+    def mouse_up(self, *, button: str = "left") -> None:
+        pyautogui = self._load_pyautogui()
+        pyautogui.mouseUp(button=button)
+
+    def move_relative(self, dx: int, dy: int, *, duration_ms: int = 0) -> None:
+        pyautogui = self._load_pyautogui()
+        pyautogui.moveRel(int(dx), int(dy), duration=max(0.0, float(duration_ms) / 1000.0))
 
     def hotkey(self, *keys: str) -> None:
         pyautogui = self._load_pyautogui()

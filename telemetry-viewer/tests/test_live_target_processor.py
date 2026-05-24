@@ -596,6 +596,93 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual([record[2]["tickId"] for record in records], [2])
             self.assertEqual(tailer.malformed_total, 0)
 
+    def test_live_inspector_default_prefers_session_with_live_overlay_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            new_empty = root / "new-empty"
+            old_live = root / "old-live"
+            new_empty.mkdir(parents=True)
+            (new_empty / "manifest.json").write_text("{}", encoding="utf-8")
+            overlay = old_live / "interaction_geometry" / "live" / "overlay_debug_state.json"
+            overlay.parent.mkdir(parents=True)
+            overlay.write_text("{}", encoding="utf-8")
+
+            resolved = inspector.resolve_session(
+                SimpleNamespace(
+                    session=None,
+                    sessions_dir=str(root),
+                    live=True,
+                    from_daemon=False,
+                    daemon_url="http://127.0.0.1:1",
+                    daemon_timeout=0.01,
+                )
+            )
+
+            self.assertEqual(resolved, old_live)
+
+    def test_live_processor_can_resolve_daemon_session_instead_of_empty_latest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            daemon_session = root / "daemon-active"
+            new_empty = root / "new-empty"
+            write_jsonl(daemon_session / "ticks" / "ticks-000001.jsonl", [raw_tick(1)])
+            new_empty.mkdir(parents=True)
+            (new_empty / "manifest.json").write_text('{"sessionId":"new-empty"}', encoding="utf-8")
+            os.utime(new_empty / "manifest.json", (4102444800, 4102444800))
+
+            args = live_args(
+                session=None,
+                latest_session=True,
+                from_daemon=True,
+                daemon_url="http://127.0.0.1:8890",
+                daemon_timeout=0.01,
+                sessions_dir=str(root),
+            )
+            with mock.patch("live_session_core.fetch_json", return_value={"sessionPath": str(daemon_session)}):
+                resolved = live.resolve_session(args)
+
+            self.assertEqual(resolved, daemon_session.resolve())
+
+    def test_live_inspector_uses_overlay_debug_state_when_live_candidates_are_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            overlay_path = session / "interaction_geometry" / "live" / "overlay_debug_state.json"
+            overlay_marker = {
+                "name": "Tree",
+                "classId": "tree",
+                "targetType": "sceneObject",
+                "targetKey": "tree-a",
+                "objectKey": "tree-a",
+                "selected": True,
+                "role": "selected",
+                "id": 1276,
+                "worldX": 3200,
+                "worldY": 3201,
+                "plane": 0,
+                "tick": 10,
+                "onScreen": True,
+                "geometryAvailable": True,
+                "aimPoint": {"x": 100, "y": 120},
+                "bounds": {"x": 90, "y": 100, "w": 20, "h": 40},
+            }
+            write_jsonl(session / "ticks" / "ticks-000001.jsonl", [raw_tick(10)])
+            overlay_path.parent.mkdir(parents=True, exist_ok=True)
+            overlay_path.write_text(
+                json.dumps({"schema": "telemetry_overlay_debug_state.v1", "latestTick": 10, "targets": [overlay_marker]}),
+                encoding="utf-8",
+            )
+
+            dataset = inspector.GeometryDataset(session, live=True)
+            dataset.load()
+            summary = dataset.summary()
+
+            self.assertEqual(summary["sourceType"], "overlay_debug_state")
+            self.assertEqual(summary["sourcePath"], str(overlay_path))
+            self.assertEqual(summary["overlayMarkerCount"], 1)
+            self.assertTrue(summary["selectedTargetPresent"])
+            self.assertEqual(summary["targetCandidateCount"], 1)
+            self.assertNotIn("Run python telemetry-viewer\\live_target_processor.py first.", summary["messages"])
+
     def test_tailer_counts_malformed_lines_but_keeps_valid_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp), [])
@@ -901,6 +988,27 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(status["pluginSnapshotProjectionRefListPath"], "projectedRefs")
             self.assertEqual(status["pluginSnapshotRefsConverted"], 1)
 
+    def test_woodcutting_profile_rejects_ambiguous_pear_tree_without_chop_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = raw_scene_object(1276, 3204, 3201, 150, 100, name="Tree", actions=["Chop down"], object_key="valid-tree")
+            pear = raw_scene_object(999001, 3201, 3201, 110, 100, name="Pear tree", actions=["Pick fruit"], object_key="pear-tree")
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [pear, tree]}))
+            response["payloads"]["projection"] = {
+                "sceneProjectionSummary": {"visibleObjectCount": 2},
+                "projectedRefs": [compact_scene_object(pear), compact_scene_object(tree)],
+            }
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot", profile="woodcutting"))
+                _added, result = processor.poll_once()
+
+            object_keys = {candidate.get("objectKey") for candidate in result["candidates"]}
+            self.assertIn("valid-tree", object_keys)
+            self.assertNotIn("pear-tree", object_keys)
+            reject_reasons = result["status"].get("pluginSnapshotPrefilterRejectReasons") or result["status"].get("pluginSnapshotCandidateRejectReasons") or {}
+            self.assertGreaterEqual(reject_reasons.get("ambiguousTreeNoChopAction", 0), 1)
+
     def test_plugin_snapshot_missing_name_actions_still_builds_world_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             tree = raw_scene_object(10820, 3201, 3201, 110, 100, name="Oak tree", object_key="snapshot-unknown-oak")
@@ -949,6 +1057,14 @@ class LiveTargetProcessorTest(unittest.TestCase):
             tree = raw_scene_object(1276, 3201, 3201, 110, 100, object_key="snapshot-tree")
             session = make_session(Path(tmp), [])
             response = snapshot_response_from_lines(compact_packet_lines(session, {1: [tree]}), warnings=["projection refs capped"])
+            response["clientTickHot"] = {
+                "schema": "client_tick_hot.v1",
+                "clientTick": 33,
+                "gameTickAtSample": 1,
+                "postMenuSort": {"topOption": "Chop down", "topTarget": "Tree"},
+                "lastMenuOptionClicked": {"option": "Chop down", "target": "Tree"},
+                "latency": {"postMenuSortAgeMillis": 12, "lastClickAgeMillis": 24, "samplesBuffered": 3},
+            }
 
             with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
                 processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot"))
@@ -962,6 +1078,9 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertIn("projection", status["pluginSnapshotPayloadTypes"])
             self.assertEqual(status["pluginSnapshotProjectionRefs"], 1)
             self.assertTrue(status["pluginSnapshotProjectionCapped"])
+            self.assertEqual(status["clientTickHotSchema"], "client_tick_hot.v1")
+            self.assertEqual(status["clientTickTopOption"], "Chop down")
+            self.assertEqual(status["clientTickLastClickedOption"], "Chop down")
             self.assertEqual(status["candidateCount"], 1)
             self.assertEqual(result["candidates"][0]["objectKey"], "snapshot-tree")
 
@@ -1040,18 +1159,31 @@ class LiveTargetProcessorTest(unittest.TestCase):
         self.assertTrue(body["requireOnScreen"])
         self.assertTrue(body["requireGeometryAvailable"])
         self.assertEqual(body["desiredClasses"], ["tree"])
+        self.assertIn("interaction_hot", body["needs"])
         self.assertIn("projection", body["needs"])
         self.assertIn("writer_health", body["needs"])
 
     def test_plugin_snapshot_request_adds_service_hints_for_service_policy(self):
         body = live.plugin_snapshot_request_body(live_args(input_source="plugin-snapshot", task_policy="woodcutting_bank"))
 
+        self.assertEqual(body["maxProjectionRefs"], 150)
         self.assertEqual(body["classHint"], "tree")
         self.assertNotIn("targetTypeHint", body)
         self.assertIn("tree", body["desiredClasses"])
         self.assertIn("bank_related", body["desiredClasses"])
         self.assertIn("banker", body["desiredClasses"])
         self.assertIn("deposit_box", body["desiredClasses"])
+        self.assertIn("route_transition", body["desiredClasses"])
+
+    def test_plugin_snapshot_request_adds_service_hints_for_service_preset(self):
+        body = live.plugin_snapshot_request_body(live_args(input_source="plugin-snapshot", preset="woodcut_bank"))
+
+        self.assertEqual(body["maxProjectionRefs"], 150)
+        self.assertEqual(body["classHint"], "tree")
+        self.assertNotIn("targetTypeHint", body)
+        self.assertIn("tree", body["desiredClasses"])
+        self.assertIn("bank_related", body["desiredClasses"])
+        self.assertIn("route_transition", body["desiredClasses"])
 
     def test_plugin_snapshot_tier_defaults_and_manual_override(self):
         hot = live.plugin_snapshot_request_body(live_args(plugin_snapshot_tier="hot", plugin_snapshot_max_projection_refs=None))
@@ -1063,6 +1195,17 @@ class LiveTargetProcessorTest(unittest.TestCase):
         self.assertEqual(expanded["maxProjectionRefs"], 500)
         self.assertEqual(audit["maxProjectionRefs"], 2000)
         self.assertEqual(manual["maxProjectionRefs"], 77)
+        service_hot = live.plugin_snapshot_request_body(live_args(plugin_snapshot_tier="hot", plugin_snapshot_max_projection_refs=None, preset="woodcut_bank"))
+        self.assertEqual(service_hot["maxProjectionRefs"], 150)
+
+    def test_plugin_snapshot_tailer_preserves_service_preset_in_request_body(self):
+        tailer = live.PluginSnapshotTailer(profile="woodcutting", preset="woodcut_bank", snapshot_tier="hot", max_projection_refs=None)
+
+        body = tailer.request_body()
+
+        self.assertEqual(tailer.max_projection_refs, 150)
+        self.assertEqual(body["maxProjectionRefs"], 150)
+        self.assertIn("route_transition", body["desiredClasses"])
 
     def test_plugin_snapshot_timeout_is_reported(self):
         tailer = live.PluginSnapshotTailer("127.0.0.1", 8893, timeout=0.01)
@@ -1268,6 +1411,30 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertIn("prefilter-oak", object_keys)
             self.assertIn("prefilter-bank", object_keys)
             self.assertNotIn("prefilter-rock", object_keys)
+
+    def test_plugin_snapshot_prefilter_keeps_route_transition_primary_class(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stair = raw_scene_object(
+                56230,
+                3204,
+                3229,
+                504,
+                134,
+                name="Staircase",
+                actions=["Climb-up", "Top-floor"],
+                object_key="prefilter-stair",
+            )
+            session = make_session(Path(tmp), [])
+            response = snapshot_response_from_lines(compact_packet_lines(session, {1: [stair]}))
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                processor = live.LiveTargetProcessor(session, live_args(input_source="plugin-snapshot", preset="woodcut_bank"))
+                _added, result = processor.poll_once()
+
+            self.assertEqual(result["status"]["pluginSnapshotRefsBeforePrefilter"], 1)
+            self.assertEqual(result["status"]["pluginSnapshotRefsAfterPrefilter"], 1)
+            self.assertEqual(result["candidates"][0]["classId"], "route_transition")
+            self.assertEqual(result["candidates"][0].get("targetName") or result["candidates"][0].get("name"), "Staircase")
 
     def test_plugin_snapshot_bottleneck_identifies_largest_bucket(self):
         self.assertEqual(
@@ -2352,6 +2519,53 @@ class LiveTargetProcessorTest(unittest.TestCase):
             self.assertEqual(state["targets"][0]["labelParts"]["reachability"], "R")
             self.assertEqual(state["targets"][0]["overlayColor"], "green")
             self.assertNotIn("BLOCK", state["targets"][0]["overlayLabel"])
+
+    def test_overlay_debug_state_reports_invalid_sentinel_aimpoint_as_not_actionable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), [raw_tick(1)])
+            candidate = {
+                "rank": 1,
+                "classId": "tree",
+                "name": "Oak tree",
+                "id": 10820,
+                "objectKey": "oak-edge",
+                "worldX": 3189,
+                "worldY": 3248,
+                "plane": 0,
+                "onScreen": True,
+                "geometryAvailable": True,
+                "qualityTier": "excellent",
+                "qualityScore": 1.0,
+                "targetLiveState": "live",
+                "aimPointContext": {"canvasX": 2147483647.5, "canvasY": 2147483647.5, "source": "live_object_pending"},
+                "geometrySummary": {"bounds": {"x": 2147483647, "y": 2147483647, "width": 1, "height": 1}},
+                "navigation": {"directReachability": "reachable", "reachabilityConfidence": 0.9},
+            }
+
+            state = live.overlay_debug_state_for(
+                session,
+                live_args(profile="woodcutting", overlay_debug_target_limit=1),
+                {
+                    "tickId": 1,
+                    "canvasWidth": 765,
+                    "canvasHeight": 503,
+                    "localPlayer": {"worldX": 3200, "worldY": 3200, "plane": 0, "sceneX": 10, "sceneY": 10},
+                },
+                [candidate],
+                {"collisionWindowAvailable": True, "collisionWindowRadius": 24, "playerSceneX": 10, "playerSceneY": 10},
+                {"budgetExceeded": False, "writeFailureCount": 0, "warnings": []},
+                "2026-01-01T00:00:00Z",
+            )
+
+            self.assertEqual(state["summary"]["targetsWritten"], 1)
+            self.assertEqual(state["summary"]["safeAimpoints"], 0)
+            self.assertEqual(state["summary"]["executableTargets"], 0)
+            self.assertEqual(state["summary"]["invalidAimpointTargets"], 1)
+            self.assertFalse(state["summary"]["selectedSafeAimPoint"])
+            self.assertIsNone(state["targets"][0]["aimPoint"])
+            self.assertIsNone(state["targets"][0]["bounds"])
+            self.assertFalse(state["targets"][0]["actionable"])
+            self.assertEqual(state["targets"][0]["validButUnsafeReason"], "invalidAimPoint")
 
     def test_overlay_debug_state_hull_limit_is_applied_after_ranking(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -99,6 +99,26 @@ def _normalize_summary(summary: Any) -> dict[str, Any]:
     return normalized
 
 
+def _normalize_inventory_slots(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    slots: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        slot = _int_value(item.get("slot"))
+        item_id = _int_value(item.get("itemId"))
+        quantity = _int_value(item.get("quantity"))
+        if slot is None or item_id is None or quantity is None or item_id <= 0 or quantity <= 0:
+            continue
+        normalized = dict(item)
+        normalized["slot"] = slot
+        normalized["itemId"] = item_id
+        normalized["quantity"] = quantity
+        slots.append(normalized)
+    return slots
+
+
 def _service_ready(service_context: Any, pathing_context: Any) -> bool:
     service_ready = _context_value(service_context, "service_ready", "serviceReady")
     if isinstance(service_ready, bool):
@@ -166,6 +186,7 @@ def analyze_bank_ui_context(
     if not inventory_summary:
         inventory_summary = _summary_from_inventory_context(inventory_context)
     bank_summary = _normalize_summary(payload.get("bankSummary"))
+    inventory_slots = _normalize_inventory_slots(payload.get("inventorySlots") or payload.get("inventorySlotWidgets"))
 
     status = "PASS"
     if missing or warnings:
@@ -207,6 +228,7 @@ def analyze_bank_ui_context(
         keyboard_close_possible=keyboard_close_possible,
         inventory_summary=inventory_summary,
         bank_summary=bank_summary,
+        inventory_slots=inventory_slots,
         service_ready=service_ready,
         reason=reason,
     )

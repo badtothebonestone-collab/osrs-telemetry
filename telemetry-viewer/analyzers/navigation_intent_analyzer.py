@@ -12,12 +12,14 @@ from analyzers.live_state import NavigationIntentContext
 
 SERVICE_TARGET_AVAILABLE = "service_target_available"
 SERVICE_TARGET_MISSING = "service_target_missing"
+SERVICE_ROUTE_PRIOR = "service_route_prior"
 TARGET_REACHABLE = "target_reachable"
 TARGET_UNREACHABLE = "target_unreachable"
 LOCAL_NAVIGATION_ONLY = "local_navigation_only"
 FULL_PATHFINDING_MISSING = "full_pathfinding_missing"
 
 TARGET_KIND_SERVICE = "service"
+TARGET_KIND_SERVICE_ROUTE = "service_route"
 TARGET_KIND_RESOURCE = "resource"
 TARGET_KIND_PROCESS_INVENTORY = "process_inventory"
 TARGET_KIND_NONE = "none"
@@ -158,6 +160,25 @@ def service_navigation_context(
 ) -> NavigationIntentContext:
     destination = context_value(service_context, "best_service_candidate", "bestServiceCandidate")
     if not isinstance(destination, dict) or not destination:
+        route_context = context_value(service_context, "service_route_context", "serviceRouteContext")
+        route_context = route_context if isinstance(route_context, dict) else {}
+        route_destination = route_context.get("currentNavigationTarget")
+        if isinstance(route_destination, dict) and route_destination:
+            warnings = [str(item) for item in route_context.get("warnings") or [] if item]
+            if not warnings and route_destination.get("verifiedLive") is not True:
+                warnings.append("service route prior is unverified; live telemetry must verify route objects before interaction")
+            return with_target_fields(
+                policy=policy,
+                navigation_reason=SERVICE_ROUTE_PRIOR,
+                target_kind=TARGET_KIND_SERVICE_ROUTE,
+                destination=route_destination,
+                navigation_context=navigation_context,
+                source_tick=source_tick,
+                started=started,
+                navigation_needed=True,
+                warnings=warnings,
+                status="WARN" if warnings or route_destination.get("verifiedLive") is not True else "PASS",
+            )
         return with_target_fields(
             policy=policy,
             navigation_reason=SERVICE_TARGET_MISSING,

@@ -217,7 +217,10 @@ def phase_from_brain_decision(decision: dict[str, Any]) -> TaskPhase:
         return TaskPhase.BLOCKED
     if phase in {"no_context", "stale_context", "no_target_observed", "missing_capability"}:
         return TaskPhase.NEEDS_MORE_CONTEXT
-    if phase in {"target_depleted", "waiting_for_respawn", "monitoring_progress", "likely_busy", "inventory_changed"}:
+    if phase == "inventory_changed":
+        best = decision.get("currentContextSummary", {}).get("bestTarget") if isinstance(decision.get("currentContextSummary"), dict) else None
+        return TaskPhase.TARGET_SELECTED if selected_target_key(best) else TaskPhase.OBSERVE
+    if phase in {"target_depleted", "waiting_for_respawn", "monitoring_progress", "likely_busy"}:
         return TaskPhase.WAIT_FOR_RESULT
     if phase == "target_available":
         best = decision.get("currentContextSummary", {}).get("bestTarget") if isinstance(decision.get("currentContextSummary"), dict) else None

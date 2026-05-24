@@ -1,0 +1,5 @@
+WARNING: An illegal reflective access operation has occurred
+WARNING: Illegal reflective access by net.runelite.client.util.ReflectUtil (file:/C:/Users/stone/.gradle/caches/modules-2/files-2.1/net.runelite/client/1.12.26.3/4f4e09949545fa9b6e522d961de31e8bc11c57c9/client-1.12.26.3.jar) to field java.lang.reflect.Executable.declaredAnnotations
+WARNING: Please consider reporting this to the maintainers of net.runelite.client.util.ReflectUtil
+WARNING: Use --illegal-access=warn to enable warnings of further illegal reflective access operations
+WARNING: All illegal access operations will be denied in a future release

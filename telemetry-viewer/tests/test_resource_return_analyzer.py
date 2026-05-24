@@ -202,7 +202,7 @@ class ResourceReturnAnalyzerTest(unittest.TestCase):
         self.assertTrue(payload["resourceTargetCurrentlyVisible"])
         self.assertEqual(payload["reason"], "resource_target_visible")
 
-    def test_banking_complete_bank_closed_without_target_or_memory_reports_missing_memory(self):
+    def test_banking_complete_bank_closed_without_target_or_memory_uses_profile_anchor(self):
         context = resource_return_analyzer.analyze_resource_return_context(
             "woodcutting_bank",
             bank_operation_context=BankOperationContext(banking_complete=True, inventory_free_slots=15, source_tick=90),
@@ -215,10 +215,58 @@ class ResourceReturnAnalyzerTest(unittest.TestCase):
 
         payload = context.to_dict()
         self.assertTrue(payload["returnDestinationNeeded"])
-        self.assertFalse(payload["returnDestinationAvailable"])
+        self.assertTrue(payload["returnDestinationAvailable"])
         self.assertFalse(payload["resourceMemoryValid"])
-        self.assertEqual(payload["reason"], "no_resource_memory")
-        self.assertIn("resource.memory", payload["missingCapabilities"])
+        self.assertEqual(payload["returnDestinationSource"], "profile_anchor")
+        self.assertEqual(payload["returnDestinationTile"], {"worldX": 3196, "worldY": 3248, "plane": 0})
+        self.assertEqual(payload["reason"], "using_profile_resource_anchor")
+        self.assertEqual(payload["missingCapabilities"], [])
+
+    def test_banking_complete_visible_resource_far_from_profile_anchor_continues_return_route(self):
+        visible = tree_target(name="Tree", x=3212, y=3232)
+
+        context = resource_return_analyzer.analyze_resource_return_context(
+            "woodcutting_bank",
+            bank_operation_context=BankOperationContext(banking_complete=True, inventory_free_slots=15, source_tick=100),
+            bank_ui_context=BankUiContext(bank_open=False, source_tick=100),
+            target_context=TargetContext(raw_best_target=visible, candidates=[visible], candidate_count=1, source_tick=100),
+            resource_memory_state=resource_return_analyzer.ResourceAreaMemoryState(),
+            player_context=player_context(x=3205, y=3228, plane=0),
+            source_tick=100,
+        )
+
+        payload = context.to_dict()
+        self.assertTrue(payload["resourceTargetCurrentlyVisible"])
+        self.assertTrue(payload["returnDestinationAvailable"])
+        self.assertEqual(payload["returnDestinationSource"], "profile_anchor")
+        self.assertEqual(payload["returnDestinationTile"], {"worldX": 3196, "worldY": 3248, "plane": 0})
+        self.assertEqual(payload["reason"], "using_profile_resource_anchor")
+
+    def test_recent_post_bank_resource_memory_far_from_profile_anchor_is_not_treated_as_return_area(self):
+        visible = tree_target(name="Tree", x=3212, y=3232)
+        memory = resource_return_analyzer.ResourceAreaMemoryState(
+            last_resource_activity_tick=100,
+            last_resource_target_tile={"worldX": 3212, "worldY": 3232, "plane": 0},
+            last_resource_target_name="Tree",
+            last_resource_plane=0,
+            last_resource_profile="woodcutting",
+            last_resource_target=visible,
+        )
+
+        context = resource_return_analyzer.analyze_resource_return_context(
+            "woodcutting_bank",
+            bank_operation_context=BankOperationContext(banking_complete=True, inventory_free_slots=15, source_tick=100),
+            bank_ui_context=BankUiContext(bank_open=False, source_tick=100),
+            target_context=TargetContext(raw_best_target=visible, candidates=[visible], candidate_count=1, source_tick=100),
+            resource_memory_state=memory,
+            player_context=player_context(x=3205, y=3228, plane=0),
+            source_tick=100,
+        )
+
+        payload = context.to_dict()
+        self.assertTrue(payload["returnDestinationAvailable"])
+        self.assertEqual(payload["returnDestinationSource"], "profile_anchor")
+        self.assertEqual(payload["reason"], "using_profile_resource_anchor")
 
 
 if __name__ == "__main__":

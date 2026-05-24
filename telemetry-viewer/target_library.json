@@ -124,6 +124,23 @@
       "notes": "Door-like scene objects, useful for navigation QA."
     },
     {
+      "classId": "route_transition",
+      "displayName": "Route Transition",
+      "targetTypes": ["sceneObject"],
+      "categories": ["navigation"],
+      "roles": ["interactable", "navigation"],
+      "objectIds": [56230, 16672, 56231],
+      "nameContains": ["stair", "stairs", "staircase", "ladder"],
+      "actionContains": ["climb", "climb-up", "climb-down", "top-floor", "bottom-floor"],
+      "tags": ["stair", "ladder", "route_transition", "navigation_geometry"],
+      "preferredGeometryTypes": ["clickboxPolygon", "clickboxBounds", "convexHullPolygon", "convexHullBounds", "canvasTilePolygon"],
+      "requiredSignals": [],
+      "negativeSignals": ["uiBlocked"],
+      "defaultQualityWeight": 1.0,
+      "profileHints": ["woodcutting", "navigation_qa", "broad_qa"],
+      "notes": "Stairs and ladder-like route transition objects. Static object ids are route priors; live telemetry remains authoritative."
+    },
+    {
       "classId": "wall",
       "displayName": "Wall / Fence / Counter",
       "targetTypes": ["sceneObject"],

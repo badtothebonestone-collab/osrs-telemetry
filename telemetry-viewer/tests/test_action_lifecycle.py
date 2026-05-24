@@ -30,6 +30,7 @@ def resource_status(
     active_intent="select_target",
     tick=1,
     free_slots=12,
+    inventory_full=False,
     held_count=0,
     progress_count=0,
     current_activity="idle",
@@ -51,7 +52,7 @@ def resource_status(
                 },
             },
             "inventoryContext": {
-                "inventoryFull": False,
+                "inventoryFull": inventory_full,
                 "freeSlots": free_slots,
                 "progress": {
                     "currentHeldCount": held_count,
@@ -65,6 +66,7 @@ def resource_status(
             },
             "bankUiContext": {"bankOpen": False},
         },
+        "inventoryFull": inventory_full,
         "inventoryFreeSlots": free_slots,
         "brainCurrentHeldCount": held_count,
         "brainProgress": {
@@ -108,6 +110,111 @@ def deposit_status(*, held=4, banking_complete=False, tick=1):
                 "resourceItemsHeld": held,
                 "depositInventoryAvailable": True,
                 "bankingComplete": banking_complete,
+            },
+        },
+    }
+
+
+def route_status(*, plane=0, tick=1, route_step_index=1):
+    return {
+        "latestTick": tick,
+        "brain": {
+            "genericTaskState": {"phase": "needs_service", "activeIntent": "needs_service"},
+            "playerContext": {"worldX": 3205, "worldY": 3229, "plane": plane},
+            "serviceRouteContext": {
+                "schema": "service_route_context.v1",
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "currentStepIndex": route_step_index,
+                "currentStep": {
+                    "type": "interact_object",
+                    "label": "first stairs up",
+                    "plane": 0,
+                    "planeChange": "+1",
+                },
+                "visibleInteractionTarget": {
+                    "targetName": "Staircase",
+                    "id": 56230,
+                    "plane": 0,
+                    "expectedPlaneChange": "+1",
+                },
+            },
+        },
+    }
+
+
+def return_route_status(*, plane=2, tick=1, route_step_index=0, active_dialogue=False):
+    status = {
+        "latestTick": tick,
+        "currentCycleStage": "return_to_resource",
+        "brain": {
+            "genericTaskState": {"phase": "return_to_resource", "activeIntent": "return_to_resource_area"},
+            "playerContext": {"worldX": 3206, "worldY": 3221, "plane": plane},
+            "returnRouteContext": {
+                "schema": "return_route_context.v1",
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                "returnRouteId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                "currentStepIndex": route_step_index,
+                "currentStep": {
+                    "type": "interact_object",
+                    "label": "bank floor stairs down",
+                    "plane": 2,
+                    "planeChange": "-1",
+                },
+                "visibleInteractionTarget": {
+                    "targetName": "Staircase",
+                    "id": 16672,
+                    "plane": plane,
+                    "expectedPlaneChange": "-1",
+                },
+            },
+        },
+    }
+    if active_dialogue:
+        status["brain"]["dialogueState"] = {
+            "active": True,
+            "type": "options",
+            "promptText": "Climb up or down the stairs?",
+            "options": [
+                {"index": 1, "key": "1", "text": "Climb up the stairs."},
+                {"index": 2, "key": "2", "text": "Climb down the stairs."},
+            ],
+        }
+    return status
+
+
+def navigation_status(
+    *,
+    tick=1,
+    x=3196,
+    y=3248,
+    plane=0,
+    service_distance=19,
+    path_distance=4,
+    phase="needs_service",
+    active_intent="navigate_to_service",
+    service_ready=False,
+    route_action_ready=False,
+    route_node="lumbridge_castle_west_approach",
+):
+    return {
+        "latestTick": tick,
+        "currentCycleStage": "needs_service",
+        "brain": {
+            "genericTaskState": {"phase": phase, "activeIntent": active_intent},
+            "playerContext": {"worldX": x, "worldY": y, "plane": plane},
+            "serviceContext": {
+                "serviceReady": service_ready,
+                "distanceToServiceTarget": service_distance,
+            },
+            "pathingContext": {
+                "pathingNeeded": not service_ready,
+                "distanceToDestination": service_distance,
+                "distanceToPathTarget": path_distance,
+            },
+            "serviceRouteContext": {
+                "actionReady": route_action_ready,
+                "currentNodeId": route_node,
+                "visibleInteractionTarget": {"targetName": "Staircase"} if route_action_ready else None,
             },
         },
     }
@@ -158,6 +265,263 @@ class ActionLifecycleTest(unittest.TestCase):
         self.assertEqual(result.lifecycle_state["currentState"], "waiting_for_result")
         self.assertEqual(result.expected_result["resultType"], "wait_for_result_or_activity")
         self.assertEqual(result.observed_result["verificationStatus"], "PASS")
+
+    def test_select_resource_progress_wins_when_inventory_becomes_full(self):
+        before = resource_status(free_slots=1, held_count=12, progress_count=4)
+        after = resource_status(
+            phase="inventory_full",
+            active_intent="needs_service",
+            free_slots=0,
+            inventory_full=True,
+            held_count=13,
+            progress_count=5,
+        )
+        after["serviceContext"] = {"serviceReady": True}
+
+        observed = verify_expected_result(
+            "select_resource_target",
+            before,
+            after,
+            elapsed_ms=15000,
+            timeout_ms=15000,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "PASS")
+        self.assertEqual(observed["observedResult"], "inventory_changed")
+        self.assertEqual(observed["resultOutcome"], "success")
+        self.assertIn("held_resource_count_increased", observed["observedSignals"])
+        self.assertNotIn("unexpected_service_context", observed["observedSignals"])
+
+    def test_select_resource_inventory_gain_wins_over_blocked_full_transition(self):
+        before = resource_status(free_slots=1, held_count=12, progress_count=4)
+        after = resource_status(
+            phase="blocked",
+            active_intent="needs_service",
+            free_slots=0,
+            inventory_full=True,
+            held_count=13,
+            progress_count=5,
+            blocking_conditions=["inventory_full"],
+        )
+
+        observed = verify_expected_result(
+            "select_resource_target",
+            before,
+            after,
+            elapsed_ms=15000,
+            timeout_ms=15000,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "PASS")
+        self.assertEqual(observed["observedResult"], "inventory_changed")
+        self.assertEqual(observed["resultOutcome"], "success")
+        self.assertIn("held_resource_count_increased", observed["observedSignals"])
+        self.assertNotIn("blocked_phase", observed["observedSignals"])
+
+    def test_service_route_object_expects_transition_progress(self):
+        expected = verify_expected_result(
+            "interact_service_route_object",
+            route_status(plane=0, tick=10),
+            route_status(plane=1, tick=11, route_step_index=2),
+            elapsed_ms=700,
+            timeout_ms=3000,
+        )
+
+        self.assertEqual(expected["verificationStatus"], "PASS")
+        self.assertEqual(expected["observedResult"], "route_transition_progress")
+        self.assertIn("player_plane_changed", expected["observedSignals"])
+        self.assertIn("route_step_changed", expected["observedSignals"])
+
+    def test_return_route_object_reports_return_transition_plane_change(self):
+        expected = verify_expected_result(
+            "interact_service_route_object",
+            return_route_status(plane=2, tick=10),
+            return_route_status(plane=1, tick=11, route_step_index=1),
+            elapsed_ms=700,
+            timeout_ms=3000,
+        )
+
+        self.assertEqual(expected["verificationStatus"], "PASS")
+        self.assertEqual(expected["observedResult"], "return_transition_plane_changed")
+        self.assertIn("player_plane_changed", expected["observedSignals"])
+
+    def test_return_route_generic_climb_can_open_down_dialogue(self):
+        expected = verify_expected_result(
+            "interact_service_route_object",
+            return_route_status(plane=1, tick=10, route_step_index=1),
+            return_route_status(plane=1, tick=11, route_step_index=1, active_dialogue=True),
+            elapsed_ms=700,
+            timeout_ms=3000,
+        )
+
+        self.assertEqual(expected["verificationStatus"], "PASS")
+        self.assertEqual(expected["observedResult"], "return_transition_dialogue_opened")
+        self.assertIn("route_transition_dialogue_opened", expected["observedSignals"])
+
+    def test_return_dialogue_choice_reports_down_transition_selected(self):
+        expected = verify_expected_result(
+            "interface_dialogue_choice",
+            return_route_status(plane=1, tick=10, route_step_index=1, active_dialogue=True),
+            return_route_status(plane=0, tick=11, route_step_index=2),
+            elapsed_ms=700,
+            timeout_ms=3000,
+        )
+
+        self.assertEqual(expected["verificationStatus"], "PASS")
+        self.assertEqual(expected["observedResult"], "return_transition_dialogue_choice_selected")
+        self.assertIn("player_plane_changed", expected["observedSignals"])
+
+    def test_return_transition_with_pathing_active_remains_pending_not_timeout(self):
+        before = return_route_status(plane=1, tick=10, route_step_index=1)
+        after = return_route_status(plane=1, tick=14, route_step_index=1)
+        after["brain"]["pathingContext"] = {
+            "movementState": "moving",
+            "localDestination": {"worldX": 3206, "worldY": 3208, "plane": 1},
+        }
+
+        expected = verify_expected_result(
+            "interact_service_route_object",
+            before,
+            after,
+            elapsed_ms=6000,
+            timeout_ms=5000,
+            wait_started_tick=10,
+            timeout_ticks=4,
+        )
+
+        self.assertEqual(expected["verificationStatus"], "WARN")
+        self.assertEqual(expected["observedResult"], "return_transition_pending")
+        self.assertEqual(expected["resultOutcome"], "still_waiting")
+        self.assertFalse(expected["resultComplete"])
+        self.assertFalse(expected["nextActionAllowed"])
+        self.assertIn("pathing_started", expected["observedSignals"])
+
+    def test_generic_route_transition_click_can_open_dialogue(self):
+        after = route_status(plane=1, tick=11, route_step_index=4)
+        after["brain"]["dialogueState"] = {
+            "active": True,
+            "type": "options",
+            "promptText": "Climb up or down the stairs?",
+            "options": [{"index": 1, "key": "1", "text": "Climb up the stairs."}],
+        }
+
+        expected = verify_expected_result(
+            "interact_service_route_object",
+            route_status(plane=1, tick=10, route_step_index=4),
+            after,
+            elapsed_ms=700,
+            timeout_ms=3000,
+        )
+
+        self.assertEqual(expected["verificationStatus"], "PASS")
+        self.assertEqual(expected["observedResult"], "route_transition_dialogue_opened")
+        self.assertIn("route_transition_dialogue_opened", expected["observedSignals"])
+
+    def test_dialogue_choice_expects_transition_progress(self):
+        expected = verify_expected_result(
+            "interface_dialogue_choice",
+            route_status(plane=1, tick=10, route_step_index=4),
+            route_status(plane=2, tick=11, route_step_index=5),
+            elapsed_ms=700,
+            timeout_ms=3000,
+        )
+
+        self.assertEqual(expected["verificationStatus"], "PASS")
+        self.assertEqual(expected["observedResult"], "route_transition_dialogue_choice_selected")
+        self.assertIn("player_plane_changed", expected["observedSignals"])
+
+    def test_navigation_progress_when_player_moves_and_service_distance_improves(self):
+        observed = verify_expected_result(
+            "navigate_to_service",
+            navigation_status(tick=10, x=3196, y=3248, service_distance=19, path_distance=4),
+            navigation_status(tick=12, x=3201, y=3242, service_distance=13, path_distance=1),
+            elapsed_ms=1600,
+            timeout_ms=2500,
+            wait_started_tick=10,
+            timeout_ticks=4,
+            progress_min_distance=1,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "PASS")
+        self.assertEqual(observed["observedResult"], "service_navigation_progress")
+        self.assertEqual(observed["resultOutcome"], "progress")
+        self.assertTrue(observed["resultComplete"])
+        self.assertIn("player_tile_changed", observed["observedSignals"])
+        self.assertIn("service_distance_decreased", observed["observedSignals"])
+        self.assertIn("path_target_distance_decreased", observed["observedSignals"])
+
+    def test_navigation_progress_reads_player_from_current_context_summary(self):
+        before = navigation_status(tick=10, x=3241, y=3248, service_distance=36, path_distance=3)
+        after = navigation_status(tick=12, x=3241, y=3245, service_distance=36, path_distance=3)
+        before["brain"].pop("playerContext")
+        after["brain"].pop("playerContext")
+        before["brain"]["currentContextSummary"] = {"player": {"worldX": 3241, "worldY": 3248, "plane": 0}}
+        after["brain"]["currentContextSummary"] = {"player": {"worldX": 3241, "worldY": 3245, "plane": 0}}
+
+        observed = verify_expected_result(
+            "navigate_to_service",
+            before,
+            after,
+            elapsed_ms=1600,
+            timeout_ms=2500,
+            wait_started_tick=10,
+            timeout_ticks=4,
+            progress_min_distance=1,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "PASS")
+        self.assertEqual(observed["observedResult"], "service_navigation_progress")
+        self.assertIn("player_tile_changed", observed["observedSignals"])
+
+    def test_navigation_wait_state_without_movement_is_not_complete(self):
+        observed = verify_expected_result(
+            "navigate_to_service",
+            navigation_status(tick=10),
+            navigation_status(tick=11, phase="wait_for_result", active_intent="navigate_to_service"),
+            elapsed_ms=500,
+            timeout_ms=2500,
+            wait_started_tick=10,
+            timeout_ticks=4,
+            progress_min_distance=1,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "WARN")
+        self.assertEqual(observed["observedResult"], "service_navigation_clicked_waiting")
+        self.assertFalse(observed["resultComplete"])
+        self.assertFalse(observed["nextActionAllowed"])
+        self.assertIn("movement_or_wait_state", observed["observedSignals"])
+
+    def test_navigation_reacquired_route_object_counts_as_progress(self):
+        observed = verify_expected_result(
+            "navigate_to_service",
+            navigation_status(tick=10, route_action_ready=False),
+            navigation_status(tick=12, route_action_ready=True),
+            elapsed_ms=1200,
+            timeout_ms=2500,
+            wait_started_tick=10,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "PASS")
+        self.assertEqual(observed["observedResult"], "service_route_object_reacquired")
+        self.assertIn("route_object_reacquired", observed["observedSignals"])
+
+    def test_navigation_route_node_change_counts_as_progress(self):
+        observed = verify_expected_result(
+            "navigate_to_service",
+            navigation_status(tick=10, route_node="lumbridge_castle_west_approach"),
+            navigation_status(tick=12, route_node="lumbridge_castle_entrance_or_courtyard"),
+            elapsed_ms=1200,
+            timeout_ms=2500,
+            wait_started_tick=10,
+            timeout_ticks=4,
+            progress_min_distance=3,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "PASS")
+        self.assertEqual(observed["observedResult"], "service_navigation_progress")
+        self.assertIn("route_node_changed", observed["observedSignals"])
+        self.assertEqual(observed["routeNodeBefore"], "lumbridge_castle_west_approach")
+        self.assertEqual(observed["routeNodeAfter"], "lumbridge_castle_entrance_or_courtyard")
 
     def test_loop_does_not_run_second_action_while_waiting_for_result(self):
         backend = FakeBackend()
@@ -247,6 +611,40 @@ class ActionLifecycleTest(unittest.TestCase):
         self.assertEqual(observed["verificationStatus"], "PASS")
         self.assertEqual(observed["observedResult"], "banking_complete")
 
+    def test_open_service_pathing_to_object_is_progress_not_dead_wait(self):
+        before = navigation_status(tick=10, x=3206, y=3218, plane=2, service_distance=5, path_distance=4)
+        after = navigation_status(
+            tick=12,
+            x=3207,
+            y=3220,
+            plane=2,
+            service_distance=3,
+            path_distance=1,
+            phase="wait_for_result",
+            active_intent="open_service",
+        )
+        before["brain"]["bankUiContext"] = {"bankOpen": False, "bankReadable": False}
+        after["brain"]["bankUiContext"] = {"bankOpen": False, "bankReadable": False}
+
+        observed = verify_expected_result(
+            "open_service",
+            before,
+            after,
+            elapsed_ms=900,
+            timeout_ms=3000,
+            wait_started_tick=10,
+            timeout_ticks=6,
+            progress_min_distance=1,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "WARN")
+        self.assertEqual(observed["observedResult"], "service_object_pathing_to_object")
+        self.assertEqual(observed["resultOutcome"], "still_waiting")
+        self.assertFalse(observed["resultComplete"])
+        self.assertFalse(observed["nextActionAllowed"])
+        self.assertIn("player_tile_changed", observed["observedSignals"])
+        self.assertIn("service_distance_decreased", observed["observedSignals"])
+
     def test_inventory_change_completes_select_resource_target_wait(self):
         observed = verify_expected_result(
             "select_resource_target",
@@ -259,6 +657,59 @@ class ActionLifecycleTest(unittest.TestCase):
         self.assertTrue(observed["nextActionAllowed"])
         self.assertIn("inventory_changed", observed["observedSignals"])
         self.assertIn("held_resource_count_increased", observed["observedSignals"])
+
+    def test_resource_view_recovery_fails_when_projection_stays_sentinel(self):
+        target = {
+            "targetName": "Tree",
+            "safeAimPoint": {
+                "status": "FAIL",
+                "actionable": False,
+                "rawAimPoint": {"x": 2147483648, "y": 2147483648},
+            },
+            "bounds": {"x": 2147483647, "y": 2147483647, "w": 1, "h": 1},
+        }
+
+        observed = verify_expected_result(
+            "resource_view_recovery",
+            {"selectedHighlighterTarget": target, "latestTick": 10},
+            {"selectedHighlighterTarget": target, "latestTick": 12},
+            elapsed_ms=2500,
+            timeout_ms=2000,
+        )
+
+        self.assertEqual(observed["observedResult"], "resource_projection_recovery_failed")
+        self.assertEqual(observed["resultOutcome"], "no_change_timeout")
+        self.assertEqual(observed["verificationStatus"], "FAIL")
+        self.assertEqual(observed["projectionBefore"]["classification"], "projection_sentinel")
+        self.assertEqual(observed["projectionAfter"]["classification"], "projection_sentinel")
+
+    def test_resource_view_recovery_succeeds_when_safe_aimpoint_appears(self):
+        before = {
+            "targetName": "Tree",
+            "safeAimPoint": {
+                "status": "FAIL",
+                "actionable": False,
+                "rawAimPoint": {"x": 2147483648, "y": 2147483648},
+            },
+            "bounds": {"x": 2147483647, "y": 2147483647, "w": 1, "h": 1},
+        }
+        after = {
+            "targetName": "Tree",
+            "safeAimPoint": {"status": "PASS", "actionable": True, "canvasX": 200, "canvasY": 180},
+            "aimPoint": {"canvasX": 200, "canvasY": 180},
+        }
+
+        observed = verify_expected_result(
+            "resource_view_recovery",
+            {"selectedHighlighterTarget": before, "latestTick": 10},
+            {"selectedHighlighterTarget": after, "latestTick": 11},
+            elapsed_ms=300,
+            timeout_ms=2000,
+        )
+
+        self.assertEqual(observed["observedResult"], "resource_camera_reacquire_success")
+        self.assertEqual(observed["resultOutcome"], "progress")
+        self.assertIn("resource_safe_aimpoint_available", observed["observedSignals"])
 
     def test_progress_increase_completes_select_resource_target_wait(self):
         observed = verify_expected_result(
@@ -317,7 +768,20 @@ class ActionLifecycleTest(unittest.TestCase):
 
         self.assertTrue(observed["resultComplete"])
         self.assertEqual(observed["resultOutcome"], "no_change_timeout")
+        self.assertEqual(observed["resourceProgressClassification"], "resource_timeout_no_progress")
         self.assertFalse(observed["nextActionAllowed"])
+
+    def test_waiting_resource_click_has_pending_classification(self):
+        observed = verify_expected_result(
+            "select_resource_target",
+            resource_status(),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result"),
+            elapsed_ms=250,
+            timeout_ms=1000,
+        )
+
+        self.assertEqual(observed["resourceProgressClassification"], "resource_click_confirmed_waiting")
+        self.assertFalse(observed["resultComplete"])
 
     def test_blocked_phase_interrupts_select_resource_target_wait(self):
         observed = verify_expected_result(
@@ -402,6 +866,187 @@ class ActionLifecycleTest(unittest.TestCase):
         self.assertEqual(payload["executedActionCount"], 2)
         self.assertEqual(len(backend.calls), 2)
         self.assertEqual(payload["actionResults"][0]["observedResult"]["resultOutcome"], "success")
+
+    def test_stop_after_inventory_changes_stops_loop(self):
+        backend = FakeBackend()
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            execute=True,
+            verify_after_action=True,
+            after_action_wait_ms=0,
+            cooldown_ms=0,
+            action_timeout_ms=5000,
+            result_timeout_ms=5000,
+            max_actions=5,
+            max_runtime_seconds=5.0,
+            stop_on_warn=False,
+            stop_on_fail=True,
+            stop_after_inventory_changes=2,
+            stop_when_inventory_full=False,
+            max_successful_actions=None,
+            max_timeouts=None,
+            seed=None,
+        )
+        statuses = [
+            resource_status(tick=1, free_slots=12, held_count=0, progress_count=0),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result", tick=2, free_slots=11, held_count=1, progress_count=1),
+            resource_status(tick=3, free_slots=11, held_count=1, progress_count=1),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result", tick=4, free_slots=10, held_count=2, progress_count=2),
+        ]
+
+        result = execute_action_loop(
+            "http://daemon",
+            options,
+            fetch_json_func=lambda *_args, **_kwargs: statuses.pop(0),
+            backend=backend,
+            sleep_func=lambda _seconds: None,
+            monotonic_func=iter([0.0, 0.01, 0.02, 0.03]).__next__,
+        )
+
+        payload = result.to_dict()
+        summary = payload["loopSummary"]
+        self.assertEqual(payload["executedActionCount"], 2)
+        self.assertEqual(payload["reason"], "inventory_change_limit_reached")
+        self.assertEqual(summary["inventoryChanges"], 2)
+        self.assertEqual(summary["inventoryFreeSlotsStart"], 12)
+        self.assertEqual(summary["inventoryFreeSlotsEnd"], 10)
+        self.assertEqual(summary["resourceCountStart"], 0)
+        self.assertEqual(summary["resourceCountEnd"], 2)
+
+    def test_stop_when_inventory_full_stops_loop(self):
+        backend = FakeBackend()
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            execute=True,
+            verify_after_action=True,
+            after_action_wait_ms=0,
+            cooldown_ms=0,
+            action_timeout_ms=5000,
+            result_timeout_ms=5000,
+            max_actions=5,
+            max_runtime_seconds=5.0,
+            stop_on_warn=False,
+            stop_on_fail=True,
+            stop_after_inventory_changes=None,
+            stop_when_inventory_full=True,
+            max_successful_actions=None,
+            max_timeouts=None,
+            seed=None,
+        )
+        statuses = [
+            resource_status(tick=1, free_slots=1, held_count=26, progress_count=26),
+            resource_status(
+                phase="wait_for_result",
+                active_intent="wait_for_result",
+                tick=2,
+                free_slots=0,
+                inventory_full=True,
+                held_count=27,
+                progress_count=27,
+            ),
+        ]
+
+        result = execute_action_loop(
+            "http://daemon",
+            options,
+            fetch_json_func=lambda *_args, **_kwargs: statuses.pop(0),
+            backend=backend,
+            sleep_func=lambda _seconds: None,
+            monotonic_func=iter([0.0, 0.01]).__next__,
+        )
+
+        payload = result.to_dict()
+        self.assertEqual(payload["executedActionCount"], 1)
+        self.assertEqual(payload["reason"], "inventory_full")
+        self.assertTrue(payload["loopSummary"]["inventoryFullEnd"])
+
+    def test_max_successful_actions_stops_loop(self):
+        backend = FakeBackend()
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            execute=True,
+            verify_after_action=True,
+            after_action_wait_ms=0,
+            cooldown_ms=0,
+            action_timeout_ms=5000,
+            result_timeout_ms=5000,
+            max_actions=5,
+            max_runtime_seconds=5.0,
+            stop_on_warn=False,
+            stop_on_fail=True,
+            stop_after_inventory_changes=None,
+            stop_when_inventory_full=False,
+            max_successful_actions=1,
+            max_timeouts=None,
+            seed=None,
+        )
+        statuses = [
+            resource_status(tick=1, held_count=0, progress_count=0),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result", tick=2, held_count=1, progress_count=1),
+        ]
+
+        result = execute_action_loop(
+            "http://daemon",
+            options,
+            fetch_json_func=lambda *_args, **_kwargs: statuses.pop(0),
+            backend=backend,
+            sleep_func=lambda _seconds: None,
+            monotonic_func=iter([0.0, 0.01]).__next__,
+        )
+
+        payload = result.to_dict()
+        self.assertEqual(payload["executedActionCount"], 1)
+        self.assertEqual(payload["reason"], "successful_action_limit_reached")
+        self.assertEqual(payload["loopSummary"]["successfulActions"], 1)
+
+    def test_max_timeouts_stops_loop_without_immediate_repeat(self):
+        backend = FakeBackend()
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            execute=True,
+            verify_after_action=True,
+            after_action_wait_ms=0,
+            cooldown_ms=0,
+            action_timeout_ms=1,
+            result_timeout_ms=1,
+            max_actions=5,
+            max_runtime_seconds=5.0,
+            stop_on_warn=False,
+            stop_on_fail=False,
+            stop_after_inventory_changes=None,
+            stop_when_inventory_full=False,
+            max_successful_actions=None,
+            max_timeouts=1,
+            seed=None,
+        )
+        statuses = [
+            resource_status(tick=1),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result", tick=2),
+            resource_status(phase="wait_for_result", active_intent="wait_for_result", tick=3),
+        ]
+
+        result = execute_action_loop(
+            "http://daemon",
+            options,
+            fetch_json_func=lambda *_args, **_kwargs: statuses.pop(0),
+            backend=backend,
+            sleep_func=lambda _seconds: None,
+            monotonic_func=iter([0.0, 0.01, 0.02, 0.03]).__next__,
+        )
+
+        payload = result.to_dict()
+        self.assertEqual(payload["executedActionCount"], 1)
+        self.assertEqual(payload["reason"], "max_timeouts_reached")
+        self.assertEqual(payload["loopSummary"]["timeouts"], 1)
+        self.assertEqual(len(backend.calls), 1)
 
     def test_loop_stops_at_max_actions(self):
         backend = FakeBackend()

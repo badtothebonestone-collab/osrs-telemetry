@@ -47,6 +47,8 @@ def unavailable_payload(error: Exception | str) -> dict[str, Any]:
 def format_human(payload: dict[str, Any]) -> str:
     input_geometry = payload.get("inputGeometry") if isinstance(payload.get("inputGeometry"), dict) else {}
     resolution = payload.get("clickPointResolution") if isinstance(payload.get("clickPointResolution"), dict) else {}
+    explanation = payload.get("targetExplanation") if isinstance(payload.get("targetExplanation"), dict) else {}
+    explanation_freshness = explanation.get("freshness") if isinstance(explanation.get("freshness"), dict) else {}
     geometry_available = input_geometry.get("inputGeometryAvailable")
     lines = [
         f"ACTION PROPOSAL - {payload.get('status') or 'UNKNOWN'}",
@@ -67,9 +69,33 @@ def format_human(payload: dict[str, Any]) -> str:
         f"World tile: {tile_label(payload.get('suggestedWorldTile') or payload.get('targetTile'))}",
         f"Key action: {payload.get('keyAction') or 'none'}",
         f"Executable: {payload.get('executable')}",
-        "",
-        "Warnings:",
+    "",
     ]
+    if explanation:
+        lines.extend(
+            [
+                "Selected target:",
+                f"  name: {explanation.get('name') or 'unknown'}",
+                f"  id: {explanation.get('id') if explanation.get('id') is not None else 'unknown'}",
+                f"  class: {explanation.get('classId') or 'unknown'}",
+                f"  score: {explanation.get('score') if explanation.get('score') is not None else 'unknown'}",
+                f"  screen: {point_label(explanation.get('screen'))}",
+                f"  world: {tile_label(explanation.get('world'))}",
+                f"  onScreen: {explanation.get('onScreen')}",
+                f"  geometryAvailable: {explanation.get('geometryAvailable')}",
+                f"  uiBlocked: {explanation.get('uiBlocked')}",
+                f"  aim point: {point_label(explanation.get('aimPoint'))}",
+                f"  aim source: {explanation.get('aimPointSource') or 'unknown'}",
+                f"  freshness: {explanation_freshness.get('status') or explanation.get('freshness') or 'unknown'}",
+                f"  stale: {explanation.get('stale')}",
+                f"  accepted reasons: {', '.join(explanation.get('acceptedReasons') or []) or 'none'}",
+                f"  rejected/demoted reasons: {', '.join(explanation.get('rejectedReasons') or []) or 'none'}",
+                "",
+            ]
+        )
+    lines.extend([
+        "Warnings:",
+    ])
     warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
     if warnings:
         lines.extend(f"  WARN: {warning}" for warning in warnings)

@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from telemetry_paths import (  # noqa: E402
     classify_frame_state,
+    find_newest_live_session,
     find_newest_session,
     list_event_files,
     list_tick_files,
@@ -122,6 +123,19 @@ class TelemetryPathsTest(unittest.TestCase):
             live_index.write_text("{}", encoding="utf-8")
 
             self.assertEqual(find_newest_session(root), live)
+
+    def test_find_newest_live_session_ignores_newer_empty_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            empty_new = root / "new-empty"
+            live_old = root / "old-live"
+            empty_new.mkdir(parents=True)
+            (empty_new / "manifest.json").write_text("{}", encoding="utf-8")
+            live_output = live_old / "interaction_geometry" / "live" / "overlay_debug_state.json"
+            live_output.parent.mkdir(parents=True)
+            live_output.write_text("{}", encoding="utf-8")
+
+            self.assertEqual(find_newest_live_session(root), live_old)
 
     def test_raw_recording_unavailable_message_mentions_compact_mode(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -127,6 +127,129 @@ public class PluginSnapshotEndpointTest
 	}
 
 	@Test
+	public void snapshotIncludesHotMenuSamplesWhenAvailable()
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		cache.update("live_baseline_packet.v1", 4L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
+		ClientTickHotState hotState = new ClientTickHotState(4);
+		hotState.recordPostMenuSort(Map.of("clientTick", 8L, "topOption", "Chop down", "topTarget", "Oak tree", "topIdentifier", 10820));
+		hotState.recordMenuOptionClicked(Map.of("clientTick", 8L, "option", "Walk here", "target", "", "identifier", 0));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				cache,
+				gson,
+				"127.0.0.1",
+				8893,
+				"",
+				50,
+				1024 * 1024,
+				false,
+				null,
+				hotState);
+		JsonObject request = new JsonObject();
+		JsonArray needs = new JsonArray();
+		needs.add("baseline");
+		request.add("needs", needs);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+
+		@SuppressWarnings("unchecked")
+		Map<String, Object> hoverMenu = (Map<String, Object>) response.get("hoverMenu");
+		@SuppressWarnings("unchecked")
+		Map<String, Object> lastClicked = (Map<String, Object>) response.get("lastMenuOptionClicked");
+		@SuppressWarnings("unchecked")
+		Map<String, Object> clientTickHot = (Map<String, Object>) response.get("clientTickHot");
+		assertEquals("Chop down", hoverMenu.get("topOption"));
+		assertEquals("Walk here", lastClicked.get("option"));
+		assertEquals("client_tick_hot.v1", clientTickHot.get("schema"));
+		assertEquals("Oak tree", ((Map<?, ?>) clientTickHot.get("postMenuSort")).get("topTarget"));
+		assertFalse(clientTickHot.containsKey("postMenuSortTail"));
+	}
+
+	@Test
+	public void snapshotCanIncludeRequestedTileProjections()
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		cache.update("live_baseline_packet.v1", 4L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				cache,
+				gson,
+				"127.0.0.1",
+				8893,
+				"",
+				50,
+				1024 * 1024,
+				false,
+				null,
+				new ClientTickHotState(4),
+				requests -> Map.of(
+						"schema", "tile_projection_response.v1",
+						"status", "PASS",
+						"tiles", List.of(Map.of(
+								"status", "PASS",
+								"label", requests.get(0).get("label"),
+								"worldX", requests.get(0).get("worldX"),
+								"worldY", requests.get(0).get("worldY"),
+								"plane", requests.get(0).get("plane"),
+								"aimPoint", Map.of("canvasX", 300, "canvasY", 240, "source", "tileProjectionCenter")))));
+		JsonObject request = new JsonObject();
+		JsonArray needs = new JsonArray();
+		needs.add("baseline");
+		request.add("needs", needs);
+		JsonArray tileRequests = new JsonArray();
+		JsonObject tile = new JsonObject();
+		tile.addProperty("label", "service-waypoint");
+		tile.addProperty("worldX", 3205);
+		tile.addProperty("worldY", 3229);
+		tile.addProperty("plane", 0);
+		tileRequests.add(tile);
+		request.add("tileProjectionRequests", tileRequests);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		JsonObject tileProjection = payloads(response).get("tile_projection").getAsJsonObject();
+		JsonObject firstTile = tileProjection.getAsJsonArray("tiles").get(0).getAsJsonObject();
+
+		assertEquals("PASS", response.get("status"));
+		assertTrue(response.containsKey("tileProjections"));
+		assertEquals("service-waypoint", firstTile.get("label").getAsString());
+		assertEquals(300, firstTile.getAsJsonObject("aimPoint").get("canvasX").getAsInt());
+	}
+
+	@Test
+	public void snapshotCanIncludeExplicitClientTickTailPayload()
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		cache.update("live_baseline_packet.v1", 4L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
+		ClientTickHotState hotState = new ClientTickHotState(4);
+		hotState.recordPostMenuSort(Map.of("clientTick", 7L, "topOption", "Walk here"));
+		hotState.recordPostMenuSort(Map.of("clientTick", 8L, "topOption", "Chop down"));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				cache,
+				gson,
+				"127.0.0.1",
+				8893,
+				"",
+				50,
+				1024 * 1024,
+				false,
+				null,
+				hotState);
+		JsonObject request = new JsonObject();
+		JsonArray needs = new JsonArray();
+		needs.add("baseline");
+		needs.add("client_tick_tail");
+		request.add("needs", needs);
+		request.addProperty("maxMenuSamples", 1);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		Map<String, JsonElement> payloads = payloads(response);
+
+		assertTrue(payloads.containsKey("client_tick_tail"));
+		JsonArray tail = payloads.get("client_tick_tail").getAsJsonObject().getAsJsonArray("postMenuSortTail");
+		assertEquals(1, tail.size());
+		assertEquals("Chop down", tail.get(0).getAsJsonObject().get("topOption").getAsString());
+	}
+
+	@Test
 	public void snapshotReturnsNavigationAndCollisionWindowWhenCached()
 	{
 		PluginLiveCache cache = new PluginLiveCache(gson);
@@ -178,6 +301,34 @@ public class PluginSnapshotEndpointTest
 		assertEquals("PASS", response.get("status"));
 		assertTrue(payloads.containsKey("bank_ui"));
 		assertTrue(payloads.get("bank_ui").getAsJsonObject().get("bankOpen").getAsBoolean());
+	}
+
+	@Test
+	public void snapshotReturnsDialogueStateWhenCached()
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		cache.update("live_baseline_packet.v1", 10L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
+		cache.update("live_dialogue_state_packet.v1", 10L, "2026-05-11T00:00:00Z", Map.of(
+				"schema", "dialogue_state.v1",
+				"active", true,
+				"type", "options",
+				"promptText", "Climb up or down the stairs?",
+				"canUseNumberKeys", true,
+				"options", List.of(Map.of("index", 1, "key", "1", "text", "Climb up the stairs."))));
+		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
+		JsonObject request = new JsonObject();
+		JsonArray needs = new JsonArray();
+		needs.add("baseline");
+		needs.add("dialogue_state");
+		request.add("needs", needs);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		Map<String, JsonElement> payloads = payloads(response);
+
+		assertEquals("PASS", response.get("status"));
+		assertTrue(payloads.containsKey("dialogue_state"));
+		assertTrue(payloads.get("dialogue_state").getAsJsonObject().get("active").getAsBoolean());
+		assertEquals("options", payloads.get("dialogue_state").getAsJsonObject().get("type").getAsString());
 	}
 
 	@Test

@@ -111,6 +111,19 @@ def _int(value: Any) -> int | None:
     return None
 
 
+def _float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def _status_brain(status: dict[str, Any]) -> dict[str, Any]:
     return _dict(status.get("brain")) or status
 
@@ -165,6 +178,20 @@ def _context(status: dict[str, Any], context_name: str) -> dict[str, Any]:
         return value
     value = status.get(context_name)
     return value if isinstance(value, dict) else {}
+
+
+def _player_context(status: dict[str, Any]) -> dict[str, Any]:
+    player = _context(status, "playerContext") or _context(status, "player")
+    if player:
+        return player
+    brain = _status_brain(status)
+    summary = brain.get("currentContextSummary")
+    if isinstance(summary, dict) and isinstance(summary.get("player"), dict):
+        return summary["player"]
+    summary = status.get("currentContextSummary")
+    if isinstance(summary, dict) and isinstance(summary.get("player"), dict):
+        return summary["player"]
+    return {}
 
 
 def _inventory_progress(status: dict[str, Any]) -> dict[str, Any]:
@@ -273,6 +300,68 @@ def _service_ready(status: dict[str, Any]) -> bool | None:
     return _bool(context_value(status, "serviceContext", "serviceReady", "serviceReady"))
 
 
+def _player_plane(status: dict[str, Any]) -> int | None:
+    player = _player_context(status)
+    tile = player.get("tile") or player.get("worldTile") or status.get("playerTile") or status.get("playerWorldTile")
+    if isinstance(tile, dict):
+        value = _int(tile.get("plane"))
+        if value is not None:
+            return value
+    for key in ("plane", "playerPlane"):
+        value = _int(player.get(key) if key in player else status.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _route_step_index(status: dict[str, Any]) -> int | None:
+    route = _context(status, "serviceRouteContext")
+    value = _int(route.get("currentStepIndex"))
+    if value is not None:
+        return value
+    return _int(status.get("serviceRouteCurrentStepIndex"))
+
+
+def _transition_route_context(status: dict[str, Any]) -> dict[str, Any]:
+    return _context(status, "returnRouteContext") or _context(status, "serviceRouteContext")
+
+
+def _transition_route_step_index(status: dict[str, Any]) -> int | None:
+    route = _transition_route_context(status)
+    value = _int(route.get("currentStepIndex"))
+    if value is not None:
+        return value
+    return _route_step_index(status)
+
+
+def _is_return_transition(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    if _context(before, "returnRouteContext") or _context(after, "returnRouteContext"):
+        return True
+    for status in (before, after):
+        phase, intent = phase_and_intent(status)
+        if phase == "return_to_resource" or intent == "return_to_resource_area":
+            return True
+        if status.get("currentCycleStage") == "return_to_resource":
+            return True
+    return False
+
+
+def _route_node_id(status: dict[str, Any]) -> str | None:
+    route = _context(status, "serviceRouteContext")
+    value = route.get("currentNodeId")
+    if value is None:
+        value = status.get("serviceRouteCurrentNodeId")
+    return str(value) if value not in (None, "") else None
+
+
+def _route_step_status(status: dict[str, Any]) -> str | None:
+    route = _context(status, "serviceRouteContext")
+    value = route.get("routeStepStatus")
+    if value is None:
+        value = status.get("serviceRouteStepStatus")
+    return str(value) if value not in (None, "") else None
+
+
 def _path_metric(status: dict[str, Any]) -> float | None:
     for key in (
         "distanceToDestination",
@@ -293,14 +382,99 @@ def _path_metric(status: dict[str, Any]) -> float | None:
     return None
 
 
+def _navigation_metrics(status: dict[str, Any]) -> dict[str, float]:
+    values: dict[str, float] = {}
+    metric_sources = (
+        ("destination_distance", "pathingContext", "distanceToDestination", "distanceToDestination"),
+        ("path_target_distance", "pathingContext", "distanceToPathTarget", "distanceToPathTarget"),
+        ("navigation_intent_distance", "navigationIntentContext", "distanceTiles", "navigationIntentDistanceTiles"),
+        ("service_distance", "serviceContext", "distanceToServiceTarget", "distanceToServiceTarget"),
+        ("final_approach_distance", "serviceContext", "distanceToFinalApproach", "serviceDistanceToFinalApproach"),
+    )
+    for name, context_name, key, fallback in metric_sources:
+        value = _float(context_value(status, context_name, key, fallback))
+        if value is not None:
+            values[name] = value
+    # Older callers sometimes flatten pathing fields into the status payload.
+    flat_aliases = {
+        "destination_distance": ("distanceToDestination",),
+        "path_target_distance": ("distanceToPathTarget",),
+        "navigation_intent_distance": ("navigationIntentDistanceTiles",),
+        "service_distance": ("distanceToServiceTarget",),
+        "final_approach_distance": ("serviceDistanceToFinalApproach",),
+    }
+    for name, keys in flat_aliases.items():
+        if name in values:
+            continue
+        for key in keys:
+            value = _float(status.get(key))
+            if value is not None:
+                values[name] = value
+                break
+    return values
+
+
+def _pathing_context(status: dict[str, Any]) -> dict[str, Any]:
+    return _context(status, "pathingContext")
+
+
+def _pathing_movement_active(status: dict[str, Any]) -> bool:
+    pathing = _pathing_context(status)
+    movement_state = str(pathing.get("movementState") or status.get("movementState") or "").strip().lower()
+    if movement_state in {"moving", "recently_moved", "pathing", "walking"}:
+        return True
+    activity = _context(status, "activityContext") or _context(status, "activity")
+    raw = activity.get("raw") if isinstance(activity.get("raw"), dict) else {}
+    raw_activity = raw.get("activity") if isinstance(raw.get("activity"), dict) else {}
+    return activity.get("isMoving") is True or raw_activity.get("isMoving") is True
+
+
+def _tile_like_key(value: Any) -> tuple[int, int, int] | None:
+    if not isinstance(value, dict):
+        return None
+    world_x = _int(value.get("worldX") if value.get("worldX") is not None else value.get("x"))
+    world_y = _int(value.get("worldY") if value.get("worldY") is not None else value.get("y"))
+    plane = _int(value.get("plane"))
+    if world_x is None or world_y is None:
+        return None
+    return (world_x, world_y, 0 if plane is None else plane)
+
+
+def _local_destination_key(status: dict[str, Any]) -> tuple[int, int, int] | None:
+    pathing = _pathing_context(status)
+    for key in ("localDestination", "currentLocalDestination", "destinationTile", "pathTargetTile", "nextWaypointTile"):
+        value = pathing.get(key)
+        tile = _tile_like_key(value)
+        if tile is not None:
+            return tile
+    for key in ("localDestination", "currentLocalDestination", "destinationTile"):
+        tile = _tile_like_key(status.get(key))
+        if tile is not None:
+            return tile
+    return None
+
+
+def _service_route_action_ready(status: dict[str, Any]) -> bool | None:
+    route = _context(status, "serviceRouteContext")
+    value = _bool(route.get("actionReady"))
+    if value is not None:
+        return value
+    return _bool(status.get("serviceRouteActionReady"))
+
+
 def _player_tile_key(status: dict[str, Any]) -> str | None:
-    player = _context(status, "playerContext") or _context(status, "player")
+    player = _player_context(status)
     tile = player.get("tile") or player.get("worldTile") or status.get("playerTile") or status.get("playerWorldTile")
     if isinstance(tile, dict):
         x = tile.get("x") or tile.get("worldX")
         y = tile.get("y") or tile.get("worldY")
         plane = tile.get("plane")
         return f"{x},{y},{plane}" if x is not None and y is not None else None
+    x = player.get("worldX") if "worldX" in player else player.get("x")
+    y = player.get("worldY") if "worldY" in player else player.get("y")
+    plane = player.get("plane")
+    if x is not None and y is not None:
+        return f"{x},{y},{plane}"
     return str(tile) if tile is not None else None
 
 
@@ -317,6 +491,13 @@ def expected_result_for_action(action: str) -> dict[str, Any]:
             "resultType": "wait_for_result_or_activity",
             "expectedSignal": "inventory_or_progress_or_activity_or_depletion",
             "description": "phase or intent enters wait_for_result, activity changes, or progress eventually changes",
+        }
+    if action == "resource_view_recovery":
+        return {
+            "action": action,
+            "resultType": "projection_refresh",
+            "expectedSignal": "resource_projection_refresh_or_reproposal",
+            "description": "camera/view recovery runs without a world click, then resource projection is refreshed before any resource click",
         }
     if action == "open_service":
         return {
@@ -352,6 +533,20 @@ def expected_result_for_action(action: str) -> dict[str, Any]:
             "resultType": "service_navigation_progress",
             "expectedSignal": "movement_or_service_ready",
             "description": "movement, path, position, or service distance changes",
+        }
+    if action == "interact_service_route_object":
+        return {
+            "action": action,
+            "resultType": "service_route_transition_progress",
+            "expectedSignal": "menu_click_plane_or_route_step_change",
+            "description": "route object interaction produces a plane/location change or route step advance",
+        }
+    if action == "interface_dialogue_choice":
+        return {
+            "action": action,
+            "resultType": "route_transition_dialogue_resolved",
+            "expectedSignal": "dialogue_choice_plane_or_route_step_change",
+            "description": "route-transition dialogue option produces a plane/location change or route step advance",
         }
     return {
         "action": action,
@@ -437,6 +632,116 @@ def _add_signal(observed: dict[str, Any], signal: str) -> None:
         signals.append(signal)
 
 
+_PROJECTION_SENTINEL_THRESHOLD = 100000.0
+
+
+def _projection_number_is_sentinel(value: Any) -> bool:
+    number = _float(value)
+    return number is not None and abs(number) >= _PROJECTION_SENTINEL_THRESHOLD
+
+
+def _projection_point_is_sentinel(value: Any) -> bool:
+    point = _dict(value)
+    if not point:
+        return False
+    return any(
+        _projection_number_is_sentinel(point.get(key))
+        for key in ("x", "y", "canvasX", "canvasY")
+    )
+
+
+def _projection_bounds_is_sentinel(value: Any) -> bool:
+    bounds = _dict(value)
+    if not bounds:
+        return False
+    return any(
+        _projection_number_is_sentinel(bounds.get(key))
+        for key in ("x", "y", "canvasX", "canvasY")
+    )
+
+
+def _target_resource_projection_state(status: dict[str, Any]) -> dict[str, Any]:
+    target: dict[str, Any] = {}
+    for key in (
+        "selectedHighlighterTarget",
+        "selectedTarget",
+        "selectedResourceTarget",
+        "activeIntentTarget",
+    ):
+        value = status.get(key)
+        if isinstance(value, dict) and value:
+            target = value
+            break
+    if not target:
+        generic = generic_state(status)
+        active = generic.get("activeIntentTarget")
+        if isinstance(active, dict):
+            target = active
+    projection = _dict(target.get("resourceProjectionStatus"))
+    safe = _dict(target.get("safeAimPoint"))
+    raw_aim = target.get("rawAimPoint") or target.get("aimPoint") or target.get("canvasAimPoint")
+    if isinstance(safe.get("rawAimPoint"), dict):
+        raw_aim = safe.get("rawAimPoint")
+    bounds = (
+        target.get("bounds")
+        or target.get("canvasBounds")
+        or target.get("canvasTileBounds")
+        or safe.get("bounds")
+    )
+    projection_sentinel = bool(
+        projection.get("projectionSentinel") is True
+        or _projection_point_is_sentinel(raw_aim)
+        or _projection_bounds_is_sentinel(bounds)
+    )
+    safe_available = bool(
+        projection.get("safeAimPointAvailable") is True
+        or safe.get("actionable") is True
+        or str(safe.get("status") or "").upper() == "PASS"
+    )
+    classification = str(projection.get("classification") or "")
+    if not classification:
+        if projection_sentinel:
+            classification = "projection_sentinel"
+        elif safe_available:
+            classification = "safe"
+        elif not target:
+            classification = "target_missing"
+        elif _bool(target.get("geometryAvailable")) is False or str(target.get("geometryStatus") or "") == "missing":
+            classification = "no_projection"
+        elif safe and safe.get("actionable") is False:
+            classification = str(safe.get("rejectionReason") or "no_safe_aimpoint")
+        else:
+            classification = "unknown"
+    return {
+        "targetPresent": bool(target),
+        "targetName": target.get("targetName") or target.get("name"),
+        "targetKey": target.get("targetKey") or target.get("objectKey"),
+        "worldLocation": target.get("worldLocation")
+        or {
+            "worldX": target.get("worldX"),
+            "worldY": target.get("worldY"),
+            "plane": target.get("plane"),
+        },
+        "classification": classification,
+        "safeAimPointAvailable": safe_available,
+        "projectionSentinel": projection_sentinel,
+        "safeAimPointReason": projection.get("safeAimPointReason") or safe.get("rejectionReason"),
+        "canvasPoint": projection.get("canvasPoint") or raw_aim,
+        "canvasBounds": projection.get("canvasBounds") or bounds,
+    }
+
+
+def _projection_recovery_improved(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    if after.get("safeAimPointAvailable") is True:
+        return True
+    before_class = str(before.get("classification") or "")
+    after_class = str(after.get("classification") or "")
+    if before_class and after_class and before_class != after_class:
+        if after_class not in {"projection_sentinel", "no_projection", "target_missing", "unknown"}:
+            return True
+    return before.get("projectionSentinel") is True and after.get("projectionSentinel") is False
+
+
 def verify_expected_result(
     action: str,
     before_status: dict[str, Any] | None,
@@ -446,6 +751,7 @@ def verify_expected_result(
     timeout_ms: int | None = None,
     wait_started_tick: int | None = None,
     timeout_ticks: int | None = None,
+    progress_min_distance: float | None = None,
 ) -> dict[str, Any]:
     before = before_status if isinstance(before_status, dict) else {}
     after = after_status if isinstance(after_status, dict) else {}
@@ -467,12 +773,6 @@ def verify_expected_result(
         observed.get("timeoutTicks"),
     )
     if action == "select_resource_target":
-        if phase == "blocked" or _blocking_conditions(after):
-            _add_signal(observed, "blocked_phase")
-            return _finish(observed, status="FAIL", result="interrupted", outcome="interrupted", complete=True, next_allowed=False)
-        if _bank_open(after) is True or _service_ready(after) is True:
-            _add_signal(observed, "unexpected_service_context")
-            return _finish(observed, status="FAIL", result="interrupted", outcome="interrupted", complete=True, next_allowed=False)
         before_signature = _inventory_signature(before)
         after_signature = _inventory_signature(after)
         if before_signature is not None and after_signature is not None and before_signature != after_signature:
@@ -498,28 +798,110 @@ def verify_expected_result(
             _add_signal(observed, "wait_for_result_state")
         signals = set(observed["observedSignals"])
         if "target_depleted_recently" in signals:
+            observed["resourceProgressClassification"] = "resource_target_depleted_success"
             return _finish(observed, status="PASS", result="target_depleted", outcome="depleted", complete=True, next_allowed=True)
         if "held_resource_count_increased" in signals or "inventory_changed" in signals or "inventory_free_slots_changed" in signals:
+            observed["resourceProgressClassification"] = "resource_delayed_inventory_success" if observed.get("elapsedMillis") else "resource_inventory_success"
             return _finish(observed, status="PASS", result="inventory_changed", outcome="success", complete=True, next_allowed=True)
         if "resource_progress_increased" in signals:
+            observed["resourceProgressClassification"] = "resource_delayed_inventory_success" if observed.get("elapsedMillis") else "resource_progress_success"
             return _finish(observed, status="PASS", result="resource_progress_increased", outcome="progress", complete=True, next_allowed=True)
         if any(signal.startswith("activity_") for signal in signals):
+            observed["resourceProgressClassification"] = "resource_animation_started_pending"
             return _finish(observed, status="PASS", result="activity_progress", outcome="progress", complete=True, next_allowed=True)
+        if phase == "blocked" or _blocking_conditions(after):
+            _add_signal(observed, "blocked_phase")
+            return _finish(observed, status="FAIL", result="interrupted", outcome="interrupted", complete=True, next_allowed=False)
+        if _bank_open(after) is True or _service_ready(after) is True:
+            _add_signal(observed, "unexpected_service_context")
+            return _finish(observed, status="FAIL", result="interrupted", outcome="interrupted", complete=True, next_allowed=False)
         if timed_out:
             observed["warnings"].append("resource result timed out without progress")
+            observed["resourceProgressClassification"] = "resource_timeout_no_progress"
             return _finish(observed, status="FAIL", result="no_change_timeout", outcome="no_change_timeout", complete=True, next_allowed=False)
         if "wait_for_result_state" in signals:
+            observed["resourceProgressClassification"] = "resource_click_confirmed_waiting"
             return _finish(observed, status="PASS", result="wait_for_result", outcome="still_waiting", complete=False, next_allowed=False)
         observed["warnings"].append("resource result not observed yet")
+        observed["resourceProgressClassification"] = "resource_click_confirmed_waiting"
         return _finish(observed, status="WARN", result="waiting", outcome="still_waiting", complete=False, next_allowed=False)
+    if action == "resource_view_recovery":
+        before_projection = _target_resource_projection_state(before)
+        after_projection = _target_resource_projection_state(after)
+        observed["projectionBefore"] = before_projection
+        observed["projectionAfter"] = after_projection
+        observed["resourceProjectionRecovery"] = True
+        if after_projection.get("safeAimPointAvailable") is True:
+            _add_signal(observed, "resource_safe_aimpoint_available")
+            observed["resourceProjectionRecoveryClassification"] = "resource_camera_reacquire_success"
+            return _finish(observed, status="PASS", result="resource_camera_reacquire_success", outcome="progress", complete=True, next_allowed=True)
+        if _projection_recovery_improved(before_projection, after_projection):
+            _add_signal(observed, "resource_projection_improved")
+            observed["resourceProjectionRecoveryClassification"] = "resource_projection_improved"
+            return _finish(observed, status="PASS", result="resource_projection_improved", outcome="progress", complete=True, next_allowed=True)
+        if timed_out:
+            observed["warnings"].append(
+                "resource projection recovery did not produce a safe aim point or improved projection"
+            )
+            observed["resourceProjectionRecoveryClassification"] = "resource_projection_recovery_failed"
+            return _finish(observed, status="FAIL", result="resource_projection_recovery_failed", outcome="no_change_timeout", complete=True, next_allowed=False)
+        observed["warnings"].append("resource projection recovery waiting for refreshed projection")
+        observed["resourceProjectionRecoveryClassification"] = "resource_projection_recovery_waiting"
+        return _finish(observed, status="WARN", result="resource_projection_recovery_waiting", outcome="still_waiting", complete=False, next_allowed=False)
     if action == "open_service":
         bank_open = _bank_open(after)
         if bank_open is True or _bool(context_value(after, "bankUiContext", "bankRootVisible", "bankRootVisible")) is True:
             _add_signal(observed, "bank_open")
+            _add_signal(observed, "bank_ui_opened")
             return _finish(observed, status="PASS", result="service_open", outcome="success", complete=True, next_allowed=True)
+        min_distance = 0.0 if progress_min_distance is None else max(0.0, float(progress_min_distance))
+        before_metrics = _navigation_metrics(before)
+        after_metrics = _navigation_metrics(after)
+        decreased_metrics: list[str] = []
+        changed_metrics: list[str] = []
+        for name, before_metric in before_metrics.items():
+            after_metric = after_metrics.get(name)
+            if after_metric is None:
+                continue
+            if after_metric != before_metric:
+                changed_metrics.append(name)
+                _add_signal(observed, f"{name}_changed")
+            if before_metric - after_metric >= min_distance and after_metric < before_metric:
+                decreased_metrics.append(name)
+                _add_signal(observed, f"{name}_decreased")
+        before_tile = _player_tile_key(before)
+        after_tile = _player_tile_key(after)
+        if before_tile is not None and after_tile is not None and after_tile != before_tile:
+            _add_signal(observed, "player_tile_changed")
+        before_node = _route_node_id(before)
+        after_node = _route_node_id(after)
+        if before_node is not None and after_node is not None and after_node != before_node:
+            _add_signal(observed, "route_node_changed")
+            observed["routeNodeBefore"] = before_node
+            observed["routeNodeAfter"] = after_node
+        before_step_status = _route_step_status(before)
+        after_step_status = _route_step_status(after)
+        if before_step_status is not None and after_step_status is not None and after_step_status != before_step_status:
+            _add_signal(observed, "route_step_status_changed")
+            observed["routeStepStatusBefore"] = before_step_status
+            observed["routeStepStatusAfter"] = after_step_status
+        if _service_ready(after) is True:
+            _add_signal(observed, "service_object_ready")
+        if is_waiting_for_result(after) or str(intent or "").startswith(("open", "service", "bank", "navigate", "move")):
+            _add_signal(observed, "movement_or_wait_state")
+        signals = set(observed["observedSignals"])
+        if "player_tile_changed" in signals or "route_node_changed" in signals or "route_step_status_changed" in signals or decreased_metrics:
+            observed["warnings"].append("service object click is pathing toward service target; waiting for bank UI")
+            return _finish(observed, status="WARN", result="service_object_pathing_to_object", outcome="still_waiting", complete=False, next_allowed=False)
+        if "movement_or_wait_state" in signals or changed_metrics:
+            if timed_out:
+                observed["warnings"].append("service object click did not show movement or bank UI before timeout")
+                return _finish(observed, status="FAIL", result="service_object_no_progress", outcome="no_change_timeout", complete=True, next_allowed=False)
+            observed["warnings"].append("service object click confirmed; waiting for pathing or bank UI")
+            return _finish(observed, status="WARN", result="service_object_click_confirmed", outcome="still_waiting", complete=False, next_allowed=False)
         if timed_out:
             observed["warnings"].append("bank UI did not open before timeout")
-            return _finish(observed, status="FAIL", result="no_change_timeout", outcome="no_change_timeout", complete=True, next_allowed=False)
+            return _finish(observed, status="FAIL", result="service_object_no_progress", outcome="no_change_timeout", complete=True, next_allowed=False)
         observed["warnings"].append("bank UI not open yet")
         return _finish(observed, status="WARN", result="waiting", outcome="still_waiting", complete=False, next_allowed=False)
     if action in {"deposit_inventory", "deposit_resources"}:
@@ -554,26 +936,138 @@ def verify_expected_result(
         observed["warnings"].append("bank UI still open")
         return _finish(observed, status="WARN", result="waiting", outcome="still_waiting", complete=False, next_allowed=False)
     if action in {"return_to_resource_area", "navigate_to_service"}:
-        before_metric = _path_metric(before)
-        after_metric = _path_metric(after)
-        if before_metric is not None and after_metric is not None and after_metric != before_metric:
-            _add_signal(observed, "path_distance_changed")
+        min_distance = 0.0 if progress_min_distance is None else max(0.0, float(progress_min_distance))
+        before_metrics = _navigation_metrics(before)
+        after_metrics = _navigation_metrics(after)
+        decreased_metrics: list[str] = []
+        changed_metrics: list[str] = []
+        for name, before_metric in before_metrics.items():
+            after_metric = after_metrics.get(name)
+            if after_metric is None:
+                continue
+            if after_metric != before_metric:
+                changed_metrics.append(name)
+                _add_signal(observed, f"{name}_changed")
+            if before_metric - after_metric >= min_distance and after_metric < before_metric:
+                decreased_metrics.append(name)
+                _add_signal(observed, f"{name}_decreased")
         before_tile = _player_tile_key(before)
         after_tile = _player_tile_key(after)
         if before_tile is not None and after_tile is not None and after_tile != before_tile:
-            _add_signal(observed, "player_position_changed")
+            _add_signal(observed, "player_tile_changed")
+        before_node = _route_node_id(before)
+        after_node = _route_node_id(after)
+        if before_node is not None and after_node is not None and after_node != before_node:
+            _add_signal(observed, "route_node_changed")
+            observed["routeNodeBefore"] = before_node
+            observed["routeNodeAfter"] = after_node
+        before_step_index = _route_step_index(before)
+        after_step_index = _route_step_index(after)
+        if before_step_index is not None and after_step_index is not None and after_step_index != before_step_index:
+            _add_signal(observed, "route_step_index_changed")
+            observed["routeStepIndexBefore"] = before_step_index
+            observed["routeStepIndexAfter"] = after_step_index
+        before_step_status = _route_step_status(before)
+        after_step_status = _route_step_status(after)
+        if before_step_status is not None and after_step_status is not None and after_step_status != before_step_status:
+            _add_signal(observed, "route_step_status_changed")
+            observed["routeStepStatusBefore"] = before_step_status
+            observed["routeStepStatusAfter"] = after_step_status
         if _service_ready(after) is True:
             _add_signal(observed, "service_ready")
+        if _service_route_action_ready(after) is True:
+            _add_signal(observed, "route_object_reacquired")
         if _bool(context_value(after, "returnToResourceContext", "resourceTargetAvailable", "returnResourceTargetAvailable")) is True:
             _add_signal(observed, "resource_target_visible")
         if is_waiting_for_result(after) or str(intent or "").startswith(("navigate", "return", "move")):
             _add_signal(observed, "movement_or_wait_state")
-        if observed["observedSignals"]:
-            return _finish(observed, status="PASS", result="movement_or_wait_state", outcome="progress", complete=True, next_allowed=True)
+        signals = set(observed["observedSignals"])
+        if action == "navigate_to_service":
+            if "service_ready" in signals:
+                return _finish(observed, status="PASS", result="service_navigation_reached_node", outcome="progress", complete=True, next_allowed=True)
+            if "route_object_reacquired" in signals:
+                return _finish(observed, status="PASS", result="service_route_object_reacquired", outcome="progress", complete=True, next_allowed=True)
+            if "player_tile_changed" in signals or "route_node_changed" in signals or "route_step_index_changed" in signals or decreased_metrics:
+                return _finish(observed, status="PASS", result="service_navigation_progress", outcome="progress", complete=True, next_allowed=True)
+            if "movement_or_wait_state" in signals or changed_metrics:
+                if timed_out:
+                    observed["warnings"].append("service navigation did not show tile movement or distance improvement before timeout")
+                    return _finish(observed, status="FAIL", result="service_navigation_no_progress", outcome="no_change_timeout", complete=True, next_allowed=False)
+                return _finish(observed, status="WARN", result="service_navigation_clicked_waiting", outcome="still_waiting", complete=False, next_allowed=False)
+        else:
+            if "resource_target_visible" in signals:
+                return _finish(observed, status="PASS", result="resource_return_reached_node", outcome="progress", complete=True, next_allowed=True)
+            if "player_tile_changed" in signals or decreased_metrics:
+                return _finish(observed, status="PASS", result="resource_return_progress", outcome="progress", complete=True, next_allowed=True)
+            if "movement_or_wait_state" in signals or changed_metrics:
+                if timed_out:
+                    observed["warnings"].append("resource return did not show tile movement or distance improvement before timeout")
+                    return _finish(observed, status="FAIL", result="resource_return_no_progress", outcome="no_change_timeout", complete=True, next_allowed=False)
+                return _finish(observed, status="WARN", result="resource_return_clicked_waiting", outcome="still_waiting", complete=False, next_allowed=False)
         if timed_out:
             observed["warnings"].append("movement result timed out")
-            return _finish(observed, status="FAIL", result="no_change_timeout", outcome="no_change_timeout", complete=True, next_allowed=False)
+            result_name = "service_navigation_stuck" if action == "navigate_to_service" else "resource_return_stuck"
+            return _finish(observed, status="FAIL", result=result_name, outcome="no_change_timeout", complete=True, next_allowed=False)
         observed["warnings"].append("movement result not observed yet")
+        return _finish(observed, status="WARN", result="waiting", outcome="still_waiting", complete=False, next_allowed=False)
+    if action in {"interact_service_route_object", "interface_dialogue_choice"}:
+        is_return_transition = _is_return_transition(before, after)
+        before_plane = _player_plane(before)
+        after_plane = _player_plane(after)
+        if before_plane is not None and after_plane is not None and before_plane != after_plane:
+            _add_signal(observed, "player_plane_changed")
+        before_tile = _player_tile_key(before)
+        after_tile = _player_tile_key(after)
+        if before_tile is not None and after_tile is not None and before_tile != after_tile:
+            _add_signal(observed, "player_position_changed")
+        before_step = _transition_route_step_index(before)
+        after_step = _transition_route_step_index(after)
+        if before_step is not None and after_step is not None and before_step != after_step:
+            _add_signal(observed, "route_step_changed")
+        if _service_ready(after) is True:
+            _add_signal(observed, "service_ready")
+        dialogue_state = _context(after, "dialogueState")
+        if action == "interact_service_route_object" and isinstance(dialogue_state, dict) and dialogue_state.get("active") is True:
+            _add_signal(observed, "route_transition_dialogue_opened")
+        before_destination = _local_destination_key(before)
+        after_destination = _local_destination_key(after)
+        if after_destination is not None and after_destination != before_destination:
+            _add_signal(observed, "local_destination_changed")
+            observed["localDestinationBefore"] = {"worldX": before_destination[0], "worldY": before_destination[1], "plane": before_destination[2]} if before_destination else None
+            observed["localDestinationAfter"] = {"worldX": after_destination[0], "worldY": after_destination[1], "plane": after_destination[2]}
+        if _pathing_movement_active(after):
+            _add_signal(observed, "pathing_started")
+        if is_waiting_for_result(after):
+            _add_signal(observed, "movement_or_wait_state")
+        if observed["observedSignals"]:
+            signal_set = set(observed["observedSignals"])
+            if action == "interact_service_route_object" and "route_transition_dialogue_opened" in signal_set:
+                result_name = "return_transition_dialogue_opened" if is_return_transition else "route_transition_dialogue_opened"
+                return _finish(observed, status="PASS", result=result_name, outcome="progress", complete=True, next_allowed=True)
+            if action == "interface_dialogue_choice":
+                result_name = "return_transition_dialogue_choice_selected" if is_return_transition else "route_transition_dialogue_choice_selected"
+            elif is_return_transition and "player_plane_changed" in signal_set:
+                result_name = "return_transition_plane_changed"
+            elif "player_plane_changed" in signal_set or "route_step_changed" in signal_set or "service_ready" in signal_set:
+                result_name = "route_transition_progress"
+            elif signal_set.intersection({"player_position_changed", "local_destination_changed", "pathing_started", "movement_or_wait_state"}):
+                result_name = "return_transition_pending" if is_return_transition else "route_transition_pending"
+                observed["routeTransitionProgressClassification"] = result_name
+                observed["warnings"].append("route transition has pending pathing evidence; waiting before retry")
+                return _finish(observed, status="WARN", result=result_name, outcome="still_waiting", complete=False, next_allowed=False)
+            else:
+                result_name = "route_transition_progress"
+            return _finish(observed, status="PASS", result=result_name, outcome="progress", complete=True, next_allowed=True)
+        if timed_out:
+            if action == "interface_dialogue_choice":
+                observed["warnings"].append("dialogue choice did not produce a plane, location, or route-step change before timeout")
+            else:
+                observed["warnings"].append("route object interaction did not produce a plane, location, or route-step change before timeout")
+            return _finish(observed, status="FAIL", result="no_change_timeout", outcome="no_change_timeout", complete=True, next_allowed=False)
+        if action == "interface_dialogue_choice":
+            observed["warnings"].append("dialogue choice result not observed yet")
+        else:
+            observed["warnings"].append("route object interaction result not observed yet")
         return _finish(observed, status="WARN", result="waiting", outcome="still_waiting", complete=False, next_allowed=False)
     return _finish(observed, status="PASS", result="not_applicable", outcome="success", complete=True, next_allowed=True)
 
@@ -615,6 +1109,8 @@ def lifecycle_after_execution(
     cooldown_ms: int = 0,
     elapsed_ms: int | None = None,
     timeout_ms: int | None = None,
+    timeout_ticks: int | None = None,
+    progress_min_distance: float | None = None,
     attempts: int = 1,
     max_attempts: int = 1,
 ) -> ActionLifecycleState:
@@ -627,6 +1123,8 @@ def lifecycle_after_execution(
             elapsed_ms=elapsed_ms,
             timeout_ms=timeout_ms,
             wait_started_tick=proposal.source_tick,
+            timeout_ticks=timeout_ticks,
+            progress_min_distance=progress_min_distance,
         )
         if after_status is not None
         else None

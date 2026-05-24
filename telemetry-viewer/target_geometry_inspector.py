@@ -9,7 +9,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from telemetry_paths import find_newest_session, get_sessions_dir, safe_read_json
+from live_file_core import overlay_targets
+from live_session_core import resolve_session_for_args
+from telemetry_paths import safe_read_json
 
 
 HOST = "127.0.0.1"
@@ -27,10 +29,7 @@ LIVE_READ_RETRY_DELAY_SECONDS = 0.025
 
 
 def resolve_session(args) -> Path | None:
-    if args.session:
-        return Path(args.session).expanduser()
-
-    return find_newest_session(get_sessions_dir(args.sessions_dir))
+    return resolve_session_for_args(args)
 
 
 def read_jsonl(path: Path, *, retry_attempts: int = 1, retry_delay: float = 0.0, strict_jsonl: bool = False) -> tuple[list[dict], list[str]]:
@@ -534,6 +533,7 @@ class GeometryDataset:
         self.ui_index_path = self.geometry_dir / ("live_index.json" if live else "ui_geometry_index.json") if self.geometry_dir else None
         self.candidates_path = self.geometry_dir / ("live_candidates.jsonl" if live else "target_candidates.jsonl") if self.geometry_dir else None
         self.candidates_index_path = self.geometry_dir / ("live_index.json" if live else "target_candidates_index.json") if self.geometry_dir else None
+        self.overlay_debug_path = self.geometry_dir / "overlay_debug_state.json" if live and self.geometry_dir else None
         self.live_status_path = self.geometry_dir / "live_status.json" if live and self.geometry_dir else None
         self.live_context_index_path = self.geometry_dir / "live_context_index.json" if live and self.geometry_dir else None
         self.reset_records()
@@ -544,6 +544,9 @@ class GeometryDataset:
         self.candidates_index = {}
         self.live_status = {}
         self.live_context_index = {}
+        self.overlay_debug = {}
+        self.overlay_markers = []
+        self.overlay_candidates_from_debug = False
         self.world_records = []
         self.ui_records = []
         self.candidate_records = []
@@ -561,6 +564,9 @@ class GeometryDataset:
             "candidates_index": self.candidates_index,
             "live_status": self.live_status,
             "live_context_index": self.live_context_index,
+            "overlay_debug": self.overlay_debug,
+            "overlay_markers": self.overlay_markers,
+            "overlay_candidates_from_debug": self.overlay_candidates_from_debug,
             "world_records": self.world_records,
             "ui_records": self.ui_records,
             "candidate_records": self.candidate_records,
@@ -589,6 +595,11 @@ class GeometryDataset:
         self.candidates_index = self._read_index(self.candidates_index_path)
         self.live_status = self._read_index(self.live_status_path)
         self.live_context_index = self._read_index(self.live_context_index_path)
+        self.overlay_debug, overlay_warnings = (
+            read_json_with_retries(self.overlay_debug_path) if self.live_mode and self.overlay_debug_path else ({}, [])
+        )
+        self.warnings.extend(overlay_warnings)
+        self.overlay_markers = overlay_targets(self.overlay_debug)
         live_read_kwargs = {
             "retry_attempts": LIVE_READ_RETRY_ATTEMPTS if self.live_mode else 1,
             "retry_delay": LIVE_READ_RETRY_DELAY_SECONDS if self.live_mode else 0.0,
@@ -599,6 +610,9 @@ class GeometryDataset:
         self.candidate_records, candidate_warnings = (
             read_jsonl(self.candidates_path, **live_read_kwargs) if self.candidates_path else ([], [])
         )
+        if self.live_mode and not self.candidate_records and self.overlay_markers:
+            self.candidate_records = self._overlay_candidate_records()
+            self.overlay_candidates_from_debug = True
         self.warnings.extend(world_warnings)
         self.warnings.extend(ui_warnings)
         self.warnings.extend(candidate_warnings)
@@ -630,11 +644,15 @@ class GeometryDataset:
         if not self.live_mode and not (self.ui_targets_path and self.ui_targets_path.exists()):
             self.messages.append(MISSING_UI_MESSAGE)
 
-        if not (self.candidates_path and self.candidates_path.exists()):
+        if not self.overlay_candidates_from_debug and not (self.candidates_path and self.candidates_path.exists()):
             self.messages.append(
-                "Run python telemetry-viewer\\live_target_processor.py first."
+                self._live_processor_required_message()
                 if self.live_mode
                 else MISSING_CANDIDATES_MESSAGE
+            )
+        elif self.overlay_candidates_from_debug:
+            self.messages.append(
+                f"Using overlay_debug_state.json highlighter markers from {self.overlay_debug_path}."
             )
 
         for source_kind, source_records in (("world", self.world_records), ("ui", self.ui_records)):
@@ -669,6 +687,79 @@ class GeometryDataset:
             self.candidates_by_tick[tick_id].append(decorated)
 
         self._build_tick_summaries()
+
+    def _live_processor_required_message(self) -> str:
+        if self.session is None:
+            return "Run python telemetry-viewer\\live_target_processor.py first."
+        return (
+            "No live candidates or overlay markers were found. If file-output inspection is required, run: "
+            f'python telemetry-viewer\\live_target_processor.py --session "{self.session}" '
+            "--profile woodcutting --follow --latency-mode realtime --liveness-mode delta "
+            "--liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 "
+            "--candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets "
+            "--emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark"
+        )
+
+    def _overlay_candidate_records(self) -> list[dict]:
+        latest_tick = self.overlay_debug.get("latestTick")
+        intent = self.overlay_debug.get("intentState") if isinstance(self.overlay_debug.get("intentState"), dict) else {}
+        if not isinstance(latest_tick, int):
+            latest_tick = intent.get("tick") if isinstance(intent.get("tick"), int) else None
+        records = []
+        for index, marker in enumerate(self.overlay_markers):
+            tick_id = marker.get("tick") if isinstance(marker.get("tick"), int) else latest_tick
+            if not isinstance(tick_id, int):
+                continue
+            world = {
+                "x": marker.get("worldX"),
+                "y": marker.get("worldY"),
+                "plane": marker.get("plane"),
+            }
+            target = {
+                "name": marker.get("name") or marker.get("targetName") or marker.get("label"),
+                "targetName": marker.get("targetName") or marker.get("name") or marker.get("label"),
+                "targetType": marker.get("targetType"),
+                "targetCategory": marker.get("targetCategory"),
+                "targetKey": marker.get("targetKey") or marker.get("markerId"),
+                "objectKey": marker.get("objectKey") or marker.get("targetKey") or marker.get("markerId"),
+                "id": marker.get("id"),
+                "rawId": marker.get("rawId") or marker.get("id"),
+                "classId": marker.get("classId"),
+                "world": world,
+            }
+            geometry = {
+                "geometryAvailable": marker.get("geometryAvailable"),
+                "onScreen": marker.get("onScreen"),
+                "aimPoint": marker.get("aimPoint"),
+                "bounds": marker.get("bounds"),
+                "clickboxBounds": marker.get("clickboxBounds") or marker.get("bounds"),
+                "preferredAimGeometry": marker.get("bounds") or marker.get("aimPoint"),
+                "preferredAimGeometryType": marker.get("geometrySource") or "overlay_debug_state",
+                "availableGeometryTypes": ["bounds"] if isinstance(marker.get("bounds"), dict) else ["aimPoint"],
+            }
+            records.append(
+                {
+                    "schema": "overlay_debug_candidate.v1",
+                    "tickId": tick_id,
+                    "rank": index + 1,
+                    "score": marker.get("qualityScore"),
+                    "qualityTier": marker.get("qualityTier"),
+                    "classId": marker.get("classId"),
+                    "uiBlocked": marker.get("uiBlocked"),
+                    "target": target,
+                    "geometry": geometry,
+                    "scoring": {
+                        "reasons": ["onScreen"] if marker.get("onScreen") is True else [],
+                        "penalties": ["offScreen"] if marker.get("onScreen") is False else [],
+                    },
+                    "overlayMarker": marker,
+                    "sourcePath": str(self.overlay_debug_path) if self.overlay_debug_path else None,
+                    "sourceType": "overlay_debug_state",
+                    "selected": bool(marker.get("selected") or marker.get("role") == "selected"),
+                    "role": marker.get("role"),
+                }
+            )
+        return records
 
     def _read_index(self, path: Path | None) -> dict:
         if path is None:
@@ -907,6 +998,13 @@ class GeometryDataset:
             "liveStatus": self.live_status,
             "liveContextIndex": self.live_context_index,
             "livePollIntervalMillis": self.live_poll_interval_ms,
+            "sourceType": self.source_type(),
+            "sourcePath": self.source_path(),
+            "overlayDebugPath": str(self.overlay_debug_path) if self.overlay_debug_path else None,
+            "overlayDebugExists": bool(self.overlay_debug_path and self.overlay_debug_path.exists()),
+            "overlayMarkerCount": len(self.overlay_markers),
+            "overlayLatestTick": self.overlay_debug.get("latestTick"),
+            "selectedTargetPresent": self.selected_target_present(),
             "liveLastProcessedTick": self.live_status.get("lastProcessedTick"),
             "liveTickRangeInWindow": self.live_status.get("tickRangeInWindow"),
             "liveLatestFrameTick": self.live_status.get("latestFrameTick"),
@@ -984,6 +1082,33 @@ class GeometryDataset:
                 "candidates": self.candidates_index,
             },
         }
+
+    def source_type(self) -> str:
+        if self.overlay_candidates_from_debug:
+            return "overlay_debug_state"
+        if self.candidate_records:
+            return "live_candidates.jsonl" if self.live_mode else "target_candidates.jsonl"
+        if self.records:
+            return "live_target_outputs" if self.live_mode else "derived_geometry"
+        return "none"
+
+    def source_path(self) -> str | None:
+        if self.overlay_candidates_from_debug and self.overlay_debug_path:
+            return str(self.overlay_debug_path)
+        if self.candidate_records and self.candidates_path:
+            return str(self.candidates_path)
+        if self.world_records and self.world_targets_path:
+            return str(self.world_targets_path)
+        return None
+
+    def selected_target_present(self) -> bool:
+        for marker in self.overlay_markers:
+            if marker.get("selected") is True or marker.get("role") == "selected" or marker.get("markerType") == "selected_target":
+                return True
+        for candidate in self.candidate_records:
+            if candidate.get("selected") is True or candidate.get("role") == "selected":
+                return True
+        return False
 
     def ticks(self, *, frame_exists_only: bool = False) -> list[dict]:
         ticks = [self.tick_summaries[tick_id] for tick_id in sorted(self.tick_summaries)]
@@ -3593,6 +3718,9 @@ def parse_args():
     )
     parser.add_argument("--session", help="Telemetry session directory to inspect.")
     parser.add_argument("--sessions-dir", help="Override telemetry sessions directory when --session is omitted.")
+    parser.add_argument("--from-daemon", action="store_true", help="Use the session currently reported by the live core daemon.")
+    parser.add_argument("--daemon-url", default="http://127.0.0.1:8890", help="Daemon URL for --from-daemon.")
+    parser.add_argument("--daemon-timeout", type=float, default=3.0, help="Seconds to wait for daemon status.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Local HTTP port, default {DEFAULT_PORT}.")
     parser.add_argument("--live", action="store_true", help="Read rolling live outputs from interaction_geometry\\live and refresh browser data periodically.")
     parser.add_argument("--live-poll-interval", type=float, default=2.0, help="Browser live refresh interval in seconds. Default: 2.0.")
@@ -3612,6 +3740,10 @@ def main() -> int:
     print(f"Session: {session if session else 'none'}")
     if args.live:
         print("Mode: LIVE")
+    summary = dataset.summary()
+    print(f"Source: {summary.get('sourceType')} {summary.get('sourcePath') or ''}".rstrip())
+    print(f"Overlay markers: {summary.get('overlayMarkerCount')} selected: {summary.get('selectedTargetPresent')}")
+    print(f"Latest tick: {summary.get('overlayLatestTick') or summary.get('liveLastProcessedTick') or 'unknown'}")
 
     for message in dataset.messages:
         print(message)

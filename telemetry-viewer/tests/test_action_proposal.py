@@ -30,11 +30,20 @@ def status_for(
     bank_operation=None,
     close_bank=None,
     resource_return=None,
+    return_route=None,
+    service_route=None,
     overlay=None,
+    latest_tick=None,
+    freshness="fresh",
+    input_geometry=None,
+    camera_viewport=None,
+    dialogue_state=None,
 ):
     active_target = active_target or {"targetName": "Oak tree", "classId": "tree", "aimPoint": aim(110, 130)}
-    return {
+    status = {
         "brain": {
+            "latestTick": latest_tick,
+            "freshnessDomains": {"targetCandidateFreshness": freshness} if freshness is not None else {},
             "genericTaskState": {
                 "phase": phase,
                 "activeIntent": active_intent,
@@ -43,19 +52,62 @@ def status_for(
             },
             "inventoryContext": {"inventoryFull": inventory_full, "freeSlots": free_slots},
             "serviceContext": service or {},
+            "serviceRouteContext": service_route or {},
             "pathingContext": pathing or {},
             "bankUiContext": bank_ui or {"bankOpen": False, "bankReadable": False, "bankPinOpen": False},
             "bankOperationContext": bank_operation or {},
             "closeBankContext": close_bank or {},
             "resourceReturnContext": resource_return or {},
+            "returnRouteContext": return_route or {},
+            "dialogueState": dialogue_state or {},
             "intentOverlayContext": overlay or {"selectedMarker": active_target},
             "missingRequiredContextDomains": [],
             "warnings": [],
         }
     }
+    if latest_tick is not None:
+        status["latestTick"] = latest_tick
+    if input_geometry is not None:
+        status["inputGeometry"] = input_geometry
+    if camera_viewport is not None:
+        status["cameraViewport"] = camera_viewport
+    return status
 
 
 class ActionProposalTest(unittest.TestCase):
+    def test_resource_candidates_without_safe_aimpoint_propose_projection_recovery(self):
+        target = {
+            "targetName": "Tree",
+            "name": "Tree",
+            "classId": "tree",
+            "targetType": "sceneObject",
+            "id": 1278,
+            "worldX": 3212,
+            "worldY": 3232,
+            "plane": 0,
+            "projectionMode": "live_object_pending",
+            "aimPoint": {"canvasX": 2147483647.5, "canvasY": 2147483647.5, "source": "live_object_pending"},
+            "bounds": {"x": 2147483647, "y": 2147483647, "width": 1, "height": 1},
+            "geometryAvailable": True,
+            "onScreen": True,
+        }
+
+        proposal = build_action_proposal(
+            status_for(
+                active_target=target,
+                overlay={"selectedMarker": target, "markers": [target]},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "resource_view_recovery")
+        self.assertEqual(proposal.target_kind, "resource_recovery")
+        self.assertTrue(proposal.executable)
+        self.assertIsNone(proposal.suggested_click_point)
+        self.assertEqual(proposal.key_action["type"], "camera_reacquire")
+        self.assertEqual(proposal.target_explanation["resourceProjectionStatus"]["classification"], "projection_sentinel")
+        self.assertEqual(proposal.target_explanation["bestLogicalResourceTarget"]["name"], "Tree")
+        self.assertIsNone(proposal.target_explanation["selectedExecutableResourceTarget"])
+
     def test_collecting_resource_target_proposes_select_resource_target(self):
         proposal = build_action_proposal(status_for())
 
@@ -87,6 +139,42 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_name, "Bank booth")
         self.assertEqual(proposal.suggested_click_point, {"x": 220, "y": 240})
 
+    def test_active_route_dialogue_proposes_number_key_choice(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="pathing_to_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service_route={
+                    "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                    "currentStepIndex": 4,
+                    "currentStep": {
+                        "type": "interact_object",
+                        "label": "second stairs up",
+                        "planeChange": "+1",
+                    },
+                },
+                dialogue_state={
+                    "schema": "dialogue_state.v1",
+                    "active": True,
+                    "type": "options",
+                    "promptText": "Climb up or down the stairs?",
+                    "canUseNumberKeys": True,
+                    "options": [
+                        {"index": 1, "key": "1", "text": "Climb up the stairs."},
+                        {"index": 2, "key": "2", "text": "Climb down the stairs."},
+                    ],
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "interface_dialogue_choice")
+        self.assertEqual(proposal.target_kind, "interface_dialogue")
+        self.assertEqual(proposal.key_action, {"type": "key_press", "key": "1"})
+        self.assertTrue(proposal.executable)
+
     def test_inventory_full_with_service_path_needed_proposes_navigate_to_service(self):
         proposal = build_action_proposal(
             status_for(
@@ -113,6 +201,444 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_kind, "path_tile")
         self.assertEqual(proposal.suggested_click_point, {"x": 260, "y": 280})
 
+    def test_service_needed_by_phase_and_free_slots_outranks_post_bank_resource_target(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="inventory_full",
+                active_intent="needs_service",
+                inventory_full=False,
+                free_slots=0,
+                active_target={
+                    "targetName": "Oak tree",
+                    "name": "Oak tree",
+                    "classId": "tree",
+                    "targetType": "sceneObject",
+                    "actions": ["Chop down"],
+                    "aimPoint": aim(430, 220),
+                },
+                service={"serviceNeeded": True, "serviceReady": False},
+                pathing={
+                    "pathingNeeded": True,
+                    "pathCompleted": False,
+                    "nextWaypointTile": {"worldX": 3201, "worldY": 3200, "plane": 0},
+                    "nextWaypointAimPoint": aim(260, 280),
+                },
+                bank_ui={"bankOpen": False},
+                bank_operation={"operationNeeded": False, "bankingComplete": True, "resourceItemsHeld": 0},
+                resource_return={"resourceTargetCurrentlyVisible": True},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_kind, "path_tile")
+        self.assertEqual(proposal.reason, "pathing_to_service")
+
+    def test_service_needed_by_phase_and_free_slots_ignores_stale_return_route(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="inventory_full",
+                active_intent="needs_service",
+                inventory_full=False,
+                free_slots=0,
+                active_target={
+                    "targetName": "Lumbridge Castle west approach return",
+                    "classId": "resource_return",
+                    "targetType": "tile",
+                    "aimPoint": aim(700, 710),
+                },
+                service={"serviceNeeded": True, "serviceReady": False},
+                pathing={
+                    "pathingNeeded": True,
+                    "pathCompleted": False,
+                    "nextWaypointTile": {"worldX": 3201, "worldY": 3200, "plane": 0},
+                    "nextWaypointAimPoint": aim(260, 280),
+                },
+                bank_ui={"bankOpen": False},
+                bank_operation={"operationNeeded": False, "bankingComplete": True, "resourceItemsHeld": 0},
+                resource_return={
+                    "returnDestinationAvailable": True,
+                    "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                },
+                return_route={
+                    "schema": "return_route_context.v1",
+                    "returnRouteId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                    "state": "return_route_ready",
+                    "currentNavigationTarget": {"worldX": 3203, "worldY": 3238, "plane": 0},
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_kind, "path_tile")
+        self.assertEqual(proposal.reason, "pathing_to_service")
+
+    def test_goal_directed_service_fallback_metadata_reaches_navigation_proposal(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 0},
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeAvailable": True,
+                    "routeMode": "goal_directed_fallback",
+                    "goalDirectedFallback": True,
+                    "routeStepStatus": "goal_directed_route_prior",
+                    "currentNodeId": "lumbridge_castle_entrance_or_courtyard",
+                    "currentNavigationTarget": {
+                        "targetName": "Lumbridge Castle entrance or ground-floor courtyard",
+                        "classId": "service_route_anchor",
+                        "targetType": "service_route_anchor",
+                        "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                        "routeMode": "goal_directed_fallback",
+                        "goalDirectedFallback": True,
+                        "worldX": 3205,
+                        "worldY": 3232,
+                        "plane": 0,
+                        "selectedServiceAnchor": {"anchorId": "lumbridge_castle_bank"},
+                        "selectedApproachNode": {"nodeId": "lumbridge_castle_entrance_or_courtyard"},
+                        "routeSourceMismatch": {"classification": "route_source_mismatch"},
+                    },
+                },
+                pathing={
+                    "pathingNeeded": True,
+                    "reason": "destination_outside_collision_window",
+                    "routeMode": "goal_directed_fallback",
+                    "goalDirectedFallback": True,
+                    "nextWaypointTile": {"worldX": 3253, "worldY": 3240, "plane": 0},
+                    "pathTargetTile": {"worldX": 3250, "worldY": 3238, "plane": 0},
+                    "predictedPathTiles": [
+                        {"worldX": 3253, "worldY": 3240, "plane": 0},
+                        {"worldX": 3252, "worldY": 3239, "plane": 0},
+                        {"worldX": 3250, "worldY": 3238, "plane": 0},
+                    ],
+                    "localFrontierWaypoint": {"worldX": 3250, "worldY": 3238, "plane": 0},
+                    "frontierDistanceBefore": 49,
+                    "frontierDistanceAfterEstimate": 45,
+                    "progressScore": 4,
+                },
+                bank_ui={"bankOpen": False},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_explanation["routeMode"], "goal_directed_fallback")
+        self.assertTrue(proposal.target_explanation["goalDirectedFallback"])
+        self.assertEqual(proposal.target_explanation["selectedServiceAnchor"]["anchorId"], "lumbridge_castle_bank")
+        self.assertEqual(proposal.target_explanation["selectedApproachNode"]["nodeId"], "lumbridge_castle_entrance_or_courtyard")
+        self.assertEqual(proposal.target_explanation["routeSourceMismatch"]["classification"], "route_source_mismatch")
+        self.assertEqual(proposal.target_explanation["localFrontierWaypoint"], {"worldX": 3250, "worldY": 3238, "plane": 0})
+        self.assertEqual(proposal.target_explanation["progressScore"], 4)
+
+    def test_visible_service_route_transition_proposes_interaction_object(self):
+        route_target = {
+            "targetName": "Staircase",
+            "classId": "service_route_transition",
+            "targetType": "sceneObject",
+            "id": 56230,
+            "worldX": 3205,
+            "worldY": 3229,
+            "plane": 0,
+            "aimPoint": aim(250, 260),
+            "actions": ["Climb-up", "Top-floor"],
+            "expectedOptions": ["Climb-up", "Climb up"],
+            "expectedTargets": ["Stair", "Staircase"],
+            "expectedPlaneChange": "+1",
+            "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+            "routeStepIndex": 1,
+        }
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 0},
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeAvailable": True,
+                    "routeStepStatus": "route_interaction_visible",
+                    "actionReady": True,
+                    "visibleInteractionTarget": route_target,
+                },
+                bank_ui={"bankOpen": False},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "interact_service_route_object")
+        self.assertEqual(proposal.target_kind, "service_route_object")
+        self.assertEqual(proposal.target_name, "Staircase")
+        self.assertEqual(proposal.suggested_click_point, {"x": 250, "y": 260})
+        self.assertIn("Climb-up", proposal.target_explanation["expectedOptions"])
+        self.assertEqual(proposal.target_explanation["expectedPlaneChange"], "+1")
+
+    def test_visible_service_route_transition_includes_safe_aimpoint_samples(self):
+        route_target = {
+            "targetName": "Staircase",
+            "classId": "service_route_transition",
+            "targetType": "sceneObject",
+            "id": 56230,
+            "worldX": 3205,
+            "worldY": 3229,
+            "plane": 0,
+            "aimPoint": aim(250, 260),
+            "clickboxBounds": bounds(230, 240, 40, 50),
+            "actions": ["Climb-up", "Top-floor"],
+            "expectedOptions": ["Climb-up", "Climb up"],
+            "expectedTargets": ["Stair", "Staircase"],
+            "expectedPlaneChange": "+1",
+            "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+            "routeStepIndex": 3,
+        }
+
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 0},
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeAvailable": True,
+                    "routeStepStatus": "route_interaction_visible",
+                    "actionReady": True,
+                    "visibleInteractionTarget": route_target,
+                },
+                bank_ui={"bankOpen": False},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "interact_service_route_object")
+        safe = proposal.target_explanation.get("safeAimPoint")
+        self.assertIsInstance(safe, dict)
+        self.assertEqual(safe.get("status"), "PASS")
+        self.assertGreater(len(safe.get("sampledAimpoints") or []), 1)
+
+    def test_route_ready_bank_service_target_proposes_open_service(self):
+        service_target = {
+            "targetName": "Bank booth",
+            "classId": "bank_booth",
+            "targetType": "sceneObject",
+            "id": 18491,
+            "worldX": 3208,
+            "worldY": 3220,
+            "plane": 2,
+            "aimPoint": aim(330, 240),
+            "clickboxBounds": bounds(300, 210, 60, 60),
+            "actions": ["Bank", "Collect"],
+            "expectedOptions": ["Bank", "Use"],
+            "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+            "routeStepIndex": 5,
+            "routeStepType": "service_interact",
+            "routeRelevance": {"relevanceStatus": "PASS"},
+        }
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 1},
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeAvailable": True,
+                    "routeStepStatus": "service_target_actionable",
+                    "currentStepIndex": 5,
+                    "currentStep": {"type": "service_interact", "label": "Lumbridge Castle bank", "expectedOptions": ["Bank", "Use"]},
+                    "actionReady": True,
+                    "visibleServiceTarget": service_target,
+                },
+                bank_ui={"bankOpen": False},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "open_service")
+        self.assertEqual(proposal.target_kind, "service")
+        self.assertEqual(proposal.target_name, "Bank booth")
+        self.assertEqual(proposal.suggested_click_point, {"x": 330, "y": 240})
+        self.assertIn("Bank", proposal.target_explanation["expectedOptions"])
+        self.assertEqual(proposal.target_explanation["safeAimPoint"]["status"], "PASS")
+        self.assertGreaterEqual(len(proposal.target_explanation["safeAimPoint"]["sampledAimpoints"]), 3)
+
+    def test_hover_confirmed_route_object_intercepts_waypoint_navigation(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 0},
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeAvailable": True,
+                    "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                    "routeStepStatus": "first_stairs_search_area",
+                    "actionReady": False,
+                    "currentStep": {
+                        "type": "interact_object",
+                        "label": "first stairs up",
+                        "expectedOptions": ["Climb-up", "Climb up", "Top-floor"],
+                        "expectedTargetContains": ["Stair", "Staircase", "Ladder"],
+                        "planeChange": "+1",
+                    },
+                    "routeSteps": [
+                        {"type": "navigate_world", "label": "Lumbridge Castle approach"},
+                        {
+                            "type": "interact_object",
+                            "label": "first stairs up",
+                            "expectedOptions": ["Climb-up", "Climb up", "Top-floor"],
+                            "expectedTargetContains": ["Stair", "Staircase", "Ladder"],
+                            "planeChange": "+1",
+                        },
+                    ],
+                },
+                pathing={
+                    "pathingNeeded": True,
+                    "nextWaypointTile": {"worldX": 3202, "worldY": 3239, "plane": 0},
+                    "nextWaypointAimPoint": aim(260, 280),
+                },
+            )
+            | {
+                "clientTickHot": {
+                    "schema": "client_tick_hot.v1",
+                    "gameState": "LOGGED_IN",
+                    "postMenuSort": {
+                        "topOption": "Climb-up",
+                        "topTarget": "Staircase",
+                        "topType": "GAME_OBJECT_FIRST_OPTION",
+                        "topIdentifier": 56230,
+                        "mouseCanvasX": 431,
+                        "mouseCanvasY": 214,
+                    },
+                    "latency": {"postMenuSortAgeMillis": 18},
+                }
+            }
+        )
+
+        self.assertEqual(proposal.proposed_action, "interact_service_route_object")
+        self.assertEqual(proposal.target_kind, "service_route_object")
+        self.assertEqual(proposal.target_name, "Staircase")
+        self.assertEqual(proposal.suggested_click_point, {"x": 431, "y": 214})
+        self.assertEqual(proposal.target_explanation["targetSource"], "client_tick_hot_hover")
+        self.assertIn("Climb-up", proposal.target_explanation["expectedOptions"])
+
+    def test_hover_confirmed_future_route_object_without_relevance_does_not_bypass_waypoint(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 0},
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeAvailable": True,
+                    "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                    "routeStepStatus": "static_route_prior",
+                    "actionReady": False,
+                    "currentStep": {"type": "navigate_world", "label": "Lumbridge Castle approach"},
+                    "routeSteps": [
+                        {"type": "navigate_world", "label": "Lumbridge Castle approach"},
+                        {
+                            "type": "interact_object",
+                            "label": "first stairs up",
+                            "expectedOptions": ["Climb-up", "Climb up", "Top-floor"],
+                            "expectedTargetContains": ["Stair", "Staircase", "Ladder"],
+                            "planeChange": "+1",
+                        },
+                    ],
+                },
+                pathing={
+                    "pathingNeeded": True,
+                    "nextWaypointTile": {"worldX": 3202, "worldY": 3239, "plane": 0},
+                    "nextWaypointAimPoint": aim(260, 280),
+                },
+            )
+            | {
+                "clientTickHot": {
+                    "schema": "client_tick_hot.v1",
+                    "gameState": "LOGGED_IN",
+                    "postMenuSort": {
+                        "topOption": "Climb-up",
+                        "topTarget": "Staircase",
+                        "topType": "GAME_OBJECT_FIRST_OPTION",
+                        "topIdentifier": 56230,
+                        "mouseCanvasX": 431,
+                        "mouseCanvasY": 214,
+                    },
+                    "latency": {"postMenuSortAgeMillis": 18},
+                }
+            }
+        )
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_kind, "path_tile")
+
+    def test_adaptive_route_waypoint_prefers_meaningful_progress_over_micro_step(self):
+        predicted = [{"worldX": 3200 + step, "worldY": 3248 - step, "plane": 0} for step in range(1, 26)]
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False},
+                pathing={
+                    "pathingNeeded": True,
+                    "nextWaypointTile": predicted[0],
+                    "predictedPathTiles": predicted,
+                    "destinationTile": predicted[-1],
+                    "routeWaypointDistanceMode": "adaptive",
+                    "routeWaypointLookaheadTiles": 12,
+                    "routeWaypointMaxHorizonTiles": 25,
+                    "minRouteProgressTiles": 3,
+                    "preferLongVisibleWaypoint": True,
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_tile, predicted[11])
+        self.assertEqual(proposal.target_explanation["routeWaypointSelection"]["mode"], "adaptive")
+        self.assertEqual(proposal.target_explanation["routeWaypointSelection"]["waypointDistanceTiles"], 12)
+
+    def test_adaptive_route_waypoint_keeps_short_step_near_transition_geometry(self):
+        predicted = [{"worldX": 3200 + step, "worldY": 3230, "plane": 0} for step in range(1, 12)]
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False},
+                pathing={
+                    "pathingNeeded": True,
+                    "nextWaypointTile": predicted[0],
+                    "predictedPathTiles": predicted,
+                    "destinationTile": predicted[-1],
+                    "routeWaypointDistanceMode": "adaptive",
+                    "routeWaypointLookaheadTiles": 12,
+                    "routeWaypointMaxHorizonTiles": 25,
+                    "routeWaypointNearTransition": True,
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_tile, predicted[0])
+        self.assertEqual(proposal.target_explanation["routeWaypointSelection"]["reason"], "near_transition_precision")
+
     def test_bank_readable_resources_held_deposit_inventory_available(self):
         proposal = build_action_proposal(
             status_for(
@@ -137,6 +663,39 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.proposed_action, "deposit_inventory")
         self.assertEqual(proposal.target_kind, "bank_ui")
         self.assertEqual(proposal.suggested_click_point, {"x": 310, "y": 405})
+
+    def test_bank_readable_non_resource_item_uses_selective_resource_deposit(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="service_open",
+                active_intent="bank_operation_pending",
+                active_target=None,
+                bank_ui={
+                    "bankOpen": True,
+                    "bankReadable": True,
+                    "depositInventoryButtonVisible": True,
+                    "depositInventoryButtonBounds": bounds(300, 400, 20, 10),
+                },
+                bank_operation={
+                    "operationNeeded": True,
+                    "operationType": "deposit_inventory",
+                    "resourceItemsHeld": 18,
+                    "nonResourceItemsHeld": 1,
+                    "depositInventoryAvailable": True,
+                    "resourceItemSlotBounds": [bounds(500, 600, 28, 28)],
+                    "resourceItemWidgets": [{"slot": 9, "itemId": 1511, "quantity": 1, "actions": ["Deposit-1", "Deposit-All"], "bounds": bounds(500, 600, 28, 28)}],
+                    "resourceDisplayName": "logs",
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "deposit_resources")
+        self.assertEqual(proposal.reason, "protected_non_resource_items_present")
+        self.assertEqual(proposal.target_name, "logs")
+        self.assertEqual(proposal.suggested_click_point, {"x": 514, "y": 614})
+        self.assertEqual(proposal.target_explanation["expectedOptions"], ["Deposit"])
+        self.assertIn("Logs", proposal.target_explanation["expectedTargets"])
+        self.assertIn("protected item", " ".join(proposal.warnings))
 
     def test_bank_readable_resources_held_without_deposit_inventory_deposit_resources(self):
         proposal = build_action_proposal(
@@ -173,6 +732,106 @@ class ActionProposalTest(unittest.TestCase):
 
         self.assertEqual(proposal.proposed_action, "close_bank")
         self.assertEqual(proposal.key_action, {"type": "key_press", "key": "escape"})
+
+    def test_banking_complete_close_ready_ignores_stale_service_needed_signal(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="waiting_for_world_view",
+                active_intent="close_service_context",
+                active_target=None,
+                free_slots=15,
+                service={
+                    "serviceNeeded": True,
+                    "serviceReady": True,
+                    "bestServiceCandidate": {
+                        "targetName": "Bank Deposit Box",
+                        "classId": "bank_related",
+                        "aimPoint": aim(388, 220),
+                    },
+                },
+                bank_ui={"bankOpen": True, "bankReadable": True},
+                bank_operation={
+                    "operationNeeded": False,
+                    "operationType": "none",
+                    "bankingComplete": True,
+                    "resourceItemsHeld": 0,
+                    "resourceItemQuantity": 0,
+                },
+                close_bank={
+                    "closeBankNeeded": True,
+                    "closeBankReady": True,
+                    "keyboardClosePossible": True,
+                },
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                    "currentNodeId": "lumbridge_castle_bank",
+                    "routeStepStatus": "service_target_actionable",
+                    "actionReady": True,
+                    "visibleServiceTarget": {
+                        "targetName": "Bank Deposit Box",
+                        "classId": "bank_related",
+                        "targetType": "sceneObject",
+                        "aimPoint": aim(388, 220),
+                        "actions": ["Bank", "Use", "Deposit"],
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "close_bank")
+        self.assertEqual(proposal.reason, "close_bank_ready")
+
+    def test_banking_complete_bank_closed_does_not_reopen_service(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="service_ready",
+                active_intent="observe_service_context",
+                active_target=None,
+                bank_ui={"bankOpen": False, "bankReadable": False},
+                bank_operation={"operationNeeded": False, "bankingComplete": True, "resourceItemsHeld": 0},
+                service={"serviceReady": True, "selectedServiceTargetName": "Bank booth"},
+                pathing={"serviceReady": True},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.reason, "service_complete_waiting_for_return_context")
+        self.assertIsNone(proposal.suggested_click_point)
+
+    def test_banking_complete_route_service_target_does_not_reopen_service(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="return_to_resource",
+                active_intent="return_to_resource_area",
+                active_target={"targetName": "", "classId": "none"},
+                bank_ui={"bankOpen": False, "bankReadable": False},
+                bank_operation={
+                    "operationNeeded": False,
+                    "operationType": "none",
+                    "bankingComplete": True,
+                    "resourceItemsHeld": 0,
+                    "resourceItemQuantity": 0,
+                },
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                    "currentNodeId": "lumbridge_castle_bank",
+                    "routeStepStatus": "service_target_visible",
+                    "actionReady": True,
+                    "visibleServiceTarget": {
+                        "targetName": "Bank Deposit Box",
+                        "classId": "bank_related",
+                        "targetType": "sceneObject",
+                        "aimPoint": aim(324, 220),
+                        "actions": ["Bank", "Use", "Deposit"],
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.reason, "service_complete_waiting_for_return_context")
         self.assertIsNone(proposal.suggested_click_point)
 
     def test_valid_return_destination_proposes_return_to_resource_area(self):
@@ -195,6 +854,257 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_kind, "path_tile")
         self.assertEqual(proposal.suggested_click_point, {"x": 700, "y": 710})
 
+    def test_return_route_yields_to_visible_resource_candidate_after_service(self):
+        status = status_for(
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+            active_target={
+                "targetName": "Lumbridge Castle west approach return",
+                "classId": "resource_return",
+                "targetType": "tile",
+                "aimPoint": aim(700, 710),
+            },
+            bank_ui={"bankOpen": False},
+            bank_operation={"bankingComplete": True, "resourceItemsHeld": 0},
+            resource_return={
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "reason": "resource_target_visible",
+                "resourceTargetCurrentlyVisible": True,
+            },
+            return_route={
+                "schema": "return_route_context.v1",
+                "returnRouteId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                "state": "return_route_ready",
+                "currentNavigationTarget": {"worldX": 3203, "worldY": 3238, "plane": 0},
+            },
+        )
+        status["brain"]["candidates"] = [
+            {
+                "targetName": "Tree",
+                "name": "Tree",
+                "classId": "tree",
+                "targetType": "sceneObject",
+                "objectId": 1276,
+                "actions": ["Chop down"],
+                "aimPoint": aim(150, 174),
+                "worldLocation": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "targetTick": 42,
+            }
+        ]
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertEqual(proposal.target_name, "Tree")
+
+    def test_return_route_yields_to_flattened_return_best_resource_target(self):
+        status = status_for(
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+            active_target={
+                "targetName": "Lumbridge Castle west approach return",
+                "classId": "resource_return",
+                "targetType": "tile",
+                "aimPoint": aim(700, 710),
+            },
+            bank_ui={"bankOpen": False},
+            bank_operation={"bankingComplete": True, "resourceItemsHeld": 0},
+            resource_return={
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "resourceTargetCurrentlyVisible": True,
+            },
+            return_route={
+                "schema": "return_route_context.v1",
+                "returnRouteId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                "state": "return_route_ready",
+                "currentNavigationTarget": {"worldX": 3203, "worldY": 3238, "plane": 0},
+            },
+        )
+        status["returnBestResourceTarget"] = {
+            "targetName": "Tree",
+            "name": "Tree",
+            "classId": "tree",
+            "targetType": "sceneObject",
+            "objectId": 1276,
+            "actions": ["Chop down"],
+            "aimPoint": aim(151, 174),
+            "worldX": 3196,
+            "worldY": 3226,
+            "plane": 0,
+            "targetTick": 42,
+        }
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertEqual(proposal.target_name, "Tree")
+
+    def test_return_route_keeps_navigating_when_reacquired_resource_is_not_actionable(self):
+        status = status_for(
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+            active_target={
+                "targetName": "Lumbridge Castle west approach return",
+                "classId": "resource_return",
+                "targetType": "tile",
+                "aimPoint": aim(700, 710),
+            },
+            bank_ui={"bankOpen": False},
+            bank_operation={"bankingComplete": True, "resourceItemsHeld": 0},
+            resource_return={
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "resourceTargetCurrentlyVisible": True,
+            },
+            return_route={
+                "schema": "return_route_context.v1",
+                "returnRouteId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                "state": "return_route_ready",
+                "currentNavigationTarget": {"worldX": 3203, "worldY": 3238, "plane": 0},
+            },
+        )
+        status["returnBestResourceTarget"] = {
+            "targetName": "Tree",
+            "name": "Tree",
+            "classId": "tree",
+            "targetType": "sceneObject",
+            "objectId": 1276,
+            "actions": ["Chop down"],
+            "aimPoint": {"x": 2147483648, "y": 2147483648},
+            "geometrySummary": {"bounds": {"x": 2147483648, "y": 2147483648, "w": 0, "h": 0}},
+            "worldX": 3196,
+            "worldY": 3226,
+            "plane": 0,
+            "targetTick": 42,
+        }
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "return_to_resource_area")
+        self.assertEqual(proposal.target_kind, "path_tile")
+
+    def test_return_route_transition_outranks_resource_return_waypoint(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="return_to_resource",
+                active_intent="return_to_resource_area",
+                active_target={"targetName": "Resource return", "classId": "resource_return", "aimPoint": aim(700, 710)},
+                bank_ui={"bankOpen": False},
+                bank_operation={"bankingComplete": True, "resourceItemsHeld": 0},
+                resource_return={
+                    "returnDestinationAvailable": True,
+                    "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                    "reason": "using_profile_resource_anchor",
+                },
+                return_route={
+                    "schema": "return_route_context.v1",
+                    "returnActionReady": True,
+                    "state": "return_transition_actionable",
+                    "currentStep": {
+                        "type": "interact_object",
+                        "label": "bank floor stairs down",
+                        "expectedOptions": ["Climb-down"],
+                        "dialogueOpenerOptions": ["Climb"],
+                        "expectedTargetContains": ["Staircase"],
+                        "planeChange": "-1",
+                    },
+                    "visibleInteractionTarget": {
+                        "targetName": "Staircase",
+                        "classId": "staircase",
+                        "targetType": "sceneObject",
+                        "aimPoint": aim(431, 214),
+                        "actions": ["Climb-down"],
+                        "expectedOptions": ["Climb-down"],
+                        "expectedTargets": ["Staircase"],
+                        "expectedPlaneChange": "-1",
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "interact_service_route_object")
+        self.assertEqual(proposal.target_kind, "service_route_object")
+        self.assertEqual(proposal.target_name, "Staircase")
+        self.assertEqual(proposal.suggested_click_point, {"x": 431, "y": 214})
+        self.assertEqual(proposal.target_explanation["expectedPlaneChange"], "-1")
+        self.assertEqual(proposal.target_explanation["dialogueOpenerOptions"], ["Climb"])
+
+    def test_return_route_dialogue_proposes_climb_down_number_key_choice(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="return_to_resource",
+                active_intent="return_to_resource_area",
+                active_target=None,
+                bank_ui={"bankOpen": False},
+                bank_operation={"bankingComplete": True, "resourceItemsHeld": 0},
+                return_route={
+                    "schema": "return_route_context.v1",
+                    "returnRouteId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                    "currentStepIndex": 1,
+                    "currentStep": {
+                        "type": "interact_object",
+                        "label": "first floor stairs down",
+                        "planeChange": "-1",
+                    },
+                },
+                dialogue_state={
+                    "schema": "dialogue_state.v1",
+                    "active": True,
+                    "type": "options",
+                    "promptText": "Climb up or down the stairs?",
+                    "canUseNumberKeys": True,
+                    "options": [
+                        {"index": 1, "key": "1", "text": "Climb up the stairs."},
+                        {"index": 2, "key": "2", "text": "Climb down the stairs."},
+                    ],
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "interface_dialogue_choice")
+        self.assertEqual(proposal.target_kind, "interface_dialogue")
+        self.assertEqual(proposal.key_action, {"type": "key_press", "key": "2"})
+        self.assertEqual(proposal.target_explanation["expectedPlaneChange"], "-1")
+
+    def test_banking_complete_ignores_stale_service_route_object_when_resource_target_visible(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="target_selected",
+                active_intent="resource_target",
+                active_target={
+                    "targetName": "Tree",
+                    "name": "Tree",
+                    "classId": "tree",
+                    "targetType": "sceneObject",
+                    "objectId": 1276,
+                    "actions": ["Chop down"],
+                    "aimPoint": aim(520, 530),
+                    "worldLocation": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                    "targetTick": 42,
+                },
+                bank_ui={"bankOpen": False},
+                bank_operation={"bankingComplete": True, "resourceItemsHeld": 0},
+                service_route={
+                    "actionReady": True,
+                    "routeStepStatus": "route_interaction_visible",
+                    "visibleInteractionTarget": {
+                        "targetName": "Staircase",
+                        "classId": "route_transition",
+                        "targetType": "sceneObject",
+                        "aimPoint": aim(240, 138),
+                        "actions": ["Climb-up"],
+                        "expectedOptions": ["Climb-up"],
+                        "expectedTargets": ["Staircase"],
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertEqual(proposal.target_name, "Tree")
+
     def test_missing_click_point_warns_and_prevents_execution(self):
         proposal = build_action_proposal(
             status_for(
@@ -207,6 +1117,178 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.proposed_action, "select_resource_target")
         self.assertIn("click_point", proposal.missing_capabilities)
         self.assertFalse(proposal.executable)
+
+    def test_stale_resource_candidate_refuses_selection(self):
+        proposal = build_action_proposal(
+            status_for(
+                latest_tick=20,
+                active_target={"targetName": "Tree", "classId": "tree", "tick": 10, "aimPoint": aim(110, 130)},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.reason, "candidate_data_stale")
+        self.assertIn("target.freshness", proposal.missing_capabilities)
+        self.assertTrue(any("candidate data stale" in warning for warning in proposal.warnings))
+        self.assertFalse(proposal.executable)
+
+    def test_select_resource_target_includes_candidate_explanation(self):
+        proposal = build_action_proposal(
+            status_for(
+                latest_tick=20,
+                active_target={
+                    "targetName": "Tree",
+                    "classId": "tree",
+                    "id": 1276,
+                    "tick": 20,
+                    "worldX": 3200,
+                    "worldY": 3201,
+                    "plane": 0,
+                    "onScreen": True,
+                    "geometryAvailable": True,
+                    "aimPoint": aim(110, 130),
+                    "positiveSignals": ["profileMatch", "onScreen"],
+                },
+            )
+        )
+
+        payload = proposal.to_dict()
+        explanation = payload["targetExplanation"]
+        self.assertEqual(explanation["name"], "Tree")
+        self.assertEqual(explanation["id"], 1276)
+        self.assertEqual(explanation["classId"], "tree")
+        self.assertEqual(explanation["targetTick"], 20)
+        self.assertFalse(explanation["stale"])
+        self.assertIn("profileMatch", explanation["acceptedReasons"])
+
+    def test_resource_target_uses_safe_visible_aimpoint_when_raw_center_is_off_viewport(self):
+        proposal = build_action_proposal(
+            status_for(
+                active_target={
+                    "targetName": "Tree",
+                    "classId": "tree",
+                    "id": 1276,
+                    "onScreen": True,
+                    "geometryAvailable": True,
+                    "aimPoint": {"canvasX": 770, "canvasY": 250, "source": "clickboxCenter"},
+                    "clickboxBounds": {"x": 748, "y": 220, "width": 40, "height": 60},
+                },
+                input_geometry={
+                    "inputGeometryAvailable": True,
+                    "canvasScreenOrigin": {"x": 1000, "y": 2000},
+                    "canvasSize": {"width": 1530, "height": 1006},
+                    "sourceCanvasSize": {"width": 765, "height": 503},
+                },
+                camera_viewport={"canvasWidth": 765, "canvasHeight": 503, "viewportXOffset": 0, "viewportYOffset": 0, "viewportWidth": 765, "viewportHeight": 503},
+            )
+        )
+
+        self.assertEqual(proposal.status, "PASS")
+        self.assertEqual(proposal.suggested_click_point["x"], 759)
+        self.assertEqual(proposal.target_explanation["safeAimPoint"]["source"], "clippedClickboxInterior")
+        self.assertTrue(proposal.target_explanation["safeAimPoint"]["insideViewport"])
+
+    def test_resource_target_without_safe_visible_point_is_not_executable(self):
+        proposal = build_action_proposal(
+            status_for(
+                active_target={
+                    "targetName": "Tree",
+                    "classId": "tree",
+                    "id": 1276,
+                    "onScreen": True,
+                    "geometryAvailable": True,
+                    "aimPoint": {"canvasX": 830, "canvasY": 250, "source": "clickboxCenter"},
+                    "clickboxBounds": {"x": 820, "y": 220, "width": 40, "height": 60},
+                },
+                camera_viewport={"canvasWidth": 765, "canvasHeight": 503, "viewportXOffset": 0, "viewportYOffset": 0, "viewportWidth": 765, "viewportHeight": 503},
+            )
+        )
+
+        self.assertEqual(proposal.status, "WARN")
+        self.assertFalse(proposal.executable)
+        self.assertIn("safe_aimpoint", proposal.missing_capabilities)
+        self.assertEqual(proposal.target_explanation["safeAimPoint"]["rejectionReason"], "no_visible_interactable_geometry")
+
+    def test_suppressed_selected_target_reacquires_backup_from_status_overlay_context(self):
+        selected = {
+            "targetName": "Oak tree",
+            "name": "Oak tree",
+            "classId": "tree",
+            "id": 10820,
+            "worldX": 3189,
+            "worldY": 3248,
+            "plane": 0,
+            "aimPoint": aim(522, 174),
+            "objectKey": "oak-selected",
+        }
+        backup = {
+            "targetName": "Tree",
+            "name": "Tree",
+            "classId": "tree",
+            "id": 1276,
+            "worldX": 3194,
+            "worldY": 3249,
+            "plane": 0,
+            "aimPoint": aim(620, 220),
+            "objectKey": "tree-backup",
+            "markerType": "backup_candidate",
+        }
+        status = status_for(active_target=selected)
+        status["suppressedResourceTargetKeys"] = ["oak-selected"]
+        status["intentOverlayContext"] = {
+            "selectedMarker": {**selected, "markerType": "selected_target"},
+            "markers": [{**selected, "markerType": "selected_target"}, backup],
+        }
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertEqual(proposal.target_name, "Tree")
+        self.assertEqual(proposal.suggested_click_point, {"x": 620, "y": 220})
+        self.assertTrue(proposal.target_explanation["reacquiredAfterSuppression"])
+
+    def test_suppression_matches_active_hash_key_to_overlay_object_key_by_identity(self):
+        active = {
+            "targetName": "Oak tree",
+            "name": "Oak tree",
+            "classId": "tree",
+            "id": 10820,
+            "worldX": 3189,
+            "worldY": 3248,
+            "plane": 0,
+            "aimPoint": aim(522, 174),
+            "key": "hash:11345729460",
+        }
+        selected_marker = {
+            **active,
+            "key": None,
+            "objectKey": "0:3189:3248:53:48:GAME_OBJECT:10820:11345729460:1024",
+            "markerType": "selected_target",
+        }
+        backup = {
+            "targetName": "Tree",
+            "name": "Tree",
+            "classId": "tree",
+            "id": 1276,
+            "worldX": 3194,
+            "worldY": 3249,
+            "plane": 0,
+            "aimPoint": aim(620, 220),
+            "objectKey": "0:3194:3249:58:49:GAME_OBJECT:1276:1338120378:1024",
+            "markerType": "backup_candidate",
+        }
+        status = status_for(active_target=active)
+        status["suppressedResourceTargetKeys"] = ["10820:3189:3248:0:tree"]
+        status["intentOverlayContext"] = {
+            "selectedMarker": selected_marker,
+            "markers": [selected_marker, backup],
+        }
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.target_name, "Tree")
+        self.assertEqual(proposal.suggested_click_point, {"x": 620, "y": 220})
+        self.assertTrue(proposal.target_explanation["reacquiredAfterSuppression"])
 
 
 if __name__ == "__main__":

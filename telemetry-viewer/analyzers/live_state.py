@@ -282,6 +282,14 @@ class PathingContext(AnalyzerContractFields):
     path_completed: bool = False
     path_completion_reason: str | None = None
     retained_path_after_arrival: bool = False
+    route_mode: str | None = None
+    goal_directed_fallback_active: bool = False
+    fallback_goal: dict[str, Any] | None = None
+    fallback_approach_node: dict[str, Any] | None = None
+    local_frontier_waypoint: dict[str, Any] | None = None
+    frontier_distance_before: int | None = None
+    frontier_distance_after_estimate: int | None = None
+    progress_score: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -370,6 +378,14 @@ class PathingContext(AnalyzerContractFields):
             "pathCompleted": self.path_completed,
             "pathCompletionReason": self.path_completion_reason,
             "retainedPathAfterArrival": self.retained_path_after_arrival,
+            "routeMode": self.route_mode,
+            "goalDirectedFallback": self.goal_directed_fallback_active,
+            "fallbackGoal": self.fallback_goal,
+            "fallbackApproachNode": self.fallback_approach_node,
+            "localFrontierWaypoint": self.local_frontier_waypoint,
+            "frontierDistanceBefore": self.frontier_distance_before,
+            "frontierDistanceAfterEstimate": self.frontier_distance_after_estimate,
+            "progressScore": self.progress_score,
         }
 
 
@@ -464,6 +480,7 @@ class ServiceContext(AnalyzerContractFields):
     arrived_at_final_approach: bool = False
     arrived_near_destination: bool = False
     distance_to_final_approach: int | None = None
+    service_route_context: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -511,6 +528,7 @@ class ServiceContext(AnalyzerContractFields):
             "arrivedAtFinalApproach": self.arrived_at_final_approach,
             "arrivedNearDestination": self.arrived_near_destination,
             "distanceToFinalApproach": self.distance_to_final_approach,
+            "serviceRouteContext": self.service_route_context,
         }
 
 
@@ -575,6 +593,7 @@ class BankUiContext(AnalyzerContractFields):
     keyboard_close_possible: bool | None = None
     inventory_summary: dict[str, Any] = field(default_factory=dict)
     bank_summary: dict[str, Any] = field(default_factory=dict)
+    inventory_slots: list[dict[str, Any]] = field(default_factory=list)
     service_ready: bool = False
     reason: str | None = None
 
@@ -600,6 +619,8 @@ class BankUiContext(AnalyzerContractFields):
             "keyboardClosePossible": self.keyboard_close_possible,
             "inventorySummary": dict(self.inventory_summary),
             "bankSummary": dict(self.bank_summary),
+            "inventorySlots": [dict(slot) for slot in self.inventory_slots if isinstance(slot, dict)],
+            "inventorySlotWidgets": [dict(slot) for slot in self.inventory_slots if isinstance(slot, dict)],
             "serviceReady": self.service_ready,
             "reason": self.reason,
         }
@@ -617,7 +638,10 @@ class BankOperationContext(AnalyzerContractFields):
     operation_type: str = "unknown"
     resource_items_held: int | None = None
     resource_item_slots: list[int] = field(default_factory=list)
+    resource_item_slot_bounds: list[dict[str, Any]] = field(default_factory=list)
+    resource_item_widgets: list[dict[str, Any]] = field(default_factory=list)
     resource_item_quantity: int | None = None
+    resource_display_name: str | None = None
     non_resource_items_held: int | None = None
     inventory_free_slots: int | None = None
     inventory_full: bool | None = None
@@ -635,7 +659,10 @@ class BankOperationContext(AnalyzerContractFields):
             "operationType": self.operation_type,
             "resourceItemsHeld": self.resource_items_held,
             "resourceItemSlots": list(self.resource_item_slots),
+            "resourceItemSlotBounds": [dict(bounds) for bounds in self.resource_item_slot_bounds if isinstance(bounds, dict)],
+            "resourceItemWidgets": [dict(widget) for widget in self.resource_item_widgets if isinstance(widget, dict)],
             "resourceItemQuantity": self.resource_item_quantity,
+            "resourceDisplayName": self.resource_display_name,
             "nonResourceItemsHeld": self.non_resource_items_held,
             "inventoryFreeSlots": self.inventory_free_slots,
             "inventoryFull": self.inventory_full,

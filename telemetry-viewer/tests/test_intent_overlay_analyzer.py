@@ -346,6 +346,43 @@ class IntentOverlayAnalyzerTest(unittest.TestCase):
         self.assertFalse([marker for marker in result["markers"] if marker["markerType"] == "selected_target"])
         self.assertTrue(any(marker["markerType"] == "warning" and marker["label"] == "Inventory full: bank target not observed" for marker in result["markers"]))
 
+    def test_service_route_object_counts_are_reported_separately_from_resource_counts(self):
+        result = overlay.build_overlay_state_for_mode(
+            Path("."),
+            SimpleNamespace(brain_task="woodcutting", overlay_backup_candidates=2, overlay_mode="intent"),
+            {"overlayDebug": {"summary": {}, "targets": [], "markers": []}},
+            {"status": {"lastProcessedTick": 3}, "candidates": []},
+            {
+                "task": "woodcutting",
+                "phase": "inventory_full",
+                "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
+                "serviceRouteContext": {
+                    "currentNodeId": "lumbridge_ground_floor_stairs",
+                    "nextEdge": {"type": "interact_climb_up"},
+                    "routeObjectsVisible": 1,
+                    "routeObjectsActionable": 1,
+                    "routeRelevantObjects": 1,
+                    "routeRelevantActionableObjects": 1,
+                    "visibleButRouteIrrelevantObjects": 2,
+                    "selectedRouteObjectPresent": True,
+                    "selectedRouteObjectAction": "Climb-up",
+                    "selectedRouteObjectRelevance": {"relevanceStatus": "PASS"},
+                    "routeObjectInterceptReady": True,
+                },
+                "confidence": 0.95,
+            },
+            "2026-01-01T00:00:00Z",
+            None,
+        )
+
+        summary = result["summary"]
+        self.assertEqual(summary["safeAimpoints"], 0)
+        self.assertEqual(summary["routeObjectsVisible"], 1)
+        self.assertEqual(summary["routeRelevantActionableObjects"], 1)
+        self.assertEqual(summary["visibleButRouteIrrelevantObjects"], 2)
+        self.assertTrue(summary["routeObjectInterceptReady"])
+        self.assertEqual(summary["selectedRouteObjectAction"], "Climb-up")
+
     def test_process_inventory_intent_does_not_draw_selected_tree(self):
         selected = candidate("selected")
         state = intent_stabilizer.IntentState()

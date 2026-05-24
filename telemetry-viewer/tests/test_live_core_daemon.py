@@ -20,7 +20,7 @@ import live_target_processor as live
 import test_live_target_processor as fixtures
 import diagnose_brain_progress
 from analyzers import resource_return_analyzer
-from analyzers.live_state import BankUiContext, PathingContext, ServiceContext, TargetContext
+from analyzers.live_state import BankOperationContext, BankUiContext, PathingContext, ResourceReturnContext, ServiceContext, TargetContext
 
 
 def make_args(session: Path, *extra: str):
@@ -694,7 +694,16 @@ class LiveCoreDaemonTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             open_response = snapshot_with_logs(session, 1, [], objects=[])
-            closed_response = snapshot_with_logs(session, 2, [], objects=synthetic_tree_objects(1, tick=2))
+            west_tree = fixtures.raw_scene_object(
+                10820,
+                3197,
+                3248,
+                140,
+                120,
+                name="Oak tree",
+                object_key="oak-return-area-2",
+            )
+            closed_response = snapshot_with_logs(session, 2, [], objects=[west_tree])
             coin_items = [{"slot": slot, "itemId": 995, "quantity": 100} for slot in range(13)]
             coin_signature = "|".join(f"{item['slot']}:{item['itemId']}:{item['quantity']}" for item in coin_items)
             for response, bank_open in ((open_response, True), (closed_response, False)):
@@ -773,7 +782,214 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertTrue(core.state.brain_decision["postBankReacquisitionContext"]["resourceTargetReacquisitionAllowed"])
         self.assertFalse(core.state.brain_decision["closeBankContext"]["closeBankNeeded"])
 
-    def test_bank_closed_after_banking_complete_without_tree_reports_no_target(self):
+    def test_reacquired_tree_target_wins_over_stale_return_route_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            open_response = snapshot_with_logs(session, 1, [], objects=[])
+            west_tree = fixtures.raw_scene_object(
+                10820,
+                3197,
+                3248,
+                140,
+                120,
+                name="Oak tree",
+                object_key="oak-return-area-stale-route",
+            )
+            closed_response = snapshot_with_logs(session, 2, [], objects=[west_tree])
+            coin_items = [{"slot": slot, "itemId": 995, "quantity": 100} for slot in range(13)]
+            coin_signature = "|".join(f"{item['slot']}:{item['itemId']}:{item['quantity']}" for item in coin_items)
+            for response, bank_open in ((open_response, True), (closed_response, False)):
+                response["payloads"]["inventory"]["inventory"] = {
+                    "known": True,
+                    "freeSlots": 15,
+                    "filledSlots": 13,
+                    "itemCount": 1300,
+                    "inventoryFull": False,
+                    "inventorySlotCount": 28,
+                    "slotCount": 28,
+                    "signature": coin_signature,
+                    "inventorySignature": coin_signature,
+                    "items": coin_items,
+                }
+                response["payloads"]["bank_ui"] = {
+                    "bankOpen": bank_open,
+                    "bankPinOpen": False,
+                    "bankRootVisible": bank_open,
+                    "bankContainerVisible": bank_open,
+                    "bankInventoryVisible": bank_open,
+                    "depositInventoryButtonVisible": bank_open,
+                    "closeButtonVisible": bank_open,
+                    "inventorySummary": {"freeSlots": 15, "occupiedSlots": 13, "matchingResourceCount": 0},
+                    "bankSummary": {"occupiedSlots": 12, "uniqueItemIds": [1511, 1521]} if bank_open else {},
+                }
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service_target = {
+                "targetType": "sceneObject",
+                "classId": "bank_booth",
+                "targetName": "Bank booth",
+                "id": 10355,
+                "worldX": 3208,
+                "worldY": 3219,
+                "plane": 0,
+            }
+            service = ServiceContext(
+                service_required=True,
+                service_type_needed="bank_full",
+                best_service_candidate=service_target,
+                candidate_count=1,
+                source_tick=1,
+            )
+            pathing = PathingContext(
+                pathing_needed=False,
+                destination=service_target,
+                destination_tile={"worldX": 3208, "worldY": 3219, "plane": 0},
+                service_ready=True,
+                service_ready_reason="arrived_at_service",
+                service_ready_stable_for_ticks=2,
+                path_completed=True,
+                source_tick=1,
+            )
+            stale_return = ResourceReturnContext(
+                return_destination_needed=True,
+                return_destination_available=True,
+                return_destination_tile={"worldX": 3197, "worldY": 3248, "plane": 0},
+                return_destination_source="profile_anchor",
+                resource_target_currently_visible=True,
+                destination_target={"targetType": "tile", "targetName": "West trees", "worldX": 3197, "worldY": 3248, "plane": 0},
+                reason="resource_target_visible",
+                banking_complete=True,
+                bank_open=False,
+                source_tick=2,
+            )
+            stale_return_route = {
+                "schema": "return_route_context.v1",
+                "routeAvailable": True,
+                "returnRouteId": "lumbridge_bank_return",
+                "currentNavigationTarget": {"targetType": "tile", "targetName": "Return waypoint", "worldX": 3199, "worldY": 3246, "plane": 0},
+                "returnActionReady": True,
+                "state": "return_route_ready",
+            }
+            no_service = ServiceContext(service_required=False, source_tick=2)
+            no_pathing = PathingContext(pathing_needed=False, source_tick=2)
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", side_effect=snapshot_request_side_effect([open_response, open_response, closed_response, closed_response])):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", side_effect=[service, no_service]):
+                    with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", side_effect=[pathing, no_pathing, no_pathing, no_pathing, no_pathing]):
+                        with mock.patch.object(daemon.resource_return_analyzer, "analyze_resource_return_context", return_value=stale_return):
+                            with mock.patch.object(daemon.service_route_core, "build_return_route_context", return_value=stale_return_route):
+                                core = daemon.LiveCoreDaemon(session, args)
+                                core.poll_once()
+                                core.poll_once()
+
+        generic = core.state.brain_decision["genericTaskState"]
+        self.assertEqual(generic["phase"], "target_selected")
+        self.assertEqual(generic["activeIntent"], "select_target")
+        self.assertEqual(generic["activeIntentTarget"]["classId"], "tree")
+        self.assertEqual(core.state.brain_decision["phase"], "target_selected")
+
+    def test_resource_target_cycle_stage_clears_stale_return_route_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            tree = fixtures.raw_scene_object(
+                10820,
+                3214,
+                3232,
+                160,
+                135,
+                name="Oak tree",
+                object_key="oak-post-service-live-target",
+            )
+            response = snapshot_with_logs(session, 3, [0, 1], objects=[tree])
+            response["payloads"]["inventory"]["inventory"].update(
+                {
+                    "freeSlots": 13,
+                    "filledSlots": 15,
+                    "inventoryFull": False,
+                    "resourceCounts": {"woodcutting_logs": {"count": 2}},
+                }
+            )
+            response["payloads"]["bank_ui"] = {
+                "bankOpen": False,
+                "bankPinOpen": False,
+                "bankRootVisible": False,
+                "bankContainerVisible": False,
+                "bankInventoryVisible": False,
+                "depositInventoryButtonVisible": False,
+                "closeButtonVisible": False,
+                "inventorySummary": {"freeSlots": 13, "occupiedSlots": 15, "matchingResourceCount": 2},
+            }
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            stale_return = ResourceReturnContext(
+                return_destination_needed=True,
+                return_destination_available=True,
+                return_destination_tile={"worldX": 3196, "worldY": 3248, "plane": 0},
+                return_destination_source="profile_anchor",
+                resource_target_currently_visible=True,
+                destination_target={"targetType": "tile", "targetName": "Profile anchor", "worldX": 3196, "worldY": 3248, "plane": 0},
+                reason="using_profile_resource_anchor",
+                banking_complete=True,
+                bank_open=False,
+                source_tick=3,
+            )
+            stale_return_route = {
+                "schema": "return_route_context.v1",
+                "routeAvailable": True,
+                "returnRouteId": "lumbridge_bank_return",
+                "currentNavigationTarget": {"targetType": "tile", "targetName": "Return waypoint", "worldX": 3199, "worldY": 3246, "plane": 0},
+                "returnActionReady": True,
+                "state": "return_route_ready",
+            }
+            bank_complete = BankOperationContext(
+                operation_needed=False,
+                operation_type="none",
+                resource_item_quantity=0,
+                inventory_free_slots=13,
+                inventory_full=False,
+                banking_complete=True,
+                completion_reason="no_resource_items_held",
+                source_tick=3,
+            )
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=ServiceContext(service_required=False, source_tick=3)):
+                    with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", return_value=PathingContext(pathing_needed=False, source_tick=3)):
+                        with mock.patch.object(daemon.bank_operation_analyzer, "analyze_bank_operation_context", return_value=bank_complete):
+                            with mock.patch.object(daemon.resource_return_analyzer, "analyze_resource_return_context", return_value=stale_return):
+                                with mock.patch.object(daemon.service_route_core, "build_return_route_context", return_value=stale_return_route):
+                                    core = daemon.LiveCoreDaemon(session, args)
+                                    core.state.cycle_history.update(
+                                        {
+                                            "tick": 2,
+                                            "cycleStage": "resource_target_selected",
+                                            "phase": "target_selected",
+                                            "activeIntent": "select_target",
+                                            "resourceTargetAvailable": True,
+                                            "bankingComplete": True,
+                                        }
+                                    )
+                                    core.poll_once()
+
+        generic = core.state.brain_decision["genericTaskState"]
+        self.assertEqual(generic["phase"], "target_selected")
+        self.assertEqual(generic["activeIntent"], "select_target")
+        self.assertEqual(generic["activeIntentTarget"]["classId"], "tree")
+        self.assertEqual(core.state.brain_decision["phase"], "target_selected")
+
+    def test_bank_closed_after_banking_complete_without_tree_uses_profile_return_anchor(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             open_response = snapshot_with_logs(session, 1, [], objects=[])
@@ -849,12 +1065,106 @@ class LiveCoreDaemonTest(unittest.TestCase):
                         core.poll_once()
 
         generic = core.state.brain_decision["genericTaskState"]
-        self.assertEqual(generic["phase"], "needs_more_context")
-        self.assertEqual(generic["activeIntent"], "select_target")
+        self.assertEqual(generic["phase"], "return_to_resource")
+        self.assertEqual(generic["activeIntent"], "return_to_resource_area")
+        self.assertTrue(core.state.brain_decision["resourceReturnContext"]["returnDestinationAvailable"])
+        self.assertEqual(core.state.brain_decision["resourceReturnContext"]["returnDestinationSource"], "profile_anchor")
+        self.assertEqual(core.state.brain_decision["resourceReturnContext"]["reason"], "using_profile_resource_anchor")
+        self.assertEqual(generic["returnRouteAvailable"], True)
         self.assertEqual(core.state.brain_decision["postBankReacquisitionContext"]["reason"], "no_resource_target_observed")
         self.assertTrue(core.state.brain_decision["postBankReacquisitionContext"]["resourceTargetReacquisitionAllowed"])
         self.assertFalse(core.state.brain_decision["closeBankContext"]["closeBankNeeded"])
-        self.assertIn("target.candidates", core.state.brain_decision.get("missingRequiredContextDomains", []))
+        self.assertNotIn("no_target_observed", generic.get("blockingConditions", []))
+
+    def test_bank_closed_after_banking_complete_uses_return_anchor_when_visible_tree_is_far_from_resource_area(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            distant_tree = fixtures.raw_scene_object(
+                10820,
+                3212,
+                3232,
+                220,
+                160,
+                name="Oak tree",
+                object_key="castle-tree-after-bank",
+            )
+            response = snapshot_with_logs(session, 2, [], objects=[distant_tree])
+            coin_items = [{"slot": slot, "itemId": 995, "quantity": 100} for slot in range(13)]
+            coin_signature = "|".join(f"{item['slot']}:{item['itemId']}:{item['quantity']}" for item in coin_items)
+            response["payloads"]["inventory"]["inventory"] = {
+                "known": True,
+                "freeSlots": 15,
+                "filledSlots": 13,
+                "itemCount": 1300,
+                "inventoryFull": False,
+                "inventorySlotCount": 28,
+                "slotCount": 28,
+                "signature": coin_signature,
+                "inventorySignature": coin_signature,
+                "items": coin_items,
+            }
+            response["payloads"]["bank_ui"] = {
+                "bankOpen": False,
+                "bankPinOpen": False,
+                "bankRootVisible": False,
+                "bankContainerVisible": False,
+                "bankInventoryVisible": False,
+                "depositInventoryButtonVisible": False,
+                "closeButtonVisible": False,
+                "inventorySummary": {"freeSlots": 15, "occupiedSlots": 13, "matchingResourceCount": 0},
+            }
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            no_service = ServiceContext(service_required=False, source_tick=2)
+            pathing_generic_states: list[dict] = []
+            pathing_search_budgets: list[tuple[int | None, float | None]] = []
+
+            def fake_pathing_context(**kwargs):
+                generic = dict(kwargs.get("generic_task_state") or {})
+                pathing_generic_states.append(generic)
+                pathing_search_budgets.append((kwargs.get("max_nodes"), kwargs.get("budget_millis")))
+                active_target = generic.get("activeIntentTarget") if isinstance(generic.get("activeIntentTarget"), dict) else None
+                tile = (
+                    {"worldX": active_target.get("worldX"), "worldY": active_target.get("worldY"), "plane": active_target.get("plane")}
+                    if active_target
+                    else None
+                )
+                return PathingContext(
+                    pathing_needed=bool(active_target and generic.get("activeIntent") == "return_to_resource_area"),
+                    destination=active_target,
+                    destination_tile=tile,
+                    local_reachability="unknown" if active_target else "unknown",
+                    reason="resource_return_destination" if active_target else "not_needed_for_current_phase",
+                    source_tick=2,
+                )
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=no_service):
+                    with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", side_effect=fake_pathing_context):
+                        core = daemon.LiveCoreDaemon(session, args)
+                        core.state.brain_decision = {
+                            "bankOperationContext": {"bankingComplete": True, "completionReason": "no_resource_items_held"},
+                            "postBankReacquisitionContext": {"postBankReacquisitionNeeded": True, "reason": "bank_ui_still_open"},
+                        }
+                        core.poll_once()
+
+        generic = core.state.brain_decision["genericTaskState"]
+        return_context = core.state.brain_decision["resourceReturnContext"]
+        return_route = core.state.brain_decision["returnRouteContext"]
+        self.assertEqual(return_context["reason"], "using_profile_resource_anchor")
+        self.assertTrue(return_context["resourceTargetCurrentlyVisible"])
+        self.assertEqual(generic["phase"], "return_to_resource")
+        self.assertEqual(generic["activeIntent"], "return_to_resource_area")
+        self.assertEqual(generic["activeIntentTarget"], return_route["currentNavigationTarget"])
+        self.assertNotEqual(generic["activeIntentTarget"].get("objectKey"), "castle-tree-after-bank")
+        self.assertTrue(any(state.get("activeIntent") == "return_to_resource_area" for state in pathing_generic_states))
 
     def test_bank_closed_after_banking_complete_without_tree_uses_resource_memory_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -895,10 +1205,12 @@ class LiveCoreDaemonTest(unittest.TestCase):
             )
             no_service = ServiceContext(service_required=False, source_tick=2)
             pathing_generic_states: list[dict] = []
+            pathing_search_budgets: list[tuple[int | None, float | None]] = []
 
             def fake_pathing_context(**kwargs):
                 generic = dict(kwargs.get("generic_task_state") or {})
                 pathing_generic_states.append(generic)
+                pathing_search_budgets.append((kwargs.get("max_nodes"), kwargs.get("budget_millis")))
                 active_target = generic.get("activeIntentTarget") if isinstance(generic.get("activeIntentTarget"), dict) else None
                 tile = (
                     {"worldX": active_target.get("worldX"), "worldY": active_target.get("worldY"), "plane": active_target.get("plane")}
@@ -937,16 +1249,23 @@ class LiveCoreDaemonTest(unittest.TestCase):
 
         generic = core.state.brain_decision["genericTaskState"]
         status = core.state.status()
+        return_route = core.state.brain_decision["returnRouteContext"]
         self.assertEqual(generic["phase"], "return_to_resource")
         self.assertEqual(generic["activeIntent"], "return_to_resource_area")
-        self.assertEqual(generic["activeIntentTarget"]["classId"], "resource_return")
-        self.assertEqual(generic["activeIntentTarget"]["targetName"], "Resource return")
+        self.assertEqual(generic["activeIntentTarget"], return_route["currentNavigationTarget"])
         self.assertTrue(core.state.brain_decision["resourceReturnContext"]["returnDestinationAvailable"])
         self.assertEqual(core.state.brain_decision["resourceReturnContext"]["reason"], "using_remembered_resource_area")
+        self.assertEqual(return_route["schema"], "return_route_context.v1")
+        self.assertTrue(return_route["returnActionReady"])
+        self.assertEqual(return_route["targetResourceArea"], {"worldX": 3156, "worldY": 3237, "plane": 0})
         self.assertTrue(core.state.brain_decision["pathingContext"]["pathingNeeded"])
-        self.assertEqual(core.state.brain_decision["pathingContext"]["destination"]["classId"], "resource_return")
+        self.assertEqual(core.state.brain_decision["pathingContext"]["destination"], return_route["currentNavigationTarget"])
         self.assertEqual(status["resourceReturnDestinationAvailable"], True)
+        self.assertEqual(status["returnRouteAvailable"], True)
+        self.assertEqual(status["returnRouteId"], "lumbridge_west_trees_to_lumbridge_castle_bank_return")
+        self.assertEqual(status["resourceAnchorKnown"], True)
         self.assertTrue(any(state.get("activeIntent") == "return_to_resource_area" for state in pathing_generic_states))
+        self.assertTrue(any((nodes or 0) >= 8192 and (budget or 0.0) >= 25.0 for nodes, budget in pathing_search_budgets))
 
     def test_select_target_intent_does_not_stabilize_bank_service_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1132,6 +1451,130 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertIs(kwargs["service_target_state"], core.state.service_target_state)
         self.assertEqual(kwargs["current_plane"], core.state.analysis_result.player.plane)
 
+    def test_daemon_attaches_service_route_context_when_service_target_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--human-dashboard",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service = ServiceContext(service_required=True, service_type_needed="bank_full", candidate_count=0)
+            route_context = {
+                "schema": "service_route_context.v1",
+                "status": "WARN",
+                "routeAvailable": True,
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "routeStepStatus": "static_route_prior",
+                "currentNodeId": "lumbridge_west_stair_anchor",
+                "nextEdge": {"type": "walk_to"},
+                "completedSteps": ["first stairs up"],
+                "currentNavigationTarget": {
+                    "targetType": "service_route_anchor",
+                    "targetName": "Lumbridge Castle west stair approach",
+                    "worldX": 3205,
+                    "worldY": 3229,
+                    "plane": 0,
+                    "verifiedLive": False,
+                },
+                "warnings": ["route prior is unverified"],
+            }
+            real_pathing = daemon.pathing_analyzer.analyze_pathing_context
+            pathing_calls = []
+
+            def wrapped_pathing(*args, **kwargs):
+                pathing_calls.append(kwargs)
+                return real_pathing(*args, **kwargs)
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
+                    with mock.patch.object(daemon.service_route_core, "build_service_route_context", return_value=route_context) as route_mock:
+                        with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", side_effect=wrapped_pathing):
+                            core = daemon.LiveCoreDaemon(session, args)
+                            core.poll_once()
+
+        route_kwargs = route_mock.call_args.kwargs
+        self.assertIs(route_kwargs["route_state"], core.state.service_route_state)
+        service_payload = core.state.brain_decision["serviceContext"]
+        self.assertEqual(service_payload["serviceRouteContext"]["routeId"], route_context["routeId"])
+        self.assertEqual(core.state.brain_decision["serviceRouteContext"]["routeStepStatus"], "static_route_prior")
+        self.assertEqual(core.state.brain_decision["navigationIntentContext"]["targetKind"], "service_route")
+        status = core.state.context()["status"]
+        self.assertEqual(status["serviceRouteId"], route_context["routeId"])
+        self.assertEqual(status["serviceRouteStepStatus"], "static_route_prior")
+        public_status = core.state.status()
+        self.assertEqual(public_status["serviceRouteId"], route_context["routeId"])
+        self.assertEqual(public_status["serviceRouteStepStatus"], "static_route_prior")
+        self.assertTrue(public_status["serviceRouteAvailable"])
+        self.assertEqual(public_status["serviceRouteCurrentNodeId"], "lumbridge_west_stair_anchor")
+        self.assertEqual(public_status["serviceRouteNextEdgeType"], "walk_to")
+        self.assertEqual(public_status["serviceRouteCompletedSteps"], ["first stairs up"])
+        self.assertEqual(public_status["serviceRouteObjectsVisible"], 0)
+        self.assertEqual(public_status["serviceRouteObjectsActionable"], 0)
+        self.assertEqual(public_status["serviceRouteServiceObjectsVisible"], 0)
+        self.assertFalse(public_status["serviceRouteSelectedObjectPresent"])
+        self.assertGreaterEqual(pathing_calls[0]["max_nodes"], 8192)
+        self.assertGreaterEqual(pathing_calls[0]["budget_millis"], 25.0)
+
+    def test_new_service_cycle_clears_stale_service_route_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 1, list(range(28)))
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--human-dashboard",
+                "--goal-count",
+                "60",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service = ServiceContext(service_required=True, service_type_needed="bank_full", candidate_count=0)
+            route_context = {
+                "schema": "service_route_context.v1",
+                "status": "WARN",
+                "routeAvailable": True,
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "routeStepStatus": "static_route_prior",
+                "currentNodeId": "lumbridge_castle_west_approach",
+                "completedSteps": [],
+                "currentNavigationTarget": {
+                    "targetType": "service_route_anchor",
+                    "targetName": "Lumbridge Castle west approach",
+                    "worldX": 3201,
+                    "worldY": 3240,
+                    "plane": 0,
+                    "verifiedLive": False,
+                },
+            }
+
+            def build_route_context(**kwargs):
+                self.assertEqual(kwargs["route_state"].completed_steps, [])
+                self.assertIsNone(kwargs["route_state"].active_route_id)
+                return route_context
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
+                    with mock.patch.object(daemon.service_route_core, "build_service_route_context", side_effect=build_route_context):
+                        core = daemon.LiveCoreDaemon(session, args)
+                        core.state.service_route_state.active_route_id = "lumbridge_west_trees_to_lumbridge_castle_bank"
+                        core.state.service_route_state.completed_steps = ["first stairs up"]
+                        core.state.brain_decision = {
+                            "serviceContext": {"serviceRequired": False},
+                            "genericTaskState": {"phase": "target_selected", "activeIntent": "select_target"},
+                        }
+                        core.poll_once()
+
+        self.assertEqual(core.state.brain_decision["serviceRouteResetReason"], "service_cycle_started")
+        self.assertEqual(core.state.brain_decision["serviceRouteContext"]["currentNodeId"], "lumbridge_castle_west_approach")
+
     def test_daily_daemon_does_not_write_policy_task_or_analyzer_runtime_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
@@ -1167,6 +1610,18 @@ class LiveCoreDaemonTest(unittest.TestCase):
         processor_options = daemon.processor_args(args, live.PLUGIN_SNAPSHOT_SOURCE, suppress_output_writes=True)
         self.assertFalse(processor_options.require_compact_packets)
         self.assertEqual(processor_options.input_source, "plugin-snapshot")
+
+    def test_processor_args_preserve_preset_for_plugin_snapshot_service_hints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            args = make_args(session, "--daily-mode", "snapshot-no-files", "--preset", "woodcut_bank")
+
+        processor_options = daemon.processor_args(args, live.PLUGIN_SNAPSHOT_SOURCE, suppress_output_writes=True)
+
+        self.assertEqual(processor_options.preset, "woodcut_bank")
+        body = live.plugin_snapshot_request_body(processor_options)
+        self.assertIn("route_transition", body["desiredClasses"])
+        self.assertIn("bank_related", body["desiredClasses"])
 
     def test_snapshot_no_file_status_marks_compact_files_not_required(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1298,7 +1753,7 @@ class LiveCoreDaemonTest(unittest.TestCase):
     def test_intent_overlay_contains_selected_tree_and_limited_backups(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
-            response = snapshot_with_logs(session, 1, [], objects=synthetic_tree_objects(5))
+            response = snapshot_with_logs(session, 1, [0], objects=synthetic_tree_objects(5))
             args = make_args(
                 session,
                 "--input-source",
@@ -1333,6 +1788,14 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertLess(len(markers), overlay["summary"]["candidateCount"])
         self.assertEqual(overlay["summary"]["intentMarkerCount"], len(markers))
         self.assertGreater(overlay["summary"]["candidateMarkersSuppressed"], 0)
+        self.assertTrue(markers[0]["actionable"])
+        self.assertEqual(markers[0]["safeAimPoint"]["status"], "PASS")
+        self.assertGreaterEqual(overlay["summary"]["safeAimpoints"], 1)
+        self.assertTrue(overlay["summary"]["selectedSafeAimPoint"])
+        status = core.state.status()
+        self.assertIn("intentOverlayContext", status)
+        self.assertEqual(status["intentOverlayContext"]["selectedMarker"]["markerType"], "selected_target")
+        self.assertEqual(len(status["intentOverlayContext"]["backupMarkers"]), 2)
 
     def test_intent_overlay_uses_stabilized_target_not_raw_flicker(self):
         def candidate(key: str, score: int, distance: int) -> dict:
@@ -1627,6 +2090,33 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(marker["tick"], 42)
         self.assertEqual(marker["markerVersion"], "overlay_intent_marker.v1")
         self.assertTrue(marker["markerId"])
+
+    def test_intent_marker_marks_projection_sentinel_as_not_actionable(self):
+        candidate = {
+            "name": "Oak tree",
+            "classId": "tree",
+            "targetType": "sceneObject",
+            "id": 10820,
+            "objectKey": "oak-edge",
+            "worldX": 3189,
+            "worldY": 3248,
+            "plane": 0,
+            "sceneX": 10,
+            "sceneY": 11,
+            "aimPoint": {"canvasX": 2147483647.5, "canvasY": 2147483647.5, "source": "live_object_pending"},
+            "geometrySource": "bounds",
+            "navigation": {"directReachability": "reachable"},
+            "targetLiveState": "live",
+        }
+
+        marker = daemon.intent_marker_from_candidate(candidate, "selected_target", "Target: Oak tree", "edge projection pending")
+        target = daemon.overlay_target_from_intent_marker(marker)
+
+        self.assertFalse(marker["actionable"])
+        self.assertEqual(marker["validButUnsafeReason"], "invalidAimPoint")
+        self.assertEqual(marker["safeAimPoint"]["status"], "FAIL")
+        self.assertFalse(target["actionable"])
+        self.assertEqual(target["validButUnsafeReason"], "invalidAimPoint")
 
     def test_candidate_overlay_mode_keeps_debug_candidate_targets(self):
         with tempfile.TemporaryDirectory() as tmp:

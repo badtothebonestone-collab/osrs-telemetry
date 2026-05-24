@@ -42,6 +42,7 @@ class DiagnoseActionProposalTest(unittest.TestCase):
         self.assertEqual(payload["suggestedClickPoint"], {"x": 100, "y": 120})
         self.assertEqual(payload["clickPointSpace"], "canvas")
         self.assertEqual(payload["resolvedScreenClickPoint"], {"x": 1200, "y": 2240})
+        self.assertEqual(payload["targetExplanation"]["name"], "Oak tree")
 
     def test_human_output_prints_expected_fields(self):
         text = diagnostic.format_human(
@@ -63,6 +64,20 @@ class DiagnoseActionProposalTest(unittest.TestCase):
                 "reason": "resource_target_visible",
                 "warnings": [],
                 "missingCapabilities": [],
+                "targetExplanation": {
+                    "name": "Oak tree",
+                    "id": 10820,
+                    "classId": "tree",
+                    "world": {"worldX": 3200, "worldY": 3201, "plane": 0},
+                    "onScreen": True,
+                    "geometryAvailable": True,
+                    "aimPoint": {"x": 100, "y": 120},
+                    "aimPointSource": "clickboxBounds",
+                    "freshness": "fresh",
+                    "stale": False,
+                    "acceptedReasons": ["profileMatch"],
+                    "rejectedReasons": [],
+                },
             }
         )
 
@@ -71,6 +86,8 @@ class DiagnoseActionProposalTest(unittest.TestCase):
         self.assertIn("Canvas click point: 100,120", text)
         self.assertIn("Resolved screen click point: 1200,2240", text)
         self.assertIn("Input geometry available: yes", text)
+        self.assertIn("Selected target:", text)
+        self.assertIn("accepted reasons: profileMatch", text)
 
     def test_json_cli_stdout_only_when_daemon_not_reachable(self):
         with tempfile.TemporaryDirectory() as temp:

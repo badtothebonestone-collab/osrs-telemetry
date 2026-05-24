@@ -122,6 +122,43 @@ class ReturnToResourceAnalyzerTest(unittest.TestCase):
         self.assertIsNone(payload["bestResourceTarget"])
         self.assertIn("target.candidates", payload["missingCapabilities"])
 
+    def test_resource_return_anchor_is_not_treated_as_reacquired_resource_target(self):
+        return_anchor = {
+            "objectKey": "resource-return-3203-3238-0",
+            "targetName": "Lumbridge Castle west approach return",
+            "targetType": "tile",
+            "classId": "resource_return",
+            "worldX": 3203,
+            "worldY": 3238,
+            "plane": 0,
+            "navigation": {"directReachability": "unknown"},
+        }
+        context = return_to_resource_analyzer.analyze_return_to_resource_context(
+            "woodcutting_bank",
+            bank_operation_context=BankOperationContext(
+                banking_complete=True,
+                inventory_free_slots=13,
+                source_tick=46,
+            ),
+            inventory_context=inventory_context(free_slots=13),
+            target_context=TargetContext(
+                raw_best_target=return_anchor,
+                candidates=[return_anchor],
+                candidate_count=1,
+                profile_candidate_count=0,
+                source_tick=46,
+            ),
+            current_task_state={"phase": "return_to_resource"},
+            source_tick=46,
+        )
+
+        payload = context.to_dict()
+        self.assertTrue(payload["returnNeeded"])
+        self.assertFalse(payload["returnReady"])
+        self.assertFalse(payload["resourceTargetAvailable"])
+        self.assertIsNone(payload["bestResourceTarget"])
+        self.assertEqual(payload["reason"], "no_resource_target_observed")
+
     def test_banking_not_complete_does_not_request_return(self):
         context = return_to_resource_analyzer.analyze_return_to_resource_context(
             "woodcutting_bank",

@@ -1206,23 +1206,37 @@ public class TelemetryDebugOverlay extends Overlay
 		int hullCount = state.summary == null ? countClickableHullTargets(intentMarkers) : safeInt(state.summary.clickableHullTargets, countClickableHullTargets(intentMarkers));
 		int hullLimit = state.summary == null ? 0 : safeInt(state.summary.hullLimit, 0);
 		int geometryCap = state.summary == null ? 0 : safeInt(state.summary.compactLiveGeometryMaxRefs, 0);
+		int pathingMarkerCount = state.summary == null ? countPathTileMarkers(intentMarkers) : safeInt(state.summary.pathingMarkerCount, countPathTileMarkers(intentMarkers));
 		StringBuilder line = new StringBuilder();
 		line.append("tick ").append(valueOrUnknown(state.latestTick))
 				.append(" | ").append(valueOrUnknown(state.profile))
 				.append(" | targets ").append(targetCount);
 		if (intentActive)
 		{
+			int safeCount = state.summary == null ? 0 : safeInt(state.summary.safeAimpoints, 0);
 			line.append(" | selected ").append(boolToken(selectedMarkerCount(intentMarkers) > 0))
 					.append(" | backups ").append(backupMarkerCount(intentMarkers))
+					.append(" | safe ").append(safeCount).append("/").append(targetCount)
+					.append(" selSafe ").append(boolToken(state.summary == null ? null : state.summary.selectedSafeAimPoint))
 					.append(" | hulls ").append(hullCount).append("/").append(targetCount)
-					.append(" | legacy best ").append(boolToken(state.summary == null ? null : state.summary.bestHullAvailable))
-					.append(" legacy nearest ").append(boolToken(state.summary == null ? null : state.summary.nearestHullAvailable));
+					.append(" | bestHull ").append(boolToken(state.summary == null ? null : state.summary.bestHullAvailable))
+					.append(" nearestHull ").append(boolToken(state.summary == null ? null : state.summary.nearestHullAvailable));
+			if (pathingMarkerCount > 0)
+			{
+				line.append(" | route markers ").append(pathingMarkerCount);
+			}
 		}
 		else
 		{
+			int safeCount = state.summary == null ? 0 : safeInt(state.summary.safeAimpoints, 0);
 			line.append(" | hulls ").append(hullCount).append("/").append(targetCount)
-					.append(" | best ").append(boolToken(state.summary == null ? null : state.summary.bestHullAvailable))
-					.append(" nearest ").append(boolToken(state.summary == null ? null : state.summary.nearestHullAvailable));
+					.append(" | safe ").append(safeCount).append("/").append(targetCount)
+					.append(" | bestHull ").append(boolToken(state.summary == null ? null : state.summary.bestHullAvailable))
+					.append(" nearestHull ").append(boolToken(state.summary == null ? null : state.summary.nearestHullAvailable));
+			if (pathingMarkerCount > 0)
+			{
+				line.append(" | route markers ").append(pathingMarkerCount);
+			}
 		}
 		line.append(" cap ").append(geometryCap).append("/").append(hullLimit)
 				.append(" | ").append(geometryMode);
@@ -1244,6 +1258,19 @@ public class TelemetryDebugOverlay extends Overlay
 		for (OverlayTarget marker : markers)
 		{
 			if (marker != null && ("selected_target".equals(marker.markerType) || Boolean.TRUE.equals(marker.selected)))
+			{
+				count++;
+			}
+		}
+		return count;
+	}
+
+	private static int countPathTileMarkers(List<OverlayTarget> markers)
+	{
+		int count = 0;
+		for (OverlayTarget marker : markers)
+		{
+			if (isPathTileMarker(marker))
 			{
 				count++;
 			}
@@ -1425,6 +1452,13 @@ public class TelemetryDebugOverlay extends Overlay
 		Double canvasTilePolygonTargets;
 		Double boundsOnlyTargets;
 		Double aimOnlyTargets;
+		Double safeAimpoints;
+		Double executableTargets;
+		Double invalidAimpointTargets;
+		Double edgeClippedCandidates;
+		Double pathingMarkerCount;
+		Boolean selectedTargetPresent;
+		Boolean selectedSafeAimPoint;
 	}
 
 	static class OverlayTarget

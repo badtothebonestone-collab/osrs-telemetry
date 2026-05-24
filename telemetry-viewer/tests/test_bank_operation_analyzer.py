@@ -58,6 +58,15 @@ def bank_ui_context(*, readable: bool = True, deposit_inventory_available: bool 
     )
 
 
+def bank_ui_context_with_inventory_slots() -> BankUiContext:
+    context = bank_ui_context(deposit_inventory_available=True)
+    context.inventory_slots = [
+        {"slot": 9, "itemId": 1511, "quantity": 1, "bounds": {"x": 550, "y": 250, "w": 32, "h": 32}, "actions": ["Deposit-1", "Deposit-All"]},
+        {"slot": 10, "itemId": 995, "quantity": 42, "bounds": {"x": 590, "y": 250, "w": 32, "h": 32}, "actions": ["Deposit-1"]},
+    ]
+    return context
+
+
 class BankOperationAnalyzerTest(unittest.TestCase):
     def test_readable_bank_with_logs_needs_deposit_inventory(self):
         context = bank_operation_analyzer.analyze_bank_operation_context(
@@ -95,6 +104,43 @@ class BankOperationAnalyzerTest(unittest.TestCase):
         self.assertFalse(payload["depositInventoryAvailable"])
         self.assertEqual(payload["resourceItemSlots"], [9])
 
+    def test_resource_deposit_carries_slot_widget_bounds(self):
+        context = bank_operation_analyzer.analyze_bank_operation_context(
+            "woodcutting_bank",
+            bank_ui_context=bank_ui_context_with_inventory_slots(),
+            inventory_context=inventory_context([log_item(9), coin_item(10)]),
+            resource_definition=WOODCUTTING,
+            source_tick=43,
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["resourceItemSlots"], [9])
+        self.assertEqual(payload["resourceItemSlotBounds"][0]["x"], 550)
+        self.assertEqual(payload["resourceItemWidgets"][0]["actions"], ["Deposit-1", "Deposit-All"])
+        self.assertEqual(payload["resourceDisplayName"], "logs")
+
+    def test_resource_slots_can_come_from_bank_ui_inventory_summary(self):
+        bank_ui = bank_ui_context_with_inventory_slots()
+        bank_ui.inventory_summary = {
+            "known": True,
+            "items": [log_item(9), coin_item(10)],
+            "freeSlots": 26,
+            "occupiedSlots": 2,
+        }
+
+        context = bank_operation_analyzer.analyze_bank_operation_context(
+            "woodcutting_bank",
+            bank_ui_context=bank_ui,
+            inventory_context=None,
+            resource_definition=WOODCUTTING,
+            source_tick=43,
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["resourceItemSlots"], [9])
+        self.assertEqual(payload["resourceItemSlotBounds"][0]["x"], 550)
+        self.assertEqual(payload["nonResourceItemsHeld"], 1)
+
     def test_readable_bank_without_logs_is_complete(self):
         context = bank_operation_analyzer.analyze_bank_operation_context(
             "woodcutting_bank",
@@ -128,6 +174,31 @@ class BankOperationAnalyzerTest(unittest.TestCase):
         self.assertFalse(payload["bankReadable"])
         self.assertIn("waiting_for_readable_bank", payload["warnings"])
         self.assertEqual(payload["completionReason"], "waiting_for_readable_bank")
+
+    def test_closed_bank_with_summary_showing_no_logs_is_complete(self):
+        bank_ui = bank_ui_context(readable=False, deposit_inventory_available=False)
+        bank_ui.inventory_summary = {
+            "known": True,
+            "items": [coin_item(0)],
+            "freeSlots": 27,
+            "occupiedSlots": 1,
+        }
+
+        context = bank_operation_analyzer.analyze_bank_operation_context(
+            "woodcutting_bank",
+            bank_ui_context=bank_ui,
+            inventory_context=None,
+            resource_definition=WOODCUTTING,
+            source_tick=45,
+        )
+
+        payload = context.to_dict()
+        self.assertFalse(payload["operationNeeded"])
+        self.assertEqual(payload["operationType"], "none")
+        self.assertFalse(payload["bankReadable"])
+        self.assertTrue(payload["bankingComplete"])
+        self.assertEqual(payload["resourceItemQuantity"], 0)
+        self.assertEqual(payload["completionReason"], "no_resource_items_held")
 
     def test_bank_pin_open_reports_user_resolution_blocker(self):
         context = bank_operation_analyzer.analyze_bank_operation_context(

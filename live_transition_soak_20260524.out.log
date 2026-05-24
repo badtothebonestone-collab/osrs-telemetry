@@ -1,0 +1,85 @@
+EXECUTE ACTION LOOP - FAIL
+
+Mode: execute
+Executed actions: 5 / 260
+Reason: pre_action_readiness_failed
+
+Summary:
+  Proposed actions: 7
+  Actual click attempts: 5
+  Actions executed: 5
+  Hover checks: 6
+  Skips: unsafe geometry=0 hover mismatch=1 stale client tick=0 suppressed targets=0 no-progress suppressions=0
+  Navigation: occluded waypoints=0 alternate attempts=0 camera adjustments=0 edge rejects=0 edge camera=0 volatile skips=0 menu flips=0
+  Route stability: motion waits=0 replan suppressed=0 oscillation=0 backtracking=0 barrier=0
+  Route transitions: attempts=0 firstTry=0 pending=0 retryRequired=0 retrySuccess=0 reconciled=0 trueTimeouts=0
+  Successful actions: 5
+  Timeouts: 0 unresolved=0 trueUnresolved=0 classifications={'resource_timeout_reconciled_success': 4}
+  Timeout details: reasons={'resource_timeout_reconciled_success': 4} actions={} intents={} recoveredBy={'delayed_progress_reconciliation': 4} resolvedByRetry=0 resolvedByLateEvidence=4 pendingButSafe=0
+  Delayed reconciliations: 4 resource timeout recoveries=4
+  Inventory changes: 5
+  Inventory free slots: 12 -> 7
+  Resource count: 3 -> 8
+  Progress: 0 -> 5
+  Lifecycle cycles: started=0 completed=0 serviceComplete=0 returnComplete=0 post-service logs=0
+  Hover confirms: 5 pass / 1 fail
+  Hover failures: cancel=0 Walk here=0 stale=0 volatile=0
+  Menu clicks: 5 expected / 0 Walk here / 0 Cancel
+  Hover latency ms: min=31 avg=120.5 max=213
+  Pacing delays ms: count=0 min=None avg=None max=None
+  Input profile: steady | mouse move avg ms=530.833 click hold avg ms=82.0 reaction avg ms=None
+  Camera hold ms: min=None avg=None max=None switches=0
+  Direct backend bypasses: 0
+  Debug screenshots: captured=1 failures=0 skippedByLimit=0
+  Reacquire waits: 0 (0 ms)
+  Final reconcile: none (4000 ms, 8 ticks)
+  Final cycle stage: unknown
+  Final phase/intent: goal_complete / none
+  Last observed signals: inventory_changed, inventory_free_slots_changed, held_resource_count_increased, resource_progress_increased
+
+Actions:
+  1. select_resource_target -> Tree
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4603, 'y': 402, 'timestampMs': 681}}
+     expected: wait_for_result_or_activity
+     observed: no_click_safety_skip
+     outcome: skipped complete=True
+     lifecycle: blocked reason=hover_confirm_timeout
+  2. select_resource_target -> Tree
+     command: {'type': 'move', 'pointCount': 27, 'clickPoint': {'x': 4603, 'y': 402, 'timestampMs': 140}}
+     expected: wait_for_result_or_activity
+     observed: inventory_changed
+     outcome: success complete=True
+     lifecycle: verified reason=success
+  3. select_resource_target -> Tree
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4388, 'y': 548, 'timestampMs': 561}}
+     expected: wait_for_result_or_activity
+     observed: inventory_changed
+     outcome: success complete=True
+     lifecycle: verified reason=success
+  4. select_resource_target -> Tree
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4893, 'y': 438, 'timestampMs': 653}}
+     expected: wait_for_result_or_activity
+     observed: inventory_changed
+     outcome: success complete=True
+     lifecycle: verified reason=success
+  5. select_resource_target -> Tree
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4359, 'y': 481, 'timestampMs': 658}}
+     expected: wait_for_result_or_activity
+     observed: inventory_changed
+     outcome: success complete=True
+     lifecycle: verified reason=success
+  6. select_resource_target -> Tree
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4510, 'y': 452, 'timestampMs': 492}}
+     expected: wait_for_result_or_activity
+     observed: inventory_changed
+     outcome: success complete=True
+     lifecycle: verified reason=success
+  7. select_resource_target -> Tree
+     command: none
+     expected: wait_for_result_or_activity
+     observed: unknown
+     outcome: unknown complete=False
+     lifecycle: blocked reason=pre_action_readiness_failed
+
+Warnings:
+  none

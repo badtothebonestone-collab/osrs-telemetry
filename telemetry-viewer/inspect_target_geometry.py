@@ -8,6 +8,9 @@ from urllib.parse import unquote
 from telemetry_paths import find_newest_session, get_sessions_dir, safe_read_json
 
 
+# Deprecated for live visual/highlighter inspection: prefer
+# target_geometry_inspector.py --from-daemon --live. Keep this script for
+# static derived world/UI JSONL review.
 MISSING_WORLD_MESSAGE = "Run python telemetry-viewer\\build_world_target_geometry.py first."
 MISSING_UI_MESSAGE = "Run python telemetry-viewer\\build_ui_target_geometry.py first."
 TARGET_TYPES = {

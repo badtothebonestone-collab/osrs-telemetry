@@ -14,7 +14,7 @@ sys.path.insert(0, str(VIEWER_DIR))
 import run_runelite_bootstrap as bootstrap
 
 
-def snapshot(game_state="LOGIN_SCREEN", *, geometry=True):
+def snapshot(game_state="LOGIN_SCREEN", *, geometry=True, top_option=None):
     baseline = {"gameState": game_state}
     if geometry:
         baseline["inputGeometry"] = {
@@ -30,11 +30,21 @@ def snapshot(game_state="LOGIN_SCREEN", *, geometry=True):
             "displayScaleX": 1.0,
             "displayScaleY": 1.0,
         }
-    return {
+    payload = {
         "status": "PASS",
         "latestTick": 42,
         "payloads": {"baseline": baseline},
     }
+    if top_option is not None:
+        payload["clientTickHot"] = {
+            "schema": "client_tick_hot.v1",
+            "hoverMenu": {
+                "topOption": top_option,
+                "topTarget": "",
+                "topType": "CC_OP" if top_option == "Play" else "WALK",
+            },
+        }
+    return payload
 
 
 def unusable_snapshot():
@@ -408,6 +418,22 @@ class RuneLiteBootstrapTest(unittest.TestCase):
         )
 
         self.assertEqual(len(backend.clicks), 0)
+        self.assertEqual(payload["startupStage"], "logged_in")
+
+    def test_logged_in_with_play_top_option_clicks_final_play_panel(self):
+        backend = FakeBackend()
+        snapshots = [snapshot("LOGGED_IN", top_option="Play"), snapshot("LOGGED_IN", top_option="Walk here")]
+        args = bootstrap.parse_args(["--skip-runelite-launch", "--execute", "--max-startup-clicks", "3"])
+
+        payload = bootstrap.run_bootstrap(
+            args,
+            fetch_snapshot_func=lambda *_args, **_kwargs: snapshots.pop(0),
+            backend=backend,
+            window_finder=FakeWindowFinder("RuneLite"),
+            sleep_func=lambda _seconds: None,
+        )
+
+        self.assertEqual(payload["clickedCandidates"][0]["name"], "click_here_to_play")
         self.assertEqual(payload["startupStage"], "logged_in")
 
     def test_stops_on_user_login_required_stage(self):

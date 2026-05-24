@@ -32,6 +32,7 @@ These are the only tools that belong in the main daily view.
 | `run_daily_gauntlet.py` | Strict daily sanity check for daemon health, process conflicts, progress invariants, and required context domains. | `python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode compact-packets --strict --check-processes` |
 | `run_woodcut_bank_live_qa.py` | One-command woodcut_bank live QA runner. Checks plugin snapshot login, daemon health, full cycle context, history, resource-return state, and gauntlet-style semantic deferrals. | `python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20` |
 | `run_runelite_bootstrap.py` | RuneLite dev bootstrap helper for already-authenticated Play/Continue/CLICK HERE TO PLAY startup flow. It launches/focuses RuneLite when requested, can move it to a secondary monitor, waits for `LOGGED_IN`, starts/reuses the daemon, and can run live QA. It does not type credentials, change account settings, or select worlds. | `python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --move-to-secondary-monitor --start-daemon --run-live-qa --print-candidates --timeout-seconds 180` |
+| `diagnose_live_readiness.py` | One-shot pre-action readiness check for daemon/session/highlighter/overlay/candidate/input-geometry synchronization. Prints to stdout and blocks unsafe action attempts through `execute_next_action.py --wait-for-ready`. | `python telemetry-viewer\diagnose_live_readiness.py --latest-session --daemon-url http://127.0.0.1:8890 --profile woodcutting` |
 
 Daily support modules are hidden from the UI but remain part of the daily lane:
 
@@ -70,6 +71,8 @@ Diagnostics and inspectors that are useful when daily output looks wrong:
 - `diagnose_woodcut_bank_cycle.py`
 - `diagnose_woodcut_bank_scenarios.py`
 - `diagnose_cycle_history.py`
+- `diagnose_live_readiness.py`
+- `diagnose_woodcutting_candidates.py`
 - `run_woodcut_bank_live_qa.py`
 - `diagnose_target_coverage.py`
 - `run_stabilization_suite.py`
@@ -107,6 +110,10 @@ python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --dry-run
 python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --start-daemon --run-live-qa
 python telemetry-viewer\run_runelite_bootstrap.py --skip-runelite-launch --execute --start-daemon --run-live-qa
 python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --move-to-secondary-monitor --start-daemon --run-live-qa --print-candidates --timeout-seconds 180
+python telemetry-viewer\diagnose_live_readiness.py --latest-session --daemon-url http://127.0.0.1:8890 --profile woodcutting
+python telemetry-viewer\diagnose_woodcutting_candidates.py --latest-session --profile woodcutting --top 20 --show-rejections
+python telemetry-viewer\execute_next_action.py --daemon-url http://127.0.0.1:8890 --backend pyautogui --movement-profile linear_debug --hover-only --hover-confirm-target --hover-confirm-timeout-ms 120 --hover-poll-ms 10 --hover-position-tolerance 3
+python telemetry-viewer\execute_next_action.py --daemon-url http://127.0.0.1:8890 --backend pyautogui --movement-profile linear_debug --execute --verify-after-action --wait-for-ready 30 --hover-confirm-target --hover-confirm-timeout-ms 120 --hover-poll-ms 10 --hover-position-tolerance 3 --click-hold-ms 60 --stop-after-inventory-changes 5 --summary-every-action --final-reconcile-ms 2000 --final-reconcile-game-ticks 6 --pacing-profile steady --target-switch-min-ms 400 --target-switch-max-ms 1400
 ```
 
 ## Legacy File Pipeline

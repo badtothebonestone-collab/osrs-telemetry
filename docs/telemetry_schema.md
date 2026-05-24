@@ -288,7 +288,7 @@ Endpoints:
 
 Supported snapshot `needs` are `baseline`, `scene_delta`, `projection`,
 `inventory`, `inventory_delta`, `activity`, `navigation`, `collision_window`,
-`writer_health`, and `watch_values`.
+`interaction_hot`, `client_tick_tail`, `writer_health`, and `watch_values`.
 
 Example request:
 
@@ -296,7 +296,7 @@ Example request:
 {
   "schema": "plugin_snapshot_request.v1",
   "requestId": "example",
-  "needs": ["baseline", "projection", "inventory", "navigation", "collision_window", "writer_health"],
+  "needs": ["baseline", "interaction_hot", "projection", "inventory", "navigation", "collision_window", "writer_health"],
   "snapshotTier": "hot",
   "profileHint": "woodcutting",
   "classHint": "tree",
@@ -311,13 +311,309 @@ Example request:
   "includeCollisionWindow": true,
   "includeWatchValues": false,
   "responseMode": "compact",
-  "projectionFieldMode": "compact"
+  "projectionFieldMode": "compact",
+  "includeMenuEntries": true,
+  "menuEntryLimit": 5
 }
 ```
 
 Snapshot responses include `schema`, `requestId`, `generatedAtUtc`,
-`latestTick`, `snapshotTier`, `status`, `freshness`, `payloads`, `missingCapabilities`,
-`warnings`, `serviceTimingMillis`, `responseSizing`, and `cacheHealth`.
+`latestTick`, `snapshotTier`, `status`, `freshness`, `payloads`,
+`clientTickHot`, legacy `hoverMenu`, legacy `lastMenuOptionClicked`,
+`missingCapabilities`, `warnings`, `serviceTimingMillis`, `responseSizing`, and
+`cacheHealth`.
+
+### Client Tick Hot State
+
+`client_tick_hot.v1` is the fast interaction layer. It is sampled from
+RuneLite client-thread events and kept in a bounded in-memory cache. It is not a
+continuous file output.
+
+Events:
+
+- `ClientTick`: latest local mouse/canvas timing sample.
+- `PostMenuSort`: latest sorted menu state at the current mouse position. This
+  predicts what the next left click will do.
+- `MenuOptionClicked`: latest menu action accepted by the client after a click.
+  This proves whether the click was `Walk here`, `Chop down`, or another action.
+
+Compact fields:
+
+- `schema=client_tick_hot.v1`
+- `clientTick`, `wallTimeMillis`, `monotonicTimeNanos`,
+  `gameTickAtSample`, `gameState`, `sessionId`, `sessionPath`
+- `mouse`: `canvasX`, `canvasY`, `isInCanvas`
+- `postMenuSort` / `hoverMenu`: source event, mouse canvas position,
+  `topOption`, `topTarget`, `topType`, `topIdentifier`, `topParam0`,
+  `topParam1`, `entryCount`, capped `entries`, and `menuOpen`
+- `lastMenuOptionClicked`: source event, option, target, type, identifier,
+  params, item id, consumed flag, and mouse canvas position
+- `latency`: ages for client/post-menu/click samples, buffered sample counts,
+  and dropped sample counts
+
+`interaction_hot` returns the compact hot state. `client_tick_tail` returns the
+same shape with optional bounded tails controlled by `maxClientTickSamples`,
+`maxMenuSamples`, `maxClickedSamples`, `includeMenuEntries`, and
+`menuEntryLimit`. The default Java ring buffer cap is 128 samples.
+
+Readiness also derives liveness fields from this payload: `clientTickHotFresh`,
+latest PostMenuSort age, last clicked-menu age, `isLoggedIn`, and
+`staleReason`. `LOGIN_SCREEN` or another non-logged-in game state is reported as
+a recovery/bootstrap problem; a logged-in stale hot cache points at plugin
+hot-state or daemon refresh.
+
+### Safe Aimpoint Contract
+
+`safe_aimpoint.v1` separates candidate validity from actionability. A target can
+be a valid candidate and still be unsafe to click if its raw center is outside
+the visible/interactable viewport.
+
+Core fields:
+
+- `status`: `PASS` or `FAIL`
+- `actionable`, `validButUnsafe`, and `unsafeReasons`
+- `canvasX`, `canvasY`: selected safe canvas point when available
+- `source`: `hoverConfirmedVisibleHull`, `visibleHullInterior`,
+  `clippedClickboxInterior`, `clickboxCenter`, `boundsCenter`, or `fallback`
+- `insideCanvas`, `insideViewport`, `insideInteractableRegion`, `uiBlocked`
+- `distanceToViewportEdgePx`, `distanceToCanvasEdgePx`
+- `clippedVisibleAreaPx`, `clippedVisibleAreaRatio`
+- `hoverConfirmed`, `hoverTopOption`, `hoverTopTarget`
+- `rawAimPoint`, `rawCenterInsideViewport`, `safePointInsideViewport`
+- `sampledAimpoints`, `acceptedAimpoint`, `rejectedAimpoints`
+- `rejectionReason`
+
+The action proposer stores this as `targetExplanation.safeAimPoint`. If the safe
+aimpoint fails for a resource target, the proposal is explanatory but
+non-executable and reports missing capability `safe_aimpoint`. Projection
+sentinel coordinates such as `2147483647` are invalid aim points and must not
+satisfy readiness. Common unsafe reasons include `centerOffViewport`,
+`centerOutsideInteractableRegion`, `noVisibleInteractableGeometry`, and
+`uiBlocked`.
+
+### Service Route Context
+
+`service_route_context.v1` is the bounded service-navigation prior used when a
+task needs a service target but no bank booth, banker, bank chest, or deposit
+target is currently visible. It is produced in memory by `service_route_core.py`
+from `telemetry-viewer\profiles\service_routes.json` plus live candidates.
+
+Route priors are not truth. Static OSRS/wiki/manual knowledge can seed labels,
+rough anchors, expected menu options, and expected plane changes, but live
+RuneLite telemetry remains authoritative for exact world tile, plane, object id,
+visibility, click geometry, menu option, and whether a route step can be
+clicked.
+
+Core fields:
+
+- `schema=service_route_context.v1`
+- `routeAvailable`, `routeId`, `routeVerifiedLive`, `routeConfidence`
+- `routeNodes`, `routeEdges`: a bounded route graph. Nodes may be world tile
+  anchors, live object anchors, stair/ladder transitions, bank/service targets,
+  or fallback scouting points. Edges describe route operations such as
+  `walk_to`, `reacquire_visible_target`, `interact_climb_up`,
+  `wait_for_plane_change`, and `interact_bank`.
+- `routeSteps`: the ordered low-confidence step prior. For Lumbridge Castle
+  bank this is staged through west approach, entrance/courtyard, first-stairs
+  search, first climb-up, second climb-up, and bank service.
+- `routeStepStatus`: `service_target_visible`, `route_interaction_visible`,
+  `retained_service_anchor`, `static_route_prior`, `route_anchor_missing`, or
+  `route_missing`
+- `currentStepIndex`, `currentStep`, `currentNodeId`, `nextEdge`
+- `currentNavigationTarget`: a low-confidence `service_route_anchor` world tile
+  used for scouting/pathing, or a previously observed service anchor used only
+  as a navigation target until visible again. Neither is a transition click.
+- `routeContext`: a nested `route_context.v1` summary for current-area/source
+  selection. It records whether the current player location is a known route
+  source, nearby known source, unmapped source, or wrong source for the route.
+  It also exposes `routeMode`, `selectedServiceAnchor`,
+  `selectedApproachNode`, and route-source mismatch details.
+- `routeMode`: `explicit_route`, `reverse_route`, `goal_directed_fallback`,
+  `local_frontier_to_service`, or `unknown`.
+- `selectedServiceAnchor`: the destination service goal, such as the Lumbridge
+  Castle bank anchor. This is a navigation goal, not a click target unless a
+  live service object is visible/actionable.
+- `selectedApproachNode`: the destination-centered approach node chosen from
+  the current player location, such as castle entrance/courtyard before stair
+  search.
+- `goalDirectedFallback`: true when the current source area is unmapped or
+  mismatched but a known service anchor exists.
+- `visibleInteractionTarget`: a live stairs/ladder/door-like object that can be
+  proposed as `interact_service_route_object`
+- `visibleServiceTarget`: the existing service target when bank/booth/banker is
+  visible; normal `open_service` handling wins
+- `routeObjectsVisible`, `routeObjectsActionable`, `serviceObjectsVisible`,
+  `routeRelevantObjects`, `routeRelevantActionableObjects`,
+  `visibleButRouteIrrelevantObjects`, and `selectedRouteObjectPresent`:
+  route/service object counts that are separate from Tree/Oak resource
+  candidate counts. A service route can legitimately show resource safe `0/N`
+  while `routeRelevantActionableObjects > 0`.
+- `routeObjectCensus`: a bounded `service_route_object_census.v1` summary. It
+  lists route-transition/service candidates separately from resource
+  candidates, records source lane counts, top route objects, rejection reasons,
+  and whether a visible object was route-relevant, actionable, or merely
+  visible-but-route-irrelevant.
+- `serviceObjectCensus`: a bounded `service_object_census.v1` summary nested
+  under the service-route context. It reports service candidates separately
+  from both resources and route transitions: `serviceObjectCandidatesTotal`,
+  `bankBoothCandidates`, `bankerCandidates`, `depositBoxCandidates`,
+  `visibleServiceObjects`, `actionableServiceObjects`,
+  `routeRelevantServiceObjects`, `routeRelevantActionableServiceObjects`,
+  `visibleButRouteIrrelevantServiceObjects`,
+  `rejectedServiceObjectsByReason`, scan source/limit fields, and
+  `topServiceObjects` with projection status and relevance. At
+  `lumbridge_castle_bank`, a route-relevant actionable service object becomes
+  `visibleServiceTarget` and sets `actionReady=true` for `open_service`.
+- `selectedRouteObjectRelevance`: `route_relevance.v1` for the selected object.
+  It checks route id, current route step, expected action/target kind, plane,
+  expected plane change, distance to the route search area/corridor, and
+  whether clicking the object would advance the route.
+  `selectedServiceObject`, `selectedServiceAction`,
+  `selectedServiceObjectRelevance`, `serviceObjectRejectedReason`, and
+  `serviceObjectInterceptReady` mirror the same decision for Bank booth,
+  Banker, Deposit box, or Bank chest candidates. `selectedServiceAction`
+  prefers the current route step's expected action, such as `Bank`, over less
+  useful object actions such as `Collect`.
+- `interactionExpectedOptions`, `interactionExpectedTargets`,
+  `expectedPlaneChange`
+- `observedAnchors`, an in-memory cache of route objects seen live in the
+  current daemon. Anchors include object id/name/world tile/actions,
+  `lastSeenTick`, `confidence`, and `verificationSource`.
+- `completedSteps`, derived from live plane/location evidence and successful
+  interactions. A later floor can mark earlier stair steps completed, but does
+  not make unseen future steps clickable.
+
+`interact_service_route_object` uses the same safe aimpoint and client-tick
+hover confirmation path as resource clicks. A fresh client-tick hover that
+predicts a route object action, such as `Climb-up Staircase`, is recorded as
+hover-discovered evidence. It may intercept waypoint walking only when route
+relevance is resolved for the active route step; otherwise it is reported as
+`hover_confirmed_but_route_unresolved` and is not clicked from hover alone.
+After the click, lifecycle verification expects route progress such as plane
+change, player location change, route-step change, or service readiness.
+
+#### Route Context
+
+`route_context.v1` keeps Lumbridge service navigation from being tied to one
+tree cluster. It is emitted inside `service_route_context.v1` and summarizes
+the current source area, destination goal, and route mode:
+
+- `currentLocation`, `currentPlane`
+- `currentAreaLabel`, `currentAreaConfidence`, `currentAreaSource`
+- `resourceArea`: current or remembered resource-area centroid/bounds when
+  known from live collection or profile anchors
+- `serviceGoal`: selected service anchor, service type, plane, confidence, and
+  source
+- `routeMode`: `explicit_route`, `reverse_route`, `goal_directed_fallback`,
+  `local_frontier_to_service`, or `unknown`
+- `selectedRouteId`, `selectedEntryNode`, `selectedApproachNode`
+- `routeSourceStatus`: `known_source`, `nearby_known_source`,
+  `unmapped_source`, or `wrong_route_source`
+- `routeSourceMismatch`: distance and diagnostic details when the active route
+  prior's source does not match the current location
+- `blockerReason`: a clear diagnostic when no route/source/goal can be used
+
+When the current player location matches the configured west-tree source, the
+route remains `explicit_route`. When the location is not a known source but the
+Lumbridge Castle bank anchor is known, the route switches to
+`goal_directed_fallback`: it chooses an approach node from the current
+coordinates and lets pathing produce a safe local frontier waypoint toward that
+approach. Route objects and service objects still outrank waypoint walking as
+soon as live telemetry makes them route-relevant and actionable.
+Approach nodes are considered complete after direct arrival, or after the
+player has moved beyond the node along the bankward corridor. This keeps a
+bridge/approach marker from being selected again behind the player during
+goal-directed fallback.
+
+For destinations outside the current collision window,
+`pathing_context.v1` may expose `localFrontierWaypoint`,
+`frontierDistanceBefore`, `frontierDistanceAfterEstimate`, and `progressScore`.
+These fields explain how the local scout waypoint reduces distance toward the
+selected service/approach anchor without clicking the far anchor directly.
+
+`open_service` lifecycle verification accepts path-to-interact evidence before
+the bank UI opens. If the click does not immediately open a bank/deposit UI but
+the player tile changes, service/path distance decreases, or the route status
+advances, the result is `service_object_pathing_to_object` and the next action
+remains blocked while OSRS continues walking to the service object. A timed-out
+service click without UI or movement is `service_object_no_progress`.
+
+`bank_ui_context.v1` includes compact bank/deposit interface state plus the
+current inventory summary. When a bank/deposit UI is readable, it may also
+include `inventorySlots`, a bounded list of bank-side inventory item widgets
+with slot, item id, quantity, bounds, aim point, visible state, actions, and
+source. `bank_operation_context.v1` uses those widgets to expose
+`resourceItemSlotBounds`, `resourceItemWidgets`, and `resourceDisplayName` for
+selective resource depositing. If the bank is closed after service but the
+retained inventory summary proves no target resources remain, the bank
+operation context reports `bankingComplete=true` with
+`completionReason=no_resource_items_held` instead of waiting for a readable bank
+again.
+
+`routeWaypointSelection` can appear in an action proposal target explanation
+when adaptive waypoint selection chooses from structured path/route tiles. It
+records mode, reason, selected tile, considered tile count, lookahead, horizon,
+and selected waypoint distance. Structured alternates replace arbitrary dense
+pixel probing around an occluded waypoint.
+
+Route tile projections are advisory until they produce actionable canvas
+geometry. Degenerate origin polygons, tiny projection bounds, and off-viewport
+tile projections are rejected for canvas clicks; route navigation can then try
+structured alternate path tiles or stop safely.
+
+`route_projection_status.v1` is attached to route waypoint target explanations
+after plugin tile projection. It records `worldTile`, `canvasPoint`,
+`canvasTileBounds`, `inCanvas`, `inViewport`, `degenerateProjection`,
+`tinyProjection`, `offscreen`, `uiBlocked`, `edgeClipped`, edge distances,
+`projectedVisibleAreaPx`, `projectedVisibleAreaRatio`, `partiallyOffscreen`,
+`objectOccluded`, hover option and target when known, `actionableByCanvas`,
+`actionableByMinimap`, `classification`, and `rejectionReason`. This is the
+quick answer to whether a route tile is visible, edge-clipped, offscreen,
+degenerate, occluded, or non-actionable. Edge-clipped route tiles should be
+alternate-waypoint or camera-reacquire candidates, not direct canvas clicks.
+
+### Action Trace V2 Additions
+
+`action_trace.v2` records the selected target explanation, including
+`rawAimPoint` and `safeAimPoint`, the intended canvas/screen point, hover
+confirmation samples, clicked-menu before/after samples, human input governor
+metrics, camera input metrics, game-tick verification timeline, and final
+classification.
+
+Loop execution also records:
+
+- skipped hover/geometry checks separately from actual click attempts
+- `cancelHoverFailures`, `walkHereHoverFailures`, and stale hover samples
+- target suppression/reacquisition fields: `targetsSuppressed`,
+  `suppressedTargets`, `targetReacquireRounds`, `targetReacquireWaits`, and
+  `targetReacquireWaitMillis`
+- clicked-menu mismatch fields under `clientTick.menuMismatch`: expected
+  intent, hover-before-click, actual clicked menu, classification, mismatch
+  reason, and likely causes such as stale hot sample, hover flip, target
+  occlusion, or focus issue
+- `menu_flip_mismatch` as an action classification when hover predicted the
+  intended action but the actual `MenuOptionClicked` event reported another
+  menu action
+- volatile navigation hover fields under `clientTick`: `menuTailVolatility`,
+  `recentMenuTail`, `volatileHoverZone`, and `volatileReasons`. These are
+  derived from bounded `postMenuSortTail` samples near the intended waypoint;
+  recent NPC/object/widget actions make a `Walk here` waypoint volatile and
+  cause a no-click skip before mouse-down.
+- service-route stability fields: `navigationInProgress`,
+  `routeStability`, clicked waypoint tile, player location after the click,
+  movement state, and replan-suppression reason. Immediate waypoint cycles are
+  reported as `route_oscillation_detected`, `route_backtracking_detected`, or
+  `route_wall_hugging_detected` instead of being clicked again.
+- `actualClicks`, `expectedMenuClicks`, `walkHereClicks`, and `cancelClicks`
+- optional final reconciliation result from `--final-reconcile-ms` and
+  `--final-reconcile-game-ticks`
+- timeout summary fields: `unresolvedTimeouts`, `timeoutReasons`,
+  `timeoutActionTypes`, `timeoutRecoveredBy`, and `evidenceAfterTimeout`
+- optional pacing fields: `pacingProfile`, `appliedDelayMs`, and
+  `pacingReason`
+- human input fields: `profile`, `movementGenerator`, mouse move and click-hold
+  timing summaries, reaction-delay summaries, camera-hold summaries,
+  `cameraDirectionSwitches`, and `directBackendBypassCount`
 
 Projection refs are prioritized before capping by generic usefulness:
 on-screen scene objects with geometry, stable IDs/locations, and player-near
@@ -348,9 +644,10 @@ actions.
 Python Phase C adds experimental `live_target_processor.py --input-source
 plugin-snapshot`. The processor posts `plugin_snapshot_request.v1` to
 `/snapshot`, asks for cached baseline, scene delta, projection, inventory,
-inventory delta, activity, navigation, collision window, writer health, and
-watch values, then converts the response payloads into the same synthetic tick
-shape used by compact packet files. Context service and brain clients continue
+inventory delta, activity, navigation, collision window, writer health, watch
+values, and compact `interaction_hot`, then converts the response payloads into
+the same synthetic tick shape used by compact packet files. Context service and
+brain clients continue
 reading the rolling live output files written by the processor.
 
 Projection conversion accepts both raw payloads and packet-envelope payloads.
@@ -388,6 +685,17 @@ Plugin snapshot processor status fields include:
 - `pluginSnapshotBottleneck`
 - `pluginSnapshotResponseBytes`
 - `pluginSnapshotPayloadTypes`
+- `clientTickHot`
+- `clientTickHotSchema`
+- `clientTickLatest`
+- `clientTickGameTickAtSample`
+- `clientTickTopOption`
+- `clientTickTopTarget`
+- `clientTickPostMenuSortAgeMillis`
+- `clientTickLastClickedOption`
+- `clientTickLastClickedTarget`
+- `clientTickLastClickAgeMillis`
+- `clientTickSamplesBuffered`
 - `pluginSnapshotProjectionRefs`
 - `pluginSnapshotProjectionCapped`
 - `pluginSnapshotTier`
@@ -455,8 +763,8 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8893/snapshot" -Body $requ
 Experimental processor commands:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --input-source plugin-snapshot --plugin-snapshot-tier hot --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
-python telemetry-viewer\live_target_processor.py --latest-session --input-source plugin-snapshot --plugin-snapshot-tier expanded --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --from-daemon --daemon-url http://127.0.0.1:8890 --input-source plugin-snapshot --plugin-snapshot-tier hot --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --from-daemon --daemon-url http://127.0.0.1:8890 --input-source plugin-snapshot --plugin-snapshot-tier expanded --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
 ```
 
 Comparison:
@@ -894,7 +1202,8 @@ category, world and scene tile, source/latest tick, on-screen and geometry
 flags, quality tier/score, target liveness, `livenessInterpretation`, direct
 reachability, path length, `interactionRadiusTiles`, collision-window
 membership, capped reachability evidence, `labelParts`, `overlayLabel`,
-`overlayColor`, aimPoint, compact bounds, and small polygons when available.
+`overlayColor`, aimPoint, compact bounds, `safeAimPoint`, `actionable`,
+`validButUnsafe`, `validButUnsafeReason`, and small polygons when available.
 Clickable hull overlay fields are:
 
 - `clickableHull`: preferred observed clickbox/clickable area polygon. The live
@@ -929,6 +1238,14 @@ matching counters for visual QA:
   polygon payloads in `overlay_debug_state.json`.
 - `bestHullAvailable` and `nearestHullAvailable`: whether the best and nearest
   overlay targets have clickable hull geometry after ranking and cap application.
+- `safeAimpoints` and `executableTargets`: how many written overlay targets have
+  a safe visible/interactable aimpoint and are action-ready.
+- `invalidAimpointTargets`: written targets whose raw aim point was rejected as
+  invalid, for example a projection sentinel coordinate.
+- `edgeClippedCandidates`: written targets whose safe-aimpoint evaluation
+  involved clipped/edge geometry.
+- `selectedTargetPresent` and `selectedSafeAimPoint`: whether the selected/best
+  marker exists and whether it has a safe actionable aimpoint.
 - `hullRankBuckets`: clickable hull counts for `rank1`, `ranks2to5`,
   `ranks6to10`, and `ranks11plus`.
 - `polygonTargetsSuppressedByHullCap`: ranked overlay targets that had polygon
@@ -1339,6 +1656,234 @@ finally label-only drawing. This keeps selected intent markers visually closer
 to the target while the camera moves between telemetry ticks without allowing
 the overlay to choose the task target.
 
+## Camera-Guided Waypoint Exposure
+
+`camera_exposure_score.v1` is Python-side action telemetry used for
+service-route navigation. It combines plugin tile projection, camera viewport,
+and `client_tick_hot.v1` hover samples to decide whether a route waypoint is
+visually exposed enough for a navigation click.
+
+Important fields:
+
+- `classification`: `exposed_walk_here`, `occluded_by_object`, `offscreen`,
+  `edge_blocked`, `no_projection`, `no_camera_delta`, `worsening`, `timeout`,
+  or `ambiguous`
+- `score`
+- `targetWorldTile`
+- `waypointCanvasPoint`
+- `projectionAvailable`, `projectionDeltaPx`
+- `mousePositionMatchesProjection`
+- `hoverOption`, `hoverTarget`, `hoverMenuClass`
+- `hoverMatchesWalkHere`
+- `blockingHoverOption`, `blockingHoverTarget`
+- `distanceToViewportEdgePx`
+- `waypointTileBounds`
+- `onScreen`
+- `geometryAvailable`
+- `cameraYaw`, `cameraPitch`, `yawDelta`, `pitchDelta`
+
+`action_trace.v2.reacquisition.cameraExposureAttempts` records bounded
+closed-loop exposure attempts. Each attempt keeps the same `targetWorldTile`,
+records `cameraMethod`, `cameraCommand`, held `cameraKeys`, `cameraMoved`,
+`projectedCanvasBefore`, `projectedCanvasAfter`, `cameraViewportBefore`,
+`cameraViewportAfter`, `exposureScoreBefore`, `exposureScoreAfter`, and compact
+per-sample hover/projection records. Keyboard methods hold keys down while
+sampling projection and `PostMenuSort`; middle-mouse drag is a pulse fallback
+that releases before hover sampling. Camera exposure is only valid for
+`navigation_waypoint_action`, where `Walk here` is the expected menu action. It
+must not authorize resource-object, service-object, or route-transition clicks.
+If the same world tile never reprojects to a fresh `Walk here` hover sample, the
+executor skips the click. A camera adjustment is counted only when yaw/pitch or
+the target projection changes.
+
+## Dialogue State
+
+`dialogue_state.v1` is a compact read-only plugin snapshot/cache packet for
+chatbox dialogue that can block a route transition after a successful object
+click.
+
+Important fields:
+
+- `active`
+- `type`: `options`, `click_to_continue`, or `unknown`
+- `promptText`
+- `options[]`: `index`, `key`, `text`, `widgetGroup`, `widgetChild`, `bounds`,
+  and `visible`
+- `canUseNumberKeys`
+- `canUseSpaceContinue`
+- `source`
+- `widgetRootIds`
+- `latestClientTick`
+- `wallTimeMillis`
+
+`interface_dialogue_choice_action` is the action intent used when the active
+service route expects a dialogue option. For the Lumbridge staircase prompt,
+`planeChange="+1"` selects the option matching `Climb up`, usually key `1`, and
+`planeChange="-1"` selects `Climb down`, usually key `2`. Number-key selection is
+preferred when the packet says or strongly implies that numbered options are
+usable; visible widget bounds are the fallback click target. `Click here to
+continue` is separate and may use space only for continue prompts, not up/down
+choice prompts.
+
+`action_trace.v2.dialogue` records the prompt, available options, expected and
+selected option, selection method, key pressed or widget clicked, and the route
+state after verification.
+
+## Intent-Aware Readiness
+
+`live_readiness.v2` separates overall context health from the readiness of the
+next action intent.
+
+Important fields:
+
+- `status`: overall `PASS`, `WARN`, or `FAIL`
+- `currentIntent`: `resource_object_action`, `navigation_waypoint_action`,
+  `service_object_action`, `route_transition_action`,
+  `interface_dialogue_choice_action`, `camera_adjustment_action`, or `unknown`
+- `actionReadiness.status`
+- `actionReadiness.executionAllowed`
+- `actionReadiness.blockers`
+- `actionReadiness.warnings`
+- `actionReadiness.checks`
+- `actionReadiness.checksSkippedAsNotApplicable`
+- `contextReadiness.status`
+- `contextReadiness.warnings`
+
+The executor gates live input on `actionReadiness.executionAllowed`. Resource
+object actions remain strict: they require selected resource/highlighter
+agreement, freshness, visible geometry, safe aimpoint, and hover-confirmable
+resource menu state. Navigation waypoint actions require a route/path waypoint,
+fresh daemon/session state, plugin snapshot when active, fresh `client_tick_hot`
+interaction state, and input geometry; they allow `Walk here` and do not
+require the selected Tree/Oak resource target to be present in the current
+highlighter source. Service-object and
+route-transition actions require their own visible/actionable target and
+expected menu option. Dialogue choice actions require active `dialogue_state`,
+a route-matching expected option, and the input controller; they do not require
+a route object or hover-confirmable `Walk here` target anymore. Context-only
+mismatches remain visible under
+`contextReadiness.warnings` so diagnostics do not hide them.
+
+Client-tick readiness blockers include `gameState`, `isLoggedIn`,
+`staleReason`, hot-state ages, and a recovery hint. Execution must remain
+blocked until `actionReadiness.executionAllowed=true` and the current
+intent-specific hot-state requirement is satisfied.
+
+### Return Route Context
+
+`return_route_context.v1` is emitted in daemon brain/status after service
+completion when a resource return destination is known. It does not write a new
+continuous file.
+
+Important fields:
+
+- `sourceRouteId`: service route being reversed or paired with a return route.
+- `returnRouteId`: return route identifier.
+- `state`: `service_complete`, `bank_ui_closing`, `return_route_ready`,
+  `return_transition_actionable`, `returning_to_resource`,
+  `resource_area_reached`, `resource_reacquired`, or `return_blocked`.
+- `currentNodeId`, `nextEdge`, `currentStep`
+- `targetResourceArea`
+- `resourceAnchor`: source, world tile/area, plane, confidence, and age.
+- `returnActionReady`
+- `returnBlockedReason`
+
+For Lumbridge Castle bank, return steps descend the bank-floor staircase and
+first-floor staircase with `Climb-down` or the generic up/down dialogue's
+`Climb down the stairs.` option, then navigate through the ground-floor /
+castle-west approach nodes back to the west-tree resource area. A route-relevant
+down staircase can produce `interact_service_route_object`; ordinary return
+waypoints produce `return_to_resource_area`.
+
+`resource_return_context.v1` may use a profile anchor when no live resource
+memory is available. The profile anchor is low confidence and only seeds the
+return route; live RuneLite telemetry still confirms route objects, planes,
+waypoints, and final resource reacquisition.
+
+### Full Lifecycle Soak Summary
+
+`execute_next_action.py` loop summaries expose full-cycle counters for bounded
+woodcut-bank-return validation:
+
+- `lifecycleCyclesStarted` / `lifecycleCyclesCompleted`
+- `collectionPhasesStarted`
+- `inventoryFullEvents`
+- `serviceRoutesStarted` / `serviceRoutesCompleted`
+- `bankOpenEvents`
+- `depositSuccesses`
+- `serviceCompleteEvents`
+- `returnRoutesStarted` / `returnRoutesCompleted`
+- `resourceReacquisitions`
+- `postServiceResourceCollections`
+- `postServiceLogsCollected`
+- `consecutiveNoProgress`
+- `consecutiveTimeouts`
+- `edgeRouteClicksRejected`
+- `cameraReacquireOnEdgeCount`
+- `unresolvedTimeouts`
+- `timeoutReasons`
+- `timeoutActionTypes`
+- `timeoutRecoveredBy`
+
+A lifecycle cycle completes only after collection reaches service, resources are
+deposited, the return route reacquires the resource area, and at least one
+post-service resource is collected. The stop flags
+`--stop-after-lifecycle-cycles`, `--stop-after-service-cycles`, and
+`--stop-after-post-service-logs` use those counters. `--max-total-actions`,
+`--max-wall-time-minutes`, `--max-consecutive-no-progress`, and
+`--max-consecutive-timeouts` are soak safety bounds.
+
+Post-bank action selection treats `bankingComplete=true` and zero held target
+resources as stronger than stale `serviceNeeded=true` proximity/service-object
+signals. While the bank UI remains open, `close_bank` is the expected action;
+after it closes, return/resource reacquisition should run instead of reopening
+bank service.
+
+For `select_resource_target`, observed results may include
+`resourceProgressClassification`:
+
+- `resource_click_confirmed_waiting`
+- `resource_animation_started_pending`
+- `resource_delayed_inventory_success`
+- `resource_target_depleted_success`
+- `resource_timeout_no_progress`
+- `resource_timeout_reconciled_success`
+
+`--resource-reconcile-ms`, `--resource-reconcile-game-ticks`, and
+`--post-click-progress-tail-ticks` extend the final reconcile window for
+resource clicks. If initial timeout is later proven successful by inventory,
+resource count, progress, activity, depletion, or task-state evidence,
+`delayedProgressReconciliation=true` is recorded and timeout counters are not
+incremented for that action.
+If a no-progress timeout leaves a fresh resource target selected, the live loop
+may keep a bounded observation window before clicking again. Late inventory or
+progress evidence is then reported as `resource_timeout_reconciled_success`
+rather than an unresolved timeout.
+
+### Human Input Governor
+
+`human_input.v1` is embedded in `action_trace.v2.humanInput` and loop summaries.
+It records the motor envelope used after fast perception has selected or
+confirmed an action.
+
+Important fields:
+
+- `profile`: `instant_debug`, `steady`, `natural`, or `manual_calibrated`
+- `movementGenerator`: configured, Fitts-guided, or variable path generator
+- `movementCount`, `clickCount`, `keyHoldCount`
+- `averageMouseMoveMs`, `mouseMoveMinMs`, `mouseMoveMaxMs`
+- `averageClickHoldMs`, `clickHoldMinMs`, `clickHoldMaxMs`
+- `averageReactionDelayMs`, `reactionDelayMinMs`, `reactionDelayMaxMs`
+- `cameraHoldMinMs`, `cameraHoldAvgMs`, `cameraHoldMaxMs`
+- `cameraDirectionSwitches`
+- `directBackendBypassCount`
+
+`action_trace.v2.cameraInput` mirrors the camera-specific subset for quick
+debugging. Live executor paths should normally report
+`directBackendBypassCount=0`; backend implementations are the low-level adapter
+exception. `manual_calibrated` is a reserved profile name and currently uses the
+natural envelope until a future calibration file is explicitly introduced.
+
 When `--brain-task woodcutting` is used, `--goal-count N` enables read-only
 resource progress tracking for `brain_decision.v1`. Without a goal count, the
 daemon treats the brain as observe-only: it may report held log counts, but it
@@ -1422,3 +1967,162 @@ packet health and source completeness fields, including
 `sourceSceneKnowledgeComplete` and `sourceCapHit`, to evaluate live capture
 health. Tools that require raw ticks should ask for `DEBUG_RECORDING` sessions
 instead of failing with generic file-not-found errors.
+
+## Resource Projection Recovery
+
+`resource_projection_status.v1` explains why a Tree/Oak candidate is or is not
+clickable. It separates logical resource discovery from executable geometry:
+
+- `projectionSentinel`: compact projection values such as `2147483647` or
+  other unrealistic coordinates were emitted by the client projection source.
+- `projectionAvailable`: usable canvas point, bounds, or hull geometry exists.
+- `safeAimPointAvailable`: the candidate has an accepted `safeAimPoint`.
+- `classification`: `safe`, `projection_sentinel`, `no_projection`,
+  `projection_pending`, `edge_clipped`, `offscreen`, `tiny_projection`,
+  `degenerate_projection`, `projection_cap_hit`, `source_cap_hit`,
+  `stale_projection`, or `no_safe_aimpoint`.
+- `recoverySuggested`: the failure looks view/projection recoverable rather
+  than a cap/source exhaustion problem.
+
+Overlay/status summaries may include `bestLogicalResourceTarget` even when
+`selectedExecutableResourceTarget=null`. In that case the tree exists as a route
+or resource candidate, but no live click should execute until projection
+recovery or a fresh candidate supplies a valid safe aimpoint and hover confirms
+the expected `Chop down` action.
+
+`resource_view_recovery` is verified separately from a resource click. It emits
+`resourceProjectionRecoveryClassification` values such as
+`resource_camera_reacquire_success`, `resource_projection_improved`,
+`resource_projection_recovery_waiting`, or
+`resource_projection_recovery_failed`. Unchanged sentinel/no-projection geometry
+must fail as recovery failed instead of being counted as progress.
+
+## Visual Debug Bundle
+
+`visual_debug_bundle.v1` is an optional action-run evidence artifact written
+only when screenshot debug flags are supplied to `execute_next_action.py`.
+Default live runs do not write these bundles.
+
+Required `bundle.json` fields:
+
+- `schema`: `visual_debug_bundle.v1`
+- `reason`: event such as `resource_projection_recovery_start`,
+  `resource_projection_recovery_end`, `route_waypoint_edge_rejected`,
+  `route_source_mismatch`, `goal_directed_fallback_started`,
+  `route_wall_hugging_detected`, `goal_directed_path_blocked`,
+  `alternate_approach_node_selected`, `service_anchor_reached`,
+  `route_object_reacquired`, `camera_reacquire_start`,
+  `camera_reacquire_end`, `route_no_progress_timeout`, `resource_timeout`,
+  `return_transition_pending`, `return_transition_retry_required`,
+  `return_transition_retry_success`, `return_transition_reconciled_success`,
+  `menu_flip_mismatch`, `unexpected_current_area`, or `final_summary`
+- `timestamp`
+- `sessionPath`
+- `bundleDir`
+- `screenshotPath` when screenshot capture succeeds
+- `screenshotCaptureFailed`
+- `daemonStatusPath`
+- `overlayDebugStatePath` when available
+- `actionTraceExcerptPath` when available
+- `playerLocation`, `plane`, `inventoryFreeSlots`, `resourceCount`
+- `inventoryState`
+- `currentIntent`, `phase`, `actionReadiness`
+- `currentRouteMode`, `currentRouteNode`, `currentRouteEdge`
+- `routeContextSummary`, `selectedServiceAnchor`, `selectedApproachNode`,
+  `selectedWaypoint`
+- `routeSourceMismatchDetails`, `pathingReason`, `wallLoopClassification`
+- `projectionStatus`, `safeAimPointStatus`, `safeAimPointSummary`,
+  `cameraState`
+- `clientTickHotSummary`, `latestHoverMenu`, `latestMenuOptionClicked`
+- `hoverMenu`, `clickedMenu`, `classification`, `clickActionClassification`,
+  `finalDecision`
+- `actionProposalSummary`, `humanInput`
+- `mousePosition`, `windowRect`, `canvasRect`
+- `warnings`
+
+Loop summaries expose `debugScreenshotBundlesCaptured`,
+`debugScreenshotCaptureFailures`, `debugScreenshotBundlesSkippedByLimit`, and
+`debugScreenshotBundlePaths`.
+
+Visual debug bundles do not feed runtime targeting. They are used to compare
+what the user/Codex saw with the existing telemetry-first decision path:
+projection geometry, safe aimpoint status, client-tick hover,
+`MenuOptionClicked`, route/service state, and HumanInputController traces.
+If screenshot capture itself fails, the bundle still writes JSON evidence and
+sets `screenshotCaptureFailed=true`; execution must not be unlocked or crashed
+by screenshot availability.
+
+## Phase-Scoped Reacquire Budgets
+
+`input_control_execution_loop_result.v1.loopSummary` includes bounded
+reacquire budget fields:
+
+- `reacquireBudgetType`: `resource`, `service_object`, `service_inventory`,
+  `route_transition`, `navigation_waypoint`, `camera_recovery`, or `unknown`.
+- `reacquireAttemptsUsed`
+- `reacquireLimit`
+- `phaseScopedBudget`
+- `budgetResetReason`
+- `reacquireBudgetResets`
+- `stoppedByReacquireLimit`
+- `candidateWasActionableBeforeLimit`
+- `routeTransitionSuppressionOverrides`
+- `reacquireRoundsByBudget`
+
+Budgets reset when the lifecycle phase, active intent, player plane, service
+route node, or return route node changes. This prevents stale Tree/Oak,
+service-object, or navigation-waypoint suppression from blocking a
+post-service return stair. If an actionable route-transition target is
+temporarily suppressed by stale hover evidence, the executor may clear that
+specific suppression within the route-transition budget and retry normal hover
+confirmation; it still does not click without fresh expected-menu proof.
+
+## Return Transition Timeout Reconciliation
+
+`route_transition_action_ledger.v1` is attached to route-transition
+observations and to the compact visual debug action-trace excerpt. It records
+the action id, intent, route id/node before and after, expected action,
+object id/hash/name and world location, plane and player location before/after,
+local destination before/after, clicked-menu samples, click timestamp/tick
+fields, verification windows, optional `retryOfActionId`, whether the retry
+used the same route object, and evidence booleans such as `menuClickMatched`,
+`pathingStarted`, `localDestinationChanged`, `locationChanged`,
+`distanceToObjectDecreased`, `routeNodeAdvanced`, `planeChanged`,
+`dialogueOpened`, and `serviceStateAdvanced`.
+
+Route-transition actions can be path-to-interact actions. If a stair click has
+menu/pathing/local-destination evidence but no final plane or route-node change
+yet, the verifier reports `return_transition_pending` or
+`route_transition_pending` and keeps the next action blocked while movement is
+still plausible. If the verification window ends with a confirmed route click
+but no completion evidence, the result becomes
+`return_transition_retry_required` or `route_transition_retry_required` rather
+than a generic `no_change_timeout`.
+
+If a later retry against the same route object succeeds, the retry result may
+record `retryOfActionId` and
+`routeTransitionProgressClassification=return_transition_retry_success` or
+`route_transition_retry_success`. If later daemon evidence proves the original
+transition action itself succeeded, the observed result may include:
+
+- `delayedProgressReconciliation=true`
+- `previousObservedResult`
+- `previousResultOutcome`
+- `routeTransitionProgressClassification`:
+  `return_transition_reconciled_success` or
+  `route_transition_reconciled_success`
+
+Loop summaries separate these cases with `routeTransitionAttempts`,
+`routeTransitionFirstTrySuccesses`, `routeTransitionPending`,
+`routeTransitionRetryRequired`, `routeTransitionRetrySuccesses`,
+`routeTransitionTrueTimeouts`, `routeTransitionReconciledSuccesses`,
+`resolvedByRetry`, `resolvedByLateEvidence`, `pendingButSafe`,
+`timeoutsByIntent`, and `retriesByIntent`. Transition verification windows can
+be tuned with `--transition-verify-ms`, `--transition-verify-game-ticks`,
+`--transition-pending-game-ticks`, and
+`--transition-retry-after-stall-ticks`.
+
+These fields are separate from resource inventory reconciliation. They exist so
+full lifecycle summaries can distinguish true route-transition failures from
+pending movement, retry-required transitions, retry successes, and late but
+proven stair progress.

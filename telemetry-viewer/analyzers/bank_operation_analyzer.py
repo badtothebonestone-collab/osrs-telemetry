@@ -101,6 +101,39 @@ def _inventory_items(raw_inventory: dict[str, Any]) -> tuple[list[dict[str, Any]
     return [], False
 
 
+def _bank_inventory_slot_widgets(bank_ui_context: Any) -> dict[int, dict[str, Any]]:
+    values = _context_value(bank_ui_context, "inventory_slots", "inventorySlots", [])
+    if not isinstance(values, list) or not values:
+        values = _context_value(bank_ui_context, "inventory_slot_widgets", "inventorySlotWidgets", [])
+    if not isinstance(values, list):
+        return {}
+    widgets: dict[int, dict[str, Any]] = {}
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        slot = _as_int(item.get("slot"))
+        item_id = _as_int(item.get("itemId"))
+        quantity = _as_int(item.get("quantity"))
+        if slot is None or item_id is None or quantity is None or item_id <= 0 or quantity <= 0:
+            continue
+        widgets[slot] = dict(item)
+    return widgets
+
+
+def _slot_bounds(widget: dict[str, Any]) -> dict[str, Any]:
+    bounds = widget.get("bounds")
+    if isinstance(bounds, dict) and bounds:
+        payload = dict(bounds)
+        payload.setdefault("source", "bank_inventory_slot_widget_canvas")
+        return payload
+    nested = widget.get("widget")
+    if isinstance(nested, dict) and isinstance(nested.get("bounds"), dict):
+        payload = dict(nested["bounds"])
+        payload.setdefault("source", "bank_inventory_slot_widget_canvas")
+        return payload
+    return {}
+
+
 def _first_int(payload: dict[str, Any], keys: tuple[str, ...]) -> int | None:
     for key in keys:
         value = _as_int(payload.get(key))
@@ -166,9 +199,16 @@ def _inventory_resource_summary(
 ) -> dict[str, Any]:
     raw_inventory = _inventory_payload(inventory_context)
     items, items_known = _inventory_items(raw_inventory)
+    if not items_known:
+        summary = _context_value(bank_ui_context, "inventory_summary", "inventorySummary", {})
+        if isinstance(summary, dict):
+            items, items_known = _inventory_items(summary)
     target_ids = set(definition.item_ids)
+    slot_widgets = _bank_inventory_slot_widgets(bank_ui_context)
     if items_known:
         resource_slots: list[int] = []
+        resource_slot_bounds: list[dict[str, Any]] = []
+        resource_item_widgets: list[dict[str, Any]] = []
         resource_quantity = 0
         resource_items_held = 0
         non_resource_items_held = 0
@@ -181,6 +221,12 @@ def _inventory_resource_summary(
                 slot = resource_progress.item_slot(item)
                 if slot is not None:
                     resource_slots.append(slot)
+                    widget = slot_widgets.get(slot)
+                    if isinstance(widget, dict):
+                        resource_item_widgets.append(dict(widget))
+                        bounds = _slot_bounds(widget)
+                        if bounds:
+                            resource_slot_bounds.append(bounds)
                 resource_quantity += quantity
                 resource_items_held += 1
             else:
@@ -189,7 +235,10 @@ def _inventory_resource_summary(
             "itemsKnown": True,
             "resourceItemsHeld": resource_items_held,
             "resourceItemSlots": sorted(resource_slots),
+            "resourceItemSlotBounds": resource_slot_bounds,
+            "resourceItemWidgets": resource_item_widgets,
             "resourceItemQuantity": resource_quantity,
+            "resourceDisplayName": definition.display_name,
             "nonResourceItemsHeld": non_resource_items_held,
         }
     fallback_count = _held_count_fallback(inventory_context, raw_inventory, bank_ui_context, definition)
@@ -201,7 +250,10 @@ def _inventory_resource_summary(
         "itemsKnown": False,
         "resourceItemsHeld": fallback_count,
         "resourceItemSlots": [],
+        "resourceItemSlotBounds": [],
+        "resourceItemWidgets": [],
         "resourceItemQuantity": fallback_count,
+        "resourceDisplayName": definition.display_name,
         "nonResourceItemsHeld": non_resource_items_held,
     }
 
@@ -282,6 +334,42 @@ def analyze_bank_operation_context(
             reason="bank pin requires user resolution before banking can continue",
         )
 
+    resource_summary = _inventory_resource_summary(inventory_context, bank_ui_context, definition)
+    resource_items_held = _as_int(resource_summary.get("resourceItemsHeld"))
+    resource_item_quantity = _as_int(resource_summary.get("resourceItemQuantity"))
+    resource_item_slots = [slot for slot in resource_summary.get("resourceItemSlots", []) if isinstance(slot, int)]
+    resource_item_slot_bounds = [dict(item) for item in resource_summary.get("resourceItemSlotBounds", []) if isinstance(item, dict)]
+    resource_item_widgets = [dict(item) for item in resource_summary.get("resourceItemWidgets", []) if isinstance(item, dict)]
+    resource_display_name = str(resource_summary.get("resourceDisplayName") or definition.display_name or "resources")
+    non_resource_items_held = _as_int(resource_summary.get("nonResourceItemsHeld"))
+    items_known = bool(resource_summary.get("itemsKnown"))
+
+    if resource_item_quantity is not None and resource_item_quantity <= 0:
+        return BankOperationContext(
+            status="PASS" if not missing else "WARN",
+            warnings=list(dict.fromkeys(warnings)),
+            missing_capabilities=capabilities.normalize_capability_names(missing),
+            source_tick=tick,
+            timing_millis=(time.perf_counter() - started) * 1000.0,
+            operation_needed=False,
+            operation_type=OP_NONE,
+            resource_items_held=resource_items_held if resource_items_held is not None else 0,
+            resource_item_slots=resource_item_slots,
+            resource_item_slot_bounds=resource_item_slot_bounds,
+            resource_item_widgets=resource_item_widgets,
+            resource_item_quantity=0,
+            resource_display_name=resource_display_name,
+            non_resource_items_held=non_resource_items_held,
+            inventory_free_slots=free_slots,
+            inventory_full=inventory_full,
+            deposit_inventory_available=deposit_available,
+            deposit_would_clear_resource_inventory=False,
+            bank_readable=bank_readable,
+            banking_complete=True,
+            completion_reason="no_resource_items_held",
+            reason="banking complete because no target resources remain in inventory",
+        )
+
     if not bank_readable:
         warnings.append("waiting_for_readable_bank")
         return BankOperationContext(
@@ -301,13 +389,6 @@ def analyze_bank_operation_context(
             reason="bank operation waits until bank UI is readable",
         )
 
-    resource_summary = _inventory_resource_summary(inventory_context, bank_ui_context, definition)
-    resource_items_held = _as_int(resource_summary.get("resourceItemsHeld"))
-    resource_item_quantity = _as_int(resource_summary.get("resourceItemQuantity"))
-    resource_item_slots = [slot for slot in resource_summary.get("resourceItemSlots", []) if isinstance(slot, int)]
-    non_resource_items_held = _as_int(resource_summary.get("nonResourceItemsHeld"))
-    items_known = bool(resource_summary.get("itemsKnown"))
-
     if resource_item_quantity is None:
         missing.append("inventory.items")
         missing.append("inventory.resource_counts")
@@ -322,7 +403,10 @@ def analyze_bank_operation_context(
             operation_type=OP_UNKNOWN,
             resource_items_held=resource_items_held,
             resource_item_slots=resource_item_slots,
+            resource_item_slot_bounds=resource_item_slot_bounds,
+            resource_item_widgets=resource_item_widgets,
             resource_item_quantity=resource_item_quantity,
+            resource_display_name=resource_display_name,
             non_resource_items_held=non_resource_items_held,
             inventory_free_slots=free_slots,
             inventory_full=inventory_full,
@@ -331,29 +415,6 @@ def analyze_bank_operation_context(
             banking_complete=False,
             completion_reason="resource_inventory_unknown",
             reason="resource inventory state is unknown",
-        )
-
-    if resource_item_quantity <= 0:
-        return BankOperationContext(
-            status="PASS" if not missing else "WARN",
-            warnings=list(dict.fromkeys(warnings)),
-            missing_capabilities=capabilities.normalize_capability_names(missing),
-            source_tick=tick,
-            timing_millis=(time.perf_counter() - started) * 1000.0,
-            operation_needed=False,
-            operation_type=OP_NONE,
-            resource_items_held=resource_items_held if resource_items_held is not None else 0,
-            resource_item_slots=resource_item_slots,
-            resource_item_quantity=0,
-            non_resource_items_held=non_resource_items_held,
-            inventory_free_slots=free_slots,
-            inventory_full=inventory_full,
-            deposit_inventory_available=deposit_available,
-            deposit_would_clear_resource_inventory=False,
-            bank_readable=True,
-            banking_complete=True,
-            completion_reason="no_resource_items_held",
-            reason="banking complete because no target resources remain in inventory",
         )
 
     operation_type = OP_UNKNOWN
@@ -374,7 +435,10 @@ def analyze_bank_operation_context(
         operation_type=operation_type,
         resource_items_held=resource_items_held,
         resource_item_slots=resource_item_slots,
+        resource_item_slot_bounds=resource_item_slot_bounds,
+        resource_item_widgets=resource_item_widgets,
         resource_item_quantity=resource_item_quantity,
+        resource_display_name=resource_display_name,
         non_resource_items_held=non_resource_items_held,
         inventory_free_slots=free_slots,
         inventory_full=inventory_full,

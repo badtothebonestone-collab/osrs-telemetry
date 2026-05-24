@@ -252,9 +252,32 @@ public class TelemetryDebugOverlayTest
 
 		Assert.assertTrue(line.contains("selected yes"));
 		Assert.assertTrue(line.contains("backups 2"));
-		Assert.assertTrue(line.contains("legacy best no"));
-		Assert.assertTrue(line.contains("legacy nearest no"));
+		Assert.assertTrue(line.contains("bestHull no"));
+		Assert.assertTrue(line.contains("nearestHull no"));
 		Assert.assertFalse(line.contains("| best no nearest no"));
+	}
+
+	@Test
+	public void statusLineReportsRouteMarkersWhenResourceSelectionIsAbsent()
+	{
+		TelemetryDebugOverlay.OverlayDebugState state = new TelemetryDebugOverlay.OverlayDebugState();
+		state.latestTick = 345.0;
+		state.profile = "woodcutting";
+		state.summary = new TelemetryDebugOverlay.OverlaySummary();
+		state.summary.targetsWritten = 2.0;
+		state.summary.pathingMarkerCount = 2.0;
+		state.summary.safeAimpoints = 0.0;
+		state.intentState = new TelemetryDebugOverlay.OverlayIntentState();
+		state.intentState.markers = List.of(
+				pathMarker("destination_tile", 3208, 3219),
+				pathMarker("waypoint", 3201, 3200)
+		);
+
+		String line = TelemetryDebugOverlay.statusLine(state, TelemetryDebugOverlayGeometryMode.CLICKABLE_HULL);
+
+		Assert.assertTrue(line.contains("selected no"));
+		Assert.assertTrue(line.contains("safe 0/2"));
+		Assert.assertTrue(line.contains("route markers 2"));
 	}
 
 	@Test

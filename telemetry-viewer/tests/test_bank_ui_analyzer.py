@@ -102,6 +102,9 @@ class BankUiAnalyzerTest(unittest.TestCase):
                 "closeButtonVisible": True,
                 "bankSummary": {"occupiedSlots": 42, "uniqueItemIds": [1511, 1521]},
                 "inventorySummary": {"freeSlots": 0, "occupiedSlots": 28, "matchingResourceCount": 28},
+                "inventorySlots": [
+                    {"slot": 9, "itemId": 1511, "quantity": 1, "bounds": {"x": 550, "y": 250, "w": 32, "h": 32}}
+                ],
             },
             inventory_context=inventory_context(),
             service_context=service_ready_context(),
@@ -121,6 +124,8 @@ class BankUiAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["topLevelInterfaceId"], 12)
         self.assertEqual(payload["bankSummary"]["occupiedSlots"], 42)
         self.assertEqual(payload["bankSummary"]["uniqueItemCount"], 2)
+        self.assertEqual(payload["inventorySlots"][0]["slot"], 9)
+        self.assertEqual(payload["inventorySlots"][0]["bounds"]["x"], 550)
 
     def test_bank_pin_open_blocks_readability(self):
         context = bank_ui_analyzer.analyze_bank_ui_context(

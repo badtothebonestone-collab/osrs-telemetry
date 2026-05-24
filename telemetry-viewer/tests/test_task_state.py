@@ -59,6 +59,19 @@ class TaskStateTest(unittest.TestCase):
         self.assertEqual(payload["missingCapabilities"], ["navigation.full_pathfinding"])
         self.assertEqual(payload["observationNeeds"][0]["capability"], "activity.animation_frame")
 
+    def test_maps_inventory_changed_with_available_target_to_target_selected(self):
+        payload = task_state.from_brain_decision(
+            {
+                "task": "woodcutting",
+                "phase": "inventory_changed",
+                "currentContextSummary": {"bestTarget": {"targetKey": "tree-1", "id": 1276}},
+            }
+        ).to_dict()
+
+        self.assertEqual(payload["phase"], "target_selected")
+        self.assertEqual(payload["activeIntent"], "continue_current_target")
+        self.assertEqual(payload["selectedTargetKey"], "tree-1")
+
     def test_maps_inventory_full_goal_complete_and_no_candidates(self):
         best = {"name": "Oak tree", "id": 10820, "directReachability": "reachable"}
         inventory_full = task_state.from_brain_decision(

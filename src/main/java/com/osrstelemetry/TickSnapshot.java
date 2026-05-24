@@ -35,6 +35,7 @@ public class TickSnapshot
     public GroundItemSnapshot[] groundItems;
     public StatusSnapshot status;
     public BankUiSnapshot bankUi;
+    public DialogueStateSnapshot dialogueState;
     public ActivePrayerSnapshot[] activePrayers;
     public String framePath;
     public String frameCaptureStatus;
@@ -80,6 +81,47 @@ public class TickSnapshot
         public WidgetSnapshot closeButtonWidget;
         public WidgetSnapshot bankPinWidget;
         public InventorySlot[] bankItems;
+        public InventorySlotWidgetSnapshot[] inventorySlotWidgets;
+    }
+
+    public static class InventorySlotWidgetSnapshot
+    {
+        public int slot;
+        public int itemId;
+        public int quantity;
+        public int widgetId;
+        public int widgetIndex;
+        public Boolean visible;
+        public Bounds bounds;
+        public CanvasPoint aimPoint;
+        public String[] actions;
+        public String source;
+    }
+
+    public static class DialogueStateSnapshot
+    {
+        public String schema;
+        public Boolean active;
+        public String type;
+        public String promptText;
+        public DialogueOptionSnapshot[] options;
+        public Boolean canUseNumberKeys;
+        public Boolean canUseSpaceContinue;
+        public String source;
+        public Integer[] widgetRootIds;
+        public Long latestClientTick;
+        public Long wallTimeMillis;
+    }
+
+    public static class DialogueOptionSnapshot
+    {
+        public int index;
+        public String key;
+        public String text;
+        public Integer widgetGroup;
+        public Integer widgetChild;
+        public Bounds bounds;
+        public boolean visible;
     }
 
     public static class InputGeometrySnapshot

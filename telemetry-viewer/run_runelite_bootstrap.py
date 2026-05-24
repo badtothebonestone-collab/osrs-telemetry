@@ -136,7 +136,7 @@ def snapshot_endpoint(snapshot_url: str) -> str:
 def snapshot_request() -> dict[str, Any]:
     return {
         "schema": "plugin_snapshot_request.v1",
-        "needs": ["baseline", "writer_health"],
+        "needs": ["baseline", "client_tick_hot", "writer_health"],
         "maxAgeTicks": 5,
         "responseMode": "compact",
     }
@@ -176,10 +176,35 @@ def snapshot_baseline(snapshot_payload: dict[str, Any]) -> dict[str, Any]:
     return dict_value(payloads.get("baseline") or snapshot_payload.get("baseline"))
 
 
+def snapshot_client_tick_hot(snapshot_payload: dict[str, Any]) -> dict[str, Any]:
+    payloads = dict_value(snapshot_payload.get("payloads"))
+    return dict_value(payloads.get("client_tick_hot") or snapshot_payload.get("clientTickHot"))
+
+
+def snapshot_top_menu(snapshot_payload: dict[str, Any]) -> dict[str, Any]:
+    hot = snapshot_client_tick_hot(snapshot_payload)
+    return dict_value(hot.get("hoverMenu") or hot.get("postMenuSort"))
+
+
+def final_play_panel_pending(snapshot_payload: dict[str, Any] | None) -> bool:
+    payload = snapshot_payload if isinstance(snapshot_payload, dict) else {}
+    baseline = snapshot_baseline(payload)
+    game_state = first_present(baseline.get("gameState"), payload.get("gameState"))
+    if game_state != "LOGGED_IN":
+        return False
+    menu = snapshot_top_menu(payload)
+    top_option = str(menu.get("topOption") or "").strip().lower()
+    top_type = str(menu.get("topType") or "").strip().upper()
+    if top_option != "play":
+        return False
+    return top_type in {"", "CC_OP", "WIDGET_TARGET", "RUNELITE"}
+
+
 def snapshot_summary(snapshot_payload: dict[str, Any] | None, *, reachable: bool, error: str | None = None) -> dict[str, Any]:
     payload = snapshot_payload if isinstance(snapshot_payload, dict) else {}
     baseline = snapshot_baseline(payload)
     game_state = first_present(baseline.get("gameState"), payload.get("gameState"))
+    menu = snapshot_top_menu(payload)
     return {
         "snapshotReachable": reachable,
         "snapshotStatus": payload.get("status") if reachable else "FAIL",
@@ -187,6 +212,10 @@ def snapshot_summary(snapshot_payload: dict[str, Any] | None, *, reachable: bool
         "gameState": game_state,
         "latestTick": payload.get("latestTick"),
         "inputGeometryAvailable": bool(dict_value(baseline.get("inputGeometry")).get("geometryAvailable")),
+        "topOption": menu.get("topOption"),
+        "topTarget": menu.get("topTarget"),
+        "topType": menu.get("topType"),
+        "finalPlayPanelPending": final_play_panel_pending(payload),
         "error": error,
     }
 
@@ -638,7 +667,7 @@ def run_bootstrap(
             snapshot_error = f"{type(error).__name__}: {error}"
         summary = snapshot_summary(snapshot_payload, reachable=snapshot_payload is not None, error=snapshot_error)
         if summary["loggedIn"]:
-            if not final_play_click_pending(clicked):
+            if not final_play_click_pending(clicked) and not summary.get("finalPlayPanelPending"):
                 startup_stage = "logged_in"
                 add_stage(stages, "logged_in", reason="snapshot reports LOGGED_IN")
                 break
@@ -647,7 +676,7 @@ def run_bootstrap(
                 stages,
                 startup_stage,
                 status="WARN",
-                reason="snapshot reports LOGGED_IN after launcher click; final play panel still pending",
+                reason="snapshot reports LOGGED_IN; final play panel still pending",
             )
         if snapshot_payload is not None and user_login_required(snapshot_payload, window):
             startup_stage = "blocked_user_login_required"
@@ -709,7 +738,7 @@ def run_bootstrap(
             snapshot_payload = fetch_snapshot_func(args.snapshot_url, timeout=3.0)
             summary = snapshot_summary(snapshot_payload, reachable=True)
             if summary["loggedIn"]:
-                if not final_play_click_pending(clicked):
+                if not final_play_click_pending(clicked) and not summary.get("finalPlayPanelPending"):
                     startup_stage = "logged_in"
                     add_stage(stages, "logged_in", reason="snapshot reports LOGGED_IN after click")
                     break
@@ -718,7 +747,7 @@ def run_bootstrap(
                     stages,
                     startup_stage,
                     status="WARN",
-                    reason="snapshot reports LOGGED_IN after launcher click; waiting for final play panel",
+                    reason="snapshot reports LOGGED_IN; waiting for final play panel",
                 )
         except Exception as error:  # noqa: BLE001
             snapshot_error = f"{type(error).__name__}: {error}"

@@ -11,9 +11,26 @@ from analyzers.live_state import BankOperationContext, BankUiContext, InventoryC
 
 
 DEFAULT_MEMORY_MAX_AGE_TICKS = 1200
+RESOURCE_AREA_REACHED_DISTANCE_TILES = 8
 RESOURCE_CLASSES = {"tree", "woodcutting_tree"}
 SERVICE_CLASSES = {"bank_booth", "banker", "bank_chest", "deposit_box", "deposit_chest", "bank_related", "bank_service"}
 SERVICE_INTENTS = {"needs_service", "navigate_to_service", "service_available", "service_open", "bank_operation_pending", "close_service_context", "wait_for_world_view"}
+PROFILE_RESOURCE_ANCHORS = {
+    "woodcutting_bank": {
+        "anchorId": "lumbridge_west_tree_area",
+        "type": "profile_anchor",
+        "worldLocation": {"worldX": 3196, "worldY": 3248, "plane": 0},
+        "confidence": 0.45,
+        "source": "route_profile",
+    },
+    "woodcut_bank": {
+        "anchorId": "lumbridge_west_tree_area",
+        "type": "profile_anchor",
+        "worldLocation": {"worldX": 3196, "worldY": 3248, "plane": 0},
+        "confidence": 0.45,
+        "source": "route_profile",
+    },
+}
 
 
 @dataclass
@@ -149,6 +166,27 @@ def _tile_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     return {"worldX": world_x, "worldY": world_y, "plane": plane}
 
 
+def _tile_distance_tiles(left: dict[str, Any] | None, right: dict[str, Any] | None) -> int | None:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return None
+    left_x = _as_int(left.get("worldX"))
+    left_y = _as_int(left.get("worldY"))
+    right_x = _as_int(right.get("worldX"))
+    right_y = _as_int(right.get("worldY"))
+    left_plane = _as_int(left.get("plane"))
+    right_plane = _as_int(right.get("plane"))
+    if left_x is None or left_y is None or right_x is None or right_y is None:
+        return None
+    if left_plane is not None and right_plane is not None and left_plane != right_plane:
+        return None
+    return max(abs(left_x - right_x), abs(left_y - right_y))
+
+
+def _near_tile(left: dict[str, Any] | None, right: dict[str, Any] | None, *, threshold: int = RESOURCE_AREA_REACHED_DISTANCE_TILES) -> bool:
+    distance = _tile_distance_tiles(left, right)
+    return distance is not None and distance <= max(0, int(threshold))
+
+
 def _player_tile(player_context: PlayerContext | dict[str, Any] | None) -> dict[str, Any] | None:
     if isinstance(player_context, PlayerContext):
         return _tile_from_payload({"worldX": player_context.world_x, "worldY": player_context.world_y, "plane": player_context.plane})
@@ -250,6 +288,16 @@ def _policy_applies(policy: task_policy_module.TaskPolicy) -> bool:
     )
 
 
+def _profile_resource_anchor(policy: task_policy_module.TaskPolicy) -> dict[str, Any] | None:
+    for key in (policy.name, policy.task, policy.profile):
+        anchor = PROFILE_RESOURCE_ANCHORS.get(str(key or ""))
+        if isinstance(anchor, dict):
+            return dict(anchor)
+    if _policy_applies(policy):
+        return dict(PROFILE_RESOURCE_ANCHORS["woodcutting_bank"])
+    return None
+
+
 def update_resource_area_memory(
     policy: task_policy_module.TaskPolicy | dict[str, Any] | str | None,
     memory_state: ResourceAreaMemoryState | None,
@@ -341,6 +389,23 @@ def analyze_resource_return_context(
     memory_age = memory.age_ticks(tick)
     visible_target = best_resource_target(target_context)
     target_visible = bool(visible_target)
+    player_tile = _player_tile(player_context)
+    destination_tile, destination_source = memory.destination_tile() if memory_valid else (None, "none")
+    profile_anchor = _profile_resource_anchor(resolved_policy)
+    profile_tile = _tile_from_payload(_context_value(profile_anchor, "worldLocation")) if isinstance(profile_anchor, dict) else None
+    if (
+        memory_valid
+        and target_visible
+        and profile_tile
+        and destination_tile
+        and not _near_tile(destination_tile, profile_tile, threshold=12)
+        and memory_age is not None
+        and memory_age <= 30
+    ):
+        memory_valid = False
+        invalid_reason = "recent_resource_memory_far_from_profile_anchor"
+        destination_tile = None
+        destination_source = "none"
 
     base_kwargs = {
         "source_tick": tick,
@@ -360,9 +425,15 @@ def analyze_resource_return_context(
     if bank_open is True:
         return ResourceReturnContext(reason="not_applicable", **base_kwargs)
     if target_visible:
-        return ResourceReturnContext(reason="resource_target_visible", **base_kwargs)
+        visible_tile = _tile_from_payload(visible_target)
+        destination_for_reached_check = destination_tile or profile_tile
+        if (
+            destination_for_reached_check is None
+            or _near_tile(player_tile, destination_for_reached_check)
+            or _near_tile(visible_tile, destination_for_reached_check)
+        ):
+            return ResourceReturnContext(reason="resource_target_visible", **base_kwargs)
 
-    destination_tile, destination_source = memory.destination_tile()
     if memory_valid and destination_tile:
         destination = _destination_target(memory, destination_tile, destination_source)
         return ResourceReturnContext(
@@ -372,6 +443,32 @@ def analyze_resource_return_context(
             return_destination_source=destination_source,
             destination_target=destination,
             reason="using_remembered_resource_area",
+            **base_kwargs,
+        )
+
+    if profile_tile:
+        destination = {
+            "targetType": "tile",
+            "classId": "resource_return",
+            "targetName": "Resource return",
+            "name": "Resource return",
+            "worldX": profile_tile.get("worldX"),
+            "worldY": profile_tile.get("worldY"),
+            "plane": profile_tile.get("plane"),
+            "objectKey": f"resource-return-{profile_tile.get('worldX')}-{profile_tile.get('worldY')}-{profile_tile.get('plane')}",
+            "returnDestinationSource": "profile_anchor",
+            "resourceAnchor": profile_anchor,
+            "navigation": {"directReachability": "unknown"},
+        }
+        return ResourceReturnContext(
+            status="WARN",
+            warnings=["using profile resource anchor because no live resource memory is available"],
+            return_destination_needed=True,
+            return_destination_available=True,
+            return_destination_tile=profile_tile,
+            return_destination_source="profile_anchor",
+            destination_target=destination,
+            reason="using_profile_resource_anchor",
             **base_kwargs,
         )
 

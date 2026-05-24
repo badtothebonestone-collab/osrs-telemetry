@@ -680,7 +680,27 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertEqual(context.local_reachability, "unknown")
         self.assertEqual(context.reason, "destination_outside_collision_window")
         self.assertFalse(context.destination_inside_collision_window)
+        self.assertIsNotNone(context.next_waypoint_tile)
+        self.assertEqual(context.path_target_tile_source, "local_frontier_waypoint")
+        self.assertGreater(context.predicted_path_count, 0)
         self.assertIn("navigation.global_pathfinding", context.missing_capabilities)
+
+    def test_outside_destination_uses_reachable_frontier_not_greedy_microstep(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(
+                collision_window_available=True,
+                raw=collision_window(width=5, height=5, blocked={(2, 1)}),
+            ),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=8, sceneY=1, worldX=107, worldY=100)),
+        )
+
+        self.assertEqual(context.local_reachability, "unknown")
+        self.assertEqual(context.reason, "destination_outside_collision_window")
+        self.assertEqual(context.path_target_tile_source, "local_frontier_waypoint")
+        self.assertGreaterEqual(context.predicted_path_count, 3)
+        self.assertLess(context.distance_to_path_target, context.distance_to_destination)
+        self.assertEqual(context.selected_approach_reason, "goal_directed_local_frontier")
 
     def test_collision_window_missing_is_unknown(self):
         context = pathing_analyzer.analyze_pathing_context(
@@ -730,6 +750,23 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertEqual(context.local_reachability, "unknown")
         self.assertTrue(context.pathing_budget_exceeded)
         self.assertEqual(context.reason, "pathing_budget_exceeded")
+
+    def test_budget_exceeded_keeps_safe_local_waypoint_fallback(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=8, height=8)),
+            navigation_intent_context=nav_intent(destination_target=destination(sceneX=7, sceneY=1, worldX=106, worldY=100, targetType="tile", classId="tile")),
+            max_nodes=1,
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "unknown")
+        self.assertEqual(payload["reason"], "pathing_budget_exceeded")
+        self.assertTrue(payload["pathingBudgetExceeded"])
+        self.assertEqual(payload["nextWaypointTile"], {"worldX": 101, "worldY": 100, "plane": 0})
+        self.assertEqual(payload["pathTargetTile"], {"worldX": 104, "worldY": 100, "plane": 0})
+        self.assertEqual(payload["pathTargetTileSource"], "local_waypoint_fallback")
+        self.assertGreaterEqual(payload["predictedStepCount"], 4)
 
     def test_process_inventory_does_not_need_pathing(self):
         context = pathing_analyzer.analyze_pathing_context(

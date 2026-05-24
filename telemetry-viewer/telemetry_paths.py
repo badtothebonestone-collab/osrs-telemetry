@@ -119,6 +119,51 @@ def session_mtime(session_path: Path) -> float:
     return max(mtimes) if mtimes else file_mtime(session_path)
 
 
+LIVE_OUTPUT_RELATIVE_PATHS = (
+    Path("interaction_geometry") / "live" / "overlay_debug_state.json",
+    Path("interaction_geometry") / "live" / "live_candidates.jsonl",
+    Path("interaction_geometry") / "live" / "live_status.json",
+    Path("interaction_geometry") / "live" / "live_context_index.json",
+)
+
+
+def live_output_mtime(session_path: Path) -> float:
+    mtimes = [file_mtime(session_path / relative) for relative in LIVE_OUTPUT_RELATIVE_PATHS if (session_path / relative).exists()]
+    return max(mtimes) if mtimes else 0
+
+
+def session_has_live_outputs(session_path: Path) -> bool:
+    return any((session_path / relative).exists() for relative in LIVE_OUTPUT_RELATIVE_PATHS)
+
+
+def find_newest_live_session(
+    sessions_dir: str | Path | None = None,
+    *,
+    active_only: bool = False,
+) -> Path | None:
+    root = get_sessions_dir(sessions_dir)
+
+    if not root.exists():
+        return None
+
+    sessions = []
+
+    for path in root.iterdir():
+        if not path.is_dir() or not session_has_live_outputs(path):
+            continue
+
+        manifest = safe_read_json(path / "manifest.json")
+        if active_only and not (isinstance(manifest, dict) and manifest.get("active")):
+            continue
+
+        sessions.append(path)
+
+    if not sessions:
+        return None
+
+    return max(sessions, key=live_output_mtime)
+
+
 def find_newest_session(
     sessions_dir: str | Path | None = None,
     *,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import select
 import socket
@@ -18,9 +19,12 @@ import build_world_target_geometry as world_builder
 import inspect_target_geometry as geometry
 import live_packet_reader
 import navigation_reachability
+import mission_presets
+import safe_aimpoint_core
 import select_target_candidates as candidate_builder
 import task_policy as task_policy_module
-from telemetry_paths import find_newest_session, get_sessions_dir, list_tick_files
+from live_session_core import resolve_session_for_args
+from telemetry_paths import get_sessions_dir, list_tick_files
 
 
 LIVE_STATUS_SCHEMA = "live_status.v1"
@@ -79,6 +83,7 @@ COMPACT_INPUT_SOURCES = {COMPACT_PACKET_SOURCE, COMPACT_STREAM_SOURCE}
 ENABLE_MAX_DRAW = True
 MAX_DRAW_LIMIT = 50
 MAX_DRAW_HULL_LIMIT = 10
+MAX_REASONABLE_CANVAS_COORDINATE = 100000.0
 COMPACT_PACKET_TYPES = {
     "baseline": "live_baseline_packet.v1",
     "sceneDelta": "live_scene_delta_packet.v1",
@@ -86,6 +91,7 @@ COMPACT_PACKET_TYPES = {
     "inventory": "live_inventory_packet.v1",
     "inventoryDelta": "live_inventory_delta_packet.v1",
     "bankUi": "live_bank_ui_packet.v1",
+    "dialogueState": "live_dialogue_state_packet.v1",
     "activity": "live_activity_packet.v1",
     "navigation": "live_navigation_packet.v1",
     "collisionWindow": "live_collision_window_packet.v1",
@@ -106,6 +112,7 @@ PLUGIN_SNAPSHOT_TIER_DEFAULT_MAX_REFS = {
 }
 PLUGIN_SNAPSHOT_DEFAULT_TIER = "hot"
 PLUGIN_SNAPSHOT_DEFAULT_MAX_PROJECTION_REFS = PLUGIN_SNAPSHOT_TIER_DEFAULT_MAX_REFS[PLUGIN_SNAPSHOT_DEFAULT_TIER]
+PLUGIN_SNAPSHOT_SERVICE_MIN_PROJECTION_REFS = 150
 PLUGIN_SNAPSHOT_PROJECTION_FIELD_MODES = {"compact", "normal", "full"}
 PLUGIN_SNAPSHOT_SERVICE_CLASS_HINTS = (
     "bank_related",
@@ -115,6 +122,8 @@ PLUGIN_SNAPSHOT_SERVICE_CLASS_HINTS = (
     "bank_chest",
     "deposit_box",
     "deposit_chest",
+    "route_transition",
+    "door",
 )
 PLUGIN_SNAPSHOT_NEED_TO_PACKET_TYPE = {
     "baseline": COMPACT_PACKET_TYPES["baseline"],
@@ -123,6 +132,7 @@ PLUGIN_SNAPSHOT_NEED_TO_PACKET_TYPE = {
     "inventory": COMPACT_PACKET_TYPES["inventory"],
     "inventory_delta": COMPACT_PACKET_TYPES["inventoryDelta"],
     "bank_ui": COMPACT_PACKET_TYPES["bankUi"],
+    "dialogue_state": COMPACT_PACKET_TYPES["dialogueState"],
     "activity": COMPACT_PACKET_TYPES["activity"],
     "navigation": COMPACT_PACKET_TYPES["navigation"],
     "collision_window": COMPACT_PACKET_TYPES["collisionWindow"],
@@ -132,11 +142,13 @@ PLUGIN_SNAPSHOT_NEED_TO_PACKET_TYPE = {
 }
 PLUGIN_SNAPSHOT_DEFAULT_NEEDS = [
     "baseline",
+    "interaction_hot",
     "scene_delta",
     "projection",
     "inventory",
     "inventory_delta",
     "bank_ui",
+    "dialogue_state",
     "activity",
     "navigation",
     "collision_window",
@@ -201,6 +213,10 @@ def json_dump_compact(data) -> str:
     return json.dumps(data, separators=(",", ":"), sort_keys=False)
 
 
+def _dict(value):
+    return value if isinstance(value, dict) else {}
+
+
 def dedupe_preserve_order(values) -> list:
     seen = set()
     result = []
@@ -237,18 +253,15 @@ def positive_float(value: str) -> float:
 
 
 def resolve_session(args) -> Path:
-    if args.session:
-        session = Path(args.session).expanduser()
-        if not session.exists():
-            raise RuntimeError(f"Session does not exist: {session}")
-        return session.resolve()
+    if not getattr(args, "session", None) and not getattr(args, "latest_session", False) and not getattr(args, "from_daemon", False):
+        raise RuntimeError("Pass --session explicitly, --from-daemon, or --latest-session to use the newest session.")
 
-    if not args.latest_session:
-        raise RuntimeError("Pass --session explicitly, or pass --latest-session to use the newest session.")
-
-    session = find_newest_session(get_sessions_dir(args.sessions_dir))
+    session = resolve_session_for_args(args)
     if session is None:
         raise RuntimeError(f"No sessions found in: {get_sessions_dir(args.sessions_dir)}")
+
+    if not session.exists():
+        raise RuntimeError(f"Session does not exist: {session}")
 
     return session.resolve()
 
@@ -1341,6 +1354,7 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
     inventory = by_type.get(COMPACT_PACKET_TYPES["inventory"], {}).get("payload") or {}
     inventory_delta_packet = by_type.get(COMPACT_PACKET_TYPES["inventoryDelta"], {}).get("payload") or {}
     bank_ui = by_type.get(COMPACT_PACKET_TYPES["bankUi"], {}).get("payload") or {}
+    dialogue_state = by_type.get(COMPACT_PACKET_TYPES["dialogueState"], {}).get("payload") or {}
     activity = by_type.get(COMPACT_PACKET_TYPES["activity"], {}).get("payload") or {}
     navigation = by_type.get(COMPACT_PACKET_TYPES["navigation"], {}).get("payload") or {}
     collision_window = by_type.get(COMPACT_PACKET_TYPES["collisionWindow"], {}).get("payload") or {}
@@ -1429,6 +1443,8 @@ def compact_packets_to_tick(packets: list[dict]) -> dict | None:
         tick["_inventoryDelta"] = inventory_delta_packet
     if isinstance(bank_ui, dict) and bank_ui:
         tick["_bankUi"] = bank_ui
+    if isinstance(dialogue_state, dict) and dialogue_state:
+        tick["_dialogueState"] = dialogue_state
     if isinstance(activity, dict) and activity:
         tick["_activityPacket"] = activity
 
@@ -1464,7 +1480,10 @@ def plugin_snapshot_tier_default_max_refs(tier: str) -> int:
 def effective_plugin_snapshot_max_projection_refs(args) -> int:
     value = getattr(args, "plugin_snapshot_max_projection_refs", None)
     if value is None:
-        return plugin_snapshot_tier_default_max_refs(getattr(args, "plugin_snapshot_tier", PLUGIN_SNAPSHOT_DEFAULT_TIER))
+        default = plugin_snapshot_tier_default_max_refs(getattr(args, "plugin_snapshot_tier", PLUGIN_SNAPSHOT_DEFAULT_TIER))
+        if task_policy_requires_service(args):
+            return max(default, PLUGIN_SNAPSHOT_SERVICE_MIN_PROJECTION_REFS)
+        return default
     return max(0, int(value))
 
 
@@ -1488,6 +1507,12 @@ def plugin_snapshot_target_type_hint(args, class_hint: str | None) -> str | None
 
 def task_policy_requires_service(args) -> bool:
     policy_name = getattr(args, "task_policy", None)
+    preset_name = getattr(args, "preset", None)
+    if not policy_name and preset_name:
+        try:
+            policy_name = mission_presets.resolve_mission_preset(str(preset_name)).taskPolicy
+        except Exception:  # noqa: BLE001 - route hints should stay tolerant of local preset drift
+            policy_name = None
     if not policy_name:
         return False
     try:
@@ -1664,6 +1689,7 @@ def plugin_snapshot_to_tick(response: dict) -> dict | None:
     tick["_pluginSnapshotProjectionDiagnostics"] = plugin_snapshot_projection_diagnostics(response)
     tick["_pluginSnapshotServiceTimingMillis"] = response.get("serviceTimingMillis")
     tick["_pluginSnapshotFreshness"] = response.get("freshness") if isinstance(response.get("freshness"), dict) else {}
+    tick["_clientTickHot"] = response.get("clientTickHot") if isinstance(response.get("clientTickHot"), dict) else {}
     return tick
 
 
@@ -2248,6 +2274,8 @@ class PluginSnapshotTailer:
         response_mode: str = "compact",
         projection_field_mode: str = "compact",
         profile: str | None = None,
+        task_policy: str | None = None,
+        preset: str | None = None,
         target_type: str = "all",
         max_candidates_hint: int = 0,
     ):
@@ -2256,11 +2284,20 @@ class PluginSnapshotTailer:
         self.token = token or ""
         self.timeout = max(0.001, float(timeout))
         self.snapshot_tier = normalized_plugin_snapshot_tier(snapshot_tier)
+        self.task_policy = task_policy
+        self.preset = preset
         self.manual_max_projection_refs = max_projection_refs is not None
         self.max_projection_refs = (
             max(0, int(max_projection_refs))
             if max_projection_refs is not None
-            else plugin_snapshot_tier_default_max_refs(self.snapshot_tier)
+            else effective_plugin_snapshot_max_projection_refs(
+                SimpleNamespace(
+                    plugin_snapshot_tier=self.snapshot_tier,
+                    plugin_snapshot_max_projection_refs=None,
+                    task_policy=task_policy,
+                    preset=preset,
+                )
+            )
         )
         self.max_age_ticks = max(0, int(max_age_ticks))
         self.include_geometry = bool(include_geometry)
@@ -2302,6 +2339,7 @@ class PluginSnapshotTailer:
         self.snapshot_projection_capped = False
         self.snapshot_projection_diagnostics: dict = {}
         self.snapshot_response_sizing: dict = {}
+        self.snapshot_client_tick_hot: dict = {}
         self.snapshot_error_code = None
         self.snapshot_request_millis = 0.0
         self.snapshot_http_request_millis = 0.0
@@ -2345,6 +2383,7 @@ class PluginSnapshotTailer:
         self.snapshot_convert_millis = 0.0
         self.snapshot_response_bytes = 0
         self.snapshot_response_sizing = {}
+        self.snapshot_client_tick_hot = {}
         self.snapshot_error_code = None
         self.snapshot_http_connection_reused = False
         self.last_snapshot_unchanged_this_poll = False
@@ -2375,6 +2414,8 @@ class PluginSnapshotTailer:
                 plugin_snapshot_include_geometry=self.include_geometry,
                 plugin_snapshot_response_mode=self.response_mode,
                 plugin_snapshot_projection_field_mode=self.projection_field_mode,
+                task_policy=self.task_policy,
+                preset=self.preset,
             )
         )
 
@@ -2465,6 +2506,7 @@ class PluginSnapshotTailer:
         self.snapshot_warnings = list(response.get("warnings") or []) if isinstance(response.get("warnings"), list) else []
         self.snapshot_error_code = response.get("errorCode") if isinstance(response.get("errorCode"), str) else None
         self.snapshot_response_sizing = response.get("responseSizing") if isinstance(response.get("responseSizing"), dict) else {}
+        self.snapshot_client_tick_hot = response.get("clientTickHot") if isinstance(response.get("clientTickHot"), dict) else {}
         service_timing = response.get("serviceTimingMillis")
         self.snapshot_endpoint_service_millis = float(service_timing) if isinstance(service_timing, (int, float)) and not isinstance(service_timing, bool) else 0.0
         self.snapshot_missing_capabilities = (
@@ -3063,15 +3105,23 @@ def profile_stable_match(record: dict, class_info: dict, profile: dict | None) -
     if not profile:
         return True
 
+    if candidate_builder.profile_semantic_reject_reason(record, class_info, profile):
+        return False
+
     include_ok, _include_reasons = candidate_builder.profile_include_match(record, class_info, profile)
     if not include_ok:
         return False
 
     class_ids = {str(class_id).lower() for class_id in class_info.get("targetClassIds") or []}
+    primary_class_id = str(class_info.get("classId") or "").lower()
+    include_classes = candidate_builder.lower_set(profile.get("includeTargetClasses"))
+    exclude_classes = candidate_builder.lower_set(profile.get("excludeTargetClasses"))
     target_role = geometry.target_role_for(record).lower()
     target_category = geometry.target_category_for(record).lower()
 
-    if class_ids & candidate_builder.lower_set(profile.get("excludeTargetClasses")):
+    if primary_class_id in exclude_classes:
+        return False
+    if class_ids & exclude_classes and primary_class_id not in include_classes:
         return False
     if target_role in candidate_builder.lower_set(profile.get("excludeRoles")):
         return False
@@ -3188,12 +3238,15 @@ def profile_source_record(record: dict, library: dict, profile: dict | None) -> 
     target_role = geometry.target_role_for(record).lower()
     target_category = geometry.target_category_for(record).lower()
     class_ids = {str(value).lower() for value in class_info.get("targetClassIds") or []}
+    primary_class_id = str(class_info.get("classId") or "").lower()
 
     exclude_classes = candidate_builder.lower_set(profile.get("excludeTargetClasses"))
     exclude_roles = candidate_builder.lower_set(profile.get("excludeRoles"))
     exclude_categories = candidate_builder.lower_set(profile.get("excludeCategories"))
 
-    if class_ids & exclude_classes:
+    if primary_class_id in exclude_classes:
+        return False
+    if class_ids & exclude_classes and primary_class_id not in candidate_builder.lower_set(profile.get("includeTargetClasses")):
         return False
     if target_role in exclude_roles:
         return False
@@ -3453,6 +3506,19 @@ def load_profile_documents(args) -> tuple[dict, dict, dict | None, list[str]]:
     return library, profiles, profile, warnings
 
 
+def service_augmented_profile(profile: dict | None, args: Any) -> dict | None:
+    if not profile or not task_policy_requires_service(args):
+        return profile
+    augmented = dict(profile)
+    include_classes = list(profile.get("includeTargetClasses") or [])
+    for class_id in PLUGIN_SNAPSHOT_SERVICE_CLASS_HINTS:
+        if class_id not in include_classes:
+            include_classes.append(class_id)
+    augmented["includeTargetClasses"] = include_classes
+    augmented["serviceRouteAugmented"] = True
+    return augmented
+
+
 def rank_live_candidates(session: Path, ticks: list[dict], source_records: list[dict], ui_records: list[dict], args, library: dict, profile: dict | None) -> tuple[list[dict], dict, list[str]]:
     candidate_args = candidate_args_from(args)
     if candidate_args.limit is None and profile and not candidate_args.no_limit:
@@ -3471,9 +3537,12 @@ def rank_live_candidates(session: Path, ticks: list[dict], source_records: list[
         if tick_id is not None and player_world is not None
     }
     ui_blockers = candidate_builder.ui_block_regions_by_tick(dataset)
-    candidates, stats = candidate_builder.rank_candidates(dataset, records, candidate_args, player_world_by_tick, library, profile, ui_blockers)
+    ranking_profile = service_augmented_profile(profile, args)
+    candidates, stats = candidate_builder.rank_candidates(dataset, records, candidate_args, player_world_by_tick, library, ranking_profile, ui_blockers)
     stats["matchingTargetsBeforeFilters"] = len(records)
     stats["selectedTicks"] = sorted(selected_ticks)
+    if ranking_profile is not profile:
+        stats["serviceRouteProfileAugmented"] = True
     warnings = list(dataset.messages) + list(dataset.warnings)
     return candidates, stats, warnings
 
@@ -3604,12 +3673,43 @@ def candidate_timeline_summary(candidate: dict | None) -> dict | None:
     }
 
 
+def overlay_coordinate(value) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if not math.isfinite(number) or abs(number) > MAX_REASONABLE_CANVAS_COORDINATE:
+        return None
+    return int(number) if number.is_integer() else number
+
+
+def overlay_candidate_has_aim_payload(candidate: dict) -> bool:
+    for key in ("aimPointContext", "aimPoint", "suggestedClickPoint", "clickPoint", "canvasPoint", "canvasLocation", "canvasCenter"):
+        value = candidate.get(key)
+        if isinstance(value, dict) and any(value.get(point_key) is not None for point_key in ("x", "y", "canvasX", "canvasY", "screenX", "screenY")):
+            return True
+    return False
+
+
+def overlay_invalid_aimpoint_reason(candidate: dict) -> str | None:
+    return "invalidAimPoint" if overlay_candidate_has_aim_payload(candidate) and overlay_aim_point(candidate) is None else None
+
+
 def overlay_aim_point(candidate: dict) -> dict | None:
     context = candidate.get("aimPointContext") if isinstance(candidate.get("aimPointContext"), dict) else {}
     aim = candidate.get("aimPoint") if isinstance(candidate.get("aimPoint"), dict) else {}
     canvas_x = context.get("canvasX", aim.get("canvasX", aim.get("x")))
     canvas_y = context.get("canvasY", aim.get("canvasY", aim.get("y")))
-    if not isinstance(canvas_x, (int, float)) or not isinstance(canvas_y, (int, float)):
+    canvas_x = overlay_coordinate(canvas_x)
+    canvas_y = overlay_coordinate(canvas_y)
+    if canvas_x is None or canvas_y is None:
         return None
     return {
         "canvasX": canvas_x,
@@ -3636,7 +3736,11 @@ def overlay_bounds(candidate: dict) -> dict | None:
         y = value.get("y")
         width = value.get("width", value.get("w"))
         height = value.get("height", value.get("h"))
-        if all(isinstance(part, (int, float)) for part in (x, y, width, height)):
+        x = overlay_coordinate(x)
+        y = overlay_coordinate(y)
+        width = overlay_coordinate(width)
+        height = overlay_coordinate(height)
+        if all(isinstance(part, (int, float)) for part in (x, y, width, height)) and width > 0 and height > 0:
             return {"x": x, "y": y, "width": width, "height": height}
     return None
 
@@ -3655,7 +3759,9 @@ def compact_polygon(points, *, max_points: int = 64) -> list[list[float]] | None
             x, y = point[0], point[1]
         else:
             return None
-        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        x = overlay_coordinate(x)
+        y = overlay_coordinate(y)
+        if x is None or y is None:
             return None
         compact.append([x, y])
     return compact
@@ -3692,6 +3798,33 @@ def overlay_geometry_source(target: dict) -> str:
     if target.get("aimPoint"):
         return "aimPoint"
     return "none"
+
+
+def overlay_source_canvas_size(latest_tick: dict | None, status: dict | None = None) -> dict | None:
+    latest_tick = latest_tick if isinstance(latest_tick, dict) else {}
+    status = status if isinstance(status, dict) else {}
+    input_geometry = status.get("inputGeometry") if isinstance(status.get("inputGeometry"), dict) else {}
+    source_size = input_geometry.get("sourceCanvasSize") if isinstance(input_geometry.get("sourceCanvasSize"), dict) else {}
+    width = first_present(source_size.get("width"), source_size.get("canvasWidth"), latest_tick.get("canvasWidth"), latest_tick.get("frameWidth"))
+    height = first_present(source_size.get("height"), source_size.get("canvasHeight"), latest_tick.get("canvasHeight"), latest_tick.get("frameHeight"))
+    width = overlay_coordinate(width)
+    height = overlay_coordinate(height)
+    if width is None or height is None or width <= 0 or height <= 0:
+        return None
+    return {"width": width, "height": height}
+
+
+def overlay_camera_viewport(latest_tick: dict | None, status: dict | None = None) -> dict | None:
+    latest_tick = latest_tick if isinstance(latest_tick, dict) else {}
+    status = status if isinstance(status, dict) else {}
+    for value in (
+        status.get("cameraViewport"),
+        (status.get("inputGeometry") or {}).get("cameraViewport") if isinstance(status.get("inputGeometry"), dict) else None,
+        latest_tick.get("cameraViewport"),
+    ):
+        if isinstance(value, dict) and value:
+            return value
+    return None
 
 
 def overlay_hull_missing_reason(candidate: dict) -> str:
@@ -3856,6 +3989,8 @@ def overlay_target_summary(
     status: dict | None = None,
     latest_tick: int | None = None,
     include_polygons: bool = True,
+    source_canvas_size: dict | None = None,
+    viewport: dict | None = None,
 ) -> dict:
     status = status or {}
     navigation = candidate.get("navigation") if isinstance(candidate.get("navigation"), dict) else {}
@@ -3863,6 +3998,23 @@ def overlay_target_summary(
     reachability = navigation.get("directReachability")
     liveness = overlay_liveness_interpretation(candidate, status)
     label_parts = overlay_label_parts(candidate, reachability, liveness)
+    invalid_aimpoint_reason = overlay_invalid_aimpoint_reason(candidate)
+    safe_aimpoint = safe_aimpoint_core.safe_aimpoint_for_target(
+        candidate,
+        source_canvas_size=source_canvas_size,
+        viewport=viewport,
+    )
+    resource_projection = safe_aimpoint_core.resource_projection_status(
+        candidate,
+        safe_aimpoint=safe_aimpoint,
+        source_canvas_size=source_canvas_size,
+        viewport=viewport,
+        source_cap_hit=status.get("sourceCapHit"),
+        projection_cap_hit=status.get("compactLiveGeometryCapHit"),
+        stale_projection=candidate.get("projectionStale"),
+    )
+    actionable = safe_aimpoint.get("status") == "PASS"
+    unsafe_reason = invalid_aimpoint_reason or safe_aimpoint.get("rejectionReason")
     target = {
         "rank": candidate.get("rank"),
         "isBest": bool(candidate.get("_overlayIsBest")),
@@ -3900,6 +4052,11 @@ def overlay_target_summary(
         "latestTick": latest_tick,
         "aimPoint": overlay_aim_point(candidate),
         "bounds": overlay_bounds(candidate),
+        "safeAimPoint": safe_aimpoint,
+        "resourceProjectionStatus": resource_projection,
+        "actionable": actionable,
+        "validButUnsafe": not actionable,
+        "validButUnsafeReason": unsafe_reason,
     }
     clickable_hull = overlay_polygon(candidate, "clickableHull", "clickboxPolygon")
     clickbox = overlay_polygon(candidate, "clickboxPolygon")
@@ -3935,6 +4092,19 @@ def overlay_geometry_counts(targets: list[dict]) -> dict:
         "aimOnlyTargets": sources.get("aimPoint", 0),
         "missingGeometryTargets": sources.get("none", 0),
     }
+
+
+def overlay_invalid_aimpoint_reasons(targets: list[dict]) -> dict:
+    reasons: Counter[str] = Counter()
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        if target.get("actionable"):
+            continue
+        projection = target.get("resourceProjectionStatus") if isinstance(target.get("resourceProjectionStatus"), dict) else {}
+        reason = projection.get("classification") or target.get("validButUnsafeReason") or "unknown"
+        reasons[str(reason)] += 1
+    return dict(sorted(reasons.items()))
 
 
 def overlay_hull_rank_bucket(rank) -> str:
@@ -4107,6 +4277,16 @@ def bank_ui_state_for(tick: dict | None, inventory_state: dict | None = None) ->
     return payload
 
 
+def dialogue_state_for(tick: dict | None) -> dict:
+    tick = tick if isinstance(tick, dict) else {}
+    dialogue_state = tick.get("_dialogueState") if isinstance(tick.get("_dialogueState"), dict) else {}
+    payload = dict(dialogue_state) if dialogue_state else {}
+    if payload:
+        payload.setdefault("latestTick", tick_id_for(tick))
+        payload.setdefault("source", tick.get("_inputSource"))
+    return payload
+
+
 def overlay_liveness_interpretation(candidate: dict | None, status: dict) -> str:
     live_state = candidate.get("targetLiveState") if isinstance(candidate, dict) else None
     if status.get("livenessDegraded") or status.get("livenessBudgetExceeded"):
@@ -4217,16 +4397,21 @@ def overlay_debug_state_for(
     recent_events = [event for event in (events or []) if isinstance(event, dict)]
     latest_event = recent_events[-1] if recent_events else {}
     warning_event_count = sum(1 for event in recent_events if event.get("severity") in {"warn", "error"})
+    source_canvas_size = overlay_source_canvas_size(latest_tick, status)
+    camera_viewport = overlay_camera_viewport(latest_tick, status)
     targets = [
         overlay_target_summary(
             candidate,
             status,
             tick_id_for(latest_tick),
             include_polygons=index < hull_limit,
+            source_canvas_size=source_canvas_size,
+            viewport=camera_viewport,
         )
         for index, candidate in enumerate(capped_candidates)
     ]
     geometry_counts = overlay_geometry_counts(targets)
+    invalid_reasons = overlay_invalid_aimpoint_reasons(targets)
     hull_rank_buckets = overlay_hull_rank_buckets(targets)
     best_target = targets[0] if targets else {}
     nearest_target = next((target for target in targets if target.get("isNearest")), {})
@@ -4264,6 +4449,78 @@ def overlay_debug_state_for(
             "bestClass": candidates[0].get("classId") if candidates else None,
             "bestHullAvailable": bool(best_target.get("clickableHullAvailable")),
             "nearestHullAvailable": bool(nearest_target.get("clickableHullAvailable")),
+            "selectedTargetPresent": bool(best_target),
+            "selectedSafeAimPoint": bool(best_target.get("actionable")) if best_target else False,
+            "safeAimpoints": sum(1 for target in targets if target.get("safeAimPoint", {}).get("status") == "PASS"),
+            "executableTargets": sum(1 for target in targets if target.get("actionable")),
+            "routeObjectsVisible": status.get("serviceRouteObjectsVisible"),
+            "routeObjectsActionable": status.get("serviceRouteObjectsActionable"),
+            "routeRelevantObjects": status.get("serviceRouteRelevantObjects"),
+            "routeRelevantActionableObjects": status.get("serviceRouteRelevantActionableObjects"),
+            "visibleButRouteIrrelevantObjects": status.get("serviceRouteVisibleButIrrelevantObjects"),
+            "selectedRouteObjectPresent": status.get("serviceRouteSelectedObjectPresent"),
+            "selectedRouteObjectAction": status.get("serviceRouteSelectedObjectAction"),
+            "routeObjectRejectedReason": status.get("serviceRouteObjectRejectedReason"),
+            "routeObjectInterceptReady": status.get("serviceRouteObjectInterceptReady"),
+            "currentRouteNode": status.get("serviceRouteCurrentNodeId"),
+            "currentRouteEdge": status.get("serviceRouteNextEdgeType"),
+            "invalidAimpointTargets": sum(1 for target in targets if target.get("validButUnsafeReason") == "invalidAimPoint"),
+            "invalidAimpointTargetsByReason": invalid_reasons,
+            "projectionSentinelTargets": sum(
+                1
+                for target in targets
+                if isinstance(target.get("resourceProjectionStatus"), dict)
+                and target["resourceProjectionStatus"].get("projectionSentinel") is True
+            ),
+            "edgeClippedCandidates": sum(
+                1
+                for target in targets
+                if isinstance(target.get("safeAimPoint"), dict)
+                and not (
+                    isinstance(target.get("resourceProjectionStatus"), dict)
+                    and target["resourceProjectionStatus"].get("projectionSentinel") is True
+                )
+                and (
+                    "centerOffViewport" in (target["safeAimPoint"].get("unsafeReasons") or [])
+                    or (
+                        isinstance(target["safeAimPoint"].get("clippedVisibleAreaRatio"), (int, float))
+                        and target["safeAimPoint"].get("clippedVisibleAreaRatio") < 1.0
+                    )
+                )
+            ),
+            "projectionCapHit": bool(status.get("compactLiveGeometryCapHit")),
+            "sourceCapHit": bool(status.get("sourceCapHit")),
+            "recoverySuggested": any(
+                isinstance(target.get("resourceProjectionStatus"), dict)
+                and target["resourceProjectionStatus"].get("recoverySuggested") is True
+                for target in targets
+            ),
+            "recoveryActionReady": bool(
+                best_target
+                and not best_target.get("actionable")
+                and isinstance(best_target.get("resourceProjectionStatus"), dict)
+                and best_target["resourceProjectionStatus"].get("recoverySuggested") is True
+            ),
+            "cameraReacquireRecommended": any(
+                isinstance(target.get("resourceProjectionStatus"), dict)
+                and target["resourceProjectionStatus"].get("recoverySuggested") is True
+                for target in targets
+            ),
+            "bestLogicalResourceTarget": {
+                "name": best_target.get("name"),
+                "id": best_target.get("id"),
+                "worldX": best_target.get("worldX"),
+                "worldY": best_target.get("worldY"),
+                "plane": best_target.get("plane"),
+                "projectionClassification": _dict(best_target.get("resourceProjectionStatus")).get("classification"),
+            } if best_target else None,
+            "selectedExecutableResourceTarget": {
+                "name": best_target.get("name"),
+                "id": best_target.get("id"),
+                "worldX": best_target.get("worldX"),
+                "worldY": best_target.get("worldY"),
+                "plane": best_target.get("plane"),
+            } if best_target and best_target.get("actionable") else None,
             "budgetExceeded": bool(status.get("budgetExceeded")),
             "writeFailures": status.get("writeFailureCount", 0),
             "latestEventSummary": latest_event.get("summary"),
@@ -5499,6 +5756,8 @@ class LiveTargetProcessor:
                 response_mode=self.args.plugin_snapshot_response_mode,
                 projection_field_mode=self.args.plugin_snapshot_projection_field_mode,
                 profile=self.args.profile,
+                task_policy=getattr(self.args, "task_policy", None),
+                preset=getattr(self.args, "preset", None),
                 target_type=self.args.target_type,
                 max_candidates_hint=self.args.limit,
             )
@@ -5683,6 +5942,7 @@ class LiveTargetProcessor:
             "projectionCapped": bool(tailer.snapshot_projection_capped),
             "projectionDiagnostics": dict(tailer.snapshot_projection_diagnostics or {}),
             "responseSizing": dict(tailer.snapshot_response_sizing or {}),
+            "clientTickHot": dict(tailer.snapshot_client_tick_hot or {}),
             "errorCode": tailer.snapshot_error_code,
             "endpointErrors": int(tailer.snapshot_endpoint_errors or 0),
             "timeouts": int(tailer.snapshot_timeouts or 0),
@@ -5786,6 +6046,7 @@ class LiveTargetProcessor:
         status["pluginSnapshotConvertMillis"] = 0.0
         status["pluginSnapshotResponseBytes"] = int(self.tailer.snapshot_response_bytes or 0)
         status["pluginSnapshotPayloadTypes"] = list(self.tailer.snapshot_payload_types or [])
+        status["clientTickHot"] = dict(self.tailer.snapshot_client_tick_hot or {})
         status["pluginSnapshotProjectionRefs"] = self.tailer.snapshot_projection_refs
         status["pluginSnapshotProjectionCapped"] = bool(self.tailer.snapshot_projection_capped)
         status["pluginSnapshotNoChangePolls"] = int(self.tailer.snapshot_no_change_polls or 0)
@@ -6032,6 +6293,55 @@ class LiveTargetProcessor:
         class_ids = class_info.get("targetClassIds") if isinstance(class_info.get("targetClassIds"), list) else []
         desired_class = plugin_snapshot_profile_class_hint(self.args.profile) if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else None
         profile_match_for_hint = profile_stable_match(preview, class_info, self.profile) if self.profile else True
+        semantic_reject = candidate_builder.profile_semantic_reject_reason(preview, class_info, self.profile)
+        if semantic_reject:
+            self.classification_cache[key] = {
+                "fingerprint": fingerprint,
+                "profileMatch": False,
+                "rejectReason": semantic_reject,
+                "classId": class_info.get("classId"),
+                "targetClassIds": class_ids,
+                "id": source.get("id"),
+                "hash": source.get("hash"),
+                "kind": source.get("kind"),
+                "name": geometry.target_name_for(preview),
+                "category": geometry.target_category_for(preview),
+                "role": geometry.target_role_for(preview),
+                "objectKey": source.get("objectKey"),
+                "worldX": source.get("worldX"),
+                "worldY": source.get("worldY"),
+                "plane": source.get("plane"),
+                "sceneX": source.get("sceneX"),
+                "sceneY": source.get("sceneY"),
+            }
+            self.last_prefilter_reject_reasons[semantic_reject] += 1
+            return False
+        service_desired_match = (
+            self.input_source_active == PLUGIN_SNAPSHOT_SOURCE
+            and task_policy_requires_service(self.args)
+            and bool({str(value).lower() for value in class_ids} & set(PLUGIN_SNAPSHOT_SERVICE_CLASS_HINTS))
+        )
+        if service_desired_match:
+            self.classification_cache[key] = {
+                "fingerprint": fingerprint,
+                "profileMatch": True,
+                "rejectReason": None,
+                "classId": class_info.get("classId"),
+                "targetClassIds": class_ids,
+                "id": source.get("id"),
+                "hash": source.get("hash"),
+                "kind": source.get("kind"),
+                "name": geometry.target_name_for(preview),
+                "category": geometry.target_category_for(preview),
+                "role": geometry.target_role_for(preview),
+                "objectKey": source.get("objectKey"),
+                "worldX": source.get("worldX"),
+                "worldY": source.get("worldY"),
+                "plane": source.get("plane"),
+                "sceneX": source.get("sceneX"),
+                "sceneY": source.get("sceneY"),
+            }
+            return True
         if (
             desired_class
             and class_info.get("knownTargetClass")
@@ -7390,10 +7700,17 @@ class LiveTargetProcessor:
         status["loadedServiceSceneCount"] = len(loaded_service_scene)
         watch_values = live_watch_values_state(latest_tick_record, inventory_state, activity, status, processed_at)
         bank_ui = bank_ui_state_for(latest_tick_record, inventory_state)
+        dialogue_state = dialogue_state_for(latest_tick_record)
         status["watchValuesPath"] = str(paths["watchValues"])
         status["watchValueCount"] = len(watch_values.get("valuesByAlias") or {})
         status["watchBudgetExceeded"] = bool(watch_values.get("watchBudgetExceeded"))
         status["bankUiPacketAvailable"] = bool(bank_ui)
+        status["dialogueState"] = dialogue_state
+        status["dialogueStateActive"] = bool(dialogue_state.get("active") is True)
+        status["dialogueStateType"] = dialogue_state.get("type")
+        status["dialoguePromptText"] = dialogue_state.get("promptText")
+        status["dialogueOptionCount"] = len(dialogue_state.get("options") or []) if isinstance(dialogue_state.get("options"), list) else 0
+        status["dialogueStatePacketAvailable"] = bool(dialogue_state)
         index = self.index_payload(output_ticks, world_output_records, ui_records, candidates, candidate_stats, processed_at, frame_ticks)
 
         output_bytes = {}
@@ -7599,6 +7916,7 @@ class LiveTargetProcessor:
             "baseline": baseline,
             "activity": activity,
             "bankUi": bank_ui,
+            "dialogueState": dialogue_state,
             "watchValues": watch_values,
             "events": list(self.event_timeline),
             "overlayDebug": overlay_debug,
@@ -7649,6 +7967,10 @@ class LiveTargetProcessor:
         stream_diag = self.compact_stream_diagnostics()
         plugin_snapshot_diag = self.plugin_snapshot_diagnostics()
         plugin_projection_diag = plugin_snapshot_diag.get("projectionDiagnostics") if isinstance(plugin_snapshot_diag.get("projectionDiagnostics"), dict) else {}
+        client_tick_hot = plugin_snapshot_diag.get("clientTickHot") if isinstance(plugin_snapshot_diag.get("clientTickHot"), dict) else {}
+        client_tick_hover = client_tick_hot.get("postMenuSort") if isinstance(client_tick_hot.get("postMenuSort"), dict) else {}
+        client_tick_clicked = client_tick_hot.get("lastMenuOptionClicked") if isinstance(client_tick_hot.get("lastMenuOptionClicked"), dict) else {}
+        client_tick_latency = client_tick_hot.get("latency") if isinstance(client_tick_hot.get("latency"), dict) else {}
         tick_ref_diag = synthetic_tick_ref_diagnostics(latest_tick_record)
         plugin_tick_diag = tick_ref_diag if self.input_source_active == PLUGIN_SNAPSHOT_SOURCE else {}
         latest_candidate_tick = max(output_ids) if output_ids else None
@@ -7752,6 +8074,17 @@ class LiveTargetProcessor:
             "pluginSnapshotProjectionCapped": bool(plugin_snapshot_diag.get("projectionCapped")),
             "pluginSnapshotErrorCode": plugin_snapshot_diag.get("errorCode"),
             "pluginSnapshotResponseSizing": plugin_snapshot_diag.get("responseSizing") or {},
+            "clientTickHot": client_tick_hot,
+            "clientTickHotSchema": client_tick_hot.get("schema"),
+            "clientTickLatest": client_tick_hot.get("clientTick"),
+            "clientTickGameTickAtSample": client_tick_hot.get("gameTickAtSample"),
+            "clientTickTopOption": client_tick_hover.get("topOption"),
+            "clientTickTopTarget": client_tick_hover.get("topTarget"),
+            "clientTickPostMenuSortAgeMillis": client_tick_latency.get("postMenuSortAgeMillis"),
+            "clientTickLastClickedOption": client_tick_clicked.get("option"),
+            "clientTickLastClickedTarget": client_tick_clicked.get("target"),
+            "clientTickLastClickAgeMillis": client_tick_latency.get("lastClickAgeMillis"),
+            "clientTickSamplesBuffered": client_tick_latency.get("samplesBuffered"),
             "pluginSnapshotProjectionRefListPath": plugin_projection_diag.get("refListPath"),
             "pluginSnapshotRefsConverted": plugin_projection_diag.get("refsConverted"),
             "pluginSnapshotSyntheticTickKeys": plugin_tick_diag.get("syntheticTickKeys") or [],
@@ -8719,6 +9052,9 @@ def parse_args():
     parser.add_argument("--session", help="Explicit telemetry session directory.")
     parser.add_argument("--sessions-dir", help="Override telemetry sessions directory when --latest-session is used.")
     parser.add_argument("--latest-session", action="store_true", help="Use the newest available session when --session is omitted.")
+    parser.add_argument("--from-daemon", action="store_true", help="Use the session currently reported by the live core daemon.")
+    parser.add_argument("--daemon-url", default="http://127.0.0.1:8890", help="Daemon URL for --from-daemon.")
+    parser.add_argument("--daemon-timeout", type=float, default=3.0, help="Seconds to wait for daemon status when --from-daemon is used.")
     parser.add_argument("--input-source", choices=sorted(INPUT_SOURCES), default="auto", help="Read source for live processing. Auto prefers compact packet files, then experimental compact stream, then raw ticks. plugin-snapshot is experimental and only used when explicitly selected or --auto-prefer-plugin-snapshot is passed. Default: auto.")
     parser.add_argument("--compact-stream-host", default="127.0.0.1", help="Local compact stream host. Default: 127.0.0.1.")
     parser.add_argument("--compact-stream-port", type=int, default=8891, help="Local compact stream TCP port. Default: 8891.")

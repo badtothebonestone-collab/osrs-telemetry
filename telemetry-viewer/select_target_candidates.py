@@ -58,6 +58,40 @@ POINT_GEOMETRY_TYPES = {"canvasPoint", "canvasLocation", "canvasCenter", "center
 WORLD_DISTANCE_ROLES = {"entity", "interactable", "item"}
 WORLD_DISTANCE_TYPES = {"npc", "player", "sceneObject", "groundItem", "tile"}
 UNKNOWN_CLASS_IDS = {"unknown_scene_object", "unclassified_scene_object"}
+WOODCUTTING_TREE_CLASS_IDS = {"tree", "oak_tree", "willow_tree"}
+KNOWN_WOODCUTTING_TREE_NAMES = {
+    "tree",
+    "oak",
+    "oak tree",
+    "willow",
+    "willow tree",
+    "maple",
+    "maple tree",
+    "yew",
+    "yew tree",
+    "magic tree",
+    "redwood",
+    "redwood tree",
+    "teak",
+    "teak tree",
+    "mahogany",
+    "mahogany tree",
+    "arctic pine",
+    "hollow tree",
+}
+AMBIGUOUS_NON_CHOP_TREE_NAMES = {
+    "apple tree",
+    "banana tree",
+    "calquat tree",
+    "curry tree",
+    "fruit tree",
+    "orange tree",
+    "palm tree",
+    "papaya tree",
+    "pear tree",
+    "pineapple plant",
+    "spirit tree",
+}
 BLOCKING_UI_NAME_PARTS = (
     "minimap",
     "chatbox",
@@ -589,6 +623,11 @@ def target_actions_for(record: dict) -> list[str]:
     return []
 
 
+def target_has_action(record: dict, needle: str) -> bool:
+    text = needle.strip().lower()
+    return bool(text) and any(text in action.lower() for action in target_actions_for(record))
+
+
 def record_signal_set(record: dict) -> set[str]:
     signals = set()
 
@@ -617,6 +656,10 @@ def record_signal_set(record: dict) -> set[str]:
 
     if "canvasTilePolygon" in available or "tilePolygon" in available:
         signals.add("hasCanvasTilePolygon")
+
+    if target_has_action(record, "chop"):
+        signals.add("hasChopAction")
+        signals.add("action:chop")
 
     return signals
 
@@ -1034,6 +1077,27 @@ def profile_include_match(record: dict, class_info: dict, profile: dict) -> tupl
     return (any(include_checks) if include_checks else True), reasons
 
 
+def profile_semantic_reject_reason(record: dict, class_info: dict, profile: dict | None) -> str | None:
+    if not profile or str(profile.get("profileId") or "").lower() != "woodcutting":
+        return None
+
+    class_ids = {str(class_id).lower() for class_id in class_info.get("targetClassIds") or []}
+    if not class_ids & WOODCUTTING_TREE_CLASS_IDS:
+        return None
+
+    if target_has_action(record, "chop"):
+        return None
+
+    name = geometry.target_name_for(record).strip().lower()
+    if name in KNOWN_WOODCUTTING_TREE_NAMES:
+        return None
+
+    if name in AMBIGUOUS_NON_CHOP_TREE_NAMES or name.endswith(" tree"):
+        return "ambiguousTreeNoChopAction"
+
+    return None
+
+
 def profile_evaluation(record: dict, aim: dict, class_info: dict, ui_info: dict, args, profile: dict | None) -> dict:
     selected = True
     reasons = []
@@ -1048,10 +1112,17 @@ def profile_evaluation(record: dict, aim: dict, class_info: dict, ui_info: dict,
             reject_reasons.append("notProfileMatch")
 
         class_ids = {class_id.lower() for class_id in class_info.get("targetClassIds") or []}
+        primary_class_id = str(class_info.get("classId") or "").lower()
+        include_classes = lower_set(profile.get("includeTargetClasses"))
+        exclude_classes = lower_set(profile.get("excludeTargetClasses"))
         target_role = geometry.target_role_for(record).lower()
         target_category = geometry.target_category_for(record).lower()
 
-        if class_ids & lower_set(profile.get("excludeTargetClasses")):
+        if primary_class_id in exclude_classes:
+            selected = False
+            reject_reasons.append("excludedTargetClass")
+
+        elif class_ids & exclude_classes and primary_class_id not in include_classes:
             selected = False
             reject_reasons.append("excludedTargetClass")
 
@@ -1078,6 +1149,11 @@ def profile_evaluation(record: dict, aim: dict, class_info: dict, ui_info: dict,
         if profile.get("excludeUiBlocked") is True and ui_info.get("uiBlocked"):
             selected = False
             reject_reasons.append("uiBlocked")
+
+        semantic_reject = profile_semantic_reject_reason(record, class_info, profile)
+        if semantic_reject:
+            selected = False
+            reject_reasons.append(semantic_reject)
 
     if args.exclude_ui_blocked and ui_info.get("uiBlocked"):
         selected = False

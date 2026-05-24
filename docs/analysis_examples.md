@@ -33,7 +33,8 @@ Daily has two source modes:
   --input-source plugin-snapshot --plugin-snapshot-tier hot`. It is
   experimental, uses `PluginLiveCache`/`PluginSnapshotEndpoint`, and expects the
   compact NDJSON file mirror to be disabled unless intentionally used as a debug
-  mirror.
+  mirror. The plugin snapshot endpoint is the RuneLite Java endpoint on
+  `127.0.0.1:8893`, not the Python context daemon on `8890`.
 
 The legacy compact-packet file stack remains available under the control
 panel's Advanced buttons. Direct compact stream is experimental and should be
@@ -193,6 +194,27 @@ Service/process context is also policy-gated and read-only:
   list only. It can report visible bank booths, bankers, bank chests, deposit
   boxes, deposit chests, or generic bank-service candidates, plus candidates by
   type, best/nearest, reachable count, and unknown-reachability count.
+- When service is needed and no service target is visible, the daemon may attach
+  `serviceRouteContext` from `telemetry-viewer\profiles\service_routes.json`.
+  This route prior can describe Lumbridge Castle bank as a multi-stage route:
+  scout through west approach, entrance/courtyard, first-stairs search, live
+  stair transition, second-stairs transition, and bank service. If a route
+  object such as `Climb-up Staircase` is visible or already hover-confirmed, it
+  wins over another walking waypoint. The route context exposes a
+  small route graph (`routeNodes`, `routeEdges`, `currentNodeId`, `nextEdge`)
+  and an in-memory `observedAnchors` cache. Observed anchors gain confidence
+  only from live visibility or successful interaction evidence; static priors
+  remain unverified scouting hints.
+- `serviceRouteContext.routeContext` classifies the current source before using
+  that prior. Known Lumbridge west trees continue to use `explicit_route`; an
+  unexpected nearby resource area with full inventory and a known Lumbridge bank
+  anchor uses `goal_directed_fallback`. The fallback chooses a service anchor
+  and destination-centered approach node, then asks pathing for a reachable
+  local frontier waypoint that reduces distance toward the approach.
+- If the local frontier hovers Tree/Oak while service is needed, that is a
+  route-context/volatility blocker for the waypoint, not a resource action. The
+  executor should skip or suppress that frontier, try another approach/camera
+  path, or stop with a clear `goal_directed_path_blocked` reason.
 - `woodcutting_firemake` runs process inventory context only. It reports held
   logs and whether the current inventory snapshot shows a tinderbox as present,
   missing, or unknown.
@@ -208,8 +230,16 @@ Navigation intent context is policy-gated read-only context too:
 - `woodcutting_bank` with a visible service candidate reports destination,
   distance, reachability, collision-window availability, and missing navigation
   capabilities if any.
-- `woodcutting_bank` with no visible service candidate reports that it is
-  waiting for service target context.
+- `woodcutting_bank` with no visible service candidate but a route anchor
+  reports `navigationReason=service_route_prior` and `targetKind=service_route`.
+  The anchor is a low-confidence scouting/navigation destination until live
+  candidates verify the actual route objects.
+- `woodcutting_bank` can reuse a previously observed service anchor as a
+  verified navigation target, but it still must reacquire visibility and hover
+  confirmation before `open_service` or `interact_service_route_object` can
+  click anything.
+- `woodcutting_bank` with no visible service candidate and no usable route
+  anchor reports that it is waiting for service target context.
 - `woodcutting_firemake` and `woodcutting_drop` do not request service
   navigation; they remain local `process_inventory` context.
 - A reachable selected resource target does not need navigation context. An
@@ -225,6 +255,30 @@ walk command, click target, route execution, or guaranteed OSRS movement.
 When an exact interaction tile is unknown, `finalApproachTile` is the predicted
 local endpoint or adjacent approach tile, and `navigation.interaction_tile`
 remains a missing capability.
+
+Service route transitions are clicked only through the separate bounded action
+executor, and only when a live route object is visible, has a safe aimpoint, and
+hover confirmation proves the expected menu action such as `Climb-up` or
+`Climb up`. Generic `Climb` may be clicked only as a route-declared dialogue
+opener; the transition is not complete until `dialogue_state.v1` exposes the
+up/down prompt, `interface_dialogue_choice_action` selects the route-correct
+option through `HumanInputController`, and plane/location/route evidence
+changes. Static route priors are never treated as proof that an object can be
+clicked.
+
+Route object acquisition has its own census separate from Tree/Oak candidates.
+For Lumbridge, `Climb-up Staircase` should become a route transition only when
+`route_relevance.v1` passes for the active route step and corridor. A random
+ladder or staircase can still appear in diagnostics as
+`visible_but_route_irrelevant`, but it must not preempt waypoint navigation.
+If the client tick hover sees a staircase while the scene scan does not, the
+hover is recorded as discovery evidence; unresolved route relevance is a
+no-click state, not permission to interact.
+
+For the Lumbridge middle-floor staircase prompt, route step `planeChange="+1"`
+selects `Climb up the stairs.` and `planeChange="-1"` selects `Climb down the
+stairs.` Number keys are preferred when the option key is known; widget-click is
+only a fallback when visible bounds are available.
 
 Daily overlay shows only destination and next waypoint markers by default when
 pathing is relevant. Debug overlay mode can show capped `predicted_path_tile`
@@ -298,6 +352,22 @@ payload is compact bank/interface telemetry in the live cache only; it does not
 open, close, deposit, withdraw, type, click widgets, invoke menus, or add a
 rolling JSON/NDJSON output.
 
+On the Lumbridge bank floor, service-object acquisition is separate from both
+resource target selection and route-transition objects. `serviceObjectCensus`
+reports Bank booth, Banker, Deposit box, and Bank chest candidates with
+projection/actionability and route relevance. A route-relevant actionable bank
+object proposes `open_service`; if the object click starts pathing before the
+bank UI opens, lifecycle verification reports
+`service_object_pathing_to_object` and waits for the UI instead of replanning
+immediately. Once the bank/deposit UI is readable, depositing all inventory is
+used only when no non-resource/protected inventory item is present; otherwise
+the action proposer selects resource slots for a targeted deposit. The targeted
+deposit path uses bank-side inventory widget bounds from `inventorySlots`,
+surfaced as `resourceItemSlotBounds` and `resourceItemWidgets`, so logs can be
+deposited without dropping or banking protected tools. After service, a closed
+bank plus an inventory summary with zero target resources is treated as service
+complete instead of reopening the bank.
+
 Task transition QA uses synthetic in-memory fixtures, so it does not require
 RuneLite, sessions, compact packets, or live files:
 
@@ -353,6 +423,87 @@ reuse the daily daemon, and run the woodcut-bank live QA runner. It never types
 passwords, changes account settings, stores credentials, selects worlds, or
 writes JSON/NDJSON files; if a credential/account prompt is detected or
 suspected it stops with `blocked_user_login_required`.
+
+Before real software input, confirm the live stack is synchronized. The
+readiness diagnostic is intent-aware: overall context can show `WARN` while the
+current `actionReadiness` is `PASS`. Resource clicks still require
+daemon/latest-live session agreement, `overlay_debug_state.json`, highlighter
+markers, selected target presence in the same highlighter source, candidate
+freshness, target aim/geometry/on-screen state, and RuneLite input geometry.
+Navigation waypoint actions require the route/path waypoint and input geometry
+instead, plus fresh `client_tick_hot.v1` menu state when plugin-snapshot input
+is active. A stale Tree/Oak highlighter match is reported as context only:
+
+```text
+python telemetry-viewer\diagnose_live_readiness.py --latest-session --daemon-url http://127.0.0.1:8890 --profile woodcutting
+python telemetry-viewer\diagnose_woodcutting_candidates.py --latest-session --profile woodcutting --top 20 --show-rejections
+python telemetry-viewer\target_geometry_inspector.py --from-daemon --daemon-url http://127.0.0.1:8890 --live
+python telemetry-viewer\execute_next_action.py --daemon-url http://127.0.0.1:8890 --backend pyautogui --input-profile steady --movement-profile linear_debug --hover-only --hover-confirm-target --hover-confirm-timeout-ms 120 --hover-poll-ms 10 --hover-position-tolerance 3
+python telemetry-viewer\execute_next_action.py --daemon-url http://127.0.0.1:8890 --backend pyautogui --input-profile steady --movement-profile linear_debug --execute --verify-after-action --wait-for-ready 30 --hover-confirm-target --hover-confirm-timeout-ms 120 --hover-poll-ms 10 --hover-position-tolerance 3 --click-hold-ms 60 --stop-after-inventory-changes 5 --summary-every-action --final-reconcile-ms 2000 --final-reconcile-game-ticks 6 --pacing-profile natural --target-switch-min-ms 400 --target-switch-max-ms 1400 --target-hover-failure-limit 2 --target-suppression-ms 2500
+python telemetry-viewer\execute_next_action.py --daemon-url http://127.0.0.1:8890 --input-profile steady --camera-self-test --camera-method auto --camera-test-return
+python telemetry-viewer\execute_next_action.py --daemon-url http://127.0.0.1:8890 --backend pyautogui --input-profile steady --movement-profile linear_debug --execute --verify-after-action --wait-for-ready 30 --hover-confirm-target --hover-confirm-timeout-ms 120 --hover-poll-ms 10 --hover-position-tolerance 3 --click-hold-ms 60 --summary-every-action --final-reconcile-ms 2000 --final-reconcile-game-ticks 6 --pacing-profile natural --target-hover-failure-limit 2 --target-suppression-ms 2500 --nav-verify-game-ticks 8 --nav-verify-ms 2500 --max-waypoint-alternates 7 --max-navigation-reacquire-rounds 3 --camera-reacquire-waypoint --camera-method auto --camera-exposure-max-ms 2000 --camera-sample-interval-ms 20 --camera-max-direction-switches 2 --camera-allow-diagonal --camera-allow-pitch-adjust --camera-debug-summary --route-waypoint-lookahead-tiles 12 --route-waypoint-max-horizon-tiles 25 --min-route-progress-tiles 3 --max-route-waypoint-distance 30 --prefer-long-visible-waypoint --route-waypoint-distance-mode adaptive
+```
+
+If action readiness fails, `execute_next_action.py` refuses to move/click and
+prints the missing file/source/status instead of falling back to stale candidate
+or stale client-tick menu data.
+Stale client-tick readiness blockers include `gameState`, logged-in status,
+`staleReason`, and a recovery hint, so login-screen/inactive-client recovery is
+not confused with a route/pathing failure.
+If overall readiness is `WARN` but `actionReadiness.executionAllowed=true`, the
+executor may proceed and records the warning in the trace.
+When hover confirmation is enabled, the executor moves first, waits briefly for
+fresh `PostMenuSort` state at the intended canvas point, requires the top menu
+to match the action intent, and records the actual `MenuOptionClicked` event
+after the click. A `Walk here` clicked event is classified separately from an
+expected action with delayed game-tick progress.
+For navigation waypoints, the executor also requests a bounded recent
+`postMenuSortTail`. If the same intended waypoint recently alternated between
+`Walk here` and NPC/object/widget actions, the waypoint is treated as a
+volatile hover zone and the click is skipped before mouse-down. The trace
+records `recentMenuTail`, `volatileHoverZone`, and `volatileReasons`.
+
+Fast perception and motor output are separate. `--input-profile steady` routes
+mouse movement, click timing, camera key holds/drags, and reaction pacing
+through `HumanInputController`; `--movement-profile` remains the lower-level
+path shape. Loop summaries and `action_trace.v2` should show
+`directBackendBypassCount=0` for live execution paths.
+
+Safe visible aimpoints are selected before movement. A partially visible edge
+candidate may remain valid in diagnostics, but it is not action-selected unless
+its clickable geometry can be clipped to a visible/interactable point inside the
+viewport margin. Projection sentinel canvas values such as `2147483647` are
+invalid aim points and should show as visible-but-not-actionable rather than
+click-ready. Hover-only skips and unsafe-geometry skips are reported separately
+from actual clicks. `--final-reconcile-ms` and
+`--final-reconcile-game-ticks` fold delayed inventory/resource progress into
+the final result, and `--pacing-profile`
+records bounded reacquisition delays between successful target switches.
+
+Repeated `Cancel` or hover-mismatch samples for the same target can trigger
+short target suppression. Suppression is a no-click state: the loop tries the
+next unsuppressed safe candidate when one is already present in daemon/profile
+or overlay context, or waits briefly for reacquisition when all candidates are
+suppressed or unsafe.
+
+For service-route navigation, `Walk here` is expected only for
+`navigation_waypoint_action`. If the waypoint hover is covered by a foreground
+object, camera-guided waypoint exposure keeps the same target world tile while
+holding camera input. The executor samples plugin projection/client-tick state
+while the key is held, reprojects the target tile, follows the updated
+projection with the mouse, and releases camera input as soon as `PostMenuSort`
+predicts `Walk here`. `action_trace.v2` records `camera_exposure_score.v1`
+samples, yaw/pitch deltas, projection deltas, and whether camera movement
+actually occurred. If `Walk here` is not freshly exposed, no click is sent.
+Right-click `Walk here` and minimap fallback remain explicit/deferred paths
+rather than defaults.
+
+If file-output inspection is required, start the live target processor against
+the active daemon session rather than blind newest-session selection:
+
+```powershell
+python telemetry-viewer\live_target_processor.py --from-daemon --daemon-url http://127.0.0.1:8890 --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --no-startup-backfill --max-new-ticks-per-update 1 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --drain-backlog-on-overrun --summary --benchmark
+```
 
 Use `diagnose_woodcut_bank_scenarios.py` for fixed synthetic state-machine
 coverage without RuneLite or live daemon state. It reuses the existing
@@ -820,8 +971,8 @@ debug/audit recordings remain the broad fallback paths.
 Plugin snapshot input source:
 
 ```text
-python telemetry-viewer\live_target_processor.py --latest-session --input-source plugin-snapshot --plugin-snapshot-tier hot --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
-python telemetry-viewer\live_target_processor.py --latest-session --input-source plugin-snapshot --plugin-snapshot-tier expanded --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --from-daemon --daemon-url http://127.0.0.1:8890 --input-source plugin-snapshot --plugin-snapshot-tier hot --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
+python telemetry-viewer\live_target_processor.py --from-daemon --daemon-url http://127.0.0.1:8890 --input-source plugin-snapshot --plugin-snapshot-tier expanded --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
 ```
 
 Compare snapshot output to the stable compact packet file bridge:
@@ -3663,3 +3814,232 @@ $request = @{
 
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8890/context" -Body $request -ContentType "application/json"
 ```
+
+## Service Route Stability Example
+
+When the active proposal is `navigation_waypoint_action`, `Walk here` is valid,
+but it is not permission to click another waypoint immediately. After a
+confirmed route click, `action_trace.v2` can record `navigationInProgress` with
+the clicked waypoint, player tile, movement state, and
+`replanSuppressedReason`. If pathing still reports `moving` or
+`recently_moved`, the loop waits/reconciles instead of replanning.
+
+Route waypoint target explanations can include `route_projection_status.v1`.
+Use it to distinguish:
+
+- `visible`: the projected tile is canvas-actionable.
+- `offscreen`: the tile can be a valid world target but needs camera/minimap or
+  a closer structured waypoint.
+- `degenerate` / `tiny_projection`: the projection must not be clicked.
+- `occluded`: the tile projection exists, but the current hover is an object or
+  actor action rather than `Walk here`.
+- `edge_clipped`: the tile is too close to the viewport/canvas edge or has too
+  little projected visible area to trust as a direct canvas click.
+
+When `--reject-edge-route-clicks` is enabled, edge-clipped waypoints are
+demoted. If `--camera-reacquire-on-edge-projection` is also enabled, the
+executor can hold camera input, reproject the same world tile, and accept the
+click only after the projection becomes safer and fresh hover still confirms
+the navigation intent.
+
+If recent clicked waypoint history forms an immediate A-B-A pattern, the
+executor reports `route_oscillation_detected` / `route_backtracking_detected`
+and stops safely instead of clicking around the same wall corridor.
+
+## Post-Bank Return Route Example
+
+After `bankingComplete=true` and `bankOpen=false`, the action layer should not
+reopen the bank just because no Tree/Oak is visible from the bank floor. The
+daemon first checks `resource_return_context.v1` for a resource destination:
+last target, learned collection area, or the Lumbridge west-tree profile anchor.
+Likewise, when `bankingComplete=true` and `bankOpen=true`, a lingering
+`serviceNeeded=true` signal from the nearby bank/deposit objects is not enough
+to reopen service. The next action should close the bank UI when close-bank
+readiness passes.
+
+When a destination exists, `return_route_context.v1` stages the reverse leg:
+
+1. `lumbridge_castle_bank` / bank-floor stairs down.
+2. `lumbridge_first_floor_stairs` / first-floor stairs down.
+3. Ground-floor or courtyard exit.
+4. Castle west approach.
+5. Lumbridge west tree area and resource reacquisition.
+
+Visible route-relevant `Climb-down Staircase` objects produce
+`interact_service_route_object` before a plain `return_to_resource_area`
+waypoint. If the staircase opens the up/down prompt, the dialogue resolver
+selects `Climb down the stairs.` for `planeChange="-1"`. Once Tree/Oak
+candidates are visible again, normal resource targeting resumes.
+
+## Full Lifecycle Soak Example
+
+Use a bounded soak when validating the whole woodcut-bank-return loop rather
+than a single click:
+
+```text
+python telemetry-viewer\execute_next_action.py --daemon-url http://127.0.0.1:8890 --backend pyautogui --input-profile steady --execute --verify-after-action --wait-for-ready 30 --hover-confirm-target --hover-confirm-timeout-ms 120 --hover-poll-ms 10 --hover-position-tolerance 3 --summary-every-action --final-reconcile-ms 3000 --final-reconcile-game-ticks 8 --resource-reconcile-ms 4000 --resource-reconcile-game-ticks 8 --pacing-profile natural --target-hover-failure-limit 2 --target-suppression-ms 2500 --nav-verify-game-ticks 8 --nav-verify-ms 2500 --max-waypoint-alternates 7 --max-navigation-reacquire-rounds 3 --camera-reacquire-waypoint --camera-method auto --camera-exposure-max-ms 2000 --camera-sample-interval-ms 20 --camera-max-direction-switches 2 --camera-allow-diagonal --camera-allow-pitch-adjust --camera-debug-summary --route-waypoint-lookahead-tiles 12 --route-waypoint-max-horizon-tiles 25 --min-route-progress-tiles 3 --max-route-waypoint-distance 30 --prefer-long-visible-waypoint --route-waypoint-distance-mode adaptive --reject-edge-route-clicks --camera-reacquire-on-edge-projection --route-click-edge-margin-px 12 --route-min-visible-area-ratio 0.45 --nav-replan-while-moving false --nav-min-game-ticks-between-clicks 3 --nav-stuck-game-ticks 6 --stop-after-lifecycle-cycles 1 --stop-after-post-service-logs 2 --max-total-actions 150 --max-consecutive-timeouts 3
+```
+
+The loop summary counts lifecycle milestones separately from click attempts:
+inventory-full events, service routes started/completed, bank opens, deposit
+successes, return routes started/completed, resource reacquisitions, and
+post-service logs collected. A full lifecycle cycle completes only after
+service has completed, the return route has reacquired resources, and at least
+one post-service log/resource is collected.
+
+Resource clicks can legitimately produce delayed progress. If a click first
+times out but later inventory/resource evidence arrives inside the bounded
+resource reconcile window, the result is counted as a delayed reconciliation
+instead of a live action failure. Real failures remain failures when no
+inventory, progress, activity, depletion, or state-transition evidence appears.
+Timeout summaries include reason and action-type maps so a successful soak can
+still explain the timeouts it tolerated.
+
+## Resource Projection Recovery Example
+
+If Tree/Oak candidates exist but `safeAimpoints=0` and
+`executableTargets=0`, check `resourceProjectionStatus` before treating it as
+"no trees found." Sentinel values such as `2147483647` are classified as
+`projection_sentinel`, not as edge-clipped geometry. They remain visible in
+diagnostics, but are never executable.
+
+When the selected logical resource target has a recoverable projection failure,
+the proposer can emit `resource_view_recovery` with
+`cameraTriggeredBy=resource_projection_sentinel`,
+`resource_no_safe_aimpoint`, `resource_edge_projection`, or another explicit
+view/projection reason. The executor issues only bounded camera input through
+`HumanInputController`; it does not click the tree. After the camera/projection
+refresh, normal resource selection runs again and can click only after a valid
+safe aimpoint plus fresh hover confirmation exists.
+Recovery should be considered successful only when the projection improves or a
+safe aimpoint appears. If the projection remains sentinel/no-projection through
+the bounded verification window, report `resource_projection_recovery_failed`
+and stop instead of repeating camera input.
+
+The live soak command can restart from this state safely. A useful run should
+report the starting `invalidAimpointTargetsByReason`, whether recovery ran,
+`safeAimpoints`/`executableTargets` before and after recovery, and then the
+normal lifecycle counters.
+
+## Visual Debug Bundle Example
+
+Use sparse visual bundles when the route works mechanically but the viewport or
+camera behavior needs human review:
+
+```text
+python telemetry-viewer\execute_next_action.py --daemon-url http://127.0.0.1:8890 --backend pyautogui --input-profile steady --execute --verify-after-action --wait-for-ready 30 --hover-confirm-target --hover-confirm-timeout-ms 120 --hover-poll-ms 10 --hover-position-tolerance 3 --summary-every-action --final-reconcile-ms 3000 --final-reconcile-game-ticks 8 --resource-reconcile-ms 4000 --resource-reconcile-game-ticks 8 --pacing-profile natural --target-hover-failure-limit 2 --target-suppression-ms 2500 --nav-verify-game-ticks 8 --nav-verify-ms 2500 --max-waypoint-alternates 7 --max-navigation-reacquire-rounds 3 --camera-reacquire-waypoint --camera-method auto --camera-exposure-max-ms 2000 --camera-sample-interval-ms 20 --camera-max-direction-switches 2 --camera-allow-diagonal --camera-allow-pitch-adjust --camera-debug-summary --route-waypoint-lookahead-tiles 12 --route-waypoint-max-horizon-tiles 25 --min-route-progress-tiles 3 --max-route-waypoint-distance 30 --prefer-long-visible-waypoint --route-waypoint-distance-mode adaptive --reject-edge-route-clicks --camera-reacquire-on-edge-projection --route-click-edge-margin-px 12 --route-min-visible-area-ratio 0.45 --nav-replan-while-moving false --nav-min-game-ticks-between-clicks 3 --nav-stuck-game-ticks 6 --stop-after-lifecycle-cycles 1 --stop-after-post-service-logs 2 --max-total-actions 180 --max-consecutive-timeouts 3 --capture-debug-screenshots --screenshot-on-failure --screenshot-on-camera-recovery --screenshot-on-timeout --screenshot-on-edge-reject --max-debug-screenshots 20
+```
+
+Bundles are written under `interaction_geometry/live/debug_bundles/` for the
+active daemon session when possible. Inspect each `bundle.json` alongside
+`screenshot.png`, `daemon_status.json`, `overlay_debug_state.json`, and
+`action_trace_excerpt.json`.
+
+Useful route/pathing bundle reasons include `route_source_mismatch`,
+`goal_directed_fallback_started`, `route_wall_hugging_detected`,
+`goal_directed_path_blocked`, `alternate_approach_node_selected`,
+`service_anchor_reached`, `route_object_reacquired`,
+`route_no_progress_timeout`, `repeated_navigation_no_progress`,
+`route_waypoint_edge_rejected`, `camera_reacquire_start`,
+`camera_reacquire_end`, `resource_projection_recovery_start`,
+`resource_projection_recovery_end`, `menu_flip_mismatch`,
+`unexpected_current_area`, and `final_summary`.
+
+Good audit questions:
+
+- Did telemetry mark a route tile as edge-clipped or partially offscreen?
+- Did camera reacquire trigger for the same reason shown in the screenshot?
+- Did a resource projection recovery start from sentinel/no-projection geometry
+  and end with either a real safe aimpoint or a clear failure?
+- Did screenshot evidence agree with hover/menu and projection telemetry?
+- Did the selected waypoint look useful, or was it hugging a wall or sitting at
+  the side of the viewport?
+- Did the screenshot show a staircase, door, bank booth, or service anchor that
+  telemetry missed?
+- Did the final summary count late post-bank logs before exit?
+
+Do not use screenshot pixels as a click source. Screenshots are validation
+evidence only; live actions remain gated by telemetry and HumanInputController.
+
+## Post-Service Return-Stair Reacquisition Example
+
+When bank service is complete and the UI is closed, the return leg should begin
+from the current route context rather than inheriting stale candidate retry
+state from service navigation or resource selection. The key diagnostics are:
+
+- `returnRouteContext.state`
+- `returnRouteContext.currentNodeId`
+- `reacquireBudgetType`
+- `reacquireAttemptsUsed` / `reacquireLimit`
+- `budgetResetReason`
+- `stoppedByReacquireLimit`
+- `candidateWasActionableBeforeLimit`
+- `routeTransitionProgressClassification`
+
+A good post-service return state looks like:
+
+```json
+{
+  "phaseScopedBudget": true,
+  "budgetResetReason": "reacquire_scope_changed",
+  "reacquireBudgetType": "route_transition",
+  "returnRouteContext": {
+    "state": "return_transition_actionable",
+    "currentNodeId": "lumbridge_first_floor_stairs"
+  }
+}
+```
+
+If `Climb-down Staircase` is visible/actionable, the proposal should be
+`interact_service_route_object` before a return waypoint. Direct left click,
+right-click row selection, or the generic staircase dialogue resolver may be
+used, but every live input still goes through `HumanInputController` and must
+verify through `MenuOptionClicked`, plane/location change, route-node
+advancement, or path-to-interact evidence.
+
+If the first verification window times out but later status proves the plane or
+route node changed, the final classification should be reconciled to
+`return_transition_reconciled_success` rather than left as an unresolved
+timeout. Capture a visual bundle with
+`return_transition_reacquire_limit_blocked` or
+`return_stair_visible_but_not_proposed` if the route object is visible but the
+proposal does not select it.
+
+## Route Transition Verification Precision Example
+
+Use the transition ledger when a stair route looks like it timed out but the
+next click succeeds. The first attempt should not be blindly marked successful.
+Check `route_transition_action_ledger.v1` for:
+
+- `menuClickMatched`
+- `pathingStarted`
+- `localDestinationChanged`
+- `locationChanged`
+- `distanceToObjectDecreased`
+- `routeNodeAdvanced`
+- `planeChanged`
+- `dialogueOpened`
+
+If a `Climb-down Staircase` click has pathing or local-destination evidence but
+no final plane change yet, classify it as `return_transition_pending` and keep
+watching instead of retrying immediately. If the click matched the expected menu
+but there is no completion evidence before the transition window closes,
+classify it as `return_transition_retry_required`. A later same-object retry
+that changes plane is `return_transition_retry_success`; it should increment
+`resolvedByRetry` without converting the first attempt to success.
+
+Only use `return_transition_reconciled_success` when later evidence proves the
+original action advanced the route. Useful proof includes a plane change inside
+the delayed reconcile window, a route-node advance attributable to that action,
+or path-to-interact movement that began after that click and completed without
+an intervening retry.
+
+For a two-cycle soak, include the transition-specific verification flags:
+
+```text
+--transition-verify-game-ticks 10 --transition-verify-ms 5000 --transition-pending-game-ticks 6 --transition-retry-after-stall-ticks 4 --stop-after-lifecycle-cycles 2
+```
+
+The summary should report route transition attempts, first-try successes,
+pending transitions, retry-required transitions, retry successes, reconciled
+successes, and true timeouts separately.

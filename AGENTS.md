@@ -19,6 +19,43 @@
 * Keep Mission Control, daemon, diagnostics, overlay, Snapshot No-File, and stabilization-suite workflows intact unless the current task explicitly requires changing them.
 * Prefer small, testable changes with clear diagnostics over large architecture rewrites.
 
+## Live Stack Cleanup Guardrails
+
+* Read `telemetry-viewer\docs\live_stack_architecture.md` before changing live/action/candidate code.
+* Prefer shared core modules over new standalone scripts:
+
+  * `live_session_core.py` for daemon/latest/live session rules.
+  * `live_file_core.py` for live file/cache loading.
+  * `candidate_core.py` for candidate identity, freshness, source matching, and explanation.
+  * `live_readiness_core.py` for readiness checks and action gating.
+  * `input_control\action_proposal.py` and `action_proposal_core.py` for action proposals.
+
+* Do not create a new diagnostic until checking the existing canonical diagnostics:
+
+  * `diagnose_live_readiness.py`
+  * `diagnose_woodcutting_candidates.py`
+  * `target_geometry_inspector.py`
+  * `execute_next_action.py --dry-run --explain-target --verify-coordinates`
+
+* Diagnostics should not become runtime dependencies.
+* Action execution requires readiness PASS.
+* Candidate source and highlighter source must match before action.
+* Any new live script must document:
+
+  * input files
+  * output files
+  * source of truth
+  * tests
+  * whether it can execute input
+
+* Keep final summaries grounded in:
+
+  * changed files
+  * behavior changed
+  * tests run
+  * live commands
+  * remaining blockers
+
 ## Current Daily Live Command
 
 The current normal daemon command is:

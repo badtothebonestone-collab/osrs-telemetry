@@ -1,0 +1,151 @@
+EXECUTE ACTION LOOP - WARN
+
+Mode: execute
+Executed actions: 14 / 180
+Reason: lifecycle_cycle_limit_reached
+
+Summary:
+  Proposed actions: 18
+  Actual click attempts: 14
+  Actions executed: 14
+  Hover checks: 17
+  Skips: unsafe geometry=0 hover mismatch=4 stale client tick=0 suppressed targets=0 no-progress suppressions=0
+  Navigation: occluded waypoints=1 alternate attempts=7 camera adjustments=0 edge rejects=0 edge camera=0 volatile skips=1 menu flips=0
+  Route stability: motion waits=0 replan suppressed=0 oscillation=0 backtracking=0 barrier=0
+  Route transitions: attempts=5 firstTry=3 pending=0 retryRequired=1 retrySuccess=1 reconciled=0 trueTimeouts=0
+  Successful actions: 13
+  Timeouts: 0 unresolved=0 trueUnresolved=0 classifications={'resource_timeout_reconciled_success': 1}
+  Timeout details: reasons={'resource_timeout_reconciled_success': 1} actions={} intents={} recoveredBy={'delayed_progress_reconciliation': 1} resolvedByRetry=1 resolvedByLateEvidence=1 pendingButSafe=0
+  Delayed reconciliations: 1 resource timeout recoveries=1
+  Inventory changes: 3
+  Inventory free slots: 0 -> 14
+  Resource count: 15 -> 1
+  Progress: 0 -> 0
+  Lifecycle cycles: started=1 completed=1 serviceComplete=1 returnComplete=1 post-service logs=1
+  Hover confirms: 13 pass / 4 fail
+  Hover failures: cancel=1 Walk here=1 stale=0 volatile=1
+  Menu clicks: 12 expected / 0 Walk here / 0 Cancel
+  Hover latency ms: min=2 avg=77.294 max=164
+  Pacing delays ms: count=0 min=None avg=None max=None
+  Input profile: steady | mouse move avg ms=437.796 click hold avg ms=104.562 reaction avg ms=None
+  Camera hold ms: min=209 avg=317.5 max=426 switches=1
+  Direct backend bypasses: 0
+  Debug screenshots: captured=1 failures=0 skippedByLimit=0
+  Reacquire waits: 0 (0 ms)
+  Final reconcile: none (4000 ms, 8 ticks)
+  Final cycle stage: resource_target_selected
+  Final phase/intent: target_selected / select_target
+  Last observed signals: inventory_changed, held_resource_count_increased
+
+Actions:
+  1. navigate_to_service -> Lumbridge Castle entrance or ground-floor courtyard
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4992, 'y': 402, 'timestampMs': 662}}
+     expected: service_navigation_progress
+     observed: no_click_safety_skip
+     outcome: skipped complete=True
+     lifecycle: blocked reason=hover_confirm_timeout
+  2. navigate_to_service -> Lumbridge Castle entrance or ground-floor courtyard
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4776, 'y': 653, 'timestampMs': 610}}
+     expected: service_navigation_progress
+     observed: service_navigation_progress
+     outcome: progress complete=True
+     lifecycle: verified reason=progress
+  3. navigate_to_service -> Lumbridge Castle entrance or ground-floor courtyard
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 5119, 'y': 421, 'timestampMs': 624}}
+     expected: service_navigation_progress
+     observed: service_navigation_progress
+     outcome: progress complete=True
+     lifecycle: verified reason=progress
+  4. navigate_to_service -> Lumbridge Castle entrance or ground-floor courtyard
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4972, 'y': 344, 'timestampMs': 590}}
+     expected: service_navigation_progress
+     observed: service_route_object_reacquired
+     outcome: progress complete=True
+     lifecycle: verified reason=progress
+  5. interact_service_route_object -> Staircase
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 5054, 'y': 323, 'timestampMs': 416}}
+     expected: service_route_transition_progress
+     observed: no_click_safety_skip
+     outcome: skipped complete=True
+     lifecycle: blocked reason=hover_confirm_timeout
+  6. interact_service_route_object -> Staircase
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4908, 'y': 442, 'timestampMs': 520}}
+     expected: service_route_transition_progress
+     observed: route_transition_progress
+     outcome: progress complete=True
+     lifecycle: verified reason=progress
+  7. interact_service_route_object -> Staircase
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4421, 'y': 327, 'timestampMs': 649}}
+     expected: service_route_transition_progress
+     observed: no_click_safety_skip
+     outcome: skipped complete=True
+     lifecycle: blocked reason=hover_confirm_timeout
+  8. interact_service_route_object -> Staircase
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4503, 'y': 435, 'timestampMs': 447}}
+     expected: service_route_transition_progress
+     observed: route_transition_retry_required
+     outcome: retry_required complete=True
+     lifecycle: verified reason=route_transition_retry_required
+  9. interact_service_route_object -> Staircase
+     command: {'type': 'move', 'pointCount': 24, 'clickPoint': {'x': 4493, 'y': 442, 'timestampMs': 207}}
+     expected: service_route_transition_progress
+     observed: return_transition_plane_changed
+     outcome: progress complete=True
+     lifecycle: verified reason=progress
+  10. navigate_to_service -> Bank booth
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4344, 'y': 682, 'timestampMs': 536}}
+     expected: service_navigation_progress
+     observed: service_route_object_reacquired
+     outcome: progress complete=True
+     lifecycle: verified reason=progress
+  11. open_service -> Bank booth
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4114, 'y': 962, 'timestampMs': 561}}
+     expected: bank_ui_open
+     observed: no_click_safety_skip
+     outcome: skipped complete=True
+     lifecycle: blocked reason=hover_confirm_timeout
+  12. open_service -> Bank booth
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4354, 'y': 821, 'timestampMs': 569}}
+     expected: bank_ui_open
+     observed: service_open
+     outcome: success complete=True
+     lifecycle: verified reason=success
+  13. deposit_resources -> Woodcutting logs
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 5426, 'y': 828, 'timestampMs': 752}}
+     expected: resources_deposited
+     observed: resource_count_decreased
+     outcome: progress complete=True
+     lifecycle: verified reason=progress
+  14. deposit_resources -> Woodcutting logs
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 5426, 'y': 1001, 'timestampMs': 507}}
+     expected: resources_deposited
+     observed: banking_complete
+     outcome: success complete=True
+     lifecycle: verified reason=success
+  15. close_bank -> Close bank
+     command: {'type': 'key_press', 'key': 'escape'}
+     expected: bank_closed
+     observed: bank_closed
+     outcome: success complete=True
+     lifecycle: verified reason=success
+  16. interact_service_route_object -> Staircase
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4752, 'y': 299, 'timestampMs': 739}}
+     expected: service_route_transition_progress
+     observed: return_transition_plane_changed
+     outcome: progress complete=True
+     lifecycle: verified reason=progress
+  17. interact_service_route_object -> Staircase
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4541, 'y': 423, 'timestampMs': 553}}
+     expected: service_route_transition_progress
+     observed: return_transition_plane_changed
+     outcome: progress complete=True
+     lifecycle: verified reason=progress
+  18. select_resource_target -> Tree
+     command: {'type': 'move', 'pointCount': 31, 'clickPoint': {'x': 4608, 'y': 270, 'timestampMs': 588}}
+     expected: wait_for_result_or_activity
+     observed: inventory_changed
+     outcome: success complete=True
+     lifecycle: verified reason=success
+
+Warnings:
+  none

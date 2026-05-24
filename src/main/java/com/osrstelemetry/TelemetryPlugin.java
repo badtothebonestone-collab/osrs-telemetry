@@ -28,6 +28,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
@@ -65,6 +68,7 @@ import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.AnimationChanged;
+import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.DecorativeObjectDespawned;
 import net.runelite.api.events.DecorativeObjectSpawned;
 import net.runelite.api.events.GameTick;
@@ -81,6 +85,7 @@ import net.runelite.api.events.ItemDespawned;
 import net.runelite.api.events.ItemQuantityChanged;
 import net.runelite.api.events.ItemSpawned;
 import net.runelite.api.events.MenuOpened;
+import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.NpcChanged;
 import net.runelite.api.events.NpcDespawned;
 import net.runelite.api.events.NpcSpawned;
@@ -88,6 +93,7 @@ import net.runelite.api.events.OverheadTextChanged;
 import net.runelite.api.events.PlayerChanged;
 import net.runelite.api.events.PlayerDespawned;
 import net.runelite.api.events.PlayerSpawned;
+import net.runelite.api.events.PostMenuSort;
 import net.runelite.api.events.ProjectileMoved;
 import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.VarClientIntChanged;
@@ -108,6 +114,7 @@ import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.widgets.Widget;
+import net.runelite.client.callback.ClientThread;
 
 @Slf4j
 @PluginDescriptor(
@@ -129,7 +136,9 @@ public class TelemetryPlugin extends Plugin
 	private static final String PACKET_COLLISION_WINDOW = "live_collision_window_packet.v1";
 	private static final String PACKET_COLLISION_GRID = "live_collision_grid_packet.v1";
 	private static final String PACKET_BANK_UI = "live_bank_ui_packet.v1";
+	private static final String PACKET_DIALOGUE_STATE = "live_dialogue_state_packet.v1";
 	private static final String PACKET_WRITER_HEALTH = "live_writer_health_packet.v1";
+	private static final int DIALOGUE_WIDGET_SCAN_LIMIT = 160;
 	private static final int MAX_SERVICE_SCENE_OBJECTS = 32;
 	private static final int SERVICE_SCENE_OBJECT_RADIUS = 48;
 	private static final int COMPACT_LIVE_GEOMETRY_MAX_REFS_HARD_CAP = 200;
@@ -148,6 +157,9 @@ public class TelemetryPlugin extends Plugin
 
 	@Inject
 	private Client client;
+
+	@Inject
+	private ClientThread clientThread;
 
 	@Inject
 	private Gson gson;
@@ -173,7 +185,11 @@ public class TelemetryPlugin extends Plugin
 	private TelemetryWriter writer;
 	private PluginLiveCache liveCache;
 	private PluginSnapshotEndpoint pluginSnapshotEndpoint;
+	private final ClientTickHotState clientTickHotState = new ClientTickHotState();
+	private volatile Map<String, Object> latestHoverMenu;
+	private volatile Map<String, Object> lastMenuOptionClicked;
 	private long tickId = 0;
+	private long clientTickId = 0;
 	private long eventSeq = 0;
 	private final Set<Integer> knownItemIds = new HashSet<>();
 	private final Set<Integer> knownNpcIds = new HashSet<>();
@@ -365,7 +381,9 @@ public class TelemetryPlugin extends Plugin
 				config.pluginSnapshotMaxProjectionRefs(),
 				config.pluginSnapshotMaxResponseBytes(),
 				config.pluginSnapshotAllowNonLocalHost(),
-				new TelemetryPresetApplier(configManager));
+				new TelemetryPresetApplier(configManager),
+				clientTickHotState,
+				this::pluginSnapshotTileProjections);
 		try
 		{
 			pluginSnapshotEndpoint.start();
@@ -509,6 +527,7 @@ public class TelemetryPlugin extends Plugin
 				safeCapture(captureErrors, "players", () -> capturePlayers(snapshot));
 				safeCapture(captureErrors, "widgets", () -> captureWidgets(snapshot));
 				safeCapture(captureErrors, "bankUi", () -> captureBankUi(snapshot));
+				safeCapture(captureErrors, "dialogueState", () -> captureDialogueState(snapshot));
 				safeCapture(captureErrors, "scene", () -> captureScene(snapshot));
 				safeCapture(captureErrors, "status", () -> captureStatus(snapshot));
 				safeCapture(captureErrors, "activePrayers", () -> captureActivePrayers(snapshot));
@@ -615,7 +634,35 @@ public class TelemetryPlugin extends Plugin
 	@Subscribe
 	public void onMenuOpened(MenuOpened event)
 	{
-		logEvent("MenuOpened", menuOpenedPayload(event));
+		Map<String, Object> payload = hoverMenuPayload();
+		payload.put("sampleSource", "MenuOpened");
+		payload.put("sourceEvent", "MenuOpened");
+		payload.put("menuEntryCount", event.getMenuEntries() == null ? 0 : event.getMenuEntries().length);
+		logEvent("MenuOpened", payload);
+		clientTickHotState.recordPostMenuSort(payload);
+	}
+
+	@Subscribe
+	public void onClientTick(ClientTick event)
+	{
+		clientTickId++;
+		clientTickHotState.recordClientTick(clientTickPayload("ClientTick"));
+	}
+
+	@Subscribe
+	public void onPostMenuSort(PostMenuSort event)
+	{
+		Map<String, Object> payload = hoverMenuPayload();
+		latestHoverMenu = payload;
+		clientTickHotState.recordPostMenuSort(payload);
+	}
+
+	@Subscribe
+	public void onMenuOptionClicked(MenuOptionClicked event)
+	{
+		Map<String, Object> payload = menuOptionClickedPayload(event);
+		lastMenuOptionClicked = payload;
+		clientTickHotState.recordMenuOptionClicked(payload);
 	}
 
 	@Subscribe
@@ -1033,6 +1080,11 @@ public class TelemetryPlugin extends Plugin
 		if (bankUiEffective)
 		{
 			currentWriter.updateLiveCache(PACKET_BANK_UI, snapshot.tickId, snapshot.timestampUtc, bankUiPayload(snapshot));
+		}
+
+		if (bankUiEffective)
+		{
+			currentWriter.updateLiveCache(PACKET_DIALOGUE_STATE, snapshot.tickId, snapshot.timestampUtc, dialogueStatePayload(snapshot));
 		}
 
 		if (config.emitCompactNavigationPackets()
@@ -2142,8 +2194,30 @@ public class TelemetryPlugin extends Plugin
 		payload.put("depositInventoryButtonWidget", bankUi == null ? null : bankUi.depositInventoryButtonWidget);
 		payload.put("closeButtonWidget", bankUi == null ? null : bankUi.closeButtonWidget);
 		payload.put("bankPinWidget", bankUi == null ? null : bankUi.bankPinWidget);
+		payload.put("inventorySlots", bankUi == null || bankUi.inventorySlotWidgets == null ? new TickSnapshot.InventorySlotWidgetSnapshot[0] : bankUi.inventorySlotWidgets);
+		payload.put("inventorySlotWidgets", bankUi == null || bankUi.inventorySlotWidgets == null ? new TickSnapshot.InventorySlotWidgetSnapshot[0] : bankUi.inventorySlotWidgets);
 		payload.put("inventorySummary", itemContainerSnapshot(snapshot == null ? null : snapshot.inventory));
 		payload.put("bankSummary", itemContainerSummary(bankUi == null ? null : bankUi.bankItems));
+		return payload;
+	}
+
+	private Map<String, Object> dialogueStatePayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		TickSnapshot.DialogueStateSnapshot dialogue = snapshot == null ? null : snapshot.dialogueState;
+
+		payload.put("schema", "dialogue_state.v1");
+		payload.put("tick", snapshot == null ? null : snapshot.tickId);
+		payload.put("active", dialogue != null && Boolean.TRUE.equals(dialogue.active));
+		payload.put("type", dialogue == null ? "unknown" : dialogue.type);
+		payload.put("promptText", dialogue == null ? "" : dialogue.promptText);
+		payload.put("options", dialogue == null || dialogue.options == null ? new TickSnapshot.DialogueOptionSnapshot[0] : dialogue.options);
+		payload.put("canUseNumberKeys", dialogue == null ? null : dialogue.canUseNumberKeys);
+		payload.put("canUseSpaceContinue", dialogue == null ? null : dialogue.canUseSpaceContinue);
+		payload.put("source", dialogue == null ? "widget_root_scan" : dialogue.source);
+		payload.put("widgetRootIds", dialogue == null || dialogue.widgetRootIds == null ? new Integer[0] : dialogue.widgetRootIds);
+		payload.put("latestClientTick", dialogue == null ? null : dialogue.latestClientTick);
+		payload.put("wallTimeMillis", dialogue == null ? null : dialogue.wallTimeMillis);
 		return payload;
 	}
 
@@ -2838,9 +2912,11 @@ public class TelemetryPlugin extends Plugin
 		payload.put("navigationCachePresent", liveCachePayloadTypes.contains(PACKET_NAVIGATION));
 		payload.put("collisionWindowCachePresent", liveCachePayloadTypes.contains(PACKET_COLLISION_WINDOW));
 		payload.put("bankUiCachePresent", liveCachePayloadTypes.contains(PACKET_BANK_UI));
+		payload.put("dialogueStateCachePresent", liveCachePayloadTypes.contains(PACKET_DIALOGUE_STATE));
 		payload.put("navigationPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_NAVIGATION, snapshot));
 		payload.put("collisionWindowPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_COLLISION_WINDOW, snapshot));
 		payload.put("bankUiPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_BANK_UI, snapshot));
+		payload.put("dialogueStatePacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_DIALOGUE_STATE, snapshot));
 		payload.put("emitNavigationEffective", emitNavigationEffective(currentWriter));
 		payload.put("emitCollisionWindowEffective", emitCollisionWindowEffective(currentWriter));
 		payload.put("emitBankUiEffective", emitBankUiEffective(currentWriter));
@@ -3249,6 +3325,8 @@ public class TelemetryPlugin extends Plugin
 		Widget bankItems = client.getWidget(InterfaceID.Bankmain.ITEMS);
 		Widget bankDepositInventory = client.getWidget(InterfaceID.Bankmain.DEPOSITINV);
 		Widget bankMenuButton = client.getWidget(InterfaceID.Bankmain.MENU_BUTTON);
+		Widget inventoryItems = client.getWidget(InterfaceID.Inventory.ITEMS);
+		Widget bankSideItems = client.getWidget(InterfaceID.Bankside.ITEMS);
 		Widget depositRoot = client.getWidget(InterfaceID.BankDepositbox.UNIVERSE);
 		Widget depositFrame = client.getWidget(InterfaceID.BankDepositbox.FRAME);
 		Widget depositContents = client.getWidget(InterfaceID.BankDepositbox.CONTENTS);
@@ -3281,7 +3359,289 @@ public class TelemetryPlugin extends Plugin
 		bankUi.closeButtonWidget = widgetSnapshot(-1, closeButton);
 		bankUi.bankPinWidget = widgetSnapshot(-1, bankPinRoot);
 		bankUi.bankItems = itemContainerSlots(client.getItemContainer(InventoryID.BANK), 0);
+		bankUi.inventorySlotWidgets = inventorySlotWidgetSnapshots(firstVisibleWidget(bankSideItems, inventoryItems, depositInventory), snapshot.inventory);
 		snapshot.bankUi = bankUi;
+	}
+
+	private TickSnapshot.InventorySlotWidgetSnapshot[] inventorySlotWidgetSnapshots(Widget inventoryItems, TickSnapshot.InventorySlot[] inventorySlots)
+	{
+		if (!widgetVisible(inventoryItems))
+		{
+			return new TickSnapshot.InventorySlotWidgetSnapshot[0];
+		}
+
+		Widget[] children = inventoryItems.getDynamicChildren();
+		if (children == null || children.length == 0)
+		{
+			children = inventoryItems.getChildren();
+		}
+		if (children == null || children.length == 0)
+		{
+			children = inventoryItems.getNestedChildren();
+		}
+		if (children == null || children.length == 0)
+		{
+			return new TickSnapshot.InventorySlotWidgetSnapshot[0];
+		}
+
+		List<TickSnapshot.InventorySlotWidgetSnapshot> snapshots = new ArrayList<>();
+		for (int i = 0; i < children.length && i < INVENTORY_SLOT_COUNT; i++)
+		{
+			Widget child = children[i];
+			if (child == null)
+			{
+				continue;
+			}
+			TickSnapshot.InventorySlotWidgetSnapshot slot = inventorySlotWidgetSnapshot(child, i, inventorySlots);
+			if (slot != null)
+			{
+				snapshots.add(slot);
+			}
+		}
+		return snapshots.toArray(new TickSnapshot.InventorySlotWidgetSnapshot[0]);
+	}
+
+	private TickSnapshot.InventorySlotWidgetSnapshot inventorySlotWidgetSnapshot(Widget widget, int fallbackSlot, TickSnapshot.InventorySlot[] inventorySlots)
+	{
+		int slotIndex = widget.getIndex() >= 0 ? widget.getIndex() : fallbackSlot;
+		if (slotIndex < 0 || slotIndex >= INVENTORY_SLOT_COUNT)
+		{
+			return null;
+		}
+
+		int itemId = widget.getItemId();
+		int quantity = widget.getItemQuantity();
+		if (inventorySlots != null && slotIndex < inventorySlots.length && inventorySlots[slotIndex] != null)
+		{
+			if (itemId <= 0)
+			{
+				itemId = inventorySlots[slotIndex].itemId;
+			}
+			if (quantity <= 0)
+			{
+				quantity = inventorySlots[slotIndex].quantity;
+			}
+		}
+		if (itemId <= 0 || quantity <= 0)
+		{
+			return null;
+		}
+
+		TickSnapshot.Bounds bounds = widgetBounds(widget);
+		if (bounds == null)
+		{
+			return null;
+		}
+
+		TickSnapshot.InventorySlotWidgetSnapshot snapshot = new TickSnapshot.InventorySlotWidgetSnapshot();
+		snapshot.slot = slotIndex;
+		snapshot.itemId = itemId;
+		snapshot.quantity = quantity;
+		snapshot.widgetId = widget.getId();
+		snapshot.widgetIndex = widget.getIndex();
+		snapshot.visible = widgetVisible(widget);
+		snapshot.bounds = bounds;
+		TickSnapshot.CanvasPoint aim = new TickSnapshot.CanvasPoint();
+		aim.x = bounds.x + bounds.w / 2;
+		aim.y = bounds.y + bounds.h / 2;
+		snapshot.aimPoint = aim;
+		snapshot.actions = widget.getActions();
+		snapshot.source = "inventory_widget";
+		return snapshot;
+	}
+
+	private void captureDialogueState(TickSnapshot snapshot)
+	{
+		TickSnapshot.DialogueStateSnapshot dialogue = new TickSnapshot.DialogueStateSnapshot();
+		dialogue.schema = "dialogue_state.v1";
+		dialogue.active = false;
+		dialogue.type = "unknown";
+		dialogue.promptText = "";
+		dialogue.options = new TickSnapshot.DialogueOptionSnapshot[0];
+		dialogue.canUseNumberKeys = null;
+		dialogue.canUseSpaceContinue = null;
+		dialogue.source = "widget_root_scan";
+		dialogue.latestClientTick = clientTickId;
+		dialogue.wallTimeMillis = System.currentTimeMillis();
+
+		Widget[] roots = client.getWidgetRoots();
+		if (roots == null || roots.length == 0)
+		{
+			dialogue.widgetRootIds = new Integer[0];
+			snapshot.dialogueState = dialogue;
+			return;
+		}
+
+		List<Widget> visibleTextWidgets = new ArrayList<>();
+		List<Integer> rootIds = new ArrayList<>();
+		int[] visited = new int[] {0};
+		for (Widget root : roots)
+		{
+			if (root == null)
+			{
+				continue;
+			}
+			if (widgetVisible(root))
+			{
+				int rootId = root.getId() >>> 16;
+				if (!rootIds.contains(rootId))
+				{
+					rootIds.add(rootId);
+				}
+			}
+			collectVisibleTextWidgets(root, visibleTextWidgets, visited);
+			if (visited[0] >= DIALOGUE_WIDGET_SCAN_LIMIT)
+			{
+				break;
+			}
+		}
+		dialogue.widgetRootIds = rootIds.toArray(new Integer[0]);
+
+		String prompt = "";
+		List<TickSnapshot.DialogueOptionSnapshot> options = new ArrayList<>();
+		boolean clickToContinue = false;
+		for (Widget widget : visibleTextWidgets)
+		{
+			String text = cleanWidgetText(widget.getText());
+			if (text.isEmpty())
+			{
+				text = cleanWidgetText(widget.getName());
+			}
+			if (text.isEmpty())
+			{
+				continue;
+			}
+			String lower = text.toLowerCase(Locale.ROOT);
+			if (lower.contains("click here to continue"))
+			{
+				clickToContinue = true;
+			}
+			if (prompt.isEmpty() && isDialoguePromptText(lower))
+			{
+				prompt = text;
+			}
+			if (isDialogueOptionText(lower))
+			{
+				options.add(dialogueOptionSnapshot(options.size() + 1, widget, text));
+			}
+		}
+
+		if (!options.isEmpty())
+		{
+			dialogue.active = true;
+			dialogue.type = "options";
+			dialogue.promptText = prompt;
+			dialogue.options = options.toArray(new TickSnapshot.DialogueOptionSnapshot[0]);
+			dialogue.canUseNumberKeys = true;
+			dialogue.canUseSpaceContinue = false;
+		}
+		else if (clickToContinue)
+		{
+			dialogue.active = true;
+			dialogue.type = "click_to_continue";
+			dialogue.promptText = prompt.isEmpty() ? "Click here to continue" : prompt;
+			dialogue.options = new TickSnapshot.DialogueOptionSnapshot[0];
+			dialogue.canUseNumberKeys = false;
+			dialogue.canUseSpaceContinue = true;
+		}
+
+		snapshot.dialogueState = dialogue;
+	}
+
+	private void collectVisibleTextWidgets(Widget widget, List<Widget> output, int[] visited)
+	{
+		if (widget == null || visited[0] >= DIALOGUE_WIDGET_SCAN_LIMIT)
+		{
+			return;
+		}
+		visited[0]++;
+		if (widgetVisible(widget))
+		{
+			String text = cleanWidgetText(widget.getText());
+			String name = cleanWidgetText(widget.getName());
+			if (!text.isEmpty() || !name.isEmpty())
+			{
+				output.add(widget);
+			}
+			Widget[] children = widget.getChildren();
+			if (children != null)
+			{
+				for (Widget child : children)
+				{
+					collectVisibleTextWidgets(child, output, visited);
+					if (visited[0] >= DIALOGUE_WIDGET_SCAN_LIMIT)
+					{
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	private boolean isDialoguePromptText(String lower)
+	{
+		return lower.contains("climb up or down")
+				|| lower.contains("up or down the stairs")
+				|| lower.contains("choose an option");
+	}
+
+	private boolean isDialogueOptionText(String lower)
+	{
+		if (lower.contains(" or down") && lower.contains("?"))
+		{
+			return false;
+		}
+		return lower.startsWith("climb up")
+				|| lower.startsWith("climb down")
+				|| lower.startsWith("1. climb up")
+				|| lower.startsWith("2. climb down")
+				|| lower.startsWith("1 climb up")
+				|| lower.startsWith("2 climb down");
+	}
+
+	private TickSnapshot.DialogueOptionSnapshot dialogueOptionSnapshot(int index, Widget widget, String text)
+	{
+		TickSnapshot.DialogueOptionSnapshot option = new TickSnapshot.DialogueOptionSnapshot();
+		option.index = index;
+		option.key = inferredDialogueOptionKey(index, text);
+		option.text = text;
+		option.widgetGroup = widget.getId() >>> 16;
+		option.widgetChild = widget.getId() & 0xFFFF;
+		option.bounds = widgetBounds(widget);
+		option.visible = widgetVisible(widget);
+		return option;
+	}
+
+	private String inferredDialogueOptionKey(int index, String text)
+	{
+		String value = cleanWidgetText(text);
+		if (value.startsWith("1.") || value.startsWith("1 "))
+		{
+			return "1";
+		}
+		if (value.startsWith("2.") || value.startsWith("2 "))
+		{
+			return "2";
+		}
+		if (index >= 1 && index <= 9)
+		{
+			return Integer.toString(index);
+		}
+		return null;
+	}
+
+	private TickSnapshot.Bounds widgetBounds(Widget widget)
+	{
+		if (!widgetVisible(widget) || widget.getCanvasLocation() == null)
+		{
+			return null;
+		}
+		TickSnapshot.Bounds bounds = new TickSnapshot.Bounds();
+		bounds.x = widget.getCanvasLocation().getX();
+		bounds.y = widget.getCanvasLocation().getY();
+		bounds.w = widget.getWidth();
+		bounds.h = widget.getHeight();
+		return bounds;
 	}
 
 	private boolean widgetVisible(Widget widget)
@@ -5101,6 +5461,213 @@ public class TelemetryPlugin extends Plugin
 		return false;
 	}
 
+	private Map<String, Object> pluginSnapshotTileProjections(List<Map<String, Object>> requests)
+	{
+		if (clientThread == null)
+		{
+			return tileProjectionFailurePayload("client thread unavailable");
+		}
+		CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
+		clientThread.invoke(() ->
+		{
+			try
+			{
+				future.complete(buildTileProjectionPayload(requests));
+			}
+			catch (RuntimeException e)
+			{
+				future.complete(tileProjectionFailurePayload("tile projection failed: " + exceptionSummary(e)));
+			}
+		});
+		try
+		{
+			return future.get(200, TimeUnit.MILLISECONDS);
+		}
+		catch (TimeoutException e)
+		{
+			return tileProjectionFailurePayload("tile projection timed out");
+		}
+		catch (Exception e)
+		{
+			return tileProjectionFailurePayload("tile projection interrupted: " + exceptionSummary(e));
+		}
+	}
+
+	private Map<String, Object> tileProjectionFailurePayload(String reason)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("schema", "tile_projection_response.v1");
+		payload.put("status", "WARN");
+		payload.put("tick", tickId);
+		payload.put("clientTick", clientTickId);
+		payload.put("tiles", List.of());
+		payload.put("warnings", List.of(reason));
+		return payload;
+	}
+
+	private Map<String, Object> buildTileProjectionPayload(List<Map<String, Object>> requests)
+	{
+		List<Map<String, Object>> tiles = new ArrayList<>();
+		for (Map<String, Object> request : requests)
+		{
+			tiles.add(projectRequestedWorldTile(request));
+		}
+		boolean allPass = true;
+		for (Map<String, Object> tile : tiles)
+		{
+			if (!"PASS".equals(tile.get("status")))
+			{
+				allPass = false;
+				break;
+			}
+		}
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("schema", "tile_projection_response.v1");
+		payload.put("status", allPass ? "PASS" : "WARN");
+		payload.put("tick", tickId);
+		payload.put("clientTick", clientTickId);
+		payload.put("gameState", client.getGameState() == null ? null : client.getGameState().name());
+		payload.put("tiles", tiles);
+		return payload;
+	}
+
+	private Map<String, Object> projectRequestedWorldTile(Map<String, Object> request)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		String label = request == null ? "" : String.valueOf(request.getOrDefault("label", ""));
+		int worldX = request == null ? -1 : getInt(request.get("worldX"), -1);
+		int worldY = request == null ? -1 : getInt(request.get("worldY"), -1);
+		int plane = request == null ? client.getPlane() : getInt(request.get("plane"), client.getPlane());
+		payload.put("schema", "tile_projection.v1");
+		payload.put("label", label);
+		payload.put("worldX", worldX);
+		payload.put("worldY", worldY);
+		payload.put("plane", plane);
+		payload.put("clientPlane", client.getPlane());
+		payload.put("status", "PASS");
+		List<String> warnings = new ArrayList<>();
+
+		if (worldX < 0 || worldY < 0)
+		{
+			payload.put("status", "FAIL");
+			payload.put("reason", "world tile missing");
+			payload.put("geometryAvailable", false);
+			payload.put("onScreen", false);
+			return payload;
+		}
+		if (plane != client.getPlane())
+		{
+			warnings.add("requested tile plane differs from client plane");
+		}
+
+		LocalPoint localPoint = null;
+		try
+		{
+			localPoint = LocalPoint.fromWorld(client, new WorldPoint(worldX, worldY, plane));
+		}
+		catch (RuntimeException e)
+		{
+			warnings.add("local point failed: " + exceptionSummary(e));
+		}
+
+		if (localPoint == null)
+		{
+			payload.put("status", "WARN");
+			payload.put("reason", "world tile is outside the loaded scene");
+			payload.put("geometryAvailable", false);
+			payload.put("onScreen", false);
+			if (!warnings.isEmpty())
+			{
+				payload.put("warnings", warnings);
+			}
+			return payload;
+		}
+
+		payload.put("localX", localPoint.getX());
+		payload.put("localY", localPoint.getY());
+		payload.put("sceneX", localPoint.getSceneX());
+		payload.put("sceneY", localPoint.getSceneY());
+
+		int[][] polygon = null;
+		TickSnapshot.CanvasPoint center = null;
+		try
+		{
+			polygon = polygonSnapshot(Perspective.getCanvasTilePoly(client, localPoint));
+			center = polygonCenter(polygon);
+		}
+		catch (RuntimeException e)
+		{
+			warnings.add("canvas tile projection failed: " + exceptionSummary(e));
+		}
+
+		TickSnapshot.Bounds tileBounds = boundsSnapshot(polygon);
+		boolean degeneratePolygon = isDegeneratePolygon(polygon);
+		if (degeneratePolygon)
+		{
+			polygon = null;
+			center = null;
+			tileBounds = null;
+			warnings.add("tile projection returned degenerate canvas polygon");
+		}
+		boolean geometryAvailable = polygon != null || center != null || tileBounds != null;
+		boolean onScreen = geometryAvailable && geometryIntersectsVisibleArea(center, polygon, tileBounds);
+		payload.put("geometryAvailable", geometryAvailable);
+		payload.put("onScreen", onScreen);
+		payload.put("canvasTilePolygon", polygon);
+		payload.put("canvasTileBounds", boundsPayload(tileBounds));
+		if (center != null)
+		{
+			payload.put("canvasCenter", Map.of("x", center.x, "y", center.y));
+			payload.put("aimPoint", Map.of("canvasX", center.x, "canvasY", center.y, "source", "tileProjectionCenter"));
+		}
+		if (!geometryAvailable)
+		{
+			payload.put("status", "WARN");
+			warnings.add("tile projection returned no canvas geometry");
+		}
+		else if (!onScreen)
+		{
+			payload.put("status", "WARN");
+			warnings.add("tile projection is outside the visible viewport");
+		}
+		if (!warnings.isEmpty())
+		{
+			payload.put("warnings", warnings);
+			payload.put("reason", warnings.get(0));
+		}
+		return payload;
+	}
+
+	private boolean isDegeneratePolygon(int[][] polygon)
+	{
+		if (polygon == null || polygon.length < 3)
+		{
+			return polygon != null;
+		}
+
+		int minX = Integer.MAX_VALUE;
+		int minY = Integer.MAX_VALUE;
+		int maxX = Integer.MIN_VALUE;
+		int maxY = Integer.MIN_VALUE;
+		int points = 0;
+
+		for (int[] point : polygon)
+		{
+			if (point == null || point.length < 2)
+			{
+				continue;
+			}
+
+			points++;
+			minX = Math.min(minX, point[0]);
+			minY = Math.min(minY, point[1]);
+			maxX = Math.max(maxX, point[0]);
+			maxY = Math.max(maxY, point[1]);
+		}
+
+		return points < 3 || maxX <= minX || maxY <= minY;
+	}
+
 	private Rectangle currentVisibleArea()
 	{
 		int viewportWidth = client.getViewportWidth();
@@ -5920,6 +6487,217 @@ public class TelemetryPlugin extends Plugin
 
 		payload.put("entries", entrySummaries);
 		return payload;
+	}
+
+	private Map<String, Object> latestHoverMenuPayload()
+	{
+		return copyHotMenuSample(latestHoverMenu);
+	}
+
+	private Map<String, Object> lastMenuOptionClickedPayload()
+	{
+		return copyHotMenuSample(lastMenuOptionClicked);
+	}
+
+	private Map<String, Object> copyHotMenuSample(Map<String, Object> sample)
+	{
+		return sample == null ? null : new LinkedHashMap<>(sample);
+	}
+
+	private Map<String, Object> clientTickPayload(String sourceEvent)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("schema", "plugin_client_tick_sample.v1");
+		payload.put("sampleSource", sourceEvent);
+		payload.put("sourceEvent", sourceEvent);
+		payload.put("clientTick", clientTickId);
+		payload.put("gameTickAtSample", tickId);
+		payload.put("timestampUtc", Instant.now().toString());
+		payload.put("wallTimeMillis", System.currentTimeMillis());
+		payload.put("monotonicTimeNanos", System.nanoTime());
+		payload.put("gameState", currentGameStateText());
+		addSessionIdentity(payload);
+		addMouseCanvasPosition(payload);
+		return payload;
+	}
+
+	private Map<String, Object> hoverMenuPayload()
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		MenuEntry[] entries = client.getMenuEntries();
+		MenuEntry topEntry = entries == null || entries.length == 0 ? null : entries[entries.length - 1];
+		List<Map<String, Object>> topEntries = new ArrayList<>();
+
+		if (entries != null)
+		{
+			for (int i = entries.length - 1; i >= 0 && topEntries.size() < 5; i--)
+			{
+				MenuEntry entry = entries[i];
+				if (entry != null)
+				{
+					topEntries.add(menuEntryPayload(entry));
+				}
+			}
+		}
+
+		payload.put("schema", "plugin_hover_menu.v1");
+		payload.put("sampleSource", "PostMenuSort");
+		payload.put("sourceEvent", "PostMenuSort");
+		payload.put("clientTick", clientTickId);
+		payload.put("gameTickAtSample", tickId);
+		payload.put("timestampUtc", Instant.now().toString());
+		payload.put("wallTimeMillis", System.currentTimeMillis());
+		payload.put("monotonicTimeNanos", System.nanoTime());
+		payload.put("gameState", currentGameStateText());
+		payload.put("menuOpen", isMenuOpenSafe());
+		addMenuBounds(payload);
+		addSessionIdentity(payload);
+		addMouseCanvasPosition(payload);
+		payload.put("entryCount", entries == null ? 0 : entries.length);
+		payload.put("entries", topEntries);
+		addTopMenuEntry(payload, topEntry);
+		return payload;
+	}
+
+	private void addMenuBounds(Map<String, Object> payload)
+	{
+		Map<String, Object> bounds = new LinkedHashMap<>();
+		try
+		{
+			bounds.put("x", client.getMenuX());
+			bounds.put("y", client.getMenuY());
+			bounds.put("width", client.getMenuWidth());
+			bounds.put("height", client.getMenuHeight());
+			bounds.put("scrollable", client.isMenuScrollable());
+			bounds.put("scroll", client.getMenuScroll());
+			payload.put("menuBounds", bounds);
+		}
+		catch (RuntimeException ex)
+		{
+			payload.put("menuBounds", null);
+		}
+	}
+
+	private void addTopMenuEntry(Map<String, Object> payload, MenuEntry entry)
+	{
+		if (entry == null)
+		{
+			payload.put("topOption", "");
+			payload.put("topTarget", "");
+			payload.put("topType", "");
+			payload.put("topIdentifier", -1);
+			payload.put("topParam0", -1);
+			payload.put("topParam1", -1);
+			return;
+		}
+
+		payload.put("topOption", safeString(entry.getOption()));
+		payload.put("topTarget", safeString(entry.getTarget()));
+		payload.put("topType", String.valueOf(entry.getType()));
+		payload.put("topIdentifier", entry.getIdentifier());
+		payload.put("topParam0", entry.getParam0());
+		payload.put("topParam1", entry.getParam1());
+	}
+
+	private Map<String, Object> menuOptionClickedPayload(MenuOptionClicked event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("schema", "plugin_menu_option_clicked.v1");
+		payload.put("sampleSource", "MenuOptionClicked");
+		payload.put("sourceEvent", "MenuOptionClicked");
+		payload.put("clientTick", clientTickId);
+		payload.put("gameTickAtSample", tickId);
+		payload.put("timestampUtc", Instant.now().toString());
+		payload.put("wallTimeMillis", System.currentTimeMillis());
+		payload.put("monotonicTimeNanos", System.nanoTime());
+		payload.put("gameState", currentGameStateText());
+		addSessionIdentity(payload);
+		addMouseCanvasPosition(payload);
+		payload.put("option", event == null ? "" : safeString(event.getMenuOption()));
+		payload.put("target", event == null ? "" : safeString(event.getMenuTarget()));
+		payload.put("type", event == null ? "" : String.valueOf(event.getMenuAction()));
+		payload.put("identifier", event == null ? -1 : event.getId());
+		payload.put("param0", event == null ? -1 : event.getParam0());
+		payload.put("param1", event == null ? -1 : event.getParam1());
+		if (event != null)
+		{
+			payload.put("itemId", event.getItemId());
+			payload.put("consumed", event.isConsumed());
+		}
+		return payload;
+	}
+
+	private void addMouseCanvasPosition(Map<String, Object> payload)
+	{
+		Point mouse = client == null ? null : client.getMouseCanvasPosition();
+		payload.put("mouseCanvasX", mouse == null ? null : mouse.getX());
+		payload.put("mouseCanvasY", mouse == null ? null : mouse.getY());
+		payload.put("isInCanvas", isMouseInCanvas(mouse));
+	}
+
+	private boolean isMouseInCanvas(Point mouse)
+	{
+		if (mouse == null || client == null)
+		{
+			return false;
+		}
+		Canvas canvas = client.getCanvas();
+		if (canvas == null)
+		{
+			return false;
+		}
+		return mouse.getX() >= 0
+				&& mouse.getY() >= 0
+				&& mouse.getX() < canvas.getWidth()
+				&& mouse.getY() < canvas.getHeight();
+	}
+
+	private String currentGameStateText()
+	{
+		if (client == null)
+		{
+			return null;
+		}
+		try
+		{
+			return String.valueOf(client.getGameState());
+		}
+		catch (Exception e)
+		{
+			return null;
+		}
+	}
+
+	private boolean isMenuOpenSafe()
+	{
+		if (client == null)
+		{
+			return false;
+		}
+		try
+		{
+			return client.isMenuOpen();
+		}
+		catch (Exception e)
+		{
+			return false;
+		}
+	}
+
+	private void addSessionIdentity(Map<String, Object> payload)
+	{
+		TelemetryWriter currentWriter = writer;
+		if (currentWriter == null)
+		{
+			return;
+		}
+		Path sessionDir = currentWriter.getSessionDir();
+		if (sessionDir == null)
+		{
+			return;
+		}
+		payload.put("sessionPath", sessionDir.toString());
+		payload.put("sessionId", sessionDir.getFileName() == null ? null : sessionDir.getFileName().toString());
 	}
 
 	private Map<String, Object> menuEntryPayload(MenuEntry entry)

@@ -20,6 +20,7 @@ import intent_stabilizer
 import live_target_processor as live
 import mission_presets
 import runtime_control
+import service_route_core
 import task_policy as task_policy_module
 from analyzers import activity_analyzer
 from analyzers import bank_operation_analyzer
@@ -330,6 +331,7 @@ def processor_args(args: argparse.Namespace, input_source: str, *, suppress_outp
         require_compact_packets=input_source == live.COMPACT_PACKET_SOURCE,
         profile=args.profile,
         task_policy=getattr(args, "task_policy", None),
+        preset=getattr(args, "preset", None),
         target_type="all",
         limit=100,
         window_ticks=10,
@@ -400,6 +402,8 @@ class LiveCoreState:
     analysis_result: LiveAnalysisResult = field(default_factory=LiveAnalysisResult)
     path_intent_state: pathing_analyzer.PathIntentState = field(default_factory=pathing_analyzer.PathIntentState)
     service_target_state: service_analyzer.ServiceTargetState = field(default_factory=service_analyzer.ServiceTargetState)
+    service_route_state: service_route_core.ServiceRouteState = field(default_factory=service_route_core.ServiceRouteState)
+    return_route_state: service_route_core.ServiceRouteState = field(default_factory=service_route_core.ServiceRouteState)
     resource_area_memory: resource_return_analyzer.ResourceAreaMemoryState = field(default_factory=resource_return_analyzer.ResourceAreaMemoryState)
     cycle_history: cycle_history_module.CycleHistoryTracker = field(default_factory=cycle_history_module.CycleHistoryTracker)
     context_retained_previous_count: int = 0
@@ -673,12 +677,57 @@ class LiveCoreState:
             "visiblePrimaryServiceTargetCount",
             "visibleDepositServiceTargetCount",
             "sourceStageCounts",
+            "pluginSnapshotCandidateRejectReasons",
+            "pluginSnapshotPrefilterRejectReasons",
+            "pluginSnapshotHost",
+            "pluginSnapshotPort",
+            "clientTickHot",
+            "clientTickHotSchema",
+            "clientTickLatest",
+            "clientTickGameTickAtSample",
+            "clientTickTopOption",
+            "clientTickTopTarget",
+            "clientTickPostMenuSortAgeMillis",
+            "clientTickLastClickedOption",
+            "clientTickLastClickedTarget",
+            "clientTickLastClickAgeMillis",
+            "clientTickSamplesBuffered",
             "memoryLifecycle",
             "serviceSwitchReason",
             "serviceCandidateDroppedReason",
             "serviceReady",
             "serviceReadyReason",
             "serviceReadyStableForTicks",
+            "serviceRouteAvailable",
+            "serviceRouteId",
+            "serviceRouteStepStatus",
+            "serviceRouteCurrentStepIndex",
+            "serviceRouteActionReady",
+            "serviceRouteCurrentNodeId",
+            "serviceRouteNextEdgeType",
+            "serviceRouteCompletedSteps",
+            "serviceRouteObjectsVisible",
+            "serviceRouteObjectsActionable",
+            "serviceRouteRelevantObjects",
+            "serviceRouteRelevantActionableObjects",
+            "serviceRouteVisibleButIrrelevantObjects",
+            "serviceRouteObjectCensus",
+            "serviceRouteSelectedObjectAction",
+            "serviceRouteSelectedObjectRelevance",
+            "serviceRouteObjectRejectedReason",
+            "serviceRouteObjectInterceptReady",
+            "serviceRouteServiceObjectsVisible",
+            "serviceRouteServiceObjectsActionable",
+            "serviceRouteRelevantServiceObjects",
+            "serviceRouteRelevantActionableServiceObjects",
+            "serviceRouteVisibleButIrrelevantServiceObjects",
+            "serviceObjectCensus",
+            "selectedServiceObject",
+            "selectedServiceAction",
+            "selectedServiceObjectRelevance",
+            "serviceObjectRejectedReason",
+            "serviceObjectInterceptReady",
+            "serviceRouteSelectedObjectPresent",
             "bankOpen",
             "bankReadable",
             "bankPinOpen",
@@ -702,7 +751,10 @@ class LiveCoreState:
             "bankOperationType",
             "bankResourceItemsHeld",
             "bankResourceItemSlots",
+            "bankResourceItemSlotBounds",
+            "bankResourceItemWidgets",
             "bankResourceItemQuantity",
+            "bankResourceDisplayName",
             "bankNonResourceItemsHeld",
             "bankOperationInventoryFreeSlots",
             "bankOperationInventoryFull",
@@ -737,6 +789,18 @@ class LiveCoreState:
             "resourceReturnTargetCurrentlyVisible",
             "resourceReturnMissingCapabilities",
             "resourceReturnWarnings",
+            "returnRouteAvailable",
+            "returnRouteId",
+            "returnSourceRouteId",
+            "returnRouteState",
+            "returnCurrentNode",
+            "returnNextEdge",
+            "resourceAnchorKnown",
+            "selectedResourceAnchor",
+            "returnActionReady",
+            "returnBlockedReason",
+            "returnTransitionObjectVisible",
+            "returnTransitionObjectActionable",
             "postBankReacquisitionNeeded",
             "postBankUiStillOpen",
             "postBankWorldViewReady",
@@ -894,6 +958,14 @@ class LiveCoreState:
                 "inputGeometryReason": input_geometry.get("reason"),
             }
         )
+        intent_overlay = self.analysis_result.intent_overlay if self.analysis_result else None
+        if intent_overlay is not None:
+            payload["intentOverlayContext"] = {
+                **intent_overlay.contract_payload(),
+                "selectedMarker": intent_overlay.selected_marker,
+                "backupMarkers": list(intent_overlay.backup_markers),
+                "markers": list(intent_overlay.markers),
+            }
         cycle_summary = self.cycle_history.summary(tail=10)
         payload.update(
             {
@@ -1085,6 +1157,7 @@ class LiveCoreDaemon:
         loaded_service_scene = context.get("loadedServiceScene") if isinstance(context.get("loadedServiceScene"), list) else []
         navigation = context.get("navigation") if isinstance(context.get("navigation"), dict) else {}
         bank_ui = context.get("bankUi") if isinstance(context.get("bankUi"), dict) else {}
+        dialogue_state = context.get("dialogueState") if isinstance(context.get("dialogueState"), dict) else {}
         activity = context.get("activity") if isinstance(context.get("activity"), dict) else {}
         events = context.get("events") if isinstance(context.get("events"), list) else []
         latest_tick = status.get("lastProcessedTick") or status.get("latestTickProcessed") or status.get("latestTick")
@@ -1175,6 +1248,14 @@ class LiveCoreDaemon:
             "collisionWindowAgeTicks": analysis.navigation.collision_window_age_ticks,
             "collisionWindowMissingReason": analysis.navigation.collision_window_missing_reason,
         }
+        dialogue_fields = {
+            "dialogueState": dialogue_state,
+            "dialogueStateActive": bool(dialogue_state.get("active") is True),
+            "dialogueStateType": dialogue_state.get("type"),
+            "dialoguePromptText": dialogue_state.get("promptText"),
+            "dialogueOptionCount": len(dialogue_state.get("options") or []) if isinstance(dialogue_state.get("options"), list) else 0,
+            "dialogueStatePacketAvailable": bool(dialogue_state),
+        }
         if (
             analysis.targets.service_candidate_input_count == 0
             and status.get("inputSourceActive") == live.PLUGIN_SNAPSHOT_SOURCE
@@ -1184,12 +1265,15 @@ class LiveCoreDaemon:
             analysis.targets.service_candidate_visibility = "possibly_capped_or_filtered"
         self.state.source_status.update(target_fields)
         self.state.source_status.update(navigation_fields)
+        self.state.source_status.update(dialogue_fields)
         if isinstance(result.get("status"), dict):
             result["status"].update(target_fields)
             result["status"].update(navigation_fields)
+            result["status"].update(dialogue_fields)
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(target_fields)
             self.state.latest_context["status"].update(navigation_fields)
+            self.state.latest_context["status"].update(dialogue_fields)
         self.state.latest_context["profileCandidates"] = list(analysis.targets.profile_candidates)
         self.state.latest_context["broadCandidates"] = list(analysis.targets.broad_candidates)
         self.state.latest_context["loadedServiceScene"] = list(analysis.targets.loaded_service_scene)
@@ -1521,6 +1605,28 @@ class LiveCoreDaemon:
             )
             service_context = self.state.analysis_result.service
             process_context = self.state.analysis_result.process_inventory
+            if service_context and service_context.service_required:
+                previous_service = previous_decision.get("serviceContext") if isinstance(previous_decision.get("serviceContext"), dict) else {}
+                previous_service_required = previous_service.get("serviceRequired") is True or previous_service.get("serviceNeeded") is True
+                if not previous_service_required:
+                    self.state.service_route_state.active_route_id = None
+                    self.state.service_route_state.current_step_index = None
+                    self.state.service_route_state.observed_anchors.clear()
+                    self.state.service_route_state.completed_steps.clear()
+                    self.state.service_route_state.last_updated_tick = source_tick
+                    self.state.service_route_state.last_reason = "service_cycle_started"
+                    brain_context.decision["serviceRouteResetReason"] = "service_cycle_started"
+                service_route_context = service_route_core.build_service_route_context(
+                    profile=policy.name,
+                    service_type=service_context.service_type_needed,
+                    player_context=self.state.analysis_result.player,
+                    service_context=service_context.to_dict(),
+                    target_context=target_context,
+                    route_state=self.state.service_route_state,
+                    source_tick=source_tick,
+                )
+                service_context.service_route_context = service_route_context
+                brain_context.decision["serviceRouteContext"] = service_route_context
             if service_context:
                 brain_context.decision["serviceContext"] = service_context.to_dict()
             if process_context:
@@ -1543,6 +1649,16 @@ class LiveCoreDaemon:
                 source_tick=source_tick,
             )
             brain_context.decision["navigationIntentContext"] = self.state.analysis_result.navigation_intent.to_dict()
+            pathing_kwargs = {
+                "movement_model": "osrs_like_predicted",
+            }
+            active_navigation_intent = str(generic_state.get("activeIntent") or generic_state.get("phase") or "")
+            if (
+                self.state.analysis_result.navigation_intent.target_kind == navigation_intent_analyzer.TARGET_KIND_SERVICE_ROUTE
+                or active_navigation_intent in {"return_to_resource_area", "navigate_to_resource_area"}
+            ):
+                pathing_kwargs["max_nodes"] = max(pathing_analyzer.DEFAULT_MAX_NODES, 8192)
+                pathing_kwargs["budget_millis"] = max(pathing_analyzer.DEFAULT_BUDGET_MILLIS, 25.0)
             self.state.analysis_result.pathing = pathing_analyzer.analyze_pathing_context(
                 player_context=self.state.analysis_result.player,
                 navigation_context=self.state.analysis_result.navigation,
@@ -1554,7 +1670,7 @@ class LiveCoreDaemon:
                 generic_task_state=generic_state,
                 path_intent_state=self.state.path_intent_state,
                 source_tick=source_tick,
-                movement_model="osrs_like_predicted",
+                **pathing_kwargs,
             )
             if service_context and self.state.analysis_result.pathing:
                 pathing = self.state.analysis_result.pathing
@@ -1582,6 +1698,9 @@ class LiveCoreDaemon:
                     brain_context.decision["phase"] = "service_available"
                     brain_context.decision["genericTaskState"] = generic_state
             context_bank_ui = context.get("bankUi") if isinstance(context.get("bankUi"), dict) else {}
+            context_dialogue_state = context.get("dialogueState") if isinstance(context.get("dialogueState"), dict) else {}
+            if context_dialogue_state:
+                brain_context.decision["dialogueState"] = dict(context_dialogue_state)
             self.state.analysis_result.bank_ui = bank_ui_analyzer.analyze_bank_ui_context(
                 policy,
                 bank_ui_payload=context_bank_ui,
@@ -1699,6 +1818,17 @@ class LiveCoreDaemon:
                 current_plane=self.state.analysis_result.player.plane if self.state.analysis_result.player else None,
             )
             brain_context.decision["resourceReturnContext"] = resource_return_context.to_dict()
+            return_route_context = service_route_core.build_return_route_context(
+                profile=policy.name,
+                service_type=service_context.service_type_needed if service_context else None,
+                player_context=self.state.analysis_result.player,
+                target_context=target_context,
+                service_context=service_context.to_dict() if service_context else {},
+                resource_return_context=resource_return_context.to_dict(),
+                route_state=self.state.return_route_state,
+                source_tick=source_tick,
+            )
+            brain_context.decision["returnRouteContext"] = return_route_context
 
             def recompute_navigation_for_generic_state() -> None:
                 self.state.analysis_result.navigation_intent = navigation_intent_analyzer.analyze_navigation_intent(
@@ -1712,6 +1842,16 @@ class LiveCoreDaemon:
                     source_tick=source_tick,
                 )
                 brain_context.decision["navigationIntentContext"] = self.state.analysis_result.navigation_intent.to_dict()
+                recompute_pathing_kwargs = {
+                    "movement_model": "osrs_like_predicted",
+                }
+                active_navigation_intent = str(generic_state.get("activeIntent") or generic_state.get("phase") or "")
+                if (
+                    self.state.analysis_result.navigation_intent.target_kind == navigation_intent_analyzer.TARGET_KIND_SERVICE_ROUTE
+                    or active_navigation_intent in {"return_to_resource_area", "navigate_to_resource_area"}
+                ):
+                    recompute_pathing_kwargs["max_nodes"] = max(pathing_analyzer.DEFAULT_MAX_NODES, 8192)
+                    recompute_pathing_kwargs["budget_millis"] = max(pathing_analyzer.DEFAULT_BUDGET_MILLIS, 25.0)
                 self.state.analysis_result.pathing = pathing_analyzer.analyze_pathing_context(
                     player_context=self.state.analysis_result.player,
                     navigation_context=self.state.analysis_result.navigation,
@@ -1723,7 +1863,7 @@ class LiveCoreDaemon:
                     generic_task_state=generic_state,
                     path_intent_state=self.state.path_intent_state,
                     source_tick=source_tick,
-                    movement_model="osrs_like_predicted",
+                    **recompute_pathing_kwargs,
                 )
 
             if service_context and service_context.service_ready:
@@ -1792,6 +1932,11 @@ class LiveCoreDaemon:
             elif return_context.return_needed:
                 resource_target = return_context.best_resource_target if isinstance(return_context.best_resource_target, dict) else None
                 resource_return_target = resource_return_context.destination_target if isinstance(resource_return_context.destination_target, dict) else None
+                return_route_navigation_target = (
+                    return_route_context.get("currentNavigationTarget")
+                    if isinstance(return_route_context.get("currentNavigationTarget"), dict)
+                    else None
+                )
                 generic_state["returnNeeded"] = return_context.return_needed
                 generic_state["returnReady"] = return_context.return_ready
                 generic_state["returnToResourceReason"] = return_context.reason
@@ -1800,20 +1945,43 @@ class LiveCoreDaemon:
                 generic_state["resourceReturnDestinationNeeded"] = resource_return_context.return_destination_needed
                 generic_state["resourceReturnDestinationAvailable"] = resource_return_context.return_destination_available
                 generic_state["resourceReturnReason"] = resource_return_context.reason
-                if return_context.return_ready and resource_target:
+                generic_state["returnRouteAvailable"] = bool(return_route_context.get("routeAvailable"))
+                generic_state["returnRouteId"] = return_route_context.get("returnRouteId") or return_route_context.get("routeId")
+                generic_state["returnCurrentNode"] = return_route_context.get("currentNodeId")
+                generic_state["returnNextEdge"] = return_route_context.get("nextEdge")
+                generic_state["returnActionReady"] = bool(return_route_context.get("returnActionReady"))
+                generic_state["returnBlockedReason"] = return_route_context.get("returnBlockedReason")
+                cycle_stage = self.state.cycle_history.summary(tail=1).get("currentCycleStage")
+                cycle_indicates_resource_reacquired = str(cycle_stage or "") in {
+                    "resource_target_selected",
+                    "collecting_resources",
+                    "resource_reacquired",
+                }
+                resource_target_reacquired = (
+                    return_context.return_ready
+                    and resource_target
+                    and (
+                        resource_return_context.return_destination_available is not True
+                        or resource_return_context.reason == "resource_target_visible"
+                        or cycle_indicates_resource_reacquired
+                    )
+                )
+                if resource_target_reacquired:
                     target_type = resource_target.get("targetType") or "sceneObject"
                     generic_state["phase"] = "target_selected"
                     generic_state["activeIntent"] = "select_target"
                     generic_state["activeIntentTarget"] = resource_target
                     generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(resource_target, str(target_type))
                     generic_state["availableTarget"] = resource_target
+                    generic_state["pathingNeeded"] = False
                     generic_state.pop("blockingConditions", None)
                     brain_context.decision["phase"] = "target_selected"
                 elif resource_return_context.return_destination_available and resource_return_target:
+                    active_return_target = dict(return_route_navigation_target or resource_return_target)
                     generic_state["phase"] = "return_to_resource"
                     generic_state["activeIntent"] = "return_to_resource_area"
-                    generic_state["activeIntentTarget"] = resource_return_target
-                    generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(resource_return_target, str(resource_return_target.get("targetType") or "tile"))
+                    generic_state["activeIntentTarget"] = active_return_target
+                    generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(active_return_target, str(active_return_target.get("targetType") or "tile"))
                     generic_state["availableTarget"] = None
                     generic_state["pathingNeeded"] = True
                     blocking = [str(item) for item in generic_state.get("blockingConditions") or [] if item and item != "no_target_observed"]
@@ -1886,6 +2054,64 @@ class LiveCoreDaemon:
             fields["selectedServiceTargetName"] = self.state.analysis_result.service.selected_service_target_name
             fields["selectedServiceTargetTile"] = self.state.analysis_result.service.selected_service_target_tile
             fields["distanceToServiceTarget"] = self.state.analysis_result.service.distance_to_service_target
+            route_context = self.state.analysis_result.service.service_route_context if isinstance(self.state.analysis_result.service.service_route_context, dict) else {}
+            if not route_context and isinstance(brain_context.decision.get("serviceRouteContext"), dict):
+                route_context = brain_context.decision["serviceRouteContext"]
+            fields["serviceRouteAvailable"] = route_context.get("routeAvailable")
+            fields["serviceRouteId"] = route_context.get("routeId")
+            fields["serviceRouteStepStatus"] = route_context.get("routeStepStatus")
+            fields["serviceRouteCurrentStepIndex"] = route_context.get("currentStepIndex")
+            fields["serviceRouteActionReady"] = route_context.get("actionReady")
+            fields["serviceRouteCurrentNodeId"] = route_context.get("currentNodeId")
+            fields["routeContext"] = route_context.get("routeContext")
+            fields["routeMode"] = route_context.get("routeMode")
+            fields["routeSourceStatus"] = route_context.get("routeSourceStatus")
+            fields["selectedServiceAnchor"] = route_context.get("selectedServiceAnchor")
+            fields["selectedApproachNode"] = route_context.get("selectedApproachNode")
+            fields["routeSourceMismatch"] = route_context.get("routeSourceMismatch")
+            fields["goalDirectedFallbackActive"] = bool(route_context.get("goalDirectedFallback"))
+            fields["goalDirectedFallbackStarted"] = bool(route_context.get("goalDirectedFallback"))
+            fields["routeContextBlockerReason"] = route_context.get("blockerReason")
+            next_edge = route_context.get("nextEdge") if isinstance(route_context.get("nextEdge"), dict) else {}
+            fields["serviceRouteNextEdgeType"] = next_edge.get("type")
+            fields["serviceRouteCompletedSteps"] = list(route_context.get("completedSteps") or [])
+            route_objects_visible = route_context.get("routeObjectsVisible")
+            if route_objects_visible is None:
+                route_objects_visible = 1 if isinstance(route_context.get("visibleInteractionTarget"), dict) and route_context.get("visibleInteractionTarget") else 0
+            route_objects_actionable = route_context.get("routeObjectsActionable")
+            if route_objects_actionable is None:
+                route_objects_actionable = 1 if route_objects_visible and route_context.get("actionReady") is True else 0
+            service_objects_visible = route_context.get("serviceObjectsVisible")
+            if service_objects_visible is None:
+                service_objects_visible = 1 if isinstance(route_context.get("visibleServiceTarget"), dict) and route_context.get("visibleServiceTarget") else 0
+            service_objects_actionable = route_context.get("serviceObjectsActionable")
+            if service_objects_actionable is None:
+                service_objects_actionable = 1 if service_objects_visible and route_context.get("actionReady") is True else 0
+            selected_route_object_present = route_context.get("selectedRouteObjectPresent")
+            if selected_route_object_present is None:
+                selected_route_object_present = bool(route_objects_visible or service_objects_visible)
+            fields["serviceRouteObjectsVisible"] = route_objects_visible
+            fields["serviceRouteObjectsActionable"] = route_objects_actionable
+            fields["serviceRouteRelevantObjects"] = route_context.get("routeRelevantObjects")
+            fields["serviceRouteRelevantActionableObjects"] = route_context.get("routeRelevantActionableObjects")
+            fields["serviceRouteVisibleButIrrelevantObjects"] = route_context.get("visibleButRouteIrrelevantObjects")
+            fields["serviceRouteObjectCensus"] = route_context.get("routeObjectCensus")
+            fields["serviceRouteSelectedObjectAction"] = route_context.get("selectedRouteObjectAction")
+            fields["serviceRouteSelectedObjectRelevance"] = route_context.get("selectedRouteObjectRelevance")
+            fields["serviceRouteObjectRejectedReason"] = route_context.get("routeObjectRejectedReason")
+            fields["serviceRouteObjectInterceptReady"] = route_context.get("routeObjectInterceptReady")
+            fields["serviceRouteServiceObjectsVisible"] = service_objects_visible
+            fields["serviceRouteServiceObjectsActionable"] = service_objects_actionable
+            fields["serviceRouteRelevantServiceObjects"] = route_context.get("routeRelevantServiceObjects")
+            fields["serviceRouteRelevantActionableServiceObjects"] = route_context.get("routeRelevantActionableServiceObjects")
+            fields["serviceRouteVisibleButIrrelevantServiceObjects"] = route_context.get("visibleButRouteIrrelevantServiceObjects")
+            fields["serviceObjectCensus"] = route_context.get("serviceObjectCensus")
+            fields["selectedServiceObject"] = route_context.get("selectedServiceObject")
+            fields["selectedServiceAction"] = route_context.get("selectedServiceAction")
+            fields["selectedServiceObjectRelevance"] = route_context.get("selectedServiceObjectRelevance")
+            fields["serviceObjectRejectedReason"] = route_context.get("serviceObjectRejectedReason")
+            fields["serviceObjectInterceptReady"] = route_context.get("serviceObjectInterceptReady")
+            fields["serviceRouteSelectedObjectPresent"] = selected_route_object_present
             fields["serviceArrivedAtFinalApproach"] = self.state.analysis_result.service.arrived_at_final_approach
             fields["serviceArrivedNearDestination"] = self.state.analysis_result.service.arrived_near_destination
             fields["serviceDistanceToFinalApproach"] = self.state.analysis_result.service.distance_to_final_approach
@@ -1950,6 +2176,14 @@ class LiveCoreDaemon:
             fields["pathingInvalidPathSegmentCount"] = pathing.invalid_path_segment_count
             fields["pathingFirstInvalidPathSegment"] = pathing.first_invalid_path_segment
             fields["pathingSelectedApproachReason"] = pathing.selected_approach_reason
+            fields["pathingRouteMode"] = pathing.route_mode
+            fields["pathingGoalDirectedFallback"] = pathing.goal_directed_fallback_active
+            fields["fallbackGoal"] = pathing.fallback_goal
+            fields["fallbackApproachNode"] = pathing.fallback_approach_node
+            fields["localFrontierWaypoint"] = pathing.local_frontier_waypoint
+            fields["frontierDistanceBefore"] = pathing.frontier_distance_before
+            fields["frontierDistanceAfterEstimate"] = pathing.frontier_distance_after_estimate
+            fields["pathingProgressScore"] = pathing.progress_score
             fields["pathingApproachQuality"] = pathing.approach_quality
             fields["pathingApproachCandidatesTested"] = pathing.approach_candidates_tested
             fields["pathingApproachCandidatesRejectedByBlockedSide"] = pathing.approach_candidates_rejected_by_blocked_side
@@ -2007,7 +2241,10 @@ class LiveCoreDaemon:
             fields["bankOperationType"] = operation.operation_type
             fields["bankResourceItemsHeld"] = operation.resource_items_held
             fields["bankResourceItemSlots"] = list(operation.resource_item_slots)
+            fields["bankResourceItemSlotBounds"] = [dict(item) for item in operation.resource_item_slot_bounds if isinstance(item, dict)]
+            fields["bankResourceItemWidgets"] = [dict(item) for item in operation.resource_item_widgets if isinstance(item, dict)]
             fields["bankResourceItemQuantity"] = operation.resource_item_quantity
+            fields["bankResourceDisplayName"] = operation.resource_display_name
             fields["bankNonResourceItemsHeld"] = operation.non_resource_items_held
             fields["bankOperationInventoryFreeSlots"] = operation.inventory_free_slots
             fields["bankOperationInventoryFull"] = operation.inventory_full
@@ -2047,6 +2284,21 @@ class LiveCoreDaemon:
             fields["resourceReturnTargetCurrentlyVisible"] = resource_return.resource_target_currently_visible
             fields["resourceReturnMissingCapabilities"] = list(resource_return.missing_capabilities)
             fields["resourceReturnWarnings"] = list(resource_return.warnings)
+        return_route_status = brain_context.decision.get("returnRouteContext") if isinstance(brain_context.decision.get("returnRouteContext"), dict) else {}
+        if return_route_status:
+            resource_anchor = return_route_status.get("resourceAnchor") if isinstance(return_route_status.get("resourceAnchor"), dict) else {}
+            fields["returnRouteAvailable"] = bool(return_route_status.get("routeAvailable"))
+            fields["returnRouteId"] = return_route_status.get("returnRouteId") or return_route_status.get("routeId")
+            fields["returnSourceRouteId"] = return_route_status.get("sourceRouteId")
+            fields["returnRouteState"] = return_route_status.get("state")
+            fields["returnCurrentNode"] = return_route_status.get("currentNodeId")
+            fields["returnNextEdge"] = return_route_status.get("nextEdge")
+            fields["resourceAnchorKnown"] = bool(resource_anchor.get("worldLocation"))
+            fields["selectedResourceAnchor"] = resource_anchor
+            fields["returnActionReady"] = bool(return_route_status.get("returnActionReady"))
+            fields["returnBlockedReason"] = return_route_status.get("returnBlockedReason")
+            fields["returnTransitionObjectVisible"] = bool(return_route_status.get("visibleInteractionTarget"))
+            fields["returnTransitionObjectActionable"] = bool(return_route_status.get("visibleInteractionTarget")) and bool(return_route_status.get("actionReady"))
         if self.state.analysis_result and self.state.analysis_result.post_bank_reacquisition:
             post_bank = self.state.analysis_result.post_bank_reacquisition
             fields["postBankReacquisitionNeeded"] = post_bank.post_bank_reacquisition_needed
