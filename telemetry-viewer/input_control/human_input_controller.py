@@ -52,6 +52,11 @@ class HumanInputContext:
 class HumanInputMetrics:
     profile: str
     movement_generator: str
+    live_input_backend: str = "unknown"
+    live_input_backend_required: bool = False
+    software_input_allowed: bool = False
+    backend_command_count: int = 0
+    backend_blocked_command_count: int = 0
     mouse_move_durations_ms: list[int] = field(default_factory=list)
     click_hold_durations_ms: list[int] = field(default_factory=list)
     reaction_delays_ms: list[int] = field(default_factory=list)
@@ -220,14 +225,50 @@ class HumanInputController:
         sleep_func=time.sleep,
         monotonic_func=time.monotonic,
         seed: int | None = None,
+        live_input_backend_required: bool = False,
+        software_input_allowed: bool = False,
     ) -> None:
         self.backend = backend
         self.profile = profile if isinstance(profile, HumanInputProfile) else resolve_input_profile(profile)
         self.sleep_func = sleep_func
         self.monotonic_func = monotonic_func
         self.rng = random.Random(seed)
-        self._metrics = HumanInputMetrics(profile=self.profile.name, movement_generator=self.profile.movement_generator)
+        self.live_input_backend_required = bool(live_input_backend_required)
+        self.software_input_allowed = bool(software_input_allowed)
+        self._metrics = HumanInputMetrics(
+            profile=self.profile.name,
+            movement_generator=self.profile.movement_generator,
+            live_input_backend=getattr(backend, "name", backend.__class__.__name__),
+            live_input_backend_required=self.live_input_backend_required,
+            software_input_allowed=self.software_input_allowed,
+        )
         self._last_camera_command: str | None = None
+
+    def _is_arduino_backend(self) -> bool:
+        return bool(getattr(self.backend, "arduino_hid_backend", False) or getattr(self.backend, "name", "") == "arduino")
+
+    def _is_software_backend(self) -> bool:
+        name = str(getattr(self.backend, "name", "") or "").lower()
+        return bool(getattr(self.backend, "software_input_backend", False) or name in {"pyautogui", "pydirectinput"})
+
+    def _ensure_live_command_allowed(self, command_kind: str) -> None:
+        if not self.live_input_backend_required:
+            self._metrics.backend_command_count += 1
+            return
+        backend_name = getattr(self.backend, "name", self.backend.__class__.__name__)
+        if self._is_software_backend() and not self.software_input_allowed:
+            self._metrics.backend_blocked_command_count += 1
+            raise RuntimeError(f"software_input_blocked: live {command_kind} requires Arduino HID backend, got {backend_name}")
+        if not self._is_arduino_backend() and not self.software_input_allowed:
+            self._metrics.backend_blocked_command_count += 1
+            raise RuntimeError(f"live_input_backend_blocked: live {command_kind} requires Arduino HID backend, got {backend_name}")
+        if self._is_arduino_backend() and bool(getattr(self.backend, "requires_arming", False)) and not bool(getattr(self.backend, "armed", False)):
+            ensure_armed = getattr(self.backend, "ensure_armed", None)
+            recovered = bool(ensure_armed()) if callable(ensure_armed) else False
+            if not recovered:
+                self._metrics.backend_blocked_command_count += 1
+                raise RuntimeError(f"arduino_unarmed: live {command_kind} requested before Arduino HID session was armed")
+        self._metrics.backend_command_count += 1
 
     def plan_mouse_movement(
         self,
@@ -275,6 +316,7 @@ class HumanInputController:
         return _retime_minimum_jerk(plan)
 
     def move_mouse(self, plan: MouseMovementPlan, *, context: HumanInputContext | None = None) -> None:
+        self._ensure_live_command_allowed("mouse_move")
         mover = getattr(self.backend, "move", None)
         if not callable(mover):
             raise RuntimeError(f"backend does not support governed mouse movement: {getattr(self.backend, 'name', self.backend.__class__.__name__)}")
@@ -291,6 +333,7 @@ class HumanInputController:
         hold_ms: int | None = None,
         context: HumanInputContext | None = None,
     ) -> None:
+        self._ensure_live_command_allowed("mouse_click")
         pre_ms = _midpoint(self.profile.pre_click_settle_ms)
         if pre_ms > 0:
             self.sleep_func(pre_ms / 1000.0)
@@ -315,6 +358,7 @@ class HumanInputController:
         hold_ms: int | None = None,
         context: HumanInputContext | None = None,
     ) -> None:
+        self._ensure_live_command_allowed("mouse_move_and_click")
         if not callable(getattr(self.backend, "move", None)) or not callable(getattr(self.backend, "click_at", None)):
             combined = getattr(self.backend, "move_and_click", None)
             if not callable(combined):
@@ -332,6 +376,7 @@ class HumanInputController:
 
     @contextmanager
     def hold_mouse_button(self, *, button: str = "left", context: HumanInputContext | None = None) -> Iterator[None]:
+        self._ensure_live_command_allowed("mouse_hold")
         mouse_down = getattr(self.backend, "mouse_down", None)
         mouse_up = getattr(self.backend, "mouse_up", None)
         if not callable(mouse_down) or not callable(mouse_up):
@@ -353,6 +398,7 @@ class HumanInputController:
             self._metrics.click_count += 1
 
     def press_key(self, key: str, *, context: HumanInputContext | None = None) -> None:
+        self._ensure_live_command_allowed("key_press")
         presser = getattr(self.backend, "press", None)
         if callable(presser):
             presser(key)
@@ -364,6 +410,7 @@ class HumanInputController:
 
     @contextmanager
     def hold_keys(self, keys: tuple[str, ...] | list[str], *, context: HumanInputContext | None = None) -> Iterator[None]:
+        self._ensure_live_command_allowed("key_hold")
         key_down = getattr(self.backend, "key_down", None)
         key_up = getattr(self.backend, "key_up", None)
         if not callable(key_down) or not callable(key_up):
@@ -390,6 +437,7 @@ class HumanInputController:
             self._metrics.camera_hold_durations_ms.append(elapsed_ms)
 
     def camera_drag_pulse(self, spec: camera_control.CameraInputSpec, *, duration_ms: int) -> None:
+        self._ensure_live_command_allowed("camera_drag")
         camera_control.apply_middle_mouse_drag_pulse(self.backend, spec, duration_ms=duration_ms, sleep_func=self.sleep_func)
         self._metrics.camera_hold_durations_ms.append(max(0, int(duration_ms or 0)))
 
@@ -409,6 +457,11 @@ class HumanInputController:
         return {
             "profile": self._metrics.profile,
             "movementGenerator": self._metrics.movement_generator,
+            "liveInputBackend": self._metrics.live_input_backend,
+            "liveInputBackendRequired": self._metrics.live_input_backend_required,
+            "softwareInputAllowed": self._metrics.software_input_allowed,
+            "backendCommandCount": self._metrics.backend_command_count,
+            "backendBlockedCommandCount": self._metrics.backend_blocked_command_count,
             "movementCount": self._metrics.movement_count,
             "clickCount": self._metrics.click_count,
             "keyHoldCount": self._metrics.key_hold_count,

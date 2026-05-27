@@ -166,6 +166,17 @@ def _candidate_polygon(target: dict[str, Any]) -> tuple[list[dict[str, float]], 
     geometry = _dict(target.get("geometry"))
     if geometry:
         return _candidate_polygon(geometry)
+    summary = _dict(target.get("geometrySummary"))
+    if summary:
+        for key, source in (
+            ("clickboxBounds", "clippedClickboxInterior"),
+            ("aimBounds", "clippedClickboxInterior"),
+            ("bounds", "boundsCenter"),
+            ("convexHullBounds", "visibleHullInterior"),
+        ):
+            bounds = _bounds_from(summary.get(key))
+            if bounds:
+                return _bounds_polygon(bounds), source
     return [], None
 
 

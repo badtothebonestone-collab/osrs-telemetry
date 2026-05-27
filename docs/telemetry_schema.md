@@ -1,23 +1,55 @@
 # Telemetry Schema
 
-Telemetry is stored as JSON Lines. Each line is one complete JSON object.
+Telemetry uses several bounded JSON formats. Historical raw/debug datasets may
+use JSON Lines, but the old live packet NDJSON/JSONL archive is no longer part
+of runtime.
+
+## Retired Live Packet Archive
+
+The append-only live packet archive has been removed from normal runtime:
+
+- `live_packets\live-*.ndjson`
+- `live_packets\live-*.jsonl`
+- live packet index/tail readers as live truth
+- compact packet file-source daemon mode
+- compact stream/file mirror runtime mode
+
+It cannot be enabled through RuneLite config or Python CLI flags. Old files on
+disk are legacy cleanup only:
+
+```powershell
+python telemetry-viewer\maintenance.py --live-packets-report
+python telemetry-viewer\maintenance.py --prune-legacy-live-packets --dry-run
+```
+
+The current pipeline and plugin UI key list are documented in
+`telemetry-viewer/docs/current_pipeline_manifest.md`,
+`telemetry-viewer/pipeline_manifest.json`, and
+`telemetry-viewer/config_keys.json`. Use `context_service.py --pipeline-health`
+to confirm active/retired components and stale config-key cleanup status.
+
+Use `PluginSnapshotEndpoint`, `WorldModelCache`, Knowledge Fabric queries,
+`current_debug_context`, `replay_scenario.v1`, `script_authoring_context.v1`,
+session memory, and sparse visual debug bundles instead.
 
 ## Recording Modes
 
-Normal live mode is compact-packet based. Raw tick/event/frame recording is now
-optional debug/audit output rather than the live substrate.
+Normal live mode is Snapshot No-File. Raw tick/event/frame recording controls
+are retired from the normal RuneLite UI; old saved keys are cleaned on plugin
+startup. Historical debug datasets may still contain these records, but they
+are not the live substrate.
 
 | Mode | Normal files written | Raw/debug files |
 | --- | --- | --- |
-| `LIVE_COMPACT_ONLY` | `live_packets\live-*.ndjson` by default; daily daemon keeps context in memory and writes only optional overlay state | Raw ticks/events/frames disabled |
-| `LIVE_COMPACT_WITH_FRAMES` | Compact packets plus optional visual QA frames; rolling live files only if legacy/debug tools are explicitly started | Frames enabled at configured interval; raw ticks/events disabled |
-| `DEBUG_RECORDING` | Compact packets when enabled | Full raw tick/event/frame recording for replay, audit, batch geometry, and training |
-| `HYBRID_DEBUG` | Compact packets | Reserved for sampled or warning-triggered raw snapshots |
+| `LIVE_COMPACT_ONLY` | No live packet files; daemon keeps context in memory and writes only optional latest-state overlay/debug JSON | Raw ticks/events/frames disabled |
+| `LIVE_COMPACT_WITH_FRAMES` | No live packet files; optional visual QA frames only | Frames enabled at configured interval; raw ticks/events disabled |
+| `DEBUG_RECORDING` | No live packet files; explicit debug outputs only | Full raw tick/event/frame recording for replay, audit, batch geometry, and training |
+| `HYBRID_DEBUG` | No live packet files | Reserved for sampled or warning-triggered raw snapshots |
 
-The RuneLite config is grouped into Normal Live, Visual QA Overlay, Frames /
-Visual Capture, Debug / Audit Recording, Retention / Storage, and Advanced /
-Experimental sections. Existing config keys are preserved so saved settings are
-not silently reset.
+The normal RuneLite config surface is now Core, Snapshot Endpoint, and Overlay.
+Advanced bounded geometry/collision settings are hidden from the normal UI, and
+retired recording/preset keys are unset only within the `osrs-telemetry` config
+group.
 
 ## Tick Records
 
@@ -119,38 +151,21 @@ not be projected for that tick, while the rest of the tick remains valid. This
 telemetry does not add overlays, input hooks, menu actions, clicks, or
 client-state mutation.
 
-## Compact Live Packets
+## Runtime Live Context
 
-Compact live packets are the default staged bridge for live sidecars. Normal
-live mode uses the compact packet file bridge; the local TCP stream is
-experimental and optional. The file bridge writes without raw tick/event/frame recording
-under:
+The runtime live bridge is now endpoint/query based:
 
-```text
-live_packets\live-*.ndjson
-live_packets\live_packet_index.json
-live_packets\latest_segment.txt
-```
+- Java plugin exposes `PluginSnapshotEndpoint` on `127.0.0.1:8893`.
+- Java keeps `WorldModelCache`, `PluginLiveCache`, and `client_tick_hot.v1` in
+  bounded memory.
+- Python `live_core_daemon.py` uses `--daily-mode snapshot-no-files
+  --input-source plugin-snapshot`.
+- Knowledge Fabric and MCP-style tools expose compact read-only queries.
+- Explicit replay/script/debug bundles may save bounded JSON on request.
 
-Each line is one versioned packet envelope:
-
-```json
-{
-  "schema": "osrs_telemetry_live_packet.v1",
-  "packetType": "live_baseline_packet.v1",
-  "sessionId": "2026-05-09_12-00-00",
-  "tick": 123,
-  "sequence": 456,
-  "timestampUtc": "2026-05-09T17:00:00Z",
-  "payload": {}
-}
-```
-
-The compact bridge is read-only observed telemetry. It does not add overlays,
-input hooks, clicking, menu invocation, automation, action routing, or
-client-state mutation. Python sidecars still own target libraries, profiles,
-candidate scoring, task interpretation, context responses, QA tooling, and any
-future vision/model work.
+There is no live packet NDJSON/JSONL envelope schema for runtime. Historical
+`osrs_telemetry_live_packet.v1` files may exist only in old sessions and should
+be handled through maintenance reporting/pruning.
 
 ## Live Config Doctor
 
@@ -180,10 +195,9 @@ Top-level fields:
 
 The `summary` object normalizes the fields that most often cause live-stack
 confusion: active input source, recording mode, raw tick/event/frame flags,
-compact packet availability and recency, compact stream state, plugin-snapshot
-state, `windowTicks`, `candidateOutputWindow`, `livenessMode`, overlay target
-count/limit, overlay geometry mode, collision-window status, budget status, and
-write failures.
+retired packet-archive status, plugin-snapshot state, `windowTicks`,
+`candidateOutputWindow`, `livenessMode`, overlay target count/limit, overlay
+geometry mode, collision-window status, budget status, and write failures.
 
 Each issue has:
 
@@ -197,19 +211,17 @@ configuration and explain what to change manually.
 
 ## Workflow Presets
 
-The plugin exposes fixed telemetry workflow presets through RuneLite config and,
-when the plugin snapshot endpoint is enabled, through localhost preset
-endpoints. Presets mutate telemetry plugin configuration only; they do not call
-RuneLite Client APIs, click, type, invoke menus, execute in-game commands, or
-mutate game state.
+Workflow preset config controls are retired from the normal RuneLite settings
+UI. The localhost preset endpoints remain read-only-game-state helper endpoints
+for compatibility and can only mutate whitelisted telemetry plugin settings;
+they do not call RuneLite Client APIs, click, type, invoke menus, execute
+in-game commands, or mutate game state.
 
-Preset config keys:
+Retired preset config keys cleaned on plugin startup:
 
-- `workflowPreset`: `DAILY_LIVE`, `DAILY_SNAPSHOT_NO_FILE`, `VISUAL_QA`,
-  `DEBUG_AUDIT`, `PLUGIN_SNAPSHOT_EXPERIMENTAL`, or `CUSTOM`
-- `presetPreviewOnly`: preview selected preset without saving changes
-- `applyWorkflowPreset`: toggle trigger that applies the selected preset and
-  resets to false
+- `workflowPreset`
+- `presetPreviewOnly`
+- `applyWorkflowPreset`
 
 Preset endpoints:
 
@@ -236,9 +248,9 @@ Preset endpoints:
   "preview": false,
   "changes": [
     {
-      "key": "emitCompactLiveStream",
-      "oldValue": "true",
-      "newValue": "false",
+      "key": "pluginSnapshotEndpointEnabled",
+      "oldValue": "false",
+      "newValue": "true",
       "changed": true
     }
   ],
@@ -253,15 +265,14 @@ changed.
 
 ## Plugin Snapshot Bridge
 
-The plugin snapshot bridge is the next read-only bridge shape. It is disabled
-by default and is not the stable daily path; compact packet files remain the
-stable bridge. The explicit Daily Snapshot No-File path enables the endpoint and
-uses `live_core_daemon.py --daily-mode snapshot-no-files` while disabling the
-compact packet file mirror.
+The plugin snapshot bridge is the stable read-only live bridge. The daily
+Snapshot No-File path enables the endpoint and
+uses `live_core_daemon.py --daily-mode snapshot-no-files --input-source
+plugin-snapshot`. There is no compact packet file mirror.
 
-Java now keeps a small in-memory `PluginLiveCache` of the latest compact packet
-payload by packet type. The cache is updated from the same compact enqueue path
-that feeds the file bridge and experimental stream. Payloads are copied into
+Java keeps a small in-memory `PluginLiveCache` of the latest live payload by
+payload type. The cache is updated from the plugin capture path; it does not
+feed any file bridge or experimental stream. Payloads are copied into
 serialized JSON strings, so request handlers never hold mutable capture maps and
 never call RuneLite APIs.
 
@@ -272,11 +283,17 @@ Opt-in config:
 - `pluginSnapshotHost`: default `127.0.0.1`.
 - `pluginSnapshotPort`: default `8893`.
 - `pluginSnapshotAuthToken`: optional `X-Plugin-Snapshot-Token` value.
+- `pluginSnapshotAllowNonLocalHost`: default false.
+
+Hidden developer config:
+
 - `pluginSnapshotMaxProjectionRefs`: cap for projection refs in responses.
 - `pluginSnapshotMaxResponseBytes`: maximum response size.
-- `pluginSnapshotAllowNonLocalHost`: default false.
-- `pluginSnapshotEnabledInNormalLive`: experimental opt-in only; normal live
-  still uses compact packet files.
+
+Retired alias cleaned on startup:
+
+- `pluginSnapshotEnabledInNormalLive`: migrated to `enablePluginSnapshotEndpoint=true`
+  when it was previously set, then unset.
 
 Endpoints:
 
@@ -561,6 +578,26 @@ geometry. Degenerate origin polygons, tiny projection bounds, and off-viewport
 tile projections are rejected for canvas clicks; route navigation can then try
 structured alternate path tiles or stop safely.
 
+`actionTargetSource` and `actionability` are attached to action proposal
+payloads and target explanations. Valid sources are `static_route_prior`,
+`retained_anchor`, `route_context_goal`, `local_frontier_waypoint`,
+`live_projected_waypoint`, `live_route_object`, `live_service_object`,
+`live_resource_candidate`, `hover_discovered_object`, and `unknown`.
+Valid actionability values are `advisory_only`, `needs_live_projection`,
+`needs_hover_confirmation`, `executable`, `stale`, and `blocked`. Static route
+priors and route context goals are never directly executable; retained anchors
+must be upgraded by fresh projection or hover evidence. Executable proposals
+must be backed by current live state and correct intent-specific hover/menu
+evidence.
+
+Resource target explanations may also include `resourceSelectionReason` and
+`reacquiredFromResourceTarget`. For woodcutting, target selection can use a
+known Woodcutting level when present. If the level is unknown, basic live
+`Tree` candidates are preferred over higher-level Oak/Willow candidates when
+both exist; this prevents a low-level live client from looping on a target that
+only produces a no-progress level-required message. Hover confirmation,
+safe aimpoint, freshness, and actionability still gate the click.
+
 `route_projection_status.v1` is attached to route waypoint target explanations
 after plugin tile projection. It records `worldTile`, `canvasPoint`,
 `canvasTileBounds`, `inCanvas`, `inViewport`, `degenerateProjection`,
@@ -587,6 +624,9 @@ Loop execution also records:
 - target suppression/reacquisition fields: `targetsSuppressed`,
   `suppressedTargets`, `targetReacquireRounds`, `targetReacquireWaits`, and
   `targetReacquireWaitMillis`
+- stale/static proposal reacquire fields: `staleProposalDetected`,
+  `staleProposalSource`, `reacquireAttempted`, `reacquireResult`,
+  `freshTargetFound`, `freshTargetSource`, and `reasonIfNoFreshTarget`
 - clicked-menu mismatch fields under `clientTick.menuMismatch`: expected
   intent, hover-before-click, actual clicked menu, classification, mismatch
   reason, and likely causes such as stale hot sample, hover flip, target
@@ -641,14 +681,14 @@ cached projection fields such as name/id/objectKey/targetType/onScreen/geometry;
 request handlers still do not call RuneLite APIs, scan the scene, or execute
 actions.
 
-Python Phase C adds experimental `live_target_processor.py --input-source
-plugin-snapshot`. The processor posts `plugin_snapshot_request.v1` to
-`/snapshot`, asks for cached baseline, scene delta, projection, inventory,
-inventory delta, activity, navigation, collision window, writer health, watch
-values, and compact `interaction_hot`, then converts the response payloads into
-the same synthetic tick shape used by compact packet files. Context service and
-brain clients continue
-reading the rolling live output files written by the processor.
+`live_target_processor.py --input-source plugin-snapshot` is the normal runtime
+path. The processor posts `plugin_snapshot_request.v1` to `/snapshot`, asks for
+cached baseline, scene delta, projection, inventory, inventory delta, activity,
+navigation, collision window, writer health, watch values, world-model data, and
+compact `interaction_hot`, then converts the response payloads into the bounded
+in-memory/live-context shape used by the daemon and Knowledge Fabric. Context
+service and AI clients read the daemon/query layer, not live packet archive
+files.
 
 Projection conversion accepts both raw payloads and packet-envelope payloads.
 The recognized ref lists are `visibleObjectRefs`, `visibleSceneObjectRefs`,
@@ -737,11 +777,10 @@ largest plugin-snapshot bucket and can be one of `endpoint_service`,
 candidate signatures skip heavy candidate/world-target output rewrites while
 continuing to refresh lightweight status.
 
-The processor does not make plugin-snapshot the default. `--input-source auto`
-continues to prefer compact packet files unless
-`--auto-prefer-plugin-snapshot` is explicitly supplied. Use
-`--compare-input-sources plugin-snapshot-vs-file` before considering it for a
-normal workflow.
+The processor defaults to plugin-snapshot. `--input-source auto`, compact packet
+file input, compact stream input, and raw-tick packet input have been removed
+from normal runtime. Use WorldModel/Knowledge Fabric queries, replay scenarios,
+or script-authoring context bundles for comparison/debug evidence.
 
 Manual local check after enabling the config:
 
@@ -767,12 +806,6 @@ python telemetry-viewer\live_target_processor.py --from-daemon --daemon-url http
 python telemetry-viewer\live_target_processor.py --from-daemon --daemon-url http://127.0.0.1:8890 --input-source plugin-snapshot --plugin-snapshot-tier expanded --plugin-snapshot-host 127.0.0.1 --plugin-snapshot-port 8893 --plugin-snapshot-projection-field-mode compact --profile woodcutting --follow --latency-mode realtime --liveness-mode delta --liveness-budget-ms 20 --candidate-output-window latest --window-ticks 10 --limit 100 --no-ui-targets --emit-world-targets candidates --summary --benchmark
 ```
 
-Comparison:
-
-```text
-python telemetry-viewer\live_target_processor.py --latest-session --compare-input-sources plugin-snapshot-vs-file --profile woodcutting --latest 5
-```
-
 Snapshot conversion diagnostic:
 
 ```text
@@ -780,8 +813,8 @@ python telemetry-viewer\diagnose_plugin_snapshot.py --latest-session --profile w
 python telemetry-viewer\diagnose_plugin_snapshot.py --latest-session --profile woodcutting --tier-sweep
 ```
 
-If comparison reports `projection refs capped` and snapshot candidates are zero
-while compact packet files have candidates, the likely cause is cap/order
+If diagnostics report `projection refs capped` and snapshot candidates are zero
+while the world model shows relevant objects, the likely cause is cap/order
 coverage rather than missing endpoint health. Increase the request cap and, if
 needed, the RuneLite snapshot endpoint cap while keeping
 `pluginSnapshotMaxResponseBytes` bounded.
@@ -800,157 +833,24 @@ accepted before profile/candidate filters. A nonzero converted-ref count with
 zero accepted refs indicates a conversion path mismatch; nonzero accepted refs
 with zero candidates indicates profile/classification or cap coverage.
 
-The first direct stream transport is a localhost TCP NDJSON server inside the
-plugin. It is disabled by default until opted in through RuneLite config:
+The former compact stream/file bridge has been retired with the live packet
+archive. RuneLite no longer exposes config items to start a packet stream or to
+mirror stream packets to `live_packets`. Python runtime CLIs no longer accept
+compact packet, compact stream, raw-tick, or auto packet fallbacks as live truth.
 
-- `emitCompactLiveStream`: start the loopback stream publisher.
-- `compactLiveStreamHost`: default `127.0.0.1`; non-loopback addresses are
-  rejected by the publisher.
-- `compactLiveStreamPort`: default `8891`.
-- `compactLiveStreamQueueSize`: bounded pending stream packet queue.
-- `compactLiveStreamCircuitBreakerEnabled`: pause stream publishing when stream
-  writes or queue pressure are unhealthy.
-- `compactLiveStreamMaxWriteMillis`: stream worker write-time budget before the
-  circuit breaker trips.
-- `compactLiveStreamDisableSeconds`: temporary stream pause after a circuit
-  breaker trip.
-- `compactLiveStreamAlsoWriteFiles`: keep the compact packet file bridge as a
-  debug mirror while the stream is enabled.
+Equivalent current data is exposed through endpoint/query payloads:
 
-The stream sends the same `osrs_telemetry_live_packet.v1` envelope, one JSON
-packet per line. It drops stream packets instead of blocking RuneLite when the
-queue is full or no local consumer is connected. It does not expose remote
-network access by default and does not add input, click, menu, or action fields.
+- `client_tick_hot.v1` for hover/menu/click proof
+- `world_model_snapshot.v1` for loaded-scene objects, actors, collision,
+  projection, minimap, and UI summaries
+- Knowledge Fabric query results for route/resource/service/path/view context
+- `writerHealth` status fields that explicitly report
+  `livePacketsRuntimeRemoved=true`, `ndjsonRuntimeRemoved=true`,
+  `jsonlRuntimeRemoved=true`, and `livePacketWriterActive=false`
 
-The Python stream consumer buffers packets by tick. A tick is promoted for
-candidate/context generation only after the required baseline and projection
-packets have arrived. Incomplete ticks are retained in a bounded buffer and
-reported through live status instead of clearing the previous good candidate
-context. Stream socket wait/reconnect timing is reported separately from active
-processing time.
-
-Packet types:
-
-- `live_baseline_packet.v1`: compact tick/game state, player facts,
-  camera/viewport fields, latest frame path, scene capture mode, and
-  source-cap/completeness summary.
-- `live_scene_delta_packet.v1`: scene capture/index summaries plus compact
-  `sceneObjectDeltas` new/updated/despawned records. It intentionally does not
-  include full `sceneObjects` arrays.
-- `live_projection_packet.v1`: projection summary plus compact visible refs
-  with `objectKey`, on-screen/geometry flags, aim point, geometry source, and
-  small geometry bounds. Heavy polygons are excluded by default. When
-  `compactLiveIncludeClickableHull`, `compactLiveIncludeCanvasTilePolygon`,
-  `compactLiveIncludeConvexHull`, or `compactLiveIncludeHeavyGeometry` is
-  enabled, or when the read-only telemetry debug overlay is enabled with
-  clickable hull/tile geometry, capped visible refs may also include
-  `clickableHull`, `clickboxPolygon`, `convexHull`, `convexHullPolygon`, and
-  `canvasTilePolygon`. Packet polygons are compact point objects such as
-  `{"x": 123, "y": 456}`. `geometryEmission` reports the requested geometry
-  types, the per-tick `compactLiveGeometryMaxRefs` cap, emitted polygon refs,
-  skipped refs, and whether the cap was hit. Those polygons are observed
-  geometry only; they are not action commands.
-- `live_inventory_packet.v1`: compact inventory/equipment state, slot count,
-  free/filled slots, total item quantity, signature, non-empty item slots, and
-  whether compact inventory delta tracking is available.
-- `live_inventory_delta_packet.v1`: compact read-only inventory change packet
-  emitted when the observed inventory signature or slot occupancy changes. It
-  can include before/after signatures, changed slots, added/removed items,
-  quantity changes, free/filled slot transitions, and `inventoryFull`.
-- `live_activity_packet.v1`: raw observed animation, pose, interacting target,
-  status fields, previous animation/pose/interacting signatures, and changed
-  field names. Task-state interpretation remains outside Java.
-- `live_navigation_packet.v1`: compact read-only navigation readiness facts:
-  player tile/world location, collision summary/hash, map dimensions, blocked
-  tile counts, and scene bounds. It does not contain routes or movement
-  instructions.
-- `live_collision_window_packet.v1`: bounded local collision flags around the
-  player for lightweight reachability QA. It includes window bounds, radius,
-  dimensions, row-encoded flags, and a window hash. It is not a movement or
-  route packet.
-- `live_collision_grid_packet.v1`: optional debug-only full collision flag grid
-  packet. Disabled by default; normal live mode emits the summary/hash packet
-  instead.
-- `live_watch_values_packet.v1`: optional/future compact packet for bounded
-  read-only watch values requested through the context service. Values are
-  keyed by alias and may include `changed`, `unavailableReason`, and budget
-  state. The first implementation exposes builtin watch values from Python and
-  keeps Java dynamic watch polling marked as future.
-- `live_writer_health_packet.v1`: raw writer, compact file bridge, compact
-  stream queue/client/drop/write-error, packet-count-by-type, latest-tick-by-
-  type, and frame-drop diagnostics.
-
-Compact stream status fields written by `live_target_processor.py` include:
-
-- `compactStreamConnected`
-- `compactStreamPacketsSeen`
-- `compactStreamPacketsProcessed`
-- `compactStreamPacketsByType`
-- `compactStreamLatestTickByType`
-- `compactStreamMissingRequiredTypesForLatestTick`
-- `compactStreamTickBufferSize`
-- `compactStreamTicksWaitingForProjection`
-- `compactStreamProcessedCompleteTicks`
-- `compactStreamSkippedIncompleteTicks`
-- `compactStreamReadMillis`
-- `compactStreamParseMillis`
-- `compactStreamWaitMillis`
-- `compactStreamReconnectMillis`
-- `compactStreamDisconnectedDurationMillis`
-- `compactStreamSocketTimeouts`
-- `compactStreamProjectionPacketsSeen`
-- `compactStreamRequiredTypesSatisfied`
-- `compactStreamCanBuildCandidates`
-- `streamFallbackToFile`
-- `streamFallbackReason`
-- `compactLiveStreamPacketsOfferedByType`
-- `compactLiveStreamPacketsSentByType`
-- `compactLiveStreamPacketsDroppedByType`
-- `compactLiveStreamCircuitBreakerTripped`
-
-The defaults preserve existing raw recording behavior and also enable compact
-live packets for normal live mode. Compact packets are bounded by retention:
-the default segment size is 64 MB, the default retention budget is 512 MB, and
-the default retained segment count is 16. Older saved RuneLite profiles may
-still have the `emitCompactLivePackets` setting disabled; enable it for normal
-live mode.
-
-Python consumption is source-selectable. The live processor supports
-`--input-source compact-stream`, `--input-source compact-packets`,
-`--input-source raw-ticks`, and `--input-source auto`. Auto mode prefers compact
-packet files when `live_packet_index` and a recent latest segment are present.
-It only tries the experimental stream when packet files are unavailable or
-stale, otherwise it falls back to raw tick JSONL with a visible warning for
-backward compatibility and audit/debug sessions. `--require-compact-packets`
-means a compact transport is required: stream mode satisfies it, and file mode
-still fails fast when packet files are missing or stale.
-
-Daily launcher flows use `--input-source compact-packets --require-compact-packets`.
-If `live_status.json` shows `inputSourceActive=compact-stream`, zero
-candidates, and missing `live_baseline_packet.v1` or
-`live_projection_packet.v1`, the stream transport is incomplete; switch the
-launcher/input source back to compact packet files.
-
-Compact packet mode converts baseline, scene-delta, projection, inventory,
-inventory-delta, activity, navigation, local collision-window, optional debug
-collision-grid, watch-values, and writer-health packets into the same rolling live candidate files under
-`interaction_geometry\live`, so context-service consumers do not need a new
-response schema.
-
-Stream status fields in `live_status.json` include `compactStreamConnected`,
-`compactStreamReconnects`, `compactStreamPacketsSeen`,
-`compactStreamPacketsProcessed`, `compactStreamReadMillis`, and
-`compactStreamParseMillis`. Writer-health packets can additionally report
-`compactLiveStreamClientCount`, `compactLiveStreamPacketsWritten`,
-`compactLiveStreamPacketsDropped`, `compactLiveStreamPacketsDroppedNoClients`,
-`compactLiveStreamWriteErrors`, per-type offered/sent/dropped packet counts,
-and circuit-breaker state.
-
-Compact packet mode is field-tolerant. If a packet omits a value needed by a
-profile, Python marks the capability as missing or warns rather than inventing
-state. It does not silently switch to broad raw scene processing unless
-`--input-source auto` selected the raw fallback because compact packets were not
-available.
+Historical packet field names may still appear in old replay notes or
+compatibility status fields, but they are not runtime sources and are not
+callable writers.
 
 Inventory fields use explicit meanings:
 
@@ -996,9 +896,9 @@ off, missing, or unavailable. `degraded` indicates budget pressure or direct
 stale/despawned/depleted evidence.
 
 `live_status.json` and `context_response.v1` diagnostics include the active
-input source, compact packet availability/recentness, fallback reason, latest
-compact packet sequence, and latest compact segment so sidecars can tell whether
-normal live mode is using compact packets.
+input source, plugin/daemon freshness, world-model availability, data-quality
+warnings, and retired packet-archive status fields such as
+`livePacketsRuntimeRemoved=true` and `livePacketWriterActive=false`.
 
 `interaction_geometry\live\live_event_timeline.jsonl` is a bounded read-only
 timeline of notable live context changes. Each line uses schema
@@ -1037,7 +937,8 @@ The live processor keeps this file bounded by `--event-timeline-limit`
 - `id`
 - `description`
 - `status`: `available`, `watchable`, `unavailable`, `debug_only`, or `future`
-- `source`: compact packet type, live file, context endpoint, or future Java API
+- `source`: plugin snapshot, world model, context endpoint, static library,
+  session memory, or debug/replay artifact
 - `updateFrequency`
 - `latencyClass`
 - `normalLiveAllowed`
@@ -1268,8 +1169,11 @@ commands, mouse/keyboard fields, or menu invocation fields.
 Navigation telemetry is read-only context. It does not click, walk, send input,
 invoke menus, mutate client state, or execute routes.
 
-Normal compact live mode emits `live_navigation_packet.v1` when compact packets
-are enabled. Its payload is intentionally small:
+The retired compact packet file/stream mode used to emit
+`live_navigation_packet.v1`. Normal runtime no longer emits this packet as a
+live file or stream. Current navigation context comes from the 8893 snapshot,
+WorldModelCache, the 8890 daemon, and Knowledge Fabric queries such as
+`query_path_frontier`. The retained schema summary is historical/debug context:
 
 - `player`: `worldX`, `worldY`, `plane`, `sceneX`, `sceneY`, `localX`,
   `localY` when available.
@@ -1283,8 +1187,10 @@ are enabled. Its payload is intentionally small:
 - `bounds`: scene min/max bounds.
 - `source`: world-view/base-plane metadata and read-only warnings.
 
-Normal compact live mode also emits `live_collision_window_packet.v1` when
-compact navigation packets are enabled. Its payload is a bounded local grid:
+The retired compact navigation path also used
+`live_collision_window_packet.v1`. Current collision/pathing truth is exposed
+through WorldModelCache and capped query/debug bundles, not a packet archive.
+Historical/debug payloads are bounded local grids:
 
 - `plane`
 - `playerSceneX` / `playerSceneY`
@@ -1347,20 +1253,10 @@ deferred. If the local window is present, context responses report
 results. If only the summary exists, status is `summary`; if collision data is
 missing, status is `unknown`.
 
-`live_packet_index.json` summarizes the rolling segment set:
-
-- `schema`: `live_packet_index.v1`
-- `activeSegment` and `latestSegment`
-- `segments`: one entry per retained segment, with sequence/tick range, byte
-  count, and packet counts by type
-- `latestTick` and `latestSequence`
-- retention settings and total pruned segment count
-
-`latest_segment.txt` contains the current active segment filename. It is a tiny
-pointer for tailing tools so they can follow the live stream without scanning
-old segments. Segment retention prunes only completed `live-*.ndjson` files
-inside `live_packets`; the active segment is never deleted. Retention can be
-bounded by bytes, segment count, and tick window.
+`live_packet_index.json` and `latest_segment.txt` are retired legacy packet
+archive files. Current runtime does not create them. If they exist in an old
+session, use the maintenance report/prune commands; do not treat them as live
+truth.
 
 NPC, object, and ground item names are best-effort read-only definition
 lookups. Scene objects prefer valid impostor names when an object definition can
@@ -1546,17 +1442,17 @@ statistics to `session_index.json`, and joins frame timing into
 ## Streamlined Live Daemon Schemas
 
 `telemetry-viewer\live_core_daemon.py` is the daily in-memory sidecar. Daily
-Stable Compact reads compact packet files; Daily Snapshot No-File uses cached
-plugin snapshots and remains experimental. The daemon builds the same candidate and
-context state as the legacy live processor and serves context-service-compatible
-HTTP responses from memory. It is read-only and does not expose click, mouse,
-keyboard, menu, invoke, execute, or command endpoints.
+Snapshot No-File uses cached plugin snapshots and WorldModel/Knowledge Fabric
+queries as the normal runtime path. The daemon builds candidate and context
+state in memory and serves context-service-compatible HTTP responses. It is
+read-only and does not expose click, mouse, keyboard, menu, invoke, execute, or
+command endpoints.
 
 Health and status endpoints keep the existing schemas:
 
 - `GET /health` returns `context_health.v1` with `service=live_core_daemon`,
   `liveCoreDaemonActive=true`, `inputSourceActive`, `dailyMode`,
-  `noFileDaily`, `compactPacketFilesRequired`, `compactPacketFilesWriting`,
+  `noFileDaily`, `livePacketsRuntimeRemoved`, `livePacketWriterActive=false`,
   `candidateCount`, `writeDebugLiveFiles`, and `overlayStateWritten`.
 - `GET /status` returns `context_status.v1` with the same daemon markers plus
   the latest live processor status fields.
@@ -1746,8 +1642,19 @@ Important fields:
 - `actionReadiness.warnings`
 - `actionReadiness.checks`
 - `actionReadiness.checksSkippedAsNotApplicable`
+- `actionReadiness.checks.proposalActionTargetSource`
+- `actionReadiness.checks.proposalActionability`
+- `actionExecution.proposalActionTargetSource`
+- `actionExecution.proposalActionability`
 - `contextReadiness.status`
 - `contextReadiness.warnings`
+- `contextReadiness.applicableWarnings`
+- `contextReadiness.nonApplicableContextWarnings`
+- `staleFileSessionContext`
+- `daemonSessionFresh`
+- `pluginSnapshotFresh`
+- `selectedResourceTargetFreshnessApplicable`
+- `selectedResourceTargetFreshnessStatus`
 
 The executor gates live input on `actionReadiness.executionAllowed`. Resource
 object actions remain strict: they require selected resource/highlighter
@@ -1762,12 +1669,39 @@ expected menu option. Dialogue choice actions require active `dialogue_state`,
 a route-matching expected option, and the input controller; they do not require
 a route object or hover-confirmable `Walk here` target anymore. Context-only
 mismatches remain visible under
-`contextReadiness.warnings` so diagnostics do not hide them.
+`contextReadiness.warnings` so diagnostics do not hide them. The diagnostic
+also separates `applicableWarnings` from `nonApplicableContextWarnings`; for
+example, stale selected resource-target freshness is non-applicable while the
+current intent is `navigation_waypoint_action`, but becomes applicable again
+for `resource_object_action`. A stale newest filesystem session sets
+`staleFileSessionContext=true` without overriding a fresh daemon/latest-live
+session match.
+
+If the current navigation proposal is `advisory_only`, `stale`, or `blocked`,
+or if its source is still `static_route_prior` / `route_context_goal`,
+readiness blocks execution with structured reasons such as
+`static_target_not_executable` or `stale_target`. The action loop can perform a
+bounded reacquire, but the stale/static proposal itself must not become a click.
 
 Client-tick readiness blockers include `gameState`, `isLoggedIn`,
 `staleReason`, hot-state ages, and a recovery hint. Execution must remain
 blocked until `actionReadiness.executionAllowed=true` and the current
 intent-specific hot-state requirement is satisfied.
+
+### Location And Coordinate Sources
+
+Daemon status and debug bundles prefer authoritative baseline/player location
+from the plugin snapshot. If that is not available, they may expose
+`collision_window_center_proxy` as a lower-confidence fallback. Route context
+fields include `locationSource` and `locationConfidence` so a collision-window
+center is not mistaken for an exact player tile.
+
+VM input geometry records logical-to-physical conversion metadata whenever a
+canvas point is resolved to a pyautogui screen point:
+`coordinateSpace`, `scaleX`, `scaleY`, `screenPointBeforeScaling`,
+`screenPointAfterScaling`, `windowBoundsSource`, and `canvasBoundsSource`.
+`scaled_logical_to_physical` means the whole AWT logical screen point was
+scaled to physical Windows/pyautogui pixels.
 
 ### Return Route Context
 
@@ -1876,6 +1810,11 @@ Important fields:
 - `averageReactionDelayMs`, `reactionDelayMinMs`, `reactionDelayMaxMs`
 - `cameraHoldMinMs`, `cameraHoldAvgMs`, `cameraHoldMaxMs`
 - `cameraDirectionSwitches`
+- `liveInputBackend`
+- `liveInputBackendRequired`
+- `softwareInputAllowed`
+- `backendCommandCount`
+- `backendBlockedCommandCount`
 - `directBackendBypassCount`
 
 `action_trace.v2.cameraInput` mirrors the camera-specific subset for quick
@@ -1883,6 +1822,114 @@ debugging. Live executor paths should normally report
 `directBackendBypassCount=0`; backend implementations are the low-level adapter
 exception. `manual_calibrated` is a reserved profile name and currently uses the
 natural envelope until a future calibration file is explicitly introduced.
+
+### Arduino HID Live Input
+
+`live_input_policy.v1` is attached to action traces and loop summaries when a
+command can emit live input. `--execute`, `--hover-only`, and
+`--camera-self-test` require Arduino HID by default. Software backends remain
+available for dry-runs, screenshots, tests, and explicit unsafe/debug override
+only.
+
+Important fields:
+
+- `liveInputBackend`: expected to be `arduino` for normal live execution
+- `liveInputBackendRequired`
+- `softwareInputAllowed`
+- `backendIsArduino`
+- `backendIsSoftware`
+- `status`
+- `blockReason`
+- `arduino`: `arduino_hid_backend_status.v1`
+- `monitor`: `arduino_hid_monitor_status.v1` when monitor-required mode is used
+
+`arduino_hid_backend_status.v1` records serial port, baud, connection,
+identified/armed state, session token hash, command count, ACK failures,
+timeouts, identity, capabilities, firmware protocol, watchdog milliseconds,
+`stopAllSent`, and latest Arduino error. The required firmware protocol is
+`arduino_hid.v1`: `PING`, `IDENTIFY`, `CAPS`, `STATUS`, `ARM <token>`,
+`DISARM`, `STOP_ALL`, relative `MOVE`, mouse down/up/click, key down/up/press,
+and bounded key holds. `STOP_ALL` is allowed while disarmed and releases every
+tracked key/button before clearing the armed state. `arduino_hid_monitor_status.v1`
+records Raw Input evidence, expected VID/PID match, injected and lower-integrity
+injected counters, latest Arduino event age, `monitorPass`, and
+`monitorBlockReason`.
+
+`input_integrity_status.v1` is the richer monitor/overlay schema used by the
+Arduino-only live path. It is compact and can be read from
+`interaction_geometry/live/input_integrity_status.json` or a local status URL.
+It contains:
+
+- `monitorRunning`, `monitorAgeMs`, and `generatedAtUtc`
+- `arduinoExpected`: expected VID, PID, serial, device path, and COM port
+- `arduinoDetected`: Raw Input device presence, keyboard/mouse presence,
+  expected VID/PID/device-path/COM matches
+- `arduinoActivity`: last mouse/keyboard/any-event ages plus Raw Input and
+  event counters
+- `injectionFlags`: `mouseInjectedCount`, `mouseLowerIlInjectedCount`,
+  `keyboardInjectedCount`, `keyboardLowerIlInjectedCount`, and last injected
+  event age
+- `backend`: `liveInputBackend`, Arduino selection/armed state,
+  `softwareInputAllowed`, and `directBackendBypassCount`
+- `firmware`: `status`, `protocol`, `name`, `version`, `board`, `resetSafe`,
+  `stopAll`, `watchdog`, `watchdogMs`, `armed`, `keysDown`,
+  `mouseButtonsDown`, and `lastCommandAgeMs`
+- `status`, `blockers`, and `warnings`
+
+When `--arduino-require-monitor` is active, `execute_next_action.py` blocks
+live execution if the status is stale/missing, the expected Arduino VID/PID or
+device evidence is absent, injected or lower-IL injected counts increase during
+the action window, the Arduino is unarmed for the live session, firmware does
+not report `protocol=arduino_hid.v1`, reset safety / `STOP_ALL` / watchdog
+capabilities are absent, firmware reports held keys/buttons, or
+`directBackendBypassCount` is nonzero. Action traces include
+`inputIntegrityStatusBefore`, `inputIntegrityStatusAfter`, monitor pass fields,
+injected-count deltas, lower-IL deltas, and the live backend. Visual debug
+bundles may include `input_integrity_status.json`.
+
+`arduino_closed_loop_move.v1` is the behavioral cursor-safety trace for
+Arduino absolute movement. It records `cursorPositionBefore`,
+`cursorPositionAfter`, `targetScreenPoint`, `allowedRegion`, `movementChunks`,
+`chunkCount`, `maxChunkSize`, `positionErrorPx`, `leftAllowedRegion`,
+`foregroundWindowBefore`, `foregroundWindowAfter`,
+`targetInsideAllowedRegion`, `cursorInsideAllowedRegion`,
+`foregroundWindowAllowed`, and `movementAbortedReason`. On any abort the
+backend sends `STOP_ALL` and `DISARM`.
+Movement chunks also report bounded settle/retry evidence:
+`chunkAckTimeMs`, `settleWindowMs`, `pollCount`,
+`cursorDeltaObserved`, `rawInputDeltaObserved`,
+`firstCursorDeltaTimeMs`, `firstRawInputDeltaTimeMs`,
+`targetErrorBefore`, `targetErrorAfter`, and classifications such as
+`move_chunk_success`, `move_chunk_delayed_success`,
+`move_chunk_retry_success`, `move_chunk_rawinput_seen_cursor_no_move`,
+`move_chunk_no_rawinput_no_cursor`, and `move_chunk_no_effect_abort`.
+The calibration pass criteria are statistical: final target error inside
+tolerance, cursor stayed in the allowed region, no clicks or keys, no injected
+or lower-IL input, `directBackendBypassCount=0`, and no excessive consecutive
+no-effect chunks.
+
+`arduino_pointer_calibration_test.v1` is the no-click calibration result. It
+contains the allowed RuneLite or calibration-window region, target points,
+movement traces, max cursor error, foreground before/after, final firmware
+status, monitor status, `clickSent=false`, `keySent=false`, and
+`directBackendBypassCount=0`. It also includes `movementMetrics`,
+`totalChunks`, `successfulChunks`, `retryChunks`, `noEffectChunks`,
+`movementSuccessRate`, `maxPositionErrorPx`, and `finalPositionErrorPx`.
+
+Until calibration is reviewed, Arduino RuneLite `--execute` and `--hover-only`
+commands fail closed with `arduino_live_movement_block.v1` and
+`reason=arduino_pointer_calibration_required`. Jagex Launcher startup
+automation is also fail-closed by default; `runelite_bootstrap.v1` includes
+`launcherAutomationAllowed`, `launcherAutomationBlockedReason`, and
+`loginRecoveryMode`.
+
+Firmware reset safety is part of the schema contract. The Arduino sketch must
+release all keyboard keys and mouse buttons in `setup()`, start `armed=0`, clear
+its key/button trackers, avoid motion during boot, avoid persisting an old
+session token, and print a safe boot line such as
+`OK BOOT armed=0 released=1 protocol=arduino_hid.v1`. A white-board reset is
+therefore a secondary recovery action; physical USB unplug remains the final
+panic stop.
 
 When `--brain-task woodcutting` is used, `--goal-count N` enables read-only
 resource progress tracking for `brain_decision.v1`. Without a goal count, the
@@ -1933,8 +1980,8 @@ while the daemon is already serving context.
 
 ## Recording Modes
 
-The Java writer reports its recording behavior in `manifest.json` and in
-`live_writer_health_packet.v1` payloads.
+The Java writer reports its recording behavior in `manifest.json` and
+writer-health/status payloads.
 
 Common fields:
 
@@ -1946,27 +1993,31 @@ Common fields:
   being written.
 - `frameRecordingEnabled`: whether `frames\*` and `frame_index.jsonl` are being
   written.
-- `compactPacketRecordingEnabled`: whether compact live packets are active.
+- `compactPacketRecordingEnabled`: always false for the retired packet archive.
+- `livePacketsRuntimeRemoved`, `ndjsonRuntimeRemoved`, `jsonlRuntimeRemoved`:
+  true when the runtime no longer supports packet archives.
+- `livePacketWriterActive`: false in current builds.
 - `rawTicksWritten`, `rawTicksSuppressedByMode`, `rawEventsWritten`,
   `rawEventsSuppressedByMode`, `framesWritten`, and
   `framesSuppressedByMode`: counters for written or mode-suppressed data.
 
 Mode behavior:
 
-- `LIVE_COMPACT_ONLY` is the normal live mode. Compact packets under
-  `live_packets\` are emitted; full raw ticks/events and frames are not written.
-- `LIVE_COMPACT_WITH_FRAMES` emits compact packets and bounded frame capture;
-  full raw ticks/events remain off.
+- `LIVE_COMPACT_ONLY` is the normal live mode name, but it no longer emits
+  compact packet files. Snapshot/WorldModel/Knowledge Fabric queries are the
+  live path; full raw ticks/events and frames are not written.
+- `LIVE_COMPACT_WITH_FRAMES` allows bounded frame capture without compact packet
+  files; full raw ticks/events remain off.
 - `DEBUG_RECORDING` preserves the historical full session layout for audit,
   replay, batch geometry builders, and training/debug datasets.
-- `HYBRID_DEBUG` is reserved for compact live plus sampled debug snapshots.
+- `HYBRID_DEBUG` is reserved for sampled debug snapshots.
 
-Compact-only live sessions may not contain `ticks\`, `events\`, `frames\`, or
-`frame_index.jsonl`. That is expected and is not capture loss. Use compact
-packet health and source completeness fields, including
-`sourceSceneKnowledgeComplete` and `sourceCapHit`, to evaluate live capture
-health. Tools that require raw ticks should ask for `DEBUG_RECORDING` sessions
-instead of failing with generic file-not-found errors.
+Compact-only live sessions may not contain `ticks\`, `events\`, `frames\`,
+`frame_index.jsonl`, or `live_packets\`. That is expected and is not capture
+loss. Use plugin snapshot health, world-model freshness, Knowledge Fabric
+status, source completeness, and cap fields to evaluate live capture health.
+Tools that require raw ticks should ask for `DEBUG_RECORDING` sessions instead
+of failing with generic file-not-found errors.
 
 ## Resource Projection Recovery
 
@@ -1997,6 +2048,45 @@ the expected `Chop down` action.
 `resource_projection_recovery_failed`. Unchanged sentinel/no-projection geometry
 must fail as recovery failed instead of being counted as progress.
 
+## Resource View Score
+
+`resource_view_score.v1` is attached to resource proposals and visual debug
+bundles when candidate selection depends on the current camera/worksite view.
+It is advisory for selection, but a poor classification can produce a bounded
+non-click `resource_view_recovery` action before any chop click is allowed.
+
+Core fields:
+
+- `worksiteId`, `worksiteAnchor`, `worksiteRadiusTiles`, `playerLocation`
+- `cameraYaw`, `cameraPitch`
+- `visibleResourceCandidates`, `executableResourceCandidates`
+- `safeAimpointCount`, `centralSafeAimpointCount`
+- `edgeClippedResourceCandidates`, `partiallyOffscreenResourceCandidates`,
+  `occludedResourceCandidates`
+- `candidateSpread`
+- `selectedTargetName`, `selectedTargetWorldLocation`
+- `selectedTargetDistanceFromWorksite`
+- `selectedTargetEdgeDistancePx`
+- `selectedTargetVisibleAreaRatio`
+- `selectedTargetHoverReady`
+- `selectedTargetPullsAwayFromWorksite`
+- `lowLevelResourceCandidatesRejected`
+- `score`
+- `classification`
+- `cameraRecoveryRecommended`
+
+Classifications are `good_resource_view`, `usable_resource_view`,
+`poor_edge_resource_view`, `poor_occluded_resource_view`,
+`poor_single_candidate_view`, `needs_resource_camera_reacquire`,
+`needs_worksite_recenter`, and `no_executable_resource_view`.
+
+Action traces may include `resourceViewScoreBefore`,
+`resourceCameraTriggeredBy`, `resourceCameraAdjustmentCount`,
+`visibleResourceCandidatesBefore`, `visibleResourceCandidatesAfter`,
+`executableResourceCandidatesBefore`, `executableResourceCandidatesAfter`,
+`selectedTargetBefore`, `selectedTargetAfter`, `worksiteDriftScore`, and
+`resourceViewRecoveryResult`.
+
 ## Visual Debug Bundle
 
 `visual_debug_bundle.v1` is an optional action-run evidence artifact written
@@ -2015,7 +2105,11 @@ Required `bundle.json` fields:
   `camera_reacquire_end`, `route_no_progress_timeout`, `resource_timeout`,
   `return_transition_pending`, `return_transition_retry_required`,
   `return_transition_retry_success`, `return_transition_reconciled_success`,
-  `menu_flip_mismatch`, `unexpected_current_area`, or `final_summary`
+  `menu_flip_mismatch`, `unexpected_current_area`, `poor_resource_view`,
+  `resource_camera_reacquire_start`, `resource_camera_reacquire_end`,
+  `resource_target_edge_rejected`, `worksite_drift_detected`,
+  `post_depletion_reacquire`, `no_executable_resource_view`, or
+  `final_summary`
 - `timestamp`
 - `sessionPath`
 - `bundleDir`
@@ -2024,19 +2118,24 @@ Required `bundle.json` fields:
 - `daemonStatusPath`
 - `overlayDebugStatePath` when available
 - `actionTraceExcerptPath` when available
-- `playerLocation`, `plane`, `inventoryFreeSlots`, `resourceCount`
+- `playerLocation`, `playerLocationSource`, `playerLocationConfidence`, `plane`,
+  `inventoryFreeSlots`, `resourceCount`
 - `inventoryState`
 - `currentIntent`, `phase`, `actionReadiness`
+- `selectedActionIntent`, `selectedTargetSource`, `selectedActionTargetSource`,
+  `selectedActionability`, `advisoryTargetSource`, `staleProposalDetected`,
+  `staleProposalSource`
 - `currentRouteMode`, `currentRouteNode`, `currentRouteEdge`
 - `routeContextSummary`, `selectedServiceAnchor`, `selectedApproachNode`,
   `selectedWaypoint`
 - `routeSourceMismatchDetails`, `pathingReason`, `wallLoopClassification`
 - `projectionStatus`, `safeAimPointStatus`, `safeAimPointSummary`,
-  `cameraState`
+  `cameraState`, `resourceViewScore`, `resourceViewClassification`,
+  `resourceCameraRecoveryRecommended`
 - `clientTickHotSummary`, `latestHoverMenu`, `latestMenuOptionClicked`
 - `hoverMenu`, `clickedMenu`, `classification`, `clickActionClassification`,
   `finalDecision`
-- `actionProposalSummary`, `humanInput`
+- `actionProposalSummary`, `coordinateScaling`, `humanInput`
 - `mousePosition`, `windowRect`, `canvasRect`
 - `warnings`
 
@@ -2066,6 +2165,13 @@ reacquire budget fields:
 - `reacquireBudgetResets`
 - `stoppedByReacquireLimit`
 - `candidateWasActionableBeforeLimit`
+- `staleProposalDetected`
+- `staleProposalSource`
+- `reacquireAttempted`
+- `reacquireResult`
+- `freshTargetFound`
+- `freshTargetSource`
+- `reasonIfNoFreshTarget`
 - `routeTransitionSuppressionOverrides`
 - `reacquireRoundsByBudget`
 
@@ -2126,3 +2232,233 @@ These fields are separate from resource inventory reconciliation. They exist so
 full lifecycle summaries can distinguish true route-transition failures from
 pending movement, retry-required transitions, retry successes, and late but
 proven stair progress.
+## World Model v2
+
+`world_model_snapshot.v1` is the Java-side read-only model of the currently
+loaded local RuneLite scene. It is not a whole-game map. The plugin keeps the
+rich scene/object/collision data in memory and exposes bounded query payloads
+through `/snapshot` only when a request includes world-model needs.
+
+Supported needs include `world_model_summary`, `scene_object_census`,
+`route_object_census`, `resource_object_census`, `service_object_census`,
+`pathing_frontier`, `projection_audit`, `minimap_projection`,
+`view_quality_inputs`, and `full_world_model_debug`. Default live use should
+consume the compact summary and censuses; `full_world_model_debug` is for debug
+bundles or explicit inspection.
+
+The snapshot metadata includes session id/path, game tick, client tick, wall
+time, game state, plane, base X/Y, player world location, camera yaw/pitch, and
+viewport/canvas geometry. Object census records include kind, id/hash, name,
+actions, world/scene/local location, route/service/resource classification,
+Woodcutting level gates for resource objects, and compact projection status
+when requested or relevant. Quality fields include `worldModelAvailable`,
+`worldModelAgeMs`, `objectCensusCapHit`, `collisionAvailable`,
+`projectionAuditAvailable`, and `projectionCapHit`.
+
+Runtime remains bounded: no full-scene JSON is emitted every tick by default,
+query responses honor object/collision caps, and cap hits are reported in the
+response instead of silently hiding data.
+
+Projection selection runs after the scene census is built. The cache
+prioritizes nearby route/resource/service objects before generic scene clutter,
+then records `projectionCapHit` when lower-priority objects were not projected.
+This prevents loaded-scene scan order from hiding the currently visible Tree,
+staircase, bank, or service object from compact query results.
+
+## Knowledge Fabric
+
+`knowledge_fabric_status.v1` is the Python-side read-only index layer over the
+live world model, daemon/session memory, static route/target libraries, and
+debug evidence. It does not replace the low-latency runtime path. Runtime
+execution still uses the plugin snapshot endpoint on `8893`, the daemon on
+`8890`, readiness checks, client-tick hover/menu proof, and
+`HumanInputController`.
+
+`live_world_index.v1` summarizes bounded indexes built from world-model query
+payloads:
+
+- `spatialIndexSummary`: objects with world location by plane.
+- `objectActionIndexSummary`: object names and actions such as `Chop down`,
+  `Climb-up`, `Bank`, `Deposit`, and `Open`.
+- `routeObjectIndexSummary`: live route-transition and route-service objects.
+- `resourceIndexSummary`: live resource candidates with skill gates.
+- `serviceIndexSummary`: live bank/deposit/service objects.
+- `projectionIndexSummary`: visible/offscreen/edge/sentinel/actionable counts.
+- `collisionFrontierIndexSummary`: compact loaded-scene pathing frontier status.
+
+`session_memory.v1` is current-session advisory memory. It can include observed
+resource areas, service anchors, route objects, successful and failed waypoints,
+menu-flip zones, camera view outcomes, and learned area labels. Session memory
+is not executable by itself; old-session memory must be explicitly loaded as a
+prior and still requires fresh live projection/hover evidence before action.
+
+`static_knowledge_library.v1` summarizes `service_routes.json`,
+`target_profiles.json`, and `target_library.json`. Static priors, service
+anchors, route nodes, target classes, and skill requirements are advisory until
+live verified. Current static skill requirements include basic Tree and Dead
+tree at Woodcutting 1, Oak at 15, and Willow at 30.
+
+`debug_evidence_index.v1` indexes sparse debug bundles and latest action-trace
+files for inspection. Visual bundle copies may include
+`knowledge_fabric_status.json`, `current_debug_context.json`,
+`explain_current_blocker.json`, `resource_candidates.json`,
+`service_candidates.json`, `route_objects.json`, `pathing_frontier.json`,
+`view_quality.json`, `session_memory_summary.json`, and
+`static_library_summary.json`.
+
+Knowledge Fabric query responses use `knowledge_fabric_query_response.v1` style
+fields: `schema`, `status`, `source`, `freshness`, `data`, `warnings`,
+`capHit`, `truncated`, and `performanceStats` with `queryTimeMs`,
+`responseBytes`, `objectCount`, and source-age fields when available.
+
+`knowledge_fabric_current_debug_context.v1` is the query-first aggregate for
+Codex. Its `data` object contains `liveStatus`, `readiness`,
+`worldModelSummary`, `knowledgeFabricStatus`, `currentBlocker`,
+`actionProposal`, `resourceCandidates`, `routeObjects`, `serviceObjects`,
+`pathingFrontier`, `viewQuality`, `overlayHealth`, `inputIntegrity`,
+`latestActionTraceSummary`, `latestVisualBundleSummary`,
+`sessionMemorySummary`, `staticProfileSummary`, `queryFirstWorkflow`, and
+`runtimeSafety`.
+
+`knowledge_fabric_current_blocker_explanation.v1` is the compact blocker
+answer. Its `data` object contains `primaryBlockerCategory`,
+`primaryBlockerSummary`, `recommendedNextStep`,
+`safeToRunBoundedLiveAction`, `codeChangeLikelyNeeded`, current
+phase/cycle/intent, location, inventory, blockers, warnings, and evidence for
+world-model freshness, action readiness, action target source/actionability,
+selected target, safe aimpoint, hover/menu, route context, pathing frontier,
+service anchor, overlay health, input integrity, and latest debug evidence.
+Categories include login/liveness, plugin/daemon freshness, input/Arduino,
+readiness/action gate, target/candidate, projection/safeAimPoint, hover/menu,
+overlay-only, route/pathing, service/bank, session mismatch, static-prior-only,
+and unknown.
+
+The optional MCP adapter in `telemetry-viewer/mcp_server.py` exposes read-only
+tools/resources for Codex or other local AI clients. It is local/stdio oriented
+and intentionally does not expose click, key, camera, or live execution tools.
+Read-only helper tools include the current debug context/blocker, resource,
+service, route, path-frontier, view-quality, session memory, static library,
+and script-authoring queries.
+
+`script_authoring_context.v1` is a sparse, explicit bundle for future script or
+profile work. It is written only when requested, normally under
+`interaction_geometry/live/script_authoring_context/<timestamp>_<profile>/`.
+Its `manifest.json` includes `createdAt`, `sessionPath`, `profile`,
+`taskName`, `playerLocation`, `plane`, `inventorySummary`, `currentPhase`,
+`currentIntent`, `blockerCategory`, `objectCounts`, `capWarnings`,
+`staleWarnings`, `queryTimes`, `responseSizes`, and `recommendedNextSteps`.
+Bundle files include current debug context, blocker explanation, world-model
+summary, Knowledge Fabric status, scene/resource/route/service object evidence,
+pathing frontier, collision summary, projection audit, view quality, overlay
+state, input integrity, latest action trace excerpt, session memory, static
+library summaries, and target/profile/route excerpts. Screenshot copying is
+best-effort from the latest visual debug bundle.
+
+`replay_scenario.v1` captures enough read-only state to replay candidate
+selection, action proposal, readiness explanation, blocker classification,
+pathing frontier explanation, and view-quality explanation offline. The replay
+command produces `replay_scenario_result.v1` and sets `noLiveInput=true`; it
+does not expose or perform mouse, keyboard, camera, click, or menu input.
+
+`data_quality_report.v1` reports `worldModelFresh`, `clientTickFresh`,
+`daemonFresh`, `pluginFresh`, `objectCount`, `collisionAvailable`,
+`projectionAuditAvailable`, `capHits`, `truncationWarnings`, `staleSources`,
+`missingExpectedSections`, `queryFailures`, `responseSizes`, `queryTimes`, a
+`confidence` value (`high`, `medium`, or `low`), and `recommendedFixes`.
+
+`debug_context_diff.v1` compares two current-debug-context, script-authoring,
+or replay bundles. It highlights changes in player location, route node/edge,
+object and candidate counts, cap warnings, blocker category/summary, pathing
+frontier, view quality, selected action/target, and session-memory summaries
+when those fields are present.
+
+`knowledge_fabric_handoff_summary.v1` is a concise handoff response with the
+current phase/intent, current blocker, latest success/failure evidence, most
+relevant bundle path, recommended next diagnostic query, recommended coding
+target, input safety summary, and tests to run if code changes.
+
+## Arduino HID Focus Safety
+
+`firmware_safety.v1` separates Arduino firmware state from VM focus state. It
+reports `armed`, `keysDown`, `mouseButtonsDown`, `watchdogOk`, `watchdogMs`,
+`stopAllAvailable`, `resetSafe`, `protocolOk`, `status`, `blockers`, and
+`warnings`.
+
+`vm_input_focus_safety.v1` reports whether the guest desktop may still be
+wedged after a self-test even when firmware is safe. Fields include
+`overlayFocusable`, `overlayClickThrough`, `overlayTopmost`,
+`monitorWindowActive`, `foregroundWindowTitle`, `foregroundProcess`,
+`postTestFocusTarget`, `postTestFocusRecovery`, and `postTestInputState`.
+Allowed post-test states include `normal`, `unknown`,
+`focus_may_be_captured`, `overlay_may_be_blocking`,
+`monitor_may_be_blocking`, and `vmware_capture_may_be_stuck`.
+
+Self-tests should not claim a clean recovery solely because firmware is safe.
+If VM focus recovery is unknown, the input-integrity result remains `WARN`.
+
+`arduino_usb_passthrough_diagnostics.v1` reports guest-visible Arduino COM
+ports, sketch/bootloader VID/PID values when known, whether reset/upload was
+performed, and host-side VMware `.vmx` autoconnect recommendations. It must not
+recommend routing the real host mouse or keyboard into the guest.
+
+## External Knowledge Layer
+
+External OSRS facts use cache-first schemas and are advisory only. Live truth
+remains RuneLite, PluginSnapshotEndpoint, WorldModelCache, and daemon/context
+state.
+
+Primary schemas:
+
+- `external_knowledge_sources.v1`
+- `external_knowledge_status.v1`
+- `external_item_lookup.v1`
+- `external_item_search.v1`
+- `external_object_lookup.v1`
+- `external_skill_requirement_lookup.v1`
+- `external_area_lookup.v1`
+- `task_probe_report.v1`
+- `data_source_inventory.v1`
+- `query_coverage_matrix.v1`
+- `coverage_report.v1`
+
+Cache path:
+
+```text
+%USERPROFILE%\.osrs-telemetry\external_knowledge_cache
+```
+
+Cache files include `item_id_map.json`, `item_name_map.json`,
+`object_knowledge.json`, `npc_knowledge.json`, `skill_requirements.json`,
+`location_knowledge.json`, `source_status.json`, `wiki_page_cache\`, and
+`map_static_cache\`.
+
+External facts include provenance fields where available: `source`,
+`sourceId`, `sourceUrl`, `fetchedAt`, `confidence`, `stale`,
+`liveOverridden`, and optional `error`. External facts never override a fresh
+live RuneLite name, ID, location, projection, hover menu, or clicked menu
+result.
+
+External API behavior:
+
+- disabled by default in hot runtime
+- explicit refresh/search only
+- User-Agent required
+- serial cache-first requests
+- no massive wiki or map downloads by default
+- cache remains usable when stale
+
+Representative commands:
+
+```powershell
+python telemetry-viewer\context_service.py --external-knowledge-status
+python telemetry-viewer\context_service.py --external-lookup-item-id 1511
+python telemetry-viewer\context_service.py --external-search-item "logs"
+python telemetry-viewer\context_service.py --external-get-skill-requirement Oak
+python telemetry-viewer\context_service.py --external-lookup-object Staircase
+python telemetry-viewer\context_service.py --external-search-wiki "Lumbridge Castle bank" --external-refresh
+```
+
+`task_probe_report.v1` combines loaded-scene evidence, static libraries,
+external cache facts, skill requirements, widgets/inventory, route/service
+priors, and a suggested review-required profile skeleton. It is read-only and
+does not send live input.

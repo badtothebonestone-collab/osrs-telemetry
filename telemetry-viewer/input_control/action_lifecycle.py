@@ -4,7 +4,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .action_proposal import ActionProposal, build_action_proposal
+from .action_proposal import (
+    ActionProposal,
+    SERVICE_COMFORTABLE_EDGE_DISTANCE_PX,
+    SERVICE_COMFORTABLE_REGION_FRACTION,
+    SERVICE_MIN_EDGE_DISTANCE_PX,
+    SERVICE_MIN_VISIBLE_AREA_PX,
+    SERVICE_MIN_VISIBLE_AREA_RATIO,
+    build_action_proposal,
+)
 
 
 SCHEMA = "action_lifecycle.v1"
@@ -499,6 +507,13 @@ def expected_result_for_action(action: str) -> dict[str, Any]:
             "expectedSignal": "resource_projection_refresh_or_reproposal",
             "description": "camera/view recovery runs without a world click, then resource projection is refreshed before any resource click",
         }
+    if action == "service_view_recovery":
+        return {
+            "action": action,
+            "resultType": "service_projection_refresh",
+            "expectedSignal": "service_projection_refresh_or_reproposal",
+            "description": "camera/view recovery runs without a service click, then service projection is refreshed before any Bank/Deposit click",
+        }
     if action == "open_service":
         return {
             "action": action,
@@ -573,6 +588,78 @@ def _timeout_reached(elapsed_ms: int | None, timeout_ms: int | None, elapsed_tic
     if timeout_ms is not None and elapsed_ms is not None and elapsed_ms >= timeout_ms:
         return True
     return timeout_ticks is not None and elapsed_ticks is not None and elapsed_ticks >= timeout_ticks
+
+
+def _first_value(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _status_game_state(status: dict[str, Any]) -> str | None:
+    brain = _status_brain(status)
+    client_hot = _dict(status.get("clientTickHot") or brain.get("clientTickHot"))
+    post_menu = _dict(client_hot.get("postMenuSort"))
+    baseline = _dict(status.get("baseline") or brain.get("baseline") or status.get("liveBaseline"))
+    world_model = _dict(status.get("worldModelSummary") or brain.get("worldModelSummary"))
+    game_state = _first_value(
+        status.get("gameState"),
+        brain.get("gameState"),
+        client_hot.get("gameState"),
+        post_menu.get("gameState"),
+        baseline.get("gameState"),
+        world_model.get("gameState"),
+    )
+    return str(game_state) if game_state not in (None, "") else None
+
+
+def _status_world_model_object_total(status: dict[str, Any]) -> int | None:
+    brain = _status_brain(status)
+    world_model = _dict(status.get("worldModelSummary") or brain.get("worldModelSummary"))
+    metadata = _dict(world_model.get("metadata"))
+    for value in (
+        status.get("worldModelObjectTotal"),
+        brain.get("worldModelObjectTotal"),
+        world_model.get("objectTotal"),
+        world_model.get("objectCount"),
+        metadata.get("objectTotal"),
+        metadata.get("objectCount"),
+    ):
+        parsed = _int(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _loaded_scene_problem(status: dict[str, Any]) -> dict[str, Any]:
+    bootstrap = _dict(status.get("bootstrapState") or _status_brain(status).get("bootstrapState"))
+    freshness = _dict(status.get("liveProcessorFreshness") or _status_brain(status).get("liveProcessorFreshness"))
+    loaded_verified = _bool(_first_value(status.get("loadedSceneVerified"), bootstrap.get("loadedSceneVerified")))
+    game_state = _status_game_state(status)
+    object_total = _status_world_model_object_total(status)
+    tick_fresh = _bool(_first_value(
+        status.get("clientTickHotFresh"),
+        status.get("pluginSnapshotFresh"),
+        freshness.get("freshByMillis"),
+    ))
+    reasons: list[str] = []
+    if loaded_verified is False:
+        reasons.append("loaded_scene_not_verified")
+    if game_state and game_state != "LOGGED_IN":
+        reasons.append(f"game_state_{game_state.lower()}")
+    if object_total == 0:
+        reasons.append("world_model_object_total_zero")
+    if tick_fresh is False:
+        reasons.append("live_scene_not_fresh")
+    return {
+        "blocking": bool(reasons),
+        "reasons": reasons,
+        "gameState": game_state,
+        "loadedSceneVerified": loaded_verified,
+        "worldModelObjectTotal": object_total,
+        "clientTickHotFresh": tick_fresh,
+    }
 
 
 def _completion_payload(
@@ -731,6 +818,169 @@ def _target_resource_projection_state(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _point_from_canvas_like(value: Any) -> tuple[float, float] | None:
+    value = _dict(value)
+    x = _float(value.get("canvasX", value.get("x")))
+    y = _float(value.get("canvasY", value.get("y")))
+    if x is None or y is None:
+        return None
+    return x, y
+
+
+def _service_exposure_metrics(target: dict[str, Any], projection: dict[str, Any], safe: dict[str, Any]) -> dict[str, Any]:
+    point = (
+        _point_from_canvas_like(safe)
+        or _point_from_canvas_like(projection.get("aimPoint"))
+        or _point_from_canvas_like(projection.get("canvasPoint"))
+        or _point_from_canvas_like(target.get("aimPoint"))
+    )
+    edge_distance = _float(
+        safe.get("distanceToViewportEdgePx")
+        if safe.get("distanceToViewportEdgePx") is not None
+        else safe.get("distanceToCanvasEdgePx")
+        if safe.get("distanceToCanvasEdgePx") is not None
+        else projection.get("edgeDistancePx")
+    )
+    if edge_distance is None and point is not None:
+        x, y = point
+        edge_distance = min(x, 765.0 - x, y, 503.0 - y)
+    area_px = _float(
+        safe.get("clippedVisibleAreaPx")
+        if safe.get("clippedVisibleAreaPx") is not None
+        else projection.get("clippedVisibleAreaPx")
+        if projection.get("clippedVisibleAreaPx") is not None
+        else projection.get("visibleAreaPx")
+    )
+    ratio = _float(
+        safe.get("clippedVisibleAreaRatio")
+        if safe.get("clippedVisibleAreaRatio") is not None
+        else projection.get("clippedVisibleAreaRatio")
+        if projection.get("clippedVisibleAreaRatio") is not None
+        else projection.get("visibleAreaRatio")
+    )
+    centrality = None
+    comfortable_region = False
+    if point is not None:
+        x, y = point
+        normalized_distance = max(abs(x - 382.5) / 382.5, abs(y - 251.5) / 251.5)
+        centrality = max(0.0, min(1.0, 1.0 - normalized_distance))
+        margin_x = 765.0 * (1.0 - SERVICE_COMFORTABLE_REGION_FRACTION) / 2.0
+        margin_y = 503.0 * (1.0 - SERVICE_COMFORTABLE_REGION_FRACTION) / 2.0
+        comfortable_region = bool(margin_x <= x <= 765.0 - margin_x and margin_y <= y <= 503.0 - margin_y)
+    safe_available = bool(
+        _projection_point_is_sentinel(safe.get("rawAimPoint") or projection.get("aimPoint") or target.get("aimPoint")) is False
+        and (
+            projection.get("actionableByCanvas") is True
+            or safe.get("actionable") is True
+            or str(safe.get("status") or "").upper() == "PASS"
+        )
+    )
+    visible_area_ok = bool(area_px is None or area_px >= SERVICE_MIN_VISIBLE_AREA_PX) and bool(
+        ratio is None or ratio >= SERVICE_MIN_VISIBLE_AREA_RATIO
+    )
+    edge_ok = bool(edge_distance is not None and edge_distance >= SERVICE_MIN_EDGE_DISTANCE_PX)
+    if _bool(safe.get("rawCenterInsideViewport")) is False and edge_distance is not None and edge_distance < SERVICE_COMFORTABLE_EDGE_DISTANCE_PX:
+        comfortable_region = False
+    usable = bool(safe_available and visible_area_ok and edge_ok and comfortable_region and safe.get("uiBlocked") is not True)
+    edge_sliver = bool(
+        safe_available
+        and (
+            (edge_distance is not None and edge_distance < SERVICE_MIN_EDGE_DISTANCE_PX)
+            or (area_px is not None and area_px < SERVICE_MIN_VISIBLE_AREA_PX)
+            or (ratio is not None and ratio < SERVICE_MIN_VISIBLE_AREA_RATIO)
+        )
+    )
+    return {
+        "safeAimPointAvailable": safe_available,
+        "usableExposureAvailable": usable,
+        "edgeSliverVisible": edge_sliver,
+        "visibleAreaPx": area_px,
+        "visibleAreaRatio": ratio,
+        "edgeDistancePx": edge_distance,
+        "centralityScore": round(centrality, 3) if centrality is not None else None,
+        "comfortableViewRegionMet": comfortable_region,
+    }
+
+
+def _target_service_projection_state(status: dict[str, Any]) -> dict[str, Any]:
+    target: dict[str, Any] = {}
+    brain = _status_brain(status)
+    route = _dict(brain.get("serviceRouteContext") or status.get("serviceRouteContext"))
+    service = _dict(brain.get("serviceContext") or status.get("serviceContext"))
+    generic = generic_state(status)
+    for value in (
+        route.get("visibleServiceTarget"),
+        route.get("selectedServiceObject"),
+        service.get("bestServiceCandidate"),
+        service.get("bestServiceTarget"),
+        service.get("target"),
+        generic.get("activeIntentTarget"),
+        status.get("selectedTarget"),
+        status.get("activeIntentTarget"),
+    ):
+        if isinstance(value, dict) and value:
+            target = value
+            break
+    projection = _dict(target.get("projectionStatus") or target.get("projection"))
+    safe = _dict(target.get("safeAimPoint"))
+    raw_aim = (
+        _dict(projection.get("aimPoint"))
+        or _dict(projection.get("canvasLocation"))
+        or target.get("rawAimPoint")
+        or target.get("aimPoint")
+        or target.get("canvasAimPoint")
+    )
+    if isinstance(safe.get("rawAimPoint"), dict):
+        raw_aim = safe.get("rawAimPoint")
+    projection_sentinel = _projection_point_is_sentinel(raw_aim)
+    safe_available = bool(
+        projection_sentinel is False
+        and (
+            projection.get("actionableByCanvas") is True
+            or safe.get("actionable") is True
+            or str(safe.get("status") or "").upper() == "PASS"
+        )
+    )
+    exposure_metrics = _service_exposure_metrics(target, projection, safe)
+    exposure_metrics["safeAimPointAvailable"] = bool(safe_available)
+    classification = str(projection.get("classification") or "")
+    if not classification:
+        if projection_sentinel:
+            classification = "projection_sentinel"
+        elif safe_available:
+            classification = "safe"
+        elif not target:
+            classification = "target_missing"
+        elif projection.get("onScreen") is False or target.get("onScreen") is False:
+            classification = "offscreen"
+        elif _bool(target.get("geometryAvailable")) is False or str(target.get("geometryStatus") or "") == "missing":
+            classification = "no_projection"
+        elif safe and safe.get("actionable") is False:
+            classification = str(safe.get("rejectionReason") or "no_safe_aimpoint")
+        else:
+            classification = "unknown"
+    result = {
+        "targetPresent": bool(target),
+        "targetName": target.get("targetName") or target.get("name"),
+        "targetKey": target.get("targetKey") or target.get("objectKey"),
+        "worldLocation": target.get("worldLocation")
+        or {
+            "worldX": target.get("worldX"),
+            "worldY": target.get("worldY"),
+            "plane": target.get("plane"),
+        },
+        "classification": classification,
+        "safeAimPointAvailable": safe_available,
+        "projectionSentinel": projection_sentinel,
+        "safeAimPointReason": projection.get("safeAimPointReason") or safe.get("rejectionReason"),
+        "canvasPoint": projection.get("canvasPoint") or raw_aim,
+        "canvasBounds": projection.get("canvasBounds") or target.get("bounds") or safe.get("bounds"),
+    }
+    result.update(exposure_metrics)
+    result["safeAimPointAvailable"] = bool(safe_available)
+    return result
+
+
 def _projection_recovery_improved(before: dict[str, Any], after: dict[str, Any]) -> bool:
     if after.get("safeAimPointAvailable") is True:
         return True
@@ -848,6 +1098,79 @@ def verify_expected_result(
         observed["warnings"].append("resource projection recovery waiting for refreshed projection")
         observed["resourceProjectionRecoveryClassification"] = "resource_projection_recovery_waiting"
         return _finish(observed, status="WARN", result="resource_projection_recovery_waiting", outcome="still_waiting", complete=False, next_allowed=False)
+    if action == "service_view_recovery":
+        before_projection = _target_service_projection_state(before)
+        after_projection = _target_service_projection_state(after)
+        liveness_after = _loaded_scene_problem(after)
+        after_proposal_action = None
+        after_proposal_reason = None
+        after_proposal_target = None
+        try:
+            after_proposal = build_action_proposal(after)
+            after_proposal_action = after_proposal.proposed_action
+            after_proposal_reason = after_proposal.reason
+            after_proposal_target = after_proposal.target_name
+        except Exception as error:  # noqa: BLE001
+            observed["warnings"].append(f"post-camera service proposal rebuild failed: {type(error).__name__}: {error}")
+        observed["projectionBefore"] = before_projection
+        observed["projectionAfter"] = after_projection
+        observed["postCameraProposal"] = {
+            "proposedAction": after_proposal_action,
+            "reason": after_proposal_reason,
+            "targetName": after_proposal_target,
+        }
+        observed["livenessAfter"] = liveness_after
+        observed["serviceViewRecovery"] = True
+        if liveness_after.get("blocking"):
+            _add_signal(observed, "loaded_scene_unavailable")
+            observed["serviceViewRecoveryClassification"] = "service_view_recovery_liveness_lost"
+            observed["warnings"].append(
+                "service view recovery cannot be verified because the loaded game scene is no longer available"
+            )
+            return _finish(observed, status="FAIL", result="service_view_recovery_liveness_lost", outcome="interrupted", complete=True, next_allowed=False)
+        post_camera_still_recovery = after_proposal_action == "service_view_recovery"
+        if after_projection.get("usableExposureAvailable") is True and not post_camera_still_recovery:
+            _add_signal(observed, "service_usable_exposure_available")
+            _add_signal(observed, "service_safe_aimpoint_available")
+            observed["serviceViewRecoveryClassification"] = "service_camera_reacquire_success"
+            return _finish(observed, status="PASS", result="service_camera_reacquire_success", outcome="progress", complete=True, next_allowed=True)
+        if after_projection.get("usableExposureAvailable") is True and post_camera_still_recovery:
+            _add_signal(observed, "service_usable_exposure_available")
+            observed["serviceViewRecoveryClassification"] = "service_recovery_still_required"
+            observed["warnings"].append("post-camera proposal still requires service_view_recovery")
+            if timed_out:
+                return _finish(observed, status="FAIL", result="service_recovery_still_required", outcome="no_change_timeout", complete=True, next_allowed=False)
+            return _finish(observed, status="WARN", result="service_recovery_still_required", outcome="still_waiting", complete=False, next_allowed=False)
+        if after_projection.get("safeAimPointAvailable") is True:
+            _add_signal(observed, "service_safe_aimpoint_available")
+            if after_projection.get("edgeSliverVisible") is True:
+                _add_signal(observed, "service_edge_sliver_only")
+            observed["serviceViewRecoveryClassification"] = "service_insufficient_exposure"
+            observed["warnings"].append("service target has a safe aimpoint but is not comfortably exposed")
+            if timed_out:
+                observed["serviceViewRecoveryPartialProgress"] = True
+                observed["warnings"].append(
+                    "service camera recovery improved the target view; another bounded camera primitive is allowed"
+                )
+                return _finish(observed, status="WARN", result="service_insufficient_exposure", outcome="progress", complete=True, next_allowed=True)
+            return _finish(observed, status="WARN", result="service_insufficient_exposure", outcome="still_waiting", complete=False, next_allowed=False)
+        if _projection_recovery_improved(before_projection, after_projection):
+            _add_signal(observed, "service_projection_improved")
+            observed["serviceViewRecoveryClassification"] = "service_projection_improved_insufficient_exposure"
+            if timed_out:
+                observed["serviceViewRecoveryPartialProgress"] = True
+                observed["warnings"].append(
+                    "service camera recovery improved projection but exposure is still below policy"
+                )
+                return _finish(observed, status="WARN", result="service_projection_improved_insufficient_exposure", outcome="progress", complete=True, next_allowed=True)
+            return _finish(observed, status="WARN", result="service_projection_improved_insufficient_exposure", outcome="still_waiting", complete=False, next_allowed=False)
+        if timed_out:
+            observed["warnings"].append("service view recovery did not expose a safe service click point")
+            observed["serviceViewRecoveryClassification"] = "service_view_recovery_failed"
+            return _finish(observed, status="FAIL", result="service_view_recovery_failed", outcome="no_change_timeout", complete=True, next_allowed=False)
+        observed["warnings"].append("service view recovery waiting for refreshed projection")
+        observed["serviceViewRecoveryClassification"] = "service_view_recovery_waiting"
+        return _finish(observed, status="WARN", result="service_view_recovery_waiting", outcome="still_waiting", complete=False, next_allowed=False)
     if action == "open_service":
         bank_open = _bank_open(after)
         if bank_open is True or _bool(context_value(after, "bankUiContext", "bankRootVisible", "bankRootVisible")) is True:

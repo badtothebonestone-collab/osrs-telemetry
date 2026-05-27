@@ -39,7 +39,7 @@ def status_for(
     camera_viewport=None,
     dialogue_state=None,
 ):
-    active_target = active_target or {"targetName": "Oak tree", "classId": "tree", "aimPoint": aim(110, 130)}
+    active_target = active_target or {"targetName": "Tree", "classId": "tree", "id": 1278, "aimPoint": aim(110, 130)}
     status = {
         "brain": {
             "latestTick": latest_tick,
@@ -113,9 +113,120 @@ class ActionProposalTest(unittest.TestCase):
 
         self.assertEqual(proposal.proposed_action, "select_resource_target")
         self.assertEqual(proposal.target_kind, "resource")
-        self.assertEqual(proposal.target_name, "Oak tree")
+        self.assertEqual(proposal.target_name, "Tree")
         self.assertEqual(proposal.suggested_click_point, {"x": 110, "y": 130})
         self.assertEqual(proposal.status, "PASS")
+
+    def test_service_context_policy_does_not_force_service_before_inventory_full(self):
+        proposal = build_action_proposal(
+            status_for(
+                free_slots=2,
+                inventory_full=False,
+                service={"serviceNeeded": True, "serviceRequired": True, "serviceReady": False},
+                pathing={
+                    "pathingNeeded": True,
+                    "nextWaypointTile": {"worldX": 3201, "worldY": 3200, "plane": 0},
+                    "nextWaypointAimPoint": aim(260, 280),
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertEqual(proposal.target_kind, "resource")
+
+    def test_static_index_resource_candidate_is_live_resource_source(self):
+        proposal = build_action_proposal(
+            status_for(
+                active_target={
+                    "targetName": "Tree",
+                    "classId": "tree",
+                    "id": 1278,
+                    "worldX": 3205,
+                    "worldY": 3240,
+                    "plane": 0,
+                    "onScreen": True,
+                    "geometryAvailable": True,
+                    "aimPoint": aim(110, 130),
+                    "source": {"type": "world_targets", "fileType": "world", "staticIndex": True},
+                }
+            )
+        )
+
+        payload = proposal.to_dict()
+        self.assertEqual(payload["actionTargetSource"], "live_resource_candidate")
+        self.assertEqual(payload["targetExplanation"]["actionTargetSource"], "live_resource_candidate")
+
+    def test_unknown_skill_resource_reacquire_replaces_oak_with_basic_tree(self):
+        oak = {
+            "targetName": "Oak tree",
+            "classId": "tree",
+            "id": 10820,
+            "worldX": 3205,
+            "worldY": 3240,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(110, 130),
+        }
+        tree = {
+            "targetName": "Tree",
+            "classId": "tree",
+            "id": 1278,
+            "worldX": 3191,
+            "worldY": 3252,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "qualityScore": 80,
+            "aimPoint": aim(210, 230),
+        }
+        status = status_for(active_target=oak, overlay={"selectedMarker": oak, "markers": [oak, tree]})
+        status["brain"]["profileCandidates"] = [oak, tree]
+        status["profileCandidates"] = [oak, tree]
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertEqual(proposal.target_name, "Tree")
+        self.assertEqual(proposal.suggested_click_point, {"x": 210, "y": 230})
+        self.assertEqual(proposal.target_explanation["resourceSelectionReason"], "preferred_skill_eligible_resource_candidate")
+
+    def test_unknown_skill_does_not_reacquire_oak_after_basic_tree_suppression(self):
+        oak = {
+            "targetName": "Oak tree",
+            "classId": "tree",
+            "id": 10820,
+            "worldX": 3205,
+            "worldY": 3240,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(110, 130),
+            "targetKey": "oak-target",
+        }
+        tree = {
+            "targetName": "Tree",
+            "classId": "tree",
+            "id": 1278,
+            "worldX": 3191,
+            "worldY": 3252,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "qualityScore": 80,
+            "aimPoint": aim(210, 230),
+            "targetKey": "tree-target",
+        }
+        status = status_for(active_target=tree, overlay={"selectedMarker": tree, "markers": [tree, oak]})
+        status["brain"]["profileCandidates"] = [tree, oak]
+        status["profileCandidates"] = [tree, oak]
+        status["suppressedResourceTargetKeys"] = ["tree-target"]
+
+        proposal = build_action_proposal(status)
+
+        self.assertNotEqual(proposal.target_name, "Oak tree")
+        self.assertFalse(proposal.executable)
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
 
     def test_service_ready_bank_closed_proposes_open_service(self):
         proposal = build_action_proposal(
@@ -271,6 +382,96 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.proposed_action, "navigate_to_service")
         self.assertEqual(proposal.target_kind, "path_tile")
         self.assertEqual(proposal.reason, "pathing_to_service")
+
+    def test_static_route_prior_is_advisory_not_executable(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="return_to_resource",
+                active_intent="return_to_resource_area",
+                inventory_full=False,
+                free_slots=28,
+                active_target=None,
+                bank_operation={"operationNeeded": False, "bankingComplete": True, "resourceItemsHeld": 0},
+                resource_return={
+                    "returnDestinationAvailable": True,
+                    "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                    "resourceTargetCurrentlyVisible": False,
+                },
+                return_route={
+                    "schema": "return_route_context.v1",
+                    "returnRouteId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                    "state": "return_route_ready",
+                    "currentNavigationTarget": {
+                        "targetName": "Lumbridge Castle west approach return",
+                        "classId": "resource_return",
+                        "targetType": "tile",
+                        "worldX": 3203,
+                        "worldY": 3238,
+                        "plane": 0,
+                        "source": "static_route_prior",
+                    },
+                },
+                pathing={},
+                bank_ui={"bankOpen": False},
+            )
+        )
+
+        payload = proposal.to_dict()
+        self.assertEqual(proposal.proposed_action, "return_to_resource_area")
+        self.assertEqual(proposal.target_kind, "path_tile")
+        self.assertFalse(proposal.executable)
+        self.assertEqual(payload["actionTargetSource"], "static_route_prior")
+        self.assertEqual(payload["actionability"], "advisory_only")
+        self.assertEqual(proposal.target_explanation["advisoryTargetSource"], "static_route_prior")
+
+    def test_static_route_prior_can_be_replaced_by_local_frontier_waypoint(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="return_to_resource",
+                active_intent="return_to_resource_area",
+                inventory_full=False,
+                free_slots=28,
+                active_target=None,
+                bank_operation={"operationNeeded": False, "bankingComplete": True, "resourceItemsHeld": 0},
+                resource_return={
+                    "returnDestinationAvailable": True,
+                    "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                    "resourceTargetCurrentlyVisible": False,
+                },
+                return_route={
+                    "schema": "return_route_context.v1",
+                    "returnRouteId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                    "state": "return_route_ready",
+                    "currentNavigationTarget": {
+                        "targetName": "Lumbridge Castle west approach return",
+                        "classId": "resource_return",
+                        "targetType": "tile",
+                        "worldX": 3203,
+                        "worldY": 3238,
+                        "plane": 0,
+                        "source": "static_route_prior",
+                    },
+                },
+                pathing={
+                    "pathingNeeded": True,
+                    "nextWaypointTile": {"worldX": 3200, "worldY": 3239, "plane": 0},
+                    "predictedPathTiles": [
+                        {"worldX": 3200, "worldY": 3239, "plane": 0},
+                        {"worldX": 3201, "worldY": 3239, "plane": 0},
+                        {"worldX": 3202, "worldY": 3238, "plane": 0},
+                    ],
+                },
+                bank_ui={"bankOpen": False},
+            )
+        )
+
+        payload = proposal.to_dict()
+        self.assertEqual(proposal.proposed_action, "return_to_resource_area")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.target_tile, {"worldX": 3202, "worldY": 3238, "plane": 0})
+        self.assertEqual(payload["actionTargetSource"], "local_frontier_waypoint")
+        self.assertEqual(payload["actionability"], "needs_live_projection")
+        self.assertEqual(proposal.target_explanation["advisoryTargetSource"], "static_route_prior")
 
     def test_goal_directed_service_fallback_metadata_reaches_navigation_proposal(self):
         proposal = build_action_proposal(
@@ -467,6 +668,191 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_explanation["safeAimPoint"]["status"], "PASS")
         self.assertGreaterEqual(len(proposal.target_explanation["safeAimPoint"]["sampledAimpoints"]), 3)
 
+    def test_route_ready_offscreen_service_target_triggers_service_view_recovery(self):
+        service_target = {
+            "targetName": "Bank Deposit Box",
+            "classId": "deposit_box",
+            "targetType": "sceneObject",
+            "id": 27291,
+            "worldX": 3209,
+            "worldY": 3221,
+            "plane": 2,
+            "aimPoint": aim(1793, 1935),
+            "actions": ["Bank", "Collect", "Deposit-box"],
+            "expectedOptions": ["Bank", "Use", "Deposit"],
+            "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+            "routeStepIndex": 5,
+            "routeStepType": "service_interact",
+            "projectionStatus": {
+                "geometryAvailable": True,
+                "onScreen": False,
+                "visible": False,
+                "actionableByCanvas": False,
+                "aimPoint": {"canvasX": 1793, "canvasY": 1935, "source": "canvasLocation"},
+                "classification": "offscreen",
+            },
+            "routeRelevance": {"relevanceStatus": "PASS"},
+        }
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 1},
+            service_route={
+                "schema": "service_route_context.v1",
+                "routeAvailable": True,
+                "routeStepStatus": "service_target_actionable",
+                "currentStepIndex": 5,
+                "currentStep": {"type": "service_interact", "label": "Lumbridge Castle bank", "expectedOptions": ["Bank", "Use"]},
+                "actionReady": True,
+                "visibleServiceTarget": service_target,
+            },
+            bank_ui={"bankOpen": False},
+            camera_viewport={
+                "canvasWidth": 765,
+                "canvasHeight": 503,
+                "viewportXOffset": 0,
+                "viewportYOffset": 0,
+                "viewportWidth": 765,
+                "viewportHeight": 503,
+                "cameraYaw": 32,
+                "cameraPitch": 383,
+            },
+        )
+        status["playerLocation"] = {"worldX": 3206, "worldY": 3229, "plane": 2}
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "service_view_recovery")
+        self.assertEqual(proposal.target_kind, "service_recovery")
+        self.assertFalse(proposal.suggested_click_point)
+        self.assertEqual(proposal.key_action["type"], "camera_reacquire")
+        self.assertEqual(proposal.key_action["command"], "yaw_right_pitch_up")
+        exposure = proposal.target_explanation["serviceTargetExposure"]
+        self.assertEqual(exposure["serviceTargetKind"], "deposit_box")
+        self.assertTrue(exposure["shouldAttemptCameraExposure"])
+        self.assertEqual(exposure["currentProjectionStatus"], "offscreen")
+        self.assertEqual(exposure["finalDecision"], "service_view_recovery")
+        self.assertEqual(exposure["targetBearing"], 907)
+        self.assertEqual(exposure["yawErrorToTarget"], 875)
+        self.assertEqual(exposure["targetViewState"]["schema"], "target_view_state.v1")
+
+    def test_service_target_edge_sliver_triggers_service_view_recovery(self):
+        service_target = {
+            "targetName": "Bank Deposit Box",
+            "classId": "deposit_box",
+            "targetType": "sceneObject",
+            "id": 27291,
+            "worldX": 3210,
+            "worldY": 3217,
+            "plane": 2,
+            "aimPoint": {"canvasX": 6, "canvasY": 93},
+            "bounds": {"x": -1, "y": 78, "width": 28, "height": 30},
+            "actions": ["Bank", "Use", "Deposit"],
+            "expectedOptions": ["Bank", "Use", "Deposit"],
+            "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+            "routeStepIndex": 5,
+            "routeStepType": "service_interact",
+            "safeAimPoint": {
+                "status": "PASS",
+                "actionable": True,
+                "canvasX": 6,
+                "canvasY": 93,
+                "distanceToViewportEdgePx": 6,
+                "clippedVisibleAreaPx": 756.0,
+                "clippedVisibleAreaRatio": 0.75,
+                "rawCenterInsideViewport": False,
+            },
+            "routeRelevance": {"relevanceStatus": "PASS"},
+        }
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 1},
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeAvailable": True,
+                    "routeStepStatus": "service_target_actionable",
+                    "currentStepIndex": 5,
+                    "currentStep": {"type": "service_interact", "label": "Lumbridge Castle bank", "expectedOptions": ["Bank", "Use"]},
+                    "actionReady": True,
+                    "visibleServiceTarget": service_target,
+                },
+                bank_ui={"bankOpen": False},
+                camera_viewport={"canvasWidth": 765, "canvasHeight": 503, "viewportXOffset": 0, "viewportYOffset": 0, "viewportWidth": 765, "viewportHeight": 503},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "service_view_recovery")
+        exposure = proposal.target_explanation["serviceTargetExposure"]
+        self.assertTrue(exposure["edgeSliverVisible"])
+        self.assertFalse(exposure["usableExposureThresholdMet"])
+        self.assertEqual(exposure["exposureResult"], "edge_sliver_only")
+        self.assertEqual(exposure["cameraExposureReason"], "service_object_edge_sliver")
+        self.assertEqual(exposure["finalDecision"], "service_view_recovery")
+
+    def test_service_target_below_world_model_viewport_triggers_recovery(self):
+        service_target = {
+            "targetName": "Bank booth",
+            "classId": "bank_related",
+            "targetType": "sceneObject",
+            "id": 27291,
+            "worldX": 3209,
+            "worldY": 3221,
+            "plane": 2,
+            "aimPoint": {"canvasX": 412, "canvasY": 350},
+            "clickboxBounds": {"x": 388, "y": 330, "width": 48, "height": 40},
+            "actions": ["Bank", "Use", "Deposit"],
+            "expectedOptions": ["Bank", "Use", "Deposit"],
+            "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+            "routeStepIndex": 5,
+            "routeStepType": "service_interact",
+            "routeRelevance": {"relevanceStatus": "PASS"},
+        }
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 1},
+            service_route={
+                "schema": "service_route_context.v1",
+                "routeAvailable": True,
+                "routeStepStatus": "service_target_actionable",
+                "currentStepIndex": 5,
+                "currentStep": {"type": "service_interact", "label": "Lumbridge Castle bank", "expectedOptions": ["Bank", "Use"]},
+                "actionReady": True,
+                "visibleServiceTarget": service_target,
+            },
+            bank_ui={"bankOpen": False},
+        )
+        status["worldModelCameraViewport"] = {
+            "viewportWidth": 512,
+            "viewportHeight": 334,
+            "viewportXOffset": 4,
+            "viewportYOffset": 4,
+            "canvasWidth": 765,
+            "canvasHeight": 503,
+        }
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "service_view_recovery")
+        self.assertFalse(proposal.suggested_click_point)
+        safe = proposal.target_explanation["safeAimPoint"]
+        self.assertEqual(safe["source"], "clippedClickboxInterior")
+        self.assertFalse(safe["rawCenterInsideViewport"])
+        exposure = proposal.target_explanation["serviceTargetExposure"]
+        self.assertTrue(exposure["edgeSliverVisible"])
+        self.assertFalse(exposure["usableExposureThresholdMet"])
+        self.assertEqual(exposure["finalDecision"], "service_view_recovery")
+
     def test_hover_confirmed_route_object_intercepts_waypoint_navigation(self):
         proposal = build_action_proposal(
             status_for(
@@ -638,6 +1024,42 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.proposed_action, "navigate_to_service")
         self.assertEqual(proposal.target_tile, predicted[0])
         self.assertEqual(proposal.target_explanation["routeWaypointSelection"]["reason"], "near_transition_precision")
+
+    def test_suppressed_navigation_waypoint_selects_alternate_route_tile(self):
+        predicted = [{"worldX": 3236 + step, "worldY": 3223, "plane": 0} for step in range(3)]
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceReady": False},
+            service_route={
+                "currentNavigationTarget": {
+                    "targetName": "Lumbridge Castle south entrance approach",
+                    "classId": "service_route_anchor",
+                }
+            },
+            pathing={
+                "pathingNeeded": True,
+                "nextWaypointTile": predicted[0],
+                "predictedPathTiles": predicted,
+                "destinationTile": predicted[-1],
+                "routeWaypointDistanceMode": "adaptive",
+                "routeWaypointNearTransition": True,
+            },
+        )
+        status["suppressedActionTargetKeys"] = ["None:3236:3223:0:service_route_anchor"]
+        status["brain"]["suppressedActionTargetKeys"] = ["None:3236:3223:0:service_route_anchor"]
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_tile, predicted[1])
+        selection = proposal.target_explanation["routeWaypointSelection"]
+        self.assertEqual(selection["reason"], "suppressed_waypoint_alternate")
+        self.assertEqual(selection["suppressedWaypointTile"], predicted[0])
+        self.assertIn("None:3236:3223:0:service_route_anchor", proposal.target_explanation["suppressedTargetKeysAtSelection"])
 
     def test_bank_readable_resources_held_deposit_inventory_available(self):
         proposal = build_action_proposal(
@@ -931,7 +1353,7 @@ class ActionProposalTest(unittest.TestCase):
             "actions": ["Chop down"],
             "aimPoint": aim(151, 174),
             "worldX": 3196,
-            "worldY": 3226,
+            "worldY": 3248,
             "plane": 0,
             "targetTick": 42,
         }
@@ -1108,8 +1530,8 @@ class ActionProposalTest(unittest.TestCase):
     def test_missing_click_point_warns_and_prevents_execution(self):
         proposal = build_action_proposal(
             status_for(
-                active_target={"targetName": "Oak tree", "classId": "tree"},
-                overlay={"selectedMarker": {"targetName": "Oak tree", "classId": "tree"}},
+                active_target={"targetName": "Tree", "classId": "tree", "id": 1278},
+                overlay={"selectedMarker": {"targetName": "Tree", "classId": "tree", "id": 1278}},
             )
         )
 
@@ -1208,6 +1630,187 @@ class ActionProposalTest(unittest.TestCase):
         self.assertFalse(proposal.executable)
         self.assertIn("safe_aimpoint", proposal.missing_capabilities)
         self.assertEqual(proposal.target_explanation["safeAimPoint"]["rejectionReason"], "no_visible_interactable_geometry")
+
+    def test_poor_edge_resource_view_triggers_camera_recovery_before_click(self):
+        edge_tree = {
+            "targetName": "Tree",
+            "classId": "tree",
+            "id": 1278,
+            "worldX": 3196,
+            "worldY": 3248,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": {"canvasX": 4, "canvasY": 180, "source": "clickboxCenter"},
+            "clickboxBounds": {"x": 0, "y": 160, "width": 24, "height": 42},
+        }
+
+        proposal = build_action_proposal(
+            status_for(
+                active_target=edge_tree,
+                resource_return={
+                    "returnDestinationAvailable": False,
+                    "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                    "worksiteRadiusTiles": 8,
+                },
+                camera_viewport={"canvasWidth": 765, "canvasHeight": 503, "viewportXOffset": 0, "viewportYOffset": 0, "viewportWidth": 765, "viewportHeight": 503},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "resource_view_recovery")
+        score = proposal.target_explanation["resourceViewScore"]
+        self.assertEqual(score["schema"], "resource_view_score.v1")
+        self.assertEqual(score["classification"], "poor_edge_resource_view")
+        self.assertEqual(proposal.target_explanation["resourceCameraTriggeredBy"], "resource_target_edge_rejected")
+
+    def test_good_resource_view_does_not_trigger_unnecessary_camera_recovery(self):
+        trees = [
+            {
+                "targetName": "Tree",
+                "classId": "tree",
+                "id": 1278,
+                "worldX": 3196 + index,
+                "worldY": 3248,
+                "plane": 0,
+                "onScreen": True,
+                "geometryAvailable": True,
+                "aimPoint": aim(220 + index * 70, 210),
+                "clickboxBounds": {"x": 205 + index * 70, "y": 185, "width": 36, "height": 48},
+                "qualityScore": 50 - index,
+            }
+            for index in range(3)
+        ]
+        status = status_for(
+            active_target=trees[0],
+            overlay={"selectedMarker": trees[0], "markers": trees},
+            resource_return={
+                "returnDestinationAvailable": False,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "worksiteRadiusTiles": 8,
+            },
+            camera_viewport={"canvasWidth": 765, "canvasHeight": 503, "viewportXOffset": 0, "viewportYOffset": 0, "viewportWidth": 765, "viewportHeight": 503},
+        )
+        status["brain"]["profileCandidates"] = trees
+        status["profileCandidates"] = trees
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertIn(proposal.target_explanation["resourceViewClassification"], {"good_resource_view", "usable_resource_view"})
+        self.assertFalse(proposal.target_explanation["resourceCameraRecoveryRecommended"])
+
+    def test_candidate_inside_worksite_outranks_far_visible_tree(self):
+        far = {
+            "targetName": "Tree",
+            "classId": "tree",
+            "id": 1278,
+            "worldX": 3218,
+            "worldY": 3268,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(240, 220),
+            "clickboxBounds": {"x": 224, "y": 196, "width": 36, "height": 48},
+            "qualityScore": 100,
+        }
+        near = {
+            "targetName": "Dead tree",
+            "classId": "tree",
+            "id": 1286,
+            "worldX": 3197,
+            "worldY": 3248,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(360, 220),
+            "clickboxBounds": {"x": 344, "y": 196, "width": 36, "height": 48},
+            "qualityScore": 5,
+        }
+        status = status_for(
+            active_target=far,
+            overlay={"selectedMarker": far, "markers": [far, near]},
+            resource_return={
+                "returnDestinationAvailable": False,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "worksiteRadiusTiles": 8,
+            },
+        )
+        status["brain"]["profileCandidates"] = [far, near]
+        status["profileCandidates"] = [far, near]
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertEqual(proposal.target_name, "Dead tree")
+        self.assertEqual(proposal.target_explanation["resourceViewScore"]["selectedTargetDistanceFromWorksite"], 1)
+
+    def test_oak_becomes_executable_when_woodcutting_level_is_sufficient(self):
+        oak = {
+            "targetName": "Oak tree",
+            "classId": "tree",
+            "id": 10820,
+            "worldX": 3196,
+            "worldY": 3248,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(260, 210),
+            "clickboxBounds": {"x": 240, "y": 188, "width": 42, "height": 54},
+            "qualityScore": 90,
+        }
+        tree = {
+            "targetName": "Tree",
+            "classId": "tree",
+            "id": 1278,
+            "worldX": 3197,
+            "worldY": 3248,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(360, 210),
+            "clickboxBounds": {"x": 344, "y": 188, "width": 36, "height": 48},
+            "qualityScore": 10,
+        }
+        status = status_for(active_target=oak, overlay={"selectedMarker": oak, "markers": [oak, tree]})
+        status["brain"]["woodcuttingLevel"] = 15
+        status["brain"]["profileCandidates"] = [oak, tree]
+        status["profileCandidates"] = [oak, tree]
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertEqual(proposal.target_name, "Oak tree")
+        self.assertEqual(proposal.target_explanation["resourceViewScore"]["lowLevelResourceCandidatesRejected"], 0)
+
+    def test_post_depletion_reacquisition_scores_resource_view_before_next_target(self):
+        edge_tree = {
+            "targetName": "Tree",
+            "classId": "tree",
+            "id": 1278,
+            "worldX": 3196,
+            "worldY": 3248,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": {"canvasX": 762, "canvasY": 210, "source": "clickboxCenter"},
+            "clickboxBounds": {"x": 746, "y": 188, "width": 42, "height": 54},
+        }
+
+        proposal = build_action_proposal(
+            status_for(
+                phase="recent_target_depletion_observed",
+                active_intent="post_depletion_reacquire",
+                active_target=edge_tree,
+                resource_return={
+                    "returnDestinationAvailable": False,
+                    "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                },
+                camera_viewport={"canvasWidth": 765, "canvasHeight": 503, "viewportXOffset": 0, "viewportYOffset": 0, "viewportWidth": 765, "viewportHeight": 503},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "resource_view_recovery")
+        self.assertEqual(proposal.target_explanation["resourceViewScore"]["viewGoal"], "post_resource_depletion_view")
 
     def test_suppressed_selected_target_reacquires_backup_from_status_overlay_context(self):
         selected = {

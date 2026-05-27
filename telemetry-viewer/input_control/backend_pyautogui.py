@@ -21,6 +21,8 @@ def scale_canvas_point_to_screen(
 
 class PyAutoGuiBackend:
     name = "pyautogui"
+    live_input_backend = True
+    software_input_backend = True
 
     def __init__(
         self,

@@ -1,6 +1,23 @@
 # Live Outputs
 
-Live outputs are generated state from the Python sidecar or plugin packet/cache paths. They are useful for diagnostics and visual QA, but the daemon session and current daemon status remain the action source of truth.
+Live outputs are generated state from the Python sidecar or plugin endpoint/cache
+paths. They are useful for diagnostics and visual QA, but the daemon session and
+current daemon status remain the action source of truth.
+
+The old append-only live packet archive has been removed from runtime. Normal
+live operation must not create `live_packets\`, `live-*.ndjson`, or
+`live-*.jsonl`. Historical files are legacy cleanup only and should be reported
+with `python telemetry-viewer\maintenance.py --live-packets-report`.
+
+Plugin configuration follows the current pipeline manifest. The normal settings
+surface exposes only Core, Snapshot Endpoint, and Overlay controls; developer
+diagnostics are hidden from the normal UI. Retired workflow, raw recording,
+frame capture, compact packet file/stream, and live packet archive keys are not
+normal UI controls. Check the current key registry and runtime status with:
+
+```powershell
+python telemetry-viewer\context_service.py --pipeline-health
+```
 
 ## Current Files
 
@@ -12,27 +29,30 @@ Live outputs are generated state from the Python sidecar or plugin packet/cache 
 | `live_status.json` | `live_target_processor.py` | `live_context_query.py`, diagnostics | Optional in snapshot-no-files daily mode | Latest processed tick/status age should be current | Context diagnostics report missing status; daemon `/status` is preferred for action | Debug status |
 | `live_activity_state.json` | `live_target_processor.py` | `live_context_query.py`, context service, activity/liveness diagnostics | Optional in snapshot-no-files daily mode | Should track latest processed activity/inventory tick | Activity/liveness answers may be incomplete | Context/debug state |
 | `live_navigation_summary.json` | `live_target_processor.py` | `live_context_query.py`, pathing/navigation diagnostics, inspector | Optional but useful for pathing QA | Should match current local collision/window tick when available | Navigation readiness becomes unknown or summary-only | Navigation debug state |
-| `live_event_timeline.jsonl` | `live_target_processor.py` | `live_context_query.py`, context service | Optional | Recent events should trail current live tick only by expected processing delay | Event-only context is empty | Debug timeline |
+| `live_event_timeline.jsonl` | `live_target_processor.py` when explicit file-output debugging is enabled | `live_context_query.py`, context service | Optional; not created by normal daemon runtime | Recent events should trail current live tick only by expected processing delay | Event-only context is empty | Bounded debug timeline |
 | `overlay_debug_state.json` | `live_core_daemon.py` / overlay state writer when enabled | `diagnose_live_readiness.py`, `diagnose_woodcutting_candidates.py`, `diagnose_overlay_state.py`, `diagnose_overlay_geometry.py`, `target_geometry_inspector.py` | Required for resource-target execution readiness when `--write-overlay-state` is expected | Must align with daemon/highlighter session and selected target | Readiness FAIL for target execution; visual diagnostics explain marker gaps | Highlighter/debug proof, not independent action truth |
 | `last_action_trace.json` | Executor/action lifecycle path when trace writing is explicitly enabled | Action lifecycle diagnostics and manual review | Optional | Last action only; not a rolling source | Diagnostics omit prior action trace | Debug trace |
 | `client_tick_hot.jsonl` | `execute_next_action.py --record-client-hot` only | Manual review, future training/debug analysis | Optional and off by default | Contains only compact samples from the current action run | No file effect on readiness; live readiness uses endpoint `client_tick_hot.v1` freshness when plugin-snapshot input is active | Debug recording, not source of truth |
-| `live_packet_index.json` and `latest_segment.txt` under `live_packets/` | Plugin compact packet writer or equivalent packet source | `live_packet_reader.py`, `inspect_live_packets.py`, daemon packet readers | Required only for compact packet file-source mode | Latest segment/tick should be current for file-source mode | Packet readers/daemon file-source mode cannot load latest packets | Packet-file source for file mode |
+| `live_packets\live-*.ndjson`, `live_packets\live-*.jsonl`, `live_packet_index.json`, `latest_segment.txt` | Removed | `maintenance.py` report/prune only | Never required | Legacy files may exist in old sessions | Runtime ignores them; maintenance can report/prune | Legacy cleanup only |
 | `overlay_state.json` / intent overlay state if present | Daemon overlay writer | Mission Control, overlay diagnostics | Optional unless a live run explicitly asks for overlay state | Should reflect current daemon intent and selected target | Overlay diagnostics WARN; action should use readiness gate | Human/debug overlay state |
 | `debug_bundles/<timestamp>_<reason>/bundle.json` plus optional `screenshot.png` | `execute_next_action.py` only when screenshot debug flags are supplied | Manual QA / Codex visual audit | Optional and off by default | Event-triggered snapshot of one action/transition/failure | Missing bundles have no effect on readiness or execution | Sparse evidence bundle, never runtime click truth |
 
 ## Rules
 
 - Do not add new continuous JSON or NDJSON runtime outputs during cleanup.
+- The live packet archive is removed. Do not reintroduce writers, readers,
+  config switches, or CLI fallbacks for `live_packets` or `live-*.ndjson/jsonl`.
 - Prefer daemon status and in-memory context for action decisions.
 - `127.0.0.1:8893` is not a live output file. It is the opt-in RuneLite Java `PluginSnapshotEndpoint`; snapshot-no-files daemon runs require it while `inputSourceActive=plugin-snapshot`.
 - `client_tick_hot.v1` is an endpoint payload, not a rolling file. It is sampled from the plugin hot cache and appears in `/snapshot` and daemon `/status` as `clientTickHot`; explicit need `client_tick_tail` returns bounded recent samples. For plugin-snapshot live actions, readiness requires this hot state to be present and fresh before execution can move/click. Stale-hot readiness reports include `gameState`, logged-in status, PostMenuSort/click ages, `staleReason`, and a recovery hint.
 - Optional `--record-client-hot` writes compact JSONL only when requested by the action command. It must remain bounded and must not become a default continuous runtime output.
 - `last_action_trace.json` / `action_trace.v2` may include `safeAimPoint`, `rawAimPoint`, sampled/rejected aimpoints, clicked-menu proof, target suppression/reacquisition, final reconciliation, pacing delay fields, `dialogue`, `humanInput`, and `cameraInput` when an action command explicitly records or prints the trace.
-- Use `live_file_core.py` for live file paths and safe loading.
+- Use `live_file_core.py` only for explicit bounded debug/latest-state files.
 - Use `live_session_core.py` for latest-session vs latest-live-session vs daemon-session selection.
 - Treat missing candidate files differently when snapshot-no-files disables file output.
 - Treat `overlay_debug_state.json` as required for resource-target execution readiness because it proves selected target/highlighter agreement.
-- `live_readiness.v2` is intent-aware. Overall context may warn when a resource target is absent from the current highlighter source, but `navigation_waypoint_action` can still have `actionReadiness.status=PASS` when route waypoint, input geometry, session freshness, plugin snapshot, and fresh client-tick hot-state requirements are satisfied.
+- `live_readiness.v2` is intent-aware. Overall context may warn when a resource target is absent from the current highlighter source, but `navigation_waypoint_action` can still have `actionReadiness.status=PASS` when route waypoint, input geometry, session freshness, plugin snapshot, and fresh client-tick hot-state requirements are satisfied. The report separates `applicableWarnings` from `nonApplicableContextWarnings`; stale resource target freshness is non-applicable during return navigation and applicable again for resource-object actions.
+- A newer filesystem `--latest-session` can be stale while the daemon/latest-live/highlighter session is fresh. Readiness reports this as `staleFileSessionContext` and keeps daemon/plugin state as the action source of truth.
 - Visible service-route objects can intercept waypoint walking. A live candidate or fresh hover such as `Climb-up Staircase` becomes a route-transition proposal before another `Walk here` waypoint. Generic `Climb Staircase` is allowed only as a route-transition dialogue opener when the current route step expects an up/down staircase prompt; final route success still requires a later plane/location/route change.
 - `dialogue_state.v1` is an endpoint/cache payload, not a rolling file. It exposes bounded chatbox prompt/options state for route-transition resolvers. When active, `interface_dialogue_choice_action` can select the route-correct option through `HumanInputController`, preferring number keys such as `1` for `Climb up the stairs.` and `2` for `Climb down the stairs.`.
 - `return_route_context.v1` is daemon status/brain context, not a new runtime
@@ -68,8 +88,140 @@ Live outputs are generated state from the Python sidecar or plugin packet/cache 
   here`, the executor records `volatileHoverZone`, skips the click before
   mouse-down, and reports `volatileHoverSkips` separately from actual clicks.
 - Executors gate live input on `actionReadiness.executionAllowed`, not on resource-only selected-target checks.
+- Action target source/actionability fields separate advice from execution.
+  `static_route_prior` and `route_context_goal` are advisory only; they can
+  guide pathing, but cannot be clicked. A live action must be upgraded to a
+  source such as `local_frontier_waypoint` plus fresh projection,
+  `live_projected_waypoint`, `live_route_object`, `live_service_object`,
+  `live_resource_candidate`, or `hover_discovered_object`.
+- When a stale/static proposal is encountered, the loop waits/reacquires once
+  within the relevant budget and reports `staleProposalDetected`,
+  `staleProposalSource`, `reacquireAttempted`, `reacquireResult`,
+  `freshTargetFound`, `freshTargetSource`, and `reasonIfNoFreshTarget`. If no
+  fresh executable target appears, the decision is wait/skip, not click.
+- Hover confirmation is keyed to the action intent. Navigation expects
+  `Walk here`; resources expect Tree/Oak `Chop`/`Chop down`; route transitions
+  expect the route-step climb/open option; service objects expect bank/use/deposit
+  options; dialogue choices expect the selected option/index. Structured
+  mismatch reasons include `hover_option_mismatch`,
+  `hover_target_mismatch`, `wrong_intent_matcher`, `stale_hover_sample`,
+  `menu_flip_mismatch`, and `target_source_mismatch`.
+- Resource proposals can report `resourceSelectionReason` such as
+  `preferred_skill_eligible_resource_candidate` when the active target is
+  replaced by a more appropriate live candidate. With no Woodcutting level
+  telemetry, a basic `Tree` outranks higher-level Oak/Willow candidates when
+  both are available; a known sufficient level allows the higher-level target
+  to rank normally.
+- VM coordinate resolution metadata is included in proposals/traces/bundles:
+  `coordinateSpace`, `scaleX`, `scaleY`, `screenPointBeforeScaling`,
+  `screenPointAfterScaling`, `windowBoundsSource`, and `canvasBoundsSource`.
+  `scaled_logical_to_physical` is the Windows/AWT logical window to pyautogui
+  physical pixel conversion used in the VMware guest.
+- Player location fields prefer authoritative baseline/player telemetry. If
+  only collision-window center is available, status/bundles label it as
+  `collision_window_center_proxy` with lower confidence.
 - `target_geometry_inspector.py --from-daemon --live` can use `overlay_debug_state.json` directly for visual/highlighter inspection when `live_candidates.jsonl` is intentionally absent.
 - JSON diagnostics should print to stdout and avoid writing new files unless the user supplies an explicit output path.
+
+## Retired Packet Archive Replacement
+
+- Current state: `context_service.py --query current-debug-context`
+- Current blocker: `context_service.py --query explain-current-blocker`
+- World/candidates: WorldModelCache plus Knowledge Fabric queries
+- Historical replay: `replay_scenario.v1`
+- Future script context: `script_authoring_context.v1`
+- Debug evidence: sparse visual debug bundles
+- Retained observations: bounded `session_memory.v1`
+- Legacy cleanup: `maintenance.py --live-packets-report` and
+  `maintenance.py --prune-legacy-live-packets --dry-run`
+
+## World Model Endpoint Payloads
+
+- `world_model_snapshot.v1` is served by the Java plugin snapshot endpoint when
+  `/snapshot` requests include world-model needs. It is endpoint data, not a
+  live output file.
+- The model covers the currently loaded local scene only. Out-of-scene
+  navigation still uses route priors, learned anchors, service anchors, and
+  local frontier progress until the next object/anchor enters the loaded scene.
+- Default live use should request compact payloads such as
+  `world_model_summary`, `route_object_census`, `resource_object_census`,
+  `service_object_census`, `pathing_frontier`, `projection_audit`, and
+  `view_quality_inputs`. `full_world_model_debug` is reserved for explicit
+  debug bundles or one-shot inspection.
+- Query responses are bounded by object/collision/projection caps. Cap and
+  freshness fields such as `worldModelAvailable`, `worldModelAgeMs`,
+  `objectCensusCapHit`, `collisionAvailable`,
+  `projectionAuditAvailable`, and `projectionCapHit` must be reported instead
+  of silently treating missing objects as absent from the game.
+- Projection budget is applied after the loaded-scene census is built. The
+  cache prioritizes nearby route/resource/service objects before lower-value
+  scene clutter, so a visible Tree or route transition should still receive
+  projection status even when the scene object census itself is capped.
+- Route, resource, and service object censuses are independent lanes. A route
+  staircase or bank object can be present in the world model even when resource
+  candidate caps or filters are saturated, and a basic Tree/Dead tree can remain
+  executable while Oak is visible but skill-locked.
+- Sparse visual debug bundles may copy the current compact evidence into
+  `world_model_summary.json`, `route_object_census.json`,
+  `resource_object_census.json`, `service_object_census.json`,
+  `projection_audit.json`, and `collision_frontier.json`. These files exist for
+  human/Codex comparison with screenshots, overlay state, and action traces;
+  they do not authorize clicks.
+- If daemon status does not already contain the world-model payloads, the bundle
+  writer may perform one compact read-only world-model query to populate these
+  evidence files. This remains debug evidence only and does not become a motor
+  or readiness path.
+
+## Knowledge Fabric Outputs
+
+- Knowledge Fabric is normally in memory. It is not a new continuous live file
+  stream and it does not change the action source of truth.
+- `knowledge_fabric_status.v1` summarizes whether the world model is fresh,
+  session memory is current, static libraries loaded, indexes built, caps hit,
+  and what query capabilities are available.
+- `knowledge_fabric_current_debug_context.v1` is the compact aggregate that
+  Codex should request first for live debugging. It includes live status,
+  readiness, world model summary, Fabric status, current blocker, action
+  proposal, resource/route/service candidates, pathing frontier, view quality,
+  overlay health, input integrity, latest trace/bundle summaries, session
+  memory, and static profile summary.
+- `knowledge_fabric_current_blocker_explanation.v1` is the compact blocker
+  diagnosis. It returns phase/state, intent, location, inventory, a primary
+  category, one-sentence summary, evidence, a recommended next step, and whether
+  a bounded live action is currently safe.
+- `live_world_index.v1` summarizes spatial, object/action, route object,
+  resource, service, projection, collision/frontier, and view-quality indexes
+  built from the current world-model payloads.
+- `session_memory.v1` may be stored under the current session at
+  `interaction_geometry/live/session_memory.json` only when explicitly updated
+  by a query/helper. It stores advisory resource areas, service anchors, route
+  objects, waypoint outcomes, menu-flip zones, camera outcomes, and area labels.
+  Old-session memory must not be used as executable live truth.
+- `static_knowledge_library.v1` is a compact summary of `service_routes.json`,
+  `target_profiles.json`, `target_library.json`, known skill requirements, area
+  hints, and advisory service anchors.
+- The optional MCP adapter is local/read-only and exposes tools/resources for
+  inspection. It does not expose live input, click, key, or camera execution.
+  The context service can expose the same aggregate through
+  `knowledge_current_debug_context` and `knowledge_current_blocker` needs.
+- `script_authoring_context.v1` is an explicit, user-triggered bundle under
+  `interaction_geometry/live/script_authoring_context/`. It contains a
+  manifest plus compact query outputs, object censuses, route/service/resource
+  evidence, pathing frontier, collision/projection/view-quality summaries,
+  overlay state, input-integrity status, trace excerpts, session memory, and
+  static library excerpts for future script/profile writing.
+- `replay_scenario.v1` is an explicit offline replay artifact under
+  `interaction_geometry/live/replay_scenarios/`. Replaying it runs candidate,
+  proposal, readiness, blocker, pathing, and view-quality reasoning without
+  live input or RuneLite.
+- `data_quality_report.v1` is included in script-authoring/debug evidence and
+  reports freshness, object count, collision/projection availability, caps,
+  truncation, missing sections, query failures, response sizes, query times,
+  confidence, and recommended fixes.
+- `debug_context_diff.v1` compares two bundle/context files for phase, route,
+  candidate, blocker, pathing, view-quality, cap, and memory changes.
+- `knowledge_fabric_handoff_summary.v1` is a concise current-state handoff for
+  the next Codex turn or human review.
 
 ## Visual Debug Bundles
 
@@ -84,9 +236,11 @@ flags include `--screenshot-on-failure`, `--screenshot-on-camera-recovery`,
 `--screenshot-on-lifecycle-transition`. Capturable reasons include route source
 mismatches, goal-directed fallback start, wall-hugging/path-blocked route
 states, alternate approach selection, service-anchor arrival, route-object
-reacquisition, route no-progress timeouts, edge-rejected waypoints,
-camera/resource recovery start/end, menu flip mismatch, unexpected current
-area, and final summary. A bundle contains `bundle.json`, the captured
+reacquisition, live target reacquisition after stale/static proposals,
+stale/static route-target blocks, hover-intent mismatches, target-source
+mismatches, stale proposal reacquire failures, route no-progress timeouts,
+edge-rejected waypoints, camera/resource recovery start/end, menu flip mismatch,
+unexpected current area, and final summary. A bundle contains `bundle.json`, the captured
 `screenshot.png` when screen capture succeeds, `daemon_status.json`,
 `overlay_debug_state.json` when available, and a compact action-trace excerpt.
 
@@ -94,9 +248,16 @@ area, and final summary. A bundle contains `bundle.json`, the captured
 path it records route mode, current route node/edge, selected service anchor,
 selected approach node, selected waypoint, route-source mismatch details,
 pathing reason, wall-loop classification, projection/safe-aimpoint summaries,
-client-tick hover/clicked-menu summaries, HumanInputController metrics when
-present, and the final decision (`clicked`, `skipped`, `waited`, `camera
-adjusted`, or `stopped safely`).
+resource view score/classification, worksite context when available,
+target source/actionability, stale proposal/reacquire status, client-tick
+hover/clicked-menu summaries, coordinate-scaling metadata,
+HumanInputController metrics when present, Knowledge Fabric evidence paths, and
+the final decision (`clicked`, `skipped`, `waited`, `camera adjusted`, or
+`stopped safely`).
+Knowledge Fabric bundle evidence includes `current_debug_context.json`,
+`explain_current_blocker.json`, resource/service/route candidates,
+`pathing_frontier.json`, `view_quality.json`, session memory, and static library
+summaries, plus `data_quality_report.json` and `handoff_summary.json`.
 
 Screenshots are evidence for humans and later debugging only. Runtime decisions
 still come from projection geometry, safe aimpoints, client-tick hover,
@@ -242,6 +403,30 @@ crash or unblock execution.
   candidates remain diagnostic only until recovery or fresh projection produces
   real canvas geometry.
 
+## Resource View Score
+
+- `resource_view_score.v1` describes whether the current camera is good enough
+  for resource candidate selection and chopping. It reports `worksiteId`,
+  `playerLocation`, `cameraYaw`, `cameraPitch`, visible/executable resource
+  counts, safe and central aimpoint counts, edge-clipped/offscreen/occluded
+  candidate counts, candidate spread, selected target world tile, worksite
+  distance, viewport-edge distance, visible-area ratio, hover readiness,
+  worksite-drift flag, score, and classification.
+- Classifications are `good_resource_view`, `usable_resource_view`,
+  `poor_edge_resource_view`, `poor_occluded_resource_view`,
+  `poor_single_candidate_view`, `needs_resource_camera_reacquire`,
+  `needs_worksite_recenter`, and `no_executable_resource_view`.
+- Poor resource views should produce a non-click `resource_view_recovery`
+  action before a chop click. Recovery keeps the target as the resource
+  cluster/worksite, sends bounded camera input through `HumanInputController`,
+  then re-reads daemon/plugin state and re-scores candidates.
+- Visual debug bundles for `poor_resource_view`,
+  `resource_camera_reacquire_start`, `resource_camera_reacquire_end`,
+  `resource_target_edge_rejected`, `worksite_drift_detected`,
+  `post_depletion_reacquire`, and `no_executable_resource_view` include the
+  score, classification, worksite context, safe aimpoint summary, and selected
+  target source/actionability.
+
 ## Pacing And Reconciliation
 
 - `--pacing-profile instant_debug` preserves the fastest loop for tests and focused debugging.
@@ -343,4 +528,118 @@ reacquisition logic runs rather than reopening a visible bank or deposit object.
 - Clicks include bounded profile-driven settle and hold timing unless an explicit compatible click-hold option is supplied.
 - Camera exposure still holds keys and samples projection/hover in a closed loop, but key holds and middle-mouse drag pulses are issued through the same governor.
 - Loop summaries and `action_trace.v2` report `inputProfile`, average mouse move time, average click hold, average reaction delay, camera hold min/avg/max, direction switches, and `directBackendBypassCount`.
+- Live summaries also report `liveInputBackend`,
+  `liveInputBackendRequired`, `softwareInputAllowed`, backend command counts,
+  and blocked command counts. Normal live execution should show Arduino
+  required, software not allowed, and `directBackendBypassCount=0`.
+- `ArduinoHIDBackend` reports `arduino_hid_backend_status.v1` with port,
+  baud, connected/identified/armed state, session token hash, command count,
+  ACK failures, timeouts, identity, capabilities, firmware protocol,
+  watchdog milliseconds, `stopAllSent`, and latest Arduino error. Live Arduino
+  output requires firmware protocol `arduino_hid.v1` with `stopAll=1`,
+  `watchdog=1`, and `resetSafe=1`; protocol mismatch is a fail-closed state.
+- Monitor-required live runs include `arduino_hid_monitor_status.v1` with
+  Raw Input keyboard/mouse proof, expected VID/PID match, injected and
+  lower-integrity-injected counters, latest Arduino event age, and
+  `monitorPass`/`monitorBlockReason`.
+- The local development indicator is
+  `telemetry-viewer\input_control\arduino_monitor.py`. It can run as a small
+  always-on-top overlay with:
+  `python telemetry-viewer\input_control\arduino_monitor.py --show-overlay --overlay-passive --overlay-no-focus --status-output interaction_geometry\live\input_integrity_status.json --vid VID_2341 --pid PID_8036 --com-port COM6`.
+  The same script also supports `--status-loop` or `--once` for terminal-only
+  checks, plus `--no-overlay` when a visible window might interfere with VM
+  focus.
+- The overlay/status file uses `input_integrity_status.v1`. It separates Raw
+  Input device identity from low-level hook injection flags:
+  `LLMHF_INJECTED`, `LLMHF_LOWER_IL_INJECTED`, `LLKHF_INJECTED`, and
+  `LLKHF_LOWER_IL_INJECTED`. PASS means the expected Arduino is present,
+  live backend is Arduino, bypass count is zero, and injected/lower-IL counts
+  are zero. It also shows firmware/protocol status, reset safety, `STOP_ALL`
+  availability, watchdog state, and firmware-reported keys/buttons currently
+  down. WARN keeps the overlay visible for development issues; FAIL blocks
+  monitor-required live execution.
+- Arduino status now includes `firmwareSafety` and `vmInputFocusSafety`.
+  Firmware safety is about the bridge releasing keys/buttons and supporting
+  STOP_ALL/watchdog/reset-safe behavior. VM focus safety is about whether the
+  overlay/monitor/VMware capture state may still be blocking normal guest
+  mouse control. A safe firmware state with unknown VM focus recovery remains
+  a WARN for post-test recovery.
+- `execute_next_action.py --input-integrity-self-test-no-move --backend
+  arduino --arduino-port COMx --no-overlay` performs STOP_ALL, handshake,
+  STATUS, ARM, STOP_ALL, DISARM, and final STATUS without sending MOVE, CLICK,
+  or KEY commands. Use it before tiny-move tests when VMware guest input focus
+  appears wedged.
+- `execute_next_action.py --arduino-pointer-calibration-test --backend
+  arduino --arduino-port COMx --allowed-window calibration --no-click` performs
+  a no-click closed-loop cursor calibration. It uses a RuneLite or dedicated
+  calibration allowed region, reads the Windows cursor position before and
+  after each relative HID chunk, stops if the cursor leaves the region or the
+  foreground window changes, and reports `arduino_pointer_calibration_test.v1`
+  plus per-target `arduino_closed_loop_move.v1` traces. It sends no clicks or
+  keys and always cleans up with STOP_ALL/DISARM.
+  The closed-loop mover now waits through a bounded settle/poll window after
+  each `OK MOVE`, records cursor and Raw Input timing, retries an ACKed
+  no-effect chunk a small bounded number of times, and judges calibration by
+  final target accuracy plus aggregate no-effect/retry counts rather than
+  requiring every individual chunk to land perfectly.
+- `execute_next_action.py --arduino-movement-diagnostics --backend arduino
+  --arduino-port COMx` runs a no-click/no-key sequence of small relative moves
+  (`+5/-5/+10/-10/+15/-15` on both axes), reports per-move ACK, Raw Input,
+  cursor delta, settle time, and reliability classification. Cursor movement
+  with coalesced Raw Input counters is reported separately from true no-effect
+  movement.
+- `execute_next_action.py --input-integrity-self-test --backend arduino
+  --arduino-port COMx --arduino-require-monitor --arduino-monitor-status
+  interaction_geometry\live\input_integrity_status.json` sends `STOP_ALL`,
+  verifies `PING`/`IDENTIFY`/`CAPS`/`STATUS`, arms the Arduino, sends only a
+  tiny safe pulse, sends `STOP_ALL`, checks Raw Input/injected-count deltas,
+  disarms in cleanup, restores focus to the requested target, and can require
+  user confirmation with `--require-user-control-confirmation`. It does not run
+  a game action.
+- `execute_next_action.py --arduino-usb-diagnostics --arduino-port COM6
+  --arduino-bootloader-port COM4` prints guest-visible Arduino USB/COM state
+  and host-side VMware `.vmx` autoconnect lines. Normal validation should not
+  reset or re-upload firmware; reconnect prompts are handled by host VMware
+  configuration, not by guest-side clicking.
+- The panic command
+  `python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --arduino-stop-all`
+  opens the serial bridge, sends `STOP_ALL`, prints the firmware response, and
+  exits. If the VM cannot run that command, use the reset button, then physical
+  USB unplug, then VMware Ctrl+Alt / Removable Devices recovery.
 - `manual_calibrated` is reserved for future manual-baseline data; it currently uses the natural envelope rather than reading a calibration file.
+
+Arduino RuneLite movement is fail-closed after any wild cursor behavior. Live
+`--execute` and `--hover-only` with `--backend arduino` now report
+`arduino_pointer_calibration_required` until the no-click calibration has been
+reviewed or an explicit unsafe override is supplied. Jagex Launcher automation
+is disabled by default; bootstrap/login output reports
+`launcherAutomationAllowed`, `launcherAutomationBlockedReason`, and
+`loginRecoveryMode`, and stops at manual login when launcher or credential
+surfaces are reached without `--allow-jagex-launcher-automation`.
+
+## External Knowledge And Authoring Outputs
+
+External OSRS knowledge is stored under:
+
+```text
+%USERPROFILE%\.osrs-telemetry\external_knowledge_cache
+```
+
+The cache contains bounded JSON files such as `item_id_map.json`,
+`item_name_map.json`, `object_knowledge.json`, `npc_knowledge.json`,
+`skill_requirements.json`, `location_knowledge.json`, `source_status.json`, and
+small `wiki_page_cache\` entries from explicit searches. These files are
+advisory static enrichment and do not replace live RuneLite truth.
+
+Useful commands:
+
+```powershell
+python telemetry-viewer\context_service.py --external-knowledge-status
+python telemetry-viewer\context_service.py --external-lookup-item-id 1511
+python telemetry-viewer\context_service.py --external-get-skill-requirement Oak
+python telemetry-viewer\context_service.py --probe-task "woodcutting and bank logs"
+```
+
+The cache has a default size budget of 500 MB. External API calls are disabled
+by default, require explicit refresh/search permission, use a descriptive
+User-Agent, and are never made from executor hot loops.

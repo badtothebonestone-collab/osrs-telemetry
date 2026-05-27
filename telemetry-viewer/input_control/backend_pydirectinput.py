@@ -5,6 +5,8 @@ import time
 
 class PyDirectInputBackend:
     name = "pydirectinput"
+    live_input_backend = True
+    software_input_backend = True
 
     def __init__(self, **_: object) -> None:
         self._pydirectinput = None

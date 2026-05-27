@@ -152,7 +152,7 @@ def build_snapshot(
     if write_debug_live_files is True:
         warnings.append("writeDebugLiveFiles is true in daily mode")
     if daily_mode == "snapshot-no-files" and compact_required is True:
-        warnings.append("compact packet files are required in snapshot-no-files mode")
+        warnings.append("retired live packet files are incorrectly marked required in snapshot-no-files mode")
 
     snapshot_status = "PASS"
     if warnings:

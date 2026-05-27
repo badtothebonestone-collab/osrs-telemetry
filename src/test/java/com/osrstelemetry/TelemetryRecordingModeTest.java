@@ -16,14 +16,14 @@ public class TelemetryRecordingModeTest
 	public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
 	@Test
-	public void liveCompactOnlyStartsWithoutRawTickEventOrFrameStreams() throws Exception
+	public void liveCompactOnlyStartsWithoutRawTickEventFrameOrLivePacketStreams() throws Exception
 	{
 		TelemetryWriter writer = newWriter(
 				TelemetryRecordingMode.LIVE_COMPACT_ONLY,
 				false,
 				false,
 				false,
-				true);
+				new PluginLiveCache(new Gson()));
 
 		writer.start();
 		try
@@ -33,10 +33,13 @@ public class TelemetryRecordingModeTest
 			assertFalse(writer.isRawEventRecordingEnabled());
 			assertFalse(writer.isFrameRecordingEnabled());
 			assertTrue(writer.isCompactLivePacketsEnabled());
+			assertTrue(writer.isLiveCacheEnabled());
+			assertFalse(writer.isCompactLivePacketFilesEnabled());
+			assertFalse(writer.isCompactLiveStreamEnabled());
 			assertFalse(Files.exists(session.resolve("ticks")));
 			assertFalse(Files.exists(session.resolve("events")));
 			assertFalse(Files.exists(session.resolve("frames")));
-			assertTrue(Files.exists(session.resolve("live_packets")));
+			assertFalse(Files.exists(session.resolve("live_packets")));
 		}
 		finally
 		{
@@ -49,7 +52,6 @@ public class TelemetryRecordingModeTest
 	{
 		TelemetryWriter writer = newWriter(
 				TelemetryRecordingMode.DEBUG_RECORDING,
-				true,
 				true,
 				true,
 				true);
@@ -73,15 +75,14 @@ public class TelemetryRecordingModeTest
 	}
 
 	@Test
-	public void compactStreamCanRunWithoutPacketFiles() throws Exception
+	public void livePacketRuntimeIsRemovedEvenWhenCacheIsEnabled() throws Exception
 	{
 		TelemetryWriter writer = newWriter(
 				TelemetryRecordingMode.LIVE_COMPACT_ONLY,
 				false,
 				false,
 				false,
-				false,
-				true);
+				new PluginLiveCache(new Gson()));
 
 		writer.start();
 		try
@@ -89,7 +90,12 @@ public class TelemetryRecordingModeTest
 			Path session = writer.getSessionDir();
 			assertTrue(writer.isCompactLivePacketsEnabled());
 			assertFalse(writer.isCompactLivePacketFilesEnabled());
-			assertTrue(writer.isCompactLiveStreamEnabled());
+			assertFalse(writer.isCompactLiveStreamEnabled());
+			assertTrue(writer.enqueueLivePacket(
+					"live_baseline_packet.v1",
+					7L,
+					"2026-05-11T00:00:00Z",
+					java.util.Map.of("gameState", "LOGGED_IN")));
 			assertFalse(Files.exists(session.resolve("live_packets")));
 		}
 		finally
@@ -104,8 +110,6 @@ public class TelemetryRecordingModeTest
 		PluginLiveCache cache = new PluginLiveCache(new Gson());
 		TelemetryWriter writer = newWriter(
 				TelemetryRecordingMode.LIVE_COMPACT_ONLY,
-				false,
-				false,
 				false,
 				false,
 				false,
@@ -138,10 +142,9 @@ public class TelemetryRecordingModeTest
 			TelemetryRecordingMode mode,
 			boolean rawTicks,
 			boolean rawEvents,
-			boolean frames,
-			boolean compactPackets)
+			boolean frames)
 	{
-		return newWriter(mode, rawTicks, rawEvents, frames, compactPackets, false);
+		return newWriter(mode, rawTicks, rawEvents, frames, null);
 	}
 
 	private TelemetryWriter newWriter(
@@ -149,19 +152,6 @@ public class TelemetryRecordingModeTest
 			boolean rawTicks,
 			boolean rawEvents,
 			boolean frames,
-			boolean compactPackets,
-			boolean compactStream)
-	{
-		return newWriter(mode, rawTicks, rawEvents, frames, compactPackets, compactStream, null);
-	}
-
-	private TelemetryWriter newWriter(
-			TelemetryRecordingMode mode,
-			boolean rawTicks,
-			boolean rawEvents,
-			boolean frames,
-			boolean compactPackets,
-			boolean compactStream,
 			PluginLiveCache liveCache)
 	{
 		return new TelemetryWriter(
@@ -186,19 +176,6 @@ public class TelemetryRecordingModeTest
 				10,
 				"RUNELITE_ONLY",
 				false,
-				compactPackets,
-				64,
-				5000,
-				512L * 1024L * 1024L,
-				16,
-				100,
-				compactStream,
-				"127.0.0.1",
-				0,
-				100,
-				true,
-				20,
-				10,
 				liveCache);
 	}
 }

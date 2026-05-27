@@ -8,7 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import build_world_target_geometry as world_builder
-import live_packet_reader
 import live_target_processor as live
 import select_target_candidates as candidate_builder
 from telemetry_paths import find_newest_session, get_sessions_dir
@@ -90,35 +89,6 @@ def request_snapshot(args) -> tuple[dict | None, str | None, int]:
     return payload if isinstance(payload, dict) else None, None, len(raw)
 
 
-def latest_projection_packet(session: Path) -> dict | None:
-    segment = live_packet_reader.latest_segment_path(session)
-    if not segment:
-        return None
-    latest = None
-    for result in live_packet_reader.iter_live_packets([segment], packet_type=live.COMPACT_PACKET_TYPES["projection"]):
-        if result.record:
-            latest = result.record
-    return latest
-
-
-def latest_compact_synthetic_tick(session: Path) -> dict | None:
-    segment = live_packet_reader.latest_segment_path(session)
-    if not segment:
-        return None
-    packets_by_tick: dict[int, list[dict]] = {}
-    for result in live_packet_reader.iter_live_packets([segment]):
-        if not result.record:
-            continue
-        tick = live.packet_tick(result.record)
-        if tick is None:
-            continue
-        packets_by_tick.setdefault(tick, []).append(result.record)
-    if not packets_by_tick:
-        return None
-    latest_tick = max(packets_by_tick)
-    return live.compact_packets_to_tick(packets_by_tick[latest_tick])
-
-
 def profile_diagnostics(session: Path | None, tick: dict | None, profile_id: str, limit: int) -> dict:
     if session is None or tick is None:
         return {
@@ -178,18 +148,11 @@ def profile_diagnostics(session: Path | None, tick: dict | None, profile_id: str
 
 
 def compact_projection_diagnostics(session: Path | None) -> dict:
-    if session is None:
-        return {"available": False, "reason": "session unavailable"}
-    packet = latest_projection_packet(session)
-    if not packet:
-        return {"available": False, "reason": "latest live_projection_packet.v1 not found"}
-    payload = packet.get("payload") if isinstance(packet.get("payload"), dict) else {}
-    diagnostics = live.projection_payload_diagnostics(payload)
     return {
-        "available": True,
-        "tick": packet.get("tick"),
-        "sequence": packet.get("sequence"),
-        "payloadDiagnostics": diagnostics,
+        "available": False,
+        "reason": "live packet NDJSON/JSONL archive is retired; compare against WorldModel/Knowledge Fabric instead",
+        "livePacketsRuntimeRemoved": True,
+        "livePacketWriterActive": False,
     }
 
 
@@ -336,7 +299,7 @@ def run_diagnostic(args, session: Path | None) -> dict:
     response, error, response_bytes = request_snapshot(args)
     response_schema = response.get("schema") if isinstance(response, dict) else None
     tick = live.plugin_snapshot_to_tick(response) if response_schema == "plugin_snapshot_response.v1" else None
-    compact_tick = latest_compact_synthetic_tick(session) if session else None
+    compact_tick = None
     response_error_code = response.get("errorCode") if isinstance(response, dict) and isinstance(response.get("errorCode"), str) else None
     response_status = response.get("status") if isinstance(response, dict) else None
     structured_endpoint_response = response_schema in {"plugin_snapshot_response.v1", "plugin_snapshot_error.v1"}
@@ -443,7 +406,7 @@ def tier_sweep_payload(args, session: Path | None) -> dict:
     if int((tiers.get("hot") or {}).get("candidates") or 0) <= 0 and int((tiers.get("expanded") or {}).get("candidates") or 0) > 0:
         recommendation = "expanded"
     elif (tiers.get("hot") or {}).get("status") == "FAIL" and (tiers.get("expanded") or {}).get("status") == "FAIL":
-        recommendation = "compact-packets"
+        recommendation = "inspect_world_model"
     return {
         "schema": "plugin_snapshot_tier_sweep.v1",
         "generatedAtUtc": live.utc_now(),

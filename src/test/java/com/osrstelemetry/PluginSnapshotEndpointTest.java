@@ -86,8 +86,8 @@ public class PluginSnapshotEndpointTest
 
 		Map<String, Object> apply = endpoint.presetPayload(request, false);
 		assertEquals("PASS", apply.get("status"));
-		assertEquals("LIVE_COMPACT_ONLY", store.values.get("telemetryRecordingMode"));
-		assertEquals("false", store.values.get("emitCompactLiveStream"));
+		assertFalse(store.values.containsKey("telemetryRecordingMode"));
+		assertFalse(store.values.containsKey("emitCompactLiveStream"));
 		assertFalse(store.values.containsKey("arbitraryKey"));
 	}
 
@@ -590,6 +590,68 @@ public class PluginSnapshotEndpointTest
 
 		assertEquals("WARN", response.get("status"));
 		assertTrue(((List<?>) response.get("warnings")).contains("baseline cache age exceeded maxAgeTicks"));
+	}
+
+	@Test
+	public void schemaReportsWorldModelNeeds()
+	{
+		PluginSnapshotEndpoint endpoint = endpoint(new PluginLiveCache(gson), 50, 1024 * 1024);
+
+		Map<String, Object> schema = endpoint.schemaPayload();
+
+		assertTrue(((List<?>) schema.get("supportedNeeds")).contains("world_model_summary"));
+		assertTrue(((List<?>) schema.get("supportedNeeds")).contains("route_object_census"));
+		assertEquals("world_model_snapshot.v1", schema.get("worldModelSchema"));
+	}
+
+	@Test
+	public void snapshotCanIncludeWorldModelQueryPayloads()
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		cache.update("live_baseline_packet.v1", 4L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				cache,
+				gson,
+				"127.0.0.1",
+				8893,
+				"",
+				50,
+				1024 * 1024,
+				false,
+				null,
+				new ClientTickHotState(4),
+				requests -> Map.of("schema", "tile_projection_response.v1", "status", "PASS", "tiles", List.of()),
+				(needs, request) -> Map.of(
+						"schema", "world_model_query_response.v1",
+						"snapshotSchema", "world_model_snapshot.v1",
+						"status", "PASS",
+						"payloads", Map.of(
+								"world_model_summary", Map.of("schema", "world_model_summary.v1", "objects", Map.of("total", 12)),
+								"resource_object_census", Map.of("schema", "resource_object_census.v1", "count", 2, "objects", List.of())),
+						"quality", Map.of(
+								"worldModelAvailable", true,
+								"worldModelAgeMs", 0,
+								"objectCensusCapHit", false,
+								"collisionAvailable", true,
+								"projectionAuditAvailable", true),
+						"sizing", Map.of("objectCount", 12)));
+		JsonObject request = new JsonObject();
+		JsonArray needs = new JsonArray();
+		needs.add("baseline");
+		needs.add("world_model_summary");
+		needs.add("resource_object_census");
+		request.add("needs", needs);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		Map<String, JsonElement> payloads = payloads(response);
+
+		assertEquals("PASS", response.get("status"));
+		assertTrue(payloads.containsKey("world_model_summary"));
+		assertTrue(payloads.containsKey("resource_object_census"));
+		assertNotNull(response.get("worldModel"));
+		assertFalse(((Map<?, ?>) response.get("worldModel")).containsKey("payloads"));
+		assertEquals(true, ((Map<?, ?>) response.get("worldModel")).get("payloadsMirroredInTopLevel"));
+		assertEquals(true, ((Map<?, ?>) response.get("worldModelQuality")).get("worldModelAvailable"));
 	}
 
 	private PluginSnapshotEndpoint endpoint(PluginLiveCache cache, int maxProjectionRefs, int maxResponseBytes)

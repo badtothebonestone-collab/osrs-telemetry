@@ -94,6 +94,8 @@ class PlayerContext:
     plane: int | None = None
     scene_x: int | None = None
     scene_y: int | None = None
+    location_source: str | None = None
+    location_confidence: float | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 

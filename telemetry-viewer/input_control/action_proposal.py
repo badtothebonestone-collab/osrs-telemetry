@@ -3,14 +3,29 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from candidate_core import explain_candidate, target_freshness_issue
+from candidate_core import (
+    explain_candidate,
+    preferred_woodcutting_resource_candidate,
+    target_freshness_issue,
+    target_matches,
+    woodcutting_level_from_context,
+    woodcutting_required_level,
+)
 import dialogue_core
 import safe_aimpoint_core
+import target_view_core
 
+from . import camera_control
 from .input_geometry import input_geometry_from_status, resolve_screen_click_point, source_canvas_size_from_status
 
 
 SCHEMA = "action_proposal.v1"
+
+SERVICE_MIN_VISIBLE_AREA_PX = 96.0
+SERVICE_MIN_VISIBLE_AREA_RATIO = 0.35
+SERVICE_MIN_EDGE_DISTANCE_PX = 32.0
+SERVICE_COMFORTABLE_EDGE_DISTANCE_PX = 48.0
+SERVICE_COMFORTABLE_REGION_FRACTION = 0.78
 
 KNOWN_ACTIONS = {
     "none",
@@ -19,6 +34,7 @@ KNOWN_ACTIONS = {
     "wait_for_resource_result",
     "navigate_to_service",
     "interact_service_route_object",
+    "service_view_recovery",
     "interface_dialogue_choice",
     "open_service",
     "deposit_inventory",
@@ -50,10 +66,14 @@ class ActionProposal:
     warnings: list[str] = field(default_factory=list)
     status: str = "PASS"
     source_tick: int | None = None
+    action_target_source: str | None = None
+    actionability: str | None = None
 
     @property
     def executable(self) -> bool:
         if self.proposed_action in {"none", "wait_for_context"}:
+            return False
+        if self.actionability in {"advisory_only", "stale", "blocked"}:
             return False
         if (
             self.target_kind == "path_tile"
@@ -85,6 +105,10 @@ class ActionProposal:
             "missingCapabilities": list(self.missing_capabilities),
             "warnings": list(self.warnings),
             "sourceTick": self.source_tick,
+            "actionTargetSource": self.action_target_source,
+            "actionability": self.actionability,
+            "staleProposalDetected": self.actionability == "stale",
+            "staleProposalSource": self.action_target_source if self.actionability == "stale" else None,
             "executable": self.executable,
         }
 
@@ -142,6 +166,23 @@ def _int(value: Any, default: int = 0) -> int:
         except ValueError:
             return default
     return default
+
+
+def _number(value: Any, default: float | None = None) -> float | None:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def _clamp_float(value: float, lower: float, upper: float) -> float:
+    return max(float(lower), min(float(upper), float(value)))
 
 
 def _target_name(target: Any) -> str | None:
@@ -297,6 +338,54 @@ def _click_point_space_from(target: Any) -> str:
     return "screen"
 
 
+def _action_target_source(target: dict[str, Any], *, target_kind: str) -> str | None:
+    explicit = target.get("actionTargetSource") or target.get("action_target_source")
+    if explicit:
+        return str(explicit)
+    if target.get("markerType") in {"selected_target", "backup_candidate"}:
+        return "overlay_marker"
+    source = target.get("source")
+    if isinstance(source, dict):
+        source_type = str(source.get("type") or source.get("sourceType") or "").lower()
+        file_type = str(source.get("fileType") or source.get("sourceFileType") or "").lower()
+        if target_kind == "resource" and (source.get("staticIndex") is True or source_type in {"world_targets", "live_targets"} or file_type == "world"):
+            return "live_resource_candidate"
+        if target_kind in {"service", "service_route_object"}:
+            return "live_service_object" if target_kind == "service" else "live_route_object"
+        return "unknown"
+    if source == "client_tick_hot_hover":
+        return "hover_discovered_object"
+    if target_kind == "resource" and source:
+        return "live_resource_candidate"
+    if target_kind == "resource" and _is_resource_target_candidate(target) and (
+        target.get("targetLiveState")
+        or target.get("directReachability")
+        or target.get("pathLengthTiles") is not None
+        or target.get("sourceTick") is not None
+        or target.get("tick") is not None
+    ):
+        return "live_resource_candidate"
+    if target_kind == "path_tile" and source:
+        return str(source)
+    return str(source) if source else None
+
+
+def _actionability(target: dict[str, Any], *, target_kind: str, click: dict[str, Any] | None, key_action: dict[str, Any] | None) -> str | None:
+    explicit = target.get("actionability")
+    if explicit:
+        return str(explicit)
+    source = str(target.get("source") or "").lower()
+    if source in {"static_route_prior", "route_context_goal"}:
+        return "advisory_only"
+    if target.get("stale") is True:
+        return "stale"
+    if target_kind == "path_tile":
+        return "needs_live_projection"
+    if click or key_action:
+        return "needs_hover_confirmation"
+    return None
+
+
 def _intent_overlay_context(status: dict[str, Any], brain: dict[str, Any]) -> dict[str, Any]:
     status_overlay = _dict(status.get("intentOverlayContext"))
     brain_overlay = _dict(brain.get("intentOverlayContext"))
@@ -344,6 +433,52 @@ def _suppressed_resource_target_keys(status: dict[str, Any], brain: dict[str, An
     if not isinstance(values, list):
         values = brain.get("suppressedResourceTargetKeys")
     return {str(value) for value in values or [] if value is not None}
+
+
+def _suppressed_action_target_keys(status: dict[str, Any], brain: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for source in (status, brain):
+        if not isinstance(source, dict):
+            continue
+        for field in ("suppressedActionTargetKeys", "suppressedNavigationTargetKeys"):
+            values = source.get(field)
+            if isinstance(values, list):
+                keys.update(str(value) for value in values if value is not None)
+    return keys
+
+
+def _route_tile_suppression_keys(
+    tile: dict[str, Any] | None,
+    *,
+    class_id: Any = None,
+    target_id: Any = None,
+) -> set[str]:
+    tile = _normalise_tile(tile)
+    if tile is None:
+        return set()
+    class_values: list[Any] = []
+    for value in (class_id, None):
+        if value not in class_values:
+            class_values.append(value)
+    id_values: list[Any] = []
+    for value in (target_id, None):
+        if value not in id_values:
+            id_values.append(value)
+    keys: set[str] = set()
+    for object_id in id_values:
+        for target_class in class_values:
+            keys.add(":".join(str(value) for value in (object_id, tile["worldX"], tile["worldY"], tile.get("plane", 0), target_class)))
+    return keys
+
+
+def _route_tile_is_suppressed(
+    tile: dict[str, Any] | None,
+    suppressed_keys: set[str],
+    *,
+    class_id: Any = None,
+    target_id: Any = None,
+) -> bool:
+    return bool(suppressed_keys and _route_tile_suppression_keys(tile, class_id=class_id, target_id=target_id).intersection(suppressed_keys))
 
 
 def _resource_candidate_lists(status: dict[str, Any], brain: dict[str, Any], active_target: dict[str, Any], overlay_selected: dict[str, Any]) -> list[dict[str, Any]]:
@@ -397,37 +532,96 @@ def _is_resource_target_candidate(candidate: dict[str, Any] | None) -> bool:
     return "resource" in target_type and "return" not in class_id and "return" not in target_type
 
 
-def _resource_target_from_context(status: dict[str, Any], brain: dict[str, Any], active_target: dict[str, Any], overlay_selected: dict[str, Any]) -> dict[str, Any]:
+def _resource_target_from_context(
+    status: dict[str, Any],
+    brain: dict[str, Any],
+    active_target: dict[str, Any],
+    overlay_selected: dict[str, Any],
+    *,
+    source_canvas_size: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     target = active_target or overlay_selected
     candidates = _resource_candidate_lists(status, brain, active_target, overlay_selected)
     suppressed = _suppressed_resource_target_keys(status, brain)
-    if not suppressed and _is_resource_target_candidate(target):
-        return target
-    target_keys = _target_suppression_keys(target) if target else set()
-    if target_keys and not target_keys.intersection(suppressed) and _is_resource_target_candidate(target):
-        return target
-    for candidate in candidates:
+    woodcutting_level = woodcutting_level_from_context(status, brain)
+    resource_candidates: list[dict[str, Any]] = []
+    for candidate in ([target] if isinstance(target, dict) and target else []) + candidates:
         candidate_keys = _target_suppression_keys(candidate)
         if candidate_keys and candidate_keys.intersection(suppressed):
             continue
         if _is_resource_target_candidate(candidate):
-            selected = dict(candidate)
-            if suppressed:
-                selected["reacquiredAfterSuppression"] = True
-                selected["suppressedTargetKeysAtSelection"] = sorted(suppressed)
-            return selected
+            resource_candidates.append(candidate)
+    selected = _preferred_resource_candidate_for_view(
+        resource_candidates,
+        status=status,
+        brain=brain,
+        source_canvas_size=source_canvas_size,
+        woodcutting_level=woodcutting_level,
+        suppressed_keys=suppressed,
+    )
+    if selected is None:
+        selected = preferred_woodcutting_resource_candidate(
+            resource_candidates,
+            woodcutting_level=woodcutting_level,
+            suppressed_keys=suppressed,
+        )
+    if selected:
+        selected = dict(selected)
+        if suppressed:
+            selected["reacquiredAfterSuppression"] = True
+            selected["suppressedTargetKeysAtSelection"] = sorted(suppressed)
+        if target and not target_matches(selected, target):
+            selected["reacquiredFromResourceTarget"] = {
+                "name": _target_name(target),
+                "id": target.get("id"),
+                "worldX": target.get("worldX"),
+                "worldY": target.get("worldY"),
+                "plane": target.get("plane"),
+            }
+            selected["resourceSelectionReason"] = "preferred_skill_eligible_resource_candidate"
+        return selected
+    if target and _is_resource_target_candidate(target):
+        target_keys = _target_suppression_keys(target)
+        if target_keys and target_keys.intersection(suppressed):
+            return {}
+        required = woodcutting_required_level(target)
+        if required is not None:
+            if woodcutting_level is None and required > 1:
+                return {}
+            if woodcutting_level is not None and required > woodcutting_level:
+                return {}
     return target
+
+
+def _world_model_summary_viewport(summary: dict[str, Any] | None) -> dict[str, Any] | None:
+    metadata = _dict(_dict(summary).get("metadata"))
+    viewport = _dict(metadata.get("viewport"))
+    if not viewport:
+        return None
+    merged = dict(viewport)
+    if metadata.get("cameraYaw") is not None and merged.get("cameraYaw") is None:
+        merged["cameraYaw"] = metadata.get("cameraYaw")
+    if metadata.get("cameraPitch") is not None and merged.get("cameraPitch") is None:
+        merged["cameraPitch"] = metadata.get("cameraPitch")
+    return merged
 
 
 def _camera_viewport_from_status(status: dict[str, Any] | None, brain: dict[str, Any] | None = None) -> dict[str, Any] | None:
     status = _dict(status)
     brain = _dict(brain)
     baseline = _dict(status.get("baseline"))
+    world_model_summary = _dict(status.get("worldModelSummary"))
+    world_model_payloads = _dict(status.get("worldModelPayloads"))
+    payload_summary = _dict(world_model_payloads.get("world_model_summary"))
     for value in (
         status.get("cameraViewport"),
         baseline.get("cameraViewport"),
+        status.get("worldModelCameraViewport"),
         brain.get("cameraViewport"),
+        brain.get("worldModelCameraViewport"),
         _dict(brain.get("baseline")).get("cameraViewport"),
+        _world_model_summary_viewport(world_model_summary),
+        _world_model_summary_viewport(payload_summary),
     ):
         if isinstance(value, dict) and value:
             return value
@@ -475,6 +669,8 @@ def _resource_target_with_safe_aimpoint(
     )
     merged["safeAimPoint"] = safe
     if safe.get("status") == "PASS" and safe.get("canvasX") is not None and safe.get("canvasY") is not None:
+        merged.setdefault("selectedAimpointSource", "original_safeAimPoint")
+        merged.setdefault("hoverConfirmedTopExpected", False)
         merged["suggestedClickPoint"] = {
             "canvasX": safe.get("canvasX"),
             "canvasY": safe.get("canvasY"),
@@ -584,7 +780,457 @@ def _resource_projection_recovery_proposal(
         proposal.target_explanation["bestLogicalResourceTarget"] = dict(recovery_target["bestLogicalResourceTarget"])
         proposal.target_explanation["selectedExecutableResourceTarget"] = None
         proposal.target_explanation["recoverySuggested"] = True
+        proposal.target_explanation["recoveryAction"] = recovery_target.get("recoveryAction")
         proposal.target_explanation["cameraTriggeredBy"] = recovery_target.get("cameraTriggeredBy")
+        if isinstance(target.get("resourceViewScore"), dict):
+            proposal.target_explanation["resourceViewScore"] = dict(target["resourceViewScore"])
+            proposal.target_explanation["resourceViewClassification"] = target["resourceViewScore"].get("classification")
+    return proposal
+
+
+def _world_tile(target: Any) -> dict[str, Any] | None:
+    target = _dict(target)
+    world = _dict(target.get("worldLocation") or target.get("world"))
+    if world.get("worldX") is not None and world.get("worldY") is not None:
+        return {"worldX": world.get("worldX"), "worldY": world.get("worldY"), "plane": world.get("plane", target.get("plane", 0))}
+    return _tile_from(target)
+
+
+def _tile_distance(a: dict[str, Any] | None, b: dict[str, Any] | None) -> int | None:
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return None
+    ax = _number(a.get("worldX", a.get("x")))
+    ay = _number(a.get("worldY", a.get("y")))
+    bx = _number(b.get("worldX", b.get("x")))
+    by = _number(b.get("worldY", b.get("y")))
+    if ax is None or ay is None or bx is None or by is None:
+        return None
+    return int(max(abs(ax - bx), abs(ay - by)))
+
+
+def _player_world_tile(status: dict[str, Any], brain: dict[str, Any]) -> dict[str, Any] | None:
+    for value in (
+        status.get("playerLocation"),
+        status.get("playerContext"),
+        brain.get("playerLocation"),
+        brain.get("playerContext"),
+        _dict(status.get("baseline")).get("player"),
+        _dict(brain.get("baseline")).get("player"),
+    ):
+        tile = _world_tile(value)
+        if tile:
+            return tile
+        value = _dict(value)
+        nested = _world_tile(value.get("worldTile") or value.get("tile"))
+        if nested:
+            return nested
+    return None
+
+
+def _resource_worksite_context(status: dict[str, Any], brain: dict[str, Any]) -> dict[str, Any]:
+    for context in (
+        _dict(status.get("resourceViewContext")),
+        _dict(brain.get("resourceViewContext")),
+        _dict(status.get("resourceReturnContext")),
+        _dict(brain.get("resourceReturnContext")),
+        _dict(status.get("returnToResourceContext")),
+        _dict(brain.get("returnToResourceContext")),
+        _dict(status.get("postBankReacquisitionContext")),
+        _dict(brain.get("postBankReacquisitionContext")),
+        _dict(status.get("returnRouteContext")),
+        _dict(brain.get("returnRouteContext")),
+    ):
+        anchor = _dict(context.get("worksiteAnchor") or context.get("resourceAnchor"))
+        tile = (
+            _world_tile(anchor)
+            or _world_tile(context.get("worksiteTile"))
+            or _world_tile(context.get("resourceAreaTile"))
+            or _world_tile(context.get("returnDestinationTile"))
+            or _world_tile(context.get("lastResourceTile"))
+        )
+        if tile:
+            radius = _int(
+                _first_present(
+                    context.get("worksiteRadiusTiles"),
+                    context.get("resourceRadiusTiles"),
+                    anchor.get("radiusTiles"),
+                    anchor.get("radius"),
+                    12,
+                ),
+                12,
+            )
+            return {
+                "worksiteId": context.get("worksiteId") or context.get("returnNodeId") or anchor.get("anchorId") or anchor.get("id"),
+                "anchor": tile,
+                "radiusTiles": max(3, radius),
+                "source": context.get("returnDestinationSource") or context.get("source") or anchor.get("type"),
+            }
+    return {}
+
+
+def _resource_level_status(candidate: dict[str, Any], woodcutting_level: int | None) -> dict[str, Any]:
+    required = woodcutting_required_level(candidate)
+    level_known = woodcutting_level is not None
+    met = required is not None and (woodcutting_level is None and required <= 1 or woodcutting_level is not None and required <= woodcutting_level)
+    return {
+        "requiredSkill": "woodcutting" if required is not None else None,
+        "requiredLevel": required,
+        "playerLevelKnown": level_known,
+        "playerLevel": woodcutting_level,
+        "levelRequirementMet": bool(met),
+        "targetTemporarilyLockedReason": None if met else ("insufficient_level" if required and required > 1 else None),
+        "visibleButNotExecutable": bool(not met and required is not None),
+        "futureEligibleWhenLevelMet": bool(not met and required is not None),
+    }
+
+
+def _resource_candidate_view_metrics(
+    candidate: dict[str, Any],
+    *,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+    source_canvas_size: dict[str, Any] | None,
+    worksite: dict[str, Any],
+    woodcutting_level: int | None,
+) -> dict[str, Any]:
+    safe = candidate.get("safeAimPoint") if isinstance(candidate.get("safeAimPoint"), dict) else None
+    if safe is None and _target_has_aimpoint_geometry(candidate):
+        safe = safe_aimpoint_core.safe_aimpoint_for_target(
+            candidate,
+            source_canvas_size=source_canvas_size,
+            viewport=_camera_viewport_from_status(status, brain),
+        )
+    projection = _resource_projection_status(
+        candidate,
+        safe_aimpoint=safe,
+        source_canvas_size=source_canvas_size,
+        status=status,
+        brain=brain,
+    )
+    level = _resource_level_status(candidate, woodcutting_level)
+    edge_distance = _number((safe or {}).get("distanceToViewportEdgePx"))
+    ratio = _number((safe or {}).get("clippedVisibleAreaRatio"))
+    tile = _world_tile(candidate)
+    distance_from_worksite = _tile_distance(tile, _dict(worksite.get("anchor"))) if worksite else None
+    inside_worksite = distance_from_worksite is None or distance_from_worksite <= _int(worksite.get("radiusTiles"), 12)
+    safe_ok = isinstance(safe, dict) and safe.get("status") == "PASS"
+    central = bool(safe_ok and (edge_distance is None or edge_distance >= 48) and (ratio is None or ratio >= 0.7))
+    edge_clipped = bool(
+        projection.get("classification") == "edge_clipped"
+        or projection.get("edgeClipped") is True
+        or (edge_distance is not None and edge_distance < 18)
+        or (ratio is not None and ratio < 0.45)
+    )
+    offscreen = bool(projection.get("offscreen") is True or projection.get("classification") == "offscreen")
+    occluded = bool(
+        projection.get("classification") in {"no_safe_aimpoint", "no_visible_interactable_geometry", "raw_aimpoint_outside_interactable_region"}
+        and projection.get("projectionAvailable") is True
+    )
+    executable = bool(level.get("levelRequirementMet") and safe_ok and not edge_clipped and not offscreen)
+    ambiguity = _dict(candidate.get("resourceTargetAmbiguity"))
+    ambiguity_status = str(ambiguity.get("ambiguityStatus") or "clear")
+    ambiguous = bool(ambiguity_status and ambiguity_status not in {"clear", "unknown"})
+    overlap_penalty = bool(
+        ambiguity.get("overlapPenaltyFromNonExecutableTarget") is True
+        or ambiguity_status
+        in {
+            "ambiguous_top_hover_mismatch",
+            "ambiguous_overlap_with_higher_level_target",
+            "ambiguous_expected_entry_not_top",
+            "ambiguous_object_stack",
+            "unsafe",
+        }
+    )
+    if ambiguous:
+        executable = False
+    return {
+        "candidate": candidate,
+        "safeAimPoint": safe,
+        "projectionStatus": projection,
+        "levelStatus": level,
+        "resourceTargetAmbiguity": ambiguity or None,
+        "ambiguousResourceTarget": ambiguous,
+        "overlapPenaltyFromNonExecutableTarget": overlap_penalty,
+        "worldLocation": tile,
+        "distanceFromWorksite": distance_from_worksite,
+        "insideWorksite": bool(inside_worksite),
+        "safeAimpoint": bool(safe_ok),
+        "centralSafeAimpoint": central,
+        "edgeClipped": edge_clipped,
+        "partiallyOffscreen": bool(ratio is not None and ratio < 1.0),
+        "occluded": occluded,
+        "executable": executable,
+        "edgeDistancePx": int(edge_distance) if edge_distance is not None else None,
+        "visibleAreaRatio": float(ratio) if ratio is not None else None,
+    }
+
+
+def _preferred_resource_candidate_for_view(
+    candidates: list[dict[str, Any]],
+    *,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+    source_canvas_size: dict[str, Any] | None,
+    woodcutting_level: int | None,
+    suppressed_keys: set[str] | None = None,
+) -> dict[str, Any] | None:
+    suppressed_keys = suppressed_keys or set()
+    worksite = _resource_worksite_context(status, brain)
+    ranked: list[tuple[tuple[Any, ...], dict[str, Any], dict[str, Any]]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        candidate_keys = _target_suppression_keys(candidate)
+        if candidate_keys and candidate_keys.intersection(suppressed_keys):
+            continue
+        level = _resource_level_status(candidate, woodcutting_level)
+        if not level.get("levelRequirementMet"):
+            continue
+        metrics = _resource_candidate_view_metrics(
+            candidate,
+            status=status,
+            brain=brain,
+            source_canvas_size=source_canvas_size,
+            worksite=worksite,
+            woodcutting_level=woodcutting_level,
+        )
+        distance = _number(candidate.get("distanceTiles", candidate.get("targetDistanceChebyshev")), 1_000_000.0)
+        quality = _number(candidate.get("qualityScore", candidate.get("score")), 0.0)
+        key = (
+            0 if metrics.get("insideWorksite") else 1,
+            1 if metrics.get("ambiguousResourceTarget") else 0,
+            1 if metrics.get("overlapPenaltyFromNonExecutableTarget") else 0,
+            0 if metrics.get("safeAimpoint") else 1,
+            0 if metrics.get("centralSafeAimpoint") else 1,
+            1 if metrics.get("edgeClipped") else 0,
+            1 if metrics.get("occluded") else 0,
+            metrics.get("distanceFromWorksite") if metrics.get("distanceFromWorksite") is not None else 999,
+            distance if distance is not None else 999,
+            -float(quality or 0.0),
+            (_target_name(candidate) or "").lower(),
+        )
+        ranked.append((key, candidate, metrics))
+    if not ranked:
+        return None
+    _key, selected, metrics = min(ranked, key=lambda item: item[0])
+    selected = dict(selected)
+    selected["resourceViewCandidateScore"] = {
+        "insideWorksite": metrics.get("insideWorksite"),
+        "distanceFromWorksite": metrics.get("distanceFromWorksite"),
+        "edgeDistancePx": metrics.get("edgeDistancePx"),
+        "visibleAreaRatio": metrics.get("visibleAreaRatio"),
+        "centralSafeAimpoint": metrics.get("centralSafeAimpoint"),
+        "edgeClipped": metrics.get("edgeClipped"),
+    }
+    return selected
+
+
+def _resource_view_goal_for_status(status: dict[str, Any], brain: dict[str, Any]) -> str:
+    phase = str(_dict(brain.get("genericTaskState")).get("phase") or status.get("phase") or "")
+    intent = str(_dict(brain.get("genericTaskState")).get("activeIntent") or status.get("activeIntent") or "")
+    if "deplet" in phase or "deplet" in intent:
+        return "post_resource_depletion_view"
+    if "reacquir" in phase or "reacquir" in intent:
+        return "resource_reacquisition_view"
+    if "return" in phase or "return" in intent:
+        return "worksite_overview_view"
+    return "resource_candidate_selection_view"
+
+
+def _resource_view_score(
+    *,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    selected_target: dict[str, Any],
+    source_canvas_size: dict[str, Any] | None,
+) -> dict[str, Any]:
+    woodcutting_level = woodcutting_level_from_context(status, brain)
+    worksite = _resource_worksite_context(status, brain)
+    player = _player_world_tile(status, brain)
+    metrics = [
+        _resource_candidate_view_metrics(
+            candidate,
+            status=status,
+            brain=brain,
+            source_canvas_size=source_canvas_size,
+            worksite=worksite,
+            woodcutting_level=woodcutting_level,
+        )
+        for candidate in candidates
+        if _is_resource_target_candidate(candidate)
+    ]
+    selected_tile = _world_tile(selected_target)
+    selected_metrics = None
+    for item in metrics:
+        if _tile_distance(item.get("worldLocation"), selected_tile) == 0 and _target_name(item.get("candidate")) == _target_name(selected_target):
+            selected_metrics = item
+            break
+    if selected_metrics is None and selected_target:
+        selected_metrics = _resource_candidate_view_metrics(
+            selected_target,
+            status=status,
+            brain=brain,
+            source_canvas_size=source_canvas_size,
+            worksite=worksite,
+            woodcutting_level=woodcutting_level,
+        )
+
+    visible = [item for item in metrics if item["projectionStatus"].get("projectionAvailable") and not item["projectionStatus"].get("projectionSentinel")]
+    executable = [item for item in metrics if item.get("executable")]
+    safe_count = sum(1 for item in metrics if item.get("safeAimpoint"))
+    central_count = sum(1 for item in metrics if item.get("centralSafeAimpoint"))
+    edge_count = sum(1 for item in metrics if item.get("edgeClipped"))
+    partial_count = sum(1 for item in metrics if item.get("partiallyOffscreen"))
+    occluded_count = sum(1 for item in metrics if item.get("occluded"))
+    low_level_rejected = sum(1 for item in metrics if item["levelStatus"].get("targetTemporarilyLockedReason") == "insufficient_level")
+    world_tiles = [item.get("worldLocation") for item in visible if isinstance(item.get("worldLocation"), dict)]
+    if len(world_tiles) >= 2:
+        xs = [_number(tile.get("worldX"), 0.0) or 0.0 for tile in world_tiles]
+        ys = [_number(tile.get("worldY"), 0.0) or 0.0 for tile in world_tiles]
+        spread = int(max(max(xs) - min(xs), max(ys) - min(ys)))
+    else:
+        spread = 0
+    selected_distance = _tile_distance(selected_tile, _dict(worksite.get("anchor"))) if worksite else None
+    selected_pulls = bool(selected_distance is not None and selected_distance > _int(worksite.get("radiusTiles"), 12))
+    score = 45
+    score += min(24, len(executable) * 8)
+    score += min(18, central_count * 6)
+    if selected_metrics and selected_metrics.get("centralSafeAimpoint"):
+        score += 12
+    if worksite and selected_metrics and selected_metrics.get("insideWorksite"):
+        score += 10
+    if edge_count:
+        score -= min(24, edge_count * 8)
+    if selected_metrics and selected_metrics.get("edgeClipped"):
+        score -= 20
+    if occluded_count:
+        score -= min(18, occluded_count * 9)
+    if selected_pulls:
+        score -= 18
+    if len(executable) == 0:
+        score -= 35
+    elif len(executable) == 1 and not (selected_metrics and selected_metrics.get("centralSafeAimpoint")):
+        score -= 10
+    if low_level_rejected and not executable:
+        score -= 15
+    score = max(0, min(100, int(round(score))))
+    if selected_pulls:
+        classification = "needs_worksite_recenter"
+    elif selected_metrics and selected_metrics.get("edgeClipped"):
+        classification = "poor_edge_resource_view"
+    elif selected_metrics and selected_metrics.get("occluded"):
+        classification = "poor_occluded_resource_view"
+    elif not executable:
+        classification = "no_executable_resource_view"
+    elif len(executable) <= 1 and score < 65:
+        classification = "poor_single_candidate_view"
+    elif score >= 78:
+        classification = "good_resource_view"
+    elif score >= 60:
+        classification = "usable_resource_view"
+    else:
+        classification = "needs_resource_camera_reacquire"
+    recovery_recommended = classification in {
+        "poor_edge_resource_view",
+        "poor_occluded_resource_view",
+        "poor_single_candidate_view",
+        "needs_resource_camera_reacquire",
+        "needs_worksite_recenter",
+        "no_executable_resource_view",
+    }
+    return {
+        "schema": "resource_view_score.v1",
+        "viewGoal": _resource_view_goal_for_status(status, brain),
+        "worksiteId": worksite.get("worksiteId"),
+        "worksiteAnchor": worksite.get("anchor"),
+        "worksiteRadiusTiles": worksite.get("radiusTiles"),
+        "playerLocation": player,
+        "cameraYaw": status.get("cameraYaw") or brain.get("cameraYaw"),
+        "cameraPitch": status.get("cameraPitch") or brain.get("cameraPitch"),
+        "visibleResourceCandidates": len(visible),
+        "executableResourceCandidates": len(executable),
+        "safeAimpointCount": safe_count,
+        "centralSafeAimpointCount": central_count,
+        "edgeClippedResourceCandidates": edge_count,
+        "ambiguousResourceCandidates": sum(1 for item in metrics if item.get("ambiguousResourceTarget")),
+        "overlapPenalizedResourceCandidates": sum(1 for item in metrics if item.get("overlapPenaltyFromNonExecutableTarget")),
+        "partiallyOffscreenResourceCandidates": partial_count,
+        "occludedResourceCandidates": occluded_count,
+        "candidateSpread": spread,
+        "selectedTargetName": _target_name(selected_target),
+        "selectedTargetWorldLocation": selected_tile,
+        "selectedTargetDistanceFromWorksite": selected_distance,
+        "selectedTargetEdgeDistancePx": selected_metrics.get("edgeDistancePx") if selected_metrics else None,
+        "selectedTargetVisibleAreaRatio": selected_metrics.get("visibleAreaRatio") if selected_metrics else None,
+        "selectedTargetHoverReady": bool(selected_metrics and selected_metrics.get("safeAimpoint")),
+        "selectedTargetPullsAwayFromWorksite": selected_pulls,
+        "lowLevelResourceCandidatesRejected": low_level_rejected,
+        "score": score,
+        "classification": classification,
+        "cameraRecoveryRecommended": recovery_recommended,
+    }
+
+
+def _resource_view_recovery_trigger(score: dict[str, Any]) -> str:
+    classification = str(score.get("classification") or "")
+    view_goal = str(score.get("viewGoal") or "resource_candidate_selection_view")
+    mapping = {
+        "poor_edge_resource_view": "resource_target_edge_rejected",
+        "poor_occluded_resource_view": "resource_candidate_occluded",
+        "poor_single_candidate_view": "poor_single_candidate_view",
+        "needs_worksite_recenter": "worksite_drift_detected",
+        "no_executable_resource_view": "no_executable_resource_view",
+    }
+    return mapping.get(classification, view_goal)
+
+
+def _resource_view_recovery_proposal(
+    *,
+    target: dict[str, Any],
+    projection_status: dict[str, Any],
+    resource_view_score: dict[str, Any],
+    input_geometry: dict[str, Any] | None,
+    source_canvas_size: dict[str, Any] | None,
+    source_tick: int | None,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+) -> ActionProposal:
+    recovery_target = _resource_recovery_target(target, projection_status)
+    trigger = _resource_view_recovery_trigger(resource_view_score)
+    recovery_target["resourceViewScore"] = dict(resource_view_score)
+    recovery_target["cameraTriggeredBy"] = trigger
+    recovery_target["recoveryAction"] = "camera_reacquire_resource_view"
+    proposal = _proposal(
+        "resource_view_recovery",
+        target_kind="resource_recovery",
+        target=recovery_target,
+        key_action={
+            "type": "camera_reacquire",
+            "method": "keyboard_arrows",
+            "command": "yaw_right_pitch_up",
+            "cameraTriggeredBy": trigger,
+            "durationMs": 220,
+        },
+        reason="resource_view_recovery_needed",
+        confidence=0.64,
+        required_context=["target", "inventory", "camera.controller"],
+        warnings=[f"resource view is not good enough for a safe chop: {resource_view_score.get('classification')}"],
+        source_tick=source_tick,
+        input_geometry=input_geometry,
+        source_canvas_size=source_canvas_size,
+        status=status,
+        brain=brain,
+        suppress_click_point=True,
+    )
+    if isinstance(proposal.target_explanation, dict):
+        proposal.target_explanation["resourceProjectionStatus"] = dict(projection_status)
+        proposal.target_explanation["resourceViewScore"] = dict(resource_view_score)
+        proposal.target_explanation["resourceViewClassification"] = resource_view_score.get("classification")
+        proposal.target_explanation["resourceCameraTriggeredBy"] = trigger
+        proposal.target_explanation["recoverySuggested"] = True
+        proposal.target_explanation["recoveryAction"] = recovery_target.get("recoveryAction")
+        proposal.target_explanation["cameraTriggeredBy"] = trigger
     return proposal
 
 
@@ -623,6 +1269,8 @@ def _proposal(
         source_canvas_size=source_canvas_size,
     ) if click else None
     resolved_screen = resolution.get("screenClickPoint") if isinstance(resolution, dict) and isinstance(resolution.get("screenClickPoint"), dict) else None
+    action_target_source = _action_target_source(target, target_kind=target_kind)
+    actionability = _actionability(target, target_kind=target_kind, click=click, key_action=key_action)
     proposal = ActionProposal(
         proposed_action=action if action in KNOWN_ACTIONS else "none",
         target_kind=target_kind,
@@ -642,7 +1290,17 @@ def _proposal(
         missing_capabilities=missing or [],
         warnings=warnings or [],
         source_tick=source_tick,
+        action_target_source=action_target_source,
+        actionability=actionability,
     )
+    if isinstance(proposal.target_explanation, dict):
+        proposal.target_explanation["actionTargetSource"] = action_target_source
+        proposal.target_explanation["actionability"] = actionability
+        if target.get("advisoryTargetSource") or target.get("advisory_target_source"):
+            proposal.target_explanation["advisoryTargetSource"] = target.get("advisoryTargetSource") or target.get("advisory_target_source")
+        if target.get("resourceSelectionReason"):
+            proposal.target_explanation["resourceSelectionReason"] = target.get("resourceSelectionReason")
+            proposal.target_explanation["reacquiredFromResourceTarget"] = target.get("reacquiredFromResourceTarget")
     if resolution and resolution.get("status") == "FAIL":
         proposal.status = "FAIL"
         proposal.missing_capabilities.extend(str(item) for item in resolution.get("missingCapabilities") or [])
@@ -769,6 +1427,447 @@ def _service_route_service_target(route_context: dict[str, Any]) -> dict[str, An
     return merged
 
 
+def _service_target_kind(target: dict[str, Any]) -> str:
+    class_id = _lower(target.get("classId") or target.get("targetClass") or target.get("serviceObjectType"))
+    name = _lower(target.get("targetName") or target.get("name"))
+    text = f"{class_id} {name}"
+    if "deposit" in text:
+        return "deposit_box"
+    if "booth" in text:
+        return "bank_booth"
+    if "banker" in text:
+        return "banker"
+    return "unknown"
+
+
+def _projection_from_target(target: dict[str, Any]) -> dict[str, Any]:
+    return _dict(target.get("projectionStatus") or target.get("projection") or target.get("resourceProjectionStatus"))
+
+
+def _canvas_point_from_projection_or_target(target: dict[str, Any], safe_aimpoint: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    projection = _projection_from_target(target)
+    for value in (
+        _dict(projection.get("aimPoint")),
+        _dict(projection.get("canvasLocation")),
+        _dict(target.get("aimPoint")),
+        _dict(target.get("aimPointContext")),
+        _dict(target.get("canvasAimPoint")),
+        _dict(target.get("canvasLocation")),
+        _dict(safe_aimpoint or {}).get("rawAimPoint"),
+    ):
+        point = _point_from_aim(value)
+        if point:
+            return point
+    return None
+
+
+def _service_projection_classification(target: dict[str, Any], safe_aimpoint: dict[str, Any] | None) -> str:
+    projection = _projection_from_target(target)
+    for key in ("classification", "status", "reason"):
+        value = projection.get(key)
+        if isinstance(value, str) and value:
+            return value
+    safe = safe_aimpoint if isinstance(safe_aimpoint, dict) else {}
+    if safe.get("status") == "PASS":
+        return "actionable"
+    if safe.get("rejectionReason"):
+        return str(safe["rejectionReason"])
+    if target.get("onScreen") is False:
+        return "offscreen"
+    return "unknown"
+
+
+def _bounds_area(value: Any) -> float | None:
+    bounds = _dict(value)
+    if isinstance(bounds.get("bounds"), dict):
+        return _bounds_area(bounds.get("bounds"))
+    width = _number(_first_present(bounds.get("width"), bounds.get("w")))
+    height = _number(_first_present(bounds.get("height"), bounds.get("h")))
+    if width is None and bounds.get("right") is not None:
+        left = _number(_first_present(bounds.get("left"), bounds.get("x"), bounds.get("minX")))
+        right = _number(bounds.get("right"))
+        if left is not None and right is not None:
+            width = right - left
+    if height is None and bounds.get("bottom") is not None:
+        top = _number(_first_present(bounds.get("top"), bounds.get("y"), bounds.get("minY")))
+        bottom = _number(bounds.get("bottom"))
+        if top is not None and bottom is not None:
+            height = bottom - top
+    if width is None or height is None or width <= 0 or height <= 0:
+        return None
+    return float(width) * float(height)
+
+
+def _service_target_exposure_metrics(
+    target: dict[str, Any],
+    safe_aimpoint: dict[str, Any] | None,
+    *,
+    canvas_point: dict[str, Any] | None,
+    projection: dict[str, Any],
+    viewport: dict[str, Any] | None,
+    source_canvas_size: dict[str, Any] | None,
+) -> dict[str, Any]:
+    safe = safe_aimpoint if isinstance(safe_aimpoint, dict) else {}
+    rect = camera_control.viewport_rect(viewport, canvas_size=source_canvas_size)
+    point = _point_from_aim(safe) or _point_from_aim(canvas_point)
+    edge_distance = _number(
+        _first_present(
+            safe.get("distanceToViewportEdgePx"),
+            safe.get("distanceToCanvasEdgePx"),
+            projection.get("edgeDistancePx"),
+            projection.get("distanceToViewportEdgePx"),
+        )
+    )
+    if point and edge_distance is None:
+        x = float(point["x"])
+        y = float(point["y"])
+        edge_distance = min(x - rect["left"], rect["right"] - x, y - rect["top"], rect["bottom"] - y)
+    visible_area_px = _number(
+        _first_present(
+            safe.get("clippedVisibleAreaPx"),
+            projection.get("clippedVisibleAreaPx"),
+            projection.get("visibleAreaPx"),
+        )
+    )
+    if visible_area_px is None:
+        visible_area_px = _bounds_area(safe.get("bounds")) or _bounds_area(projection.get("bounds")) or _bounds_area(target.get("bounds"))
+    visible_ratio = _number(
+        _first_present(
+            safe.get("clippedVisibleAreaRatio"),
+            projection.get("clippedVisibleAreaRatio"),
+            projection.get("visibleAreaRatio"),
+        )
+    )
+    centrality_score = None
+    comfortable_region_met = False
+    if point:
+        x = float(point["x"])
+        y = float(point["y"])
+        half_w = max(1.0, rect["width"] / 2.0)
+        half_h = max(1.0, rect["height"] / 2.0)
+        normalized_distance = max(abs(x - rect["centerX"]) / half_w, abs(y - rect["centerY"]) / half_h)
+        centrality_score = round(_clamp_float(1.0 - normalized_distance, 0.0, 1.0), 3)
+        margin_x = rect["width"] * (1.0 - SERVICE_COMFORTABLE_REGION_FRACTION) / 2.0
+        margin_y = rect["height"] * (1.0 - SERVICE_COMFORTABLE_REGION_FRACTION) / 2.0
+        comfortable_region_met = bool(
+            rect["left"] + margin_x <= x <= rect["right"] - margin_x
+            and rect["top"] + margin_y <= y <= rect["bottom"] - margin_y
+        )
+    safe_click_available = bool(safe.get("status") == "PASS" and safe.get("canvasX") is not None and safe.get("canvasY") is not None)
+    visible_area_threshold_met = bool(
+        visible_area_px is None or visible_area_px >= SERVICE_MIN_VISIBLE_AREA_PX
+    ) and bool(visible_ratio is None or visible_ratio >= SERVICE_MIN_VISIBLE_AREA_RATIO)
+    edge_threshold_met = bool(edge_distance is not None and edge_distance >= SERVICE_MIN_EDGE_DISTANCE_PX)
+    comfortable_edge_met = bool(edge_distance is not None and edge_distance >= SERVICE_COMFORTABLE_EDGE_DISTANCE_PX)
+    raw_center_inside = _bool(safe.get("rawCenterInsideViewport"))
+    if raw_center_inside is False and edge_distance is not None and edge_distance < SERVICE_COMFORTABLE_EDGE_DISTANCE_PX:
+        comfortable_region_met = False
+    edge_sliver = bool(
+        safe_click_available
+        and (
+            (edge_distance is not None and edge_distance < SERVICE_MIN_EDGE_DISTANCE_PX)
+            or (visible_area_px is not None and visible_area_px < SERVICE_MIN_VISIBLE_AREA_PX)
+            or (visible_ratio is not None and visible_ratio < SERVICE_MIN_VISIBLE_AREA_RATIO)
+        )
+    )
+    usable = bool(
+        safe_click_available
+        and visible_area_threshold_met
+        and edge_threshold_met
+        and comfortable_region_met
+        and safe.get("uiBlocked") is not True
+    )
+    score = 0.0
+    if safe_click_available:
+        score += 30.0
+    if visible_area_threshold_met:
+        score += 20.0
+    if edge_threshold_met:
+        score += 20.0
+    if comfortable_region_met:
+        score += 20.0
+    if safe.get("uiBlocked") is not True:
+        score += 10.0
+    if edge_distance is not None:
+        score += min(10.0, max(0.0, edge_distance) / 8.0)
+    if centrality_score is not None:
+        score += centrality_score * 10.0
+    score = round(_clamp_float(score, 0.0, 100.0), 3)
+    if edge_sliver:
+        exposure_result = "edge_sliver_only"
+    elif safe_click_available and not visible_area_threshold_met:
+        exposure_result = "insufficient_visible_area"
+    elif usable:
+        exposure_result = "comfortably_exposed"
+    else:
+        exposure_result = None
+    return {
+        "safeClickAvailable": safe_click_available,
+        "visibleAreaPx": round(float(visible_area_px), 3) if visible_area_px is not None else None,
+        "visibleAreaRatio": round(float(visible_ratio), 3) if visible_ratio is not None else None,
+        "edgeDistancePx": round(float(edge_distance), 3) if edge_distance is not None else None,
+        "centralityScore": centrality_score,
+        "edgeSliverVisible": edge_sliver,
+        "usableExposureScore": score,
+        "usableExposureThresholdMet": usable,
+        "comfortableViewRegionMet": comfortable_region_met,
+        "visibleAreaThresholdMet": visible_area_threshold_met,
+        "edgeDistanceThresholdMet": edge_threshold_met,
+        "comfortableEdgeDistanceMet": comfortable_edge_met,
+        "exposureResult": exposure_result,
+    }
+
+
+def _service_target_exposure(
+    target: dict[str, Any],
+    safe_aimpoint: dict[str, Any] | None,
+    *,
+    source_canvas_size: dict[str, Any] | None,
+    status: dict[str, Any] | None,
+    brain: dict[str, Any] | None,
+) -> dict[str, Any]:
+    projection = _projection_from_target(target)
+    viewport = _camera_viewport_from_status(status, brain)
+    canvas_point = _canvas_point_from_projection_or_target(target, safe_aimpoint)
+    exposure_error = camera_control.exposure_error_from_canvas_point(
+        canvas_point,
+        viewport=viewport,
+        canvas_size=source_canvas_size,
+    )
+    safe = safe_aimpoint if isinstance(safe_aimpoint, dict) else {}
+    classification = _service_projection_classification(target, safe)
+    exposure_metrics = _service_target_exposure_metrics(
+        target,
+        safe_aimpoint,
+        canvas_point=canvas_point,
+        projection=projection,
+        viewport=viewport,
+        source_canvas_size=source_canvas_size,
+    )
+    on_screen = (
+        projection.get("actionableByCanvas") is True
+        or projection.get("onScreen") is True
+        or projection.get("visible") is True
+        or target.get("onScreen") is True
+        or safe.get("status") == "PASS"
+    )
+    offscreen = (
+        classification == "offscreen"
+        or exposure_error.get("status") == "offscreen"
+        or target.get("onScreen") is False
+        or projection.get("onScreen") is False
+    )
+    safe_click_available = bool(exposure_metrics.get("safeClickAvailable"))
+    usable_exposure = bool(exposure_metrics.get("usableExposureThresholdMet"))
+    edge_sliver = bool(exposure_metrics.get("edgeSliverVisible"))
+    insufficient_visible_area = bool(
+        safe_click_available
+        and exposure_metrics.get("visibleAreaThresholdMet") is False
+    )
+    insufficient_edge_distance = bool(
+        safe_click_available
+        and exposure_metrics.get("edgeDistanceThresholdMet") is False
+    )
+    loaded = bool(target)
+    action_relevant = bool(_contains_any(_candidate_actions(target), ["bank", "deposit", "use", "collect"]))
+    route_relevance = _dict(target.get("routeRelevance"))
+    route_relevant = route_relevance.get("relevanceStatus") in {None, "", "PASS"} or bool(target.get("routeId"))
+    expected_action = None
+    for action in _candidate_actions(target):
+        if _lower(action) in {"bank", "deposit", "deposit-box", "use", "collect"}:
+            expected_action = str(action)
+            break
+    target_view_state = target_view_core.build_target_view_state(
+        target,
+        target_kind="service_object",
+        player_location=_player_world_tile(status or {}, brain or {}),
+        expected_action=expected_action,
+        target_source="live_world_model" if target.get("worldModelSource") or target.get("projectionStatus") else target.get("source"),
+        target_route_relevant=route_relevant,
+        target_action_relevant=action_relevant,
+        safe_aimpoint=safe,
+        viewport=viewport,
+        source_canvas_size=source_canvas_size,
+        status=status,
+    )
+    should_attempt = bool(
+        loaded
+        and action_relevant
+        and route_relevant
+        and not usable_exposure
+        and (
+            offscreen
+            or not safe_click_available
+            or edge_sliver
+            or insufficient_visible_area
+            or insufficient_edge_distance
+            or exposure_metrics.get("comfortableViewRegionMet") is False
+            or classification in {"raw_aimpoint_outside_interactable_region", "centerOffViewport", "centerOutsideInteractableRegion"}
+        )
+    )
+    if usable_exposure:
+        view_classification = "usable_service_view"
+    elif offscreen:
+        view_classification = "needs_service_camera_recovery"
+    elif edge_sliver:
+        view_classification = "service_object_edge_sliver"
+    elif insufficient_visible_area or insufficient_edge_distance or safe_click_available:
+        view_classification = "service_object_visible_but_not_usable"
+    else:
+        view_classification = "poor_service_projection"
+    if offscreen:
+        exposure_reason = "service_object_loaded_offscreen"
+    elif edge_sliver:
+        exposure_reason = "service_object_edge_sliver"
+    elif insufficient_visible_area:
+        exposure_reason = "service_object_insufficient_visible_area"
+    elif insufficient_edge_distance:
+        exposure_reason = "service_object_too_close_to_edge"
+    elif not safe_click_available:
+        exposure_reason = "service_screen_click_point_unavailable"
+    elif exposure_metrics.get("comfortableViewRegionMet") is False:
+        exposure_reason = "service_object_not_in_comfortable_view_region"
+    else:
+        exposure_reason = "not_needed"
+    exposure_result = (
+        exposure_metrics.get("exposureResult")
+        or ("not_needed" if usable_exposure else "still_offscreen" if offscreen else "still_no_projection")
+    )
+    target_plan = _dict(target_view_state.get("cameraMotorPlan"))
+    plan = {
+        "schema": "camera_motor_plan.v1",
+        "cameraInputMethod": target_plan.get("cameraInputMethod", "keyboard_arrows"),
+        "cameraDirectionChosen": target_plan.get("cameraDirectionChosen", "yaw_right_pitch_up"),
+        "cameraDirectionReason": target_plan.get("cameraDirectionReason", "target_view_recovery"),
+        "cameraHoldMs": target_plan.get("cameraHoldMs", 220),
+        "keyCombination": list(target_plan.get("keyCombination") or []),
+        "dragPathSummary": target_plan.get("dragPathSummary"),
+        "errorMagnitude": target_plan.get("errorMagnitude"),
+        "viewTolerancePx": target_plan.get("viewTolerancePx", camera_control.DEFAULT_VIEW_TOLERANCE_PX),
+        "targetBearing": target_plan.get("targetBearing"),
+        "yawErrorBefore": target_plan.get("yawErrorBefore"),
+        "pitchErrorHint": target_plan.get("pitchErrorHint"),
+        "cameraResponseCalibration": target_plan.get("cameraResponseCalibration"),
+        "controlLaw": target_plan.get("controlLaw"),
+    }
+    return {
+        "schema": "service_target_exposure.v1",
+        "serviceTargetName": _target_name(target),
+        "serviceTargetId": _first_present(target.get("id"), target.get("rawId"), target.get("objectId")),
+        "serviceTargetKind": _service_target_kind(target),
+        "serviceTargetWorldLocation": _tile_from(target),
+        "serviceTargetPlane": _first_present(target.get("plane"), _dict(_tile_from(target)).get("plane")),
+        "serviceObjectLoaded": loaded,
+        "serviceObjectRouteRelevant": route_relevant,
+        "serviceObjectActionRelevant": action_relevant,
+        "currentProjectionStatus": classification,
+        "currentCanvasPoint": canvas_point,
+        "currentSafeAimPoint": safe if safe else None,
+        "currentScreenClickPoint": target.get("screenClickPoint") or target.get("screenAimPoint"),
+        "currentlyOnScreen": bool(on_screen),
+        "currentlyOffscreen": bool(offscreen),
+        "edgeClipped": classification == "edge_clipped",
+        "edgeSliverVisible": exposure_metrics.get("edgeSliverVisible"),
+        "visibleAreaPx": exposure_metrics.get("visibleAreaPx"),
+        "visibleAreaRatio": exposure_metrics.get("visibleAreaRatio"),
+        "centralityScore": exposure_metrics.get("centralityScore"),
+        "edgeDistancePx": exposure_metrics.get("edgeDistancePx"),
+        "usableExposureScore": exposure_metrics.get("usableExposureScore"),
+        "usableExposureThresholdMet": exposure_metrics.get("usableExposureThresholdMet"),
+        "comfortableViewRegionMet": exposure_metrics.get("comfortableViewRegionMet"),
+        "visibleAreaThresholdMet": exposure_metrics.get("visibleAreaThresholdMet"),
+        "edgeDistanceThresholdMet": exposure_metrics.get("edgeDistanceThresholdMet"),
+        "comfortableEdgeDistanceMet": exposure_metrics.get("comfortableEdgeDistanceMet"),
+        "uiBlocked": safe.get("uiBlocked"),
+        "cameraYaw": _dict(viewport).get("cameraYaw"),
+        "cameraPitch": _dict(viewport).get("cameraPitch"),
+        "playerWorldLocation": target_view_state.get("playerWorldLocation"),
+        "targetBearing": target_view_state.get("targetBearing"),
+        "targetBearingDegrees": target_view_state.get("targetBearingDegrees"),
+        "yawErrorToTarget": target_view_state.get("yawErrorToTarget"),
+        "targetViewState": target_view_state,
+        "targetViewPolicy": target_view_state.get("targetViewPolicy"),
+        "cameraResponseCalibration": target_view_state.get("cameraResponseCalibration"),
+        "viewQualityClassification": view_classification,
+        "shouldAttemptCameraExposure": should_attempt,
+        "cameraExposureReason": exposure_reason,
+        "exposureAttempts": 0,
+        "exposureResult": exposure_result,
+        "evidenceSources": [
+            source
+            for source, present in (
+                ("live_world_model", bool(target.get("worldModelSource") or target.get("projectionStatus"))),
+                ("action_proposal", True),
+                ("projection_audit", bool(projection)),
+                ("view_quality", False),
+                ("screenshot", False),
+                ("external_knowledge", False),
+                ("replay_scenario", False),
+            )
+            if present
+        ],
+        "finalDecision": "service_view_recovery" if should_attempt else ("service_object_action" if usable_exposure else "block_or_reposition"),
+        "exposureError": exposure_error,
+        "cameraMotorPlan": plan,
+    }
+
+
+def _service_view_recovery_proposal(
+    *,
+    target: dict[str, Any],
+    exposure: dict[str, Any],
+    input_geometry: dict[str, Any] | None,
+    source_canvas_size: dict[str, Any] | None,
+    source_tick: int | None,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+    reason: str,
+    confidence: float,
+) -> ActionProposal:
+    motor = _dict(exposure.get("cameraMotorPlan"))
+    command = str(motor.get("cameraDirectionChosen") or "yaw_right_pitch_up")
+    method = str(motor.get("cameraInputMethod") or "keyboard_arrows")
+    duration_ms = _int(motor.get("cameraHoldMs"), 220)
+    recovery_target = dict(target)
+    recovery_target["serviceTargetExposure"] = dict(exposure)
+    if isinstance(exposure.get("targetViewState"), dict):
+        recovery_target["targetViewState"] = dict(exposure["targetViewState"])
+    recovery_target["recoverySuggested"] = True
+    recovery_target["recoveryAction"] = "camera_reacquire_service_target"
+    recovery_target["cameraTriggeredBy"] = exposure.get("cameraExposureReason")
+    proposal = _proposal(
+        "service_view_recovery",
+        target_kind="service_recovery",
+        target=recovery_target,
+        key_action={
+            "type": "camera_reacquire",
+            "method": method,
+            "command": command,
+            "cameraTriggeredBy": exposure.get("cameraExposureReason"),
+            "durationMs": duration_ms,
+        },
+        reason=reason,
+        confidence=confidence,
+        required_context=["service_route", "camera.controller", "bank_ui"],
+        warnings=[f"service object loaded but not safely clickable: {exposure.get('cameraExposureReason')}"],
+        source_tick=source_tick,
+        input_geometry=input_geometry,
+        source_canvas_size=source_canvas_size,
+        status=status,
+        brain=brain,
+        suppress_click_point=True,
+    )
+    if isinstance(proposal.target_explanation, dict):
+        proposal.target_explanation["serviceTargetExposure"] = dict(exposure)
+        if isinstance(exposure.get("targetViewState"), dict):
+            proposal.target_explanation["targetViewState"] = dict(exposure["targetViewState"])
+            proposal.target_explanation["targetViewPolicy"] = dict(_dict(exposure.get("targetViewPolicy")))
+        proposal.target_explanation["recoverySuggested"] = True
+        proposal.target_explanation["recoveryAction"] = "camera_reacquire_service_target"
+        proposal.target_explanation["cameraTriggeredBy"] = exposure.get("cameraExposureReason")
+    return proposal
+
+
 def _deposit_inventory_target(bank_ui: dict[str, Any]) -> dict[str, Any]:
     return {
         "targetName": "Deposit inventory",
@@ -861,7 +1960,10 @@ def _service_required(
         return True
     if _banking_complete(_dict(bank_operation)):
         return False
-    return _bool(service.get("serviceNeeded")) is True
+    # serviceNeeded/serviceRequired in serviceContext means the task policy has
+    # a banking service available. It is not, by itself, an immediate lifecycle
+    # demand to leave the resource area while inventory still has room.
+    return False
 
 
 def _candidate_actions(candidate: dict[str, Any]) -> list[str]:
@@ -1026,7 +2128,12 @@ def _path_tiles(pathing: dict[str, Any]) -> list[dict[str, Any]]:
     return tiles
 
 
-def _selected_route_waypoint(pathing: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+def _selected_route_waypoint(
+    pathing: dict[str, Any],
+    *,
+    class_id: Any = None,
+    target_id: Any = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     next_tile = _normalise_tile(pathing.get("nextWaypointTile"))
     mode = str(pathing.get("routeWaypointDistanceMode") or "adaptive")
     near_transition = _bool(pathing.get("routeWaypointNearTransition")) is True or str(pathing.get("nextEdgeType") or "").startswith(("interact_", "reacquire_"))
@@ -1034,16 +2141,55 @@ def _selected_route_waypoint(pathing: dict[str, Any]) -> tuple[dict[str, Any] | 
     max_horizon = max(1, _int(pathing.get("routeWaypointMaxHorizonTiles"), 25))
     min_progress = max(1, _int(pathing.get("minRouteProgressTiles"), 3))
     tiles = _path_tiles(pathing)
+    suppressed_keys = {str(value) for value in _list(pathing.get("suppressedNavigationTargetKeys")) + _list(pathing.get("suppressedActionTargetKeys")) if value is not None}
+    unsuppressed_tiles = [
+        tile
+        for tile in tiles
+        if not _route_tile_is_suppressed(tile, suppressed_keys, class_id=class_id, target_id=target_id)
+    ]
+    next_tile_suppressed = _route_tile_is_suppressed(next_tile, suppressed_keys, class_id=class_id, target_id=target_id)
     if mode != "adaptive" or near_transition or not tiles:
+        if next_tile_suppressed and unsuppressed_tiles:
+            selected = unsuppressed_tiles[0]
+            return selected, {
+                "schema": "route_waypoint_selection.v1",
+                "mode": mode,
+                "reason": "suppressed_waypoint_alternate",
+                "waypointDistanceTiles": 1,
+                "consideredTiles": len(tiles),
+                "candidateTilesAfterSuppression": len(unsuppressed_tiles),
+                "lookaheadTiles": lookahead,
+                "maxHorizonTiles": max_horizon,
+                "selectedTile": dict(selected),
+                "suppressedWaypointTile": dict(next_tile) if next_tile else None,
+                "suppressedTargetKeys": sorted(suppressed_keys),
+            }
         return next_tile, {
             "schema": "route_waypoint_selection.v1",
             "mode": mode,
-            "reason": "near_transition_precision" if near_transition else "next_waypoint",
+            "reason": "all_waypoints_suppressed" if next_tile_suppressed else ("near_transition_precision" if near_transition else "next_waypoint"),
             "waypointDistanceTiles": 1 if next_tile else None,
             "consideredTiles": len(tiles),
+            "candidateTilesAfterSuppression": len(unsuppressed_tiles) if suppressed_keys else None,
             "lookaheadTiles": lookahead,
             "maxHorizonTiles": max_horizon,
+            "suppressedTargetKeys": sorted(suppressed_keys) if suppressed_keys else [],
         }
+    if suppressed_keys:
+        tiles = unsuppressed_tiles
+        if not tiles:
+            return next_tile, {
+                "schema": "route_waypoint_selection.v1",
+                "mode": "adaptive",
+                "reason": "all_waypoints_suppressed",
+                "waypointDistanceTiles": 1 if next_tile else None,
+                "consideredTiles": len(_path_tiles(pathing)),
+                "candidateTilesAfterSuppression": 0,
+                "lookaheadTiles": lookahead,
+                "maxHorizonTiles": max_horizon,
+                "minRouteProgressTiles": min_progress,
+                "suppressedTargetKeys": sorted(suppressed_keys),
+            }
     index = min(len(tiles), max_horizon, lookahead) - 1
     if index < min_progress - 1 and len(tiles) >= min_progress:
         index = min(len(tiles), max_horizon, min_progress) - 1
@@ -1059,6 +2205,8 @@ def _selected_route_waypoint(pathing: dict[str, Any]) -> tuple[dict[str, Any] | 
         "minRouteProgressTiles": min_progress,
         "selectedTile": dict(selected),
         "nextWaypointTile": dict(next_tile) if next_tile else None,
+        "candidateTilesAfterSuppression": len(tiles) if suppressed_keys else None,
+        "suppressedTargetKeys": sorted(suppressed_keys) if suppressed_keys else [],
     }
 
 
@@ -1066,10 +2214,22 @@ def _path_target(pathing: dict[str, Any], fallback: dict[str, Any], name: str) -
     target = _dict(pathing.get("nextWaypointTarget") or pathing.get("destination") or fallback)
     merged = dict(target)
     merged.setdefault("targetName", name)
-    selected_waypoint, selection = _selected_route_waypoint(pathing)
+    advisory_source = target.get("source") or fallback.get("source")
+    if advisory_source:
+        merged.setdefault("advisoryTargetSource", advisory_source)
+    target_id = target.get("objectId", target.get("rawId", target.get("id")))
+    class_id = target.get("classId") or target.get("targetClass")
+    selected_waypoint, selection = _selected_route_waypoint(pathing, class_id=class_id, target_id=target_id)
     if isinstance(selected_waypoint, dict):
         merged["targetTile"] = dict(selected_waypoint)
         merged["routeWaypointSelection"] = selection
+        merged["actionTargetSource"] = "local_frontier_waypoint"
+        merged["actionability"] = "needs_live_projection"
+        if selection.get("suppressedTargetKeys"):
+            merged["suppressedTargetKeysAtSelection"] = list(selection.get("suppressedTargetKeys") or [])
+    elif str(advisory_source or "").lower() in {"static_route_prior", "route_context_goal"}:
+        merged.setdefault("actionTargetSource", str(advisory_source))
+        merged.setdefault("actionability", "advisory_only")
     for key in ("pathTargetTile", "destinationTile"):
         if isinstance(pathing.get(key), dict):
             merged.setdefault(key, pathing.get(key))
@@ -1116,7 +2276,7 @@ def _resource_selection_proposal(
 ) -> ActionProposal | None:
     inventory_full = _bool(_first_present(inventory.get("inventoryFull"), status.get("inventoryFull")))
     free_slots = _int(_first_present(inventory.get("freeSlots"), status.get("inventoryFreeSlots")), -1)
-    target = _resource_target_from_context(status, brain, active_target, overlay_selected)
+    target = _resource_target_from_context(status, brain, active_target, overlay_selected, source_canvas_size=source_canvas_size)
     if inventory_full is True or free_slots == 0 or not _is_resource_target_candidate(target):
         return None
     freshness_issue = target_freshness_issue(status, brain, target, source_tick)
@@ -1148,12 +2308,38 @@ def _resource_selection_proposal(
         status=status,
         brain=brain,
     )
+    resource_candidates = [
+        candidate
+        for candidate in _resource_candidate_lists(status, brain, active_target, overlay_selected)
+        if _is_resource_target_candidate(candidate)
+    ]
+    resource_view = _resource_view_score(
+        status=status,
+        brain=brain,
+        candidates=resource_candidates or [target],
+        selected_target=target,
+        source_canvas_size=source_canvas_size,
+    )
+    target["resourceViewScore"] = resource_view
+    target["resourceViewClassification"] = resource_view.get("classification")
+    target["resourceCameraRecoveryRecommended"] = resource_view.get("cameraRecoveryRecommended")
     if (
         safe_aimpoint is None or safe_aimpoint.get("status") != "PASS"
     ) and projection_status.get("recoverySuggested") is True and _tile_from(target):
         return _resource_projection_recovery_proposal(
             target=target,
             projection_status=projection_status,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
+            source_tick=source_tick,
+            status=status,
+            brain=brain,
+        )
+    if resource_view.get("cameraRecoveryRecommended") is True and _tile_from(target):
+        return _resource_view_recovery_proposal(
+            target=target,
+            projection_status=projection_status,
+            resource_view_score=resource_view,
             input_geometry=input_geometry,
             source_canvas_size=source_canvas_size,
             source_tick=source_tick,
@@ -1178,7 +2364,7 @@ def _resource_selection_proposal(
             brain=brain,
             suppress_click_point=True,
         )
-    return _proposal(
+    proposal = _proposal(
         "select_resource_target",
         target_kind="resource",
         target=target,
@@ -1191,6 +2377,11 @@ def _resource_selection_proposal(
         status=status,
         brain=brain,
     )
+    if isinstance(proposal.target_explanation, dict):
+        proposal.target_explanation["resourceViewScore"] = dict(resource_view)
+        proposal.target_explanation["resourceViewClassification"] = resource_view.get("classification")
+        proposal.target_explanation["resourceCameraRecoveryRecommended"] = resource_view.get("cameraRecoveryRecommended")
+    return proposal
 
 
 def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
@@ -1201,6 +2392,12 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
     inventory = _dict(brain.get("inventoryContext"))
     service = _dict(brain.get("serviceContext"))
     pathing = _dict(brain.get("pathingContext"))
+    suppressed_action_keys = _suppressed_action_target_keys(status, brain)
+    if suppressed_action_keys:
+        pathing = dict(pathing)
+        values = sorted(suppressed_action_keys)
+        pathing["suppressedActionTargetKeys"] = values
+        pathing["suppressedNavigationTargetKeys"] = values
     bank_ui = _dict(brain.get("bankUiContext"))
     bank_operation = _dict(brain.get("bankOperationContext"))
     close_bank = _dict(brain.get("closeBankContext"))
@@ -1210,6 +2407,35 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
     active_target = _dict(generic.get("activeIntentTarget"))
     overlay_selected = _overlay_selected(status, brain)
     source_tick = status.get("latestTick") if isinstance(status.get("latestTick"), int) else None
+    phase = _lower(generic.get("phase") or status.get("phase") or status.get("brainPhase"))
+    active_intent = _lower(generic.get("activeIntent") or status.get("activeIntent"))
+    if phase == "goal_complete" or active_intent == "goal_complete":
+        return _proposal(
+            "none",
+            target_kind="none",
+            reason="goal_complete",
+            confidence=1.0,
+            required_context=["task_lifecycle"],
+            source_tick=source_tick,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
+            status=status,
+            brain=brain,
+        )
+    if phase in {"wait_for_result", "waiting_for_result"} or active_intent in {"wait_for_result", "wait_for_resource_result"}:
+        return _proposal(
+            "wait_for_resource_result",
+            target_kind="none",
+            reason="waiting_for_previous_action_result",
+            confidence=1.0,
+            warnings=["already waiting for previous action result"],
+            required_context=["action_lifecycle"],
+            source_tick=source_tick,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
+            status=status,
+            brain=brain,
+        )
 
     if _bool(bank_ui.get("bankPinOpen")) is True or "bank_pin_required" in _list(generic.get("blockingConditions")):
         return _proposal(
@@ -1460,6 +2686,25 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
             status=status,
             brain=brain,
         )
+        exposure = _service_target_exposure(
+            target,
+            _safe_aimpoint,
+            source_canvas_size=source_canvas_size,
+            status=status,
+            brain=brain,
+        )
+        if exposure.get("shouldAttemptCameraExposure") is True:
+            return _service_view_recovery_proposal(
+                target=target,
+                exposure=exposure,
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
+                source_tick=source_tick,
+                status=status,
+                brain=brain,
+                reason="service_view_recovery_needed",
+                confidence=0.76,
+            )
         return _proposal(
             "open_service",
             target_kind="service",
@@ -1475,7 +2720,7 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
         )
 
     if banking_complete and _bool(bank_ui.get("bankOpen")) is not True:
-        post_bank_target = _resource_target_from_context(status, brain, active_target, overlay_selected)
+        post_bank_target = _resource_target_from_context(status, brain, active_target, overlay_selected, source_canvas_size=source_canvas_size)
         post_bank_target_class = str(post_bank_target.get("classId") or "").lower()
         post_bank_target_type = str(post_bank_target.get("targetType") or "").lower()
         post_bank_resource_visible = post_bank_target and (
@@ -1497,7 +2742,7 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 brain=brain,
             )
 
-    if not banking_complete:
+    if service_required and not banking_complete:
         route_target = _service_route_interaction_target(service_route)
         route_service_target = _service_route_service_target(service_route)
         if _bool(service_route.get("actionReady")) is True and route_service_target:
@@ -1507,6 +2752,25 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 status=status,
                 brain=brain,
             )
+            exposure = _service_target_exposure(
+                route_service_target,
+                _safe_aimpoint,
+                source_canvas_size=source_canvas_size,
+                status=status,
+                brain=brain,
+            )
+            if exposure.get("shouldAttemptCameraExposure") is True:
+                return _service_view_recovery_proposal(
+                    target=route_service_target,
+                    exposure=exposure,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    source_tick=source_tick,
+                    status=status,
+                    brain=brain,
+                    reason="service_view_recovery_needed",
+                    confidence=0.78,
+                )
             return _proposal(
                 "open_service",
                 target_kind="service",

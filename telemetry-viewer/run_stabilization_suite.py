@@ -64,7 +64,17 @@ COMMANDS = [
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\action_proposal_core.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\client_tick_core.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\safe_aimpoint_core.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\target_view_core.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\service_route_core.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\world_model_core.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\world_model_client.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\external_knowledge_cache.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\external_knowledge.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\external_sources\\osrs_wiki.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\external_sources\\osrs_prices.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\external_sources\\osrsbox.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\knowledge_fabric.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\mcp_server.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\woodcutting_candidate_diagnostics.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\diagnose_woodcutting_candidates.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\live_readiness.py"],
@@ -76,8 +86,11 @@ COMMANDS = [
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\input_control\\mouse_movement.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\input_control\\human_input_controller.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\input_control\\visual_debug_bundle.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\input_control\\input_integrity.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\input_control\\arduino_monitor.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\input_control\\backend_pyautogui.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\input_control\\backend_pydirectinput.py"],
+    [sys.executable, "-m", "py_compile", "telemetry-viewer\\input_control\\backend_arduino_hid.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\input_control\\executor.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\input_control\\diagnostics.py"],
     [sys.executable, "-m", "py_compile", "telemetry-viewer\\diagnose_action_proposal.py"],
@@ -128,6 +141,7 @@ COMMANDS = [
     [sys.executable, "telemetry-viewer\\tests\\test_live_core_daemon.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_live_config_doctor.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_live_control_panel.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_check_live_setup.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_live_context_query.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_diagnose_brain_progress.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_diagnose_service_context.py"],
@@ -145,9 +159,14 @@ COMMANDS = [
     [sys.executable, "telemetry-viewer\\tests\\test_input_geometry.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_mouse_movement.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_human_input_controller.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_arduino_live_input_policy.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_input_integrity.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_visual_debug_bundle.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_world_model_core.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_knowledge_fabric.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_client_tick_core.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_safe_aimpoint_core.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_target_view_core.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_input_control_executor.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_diagnose_action_proposal.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_woodcutting_candidate_diagnostic.py"],
@@ -165,8 +184,8 @@ COMMANDS = [
     [sys.executable, "telemetry-viewer\\tests\\test_runelite_bootstrap.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_context_service.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_live_target_processor.py"],
-    [sys.executable, "telemetry-viewer\\tests\\test_live_packet_reader.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_inspect_live_packets.py"],
+    [sys.executable, "telemetry-viewer\\tests\\test_maintenance.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_telemetry_paths.py"],
     [sys.executable, "telemetry-viewer\\tests\\test_diagnose_target_coverage.py"],
 ]
@@ -198,7 +217,7 @@ def command_group_name(command: list[str]) -> str:
     name = _command_file(command)
     if name in {"test_telemetry_paths.py"}:
         return "path/session resolution"
-    if name in {"test_live_packet_reader.py", "test_live_target_processor.py"}:
+    if name in {"test_live_target_processor.py"}:
         return "live file loading/cache"
     if name in {"test_target_analyzer.py", "test_target_candidate_dedupe.py", "test_woodcutting_candidate_diagnostic.py", "test_live_core_contracts.py"}:
         return "candidate classification/scoring"

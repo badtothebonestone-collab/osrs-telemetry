@@ -7,6 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    import knowledge_fabric
+except Exception:  # noqa: BLE001
+    knowledge_fabric = None  # type: ignore
+
 
 LIVE_DIR = Path("interaction_geometry") / "live"
 DEFAULT_DEBUG_DIR = LIVE_DIR / "debug_bundles"
@@ -103,6 +108,93 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 
 
+def _write_world_model_evidence(bundle_dir: Path, status: dict[str, Any]) -> dict[str, str]:
+    evidence = {
+        "world_model_summary.json": status.get("worldModelSummary"),
+        "route_object_census.json": status.get("worldModelRouteObjectCensus"),
+        "resource_object_census.json": status.get("worldModelResourceObjectCensus"),
+        "service_object_census.json": status.get("worldModelServiceObjectCensus"),
+        "projection_audit.json": status.get("worldModelProjectionAudit"),
+        "collision_frontier.json": status.get("worldModelPathingFrontier"),
+    }
+    if knowledge_fabric is not None and not any(isinstance(payload, dict) and payload for payload in evidence.values()):
+        try:
+            fabric = knowledge_fabric.fabric_from_live(max_objects=160, include_collision=True, timeout=1.5)
+            payloads = getattr(fabric, "world_model_payloads", {})
+            if isinstance(payloads, dict):
+                evidence = {
+                    "world_model_summary.json": payloads.get("world_model_summary"),
+                    "route_object_census.json": payloads.get("route_object_census"),
+                    "resource_object_census.json": payloads.get("resource_object_census"),
+                    "service_object_census.json": payloads.get("service_object_census"),
+                    "projection_audit.json": payloads.get("projection_audit"),
+                    "collision_frontier.json": payloads.get("pathing_frontier"),
+                }
+        except Exception:  # noqa: BLE001
+            pass
+    written: dict[str, str] = {}
+    for filename, payload in evidence.items():
+        if not isinstance(payload, dict) or not payload:
+            continue
+        path = bundle_dir / filename
+        _write_json(path, payload)
+        written[filename] = str(path)
+    return written
+
+
+def _write_knowledge_fabric_evidence(bundle_dir: Path, status: dict[str, Any]) -> dict[str, str]:
+    if knowledge_fabric is None:
+        return {}
+    try:
+        fabric = knowledge_fabric.KnowledgeFabric.from_status(status)
+        evidence = {
+            "knowledge_fabric_status.json": fabric.status(),
+            "current_debug_context.json": fabric.query_current_debug_context(limit=20),
+            "explain_current_blocker.json": fabric.explain_current_blocker(),
+            "resource_candidates.json": fabric.query_resource_candidates(limit=20),
+            "service_candidates.json": fabric.query_service_candidates(limit=20),
+            "route_objects.json": fabric.query_route_objects(limit=20),
+            "pathing_frontier.json": fabric.query_path_frontier(limit=20),
+            "view_quality.json": fabric.query_view_quality(intent=str(status.get("currentIntent") or "unknown")),
+            "session_memory_summary.json": fabric.session_memory,
+            "static_library_summary.json": fabric.static_library,
+            "data_quality_report.json": fabric.data_quality_report(limit=20),
+            "handoff_summary.json": fabric.handoff_summary(),
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+    written: dict[str, str] = {}
+    for filename, payload in evidence.items():
+        if not isinstance(payload, dict) or not payload:
+            continue
+        path = bundle_dir / filename
+        _write_json(path, payload)
+        written[filename] = str(path)
+    return written
+
+
+def _input_integrity_payload(
+    status: dict[str, Any],
+    action_trace: dict[str, Any] | None,
+    extra: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    trace = action_trace if isinstance(action_trace, dict) else {}
+    extra = extra if isinstance(extra, dict) else {}
+    for value in (
+        extra.get("inputIntegrityStatus"),
+        trace.get("inputIntegrityStatusAfter"),
+        trace.get("inputIntegrityStatusBefore"),
+        _safe_dict(trace.get("liveInput")).get("inputIntegrityStatusAfter"),
+        _safe_dict(trace.get("liveInput")).get("inputIntegrityStatusBefore"),
+        _safe_dict(trace.get("liveInput")).get("inputIntegrityStatus"),
+        status.get("inputIntegrityStatus"),
+        _safe_dict(status.get("liveInput")).get("inputIntegrityStatus"),
+    ):
+        if isinstance(value, dict) and value:
+            return dict(value)
+    return None
+
+
 def _sanitize_reason(reason: str) -> str:
     text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(reason or "debug")).strip("_")
     return text[:80] or "debug"
@@ -126,6 +218,7 @@ def _proposal_payload(proposal: Any) -> dict[str, Any]:
 def _proposal_summary(proposal: Any) -> dict[str, Any]:
     payload = _proposal_payload(proposal)
     explanation = _safe_dict(payload.get("targetExplanation"))
+    resolution = _safe_dict(payload.get("clickPointResolution"))
     return {
         "proposedAction": payload.get("proposedAction"),
         "targetKind": payload.get("targetKind"),
@@ -134,10 +227,35 @@ def _proposal_summary(proposal: Any) -> dict[str, Any]:
         "confidence": payload.get("confidence"),
         "clickPointSpace": payload.get("clickPointSpace"),
         "suggestedClickPoint": payload.get("suggestedClickPoint"),
+        "clickPointResolution": resolution or None,
+        "coordinateSpace": resolution.get("coordinateSpace"),
+        "scaleX": resolution.get("scaleX"),
+        "scaleY": resolution.get("scaleY"),
+        "screenPointBeforeScaling": resolution.get("screenPointBeforeScaling"),
+        "screenPointAfterScaling": resolution.get("screenPointAfterScaling"),
+        "windowBoundsSource": resolution.get("windowBoundsSource"),
+        "canvasBoundsSource": resolution.get("canvasBoundsSource"),
         "targetTile": payload.get("targetTile"),
         "selectedTarget": explanation.get("targetName") or explanation.get("name") or payload.get("targetName"),
+        "targetSource": explanation.get("targetSource") or explanation.get("source"),
+        "actionTargetSource": payload.get("actionTargetSource") or explanation.get("actionTargetSource"),
+        "actionability": payload.get("actionability") or explanation.get("actionability"),
+        "advisoryTargetSource": explanation.get("advisoryTargetSource"),
+        "staleProposalDetected": payload.get("staleProposalDetected"),
+        "staleProposalSource": payload.get("staleProposalSource"),
         "routeProjectionStatus": explanation.get("routeProjectionStatus"),
         "resourceProjectionStatus": explanation.get("resourceProjectionStatus"),
+        "resourceViewScore": explanation.get("resourceViewScore"),
+        "resourceViewClassification": explanation.get("resourceViewClassification"),
+        "resourceCameraRecoveryRecommended": explanation.get("resourceCameraRecoveryRecommended"),
+        "serviceTargetExposure": explanation.get("serviceTargetExposure"),
+        "targetViewState": explanation.get("targetViewState"),
+        "targetViewPolicy": explanation.get("targetViewPolicy"),
+        "resourceTargetAmbiguity": explanation.get("resourceTargetAmbiguity"),
+        "aimpointSamplesTried": explanation.get("aimpointSamplesTried"),
+        "aimpointSampleResults": explanation.get("aimpointSampleResults"),
+        "selectedAimpointSource": explanation.get("selectedAimpointSource"),
+        "hoverConfirmedTopExpected": explanation.get("hoverConfirmedTopExpected"),
         "safeAimPoint": explanation.get("safeAimPoint"),
     }
 
@@ -151,11 +269,14 @@ def _trace_excerpt(action_trace: dict[str, Any] | None) -> dict[str, Any]:
         "finalClassification": trace.get("finalClassification"),
         "selectedTarget": trace.get("selectedTarget"),
         "intendedPoint": trace.get("intendedPoint"),
+        "coordinateScaling": _safe_dict(trace.get("intendedPoint")),
         "reacquisition": trace.get("reacquisition"),
         "cameraInput": trace.get("cameraInput"),
         "humanInput": trace.get("humanInput"),
         "routeStability": trace.get("routeStability"),
         "routeTransitionLedgerEntry": trace.get("routeTransitionLedgerEntry"),
+        "resourceTargetAmbiguity": trace.get("resourceTargetAmbiguity"),
+        "targetViewState": trace.get("targetViewState"),
         "hoverMenu": client_tick.get("acceptedHoverSample") or client_tick.get("latestRejectedHoverSample"),
         "clickedMenu": client_tick.get("lastMenuOptionClickedAfter"),
         "menuMismatch": client_tick.get("menuMismatch"),
@@ -164,6 +285,13 @@ def _trace_excerpt(action_trace: dict[str, Any] | None) -> dict[str, Any]:
 
 def _player_location(status: dict[str, Any]) -> dict[str, Any] | None:
     player = _status_context(status, "playerContext") or _status_context(status, "player")
+    location = status.get("playerLocation") if isinstance(status.get("playerLocation"), dict) else None
+    if location:
+        return {
+            "worldX": location.get("worldX", location.get("x")),
+            "worldY": location.get("worldY", location.get("y")),
+            "plane": location.get("plane"),
+        }
     tile = player.get("worldTile") if isinstance(player.get("worldTile"), dict) else player.get("tile")
     if isinstance(tile, dict):
         return {
@@ -189,6 +317,38 @@ def _player_location(status: dict[str, Any]) -> dict[str, Any] | None:
                     return {"worldX": fallback_x, "worldY": fallback_y, "plane": value.get("plane")}
         return None
     return {"worldX": world_x, "worldY": world_y, "plane": player.get("plane", status.get("playerPlane"))}
+
+
+def _player_location_source(status: dict[str, Any]) -> str | None:
+    player = _status_context(status, "playerContext") or _status_context(status, "player")
+    source = status.get("playerLocationSource") or player.get("locationSource")
+    if isinstance(source, str) and source:
+        return source
+    if isinstance(status.get("playerLocation"), dict):
+        return "daemon_player_location"
+    if player.get("worldX") is not None or player.get("world_x") is not None or isinstance(player.get("worldTile"), dict):
+        return "player_context"
+    pathing = _status_context(status, "pathingContext")
+    if (
+        isinstance(pathing.get("collisionWindowCenterWorld"), dict)
+        or isinstance(status.get("pathingCollisionWindowCenterWorld"), dict)
+        or isinstance(status.get("collisionWindowCenterWorld"), dict)
+    ):
+        return "collision_window_center_proxy"
+    return None
+
+
+def _player_location_confidence(status: dict[str, Any]) -> float | None:
+    player = _status_context(status, "playerContext") or _status_context(status, "player")
+    for value in (status.get("playerLocationConfidence"), player.get("locationConfidence")):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    source = _player_location_source(status)
+    if source == "collision_window_center_proxy":
+        return 0.35
+    if source:
+        return 1.0
+    return None
 
 
 def _inventory_free_slots(status: dict[str, Any]) -> int | None:
@@ -470,7 +630,29 @@ def _mouse_position(backend: Any | None, warnings: list[str]) -> dict[str, int] 
 
 def _trigger_flag(reason: str) -> str | None:
     value = str(reason or "")
-    if value in {"resource_projection_recovery_start", "resource_projection_recovery_end", "camera_reacquire_start", "camera_reacquire_end"}:
+    if value in {
+        "resource_projection_recovery_start",
+        "resource_projection_recovery_end",
+        "resource_camera_reacquire_start",
+        "resource_camera_reacquire_end",
+        "camera_reacquire_start",
+        "camera_reacquire_end",
+        "target_loaded_offscreen",
+        "target_edge_sliver",
+        "target_insufficient_exposure",
+        "target_screen_click_point_unavailable",
+        "target_view_recovery_start",
+        "target_view_recovery_success",
+        "target_view_recovery_failed",
+        "target_hover_confirmed_after_camera",
+        "target_zoom_recovery_used",
+        "target_bearing_camera_alignment",
+        "service_object_loaded_offscreen",
+        "service_object_edge_sliver",
+        "service_view_recovery_start",
+        "service_view_recovery_success",
+        "service_view_recovery_failed",
+    }:
         return "screenshot_on_camera_recovery"
     if value in {"route_edge_projection_rejected", "route_waypoint_edge_rejected"}:
         return "screenshot_on_edge_reject"
@@ -494,10 +676,24 @@ def _trigger_flag(reason: str) -> str | None:
         "execution_failed",
         "pre_action_readiness_failed",
         "route_source_mismatch",
+        "target_source_mismatch",
+        "stale_static_route_target",
+        "hover_intent_mismatch",
+        "stale_proposal_reacquire_failed",
         "route_wall_hugging_detected",
         "goal_directed_path_blocked",
         "unexpected_current_area",
         "repeated_navigation_no_progress",
+        "poor_resource_view",
+        "resource_target_edge_rejected",
+        "worksite_drift_detected",
+        "no_executable_resource_view",
+        "input_integrity_fail",
+        "arduino_missing",
+        "monitor_missing",
+        "injected_input_detected",
+        "backend_bypass_detected",
+        "arduino_self_test_fail",
     }:
         return "screenshot_on_failure"
     if value in {
@@ -507,6 +703,9 @@ def _trigger_flag(reason: str) -> str | None:
         "alternate_approach_node_selected",
         "service_anchor_reached",
         "route_object_reacquired",
+        "live_target_reacquired",
+        "post_depletion_reacquire",
+        "arduino_self_test_pass",
     }:
         return "screenshot_on_lifecycle_transition"
     if value == "final_summary":
@@ -625,11 +824,21 @@ class VisualDebugBundleWriter:
         trace_excerpt = _trace_excerpt(action_trace)
         if trace_excerpt:
             _write_json(bundle_dir / "action_trace_excerpt.json", trace_excerpt)
+        world_model_paths = _write_world_model_evidence(bundle_dir, status)
+        knowledge_fabric_paths = _write_knowledge_fabric_evidence(bundle_dir, status)
+        input_integrity = _input_integrity_payload(status, action_trace, extra)
+        input_integrity_path = None
+        if input_integrity:
+            input_integrity_path = bundle_dir / "input_integrity_status.json"
+            _write_json(input_integrity_path, input_integrity)
 
         proposal_summary = _proposal_summary(proposal)
         route_summary = _route_context_summary(status, proposal_summary, extra)
         phase, intent = _phase_intent(status)
         action_readiness = _safe_dict(readiness.get("actionReadiness")) if isinstance(readiness, dict) else {}
+        action_need = _safe_dict(readiness.get("actionNeed")) if isinstance(readiness, dict) else {}
+        overlay_health = _safe_dict(readiness.get("overlayHealth")) if isinstance(readiness, dict) else {}
+        action_safety_evidence = _safe_dict(readiness.get("actionSafetyEvidence")) if isinstance(readiness, dict) else {}
         clicked = clicked_menu or trace_excerpt.get("clickedMenu") or _latest_clicked_menu(status)
         hover = trace_excerpt.get("hoverMenu") or _hover_menu(status)
         wall_loop_classification = _wall_loop_classification(reason, classification, route_summary, trace_excerpt, extra)
@@ -647,7 +856,13 @@ class VisualDebugBundleWriter:
             "daemonStatusPath": str(bundle_dir / "daemon_status.json") if status else None,
             "overlayDebugStatePath": str(bundle_dir / "overlay_debug_state.json") if overlay is not None else None,
             "actionTraceExcerptPath": str(bundle_dir / "action_trace_excerpt.json") if trace_excerpt else None,
+            "worldModelEvidencePaths": world_model_paths,
+            "knowledgeFabricEvidencePaths": knowledge_fabric_paths,
+            "inputIntegrityStatusPath": str(input_integrity_path) if input_integrity_path is not None else None,
+            "inputIntegrityStatus": input_integrity,
             "playerLocation": _player_location(status),
+            "playerLocationSource": _player_location_source(status),
+            "playerLocationConfidence": _player_location_confidence(status),
             "plane": (_player_location(status) or {}).get("plane") if _player_location(status) else None,
             "inventoryFreeSlots": _inventory_free_slots(status),
             "resourceCount": _resource_count(status),
@@ -655,7 +870,17 @@ class VisualDebugBundleWriter:
             "currentIntent": intent or proposal_summary.get("proposedAction"),
             "phase": phase,
             "actionReadiness": action_readiness or None,
+            "actionNeed": action_need or None,
+            "overlayHealth": overlay_health or None,
+            "actionSafetyEvidence": action_safety_evidence or None,
+            "selectedActionIntent": action_readiness.get("intent") or intent or proposal_summary.get("proposedAction"),
             "selectedTarget": proposal_summary.get("selectedTarget"),
+            "selectedTargetSource": proposal_summary.get("targetSource"),
+            "selectedActionTargetSource": proposal_summary.get("actionTargetSource"),
+            "selectedActionability": proposal_summary.get("actionability"),
+            "advisoryTargetSource": proposal_summary.get("advisoryTargetSource"),
+            "staleProposalDetected": proposal_summary.get("staleProposalDetected"),
+            "staleProposalSource": proposal_summary.get("staleProposalSource"),
             "selectedWaypoint": route_summary.get("selectedWaypoint"),
             "routeNode": _status_context(status, "serviceRouteContext").get("currentNodeId")
             or status.get("serviceRouteCurrentNodeId"),
@@ -669,10 +894,26 @@ class VisualDebugBundleWriter:
             "pathingReason": route_summary.get("pathingReason"),
             "wallLoopClassification": wall_loop_classification,
             "projectionStatus": proposal_summary.get("routeProjectionStatus") or proposal_summary.get("resourceProjectionStatus"),
+            "resourceViewScore": proposal_summary.get("resourceViewScore"),
+            "resourceViewClassification": proposal_summary.get("resourceViewClassification"),
+            "resourceCameraRecoveryRecommended": proposal_summary.get("resourceCameraRecoveryRecommended"),
+            "serviceTargetExposure": proposal_summary.get("serviceTargetExposure"),
+            "targetViewState": proposal_summary.get("targetViewState"),
+            "targetViewPolicy": proposal_summary.get("targetViewPolicy"),
+            "resourceTargetAmbiguity": proposal_summary.get("resourceTargetAmbiguity")
+            or trace_excerpt.get("resourceTargetAmbiguity"),
+            "aimpointSamplesTried": proposal_summary.get("aimpointSamplesTried"),
+            "aimpointSampleResults": proposal_summary.get("aimpointSampleResults"),
+            "selectedAimpointSource": proposal_summary.get("selectedAimpointSource"),
+            "hoverConfirmedTopExpected": proposal_summary.get("hoverConfirmedTopExpected"),
             "safeAimPointStatus": safe_aimpoint.get("status"),
             "safeAimPointSummary": safe_aimpoint or None,
             "cameraState": _camera_state(status),
             "clientTickHotSummary": _client_tick_hot_summary(status),
+            "daemonSessionPath": str(_session_path(status)) if _session_path(status) is not None else None,
+            "daemonTick": status.get("latestTick") or status.get("tick"),
+            "pluginSnapshotSessionPath": status.get("pluginSnapshotSessionPath"),
+            "pluginSnapshotTick": status.get("pluginSnapshotLatestTick") or status.get("pluginSnapshotTick"),
             "hoverMenu": hover,
             "latestHoverMenu": hover,
             "clickedMenu": clicked,
@@ -682,8 +923,13 @@ class VisualDebugBundleWriter:
             "finalDecision": final_decision,
             "proposal": proposal_summary,
             "actionProposalSummary": proposal_summary,
+            "coordinateScaling": proposal_summary.get("clickPointResolution")
+            or _safe_dict(trace_excerpt.get("intendedPoint"))
+            or None,
             "actionTraceExcerpt": trace_excerpt,
             "humanInput": trace_excerpt.get("humanInput"),
+            "liveInputBackend": _safe_dict(trace_excerpt.get("humanInput")).get("liveInputBackend") or trace_excerpt.get("liveInputBackend"),
+            "directBackendBypassCount": _safe_dict(trace_excerpt.get("humanInput")).get("directBackendBypassCount"),
             "loopSummary": loop_summary if isinstance(loop_summary, dict) else None,
             "mousePosition": mouse,
             "windowRect": window,

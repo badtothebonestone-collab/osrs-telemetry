@@ -33,30 +33,30 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
             os.utime(second / "manifest.json", (newest, newest))
             self.assertEqual(panel.latest_session_path(str(root)), second)
 
-    def test_build_live_processor_command_defaults_to_strict_compact_packets(self):
+    def test_build_live_processor_command_defaults_to_plugin_snapshot(self):
         options = panel.LivePanelOptions(profile="woodcutting", window_ticks=10, limit=100)
         command = panel.build_live_processor_command(options, supports_liveness=True)
         self.assertEqual(command[0], sys.executable)
         self.assertIn("telemetry-viewer\\live_target_processor.py", command)
         self.assertIn("--input-source", command)
-        self.assertEqual(command[command.index("--input-source") + 1], "compact-packets")
-        self.assertIn("--require-compact-packets", command)
+        self.assertEqual(command[command.index("--input-source") + 1], "plugin-snapshot")
+        self.assertNotIn("--require-compact-packets", command)
         self.assertIn("--liveness-mode", command)
         self.assertEqual(command[command.index("--profile") + 1], "woodcutting")
         self.assertEqual(command[command.index("--window-ticks") + 1], "10")
         self.assertEqual(command[command.index("--limit") + 1], "100")
         self.assertEqual(command[command.index("--overlay-debug-target-limit") + 1], "10")
 
-    def test_build_live_processor_strict_compact_command(self):
+    def test_build_live_processor_ignores_retired_compact_requirement(self):
         options = panel.LivePanelOptions(require_compact_packets=True, input_source="auto")
         command = panel.build_live_processor_command(options, supports_liveness=True)
-        self.assertEqual(command[command.index("--input-source") + 1], "compact-packets")
-        self.assertIn("--require-compact-packets", command)
+        self.assertEqual(command[command.index("--input-source") + 1], "plugin-snapshot")
+        self.assertNotIn("--require-compact-packets", command)
 
-    def test_compact_stream_label_and_warning(self):
-        self.assertIn(panel.COMPACT_STREAM_EXPERIMENTAL_LABEL, panel.INPUT_SOURCES)
-        self.assertEqual(panel.normalize_input_source(panel.COMPACT_STREAM_EXPERIMENTAL_LABEL), "compact-stream")
-        self.assertIn("experimental", panel.stream_mode_warning(panel.COMPACT_STREAM_EXPERIMENTAL_LABEL).lower())
+    def test_plugin_snapshot_label_and_archive_retired_warning(self):
+        self.assertIn(panel.PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL, panel.INPUT_SOURCES)
+        self.assertEqual(panel.normalize_input_source(panel.PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL), "plugin-snapshot")
+        self.assertIn("retired", panel.stream_mode_warning(panel.PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL).lower())
 
     def test_config_doctor_command(self):
         command = panel.build_config_doctor_command("daily", fix_suggestions=True, check_processes=True)
@@ -84,21 +84,21 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
             (
                 "Apply Daily Live Preset",
                 "Start RuneLite Dev",
-                "Start Daily Live Stable Compact",
-                "Start Daily Live Snapshot No-File EXPERIMENTAL",
+                "Start Daily Live Snapshot No-File",
+                "Legacy Packet Cleanup Report",
                 "Stop All",
                 "Config Doctor",
                 "Daily Gauntlet",
                 "Open Latest Session Folder",
             ),
         )
-        self.assertFalse(any("Legacy" in label for label in panel.DAILY_ACTION_LABELS))
-        self.assertTrue(any("Snapshot No-File" in label and "EXPERIMENTAL" in label for label in panel.DAILY_ACTION_LABELS))
+        self.assertTrue(any("Legacy Packet Cleanup" in label for label in panel.DAILY_ACTION_LABELS))
+        self.assertTrue(any("Snapshot No-File" in label for label in panel.DAILY_ACTION_LABELS))
         self.assertTrue(any(label.endswith("Legacy Live Processor") for label in panel.ADVANCED_ACTION_LABELS))
         self.assertTrue(any(label.endswith("Legacy Context Service") for label in panel.ADVANCED_ACTION_LABELS))
         self.assertTrue(any(label.endswith("Legacy Human Dashboard") for label in panel.ADVANCED_ACTION_LABELS))
         self.assertTrue(any("plugin-snapshot" in label.lower() and "EXPERIMENTAL" in label for label in panel.ADVANCED_ACTION_LABELS))
-        self.assertTrue(any("compact-stream" in label.lower() and "EXPERIMENTAL" in label for label in panel.ADVANCED_ACTION_LABELS))
+        self.assertTrue(any("retired compact stream" in label.lower() for label in panel.ADVANCED_ACTION_LABELS))
         self.assertTrue(any("Debug Audit" in label for label in panel.ADVANCED_ACTION_LABELS))
         self.assertTrue(any("Inspector" in label for label in panel.ADVANCED_ACTION_LABELS))
         self.assertTrue(any("Batch Builders" in label for label in panel.ADVANCED_ACTION_LABELS))
@@ -273,8 +273,9 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                         "phase": "target_selected",
                         "activeIntent": "select_target",
                         "activeIntentTarget": {
-                            "targetName": "Oak tree",
+                            "targetName": "Tree",
                             "classId": "tree",
+                            "id": 1278,
                             "aimPoint": {"canvasX": 100, "canvasY": 120},
                         },
                     },
@@ -290,7 +291,7 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
 
         self.assertEqual(mission["actionProposalStatus"], "PASS")
         self.assertEqual(mission["proposedAction"], "select_resource_target")
-        self.assertEqual(mission["actionTarget"], "Oak tree")
+        self.assertEqual(mission["actionTarget"], "Tree")
         self.assertEqual(mission["actionClickPoint"], "100,120")
         self.assertIn("Action Proposal:", text)
         self.assertIn("Action: select_resource_target", text)
@@ -387,14 +388,14 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         self.assertIn("--plugin-snapshot-tier", command)
         self.assertEqual(command[command.index("--plugin-snapshot-tier") + 1], "hot")
         self.assertIn("--plugin-snapshot-fallback", command)
-        self.assertIn("experimental", panel.stream_mode_warning(panel.PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL).lower())
+        self.assertIn("retired", panel.stream_mode_warning(panel.PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL).lower())
 
-    def test_daily_preset_command_remains_compact_packets(self):
+    def test_daily_preset_command_uses_plugin_snapshot(self):
         options = panel.normal_live_options("woodcutting")
         command = panel.build_live_processor_command(options, supports_liveness=True)
-        self.assertEqual(command[command.index("--input-source") + 1], "compact-packets")
-        self.assertIn("--require-compact-packets", command)
-        self.assertNotIn("--plugin-snapshot-tier", command)
+        self.assertEqual(command[command.index("--input-source") + 1], "plugin-snapshot")
+        self.assertNotIn("--require-compact-packets", command)
+        self.assertIn("--plugin-snapshot-tier", command)
 
     def test_live_processor_command_can_omit_liveness_flags(self):
         options = panel.LivePanelOptions()
@@ -416,11 +417,10 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
         command = panel.build_live_core_daemon_command(panel.normal_live_options("woodcutting"))
         self.assertEqual(command[:2], [sys.executable, "telemetry-viewer\\live_core_daemon.py"])
         self.assertIn("--daily-mode", command)
-        self.assertEqual(command[command.index("--daily-mode") + 1], "compact-packets")
+        self.assertEqual(command[command.index("--daily-mode") + 1], "snapshot-no-files")
         self.assertIn("--input-source", command)
-        self.assertEqual(command[command.index("--input-source") + 1], "compact-packets")
+        self.assertEqual(command[command.index("--input-source") + 1], "plugin-snapshot")
         self.assertNotIn("telemetry-viewer\\live_target_processor.py", command)
-        self.assertNotIn("plugin-snapshot", command)
         self.assertNotIn("compact-stream", command)
         self.assertNotIn("--write-debug-live-files", command)
         self.assertIn("--write-overlay-state", command)
@@ -465,17 +465,17 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                 "compactStreamMissingRequiredTypesForLatestTick": ["live_projection_packet.v1"],
             }
         )
-        self.assertEqual(warning, "Stream incomplete. Switch to compact-packets.")
+        self.assertEqual(warning, "")
         self.assertEqual(panel.stream_incomplete_warning({"inputSourceActive": "compact-packets", "candidateCount": 0}), "")
 
-    def test_normal_live_stack_commands_are_strict_compact(self):
+    def test_normal_live_stack_commands_use_plugin_snapshot(self):
         options = panel.normal_live_options("woodcutting")
         stack = panel.build_normal_live_stack_commands(options, supports_liveness=True)
         names = [name for name, _command, _log_name in stack]
         self.assertEqual(names, ["Check Live Setup", "Live Processor", "Context Service", "Human Dashboard"])
         live_command = stack[1][1]
-        self.assertEqual(live_command[live_command.index("--input-source") + 1], "compact-packets")
-        self.assertIn("--require-compact-packets", live_command)
+        self.assertEqual(live_command[live_command.index("--input-source") + 1], "plugin-snapshot")
+        self.assertNotIn("--require-compact-packets", live_command)
         self.assertIn("--liveness-mode", live_command)
 
     def test_mock_brain_and_debug_audit_commands(self):
@@ -514,17 +514,12 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                 session / "interaction_geometry" / "live" / "live_status.json",
                 {
                     "latestTickProcessed": 12,
-                    "inputSourceActive": "compact-packets",
+                    "inputSourceActive": "plugin-snapshot",
                     "candidateCount": 4,
                     "budgetExceeded": False,
                     "writeFailureCount": 0,
-                    "compactPacketsAvailable": True,
-                    "compactPacketLatestSegment": str(session / "live_packets" / "live-000001.ndjson"),
                 },
             )
-            write_json(session / "live_packets" / "live_packet_index.json", {"latestTick": 12, "activeSegment": "live-000001.ndjson"})
-            (session / "live_packets" / "latest_segment.txt").write_text("live-000001.ndjson", encoding="utf-8")
-            (session / "live_packets" / "live-000001.ndjson").write_text('{"packetType":"live_baseline_packet.v1"}\n', encoding="utf-8")
             write_json(
                 session / "manifest.json",
                 {
@@ -539,15 +534,16 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
             )
             snapshot = panel.status_snapshot(session)
             self.assertEqual(snapshot["latestTick"], 12)
-            self.assertEqual(snapshot["inputSourceActive"], "compact-packets")
+            self.assertEqual(snapshot["inputSourceActive"], "plugin-snapshot")
             self.assertEqual(snapshot["candidateCount"], 4)
-            self.assertTrue(snapshot["compactPacketsAvailable"])
+            self.assertFalse(snapshot["compactPacketsAvailable"])
+            self.assertTrue(snapshot["livePacketsRuntimeRemoved"])
             self.assertEqual(snapshot["recordingMode"], "LIVE_COMPACT_ONLY")
             self.assertFalse(snapshot["rawTickRecordingEnabled"])
             self.assertEqual(snapshot["latestEventSummary"], "Inventory changed: +1 item 1511")
             self.assertEqual(snapshot["latestEventTick"], 13)
 
-    def test_status_snapshot_reports_incomplete_stream(self):
+    def test_status_snapshot_ignores_retired_incomplete_stream(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             write_json(
@@ -560,9 +556,9 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                 },
             )
             snapshot = panel.status_snapshot(session)
-            self.assertEqual(snapshot["streamIncompleteWarning"], "Stream incomplete. Switch to compact-packets.")
+            self.assertEqual(snapshot["streamIncompleteWarning"], "")
 
-    def test_status_snapshot_warns_when_stream_file_mirror_is_off(self):
+    def test_status_snapshot_reports_archive_retired_checklist(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             write_json(
@@ -577,12 +573,11 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
             )
             snapshot = panel.status_snapshot(session)
             self.assertFalse(snapshot["compactPacketsAvailable"])
-            self.assertIn("Stream also writes files", snapshot["compactFileBridgeWarning"])
-            self.assertEqual(snapshot["compactChecklist"]["Emit compact live packets"], "yes")
-            self.assertEqual(snapshot["compactChecklist"]["Stream also writes files"], "no")
-            self.assertEqual(snapshot["compactChecklist"]["Latest segment exists"], "no")
+            self.assertEqual(snapshot["compactFileBridgeWarning"], "")
+            self.assertEqual(snapshot["compactChecklist"]["Live packet archive retired"], "yes")
+            self.assertEqual(snapshot["compactChecklist"]["Live packet writer active"], "no")
 
-    def test_check_live_setup_reports_missing_segment_with_stream_mirror_hint(self):
+    def test_check_live_setup_reports_archive_retired(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             session.mkdir(parents=True, exist_ok=True)
@@ -596,18 +591,17 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
                     "compactLivePacketFilesEnabled": False,
                 },
             )
-            payload = setup.check_live_setup(session, require_compact_packets=True)
+            payload = setup.check_live_setup(session)
             text = " ".join(
                 list(payload.get("warnings") or [])
                 + list(payload.get("failures") or [])
                 + [str(check.get("message")) for check in payload.get("checks") or []]
             )
-            self.assertIn("Stream also writes files", text)
-            self.assertIn("compact-stream experimental", text)
-            self.assertEqual(payload["compactLiveStreamEnabled"], True)
-            self.assertEqual(payload["compactLiveStreamAlsoWriteFiles"], False)
+            self.assertIn("livepacket", text.lower())
+            self.assertTrue(payload["livePacketsRuntimeRemoved"])
+            self.assertFalse(payload["livePacketWriterActive"])
 
-    def test_compact_packet_status_and_stale_warning(self):
+    def test_compact_packet_status_reports_legacy_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             segment = session / "live_packets" / "live-000001.ndjson"
@@ -621,12 +615,13 @@ class LiveControlPanelHelpersTest(unittest.TestCase):
             for path in (session, session / "live_packets" / "live_packet_index.json", session / "live_packets" / "latest_segment.txt", segment):
                 os.utime(path, (now, now))
             status = panel.compact_packet_status(session, now=now)
-            self.assertTrue(status["available"])
-            self.assertTrue(status["recent"])
-            self.assertEqual(status["latestTick"], 42)
+            self.assertFalse(status["available"])
+            self.assertFalse(status["recent"])
+            self.assertTrue(status["runtimeRemoved"])
+            self.assertTrue(status["legacyLivePacketFilesPresent"])
             self.assertEqual(panel.stale_session_warning(session, now=now), "")
             stale_now = now + panel.COMPACT_PACKET_STALE_SECONDS + 10
-            self.assertIn("stale", panel.stale_session_warning(session, now=stale_now).lower())
+            self.assertEqual(panel.stale_session_warning(session, now=stale_now), "")
 
     def test_context_request_body(self):
         body = panel.build_context_request_body(max_candidates=2)

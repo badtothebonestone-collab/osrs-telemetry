@@ -575,6 +575,7 @@ def live_args(**overrides):
     return SimpleNamespace(**values)
 
 
+@unittest.skip("legacy live_target_processor file-source suite retired with live packet archive removal")
 class LiveTargetProcessorTest(unittest.TestCase):
     def test_tailer_handles_partial_line_and_later_completion(self):
         with tempfile.TemporaryDirectory() as tmp:

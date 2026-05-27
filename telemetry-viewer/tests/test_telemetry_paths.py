@@ -111,7 +111,7 @@ class TelemetryPathsTest(unittest.TestCase):
             self.assertFalse(existing_state["framePending"])
             self.assertFalse(existing_state["frameExpiredOrMissing"])
 
-    def test_find_newest_session_considers_compact_packet_index(self):
+    def test_find_newest_session_ignores_legacy_live_packet_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "sessions"
             old = root / "old-debug"
@@ -119,10 +119,10 @@ class TelemetryPathsTest(unittest.TestCase):
             old.mkdir(parents=True)
             live_index = live / "live_packets" / "live_packet_index.json"
             live_index.parent.mkdir(parents=True)
-            (old / "manifest.json").write_text("{}", encoding="utf-8")
+            (old / "manifest.json").write_text('{"session":"old"}', encoding="utf-8")
             live_index.write_text("{}", encoding="utf-8")
 
-            self.assertEqual(find_newest_session(root), live)
+            self.assertEqual(find_newest_session(root), old)
 
     def test_find_newest_live_session_ignores_newer_empty_session(self):
         with tempfile.TemporaryDirectory() as tmp:

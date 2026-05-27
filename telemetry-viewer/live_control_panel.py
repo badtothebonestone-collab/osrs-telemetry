@@ -35,16 +35,15 @@ VIEWER_DIR = PROJECT_ROOT / "telemetry-viewer"
 MAX_LOG_LINES = 1000
 READ_ONLY_TEXT = "Read-only telemetry launcher. Starts local tools and shows context without controlling the game."
 PROFILES = ("woodcutting", "broad_qa", "navigation_qa", "npc_qa", "ground_item_qa", "ui_qa")
-COMPACT_STREAM_EXPERIMENTAL_LABEL = "compact-stream EXPERIMENTAL"
-PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL = "plugin-snapshot EXPERIMENTAL"
-INPUT_SOURCES = ("compact-packets", "auto", "raw-ticks", COMPACT_STREAM_EXPERIMENTAL_LABEL, PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL)
+PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL = "plugin-snapshot"
+INPUT_SOURCES = (PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL,)
 LIVENESS_MODES = ("off", "basic", "delta", "full")
 WORKFLOW_MODES = ("Daily", "Daily Snapshot No-File", "Visual QA", "Debug Audit", "Plugin Snapshot Experimental")
 DAILY_ACTION_LABELS = (
     "Apply Daily Live Preset",
     "Start RuneLite Dev",
-    "Start Daily Live Stable Compact",
-    "Start Daily Live Snapshot No-File EXPERIMENTAL",
+    "Start Daily Live Snapshot No-File",
+    "Legacy Packet Cleanup Report",
     "Stop All",
     "Config Doctor",
     "Daily Gauntlet",
@@ -56,7 +55,7 @@ ADVANCED_ACTION_LABELS = (
     "Advanced: Legacy Context Service",
     "Advanced: Legacy Human Dashboard",
     "Advanced: Plugin-Snapshot Testing EXPERIMENTAL",
-    "Advanced: Compact-Stream Testing EXPERIMENTAL",
+    "Advanced: Retired Compact Stream Notice",
     "Advanced: Debug Audit Tools",
     "Advanced: Inspectors",
     "Advanced: Batch Builders",
@@ -85,8 +84,8 @@ REQUIRED_STREAM_PACKET_TYPES = {"live_baseline_packet.v1", "live_projection_pack
 class LivePanelOptions:
     profile: str = "woodcutting"
     mode: str = "Daily"
-    daily_mode: str = "compact-packets"
-    input_source: str = "compact-packets"
+    daily_mode: str = "snapshot-no-files"
+    input_source: str = "plugin-snapshot"
     liveness_mode: str = "delta"
     window_ticks: int = 10
     limit: int = 100
@@ -96,7 +95,7 @@ class LivePanelOptions:
     goal_count: int | None = 5
     task_policy: str = "woodcutting_bank"
     observe_only: bool = False
-    require_compact_packets: bool = True
+    require_compact_packets: bool = False
     no_ui_targets: bool = True
     write_overlay_state: bool = True
     benchmark: bool = True
@@ -112,19 +111,15 @@ def command_preview(command: list[str]) -> str:
 
 
 def normalize_input_source(value: str) -> str:
-    if value == COMPACT_STREAM_EXPERIMENTAL_LABEL:
-        return "compact-stream"
     if value == PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL:
         return "plugin-snapshot"
-    return value or "compact-packets"
+    return "plugin-snapshot"
 
 
 def stream_mode_warning(input_source: str) -> str:
     normalized = normalize_input_source(input_source)
-    if normalized == "compact-stream":
-        return "Stream mode is experimental. If candidates go to zero, use compact-packets."
     if normalized == "plugin-snapshot":
-        return "Plugin-snapshot is experimental. Keep compact-packets as the stable fallback."
+        return "Plugin snapshot is the live source; live packet archives are retired."
     return ""
 
 
@@ -142,14 +137,11 @@ def build_runelite_command() -> list[str]:
 
 
 def build_check_live_setup_command(require_compact_packets: bool = False) -> list[str]:
-    command = python_command("telemetry-viewer\\check_live_setup.py", "--latest-session")
-    if require_compact_packets:
-        command.append("--require-compact-packets")
-    return command
+    return python_command("telemetry-viewer\\check_live_setup.py", "--latest-session")
 
 
 def build_inspect_packets_command() -> list[str]:
-    return python_command("telemetry-viewer\\inspect_live_packets.py", "--latest-session", "--summary")
+    return python_command("telemetry-viewer\\maintenance.py", "--live-packets-report")
 
 
 def doctor_mode_key(label: str) -> str:
@@ -710,15 +702,13 @@ def request_preset_endpoint(path: str, preset: str, *, timeout: float = 1.0) -> 
 
 
 def build_live_processor_command(options: LivePanelOptions, *, supports_liveness: bool = True) -> list[str]:
-    input_source = "compact-packets" if options.require_compact_packets else normalize_input_source(options.input_source)
+    input_source = "plugin-snapshot"
     command = python_command(
         "telemetry-viewer\\live_target_processor.py",
         "--latest-session",
         "--input-source",
         input_source,
     )
-    if options.require_compact_packets:
-        command.append("--require-compact-packets")
     command.extend(
         [
             "--profile",
@@ -752,15 +742,14 @@ def build_live_processor_command(options: LivePanelOptions, *, supports_liveness
         command.append("--summary")
     if options.benchmark:
         command.append("--benchmark")
-    if input_source == "plugin-snapshot":
-        command.extend([
-            "--plugin-snapshot-tier",
-            "hot",
-            "--plugin-snapshot-projection-field-mode",
-            "compact",
-            "--plugin-snapshot-fallback",
-            "compact-packets",
-        ])
+    command.extend([
+        "--plugin-snapshot-tier",
+        "hot",
+        "--plugin-snapshot-projection-field-mode",
+        "compact",
+        "--plugin-snapshot-fallback",
+        "none",
+    ])
     return command
 
 
@@ -769,8 +758,8 @@ def build_context_service_command(port: int) -> list[str]:
 
 
 def build_live_core_daemon_command(options: LivePanelOptions) -> list[str]:
-    daily_mode = options.daily_mode or ("snapshot-no-files" if options.input_source == "plugin-snapshot" else "compact-packets")
-    input_source = "plugin-snapshot" if daily_mode == "snapshot-no-files" else "compact-packets"
+    daily_mode = "snapshot-no-files"
+    input_source = "plugin-snapshot"
     command = python_command(
         "telemetry-viewer\\live_core_daemon.py",
         "--latest-session",
@@ -920,8 +909,8 @@ def normal_live_options(profile: str = "woodcutting") -> LivePanelOptions:
     return LivePanelOptions(
         profile=profile,
         mode="Daily",
-        daily_mode="compact-packets",
-        input_source="compact-packets",
+        daily_mode="snapshot-no-files",
+        input_source="plugin-snapshot",
         liveness_mode="delta",
         window_ticks=10,
         limit=100,
@@ -930,7 +919,7 @@ def normal_live_options(profile: str = "woodcutting") -> LivePanelOptions:
         interval=1.0,
         goal_count=5,
         task_policy="woodcutting_bank",
-        require_compact_packets=True,
+        require_compact_packets=False,
         no_ui_targets=True,
         write_overlay_state=True,
         benchmark=True,
@@ -964,7 +953,8 @@ def build_normal_live_stack_commands(options: LivePanelOptions, *, supports_live
     stack_options = LivePanelOptions(
         profile=options.profile,
         mode="Daily",
-        input_source="compact-packets",
+        daily_mode="snapshot-no-files",
+        input_source="plugin-snapshot",
         liveness_mode=options.liveness_mode or "delta",
         window_ticks=options.window_ticks,
         limit=options.limit,
@@ -974,14 +964,14 @@ def build_normal_live_stack_commands(options: LivePanelOptions, *, supports_live
         goal_count=options.goal_count,
         task_policy=options.task_policy,
         observe_only=options.observe_only,
-        require_compact_packets=True,
+        require_compact_packets=False,
         no_ui_targets=options.no_ui_targets,
         write_overlay_state=options.write_overlay_state,
         benchmark=options.benchmark,
         summary=options.summary,
     )
     return [
-        ("Check Live Setup", build_check_live_setup_command(require_compact_packets=True), "Setup/Packet tools"),
+        ("Check Live Setup", build_check_live_setup_command(require_compact_packets=False), "Setup/Packet tools"),
         ("Live Processor", build_live_processor_command(stack_options, supports_liveness=supports_liveness), "Live Processor"),
         ("Context Service", build_context_service_command(stack_options.port), "Context Service"),
         ("Human Dashboard", build_dashboard_command(stack_options.interval), "Dashboard"),
@@ -1013,43 +1003,37 @@ def _path_age_seconds(path: Path, now: float | None = None) -> float | None:
 
 def compact_packet_status(session: Path | None, *, now: float | None = None, stale_seconds: int = COMPACT_PACKET_STALE_SECONDS) -> dict:
     if session is None:
-        return {"available": False, "recent": False, "warning": "No latest session found."}
+        return {"runtimeRemoved": True, "writerActive": False, "available": False, "recent": False, "warning": "No latest session found."}
     packet_dir = session / "live_packets"
-    index_path = packet_dir / "live_packet_index.json"
-    pointer_path = packet_dir / "latest_segment.txt"
-    index = safe_load_json(index_path)
-    latest_segment = index.get("activeSegment") or index.get("latestSegment")
-    if not latest_segment and pointer_path.exists():
+    files = sorted(list(packet_dir.glob("live-*.ndjson")) + list(packet_dir.glob("live-*.jsonl"))) if packet_dir.exists() else []
+    total_bytes = 0
+    ages = []
+    for path in files:
         try:
-            latest_segment = pointer_path.read_text(encoding="utf-8").strip()
+            total_bytes += int(path.stat().st_size)
         except OSError:
-            latest_segment = None
-    segment_path = packet_dir / Path(str(latest_segment)).name if latest_segment else None
-    available = bool(packet_dir.exists() and index and latest_segment and segment_path and segment_path.exists())
-    ages = [
-        age
-        for age in (
-            _path_age_seconds(index_path, now),
-            _path_age_seconds(pointer_path, now),
-            _path_age_seconds(segment_path, now) if segment_path else None,
-        )
-        if age is not None
-    ]
+            continue
+        age = _path_age_seconds(path, now)
+        if age is not None:
+            ages.append(age)
     age_seconds = min(ages) if ages else None
-    recent = bool(available and age_seconds is not None and age_seconds <= stale_seconds)
-    warning = ""
-    if not available:
-        warning = "Compact packets are not available yet."
-    elif not recent:
-        warning = f"Compact packets look stale ({int(age_seconds or 0)}s old)."
+    warning = "Live packet archive is retired."
+    if files:
+        warning = f"Legacy live packet archives remain ({len(files)} files, {round(total_bytes / (1024 * 1024), 2)} MB)."
     return {
-        "available": available,
-        "recent": recent,
+        "runtimeRemoved": True,
+        "writerActive": False,
+        "available": False,
+        "recent": False,
+        "legacyLivePacketFilesPresent": bool(files),
+        "legacyLivePacketFileCount": len(files),
+        "legacyLivePacketTotalBytes": total_bytes,
+        "legacyLivePacketTotalMb": round(total_bytes / (1024 * 1024), 3),
         "warning": warning,
-        "indexPath": str(index_path),
-        "latestSegment": str(segment_path) if segment_path else None,
-        "latestTick": index.get("latestTick"),
-        "latestSequence": index.get("latestSequence"),
+        "indexPath": None,
+        "latestSegment": str(files[-1]) if files else None,
+        "latestTick": None,
+        "latestSequence": None,
         "ageSeconds": age_seconds,
     }
 
@@ -1062,17 +1046,12 @@ def stale_session_warning(
     max_packet_age_seconds: int = COMPACT_PACKET_STALE_SECONDS,
 ) -> str:
     if session is None:
-        return "No latest session found. Start RuneLite dev and collect compact packets."
+        return "No latest session found. Start RuneLite dev and verify the plugin snapshot endpoint."
     packet = compact_packet_status(session, now=now, stale_seconds=max_packet_age_seconds)
-    if not packet["available"]:
-        return "Waiting for compact packets. Enable compact live packets in RuneLite config if this persists."
-    if not packet["recent"]:
-        return packet["warning"]
     activity_ages = [
         age
         for age in (
             _path_age_seconds(session, now),
-            packet.get("ageSeconds"),
         )
         if isinstance(age, (int, float))
     ]
@@ -1084,13 +1063,6 @@ def stale_session_warning(
 
 
 def stream_incomplete_warning(status: dict) -> str:
-    if status.get("inputSourceActive") != "compact-stream":
-        return ""
-    candidate_count = status.get("candidateCount")
-    missing = status.get("compactStreamMissingRequiredTypesForLatestTick") or status.get("compactStreamKnownMissingTypes") or []
-    missing_required = sorted(REQUIRED_STREAM_PACKET_TYPES.intersection(str(item) for item in missing))
-    if candidate_count == 0 and missing_required:
-        return "Stream incomplete. Switch to compact-packets."
     return ""
 
 
@@ -1110,14 +1082,6 @@ def yes_no_unknown(value: Any) -> str:
 
 
 def compact_file_bridge_warning(snapshot: dict) -> str:
-    if snapshot.get("compactPacketsAvailable") is True:
-        return ""
-    if (
-        snapshot.get("compactLiveStreamEnabled") is True
-        or snapshot.get("compactLiveStreamAlsoWriteFiles") is False
-        or snapshot.get("compactLivePacketFilesEnabled") is False
-    ):
-        return "No compact packet file segment. Check 'Stream also writes files' or use compact-packets stable mode."
     return ""
 
 
@@ -1135,10 +1099,6 @@ def status_snapshot(session: Path | None, previous: dict | None = None) -> dict:
         live_dir / "live_context_index.json",
         previous.get("context") if isinstance(previous.get("context"), dict) else None,
     )
-    packet_index = safe_load_json(
-        session / "live_packets" / "live_packet_index.json",
-        previous.get("packetIndex") if isinstance(previous.get("packetIndex"), dict) else None,
-    )
     overlay = safe_load_json(
         live_dir / "overlay_debug_state.json",
         previous.get("overlayDebug") if isinstance(previous.get("overlayDebug"), dict) else None,
@@ -1148,45 +1108,31 @@ def status_snapshot(session: Path | None, previous: dict | None = None) -> dict:
         previous.get("manifest") if isinstance(previous.get("manifest"), dict) else None,
     )
     packet_status = compact_packet_status(session)
-    latest_segment = (
-        packet_status.get("latestSegment")
-        or status.get("compactPacketLatestSegment")
-        or packet_index.get("activeSegment")
-        or packet_index.get("latestSegment")
-    )
+    latest_segment = packet_status.get("latestSegment")
     compact_packets_available = bool(packet_status.get("available"))
-    compact_packet_recording_enabled = first_present(
-        status.get("compactPacketRecordingEnabled"),
-        status.get("compactLiveEnabled"),
-        manifest.get("compactPacketRecordingEnabled"),
-        manifest.get("compactLivePacketsEnabled"),
-    )
-    compact_live_packet_files_enabled = first_present(
-        status.get("compactLivePacketFilesEnabled"),
-        manifest.get("compactLivePacketFilesEnabled"),
-    )
-    compact_live_stream_enabled = first_present(
-        status.get("compactLiveStreamEnabled"),
-        manifest.get("compactLiveStreamEnabled"),
-    )
-    compact_live_stream_also_write_files = first_present(
-        status.get("compactLiveStreamAlsoWriteFiles"),
-        manifest.get("compactLiveStreamAlsoWriteFiles"),
-    )
+    compact_packet_recording_enabled = False
+    compact_live_packet_files_enabled = False
+    compact_live_stream_enabled = False
+    compact_live_stream_also_write_files = False
     snapshot = {
         "status": status,
         "performance": performance,
         "context": context,
-        "packetIndex": packet_index,
+        "packetIndex": {},
         "overlayDebug": overlay,
         "manifest": manifest,
-        "latestTick": status.get("latestTickProcessed") or status.get("lastProcessedTick") or status.get("latestTick") or context.get("latestTick") or packet_index.get("latestTick"),
+        "latestTick": status.get("latestTickProcessed") or status.get("lastProcessedTick") or status.get("latestTick") or context.get("latestTick"),
         "inputSourceActive": status.get("inputSourceActive"),
         "candidateCount": status.get("candidateCount"),
         "budgetExceeded": status.get("budgetExceeded"),
         "writeFailures": status.get("writeFailureCount"),
         "compactPacketsAvailable": compact_packets_available,
         "compactPacketsRecent": packet_status.get("recent"),
+        "livePacketsRuntimeRemoved": packet_status.get("runtimeRemoved"),
+        "livePacketWriterActive": packet_status.get("writerActive"),
+        "legacyLivePacketFilesPresent": packet_status.get("legacyLivePacketFilesPresent"),
+        "legacyLivePacketFileCount": packet_status.get("legacyLivePacketFileCount"),
+        "legacyLivePacketTotalMb": packet_status.get("legacyLivePacketTotalMb"),
         "latestSegment": latest_segment,
         "latestSegmentExists": bool(packet_status.get("available")),
         "recordingMode": status.get("recordingMode") or manifest.get("recordingMode"),
@@ -1203,10 +1149,10 @@ def status_snapshot(session: Path | None, previous: dict | None = None) -> dict:
     }
     snapshot["compactFileBridgeWarning"] = compact_file_bridge_warning(snapshot)
     snapshot["compactChecklist"] = {
-        "Emit compact live packets": yes_no_unknown(compact_packet_recording_enabled),
-        "Stream also writes files": yes_no_unknown(compact_live_stream_also_write_files),
-        "Latest segment exists": yes_no_unknown(snapshot.get("latestSegmentExists")),
-        "Compact packets recent": yes_no_unknown(packet_status.get("recent")),
+        "Live packet archive retired": "yes",
+        "Live packet writer active": yes_no_unknown(False),
+        "Legacy files present": yes_no_unknown(packet_status.get("legacyLivePacketFilesPresent")),
+        "Plugin snapshot input": yes_no_unknown(snapshot.get("inputSourceActive") == "plugin-snapshot"),
     }
     return snapshot
 
@@ -1247,11 +1193,11 @@ class LiveControlPanel:
         self.doctor_status_var = tk.StringVar(value="config doctor: unknown")
         self.doctor_warnings_var = tk.StringVar(value="")
         self.session_var = tk.StringVar(value=str(self.latest_session) if self.latest_session else "No session found")
-        self.packet_status_var = tk.StringVar(value="compact packets: unknown")
+        self.packet_status_var = tk.StringVar(value="live packet archive: retired")
         self.latest_tick_var = tk.StringVar(value="latest tick: unknown")
         self.mode_var = tk.StringVar(value="Daily")
         self.profile_var = tk.StringVar(value="woodcutting")
-        self.input_source_var = tk.StringVar(value="compact-packets")
+        self.input_source_var = tk.StringVar(value="plugin-snapshot")
         self.liveness_var = tk.StringVar(value="delta")
         self.window_ticks_var = tk.StringVar(value="10")
         self.limit_var = tk.StringVar(value="100")
@@ -1261,7 +1207,7 @@ class LiveControlPanel:
         self.mission_preset_var = tk.StringVar(value="woodcut_bank")
         self.task_policy_var = tk.StringVar(value="woodcutting_bank")
         self.observe_only_var = tk.BooleanVar(value=False)
-        self.require_compact_var = tk.BooleanVar(value=True)
+        self.require_compact_var = tk.BooleanVar(value=False)
         self.no_ui_targets_var = tk.BooleanVar(value=True)
         self.write_overlay_state_var = tk.BooleanVar(value=True)
         self.benchmark_var = tk.BooleanVar(value=True)
@@ -1308,7 +1254,7 @@ class LiveControlPanel:
         self._entry_row(options, 5, "Limit", self.limit_var)
         self._entry_row(options, 6, "Port", self.port_var)
         self._entry_row(options, 7, "Dashboard interval", self.interval_var)
-        ttk.Checkbutton(options, text="Require compact packets", variable=self.require_compact_var).grid(row=8, column=0, columnspan=2, sticky=tk.W)
+        ttk.Checkbutton(options, text="Legacy packet report only", variable=self.require_compact_var).grid(row=8, column=0, columnspan=2, sticky=tk.W)
         ttk.Checkbutton(options, text="No UI targets", variable=self.no_ui_targets_var).grid(row=9, column=0, columnspan=2, sticky=tk.W)
         ttk.Checkbutton(options, text="Overlay state", variable=self.write_overlay_state_var).grid(row=10, column=0, sticky=tk.W)
         ttk.Checkbutton(options, text="Summary", variable=self.summary_var).grid(row=10, column=1, sticky=tk.W)
@@ -1323,7 +1269,7 @@ class LiveControlPanel:
             (DAILY_ACTION_LABELS[0], lambda: self.apply_workflow_preset("DAILY_LIVE")),
             (DAILY_ACTION_LABELS[1], self.start_runelite),
             (DAILY_ACTION_LABELS[2], self.start_live_core_daemon),
-            (DAILY_ACTION_LABELS[3], self.start_snapshot_no_file_daemon),
+            (DAILY_ACTION_LABELS[3], self.inspect_packets),
             (DAILY_ACTION_LABELS[4], self.stop_all),
             (DAILY_ACTION_LABELS[5], self.config_doctor),
             (DAILY_ACTION_LABELS[6], self.daily_gauntlet),
@@ -1443,7 +1389,7 @@ class LiveControlPanel:
         return LivePanelOptions(
             profile=self.profile_var.get(),
             mode=mode,
-            daily_mode="snapshot-no-files" if mode == "Daily Snapshot No-File" else "compact-packets",
+            daily_mode="snapshot-no-files",
             input_source=normalize_input_source(self.input_source_var.get()),
             liveness_mode=self.liveness_var.get(),
             window_ticks=self._int_var(self.window_ticks_var, 10),
@@ -1540,11 +1486,11 @@ class LiveControlPanel:
         if preset == "DAILY_SNAPSHOT_NO_FILE":
             self.apply_snapshot_no_file_defaults()
             self.profile_var.set(profile)
-            self.log("Setup/Packet tools", "Daily Snapshot No-File is experimental and expects the plugin snapshot endpoint instead of compact NDJSON files.")
+            self.log("Setup/Packet tools", "Daily Snapshot No-File uses the plugin snapshot endpoint; live packet archives are retired.")
             return
         if preset == "VISUAL_QA":
             self.mode_var.set("Visual QA")
-            self.input_source_var.set("compact-packets")
+            self.input_source_var.set("plugin-snapshot")
             self.liveness_var.set("delta")
             self.window_ticks_var.set("10")
             self.limit_var.set("100")
@@ -1560,7 +1506,7 @@ class LiveControlPanel:
             return
         if preset == "DEBUG_AUDIT":
             self.mode_var.set("Debug Audit")
-            self.input_source_var.set("compact-packets")
+            self.input_source_var.set("plugin-snapshot")
             self.liveness_var.set("full")
             self.window_ticks_var.set("25")
             self.limit_var.set("500")
@@ -1636,26 +1582,17 @@ class LiveControlPanel:
         self.apply_normal_live_defaults()
         if stale_session_warning(self.latest_session) and not self.is_process_running("RuneLite Dev"):
             self.start_runelite()
-        self.log("Setup/Packet tools", "Starting normal live stack. Waiting for recent compact packets before launching sidecars.")
+        self.log("Setup/Packet tools", "Starting normal live stack with plugin snapshot/WorldModel. Legacy packet archives are ignored.")
         threading.Thread(target=self._normal_live_stack_worker, daemon=True).start()
 
     def _normal_live_stack_worker(self) -> None:
-        deadline = time.time() + 90
-        last_warning = ""
-        while time.time() < deadline:
-            session = latest_session_path()
-            warning = stale_session_warning(session)
-            if session is not None and not warning:
-                self.log_queue.put(("Setup/Packet tools", f"Compact packet session ready: {session}"))
-                self.root.after(0, self.refresh_latest_session)
-                self.root.after(0, self._start_normal_live_sidecars)
-                return
-            if warning and warning != last_warning:
-                last_warning = warning
-                self.log_queue.put(("Setup/Packet tools", warning))
-            time.sleep(2)
-        self.log_queue.put(("Setup/Packet tools", "Compact packets did not become recent before timeout. Running setup check so the missing piece is visible."))
-        self.root.after(0, self.check_live_setup)
+        session = latest_session_path()
+        if session is None:
+            self.log_queue.put(("Setup/Packet tools", "No latest session found. Starting sidecars anyway; plugin snapshot health will decide readiness."))
+        else:
+            self.log_queue.put(("Setup/Packet tools", f"Latest session: {session}"))
+        self.root.after(0, self.refresh_latest_session)
+        self.root.after(0, self._start_normal_live_sidecars)
 
     def _start_normal_live_sidecars(self) -> None:
         supports_liveness = script_supports_flag(VIEWER_DIR / "live_target_processor.py", "--liveness-mode")
@@ -1684,7 +1621,7 @@ class LiveControlPanel:
         if localhost_port_is_listening(port) and not self.is_process_running("Live Core Daemon"):
             self.log("Live Daemon", f"Port {port} is already in use on 127.0.0.1. Stop the existing context service/daemon or choose another port.")
             return
-        self.log("Live Daemon", "Starting experimental Daily Snapshot No-File mode. It uses the plugin snapshot endpoint and should not require compact NDJSON files.")
+        self.log("Live Daemon", "Starting Daily Snapshot No-File mode. It uses the plugin snapshot endpoint; live packet archives are retired.")
         self.start_process("Live Core Daemon", build_live_core_daemon_command(self.options()), "Live Daemon")
 
     def stop_live_core_daemon(self) -> None:
@@ -1796,15 +1733,11 @@ class LiveControlPanel:
         self.input_source_var.set(PLUGIN_SNAPSHOT_EXPERIMENTAL_LABEL)
         self.require_compact_var.set(False)
         self.update_stream_warning()
-        self.log("Live Processor", "Plugin-snapshot testing is EXPERIMENTAL. Daily mode remains live_core_daemon + compact-packets.")
+        self.log("Live Processor", "Plugin-snapshot testing uses the current live path; live packet archives are retired.")
         self.start_live_processor()
 
     def start_compact_stream_testing(self) -> None:
-        self.input_source_var.set(COMPACT_STREAM_EXPERIMENTAL_LABEL)
-        self.require_compact_var.set(False)
-        self.update_stream_warning()
-        self.log("Live Processor", "Compact-stream testing is EXPERIMENTAL. If candidates go to zero, return to compact-packets.")
-        self.start_live_processor()
+        self.log("Live Processor", "Compact-stream testing is retired with the live packet archive. Use plugin-snapshot/Knowledge Fabric queries instead.")
 
     def start_context_service(self) -> None:
         port = self.options().port
@@ -2004,13 +1937,12 @@ class LiveControlPanel:
         checklist_text = "; ".join(f"{name}={value}" for name, value in checklist.items())
         self.latest_tick_var.set(f"latest tick: {snapshot.get('latestTick') or 'unknown'}")
         self.packet_status_var.set(
-            "compact packets: "
-            f"{'available' if snapshot.get('compactPacketsAvailable') else 'unknown'}; "
+            "live packet archive: retired; "
+            f"legacyFiles={'present' if snapshot.get('legacyLivePacketFilesPresent') else 'none'}; "
             f"input={snapshot.get('inputSourceActive') or 'unknown'}; "
             f"candidates={snapshot.get('candidateCount') if snapshot.get('candidateCount') is not None else 'unknown'}; "
             f"budgetExceeded={snapshot.get('budgetExceeded')}; "
             f"writeFailures={snapshot.get('writeFailures')}; "
-            f"segment={Path(str(snapshot.get('latestSegment'))).name if snapshot.get('latestSegment') else 'unknown'}; "
             f"recording={snapshot.get('recordingMode') or 'unknown'}; "
             f"rawTicks={snapshot.get('rawTickRecordingEnabled')}; "
             f"frames={snapshot.get('frameRecordingEnabled')}; "

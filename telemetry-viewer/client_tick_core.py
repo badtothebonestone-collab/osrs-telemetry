@@ -245,6 +245,7 @@ class HoverMenuMatchResult:
         return {
             "confirmed": self.confirmed,
             "reason": self.reason,
+            "mismatchReason": self.details.get("mismatchReason") if isinstance(self.details, dict) else None,
             "sample": self.sample,
             "details": dict(self.details),
         }
@@ -475,6 +476,20 @@ def _type_allowed(sample: dict[str, Any], intent: ActionIntent, *, top_prefix: b
     return any(_lower_menu_text(item) in menu_type for item in intent.allow_menu_types if _lower_menu_text(item))
 
 
+def _target_text_matches_expected(target: str, expected: str) -> bool:
+    target_key = _lower_menu_text(target)
+    expected_key = _lower_menu_text(expected)
+    if not expected_key:
+        return False
+    if expected_key == "tree":
+        return target_key == "tree" or target_key.startswith("tree ") or target_key.startswith("tree/")
+    if expected_key == "dead tree":
+        return target_key == "dead tree" or target_key.startswith("dead tree ")
+    if expected_key in {"oak", "oak tree"}:
+        return target_key in {"oak", "oak tree"} or target_key.startswith("oak tree ")
+    return expected_key in target_key
+
+
 def _target_matches(sample: dict[str, Any], intent: ActionIntent, *, top_prefix: bool = True) -> bool:
     identifier = _sample_int(sample, "topIdentifier" if top_prefix else "identifier", "identifier")
     if identifier is not None and identifier in intent.expected_object_ids:
@@ -482,7 +497,38 @@ def _target_matches(sample: dict[str, Any], intent: ActionIntent, *, top_prefix:
     target = _lower_menu_text(sample.get("topTarget" if top_prefix else "target") or sample.get("target"))
     if not intent.expected_targets and not intent.expected_object_ids:
         return True
-    return any(_lower_menu_text(expected) in target for expected in intent.expected_targets if _lower_menu_text(expected))
+    return any(_target_text_matches_expected(target, expected) for expected in intent.expected_targets if _lower_menu_text(expected))
+
+
+def menu_entry_matches_intent(entry: dict[str, Any] | None, intent: ActionIntent) -> bool:
+    if not isinstance(entry, dict) or is_cancel_entry(entry):
+        return False
+    option = _lower_menu_text(entry.get("option") or entry.get("topOption"))
+    if _option_rejected(option, intent.reject_options):
+        return False
+    if is_walk_here_entry(entry) and not _option_matches(option, intent.expected_options):
+        return False
+    return (
+        _option_matches(option, intent.expected_options)
+        and _type_allowed(entry, intent, top_prefix=False)
+        and _target_matches(entry, intent, top_prefix=False)
+    )
+
+
+def expected_entries_not_top(sample: dict[str, Any] | None, intent: ActionIntent) -> list[dict[str, Any]]:
+    if not isinstance(sample, dict):
+        return []
+    selected = get_left_click_entry(sample)
+    selected_index = selected.get("entryIndex") if isinstance(selected, dict) else None
+    matches: list[dict[str, Any]] = []
+    for entry in get_actionable_entries(sample):
+        if selected_index is not None and entry.get("entryIndex") == selected_index:
+            continue
+        if selected_index is None and selected is not None and same_menu_option_sample(entry, selected):
+            continue
+        if menu_entry_matches_intent(entry, intent):
+            matches.append(dict(entry))
+    return matches
 
 
 def hover_sample_matches_intent(
@@ -494,17 +540,17 @@ def hover_sample_matches_intent(
     min_wall_time_millis: int | None = None,
 ) -> HoverMenuMatchResult:
     if not isinstance(sample, dict):
-        return HoverMenuMatchResult(False, "hover_menu_missing")
+        return HoverMenuMatchResult(False, "hover_menu_missing", details={"mismatchReason": "stale_hover_sample"})
     wall_time_millis = _sample_int(sample, "wallTimeMillis")
     if min_wall_time_millis is not None and wall_time_millis is not None and wall_time_millis < min_wall_time_millis:
-        return HoverMenuMatchResult(False, "hover_menu_stale", sample)
+        return HoverMenuMatchResult(False, "hover_menu_stale", sample, {"mismatchReason": "stale_hover_sample"})
 
     mouse_x = _sample_int(sample, "mouseCanvasX")
     mouse_y = _sample_int(sample, "mouseCanvasY")
     expected_x = _int_or_none(canvas_point.get("x")) if isinstance(canvas_point, dict) else None
     expected_y = _int_or_none(canvas_point.get("y")) if isinstance(canvas_point, dict) else None
     if mouse_x is None or mouse_y is None or expected_x is None or expected_y is None:
-        return HoverMenuMatchResult(False, "mouse_position_missing", sample)
+        return HoverMenuMatchResult(False, "mouse_position_missing", sample, {"mismatchReason": "stale_hover_sample"})
     dx = abs(mouse_x - expected_x)
     dy = abs(mouse_y - expected_y)
     tolerance = intent.position_tolerance_px if tolerance_px is None else max(0, int(tolerance_px))
@@ -513,12 +559,12 @@ def hover_sample_matches_intent(
             False,
             "mouse_position_outside_tolerance",
             sample,
-            {"dx": dx, "dy": dy, "tolerancePx": tolerance},
+            {"dx": dx, "dy": dy, "tolerancePx": tolerance, "mismatchReason": "hover_position_mismatch"},
         )
 
     selected_entry = get_left_click_entry(sample)
     if not isinstance(selected_entry, dict):
-        return HoverMenuMatchResult(False, "menu_entry_missing", sample)
+        return HoverMenuMatchResult(False, "menu_entry_missing", sample, {"mismatchReason": "hover_option_mismatch"})
     details = {
         "dx": dx,
         "dy": dy,
@@ -528,21 +574,28 @@ def hover_sample_matches_intent(
         "menuSelectionReason": selected_entry.get("selectionReason"),
         "menuOpen": sample.get("menuOpen"),
     }
+    lower_expected_entries = expected_entries_not_top(sample, intent)
+    if lower_expected_entries:
+        details["expectedEntryPresentButNotTop"] = True
+        details["lowerHoverEntries"] = lower_expected_entries
+        details["lowerMenuWouldWorkPotentially"] = True
+        if intent.activity == "woodcutting":
+            details["rightClickResourceSelectionDeferred"] = True
     if selected_entry.get("selectionReason") == "menu_open_cancel_top":
-        return HoverMenuMatchResult(False, "menu_state_ambiguous", sample, details)
+        return HoverMenuMatchResult(False, "menu_state_ambiguous", sample, {**details, "mismatchReason": "hover_option_mismatch"})
     if is_cancel_entry(selected_entry):
-        return HoverMenuMatchResult(False, "cancel_hover", sample, details)
+        return HoverMenuMatchResult(False, "cancel_hover", sample, {**details, "mismatchReason": "hover_option_mismatch"})
     option = _lower_menu_text(selected_entry.get("option"))
     if _option_rejected(option, intent.reject_options):
-        return HoverMenuMatchResult(False, "top_option_rejected", sample, {**details, "topOption": selected_entry.get("option")})
+        return HoverMenuMatchResult(False, "top_option_rejected", sample, {**details, "topOption": selected_entry.get("option"), "mismatchReason": "hover_option_mismatch"})
     if is_walk_here_entry(selected_entry) and not _option_matches(option, intent.expected_options):
-        return HoverMenuMatchResult(False, "top_option_rejected", sample, {**details, "topOption": selected_entry.get("option")})
+        return HoverMenuMatchResult(False, "top_option_rejected", sample, {**details, "topOption": selected_entry.get("option"), "mismatchReason": "hover_option_mismatch"})
     if not _option_matches(option, intent.expected_options):
-        return HoverMenuMatchResult(False, "top_option_not_expected", sample, {**details, "topOption": selected_entry.get("option")})
+        return HoverMenuMatchResult(False, "top_option_not_expected", sample, {**details, "topOption": selected_entry.get("option"), "mismatchReason": "hover_option_mismatch"})
     if not _type_allowed(selected_entry, intent, top_prefix=False):
-        return HoverMenuMatchResult(False, "top_type_not_allowed", sample, {**details, "topType": selected_entry.get("type")})
+        return HoverMenuMatchResult(False, "top_type_not_allowed", sample, {**details, "topType": selected_entry.get("type"), "mismatchReason": "wrong_intent_matcher"})
     if not _target_matches(selected_entry, intent, top_prefix=False):
-        return HoverMenuMatchResult(False, "top_target_not_expected", sample, details)
+        return HoverMenuMatchResult(False, "top_target_not_expected", sample, {**details, "mismatchReason": "hover_target_mismatch"})
     return HoverMenuMatchResult(
         True,
         "hover_menu_confirmed",
@@ -550,6 +603,7 @@ def hover_sample_matches_intent(
         {
             **details,
             "menuActionClass": classify_menu_action(sample),
+            "matchedIntent": intent.activity,
         },
     )
 
@@ -618,9 +672,15 @@ def action_intent_from_proposal(proposal: Any, *, tolerance_px: int = 3, freshne
         )
 
     if proposed_action == "select_resource_target" and ("tree" in target_name.lower() or class_id == "tree"):
-        expected_targets = ["Tree", "Oak tree"]
-        if target_name:
-            expected_targets.append(target_name)
+        lower_name = target_name.lower()
+        if "oak" in lower_name:
+            expected_targets = ["Oak tree", "Oak"]
+        elif "dead" in lower_name:
+            expected_targets = ["Dead tree"]
+        elif target_name:
+            expected_targets = [target_name]
+        else:
+            expected_targets = ["Tree", "Dead tree"]
         return ActionIntent.for_target(
             activity="woodcutting",
             target_name=target_name,

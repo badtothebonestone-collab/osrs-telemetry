@@ -23,6 +23,16 @@ class TargetAnalyzerTest(unittest.TestCase):
         self.assertEqual(context.nearest_target["targetName"], "Tree A")
         self.assertEqual(len(context.top_candidates), 2)
 
+    def test_unknown_woodcutting_level_prefers_basic_tree_over_oak(self):
+        candidates = [
+            {"classId": "tree", "targetName": "Oak tree", "id": 10820, "qualityScore": 100, "distanceTiles": 2},
+            {"classId": "tree", "targetName": "Tree", "id": 1278, "qualityScore": 80, "distanceTiles": 12},
+        ]
+
+        context = target_analyzer.analyze_targets(candidates, class_id="tree", max_candidates=2)
+
+        self.assertEqual(context.raw_best_target["targetName"], "Tree")
+
     def test_separates_profile_candidates_from_policy_service_candidates(self):
         candidates = [
             {"classId": "tree", "targetName": "Tree", "qualityScore": 30, "distanceTiles": 2},

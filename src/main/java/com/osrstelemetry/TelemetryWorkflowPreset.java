@@ -5,8 +5,6 @@ public enum TelemetryWorkflowPreset
 	DAILY_LIVE("Daily Live"),
 	DAILY_SNAPSHOT_NO_FILE("Daily Snapshot No-File"),
 	VISUAL_QA("Visual QA"),
-	DEBUG_AUDIT("Debug Audit"),
-	PLUGIN_SNAPSHOT_EXPERIMENTAL("Plugin Snapshot Experimental"),
 	CUSTOM("Custom");
 
 	private final String label;

@@ -47,11 +47,15 @@ class WoodcuttingCandidateDiagnosticTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "sessions"
             daemon_session = root / "daemon"
-            newer_empty = root / "newer"
-            write_json(newer_empty / "manifest.json", {"sessionId": "newer"})
+            newer_session = root / "newer"
             live_dir = daemon_session / "interaction_geometry" / "live"
             marker = target()
             write_json(live_dir / "overlay_debug_state.json", {"latestTick": 10, "markers": [marker], "targets": [marker]})
+            write_json(newer_session / "manifest.json", {"sessionId": "newer"})
+            write_json(
+                newer_session / "interaction_geometry" / "live" / "overlay_debug_state.json",
+                {"latestTick": 1, "markers": [], "targets": []},
+            )
             status = {
                 "sessionPath": str(daemon_session),
                 "latestTick": 10,

@@ -14,7 +14,7 @@ from argparse import Namespace
 import execute_next_action as execute_cli
 from input_control.action_proposal import ActionProposal
 from input_control.backend_pyautogui import scale_canvas_point_to_screen
-from input_control.camera_control import camera_input_spec, hold_camera_input
+from input_control.camera_control import camera_input_spec, fitts_hold_duration_ms, hold_camera_input, smooth_drag_segments
 from input_control.human_input_controller import HumanInputController
 from input_control.mouse_movement import MouseMovementProfile
 from input_control.executor import (
@@ -30,6 +30,7 @@ from input_control.executor import (
     _record_target_no_progress_failure,
     _route_transition_retry_required_observation,
     _goal_reached_with_only_recoverable_failures,
+    _target_key_from_proposal,
     _verify_action_after_execution,
     _mark_navigation_no_progress,
     _navigation_motion_lock_observation,
@@ -98,6 +99,25 @@ class FakeImage:
 class FailingCanvasBackend(FakeBackend):
     def canvas_to_screen_point(self, point):
         raise AssertionError("dynamic geometry should avoid backend fallback conversion")
+
+
+class CameraMotorMathTest(unittest.TestCase):
+    def test_fitts_hold_duration_shrinks_as_exposure_error_decreases(self):
+        far = fitts_hold_duration_ms(900, tolerance_px=72, min_ms=120, max_ms=900)
+        near = fitts_hold_duration_ms(80, tolerance_px=72, min_ms=120, max_ms=900)
+
+        self.assertGreater(far, near)
+        self.assertGreaterEqual(near, 120)
+        self.assertLessEqual(far, 900)
+
+    def test_middle_mouse_drag_segments_use_smooth_envelope(self):
+        segments = smooth_drag_segments(80, 0, steps=5)
+
+        self.assertGreater(len(segments), 1)
+        self.assertEqual(sum(dx for dx, _dy in segments), 80)
+        self.assertEqual(sum(dy for _dx, dy in segments), 0)
+        self.assertLess(abs(segments[0][0]), abs(segments[2][0]))
+        self.assertLess(abs(segments[-1][0]), abs(segments[2][0]))
 
 
 def status_payload_for_loop(
@@ -586,6 +606,50 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertFalse(any(call[0] == "click_at" for call in backend.calls))
         self.assertEqual(result.action_trace["reacquisition"]["cameraTriggeredBy"], "resource_projection_sentinel")
         self.assertEqual(result.action_trace["finalClassification"], "resource_projection_recovery_started")
+
+    def test_service_view_recovery_uses_held_camera_input_without_click(self):
+        backend = FakeBackend()
+        proposal = ActionProposal(
+            proposed_action="service_view_recovery",
+            target_kind="service_recovery",
+            key_action={"type": "camera_reacquire", "command": "yaw_right_pitch_up", "method": "keyboard_arrows", "durationMs": 180},
+            target_explanation={
+                "targetName": "Bank Deposit Box",
+                "serviceTargetExposure": {
+                    "schema": "service_target_exposure.v1",
+                    "serviceTargetKind": "deposit_box",
+                    "cameraExposureReason": "service_object_loaded_offscreen",
+                    "currentProjectionStatus": "offscreen",
+                    "cameraMotorPlan": {
+                        "cameraInputMethod": "keyboard_arrows",
+                        "cameraDirectionChosen": "yaw_right_pitch_up",
+                        "cameraDirectionReason": "canvas_point_offscreen_diagonal",
+                        "cameraHoldMs": 180,
+                    },
+                },
+            },
+        )
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile="instant_test",
+            dry_run=False,
+            navigation_options=Namespace(input_profile="steady", camera_method="keyboard_arrows"),
+            sleep_func=lambda _seconds: None,
+        )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertTrue(result.executed)
+        self.assertIn(("key_down", "right"), backend.calls)
+        self.assertIn(("key_down", "up"), backend.calls)
+        self.assertIn(("key_up", "up"), backend.calls)
+        self.assertIn(("key_up", "right"), backend.calls)
+        self.assertFalse(any(call[0] == "click_at" for call in backend.calls))
+        self.assertEqual(result.commands[0]["type"], "service_camera_reacquire")
+        self.assertTrue(result.commands[0]["nonClick"])
+        self.assertEqual(result.action_trace["reacquisition"]["cameraTriggeredBy"], "service_object_loaded_offscreen")
+        self.assertEqual(result.action_trace["finalClassification"], "service_view_recovery_started")
 
     def test_resource_view_recovery_loop_stops_when_projection_does_not_improve(self):
         backend = FakeBackend()
@@ -1501,6 +1565,8 @@ class InputControlExecutorTest(unittest.TestCase):
 
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.click_point_resolution["coordinateMethod"], "dynamic_input_geometry")
+        self.assertEqual(result.action_trace["intendedPoint"]["coordinateSpace"], "physical_pyautogui")
+        self.assertEqual(result.action_trace["intendedPoint"]["windowBoundsSource"], "canvasScreenOrigin")
         self.assertEqual(result.commands[0]["clickPoint"]["x"], 4555)
         self.assertEqual(result.commands[0]["clickPoint"]["y"], 500)
 
@@ -1861,6 +1927,53 @@ class InputControlExecutorTest(unittest.TestCase):
         attempts = result.action_trace["reacquisition"]["navigationAlternateWaypoints"]
         self.assertLessEqual(len(attempts), 2)
 
+    def test_navigation_alternate_requests_skip_suppressed_route_tile(self):
+        proposal = ActionProposal(
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_name="Service waypoint",
+            target_tile={"worldX": 3235, "worldY": 3224, "plane": 0},
+            target_explanation={
+                "name": "Service waypoint",
+                "classId": "service_route_anchor",
+                "destinationTile": {"worldX": 3240, "worldY": 3223, "plane": 0},
+                "suppressedTargetKeysAtSelection": ["None:3236:3223:0:service_route_anchor"],
+                "predictedPathTiles": [
+                    {"worldX": 3236, "worldY": 3223, "plane": 0},
+                    {"worldX": 3237, "worldY": 3223, "plane": 0},
+                    {"worldX": 3238, "worldY": 3223, "plane": 0},
+                ],
+            },
+        )
+        snapshot = {"payloads": {"baseline": {"player": {"worldX": 3234, "worldY": 3226, "plane": 0}}}}
+
+        requests = _navigation_alternate_tile_requests(
+            proposal,
+            snapshot,
+            max_requests=3,
+            navigation_options=Namespace(max_route_waypoint_distance=30, min_route_progress_tiles=1),
+        )
+
+        requested_tiles = {(request["worldX"], request["worldY"], request.get("plane", 0)) for request in requests}
+        self.assertNotIn((3236, 3223, 0), requested_tiles)
+        self.assertIn((3237, 3223, 0), requested_tiles)
+
+    def test_path_tile_suppression_key_prefers_actual_waypoint_tile(self):
+        proposal = ActionProposal(
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_name="Service waypoint",
+            target_tile={"worldX": 3236, "worldY": 3223, "plane": 0},
+            target_explanation={
+                "name": "Lumbridge Castle south entrance approach",
+                "classId": "service_route_anchor",
+                "targetKey": "None:3221:3218:0:service_route_anchor",
+                "worldLocation": {"worldX": 3221, "worldY": 3218, "plane": 0},
+            },
+        )
+
+        self.assertEqual(_target_key_from_proposal(proposal), "None:3236:3223:0:service_route_anchor")
+
     def test_navigation_trace_records_occluded_waypoint_failure(self):
         backend = FakeBackend()
         proposal = ActionProposal(
@@ -1977,6 +2090,57 @@ class InputControlExecutorTest(unittest.TestCase):
         )
 
         self.assertEqual(reason, "waypoint_occluded_by_object")
+
+    def test_navigation_hover_position_mismatch_is_classified_structurally(self):
+        proposal = ActionProposal(
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_name="Service waypoint",
+            target_tile={"worldX": 10, "worldY": 9, "plane": 0},
+        )
+        reason = _navigation_hover_failure_reason(
+            proposal,
+            {
+                "reason": "hover_confirm_timeout",
+                "latestMatch": {
+                    "reason": "mouse_position_outside_tolerance",
+                    "details": {"dx": 227, "dy": 19, "tolerancePx": 3, "mismatchReason": "hover_position_mismatch"},
+                    "sample": {
+                        "topOption": "Walk here",
+                        "topTarget": "",
+                        "topType": "WALK",
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(reason, "hover_position_mismatch")
+
+    def test_executor_refuses_static_advisory_target_without_live_projection(self):
+        backend = FakeBackend()
+        proposal = ActionProposal(
+            proposed_action="return_to_resource_area",
+            target_kind="path_tile",
+            target_name="Resource return",
+            target_tile={"worldX": 3203, "worldY": 3238, "plane": 0},
+            action_target_source="static_route_prior",
+            actionability="advisory_only",
+            target_explanation={"targetSource": "static_route_prior", "actionability": "advisory_only"},
+        )
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile="instant_test",
+            dry_run=False,
+            sleep_func=lambda _seconds: None,
+        )
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.executed)
+        self.assertEqual(result.lifecycle_state["reason"], "static_target_not_executable")
+        self.assertEqual(backend.calls, [])
+        self.assertEqual(result.action_trace["humanInput"]["directBackendBypassCount"], 0)
 
     def test_camera_exposure_direction_reverses_after_worsening_score(self):
         direction = next_camera_direction_from_exposure(
@@ -2535,6 +2699,97 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(mismatch["mismatchReason"], "clicked_menu_did_not_match_navigation_waypoint_action")
         self.assertEqual(mismatch["actualClickedMenu"]["option"], "Attack")
         self.assertIn("hover_flip", mismatch["possibleCauses"])
+
+    def test_loop_suppresses_menu_flip_without_resource_wait(self):
+        backend = FakeBackend()
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            execute=True,
+            verify_after_action=True,
+            after_action_wait_ms=0,
+            hover_confirm_target=False,
+            wait_for_ready=0,
+            cooldown_ms=0,
+            result_timeout_ms=1,
+            action_timeout_ms=1,
+            poll_interval_ms=10,
+            max_actions=1,
+            max_total_actions=0,
+            max_runtime_seconds=1,
+            final_reconcile_ms=0,
+            final_reconcile_game_ticks=0,
+            resource_reconcile_ms=0,
+            resource_reconcile_game_ticks=0,
+            stop_on_warn=False,
+            stop_on_fail=False,
+            stop_after_inventory_changes=None,
+            stop_when_inventory_full=False,
+            max_successful_actions=None,
+            max_timeouts=None,
+            max_consecutive_timeouts=4,
+            seed=None,
+            require_live_readiness=False,
+            target_hover_failure_limit=2,
+            target_suppression_ms=2500,
+            max_candidate_reacquire_rounds=3,
+            clear_suppression_on_progress=True,
+            pacing_profile="instant_debug",
+        )
+        menu_flip_result = ExecutionResult(
+            status="FAIL",
+            proposed_action="select_resource_target",
+            dry_run=False,
+            executed=True,
+            proposal={
+                "proposedAction": "select_resource_target",
+                "targetKind": "resource",
+                "targetName": "Tree",
+                "targetExplanation": {
+                    "name": "Tree",
+                    "classId": "tree",
+                    "id": 1276,
+                    "worldLocation": {"worldX": 3212, "worldY": 3232, "plane": 0},
+                },
+            },
+            commands=[{"type": "click_at", "x": 1200, "y": 2200}],
+            observed_result={"actionResultClassification": "menu_flip_mismatch"},
+            hover_confirmation={"confirmed": True, "clickClassification": "clicked_npc_action"},
+            action_trace={
+                "finalClassification": "menu_flip_mismatch",
+                "gameTickVerificationTimeline": [],
+                "clientTick": {
+                    "menuMismatch": {
+                        "mismatchReason": "clicked_menu_did_not_match_resource_object_action",
+                        "actualClickedMenu": {"option": "Attack", "target": "Man"},
+                    }
+                },
+            },
+        )
+
+        with patch("input_control.executor.execute_action", return_value=menu_flip_result):
+            result = execute_action_loop(
+                "http://daemon",
+                options,
+                fetch_json_func=lambda *_args, **_kwargs: status_payload_for_loop(free_slots=12, held_count=0, progress_count=0),
+                backend=backend,
+                sleep_func=lambda _seconds: None,
+                monotonic_func=IncrementingClock(step=0.1),
+            )
+
+        payload = result.to_dict()
+        observed = payload["actionResults"][0]["observedResult"]
+        self.assertEqual(payload["status"], "WARN")
+        self.assertEqual(observed["observedResult"], "menu_flip_mismatch")
+        self.assertEqual(observed["resultOutcome"], "menu_mismatch")
+        self.assertTrue(observed["nextActionAllowed"])
+        self.assertNotEqual(observed.get("observedResult"), "resource_click_confirmed_waiting")
+        self.assertNotIn("resourceTimeoutExtendedWait", observed)
+        self.assertEqual(payload["actionResults"][0]["lifecycleState"]["reason"], "menu_flip_mismatch")
+        self.assertEqual(payload["loopSummary"]["menuFlipMismatchCount"], 1)
+        self.assertEqual(payload["loopSummary"]["targetMenuFlipSuppressions"], 1)
+        self.assertEqual(payload["loopSummary"]["suppressedTargets"][0]["reason"], "menu_flip_mismatch")
 
     def test_navigation_volatile_menu_tail_blocks_click_before_mousedown(self):
         backend = FakeBackend()
@@ -3207,6 +3462,33 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(summary["lifecycleCyclesCompleted"], 1)
         self.assertEqual(_loop_stop_reason(Namespace(stop_after_lifecycle_cycles=1), summary), "lifecycle_cycle_limit_reached")
 
+    def test_loop_summary_prefers_authoritative_player_location_and_labels_proxy_fallback(self):
+        summary = _new_loop_summary()
+
+        _record_loop_status(
+            summary,
+            {
+                "playerLocation": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "playerLocationSource": "plugin_snapshot_baseline_player",
+                "playerLocationConfidence": 1.0,
+                "collisionWindowCenterWorld": {"worldX": 3200, "worldY": 3239, "plane": 0},
+            },
+        )
+
+        self.assertEqual(summary["finalLocation"], {"worldX": 3196, "worldY": 3248, "plane": 0})
+        self.assertEqual(summary["finalLocationSource"], "plugin_snapshot_baseline_player")
+        self.assertEqual(summary["finalLocationConfidence"], 1.0)
+
+        proxy_summary = _new_loop_summary()
+        _record_loop_status(
+            proxy_summary,
+            {"collisionWindowCenterWorld": {"worldX": 3200, "worldY": 3239, "plane": 0}},
+        )
+
+        self.assertEqual(proxy_summary["finalLocation"], {"worldX": 3200, "worldY": 3239, "plane": 0})
+        self.assertEqual(proxy_summary["finalLocationSource"], "collision_window_center_proxy")
+        self.assertEqual(proxy_summary["finalLocationConfidence"], 0.35)
+
     def test_loop_stop_reason_honors_soak_limits(self):
         summary = _new_loop_summary()
         summary.update(
@@ -3540,6 +3822,41 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertTrue(result.confirmed)
         self.assertEqual(result.reason, "hover_menu_confirmed")
 
+    def test_hover_menu_parser_rejects_oak_top_for_tree_target_with_lower_tree_entry(self):
+        proposal = ActionProposal(
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Tree",
+            suggested_click_point={"x": 200, "y": 146},
+            click_point_space="canvas",
+            target_explanation={"objectId": 1276, "name": "Tree"},
+        )
+        sample = {
+            "wallTimeMillis": 2000,
+            "mouseCanvasX": 200,
+            "mouseCanvasY": 146,
+            "topOption": "Chop down",
+            "topTarget": "<col=ffff>Oak tree",
+            "topIdentifier": 10820,
+            "entries": [
+                {"option": "Chop down", "target": "<col=ffff>Oak tree", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 10820},
+                {"option": "Chop down", "target": "<col=ffff>Tree", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 1276},
+            ],
+        }
+
+        result = hover_menu_matches_target(
+            sample,
+            proposal,
+            {"x": 200, "y": 146},
+            tolerance_px=3,
+            min_wall_time_millis=1000,
+        )
+
+        self.assertFalse(result.confirmed)
+        self.assertEqual(result.reason, "top_target_not_expected")
+        self.assertTrue(result.details["expectedEntryPresentButNotTop"])
+        self.assertTrue(result.details["rightClickResourceSelectionDeferred"])
+
     def test_hover_menu_parser_rejects_walk_here(self):
         proposal = ActionProposal(
             proposed_action="select_resource_target",
@@ -3627,6 +3944,77 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertFalse(result.confirmed)
         self.assertEqual(result.reason, "mouse_position_outside_tolerance")
 
+    def test_resource_hover_position_mismatch_retargets_matching_observed_tree(self):
+        backend = FakeBackend()
+        proposal = ActionProposal(
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Tree",
+            suggested_click_point={"x": 200, "y": 146},
+            click_point_space="canvas",
+            resolved_screen_click_point={"x": 1200, "y": 2146},
+            click_point_resolution={"status": "PASS", "screenClickPoint": {"x": 1200, "y": 2146}},
+            target_explanation={
+                "objectId": 1276,
+                "name": "Tree",
+                "requiredLevel": 1,
+                "playerLevelKnown": False,
+                "safeAimPoint": {
+                    "status": "PASS",
+                    "canvasX": 200,
+                    "canvasY": 146,
+                    "sampledAimpoints": [{"x": 202, "y": 146}],
+                },
+            },
+            confidence=0.9,
+        )
+        snapshots = [
+            {
+                "hoverMenu": {
+                    "wallTimeMillis": 2000,
+                    "mouseCanvasX": 185,
+                    "mouseCanvasY": 146,
+                    "topOption": "Chop down",
+                    "topTarget": "Tree",
+                    "topIdentifier": 1276,
+                    "topType": "GAME_OBJECT_FIRST_OPTION",
+                    "entries": [
+                        {"option": "Chop down", "target": "Tree", "identifier": 1276, "type": "GAME_OBJECT_FIRST_OPTION"},
+                        {"option": "Walk here", "target": "", "identifier": 0, "type": "WALK"},
+                    ],
+                }
+            }
+        ]
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile="instant_test",
+            dry_run=True,
+            input_controller=HumanInputController(backend, profile="steady", sleep_func=lambda _seconds: None, seed=10),
+            hover_options=HoverConfirmationOptions(
+                enabled=True,
+                hover_only=True,
+                snapshot_url="http://snapshot",
+                timeout_ms=0,
+                poll_ms=10,
+                tolerance_px=3,
+            ),
+            snapshot_fetch_func=lambda *_args, **_kwargs: snapshots.pop(0),
+            monotonic_func=IncrementingClock(start=1.0, step=0.01),
+            wall_time_millis_func=lambda: 1000,
+        )
+
+        self.assertEqual(result.status, "PASS", result.warnings)
+        self.assertFalse(result.executed)
+        self.assertEqual(result.hover_confirmation["reason"], "resource_hover_confirmed_at_observed_point")
+        self.assertEqual(result.hover_confirmation["expectedCanvasPoint"], {"x": 185, "y": 146})
+        self.assertIn("resource_retarget_observed_hover", [command["type"] for command in result.commands])
+        self.assertEqual(result.proposal["suggestedClickPoint"], {"x": 185, "y": 146})
+        self.assertEqual(result.proposal["resolvedScreenClickPoint"], {"x": 1185, "y": 2146})
+        self.assertEqual(result.proposal["targetExplanation"]["selectedAimpointSource"], "hover_observed_same_target")
+        self.assertTrue(result.action_trace["reacquisition"]["resourceRetargetedToObservedHover"])
+
     def test_hover_only_moves_and_does_not_click(self):
         backend = FakeBackend()
         proposal = ActionProposal(
@@ -3684,6 +4072,94 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(trace["clientTick"]["acceptedHoverSample"]["topTarget"], "Oak tree")
         self.assertEqual(trace["finalClassification"], "hover_confirmed_click")
 
+    def test_resource_alternate_aimpoint_recovers_from_tree_oak_overlap(self):
+        backend = FakeBackend()
+        proposal = ActionProposal(
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Tree",
+            suggested_click_point={"x": 200, "y": 146},
+            click_point_space="canvas",
+            resolved_screen_click_point={"x": 1200, "y": 2146},
+            click_point_resolution={"status": "PASS", "screenClickPoint": {"x": 1200, "y": 2146}},
+            target_explanation={
+                "objectId": 1276,
+                "name": "Tree",
+                "requiredLevel": 1,
+                "playerLevelKnown": False,
+                "safeAimPoint": {
+                    "status": "PASS",
+                    "canvasX": 200,
+                    "canvasY": 146,
+                    "sampledAimpoints": [{"x": 202, "y": 146}, {"x": 205, "y": 146}],
+                },
+            },
+            confidence=0.9,
+        )
+        snapshots = [
+            {
+                "hoverMenu": {
+                    "wallTimeMillis": 2000,
+                    "mouseCanvasX": 200,
+                    "mouseCanvasY": 146,
+                    "topOption": "Chop down",
+                    "topTarget": "Oak tree",
+                    "topIdentifier": 10820,
+                    "entries": [
+                        {"option": "Chop down", "target": "Oak tree", "identifier": 10820, "type": "GAME_OBJECT_FIRST_OPTION"},
+                        {"option": "Chop down", "target": "Tree", "identifier": 1276, "type": "GAME_OBJECT_FIRST_OPTION"},
+                    ],
+                }
+            },
+            {
+                "hoverMenu": {
+                    "wallTimeMillis": 2100,
+                    "mouseCanvasX": 202,
+                    "mouseCanvasY": 146,
+                    "topOption": "Chop down",
+                    "topTarget": "Oak tree",
+                    "topIdentifier": 10820,
+                }
+            },
+            {
+                "hoverMenu": {
+                    "wallTimeMillis": 2200,
+                    "mouseCanvasX": 205,
+                    "mouseCanvasY": 146,
+                    "topOption": "Chop down",
+                    "topTarget": "Tree",
+                    "topIdentifier": 1276,
+                }
+            },
+        ]
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile="instant_test",
+            dry_run=True,
+            input_controller=HumanInputController(backend, profile="steady", sleep_func=lambda _seconds: None, seed=10),
+            hover_options=HoverConfirmationOptions(
+                enabled=True,
+                snapshot_url="http://snapshot",
+                timeout_ms=0,
+                poll_ms=10,
+                tolerance_px=3,
+            ),
+            snapshot_fetch_func=lambda *_args, **_kwargs: snapshots.pop(0),
+            monotonic_func=lambda: 1.0,
+            wall_time_millis_func=lambda: 1000,
+        )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertFalse(result.executed)
+        command_types = [command["type"] for command in result.commands]
+        self.assertIn("resource_reacquire_alternate_aimpoint", command_types)
+        self.assertTrue(result.action_trace["reacquisition"]["resourceAimpointReacquired"])
+        self.assertEqual(result.action_trace["resourceTargetAmbiguity"]["ambiguityStatus"], "clear")
+        self.assertEqual(result.proposal["targetExplanation"]["selectedAimpointSource"], "alternate_hull_sample")
+        self.assertEqual(result.proposal["targetExplanation"]["aimpointSamplesTried"], 2)
+
     def test_last_menu_option_clicked_classifies_walk_and_chop(self):
         proposal = ActionProposal(
             proposed_action="select_resource_target",
@@ -3731,6 +4207,21 @@ class InputControlExecutorTest(unittest.TestCase):
             ),
             "clicked_expected_action",
         )
+
+    def test_route_transition_menu_row_uses_observed_full_option_band(self):
+        sample = {
+            "menuBounds": {"x": 145, "y": 154, "width": 150, "height": 112},
+            "entryCount": 6,
+            "entries": [
+                {"option": "Climb", "target": "<col=ffff>Staircase"},
+                {"option": "Climb-up", "target": "<col=ffff>Staircase"},
+                {"option": "Climb-down", "target": "<col=ffff>Staircase"},
+                {"option": "Walk here", "target": ""},
+                {"option": "Examine", "target": "<col=ffff>Staircase"},
+            ],
+        }
+
+        self.assertEqual(_menu_row_canvas_point(sample, 2), {"x": 220, "y": 214})
 
     def test_route_transition_selects_direct_right_click_row_when_top_is_generic_climb(self):
         backend = FakeBackend()
@@ -4691,7 +5182,7 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(summary["expectedMenuClicks"], 1)
         self.assertEqual(summary["cancelHoverFailures"], 2)
         self.assertEqual(summary["targetsSuppressed"], 2)
-        self.assertEqual(summary["targetReacquireRounds"], 4)
+        self.assertEqual(summary["targetReacquireRounds"], 6)
         self.assertEqual(summary["walkHereClicks"], 0)
         self.assertEqual(summary["cancelClicks"], 0)
         self.assertIn(("click_at", 1300, 2150, "left", 0), backend.calls)

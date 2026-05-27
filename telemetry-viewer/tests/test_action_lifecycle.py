@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 
 VIEWER_DIR = Path(__file__).resolve().parents[1]
@@ -46,8 +47,9 @@ def resource_status(
                 "activeIntent": active_intent,
                 "blockingConditions": list(blocking_conditions or []),
                 "activeIntentTarget": {
-                    "targetName": "Oak tree",
+                    "targetName": "Tree",
                     "classId": "tree",
+                    "id": 1278,
                     "aimPoint": aim(110, 130),
                 },
             },
@@ -710,6 +712,326 @@ class ActionLifecycleTest(unittest.TestCase):
         self.assertEqual(observed["observedResult"], "resource_camera_reacquire_success")
         self.assertEqual(observed["resultOutcome"], "progress")
         self.assertIn("resource_safe_aimpoint_available", observed["observedSignals"])
+
+    def test_service_view_recovery_succeeds_when_safe_aimpoint_appears(self):
+        before = {
+            "brain": {
+                "serviceRouteContext": {
+                    "visibleServiceTarget": {
+                        "targetName": "Bank Deposit Box",
+                        "classId": "deposit_box",
+                        "projectionStatus": {
+                            "classification": "offscreen",
+                            "onScreen": False,
+                            "actionableByCanvas": False,
+                            "aimPoint": {"canvasX": 1793, "canvasY": 1935},
+                        },
+                    }
+                }
+            },
+            "latestTick": 10,
+        }
+        after = {
+            "brain": {
+                "serviceRouteContext": {
+                    "visibleServiceTarget": {
+                        "targetName": "Bank Deposit Box",
+                        "classId": "deposit_box",
+                        "projectionStatus": {
+                            "classification": "actionable",
+                            "onScreen": True,
+                            "actionableByCanvas": True,
+                            "aimPoint": {"canvasX": 380, "canvasY": 220},
+                        },
+                        "safeAimPoint": {"status": "PASS", "actionable": True, "canvasX": 380, "canvasY": 220},
+                    }
+                }
+            },
+            "latestTick": 11,
+        }
+
+        observed = verify_expected_result(
+            "service_view_recovery",
+            before,
+            after,
+            elapsed_ms=320,
+            timeout_ms=2000,
+        )
+
+        self.assertEqual(observed["observedResult"], "service_camera_reacquire_success")
+        self.assertEqual(observed["resultOutcome"], "progress")
+        self.assertIn("service_safe_aimpoint_available", observed["observedSignals"])
+
+    def test_service_view_recovery_does_not_succeed_from_actionability_only(self):
+        target = {
+            "targetName": "Bank Deposit Box",
+            "classId": "deposit_box",
+            "actionability": "needs_hover_confirmation",
+            "projectionStatus": {
+                "classification": "projection_sentinel",
+                "onScreen": False,
+                "actionableByCanvas": False,
+                "aimPoint": {"canvasX": 2147483648, "canvasY": 2147483648},
+            },
+            "safeAimPoint": {
+                "status": "FAIL",
+                "actionable": False,
+                "rawAimPoint": {"x": 2147483648, "y": 2147483648},
+                "rejectionReason": "projection_sentinel",
+            },
+        }
+        before = {
+            "brain": {"serviceRouteContext": {"visibleServiceTarget": target}},
+            "latestTick": 10,
+        }
+        after = {
+            "brain": {"serviceRouteContext": {"visibleServiceTarget": target}},
+            "latestTick": 11,
+        }
+
+        observed = verify_expected_result(
+            "service_view_recovery",
+            before,
+            after,
+            elapsed_ms=2500,
+            timeout_ms=2000,
+        )
+
+        self.assertEqual(observed["observedResult"], "service_view_recovery_failed")
+        self.assertEqual(observed["resultOutcome"], "no_change_timeout")
+        self.assertNotIn("service_safe_aimpoint_available", observed["observedSignals"])
+
+    def test_service_view_recovery_does_not_succeed_from_edge_sliver(self):
+        before = {
+            "brain": {
+                "serviceRouteContext": {
+                    "visibleServiceTarget": {
+                        "targetName": "Bank Deposit Box",
+                        "classId": "deposit_box",
+                        "projectionStatus": {
+                            "classification": "offscreen",
+                            "onScreen": False,
+                            "actionableByCanvas": False,
+                            "aimPoint": {"canvasX": 1793, "canvasY": 1935},
+                        },
+                    }
+                }
+            },
+            "latestTick": 10,
+        }
+        after = {
+            "brain": {
+                "serviceRouteContext": {
+                    "visibleServiceTarget": {
+                        "targetName": "Bank Deposit Box",
+                        "classId": "deposit_box",
+                        "projectionStatus": {
+                            "classification": "actionable",
+                            "onScreen": True,
+                            "actionableByCanvas": True,
+                            "aimPoint": {"canvasX": 6, "canvasY": 93},
+                        },
+                        "safeAimPoint": {
+                            "status": "PASS",
+                            "actionable": True,
+                            "canvasX": 6,
+                            "canvasY": 93,
+                            "distanceToViewportEdgePx": 6,
+                            "clippedVisibleAreaPx": 756.0,
+                            "clippedVisibleAreaRatio": 0.75,
+                            "rawCenterInsideViewport": False,
+                        },
+                    }
+                }
+            },
+            "latestTick": 11,
+        }
+
+        observed = verify_expected_result(
+            "service_view_recovery",
+            before,
+            after,
+            elapsed_ms=320,
+            timeout_ms=2000,
+        )
+
+        self.assertEqual(observed["observedResult"], "service_insufficient_exposure")
+        self.assertEqual(observed["serviceViewRecoveryClassification"], "service_insufficient_exposure")
+        self.assertEqual(observed["resultOutcome"], "still_waiting")
+        self.assertFalse(observed["resultComplete"])
+        self.assertFalse(observed["nextActionAllowed"])
+        self.assertIn("service_edge_sliver_only", observed["observedSignals"])
+        self.assertNotEqual(observed["resultOutcome"], "success")
+
+    def test_service_view_recovery_timeout_with_partial_exposure_allows_next_camera_primitive(self):
+        before = {
+            "brain": {
+                "serviceRouteContext": {
+                    "visibleServiceTarget": {
+                        "targetName": "Bank booth",
+                        "classId": "bank_booth",
+                        "projectionStatus": {
+                            "classification": "offscreen",
+                            "onScreen": False,
+                            "actionableByCanvas": False,
+                            "aimPoint": {"canvasX": 1560, "canvasY": 2471},
+                        },
+                    }
+                }
+            },
+            "latestTick": 10,
+        }
+        after = {
+            "brain": {
+                "serviceRouteContext": {
+                    "visibleServiceTarget": {
+                        "targetName": "Bank booth",
+                        "classId": "bank_booth",
+                        "projectionStatus": {
+                            "classification": "actionable",
+                            "onScreen": True,
+                            "actionableByCanvas": True,
+                            "aimPoint": {"canvasX": 60, "canvasY": 236},
+                        },
+                        "safeAimPoint": {
+                            "status": "PASS",
+                            "actionable": True,
+                            "canvasX": 60,
+                            "canvasY": 236,
+                            "distanceToViewportEdgePx": 24,
+                            "clippedVisibleAreaPx": 500.0,
+                            "clippedVisibleAreaRatio": 0.2,
+                        },
+                    }
+                }
+            },
+            "latestTick": 11,
+        }
+
+        observed = verify_expected_result(
+            "service_view_recovery",
+            before,
+            after,
+            elapsed_ms=2500,
+            timeout_ms=2000,
+        )
+
+        self.assertEqual(observed["observedResult"], "service_insufficient_exposure")
+        self.assertEqual(observed["resultOutcome"], "progress")
+        self.assertTrue(observed["resultComplete"])
+        self.assertTrue(observed["nextActionAllowed"])
+        self.assertTrue(observed["serviceViewRecoveryPartialProgress"])
+        self.assertNotEqual(observed["resultOutcome"], "success")
+
+    def test_service_view_recovery_fails_if_loaded_scene_lost(self):
+        before = {
+            "brain": {
+                "serviceRouteContext": {
+                    "visibleServiceTarget": {
+                        "targetName": "Bank Deposit Box",
+                        "projectionStatus": {
+                            "classification": "offscreen",
+                            "onScreen": False,
+                            "actionableByCanvas": False,
+                            "aimPoint": {"canvasX": 1793, "canvasY": 1935},
+                        },
+                    }
+                }
+            },
+            "gameState": "LOGGED_IN",
+            "latestTick": 10,
+        }
+        after = {
+            "gameState": "LOGIN_SCREEN",
+            "loadedSceneVerified": False,
+            "worldModelObjectTotal": 0,
+            "latestTick": 10,
+            "brain": {
+                "serviceRouteContext": {
+                    "visibleServiceTarget": {
+                        "targetName": "Bank Deposit Box",
+                        "projectionStatus": {
+                            "classification": "actionable",
+                            "onScreen": True,
+                            "actionableByCanvas": True,
+                            "aimPoint": {"canvasX": 380, "canvasY": 220},
+                        },
+                        "safeAimPoint": {"status": "PASS", "actionable": True, "canvasX": 380, "canvasY": 220},
+                    }
+                }
+            },
+        }
+
+        observed = verify_expected_result(
+            "service_view_recovery",
+            before,
+            after,
+            elapsed_ms=320,
+            timeout_ms=2000,
+        )
+
+        self.assertEqual(observed["observedResult"], "service_view_recovery_liveness_lost")
+        self.assertEqual(observed["verificationStatus"], "FAIL")
+        self.assertEqual(observed["resultOutcome"], "interrupted")
+        self.assertIn("loaded_scene_unavailable", observed["observedSignals"])
+
+    def test_service_view_recovery_not_success_if_post_camera_proposal_still_recovery(self):
+        before = {
+            "brain": {
+                "serviceRouteContext": {
+                    "visibleServiceTarget": {
+                        "targetName": "Bank Deposit Box",
+                        "classId": "deposit_box",
+                        "projectionStatus": {
+                            "classification": "offscreen",
+                            "onScreen": False,
+                            "actionableByCanvas": False,
+                            "aimPoint": {"canvasX": 1793, "canvasY": 1935},
+                        },
+                    }
+                }
+            },
+            "latestTick": 10,
+        }
+        after = {
+            "brain": {
+                "serviceRouteContext": {
+                    "visibleServiceTarget": {
+                        "targetName": "Bank Deposit Box",
+                        "classId": "deposit_box",
+                        "projectionStatus": {
+                            "classification": "actionable",
+                            "onScreen": True,
+                            "actionableByCanvas": True,
+                            "aimPoint": {"canvasX": 380, "canvasY": 220},
+                        },
+                        "safeAimPoint": {"status": "PASS", "actionable": True, "canvasX": 380, "canvasY": 220},
+                    }
+                }
+            },
+            "latestTick": 11,
+        }
+
+        with patch(
+            "input_control.action_lifecycle.build_action_proposal",
+            return_value=Namespace(
+                proposed_action="service_view_recovery",
+                reason="service_view_recovery_needed",
+                target_name="Bank Deposit Box",
+            ),
+        ):
+            observed = verify_expected_result(
+                "service_view_recovery",
+                before,
+                after,
+                elapsed_ms=320,
+                timeout_ms=2000,
+            )
+
+        self.assertEqual(observed["observedResult"], "service_recovery_still_required")
+        self.assertEqual(observed["verificationStatus"], "WARN")
+        self.assertEqual(observed["resultOutcome"], "still_waiting")
+        self.assertFalse(observed["resultComplete"])
 
     def test_progress_increase_completes_select_resource_target_wait(self):
         observed = verify_expected_result(

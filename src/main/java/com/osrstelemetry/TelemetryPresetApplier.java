@@ -16,8 +16,6 @@ public class TelemetryPresetApplier
 			"DAILY_LIVE",
 			"DAILY_SNAPSHOT_NO_FILE",
 			"VISUAL_QA",
-			"DEBUG_AUDIT",
-			"PLUGIN_SNAPSHOT_EXPERIMENTAL",
 			"CUSTOM");
 
 	private final ConfigStore store;
@@ -111,6 +109,10 @@ public class TelemetryPresetApplier
 			return null;
 		}
 		String normalized = value.trim().replace('-', '_').replace(' ', '_').toUpperCase(Locale.ROOT);
+		if (!PRESET_NAMES.contains(normalized))
+		{
+			return null;
+		}
 		for (TelemetryWorkflowPreset preset : TelemetryWorkflowPreset.values())
 		{
 			if (preset.name().equals(normalized))
@@ -131,10 +133,6 @@ public class TelemetryPresetApplier
 				return dailySnapshotNoFilePreset();
 			case VISUAL_QA:
 				return visualQaPreset();
-			case DEBUG_AUDIT:
-				return debugAuditPreset();
-			case PLUGIN_SNAPSHOT_EXPERIMENTAL:
-				return pluginSnapshotExperimentalPreset();
 			case CUSTOM:
 			default:
 				return List.of();
@@ -144,12 +142,7 @@ public class TelemetryPresetApplier
 	private List<PresetValue> dailyLivePreset()
 	{
 		List<PresetValue> values = baseCompactLivePreset();
-		values.add(v("debugRecordFrames", false));
-		values.add(v("captureScreenshots", false));
-		values.add(v("emitCompactLiveStream", false));
-		values.add(v("compactLiveStreamAlsoWriteFiles", true));
 		values.add(v("enablePluginSnapshotEndpoint", false));
-		values.add(v("pluginSnapshotEnabledInNormalLive", false));
 		values.add(v("telemetryDebugOverlayMaxTargets", 32));
 		values.add(v("telemetryDebugOverlayMode", TelemetryDebugOverlayMode.CANDIDATES));
 		values.add(v("telemetryDebugOverlayShowLabels", true));
@@ -169,17 +162,12 @@ public class TelemetryPresetApplier
 	private List<PresetValue> dailySnapshotNoFilePreset()
 	{
 		List<PresetValue> values = baseSnapshotLivePreset();
-		values.add(v("debugRecordFrames", false));
-		values.add(v("captureScreenshots", false));
-		values.add(v("emitCompactLiveStream", false));
-		values.add(v("compactLiveStreamAlsoWriteFiles", false));
 		values.add(v("enablePluginSnapshotEndpoint", true));
 		values.add(v("pluginSnapshotHost", "127.0.0.1"));
 		values.add(v("pluginSnapshotPort", 8893));
 		values.add(v("pluginSnapshotMaxProjectionRefs", 100));
 		values.add(v("pluginSnapshotMaxResponseBytes", 1048576));
 		values.add(v("pluginSnapshotAllowNonLocalHost", false));
-		values.add(v("pluginSnapshotEnabledInNormalLive", true));
 		values.add(v("telemetryDebugOverlayMaxTargets", 32));
 		values.add(v("telemetryDebugOverlayMode", TelemetryDebugOverlayMode.CANDIDATES));
 		values.add(v("telemetryDebugOverlayShowLabels", true));
@@ -199,12 +187,7 @@ public class TelemetryPresetApplier
 	private List<PresetValue> visualQaPreset()
 	{
 		List<PresetValue> values = baseCompactLivePreset();
-		values.add(v("debugRecordFrames", false));
-		values.add(v("captureScreenshots", false));
-		values.add(v("emitCompactLiveStream", false));
-		values.add(v("compactLiveStreamAlsoWriteFiles", true));
 		values.add(v("enablePluginSnapshotEndpoint", false));
-		values.add(v("pluginSnapshotEnabledInNormalLive", false));
 		values.add(v("telemetryDebugOverlayEnabled", true));
 		values.add(v("telemetryDebugOverlayMode", TelemetryDebugOverlayMode.CANDIDATES));
 		values.add(v("telemetryDebugOverlayMaxTargets", 32));
@@ -224,54 +207,9 @@ public class TelemetryPresetApplier
 		return values;
 	}
 
-	private List<PresetValue> debugAuditPreset()
-	{
-		List<PresetValue> values = new ArrayList<>();
-		values.add(v("telemetryRecordingMode", TelemetryRecordingMode.DEBUG_RECORDING));
-		values.add(v("emitCompactLivePackets", true));
-		values.add(v("compactLivePacketsRequiredForLive", true));
-		values.add(v("debugRecordRawTicks", true));
-		values.add(v("debugRecordRawEvents", true));
-		values.add(v("debugRecordFrames", true));
-		values.add(v("captureScreenshots", true));
-		values.add(v("screenshotEveryTicks", 1));
-		values.add(v("emitCompactLiveStream", false));
-		values.add(v("compactLiveStreamAlsoWriteFiles", true));
-		values.add(v("enablePluginSnapshotEndpoint", false));
-		values.add(v("pluginSnapshotEnabledInNormalLive", false));
-		values.add(v("retentionEnabled", true));
-		return values;
-	}
-
-	private List<PresetValue> pluginSnapshotExperimentalPreset()
-	{
-		List<PresetValue> values = baseCompactLivePreset();
-		values.add(v("debugRecordFrames", false));
-		values.add(v("captureScreenshots", false));
-		values.add(v("emitCompactLiveStream", false));
-		values.add(v("compactLiveStreamAlsoWriteFiles", true));
-		values.add(v("enablePluginSnapshotEndpoint", true));
-		values.add(v("pluginSnapshotHost", "127.0.0.1"));
-		values.add(v("pluginSnapshotPort", 8893));
-		values.add(v("pluginSnapshotMaxProjectionRefs", 500));
-		values.add(v("pluginSnapshotMaxResponseBytes", 1048576));
-		values.add(v("pluginSnapshotAllowNonLocalHost", false));
-		values.add(v("pluginSnapshotEnabledInNormalLive", true));
-		values.add(v("compactLiveIncludeHeavyGeometry", false));
-		values.add(v("compactLiveIncludeClickableHull", false));
-		values.add(v("compactLiveIncludeCanvasTilePolygon", false));
-		values.add(v("compactLiveIncludeConvexHull", false));
-		return values;
-	}
-
 	private List<PresetValue> baseCompactLivePreset()
 	{
 		List<PresetValue> values = new ArrayList<>();
-		values.add(v("telemetryRecordingMode", TelemetryRecordingMode.LIVE_COMPACT_ONLY));
-		values.add(v("emitCompactLivePackets", true));
-		values.add(v("compactLivePacketsRequiredForLive", true));
-		values.add(v("debugRecordRawTicks", false));
-		values.add(v("debugRecordRawEvents", false));
 		values.add(v("emitCompactNavigationPackets", true));
 		values.add(v("compactNavigationEmitCollisionWindow", true));
 		values.add(v("compactLivePacketTypes", "all"));
@@ -281,11 +219,6 @@ public class TelemetryPresetApplier
 	private List<PresetValue> baseSnapshotLivePreset()
 	{
 		List<PresetValue> values = new ArrayList<>();
-		values.add(v("telemetryRecordingMode", TelemetryRecordingMode.LIVE_COMPACT_ONLY));
-		values.add(v("emitCompactLivePackets", false));
-		values.add(v("compactLivePacketsRequiredForLive", false));
-		values.add(v("debugRecordRawTicks", false));
-		values.add(v("debugRecordRawEvents", false));
 		values.add(v("emitCompactNavigationPackets", true));
 		values.add(v("compactNavigationEmitCollisionWindow", true));
 		values.add(v("compactLivePacketTypes", "all"));

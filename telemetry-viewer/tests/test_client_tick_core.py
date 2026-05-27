@@ -11,6 +11,7 @@ from client_tick_core import (  # noqa: E402
     action_intent_from_proposal,
     classify_clicked_menu,
     classify_menu_action,
+    expected_entries_not_top,
     get_actionable_entries,
     get_left_click_entry,
     hover_sample_matches_intent,
@@ -83,6 +84,35 @@ class ClientTickCoreTest(unittest.TestCase):
         self.assertTrue(result.confirmed)
         self.assertEqual(result.reason, "hover_menu_confirmed")
 
+    def test_tree_resource_intent_rejects_oak_top_even_when_tree_is_lower_menu_entry(self):
+        proposal = ActionProposal(
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Tree",
+            target_explanation={"objectId": 1276, "name": "Tree"},
+        )
+        intent = action_intent_from_proposal(proposal)
+        sample = {
+            "wallTimeMillis": 2200,
+            "mouseCanvasX": 200,
+            "mouseCanvasY": 146,
+            "topOption": "Chop down",
+            "topTarget": "Oak tree",
+            "topIdentifier": 10820,
+            "entries": [
+                {"option": "Chop down", "target": "Oak tree", "identifier": 10820, "type": "GAME_OBJECT_FIRST_OPTION"},
+                {"option": "Chop down", "target": "Tree", "identifier": 1276, "type": "GAME_OBJECT_FIRST_OPTION"},
+            ],
+        }
+
+        result = hover_sample_matches_intent(sample, intent, {"x": 200, "y": 146}, tolerance_px=3)
+
+        self.assertFalse(result.confirmed)
+        self.assertEqual(result.reason, "top_target_not_expected")
+        self.assertTrue(result.details["expectedEntryPresentButNotTop"])
+        self.assertTrue(result.details["rightClickResourceSelectionDeferred"])
+        self.assertEqual(expected_entries_not_top(sample, intent)[0]["target"], "Tree")
+
     def test_hover_sample_rejects_stale_position_and_walk_here(self):
         intent = ActionIntent.for_target(
             activity="woodcutting",
@@ -100,22 +130,19 @@ class ClientTickCoreTest(unittest.TestCase):
             "topTarget": "Tree",
             "topIdentifier": 1276,
         }
-        self.assertEqual(
-            hover_sample_matches_intent(stale, intent, {"x": 200, "y": 146}, min_wall_time_millis=2000).reason,
-            "hover_menu_stale",
-        )
+        stale_result = hover_sample_matches_intent(stale, intent, {"x": 200, "y": 146}, min_wall_time_millis=2000)
+        self.assertEqual(stale_result.reason, "hover_menu_stale")
+        self.assertEqual(stale_result.details["mismatchReason"], "stale_hover_sample")
 
         far = dict(stale, wallTimeMillis=2200, mouseCanvasX=210)
-        self.assertEqual(
-            hover_sample_matches_intent(far, intent, {"x": 200, "y": 146}, tolerance_px=3).reason,
-            "mouse_position_outside_tolerance",
-        )
+        far_result = hover_sample_matches_intent(far, intent, {"x": 200, "y": 146}, tolerance_px=3)
+        self.assertEqual(far_result.reason, "mouse_position_outside_tolerance")
+        self.assertEqual(far_result.details["mismatchReason"], "hover_position_mismatch")
 
         walk = dict(stale, wallTimeMillis=2200, topOption="Walk here", topTarget="")
-        self.assertEqual(
-            hover_sample_matches_intent(walk, intent, {"x": 200, "y": 146}, tolerance_px=3).reason,
-            "top_option_rejected",
-        )
+        walk_result = hover_sample_matches_intent(walk, intent, {"x": 200, "y": 146}, tolerance_px=3)
+        self.assertEqual(walk_result.reason, "top_option_rejected")
+        self.assertEqual(walk_result.details["mismatchReason"], "hover_option_mismatch")
 
     def test_clicked_menu_compares_before_after_and_expected_action(self):
         intent = ActionIntent.for_target(
@@ -238,6 +265,43 @@ class ClientTickCoreTest(unittest.TestCase):
         self.assertIn("Climb-up", intent.expected_options)
         self.assertTrue(hover_sample_matches_intent(sample, intent, {"x": 210, "y": 146}).confirmed)
 
+        unrelated = dict(sample, topOption="Talk-to", topTarget="Hans", topType="NPC_FIRST_OPTION", topIdentifier=1)
+        result = hover_sample_matches_intent(unrelated, intent, {"x": 210, "y": 146})
+        self.assertFalse(result.confirmed)
+        self.assertEqual(result.details["mismatchReason"], "hover_option_mismatch")
+
+    def test_service_proposal_accepts_expected_bank_use_and_rejects_unrelated(self):
+        proposal = ActionProposal(
+            proposed_action="open_service",
+            target_kind="service",
+            target_name="Bank booth",
+            suggested_click_point={"x": 420, "y": 260},
+            click_point_space="canvas",
+            target_explanation={
+                "name": "Bank booth",
+                "classId": "bank_booth",
+                "objectId": 18491,
+                "expectedOptions": ["Bank", "Use", "Deposit"],
+                "expectedTargets": ["Bank booth"],
+            },
+        )
+        intent = action_intent_from_proposal(proposal)
+        bank = {
+            "wallTimeMillis": 2200,
+            "mouseCanvasX": 420,
+            "mouseCanvasY": 260,
+            "topOption": "Bank",
+            "topTarget": "Bank booth",
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "topIdentifier": 18491,
+        }
+        talk = dict(bank, topOption="Talk-to", topTarget="Banker", topType="NPC_FIRST_OPTION", topIdentifier=2897)
+
+        self.assertTrue(hover_sample_matches_intent(bank, intent, {"x": 420, "y": 260}, tolerance_px=3).confirmed)
+        result = hover_sample_matches_intent(talk, intent, {"x": 420, "y": 260}, tolerance_px=3)
+        self.assertFalse(result.confirmed)
+        self.assertEqual(result.details["mismatchReason"], "hover_option_mismatch")
+
     def test_deposit_resource_proposal_accepts_log_widget_hover(self):
         proposal = ActionProposal(
             proposed_action="deposit_resources",
@@ -298,6 +362,11 @@ class ClientTickCoreTest(unittest.TestCase):
         self.assertTrue(result.confirmed)
         self.assertEqual(classify_clicked_menu(None, {"clientTick": 12, "option": "Walk here", "type": "WALK"}, intent), "clicked_expected_action")
 
+        chop = dict(sample, topOption="Chop down", topTarget="Tree", topType="GAME_OBJECT_FIRST_OPTION", topIdentifier=1276)
+        rejected = hover_sample_matches_intent(chop, intent, {"x": 300, "y": 240}, tolerance_px=3)
+        self.assertFalse(rejected.confirmed)
+        self.assertEqual(rejected.details["mismatchReason"], "hover_option_mismatch")
+
     def test_woodcutting_still_rejects_walk_here_hover(self):
         proposal = ActionProposal(
             proposed_action="select_resource_target",
@@ -320,6 +389,7 @@ class ClientTickCoreTest(unittest.TestCase):
 
         self.assertFalse(result.confirmed)
         self.assertEqual(result.reason, "top_option_rejected")
+        self.assertEqual(result.details["mismatchReason"], "hover_option_mismatch")
 
     def test_menu_tail_volatility_marks_recent_npc_action_near_navigation_waypoint(self):
         proposal = ActionProposal(

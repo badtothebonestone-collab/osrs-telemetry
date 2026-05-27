@@ -1,7 +1,12 @@
 ﻿# Current Codex Handoff
 
 Repo:
-`C:\Users\stone\osrs-telemetry\example-plugin`
+Current VM repo path for the live dev guest:
+`C:\Users\badto\osrs-telemetry`
+
+Older host paths such as `C:\Users\stone\...` are not authoritative inside the
+VM. Confirm `pwd` and `git status` in the current guest before running live
+commands.
 
 New Codex chats should read `AGENTS.md` first, then this file. Do not treat
 older chat history as source of truth. Use the current repo, current tests,
@@ -10,6 +15,125 @@ current diagnostics, `AGENTS.md`, and this handoff.
 ## Current Daily Path
 
 Snapshot No-File is the daily path.
+
+The old live packet archive is removed from runtime. Normal live tools must not
+create or consume `live_packets\`, `live-*.ndjson`, or `live-*.jsonl`, and
+RuneLite config no longer exposes an option to enable packet archive or compact
+stream/file output. If old files exist under `.osrs-telemetry\sessions`, they
+are legacy disk cleanup only:
+
+```powershell
+python telemetry-viewer\maintenance.py --live-packets-report
+python telemetry-viewer\maintenance.py --prune-legacy-live-packets --dry-run
+```
+
+Use `PluginSnapshotEndpoint`, `WorldModelCache`, Knowledge Fabric queries,
+`current_debug_context`, `replay_scenario.v1`, `script_authoring_context.v1`,
+session memory, and sparse visual debug bundles for current/live/debug context.
+Explicit bounded JSON artifacts remain valid; the removed piece is only the
+unbounded append-only packet archive.
+
+Pipeline cleanup source of truth:
+
+```powershell
+python telemetry-viewer\context_service.py --pipeline-health
+```
+
+The RuneLite plugin settings should show only the current Core, Snapshot
+Endpoint, and Overlay surface by default. Developer diagnostics are hidden from
+the normal UI. Retired workflow presets, raw tick/event recording, frame capture
+toggles, compact packet file/stream labels, and the old normal-live snapshot
+alias are not normal UI controls and are cleaned from this plugin's saved
+config on startup when present.
+
+Live execution now requires Arduino HID by default. `execute_next_action.py
+--execute`, `--hover-only`, and `--camera-self-test` default to
+`--backend arduino`; software input backends are dry-run/debug tools unless
+`--allow-software-input` or `--unsafe-allow-pyautogui-live` is passed
+explicitly. A live run should report `liveInputBackend=arduino`,
+`liveInputBackendRequired=true`, `softwareInputAllowed=false`, and
+`directBackendBypassCount=0`.
+
+Arduino live cursor movement is blocked by default until the closed-loop
+pointer calibration path is reviewed. `--execute --backend arduino` and
+`--hover-only --backend arduino` now stop with
+`arduino_pointer_calibration_required` unless an explicit override is supplied.
+Run the no-click calibration first:
+
+```powershell
+python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --arduino-pointer-calibration-test --allowed-window calibration --no-click
+```
+
+The calibration opens or uses a bounded allowed region, moves only through
+closed-loop relative HID chunks, reads the actual Windows cursor position after
+each chunk, aborts if the cursor leaves the region or foreground changes, and
+always sends `STOP_ALL`/`DISARM` during cleanup. It sends no clicks or keys.
+The closed-loop calibration is robust to occasional delayed, coalesced, or
+ignored `MOVE` chunks: after each firmware ACK it polls cursor and Raw Input
+for a bounded settle/no-effect window, retries no-effect chunks only within the
+allowed region, and reports aggregate `totalChunks`, `retryChunks`,
+`noEffectChunks`, `movementSuccessRate`, `maxPositionErrorPx`, and
+`finalPositionErrorPx`. Raw Input counter coalescing is diagnostic evidence;
+live safety still depends on final cursor feedback, allowed-region containment,
+zero injected/lower-IL counts, and `directBackendBypassCount=0`.
+
+Arduino checks:
+
+```powershell
+python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --arduino-stop-all
+python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --arduino-check ping
+python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --arduino-check identify
+python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --arduino-check caps
+python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --arduino-status
+python telemetry-viewer\input_control\arduino_monitor.py --show-overlay --status-output interaction_geometry\live\input_integrity_status.json --vid VID_2341 --pid PID_8036 --com-port COMx
+python telemetry-viewer\execute_next_action.py --backend arduino --arduino-require-monitor --arduino-monitor-status interaction_geometry\live\input_integrity_status.json --arduino-check monitor
+python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --arduino-require-monitor --arduino-monitor-status interaction_geometry\live\input_integrity_status.json --input-integrity-self-test
+python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --input-integrity-self-test-no-move --no-overlay
+python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --arduino-pointer-calibration-test --allowed-window calibration --no-click
+python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --arduino-usb-diagnostics --arduino-bootloader-port COM4
+```
+
+VM USB checklist: connect the Arduino to the VMware guest through
+VMware Removable Devices, verify the COM port inside Windows Device Manager,
+verify the HID keyboard/mouse device is visible to the guest, and require the
+monitor proof before live actions when `--arduino-require-monitor` is used.
+The monitor overlay/status uses `input_integrity_status.v1`; it separates Raw
+Input source-device proof from Windows injected-input flags
+(`LLMHF_*`/`LLKHF_*`) and should show Arduino backend selected, VID/PID
+matched, zero injected/lower-IL counts, and `directBackendBypassCount=0`.
+Arduino self-tests now separate `firmwareSafety` from `vmInputFocusSafety`.
+Firmware safe means STOP_ALL/DISARM released keys/buttons; VM focus safe means
+the guest foreground/capture state was restored or the user confirmed normal
+control. A self-test with unknown VM focus recovery should remain `WARN`, not a
+false `PASS`. The overlay should be launched passive/no-focus for short checks,
+and no-move self-tests should be run before tiny-move Raw Input checks when the
+VM mouse capture state is suspect.
+
+If the host VMware USB prompt repeats after Leonardo reset/upload, shut down
+the VM and add exact Arduino sketch/bootloader `.vmx` autoconnect rules from
+`--arduino-usb-diagnostics`. Do not use broad rules that could pass the real
+host mouse or keyboard into the guest.
+
+The Arduino firmware contract is `arduino_hid.v1`
+(`arduino\ArduinoHIDBridge\ArduinoHIDBridge.ino`). The Python backend requires
+`IDENTIFY` to report `protocol=arduino_hid.v1` and `CAPS` to include
+`stopAll=1`, `watchdog=1`, and `resetSafe=1`; old firmware that returns
+`ERR UNKNOWN` for `IDENTIFY`, `CAPS`, or `STOP_ALL` is blocked from live
+execution. The sketch starts disarmed, releases all keys/buttons in `setup()`,
+does not auto-arm after reset, clamps movement/hold durations, and watchdog
+timeouts call `STOP_ALL`. Panic order: run `--arduino-stop-all` if the VM is
+controllable, press the Arduino reset button, physically unplug the Arduino,
+use VMware Ctrl+Alt to release capture, then disconnect/reconnect the Arduino
+to the guest.
+
+Jagex Launcher automation is disabled by default. The bootstrap helper reports
+`launcherAutomationAllowed=false`,
+`launcherAutomationBlockedReason=jagex_launcher_automation_disabled_by_default`,
+and `loginRecoveryMode=runelite_dev_only` unless
+`--allow-jagex-launcher-automation` is passed. If a credential, account, MFA,
+or Jagex Launcher prompt is reached without that explicit flag, the bootstrap
+stops at `manual_login_required`/`blocked_user_login_required` and asks the
+user to log in manually inside the VM.
 
 Daily daemon command:
 
@@ -81,6 +205,12 @@ RuneLite plugin
   context warnings from `actionReadiness.executionAllowed`, so service-route
   navigation can proceed through route/waypoint checks while resource clicks
   still require selected Tree/Oak/highlighter/safeAimPoint agreement.
+- Context warnings are intent-aware. Stale selected resource-target freshness,
+  selected-target/highlighter mismatch, and selected-target actionability are
+  reported as `nonApplicableContextWarnings` while the current intent is
+  navigation such as `return_to_resource_area`; they become applicable again
+  for `resource_object_action`. Stale filesystem `--latest-session` context is
+  reported separately from fresh daemon/plugin live-session state.
 - Live liveness recovery is explicit: stale `client_tick_hot.v1` blockers now
   report `gameState`, logged-in status, hot-state ages, a `staleReason` such as
   `login_screen` or `plugin_hot_state_not_advancing`, and a recovery action.
@@ -146,12 +276,90 @@ RuneLite plugin
   waypoint has recent NPC/object/widget actions near the `Walk here` samples,
   the executor records `volatileHoverZone` and skips the click before
   mouse-down instead of relying on one unstable menu sample.
+- Action target source/actionability is explicit. Static route priors and route
+  context goals are `advisory_only`; retained anchors are navigation goals until
+  fresh projection or hover evidence upgrades them. Executable actions must come
+  from a live projected waypoint, live route/service/resource object, hover
+  discovered object, or validated current route context. The executor refuses
+  `advisory_only`, `stale`, and `blocked` proposals even if called directly.
+- Hover matching is keyed to action intent: navigation accepts `Walk here`;
+  resource actions accept Tree/Oak `Chop`/`Chop down`; route transitions accept
+  the expected climb/open action; service actions accept expected bank/use/deposit
+  options; dialogue choices require the expected option/index. Structured
+  mismatch reasons include `stale_target`, `static_target_not_executable`,
+  `hover_option_mismatch`, `hover_target_mismatch`, `wrong_intent_matcher`,
+  `stale_hover_sample`, `menu_flip_mismatch`, and `target_source_mismatch`.
+- Woodcutting resource selection is skill-aware when telemetry exposes a
+  Woodcutting level. When skill telemetry is absent, it prefers a basic live
+  `Tree` over higher-level Oak/Willow candidates if both are available, so
+  low-level VM accounts do not repeatedly click targets they cannot chop.
+- Resource collection now has view planning in front of target execution.
+  `resource_view_score.v1` measures visible/executable Tree/Dead tree
+  candidates, central safe aimpoints, edge clipping, visible area, worksite
+  distance, and drift away from the remembered worksite. Poor edge/occluded,
+  single-candidate, no-executable, or worksite-drift views propose bounded
+  `resource_view_recovery` camera input through `HumanInputController` before
+  any chop click is allowed.
+- VM live input geometry handles Windows/AWT scaling by not applying
+  `displayScale` twice when `canvasSize` is already screen-scaled relative to
+  `sourceCanvasSize`.
+- VM coordinate traces include `coordinateSpace`, `scaleX`, `scaleY`,
+  `screenPointBeforeScaling`, `screenPointAfterScaling`, `windowBoundsSource`,
+  and `canvasBoundsSource`. `scaled_logical_to_physical` means the full
+  logical AWT screen point was scaled to physical pyautogui pixels.
+- Player location status prefers authoritative baseline/player location and
+  labels collision-window fallback as `collision_window_center_proxy` with
+  lower confidence.
 - RuneLite Dev Bootstrap / Login Flow Helper v2 is implemented. Current live
   run confirms launch, secondary-monitor placement, bounded startup clicks,
   `LOGGED_IN` detection, daemon start/reuse, and live QA handoff. The bootstrap
   waits after `Play Now` for the server transition before clicking the final
   `CLICK HERE TO PLAY` panel.
-- Stabilization suite currently passes 158/158 and reports behavior categories.
+- World Model v2 is available through the plugin snapshot endpoint. Java keeps
+  a bounded in-memory loaded-scene cache and serves compact query payloads for
+  `world_model_summary`, route/resource/service object censuses,
+  `pathing_frontier`, `projection_audit`, and `view_quality_inputs`. Runtime
+  still uses compact query results and `client_tick_hot`; full local-scene
+  debug snapshots are explicit and bounded. The model is the currently loaded
+  scene only, not a whole-game map. Route priors and learned anchors remain the
+  source for beyond-scene goals.
+- Loaded-scene projection is prioritized after census capture, not while
+  scanning scene tiles. The world model indexes the full loaded scene first and
+  then spends its bounded projection budget on nearby route/resource/service
+  objects before lower-value clutter. This keeps visible Tree/route/service
+  objects queryable even when the local scene has thousands of objects.
+- Knowledge Fabric v1 is available on the Python side as an optional read-only
+  query/index layer. It builds compact spatial, object/action, route object,
+  resource, service, projection, collision/frontier, session-memory,
+  static-library, and debug-evidence indexes from world-model payloads and
+  daemon status. It does not replace `8893`/`8890` and does not expose input
+  execution. Static priors and session memory remain advisory until fresh live
+  targets verify them.
+- Query-first debugging is now the preferred live workflow. Start with
+  `get_current_debug_context`, then `explain_current_blocker`, then the
+  blocker-specific query: resource candidates, route objects, service objects,
+  path frontier, or view quality. Only inspect raw files/logs after these
+  query surfaces are insufficient or point at a code path.
+- `telemetry-viewer\mcp_server.py` is an optional local stdio MCP adapter for
+  Codex/AI inspection. It exposes read-only tools such as
+  `get_current_debug_context`, `get_knowledge_fabric_status`,
+  `query_resource_candidates`,
+  `query_service_candidates`, `query_route_objects`, `query_path_frontier`,
+  `query_view_quality`, `explain_current_blocker`, `search_session_memory`, and
+  `search_static_library`, plus script-authoring helpers such as
+  `list_available_profiles`, `describe_profile`, `list_known_actions`,
+  `capture_script_authoring_context`, `capture_replay_scenario`,
+  `replay_scenario`, `get_data_quality_report`, `diff_debug_context`, and
+  `get_handoff_summary`. It also exposes `osrs://...` resources for
+  live/status, current debug context, current blocker,
+  route/resource/service candidates, session memory, debug bundles, and static
+  routes/targets/actions plus the newest script-authoring and replay artifacts.
+- Stabilization suite currently passes 171/171 with World Model v2 and
+  Knowledge Fabric checks included.
+- VM loaded-scene validation on 2026-05-25 confirmed `worldModelAvailable=true`,
+  collision available, 8k loaded scene objects, actionable Tree projections in
+  `resource_object_census`, read-only MCP tool/resource responses, and a short
+  live run with four successful Tree clicks and `directBackendBypassCount=0`.
 
 ## Woodcut Bank Cycle Summary
 
@@ -271,6 +479,30 @@ python telemetry-viewer\diagnose_close_bank_context.py --from-daemon --daemon-ur
 python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890
 python telemetry-viewer\diagnose_overlay_state.py --latest-session --intent
 ```
+
+Knowledge Fabric / MCP inspection:
+
+```powershell
+python telemetry-viewer\context_service.py --latest-session --query current-debug-context
+python telemetry-viewer\mcp_server.py --list-tools
+python telemetry-viewer\mcp_server.py --list-resources
+python telemetry-viewer\mcp_server.py --call-tool get_current_debug_context --arguments "{`"profile`":`"woodcutting`",`"limit`":10}"
+python telemetry-viewer\mcp_server.py --call-tool get_knowledge_fabric_status --arguments "{}"
+python telemetry-viewer\mcp_server.py --call-tool explain_current_blocker --arguments "{}"
+python telemetry-viewer\mcp_server.py --call-tool search_static_library --arguments "{`"search`":`"Oak`",`"limit`":5}"
+python telemetry-viewer\context_service.py --capture-script-authoring-context --profile woodcutting --reason route_wall_hugging
+python telemetry-viewer\context_service.py --capture-replay-scenario --profile woodcutting --reason route_wall_hugging
+python telemetry-viewer\context_service.py --data-quality-report
+python telemetry-viewer\context_service.py --handoff-summary
+python telemetry-viewer\context_service.py --context-json live_logs\current_debug_context_daemon_context_latest.json --data-quality-report
+python telemetry-viewer\context_service.py --replay-scenario <scenario.json>
+python telemetry-viewer\context_service.py --diff-debug-context <bundleA> <bundleB>
+```
+
+`context_service.py` bundle/replay commands use the live `8890`/`8893` query
+path when no explicit `--session` or `--latest-session` is supplied. They do
+not execute input and are intended for Codex handoff, script authoring, and
+offline replay of candidate/proposal/readiness/blocker decisions.
 
 Daily gauntlet:
 
@@ -599,6 +831,39 @@ checks, for example:
 python -m py_compile telemetry-viewer\live_core_daemon.py
 python -m py_compile telemetry-viewer\diagnose_woodcut_bank_cycle.py
 ```
+
+## Query-First Data Toolkit
+
+Before editing code for a live issue, Codex should ask the data layer first:
+
+```powershell
+python telemetry-viewer\context_service.py --query current-debug-context
+python telemetry-viewer\context_service.py --query current-blocker
+python telemetry-viewer\context_service.py --query data-source-inventory
+python telemetry-viewer\context_service.py --query query-coverage-matrix
+python telemetry-viewer\context_service.py --data-quality-report
+python telemetry-viewer\context_service.py --coverage-report
+```
+
+The source inventory is documented at
+`telemetry-viewer\docs\data_source_inventory.md`; query coverage is documented
+at `telemetry-viewer\docs\query_coverage_matrix.md`.
+
+External OSRS knowledge now lives under
+`%USERPROFILE%\.osrs-telemetry\external_knowledge_cache`. It is cache-first,
+advisory, and never live execution truth. Use it for labels, item IDs, wiki
+links, requirements, location names, and profile authoring:
+
+```powershell
+python telemetry-viewer\context_service.py --external-knowledge-status
+python telemetry-viewer\context_service.py --external-lookup-item-id 1511
+python telemetry-viewer\context_service.py --external-get-skill-requirement Oak
+python telemetry-viewer\context_service.py --external-lookup-object Staircase
+python telemetry-viewer\context_service.py --probe-task "woodcutting and bank logs" --profile woodcutting
+```
+
+External API refresh is explicit only. It must not be added to executor hot
+loops, readiness gates, or live click execution.
 
 ## Current Next Milestone
 

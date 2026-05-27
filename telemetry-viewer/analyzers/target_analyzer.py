@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 import capabilities
+from candidate_core import woodcutting_resource_preference_key
 from analyzers import service_analyzer
 from analyzers.live_state import TargetContext
 
@@ -49,6 +50,12 @@ def _tick(candidate: dict[str, Any]) -> int | None:
         if value is not None:
             return int(value)
     return None
+
+
+def _best_target_sort_key(candidate: dict[str, Any], class_id: str | None) -> tuple:
+    if str(class_id or "").lower() == "tree":
+        return (*woodcutting_resource_preference_key(candidate), -_score(candidate), _distance(candidate))
+    return (-_score(candidate), _distance(candidate))
 
 
 def _is_service_candidate(candidate: dict[str, Any]) -> bool:
@@ -100,7 +107,7 @@ def analyze_targets(
             service_inputs.append(payload)
     raw_best = scoped[0] if scoped else (candidates[0] if candidates and class_id is None else None)
     if scoped:
-        raw_best = max(scoped, key=_score)
+        raw_best = min(scoped, key=lambda candidate: _best_target_sort_key(candidate, class_id))
     nearest = min(scoped, key=_distance) if scoped else None
     missing: list[str] = []
     warnings: list[str] = []

@@ -59,6 +59,9 @@ class InputGeometryTest(unittest.TestCase):
         self.assertEqual(resolution["status"], "PASS")
         self.assertEqual(resolution["method"], "dynamic_input_geometry")
         self.assertEqual(resolution["screenClickPoint"], {"x": 1400, "y": 2300})
+        self.assertEqual(resolution["coordinateSpace"], "physical_pyautogui")
+        self.assertEqual(resolution["screenPointBeforeScaling"], {"x": 1400, "y": 2300})
+        self.assertEqual(resolution["screenPointAfterScaling"], {"x": 1400, "y": 2300})
 
     def test_dynamic_geometry_scales_when_source_canvas_differs(self):
         geometry = normalize_input_geometry(geometry_payload(displayScaleX=1.0, displayScaleY=1.0))
@@ -95,6 +98,96 @@ class InputGeometryTest(unittest.TestCase):
 
         self.assertEqual(resolution["screenClickPoint"], {"x": 6442, "y": 202})
         self.assertEqual(resolution["sourceCanvasSize"], {"width": 765, "height": 503})
+
+    def test_dynamic_geometry_does_not_double_apply_vm_display_scale(self):
+        geometry = normalize_input_geometry(
+            geometry_payload(
+                canvasScreenX=848,
+                canvasScreenY=73,
+                canvasWidth=1229,
+                canvasHeight=868,
+                displayScaleX=1.75,
+                displayScaleY=1.75,
+                sourceCanvasWidth=765,
+                sourceCanvasHeight=503,
+            )
+        )
+
+        resolution = resolve_screen_click_point(
+            {"x": 455, "y": 302},
+            click_point_space="canvas",
+            input_geometry=geometry,
+        )
+
+        self.assertEqual(resolution["status"], "PASS")
+        self.assertEqual(resolution["screenClickPoint"], {"x": 1579, "y": 594})
+        self.assertFalse(resolution["displayScaleApplied"])
+        self.assertEqual(resolution["coordinateSpace"], "physical_pyautogui")
+        self.assertEqual(resolution["windowBoundsSource"], "canvasScreenOrigin")
+
+    def test_dynamic_geometry_scales_vm_logical_window_coordinates_to_physical_screen(self):
+        geometry = normalize_input_geometry(
+            geometry_payload(
+                canvasScreenX=51,
+                canvasScreenY=166,
+                canvasWidth=765,
+                canvasHeight=503,
+                displayScaleX=1.75,
+                displayScaleY=1.75,
+                sourceCanvasWidth=765,
+                sourceCanvasHeight=503,
+                clientWindowX=40,
+                clientWindowY=139,
+                clientWindowWidth=1282,
+                clientWindowHeight=906,
+            )
+        )
+
+        resolution = resolve_screen_click_point(
+            {"x": 455, "y": 302},
+            click_point_space="canvas",
+            input_geometry=geometry,
+        )
+
+        self.assertEqual(resolution["status"], "PASS")
+        self.assertEqual(resolution["screenClickPoint"], {"x": 886, "y": 819})
+        self.assertTrue(resolution["displayScaleApplied"])
+        self.assertEqual(resolution["coordinateSpace"], "scaled_logical_to_physical")
+        self.assertEqual(resolution["screenPointBeforeScaling"], {"x": 506, "y": 468})
+        self.assertEqual(resolution["screenPointAfterScaling"], {"x": 886, "y": 819})
+        self.assertEqual(resolution["windowBoundsSource"], "clientWindowBounds")
+        self.assertEqual(resolution["canvasBoundsSource"], "canvasSize/sourceCanvasSize")
+
+    def test_dynamic_geometry_does_not_double_scale_physical_vm_canvas_with_window_bounds(self):
+        geometry = normalize_input_geometry(
+            geometry_payload(
+                canvasScreenX=51,
+                canvasScreenY=166,
+                canvasWidth=1229,
+                canvasHeight=868,
+                displayScaleX=1.75,
+                displayScaleY=1.75,
+                sourceCanvasWidth=765,
+                sourceCanvasHeight=503,
+                clientWindowX=40,
+                clientWindowY=139,
+                clientWindowWidth=1282,
+                clientWindowHeight=906,
+            )
+        )
+
+        resolution = resolve_screen_click_point(
+            {"x": 244, "y": 132},
+            click_point_space="canvas",
+            input_geometry=geometry,
+        )
+
+        self.assertEqual(resolution["status"], "PASS")
+        self.assertEqual(resolution["screenClickPoint"], {"x": 443, "y": 394})
+        self.assertFalse(resolution["displayScaleApplied"])
+        self.assertEqual(resolution["coordinateSpace"], "physical_pyautogui")
+        self.assertEqual(resolution["screenPointBeforeScaling"], {"x": 443, "y": 394})
+        self.assertEqual(resolution["screenPointAfterScaling"], {"x": 443, "y": 394})
 
     def test_canvas_point_outside_dynamic_canvas_fails(self):
         geometry = normalize_input_geometry(geometry_payload(displayScaleX=1.0, displayScaleY=1.0))

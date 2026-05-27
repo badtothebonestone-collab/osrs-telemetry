@@ -16,11 +16,11 @@ from telemetry_paths import find_newest_session, get_sessions_dir, list_event_fi
 
 
 SCHEMA = "live_config_doctor.v1"
-RECENT_COMPACT_SECONDS = 120.0
+RECENT_LEGACY_SECONDS = 120.0
 STALE_SESSION_SECONDS = 15 * 60
 MODES = ("daily", "snapshot_no_file", "visual_qa", "debug_audit", "plugin_snapshot_experimental")
 MODE_PRESET_RECOMMENDATIONS = {
-    "daily": ("DAILY_LIVE", "Click Apply Daily Live Preset."),
+    "daily": ("DAILY_SNAPSHOT_NO_FILE", "Click Apply Daily Snapshot No-File Preset."),
     "snapshot_no_file": ("DAILY_SNAPSHOT_NO_FILE", "Click Apply Daily Snapshot No-File Preset."),
     "visual_qa": ("VISUAL_QA", "Click Apply Visual QA Preset."),
     "debug_audit": ("DEBUG_AUDIT", "Click Apply Debug Audit Preset."),
@@ -83,44 +83,35 @@ def resolve_session(args: argparse.Namespace) -> Path | None:
     return None
 
 
-def latest_segment_from_index(session: Path, index: dict) -> Path | None:
-    packet_dir = session / "live_packets"
-    latest = index.get("activeSegment") or index.get("latestSegment")
-    pointer = packet_dir / "latest_segment.txt"
-    if not latest and pointer.exists():
-        try:
-            latest = pointer.read_text(encoding="utf-8").strip()
-        except OSError:
-            latest = None
-    if not latest:
-        return None
-    return packet_dir / Path(str(latest)).name
-
-
 def compact_packet_summary(session: Path, *, now: float | None = None) -> dict:
     packet_dir = session / "live_packets"
-    index_path = packet_dir / "live_packet_index.json"
-    index = safe_load_json(index_path)
-    segment = latest_segment_from_index(session, index)
-    available = bool(index_path.exists() and segment is not None and segment.exists())
-    ages = [
-        age
-        for age in (
-            file_age_seconds(index_path, now=now),
-            file_age_seconds(segment, now=now) if segment else None,
-        )
-        if age is not None
-    ]
+    files = sorted(list(packet_dir.glob("live-*.ndjson")) + list(packet_dir.glob("live-*.jsonl"))) if packet_dir.exists() else []
+    total_bytes = 0
+    ages = []
+    for path in files:
+        try:
+            total_bytes += int(path.stat().st_size)
+        except OSError:
+            continue
+        age = file_age_seconds(path, now=now)
+        if age is not None:
+            ages.append(age)
     age = min(ages) if ages else None
     return {
-        "available": available,
-        "recent": bool(available and age is not None and age <= RECENT_COMPACT_SECONDS),
+        "available": False,
+        "recent": False,
+        "runtimeRemoved": True,
+        "writerActive": False,
+        "legacyLivePacketFilesPresent": bool(files),
+        "legacyLivePacketFileCount": len(files),
+        "legacyLivePacketTotalBytes": total_bytes,
+        "legacyLivePacketTotalMb": round(total_bytes / (1024 * 1024), 3),
         "ageSeconds": age,
-        "indexPath": str(index_path),
-        "latestSegment": str(segment) if segment else None,
-        "latestSegmentExists": bool(segment and segment.exists()),
-        "latestTick": index.get("latestTick"),
-        "latestSequence": index.get("latestSequence"),
+        "indexPath": None,
+        "latestSegment": str(files[-1]) if files else None,
+        "latestSegmentExists": False,
+        "latestTick": None,
+        "latestSequence": None,
     }
 
 
@@ -232,7 +223,6 @@ def collect_live_snapshot(
     context = safe_load_json(live_dir / "live_context_index.json")
     overlay = safe_load_json(live_dir / "overlay_debug_state.json")
     manifest = safe_load_json(session / "manifest.json")
-    packet_index = safe_load_json(session / "live_packets" / "live_packet_index.json")
     packet = compact_packet_summary(session, now=now)
     overlay_summary = overlay.get("summary") if isinstance(overlay.get("summary"), dict) else {}
     overlay_targets = overlay.get("targets") if isinstance(overlay.get("targets"), list) else []
@@ -270,17 +260,17 @@ def collect_live_snapshot(
         daemon_status.get("compactPacketFilesEnabledInManifest"),
         status.get("compactLivePacketFilesEnabled"),
         manifest.get("compactLivePacketFilesEnabled"),
+        False,
     )
     compact_files_required = first_present(
         daemon_status.get("compactPacketFilesRequired"),
         status.get("compactPacketFilesRequired"),
-        active_input == "compact-packets" if active_input is not None else None,
+        False,
     )
     compact_files_writing = first_present(
         daemon_status.get("compactPacketFilesWriting"),
         status.get("compactPacketFilesWriting"),
-        compact_file_manifest,
-        packet.get("available"),
+        False,
     )
     snapshot = {
         "sessionPath": str(session),
@@ -290,7 +280,7 @@ def collect_live_snapshot(
         "context": context,
         "overlayDebug": overlay,
         "manifest": manifest,
-        "packetIndex": packet_index,
+        "packetIndex": {},
         "liveCoreDaemonActive": live_core_active,
         "liveCoreWriteDebugLiveFiles": daemon_status.get("writeDebugLiveFiles"),
         "liveCoreOverlayStateWritten": daemon_status.get("overlayStateWritten"),
@@ -333,6 +323,11 @@ def collect_live_snapshot(
         "rawEventFilesAvailable": bool(raw_events),
         "compactPacketsAvailable": packet.get("available"),
         "compactPacketsRecent": packet.get("recent"),
+        "livePacketsRuntimeRemoved": packet.get("runtimeRemoved"),
+        "livePacketWriterActive": packet.get("writerActive"),
+        "legacyLivePacketFilesPresent": packet.get("legacyLivePacketFilesPresent"),
+        "legacyLivePacketFileCount": packet.get("legacyLivePacketFileCount"),
+        "legacyLivePacketTotalMb": packet.get("legacyLivePacketTotalMb"),
         "compactPacketAgeSeconds": packet.get("ageSeconds"),
         "latestSegment": packet.get("latestSegment"),
         "latestTick": first_present(daemon_status.get("latestTick"), status.get("latestTickProcessed"), status.get("lastProcessedTick"), status.get("latestTick"), context.get("latestTick"), packet.get("latestTick")),
@@ -378,7 +373,7 @@ def collect_live_snapshot(
 
 def apply_common_rules(report: dict, snapshot: dict, mode: str) -> None:
     if not snapshot.get("sessionExists"):
-        add_issue(report, "FAIL", "missing_session", "No session was found.", "Start RuneLite dev, collect compact packets, then rerun the doctor.")
+        add_issue(report, "FAIL", "missing_session", "No session was found.", "Start RuneLite dev, verify the plugin snapshot endpoint, then rerun the doctor.")
         return
     session_age = snapshot.get("sessionAgeSeconds")
     if isinstance(session_age, (int, float)) and session_age > STALE_SESSION_SECONDS:
@@ -389,27 +384,13 @@ def apply_common_rules(report: dict, snapshot: dict, mode: str) -> None:
             f"Latest session activity is about {int(session_age // 60)} minutes old.",
             "Confirm this is the intended session or start a fresh normal live run.",
         )
-    compact_packets_required_for_mode = mode not in {"snapshot_no_file"}
-    if compact_packets_required_for_mode and not snapshot.get("compactPacketsAvailable"):
-        missing_compact_severity = "FAIL"
-        if snapshot.get("liveCoreDaemonActive") or mode == "plugin_snapshot_experimental":
-            missing_compact_severity = "WARN"
-        elif mode == "debug_audit" and snapshot.get("rawTickFilesAvailable"):
-            missing_compact_severity = "WARN"
-        add_issue(
-            report,
-            missing_compact_severity,
-            "compact_packets_missing",
-            "Compact packet files are not available.",
-            "Use --input-source compact-packets --require-compact-packets only after compact packets are being written.",
-        )
-    elif compact_packets_required_for_mode and not snapshot.get("compactPacketsRecent"):
+    if snapshot.get("legacyLivePacketFilesPresent"):
         add_issue(
             report,
             "WARN",
-            "compact_packets_stale",
-            f"Compact packet files look stale ({int(snapshot.get('compactPacketAgeSeconds') or 0)}s old).",
-            "Restart normal live mode or confirm RuneLite is writing compact packets.",
+            "legacy_live_packets_present",
+            f"Legacy live packet archives remain on disk ({snapshot.get('legacyLivePacketTotalMb')} MB).",
+            "Run maintenance.py --prune-legacy-live-packets --dry-run, then --apply only after review.",
         )
     write_failures = numeric(snapshot.get("writeFailures")) or 0
     if write_failures > 0:
@@ -429,8 +410,8 @@ def apply_common_rules(report: dict, snapshot: dict, mode: str) -> None:
 def apply_daily_rules(report: dict, snapshot: dict) -> None:
     input_source = snapshot.get("inputSourceActive")
     daemon_active = bool(snapshot.get("liveCoreDaemonActive"))
-    if input_source and input_source != "compact-packets" and not daemon_active:
-        add_issue(report, "WARN", "daily_input_source", f"Daily mode is using {input_source}.", "Use --input-source compact-packets --require-compact-packets for daily mode.")
+    if input_source and input_source != "plugin-snapshot":
+        add_issue(report, "WARN", "daily_input_source", f"Daily mode is using {input_source}.", "Use --daily-mode snapshot-no-files --input-source plugin-snapshot for daily mode.")
     if daemon_active and snapshot.get("liveCoreWriteDebugLiveFiles") is True:
         add_issue(report, "WARN", "daily_daemon_debug_writes", "Streamlined live daemon is writing debug live files.", "Run live_core_daemon without --write-debug-live-files for daily mode.")
     recording_mode = snapshot.get("recordingMode")
@@ -447,9 +428,7 @@ def apply_daily_rules(report: dict, snapshot: dict) -> None:
         if boolish(snapshot.get(key)) is True:
             add_issue(report, "WARN", f"daily_{key}", f"{label} is enabled.", f"Disable {label} for daily LIVE_COMPACT_ONLY mode.")
     if snapshot.get("compactStreamActive") or boolish(snapshot.get("compactStreamEnabled")) is True:
-        add_issue(report, "WARN", "daily_compact_stream", "Compact stream is enabled or active in daily mode.", "Disable compact stream for daily mode.")
-    if snapshot.get("pluginSnapshotInputActive") and not daemon_active:
-        add_issue(report, "WARN", "daily_plugin_snapshot_input", "Plugin-snapshot is active in daily mode.", "Use compact-packets for daily mode; keep plugin-snapshot experimental.")
+        add_issue(report, "WARN", "daily_compact_stream", "Compact stream is enabled or active in daily mode.", "Disable compact stream; live packet stream runtime is retired.")
     window_ticks = snapshot.get("windowTicks")
     if isinstance(window_ticks, int) and window_ticks > 20:
         add_issue(report, "WARN", "daily_window_ticks", f"windowTicks is {window_ticks}.", "Use --window-ticks 10.")
@@ -466,13 +445,13 @@ def apply_daily_rules(report: dict, snapshot: dict) -> None:
     if overlay_mode and overlay_mode != "intent":
         add_issue(report, "WARN", "daily_overlay_mode", f"Overlay mode is {overlay_mode}.", "Use --overlay-mode intent for daily mode; keep candidates/debug for visual QA.")
     if snapshot.get("budgetExceeded") is True:
-        add_issue(report, "WARN", "daily_budget_exceeded", "Live processor budget is exceeded.", "Use daily preset settings and compact-packets, then inspect timing buckets.")
+        add_issue(report, "WARN", "daily_budget_exceeded", "Live processor budget is exceeded.", "Use daily snapshot no-file settings, then inspect timing buckets.")
 
 
 def apply_visual_qa_rules(report: dict, snapshot: dict) -> None:
     input_source = snapshot.get("inputSourceActive")
-    if input_source and input_source not in {"compact-packets", "auto"}:
-        add_issue(report, "WARN", "visual_qa_input_source", f"Visual QA is using {input_source}.", "Prefer --input-source compact-packets for visual QA.")
+    if input_source and input_source != "plugin-snapshot":
+        add_issue(report, "WARN", "visual_qa_input_source", f"Visual QA is using {input_source}.", "Prefer --input-source plugin-snapshot for live visual QA.")
     overlay_limit = snapshot.get("overlayTargetLimit")
     if isinstance(overlay_limit, int) and overlay_limit > 25:
         add_issue(report, "WARN", "visual_qa_overlay_limit", f"Overlay target limit is {overlay_limit}.", "Use an overlay target limit of 25 or lower for visual QA.")
@@ -485,7 +464,7 @@ def apply_debug_audit_rules(report: dict, snapshot: dict) -> None:
         add_issue(report, "WARN", "debug_audit_disk_growth", "Raw ticks or frames are enabled for debug audit.", "Watch disk usage and stop recording when the audit capture is complete.")
 
 
-def apply_plugin_snapshot_rules(report: dict, snapshot: dict, *, require_compact_fallback: bool = True) -> None:
+def apply_plugin_snapshot_rules(report: dict, snapshot: dict, *, require_compact_fallback: bool = False) -> None:
     health = snapshot.get("pluginSnapshotHealth") if isinstance(snapshot.get("pluginSnapshotHealth"), dict) else {}
     if health.get("status") != "PASS":
         add_issue(report, "FAIL", "plugin_snapshot_health", f"Plugin snapshot endpoint health is {health.get('status') or 'unavailable'}.", "Enable the plugin snapshot endpoint and verify GET http://127.0.0.1:8893/health.")
@@ -503,8 +482,8 @@ def apply_plugin_snapshot_rules(report: dict, snapshot: dict, *, require_compact
     active_ms = numeric(snapshot.get("pluginSnapshotTotalActiveMillis"))
     if active_ms is not None and active_ms > 100:
         add_issue(report, "WARN", "plugin_snapshot_active_ms", f"Plugin snapshot active time is {active_ms:.1f} ms.", "Inspect pluginSnapshotBottleneck and keep plugin-snapshot experimental until hot tier stays under 100 ms.")
-    if require_compact_fallback and not snapshot.get("compactPacketsAvailable"):
-        add_issue(report, "WARN", "plugin_snapshot_no_file_fallback", "Compact packet files are unavailable.", "Keep compact-packets available as the stable fallback while testing plugin-snapshot.")
+    if boolish(snapshot.get("livePacketWriterActive")) is True:
+        add_issue(report, "FAIL", "live_packet_writer_active", "Retired live packet writer appears active.", "Restart RuneLite with the updated plugin; runtime packet archives cannot be enabled.")
 
 
 def apply_snapshot_no_file_rules(report: dict, snapshot: dict) -> None:
@@ -530,7 +509,7 @@ def apply_snapshot_no_file_rules(report: dict, snapshot: dict) -> None:
             "FAIL",
             "snapshot_no_file_health",
             f"Plugin snapshot endpoint health is {health.get('status') or 'unavailable'}.",
-            "Enable the plugin snapshot endpoint or use Daily Stable Compact.",
+            "Enable the plugin snapshot endpoint; live packet archive fallback has been retired.",
         )
     if snapshot.get("inputSourceActive") and snapshot.get("inputSourceActive") != "plugin-snapshot":
         add_issue(
@@ -547,7 +526,7 @@ def apply_snapshot_no_file_rules(report: dict, snapshot: dict) -> None:
             "WARN",
             "snapshot_no_file_no_candidates",
             "Plugin snapshot daemon currently has no candidates.",
-            "Use Daily Stable Compact if snapshot no-file cannot build candidates in this area.",
+            "Inspect WorldModel/Knowledge Fabric queries if snapshot no-file cannot build candidates in this area.",
         )
     active_ms = numeric(snapshot.get("activeMs")) or numeric(snapshot.get("pluginSnapshotTotalActiveMillis"))
     if active_ms is not None and active_ms > 100:
@@ -556,31 +535,31 @@ def apply_snapshot_no_file_rules(report: dict, snapshot: dict) -> None:
             "WARN",
             "snapshot_no_file_active_ms",
             f"Snapshot no-file active time is {active_ms:.1f} ms.",
-            "Use Daily Stable Compact until snapshot no-file stays under budget.",
+            "Inspect plugin snapshot/WorldModel timing until snapshot no-file stays under budget.",
         )
     if boolish(snapshot.get("compactPacketFilesRequired")) is True:
         add_issue(
             report,
             "FAIL",
             "snapshot_no_file_compact_required",
-            "Compact packet files are still required in snapshot no-file mode.",
-            "Start live_core_daemon with --daily-mode snapshot-no-files.",
+            "Retired live packet archive files are still marked required in snapshot no-file mode.",
+            "Start live_core_daemon with --daily-mode snapshot-no-files --input-source plugin-snapshot.",
         )
     if boolish(snapshot.get("compactPacketFilesWriting")) is True:
         add_issue(
             report,
             "WARN",
             "snapshot_no_file_compact_packet_files",
-            "Compact NDJSON packet files appear to be enabled or growing in snapshot no-file mode.",
-            "Apply Daily Snapshot No-File Preset or set emitCompactLivePackets=false and compactLivePacketsRequiredForLive=false.",
+            "Retired live packet archive files appear to be enabled or growing in snapshot no-file mode.",
+            "Restart RuneLite/daemon with the updated code; the archive cannot be enabled.",
         )
     if boolish(snapshot.get("debugMirrorEnabled")) is True:
         add_issue(
             report,
             "WARN",
             "snapshot_no_file_debug_mirror",
-            "Compact packet debug mirror is enabled in snapshot no-file mode.",
-            "Disable the compact packet file mirror unless intentionally debugging.",
+            "Retired compact packet debug mirror is enabled in snapshot no-file mode.",
+            "Restart RuneLite/daemon with the updated code; live packet file mirrors are retired.",
         )
     apply_plugin_snapshot_rules(report, snapshot, require_compact_fallback=False)
 
@@ -603,7 +582,7 @@ def evaluate_live_config(
         plugin_snapshot_host=plugin_snapshot_host,
         plugin_snapshot_port=plugin_snapshot_port,
         check_context_service=check_context_service,
-        check_plugin_snapshot=mode in {"plugin_snapshot_experimental", "snapshot_no_file"},
+        check_plugin_snapshot=mode in {"daily", "plugin_snapshot_experimental", "snapshot_no_file", "visual_qa"},
         check_processes=check_processes,
         now=now,
     )
@@ -637,6 +616,11 @@ def evaluate_live_config(
                 "perceptionCaptureEnabled",
                 "compactPacketsAvailable",
                 "compactPacketsRecent",
+                "livePacketsRuntimeRemoved",
+                "livePacketWriterActive",
+                "legacyLivePacketFilesPresent",
+                "legacyLivePacketFileCount",
+                "legacyLivePacketTotalMb",
                 "compactStreamEnabled",
                 "compactStreamActive",
                 "pluginSnapshotInputActive",
@@ -652,13 +636,14 @@ def evaluate_live_config(
                 "latestTick",
             )
         },
-        "compactPackets": {
-            "available": snapshot.get("compactPacketsAvailable"),
-            "recent": snapshot.get("compactPacketsRecent"),
+        "legacyLivePackets": {
+            "runtimeRemoved": snapshot.get("livePacketsRuntimeRemoved"),
+            "writerActive": snapshot.get("livePacketWriterActive"),
+            "filesPresent": snapshot.get("legacyLivePacketFilesPresent"),
+            "fileCount": snapshot.get("legacyLivePacketFileCount"),
+            "totalMb": snapshot.get("legacyLivePacketTotalMb"),
             "ageSeconds": snapshot.get("compactPacketAgeSeconds"),
-            "latestSegment": snapshot.get("latestSegment"),
-            "latestTick": snapshot.get("compactPacketLatestTick"),
-            "latestSequence": snapshot.get("compactPacketLatestSequence"),
+            "latestLegacySegment": snapshot.get("latestSegment"),
         },
         "stream": {
             "enabled": snapshot.get("compactStreamEnabled"),
@@ -717,11 +702,11 @@ def print_human(report: dict, *, fix_suggestions: bool = False) -> None:
         f"crops={summary.get('cropCaptureEnabled')} "
         f"perception={summary.get('perceptionCaptureEnabled')}"
     )
+    legacy = report.get("legacyLivePackets") or {}
     print(
-        "compact packets: "
-        f"available={summary.get('compactPacketsAvailable')} recent={summary.get('compactPacketsRecent')} "
-        f"required={summary.get('compactPacketFilesRequired')} writing={summary.get('compactPacketFilesWriting')} "
-        f"segment={(report.get('compactPackets') or {}).get('latestSegment') or 'unknown'}"
+        "live packet archive: "
+        f"retired={summary.get('livePacketsRuntimeRemoved')} writerActive={summary.get('livePacketWriterActive')} "
+        f"legacyFiles={legacy.get('fileCount') or 0} legacyMb={legacy.get('totalMb') or 0}"
     )
     print(
         "processor: "

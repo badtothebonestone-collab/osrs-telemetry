@@ -203,19 +203,138 @@ class LiveReadinessTest(unittest.TestCase):
             report = live_readiness.build_readiness_report(daemon_status=status_for(session), sessions_dir=root)
 
             self.assertEqual(report["status"], "FAIL")
-            self.assertIn("debug_overlay_json_missing", [item["code"] for item in report["blockers"]])
+            self.assertIn("latest_live_session_missing", [item["code"] for item in report["blockers"]])
 
     def test_empty_highlighter_source_blocks_resource_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "sessions"
             session = root / "session"
+            marker = target()
+            marker["actionTargetSource"] = "overlay_marker"
             write_json(session / "manifest.json", {"sessionId": "session"})
             write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
 
-            report = live_readiness.build_readiness_report(daemon_status=status_for(session), sessions_dir=root)
+            report = live_readiness.build_readiness_report(daemon_status=status_for(session, marker), sessions_dir=root)
 
             self.assertEqual(report["status"], "FAIL")
             self.assertIn("highlighter_source_not_ready", [item["code"] for item in report["blockers"]])
+            self.assertEqual(report["overlayHealth"]["markerCountZeroStatus"], "unexpected_collecting_needs_target")
+            self.assertTrue(report["overlayHealth"]["overlayBlocksCurrentAction"])
+
+    def test_marker_count_zero_expected_after_goal_complete_does_not_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target()
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
+            status = status_for(session, marker)
+            status["brain"]["genericTaskState"] = {
+                "phase": "goal_complete",
+                "activeIntent": "none",
+                "activeIntentTarget": None,
+            }
+            status["brain"]["goalProgress"] = {
+                "goalCount": 5,
+                "displayedGoalProgress": 5,
+                "heldResourceCount": 13,
+            }
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertEqual(report["status"], "PASS")
+            self.assertTrue(report["readinessPassed"])
+            self.assertEqual(report["proposedAction"], "none")
+            self.assertFalse(report["actionNeed"]["actionReadinessNeeded"])
+            self.assertTrue(report["actionNeed"]["goalComplete"])
+            self.assertEqual(report["overlayHealth"]["markerCountZeroStatus"], "expected_goal_complete")
+            self.assertFalse(report["overlayHealth"]["overlayBlocksCurrentAction"])
+
+    def test_marker_count_zero_expected_while_waiting_for_result_does_not_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target()
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
+            status = status_for(session, marker)
+            status["brain"]["genericTaskState"] = {
+                "phase": "wait_for_result",
+                "activeIntent": "wait_for_result",
+                "activeIntentTarget": marker,
+            }
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertEqual(report["status"], "PASS")
+            self.assertTrue(report["readinessPassed"])
+            self.assertFalse(report["actionNeed"]["actionReadinessNeeded"])
+            self.assertTrue(report["actionNeed"]["waitingForResult"])
+            self.assertEqual(report["overlayHealth"]["markerCountZeroStatus"], "expected_waiting_for_result")
+            self.assertFalse(report["overlayHealth"]["overlayBlocksCurrentAction"])
+
+    def test_marker_count_zero_is_warning_only_with_live_candidate_safety_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target()
+            marker["targetLiveState"] = "live_assumed"
+            marker["directReachability"] = "reachable"
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
+            status = enable_plugin_snapshot(status_for(session, marker))
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertEqual(report["status"], "WARN")
+            self.assertTrue(report["readinessPassed"])
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertEqual(report["actionSafetyEvidence"]["proposalActionTargetSource"], "live_resource_candidate")
+            self.assertTrue(report["actionSafetyEvidence"]["canUseLiveTargetWithoutOverlayMarker"])
+            self.assertEqual(report["overlayHealth"]["markerCountZeroStatus"], "unexpected_collecting_needs_target")
+            self.assertTrue(report["overlayHealth"]["overlayWarningOnly"])
+            self.assertFalse(report["overlayHealth"]["overlayBlocksCurrentAction"])
+            self.assertIn("highlighter.markers", report["optionalCapabilities"])
+
+    def test_service_context_policy_is_not_immediate_service_need_with_free_slots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target()
+            marker["targetLiveState"] = "live_assumed"
+            marker["directReachability"] = "reachable"
+            marker["safeAimPoint"] = {"status": "PASS", "actionable": True, "canvasX": 100, "canvasY": 120}
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [marker]})
+            status = enable_plugin_snapshot(status_for(session, marker))
+            status["brain"]["serviceContext"] = {"serviceNeeded": True, "serviceRequired": True, "serviceReady": False}
+            status["serviceNeeded"] = True
+            status["inventoryFreeSlots"] = 2
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertEqual(report["status"], "PASS")
+            self.assertFalse(report["actionNeed"]["needsService"])
+            self.assertTrue(report["actionNeed"]["serviceContextRequired"])
+            self.assertTrue(report["actionNeed"]["needsNextTarget"])
+
+    def test_overlay_marker_source_is_required_when_target_source_is_overlay_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target()
+            marker["markerType"] = "selected_target"
+            marker["source"] = "brain"
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
+            status = enable_plugin_snapshot(status_for(session, marker))
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertEqual(report["status"], "FAIL")
+            self.assertEqual(report["actionSafetyEvidence"]["proposalActionTargetSource"], "overlay_marker")
+            self.assertTrue(report["overlayHealth"]["overlaySourceRequiredForCurrentAction"])
+            self.assertTrue(report["overlayHealth"]["overlayBlocksCurrentAction"])
 
     def test_plugin_snapshot_request_failure_blocks_readiness(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -281,12 +400,14 @@ class LiveReadinessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "sessions"
             session = root / "session"
+            selected = target(key="selected")
+            selected["actionTargetSource"] = "overlay_marker"
             other = target(key="other")
             other["worldX"] = 3300
             write_json(session / "manifest.json", {"sessionId": "session"})
             write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [other]})
 
-            report = live_readiness.build_readiness_report(daemon_status=status_for(session, target(key="selected")), sessions_dir=root)
+            report = live_readiness.build_readiness_report(daemon_status=status_for(session, selected), sessions_dir=root)
 
             self.assertEqual(report["status"], "FAIL")
             self.assertIn("selected_target_not_in_highlighter_source", [item["code"] for item in report["blockers"]])
@@ -310,6 +431,8 @@ class LiveReadinessTest(unittest.TestCase):
                 "aimPoint": {"canvasX": 330, "canvasY": 90},
             }
             tree = target(key="tree-after-return", tick=10)
+            tree["worldX"] = 3196
+            tree["worldY"] = 3248
             write_json(session / "manifest.json", {"sessionId": "session"})
             write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [return_marker]})
             status = status_for(session, return_marker)
@@ -341,12 +464,15 @@ class LiveReadinessTest(unittest.TestCase):
             self.assertEqual(report["actionReadiness"]["status"], "PASS")
             self.assertTrue(report["actionReadiness"]["executionAllowed"])
             self.assertEqual(report["selectedTarget"]["name"], "Tree")
+            self.assertTrue(report["selectedTargetChecks"]["inHighlighterSource"])
+            self.assertFalse(any("selected daemon target is not present in highlighter" in warning for warning in report["warnings"]))
 
     def test_navigation_intent_does_not_require_resource_target_in_highlighter_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "sessions"
             session = root / "session"
             selected = target(key="selected")
+            selected["actionTargetSource"] = "overlay_marker"
             other = target(key="other")
             other["worldX"] = 3300
             write_json(session / "manifest.json", {"sessionId": "session"})
@@ -364,7 +490,121 @@ class LiveReadinessTest(unittest.TestCase):
             self.assertTrue(report["actionReadiness"]["executionAllowed"])
             self.assertNotIn("selected_target_not_in_highlighter_source", [item["code"] for item in report["actionReadiness"]["blockers"]])
             self.assertIn("target.highlighterMatch", report["actionReadiness"]["checksSkippedAsNotApplicable"])
-            self.assertIn("selected daemon target is not present in highlighter marker source", report["contextReadiness"]["warnings"])
+            self.assertFalse(report["selectedResourceTargetFreshnessApplicable"])
+            self.assertTrue(any("selected daemon target is not present in highlighter marker source" in warning for warning in report["nonApplicableContextWarnings"]))
+            self.assertFalse(any("selected daemon target is not present in highlighter marker source" in warning for warning in report["applicableWarnings"]))
+
+    def test_navigation_intent_marks_stale_resource_target_as_non_applicable_context_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            selected = target(key="selected")
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [selected]})
+            status = navigation_status_for(session, resource_marker=selected, latest_tick=20)
+            status["brain"]["freshnessDomains"] = {"targetCandidateFreshness": "stale"}
+
+            report = live_readiness.build_readiness_report(
+                daemon_status=status,
+                sessions_dir=root,
+            )
+
+            self.assertEqual(report["currentIntent"], "navigation_waypoint_action")
+            self.assertEqual(report["actionReadiness"]["status"], "PASS")
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertFalse(report["selectedResourceTargetFreshnessApplicable"])
+            self.assertEqual(report["selectedResourceTargetFreshnessStatus"], "stale")
+            self.assertIn("target.candidateFreshness", report["actionReadiness"]["checksSkippedAsNotApplicable"])
+            self.assertTrue(any("not applicable while current intent is navigation_waypoint_action" in warning for warning in report["nonApplicableContextWarnings"]))
+
+    def test_resource_intent_treats_stale_resource_target_as_applicable_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target(tick=10)
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [marker]})
+            status = status_for(session, marker, latest_tick=20)
+            status["brain"]["freshnessDomains"] = {"targetCandidateFreshness": "stale"}
+
+            report = live_readiness.build_readiness_report(
+                daemon_status=status,
+                sessions_dir=root,
+                proposed_action="select_resource_target",
+            )
+
+            self.assertEqual(report["currentIntent"], "resource_object_action")
+            self.assertTrue(report["selectedResourceTargetFreshnessApplicable"])
+            self.assertEqual(report["selectedResourceTargetFreshnessStatus"], "stale")
+            self.assertEqual(report["actionReadiness"]["status"], "FAIL")
+            self.assertFalse(report["actionReadiness"]["executionAllowed"])
+            self.assertIn("candidate_data_stale", [item["code"] for item in report["blockers"]])
+
+    def test_stale_latest_file_session_is_reported_separately_from_fresh_daemon_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            daemon_session = root / "daemon"
+            newer_session = root / "newer"
+            selected = target(key="selected")
+            write_json(daemon_session / "manifest.json", {"sessionId": "daemon"})
+            write_json(newer_session / "manifest.json", {"sessionId": "newer"})
+            write_json(daemon_session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [selected]})
+            os.utime(newer_session / "manifest.json", (time_value := 4102444800, time_value))
+
+            report = live_readiness.build_readiness_report(
+                daemon_status=navigation_status_for(daemon_session, resource_marker=selected),
+                sessions_dir=root,
+            )
+
+            self.assertTrue(report["staleFileSessionContext"])
+            self.assertTrue(report["daemonSessionFresh"])
+            self.assertTrue(any("latest file session differs" in warning for warning in report["nonApplicableContextWarnings"]))
+            self.assertNotIn("daemon_latest_session_mismatch", [item["code"] for item in report["blockers"]])
+
+    def test_static_route_prior_blocks_navigation_execution_until_live_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            status = status_for(session)
+            brain = status["brain"]
+            brain["genericTaskState"] = {
+                "phase": "return_to_resource",
+                "activeIntent": "return_to_resource_area",
+                "activeIntentTarget": {},
+                "blockingConditions": [],
+            }
+            brain["inventoryContext"] = {"inventoryFull": False, "freeSlots": 28}
+            brain["bankOperationContext"] = {"operationNeeded": False, "bankingComplete": True, "resourceItemsHeld": 0}
+            brain["resourceReturnContext"] = {
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "resourceTargetCurrentlyVisible": False,
+            }
+            brain["returnRouteContext"] = {
+                "schema": "return_route_context.v1",
+                "returnRouteId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                "state": "return_route_ready",
+                "currentNavigationTarget": {
+                    "targetName": "Lumbridge Castle west approach return",
+                    "classId": "resource_return",
+                    "targetType": "tile",
+                    "worldX": 3203,
+                    "worldY": 3238,
+                    "plane": 0,
+                    "source": "static_route_prior",
+                },
+            }
+            brain["pathingContext"] = {}
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertEqual(report["currentIntent"], "navigation_waypoint_action")
+            self.assertEqual(report["actionReadiness"]["status"], "FAIL")
+            self.assertFalse(report["actionReadiness"]["executionAllowed"])
+            self.assertIn("static_target_not_executable", [item["code"] for item in report["blockers"]])
+            self.assertEqual(report["actionReadiness"]["checks"]["proposalActionTargetSource"], "static_route_prior")
+            self.assertEqual(report["actionReadiness"]["checks"]["proposalActionability"], "advisory_only")
 
     def test_navigation_intent_requires_fresh_client_tick_hot_when_plugin_snapshot_is_active(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -497,7 +737,7 @@ class LiveReadinessTest(unittest.TestCase):
             self.assertFalse(report["clientTickHot"]["isLoggedIn"])
             self.assertEqual(report["capabilities"]["clientTickHot"]["staleReason"], "login_screen")
 
-    def test_selected_target_without_safe_aimpoint_blocks_readiness(self):
+    def test_selected_target_without_safe_aimpoint_requires_resource_view_recovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "sessions"
             session = root / "session"
@@ -511,12 +751,14 @@ class LiveReadinessTest(unittest.TestCase):
 
             report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
 
-            self.assertEqual(report["status"], "FAIL")
-            blockers = [item["code"] for item in report["blockers"]]
-            self.assertIn("selected_target_not_actionable", blockers)
-            self.assertIn("safe_aimpoint", report["missingCapabilities"])
+            self.assertEqual(report["status"], "WARN")
+            self.assertEqual(report["proposedAction"], "resource_view_recovery")
+            self.assertEqual(report["currentIntent"], "resource_view_recovery_action")
+            self.assertEqual(report["actionReadiness"]["status"], "PASS")
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertIn("target.safeAimPoint", report["actionReadiness"]["checksSkippedAsNotApplicable"])
             self.assertFalse(report["selectedTargetChecks"]["actionable"])
-            self.assertFalse(report["actionExecution"]["allowed"])
+            self.assertTrue(report["actionExecution"]["allowed"])
 
     def test_resource_projection_recovery_allows_non_click_action_when_safe_aimpoint_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -594,7 +836,7 @@ class ExecutorReadinessGateTest(unittest.TestCase):
             self.assertEqual(result.status, "FAIL")
             self.assertFalse(result.executed)
             self.assertEqual(backend.calls, [])
-            self.assertIn("overlay_debug_state.json", result.missing_capabilities)
+            self.assertIn("session.liveOutputs", result.missing_capabilities)
 
     def test_wait_for_ready_waits_then_executes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -668,7 +910,7 @@ class ExecutorReadinessGateTest(unittest.TestCase):
             self.assertEqual(result.status, "FAIL")
             self.assertFalse(result.executed)
             self.assertEqual(backend.calls, [])
-            self.assertIn("overlay_debug_state.json", result.missing_capabilities)
+            self.assertIn("session.liveOutputs", result.missing_capabilities)
 
 
 if __name__ == "__main__":

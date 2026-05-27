@@ -102,6 +102,20 @@ class SafeAimpointCoreTest(unittest.TestCase):
         self.assertGreaterEqual(len(result["sampledAimpoints"]), 8)
         self.assertIn({"x": 470, "y": 316}, result["sampledAimpoints"])
 
+    def test_geometry_summary_bounds_provide_sampled_aimpoints(self):
+        target = {
+            "aimPoint": {"x": 252, "y": 134, "source": "clickboxBounds"},
+            "geometrySummary": {
+                "bounds": {"x": 218, "y": 89, "w": 69, "h": 91},
+            },
+        }
+
+        result = safe_aimpoint_core.safe_aimpoint_for_target(target)
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertGreaterEqual(len(result["sampledAimpoints"]), 8)
+        self.assertIn({"x": 242, "y": 134}, result["sampledAimpoints"])
+
     def test_ui_blocked_region_is_rejected(self):
         target = {
             "aimPoint": {"canvasX": 100, "canvasY": 120, "source": "clickboxCenter"},
@@ -115,6 +129,32 @@ class SafeAimpointCoreTest(unittest.TestCase):
         self.assertEqual(result["rejectionReason"], "ui_blocked")
         self.assertTrue(result["validButUnsafe"])
         self.assertIn("uiBlocked", result["unsafeReasons"])
+
+    def test_world_model_viewport_clips_full_canvas_service_point(self):
+        target = {
+            "aimPoint": {"canvasX": 412, "canvasY": 350, "source": "clickboxCenter"},
+            "clickboxBounds": {"x": 388, "y": 330, "width": 48, "height": 40},
+        }
+
+        result = safe_aimpoint_core.safe_aimpoint_for_target(
+            target,
+            source_canvas_size={"width": 765, "height": 503},
+            viewport={
+                "viewportWidth": 512,
+                "viewportHeight": 334,
+                "viewportXOffset": 4,
+                "viewportYOffset": 4,
+                "canvasWidth": 765,
+                "canvasHeight": 503,
+            },
+            edge_margin_px=6,
+        )
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["source"], "clippedClickboxInterior")
+        self.assertFalse(result["rawCenterInsideViewport"])
+        self.assertLess(result["canvasY"], 338)
+        self.assertIn("centerOffViewport", result["unsafeReasons"])
 
 
 if __name__ == "__main__":

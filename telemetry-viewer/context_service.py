@@ -10,6 +10,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import live_context_query as query
+import external_knowledge
+import knowledge_fabric
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
 
@@ -25,6 +27,9 @@ WATCH_REQUEST_SCHEMA = "context_watch_request.v1"
 WATCH_RESPONSE_SCHEMA = "context_watch_response.v1"
 CAPABILITY_REGISTRY_PATH = Path(__file__).resolve().with_name("capability_registry.json")
 WATCH_LIBRARY_PATH = Path(__file__).resolve().with_name("watch_library.json")
+PIPELINE_MANIFEST_PATH = Path(__file__).resolve().with_name("pipeline_manifest.json")
+CONFIG_KEYS_PATH = Path(__file__).resolve().with_name("config_keys.json")
+PIPELINE_HEALTH_SCHEMA = "pipeline_health.v1"
 WATCH_REQUEST_DIR = "live_requests"
 WATCH_REQUEST_FILE = "watch_requests.json"
 WATCH_REQUEST_LIMIT = 32
@@ -60,6 +65,31 @@ SUPPORTED_NEEDS = [
     "capability:<id>",
     "aim_point",
     "task_summary",
+    "world_model",
+    "world_model_summary",
+    "resource_object_census",
+    "service_object_census",
+    "route_object_census",
+    "projection_audit",
+    "pathing_frontier",
+    "knowledge_fabric",
+    "knowledge_fabric_status",
+    "knowledge_current_debug_context",
+    "knowledge_current_blocker",
+    "knowledge_resource_candidates",
+    "knowledge_service_candidates",
+    "knowledge_route_objects",
+    "knowledge_path_frontier",
+    "knowledge_view_quality",
+    "knowledge_session_memory",
+    "knowledge_debug_evidence",
+    "knowledge_data_quality_report",
+    "knowledge_data_source_inventory",
+    "knowledge_query_coverage_matrix",
+    "knowledge_coverage_report",
+    "knowledge_task_probe",
+    "external_knowledge_status",
+    "knowledge_handoff_summary",
     "best:<classId>",
     "nearest:<classId>",
     "reachability:<classId>",
@@ -273,7 +303,7 @@ def runtime_capability_status(capability: dict, context: dict) -> str:
     navigation = context.get("navigation") or {}
     watch_values = context.get("watchValues") or {}
     if cap_id == "compact_packets.input":
-        return "available" if status_doc.get("inputSourceActive") == "compact-packets" or status_doc.get("compactPacketsAvailable") else "missing"
+        return "retired"
     if cap_id == "baseline.player_location":
         player = baseline.get("player") if isinstance(baseline.get("player"), dict) else {}
         return "available" if player.get("worldX") is not None or player.get("sceneX") is not None else "missing"
@@ -1053,6 +1083,91 @@ def build_context_response(
                 warnings.append(warning)
     if "diagnostics" in needs:
         response["diagnostics"] = diagnostics_payload(scoped_context, response_mode)
+    world_model_payloads = scoped_context.get("worldModelPayloads") if isinstance(scoped_context.get("worldModelPayloads"), dict) else {}
+    if "world_model" in needs:
+        response["worldModel"] = {
+            "summary": scoped_context.get("worldModelSummary") or world_model_payloads.get("world_model_summary") or {},
+            "resourceObjectCensus": scoped_context.get("worldModelResourceObjectCensus") or world_model_payloads.get("resource_object_census") or {},
+            "serviceObjectCensus": scoped_context.get("worldModelServiceObjectCensus") or world_model_payloads.get("service_object_census") or {},
+            "routeObjectCensus": scoped_context.get("worldModelRouteObjectCensus") or world_model_payloads.get("route_object_census") or {},
+            "projectionAudit": scoped_context.get("worldModelProjectionAudit") or world_model_payloads.get("projection_audit") or {},
+            "pathingFrontier": scoped_context.get("worldModelPathingFrontier") or world_model_payloads.get("pathing_frontier") or {},
+        }
+    if "world_model_summary" in needs:
+        response["worldModelSummary"] = scoped_context.get("worldModelSummary") or world_model_payloads.get("world_model_summary") or {}
+    if "resource_object_census" in needs:
+        response["resourceObjectCensus"] = scoped_context.get("worldModelResourceObjectCensus") or world_model_payloads.get("resource_object_census") or {}
+    if "service_object_census" in needs:
+        response["serviceObjectCensus"] = scoped_context.get("worldModelServiceObjectCensus") or world_model_payloads.get("service_object_census") or {}
+    if "route_object_census" in needs:
+        response["routeObjectCensus"] = scoped_context.get("worldModelRouteObjectCensus") or world_model_payloads.get("route_object_census") or {}
+    if "projection_audit" in needs:
+        response["projectionAudit"] = scoped_context.get("worldModelProjectionAudit") or world_model_payloads.get("projection_audit") or {}
+    if "pathing_frontier" in needs:
+        response["pathingFrontier"] = scoped_context.get("worldModelPathingFrontier") or world_model_payloads.get("pathing_frontier") or {}
+    knowledge_needs = {
+        "knowledge_fabric",
+        "knowledge_fabric_status",
+        "knowledge_current_debug_context",
+        "knowledge_current_blocker",
+        "knowledge_resource_candidates",
+        "knowledge_service_candidates",
+        "knowledge_route_objects",
+        "knowledge_path_frontier",
+        "knowledge_view_quality",
+        "knowledge_session_memory",
+        "knowledge_debug_evidence",
+        "knowledge_data_quality_report",
+        "knowledge_data_source_inventory",
+        "knowledge_query_coverage_matrix",
+        "knowledge_coverage_report",
+        "knowledge_task_probe",
+        "external_knowledge_status",
+        "knowledge_handoff_summary",
+    }
+    if any(need in needs for need in knowledge_needs):
+        fabric = knowledge_fabric.KnowledgeFabric.from_status(scoped_context)
+        if "knowledge_fabric" in needs:
+            response["knowledgeFabric"] = {
+                "status": fabric.status(),
+                "worldSummary": fabric.query_world_summary(),
+                "sessionMemory": fabric.session_memory,
+                "staticLibrary": fabric.static_library.get("summary", {}),
+            }
+        if "knowledge_fabric_status" in needs:
+            response["knowledgeFabricStatus"] = fabric.status()
+        if "knowledge_current_debug_context" in needs:
+            response["knowledgeCurrentDebugContext"] = fabric.query_current_debug_context(limit=max_candidates)
+        if "knowledge_current_blocker" in needs:
+            response["knowledgeCurrentBlocker"] = fabric.explain_current_blocker()
+        if "knowledge_resource_candidates" in needs:
+            response["knowledgeResourceCandidates"] = fabric.query_resource_candidates(limit=max_candidates)
+        if "knowledge_service_candidates" in needs:
+            response["knowledgeServiceCandidates"] = fabric.query_service_candidates(limit=max_candidates)
+        if "knowledge_route_objects" in needs:
+            response["knowledgeRouteObjects"] = fabric.query_route_objects(limit=max_candidates)
+        if "knowledge_path_frontier" in needs:
+            response["knowledgePathFrontier"] = fabric.query_path_frontier(limit=max_candidates)
+        if "knowledge_view_quality" in needs:
+            response["knowledgeViewQuality"] = fabric.query_view_quality(intent=str(scoped_context.get("currentIntent") or "unknown"))
+        if "knowledge_session_memory" in needs:
+            response["knowledgeSessionMemory"] = fabric.query_session_memory(limit=max_candidates)
+        if "knowledge_debug_evidence" in needs:
+            response["knowledgeDebugEvidence"] = fabric.query_debug_evidence(limit=max_candidates)
+        if "knowledge_data_quality_report" in needs:
+            response["knowledgeDataQualityReport"] = fabric.data_quality_report(limit=max_candidates)
+        if "knowledge_data_source_inventory" in needs:
+            response["knowledgeDataSourceInventory"] = fabric.data_source_inventory()
+        if "knowledge_query_coverage_matrix" in needs:
+            response["knowledgeQueryCoverageMatrix"] = fabric.query_coverage_matrix()
+        if "knowledge_coverage_report" in needs:
+            response["knowledgeCoverageReport"] = fabric.coverage_report(intent=str(scoped_context.get("currentIntent") or ""), limit=max_candidates)
+        if "knowledge_task_probe" in needs:
+            response["knowledgeTaskProbe"] = fabric.probe_task(str(request.get("taskDescription") or request.get("task") or "woodcutting"), limit=max_candidates)
+        if "external_knowledge_status" in needs:
+            response["externalKnowledgeStatus"] = external_knowledge.knowledge_status()
+        if "knowledge_handoff_summary" in needs:
+            response["knowledgeHandoffSummary"] = fabric.handoff_summary()
     if "frame" in needs:
         response["frame"] = frame_payload(scoped_context)
     if "candidates" in needs:
@@ -1258,7 +1373,7 @@ def build_context_response(
         response["missingCapabilities"] = sorted(set(response["missingCapabilities"] + ["realtimeLiveness"]))
     if status_doc.get("inputSourceActive") == "raw-ticks" and status_doc.get("inputSourceRequested") == "auto":
         response["warnings"] = sorted(
-            set(response["warnings"] + ["live processor is using raw tick fallback; compact packets are not active."])
+            set(response["warnings"] + ["live processor is using retired raw tick fallback; plugin-snapshot should be the live source."])
         )
     response["serviceTimingMillis"] = round((time.perf_counter() - started) * 1000.0, 3)
     return enforce_response_size(response, max_response_bytes, response_mode)
@@ -1569,6 +1684,271 @@ def oneshot(args) -> int:
     return 0 if response.get("status") != "FAIL" else 1
 
 
+def fabric_for_cli(args) -> knowledge_fabric.KnowledgeFabric:
+    if getattr(args, "context_json", None):
+        try:
+            payload = json.loads(Path(args.context_json).read_text(encoding="utf-8-sig"))
+        except Exception as error:  # noqa: BLE001
+            return knowledge_fabric.KnowledgeFabric.from_status(
+                {"schema": "context_json_load_error.v1", "status": "FAIL", "warnings": [f"{type(error).__name__}: {error}"]}
+            )
+        return knowledge_fabric.KnowledgeFabric.from_status(payload)
+    if args.session or args.latest_session:
+        state = ContextState(args)
+        context = state.load_context(force=True)
+        return knowledge_fabric.KnowledgeFabric.from_status(context)
+    return knowledge_fabric.fabric_from_live(
+        daemon_url=args.daemon_url,
+        snapshot_url=args.snapshot_url,
+        timeout=args.live_timeout,
+        include_projection=True,
+        include_collision=True,
+        max_objects=args.world_max_objects,
+    )
+
+
+def print_json_response(payload: dict[str, Any]) -> int:
+    print(json.dumps(payload, separators=(",", ":"), sort_keys=False, default=str))
+    return 0 if payload.get("status") != "FAIL" else 1
+
+
+def capture_script_authoring_context_cli(args) -> int:
+    fabric = fabric_for_cli(args)
+    payload = fabric.capture_script_authoring_context(
+        profile=args.profile,
+        task_name=args.task_name,
+        reason=args.reason,
+        limit=args.max_candidates,
+    )
+    return print_json_response(payload)
+
+
+def capture_replay_scenario_cli(args) -> int:
+    fabric = fabric_for_cli(args)
+    payload = fabric.capture_replay_scenario(
+        profile=args.profile,
+        reason=args.reason,
+        limit=args.max_candidates,
+    )
+    return print_json_response(payload)
+
+
+def replay_scenario_cli(args) -> int:
+    return print_json_response(knowledge_fabric.replay_scenario(args.replay_scenario, limit=args.max_candidates))
+
+
+def diff_debug_context_cli(args) -> int:
+    return print_json_response(knowledge_fabric.diff_debug_context(args.diff_debug_context[0], args.diff_debug_context[1]))
+
+
+def handoff_summary_cli(args) -> int:
+    return print_json_response(fabric_for_cli(args).handoff_summary())
+
+
+def data_quality_report_cli(args) -> int:
+    return print_json_response(fabric_for_cli(args).data_quality_report(limit=args.max_candidates))
+
+
+def data_source_inventory_cli(args) -> int:
+    return print_json_response(fabric_for_cli(args).data_source_inventory())
+
+
+def query_coverage_matrix_cli(args) -> int:
+    return print_json_response(fabric_for_cli(args).query_coverage_matrix())
+
+
+def coverage_report_cli(args) -> int:
+    return print_json_response(fabric_for_cli(args).coverage_report(limit=args.max_candidates))
+
+
+def probe_task_cli(args) -> int:
+    return print_json_response(
+        fabric_for_cli(args).probe_task(
+            args.probe_task,
+            profile=args.profile,
+            limit=args.max_candidates,
+            capture_bundle=bool(args.probe_task_capture),
+        )
+    )
+
+
+def external_knowledge_status_cli(args) -> int:
+    return print_json_response(external_knowledge.knowledge_status())
+
+
+def external_lookup_item_id_cli(args) -> int:
+    return print_json_response(external_knowledge.lookup_item_id(args.external_lookup_item_id))
+
+
+def external_search_item_cli(args) -> int:
+    return print_json_response(external_knowledge.search_item(args.external_search_item, limit=args.max_candidates))
+
+
+def external_lookup_object_cli(args) -> int:
+    return print_json_response(external_knowledge.lookup_object(args.external_lookup_object))
+
+
+def external_get_skill_requirement_cli(args) -> int:
+    return print_json_response(external_knowledge.get_skill_requirement(args.external_get_skill_requirement))
+
+
+def external_lookup_area_cli(args) -> int:
+    return print_json_response(external_knowledge.lookup_area(args.external_lookup_area))
+
+
+def external_search_wiki_cli(args) -> int:
+    return print_json_response(
+        external_knowledge.search_wiki(
+            args.external_search_wiki,
+            allow_refresh=bool(args.external_refresh),
+            limit=args.max_candidates,
+        )
+    )
+
+
+def external_refresh_item_map_cli(args) -> int:
+    return print_json_response(external_knowledge.refresh_item_map(limit=args.external_refresh_limit))
+
+
+def _snapshot_health_url(snapshot_url: str) -> str:
+    text = str(snapshot_url or "").strip() or "http://127.0.0.1:8893/snapshot"
+    if text.endswith("/snapshot"):
+        return text[: -len("/snapshot")] + "/health"
+    return text.rstrip("/") + "/health"
+
+
+def pipeline_health_payload(args) -> dict[str, Any]:
+    started = time.perf_counter()
+    manifest = safe_load_json(PIPELINE_MANIFEST_PATH, {"schema": "osrs_telemetry_pipeline_manifest.v1", "components": []})
+    config_keys = safe_load_json(CONFIG_KEYS_PATH, {"schema": "osrs_telemetry_config_keys.v1"})
+    components = [item for item in manifest.get("components") or [] if isinstance(item, dict)]
+    active_components = [item.get("id") for item in components if item.get("active") is True]
+    disabled_components = [item.get("id") for item in components if item.get("active") is False]
+    sessions_root = get_sessions_dir(getattr(args, "sessions_dir", None))
+
+    try:
+        import maintenance
+
+        legacy_report = maintenance.live_packets_report(sessions_root, top=10)
+    except Exception as error:  # noqa: BLE001
+        legacy_report = {
+            "schema": "legacy_live_packets_report_error.v1",
+            "status": "FAIL",
+            "error": f"{type(error).__name__}: {error}",
+            "legacyLivePacketFilesPresent": None,
+            "legacyLivePacketTotalMb": None,
+            "livePacketsRuntimeRemoved": True,
+            "ndjsonRuntimeRemoved": True,
+            "jsonlRuntimeRemoved": True,
+            "livePacketWriterActive": False,
+        }
+
+    daemon_health = knowledge_fabric.fetch_json(str(args.daemon_url).rstrip("/") + "/health", timeout=getattr(args, "live_timeout", 1.0))
+    daemon_status = knowledge_fabric.fetch_json(str(args.daemon_url).rstrip("/") + "/status", timeout=getattr(args, "live_timeout", 1.0))
+    snapshot_health = knowledge_fabric.fetch_json(_snapshot_health_url(str(args.snapshot_url)), timeout=getattr(args, "live_timeout", 1.0))
+    recommendations: list[str] = []
+    if legacy_report.get("legacyLivePacketFilesPresent"):
+        recommendations.append("Run maintenance.py --prune-legacy-live-packets --dry-run, then --apply only if you approve deletion.")
+    if daemon_health.get("status") == "FAIL":
+        recommendations.append("Start or rebind live_core_daemon.py on 8890 before live validation.")
+    if snapshot_health.get("status") == "FAIL":
+        recommendations.append("Enable/recover the RuneLite plugin snapshot endpoint on 8893 before live validation.")
+    if not recommendations:
+        recommendations.append("No immediate cleanup step is required.")
+
+    payload = {
+        "schema": PIPELINE_HEALTH_SCHEMA,
+        "status": "WARN" if daemon_health.get("status") == "FAIL" or snapshot_health.get("status") == "FAIL" or legacy_report.get("legacyLivePacketFilesPresent") else "PASS",
+        "activeComponents": active_components,
+        "disabledRemovedComponents": disabled_components,
+        "componentCount": len(components),
+        "manifestPath": str(PIPELINE_MANIFEST_PATH),
+        "configKeyRegistryPath": str(CONFIG_KEYS_PATH),
+        "configUi": {
+            "configGroup": config_keys.get("configGroup"),
+            "activeExposedKeys": config_keys.get("activeExposedKeys") or [],
+            "developerHiddenKeys": config_keys.get("developerHiddenKeys") or [],
+            "retiredKeys": config_keys.get("retiredKeys") or [],
+            "migration": config_keys.get("migration") or {},
+        },
+        "staleConfigKeys": config_keys.get("retiredKeys") or [],
+        "unknownFilesOrModules": [
+            "Historical offline JSONL tooling remains for review; it is not the retired live_packets runtime archive.",
+        ],
+        "legacyLivePackets": legacy_report,
+        "livePacketsRuntimeRemoved": True,
+        "ndjsonRuntimeRemoved": True,
+        "jsonlRuntimeRemoved": True,
+        "livePacketWriterActive": False,
+        "directQueryStatus": {
+            "daemonHealth": daemon_health,
+            "daemonStatusSummary": {
+                "status": daemon_status.get("status"),
+                "schema": daemon_status.get("schema"),
+                "gameState": daemon_status.get("gameState") or (daemon_status.get("baseline") or {}).get("gameState"),
+                "latestTick": daemon_status.get("latestTick"),
+                "sessionPath": daemon_status.get("sessionPath"),
+            },
+            "snapshotHealth": snapshot_health,
+        },
+        "arduinoStatus": {
+            "status": "NOT_CHECKED",
+            "reason": "pipeline-health is read-only and does not open COM ports",
+        },
+        "recommendedCleanupSteps": recommendations,
+        "queryTimeMs": round((time.perf_counter() - started) * 1000.0, 3),
+        "capHit": False,
+        "truncated": False,
+        "objectCount": len(components),
+        "sourceAgeMs": 0,
+    }
+    payload["responseBytes"] = len(json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8"))
+    return payload
+
+
+def pipeline_health_cli(args) -> int:
+    return print_json_response(pipeline_health_payload(args))
+
+
+def query_oneshot(args) -> int:
+    state = ContextState(args)
+    context = state.load_context(force=True)
+    query_name = str(args.query or "").strip().lower().replace("_", "-")
+    needs_by_query = {
+        "current-debug-context": ["knowledge_current_debug_context"],
+        "current-blocker": ["knowledge_current_blocker"],
+        "explain-current-blocker": ["knowledge_current_blocker"],
+        "knowledge-fabric-status": ["knowledge_fabric_status"],
+        "data-quality-report": ["knowledge_data_quality_report"],
+        "data-source-inventory": ["knowledge_data_source_inventory"],
+        "query-coverage-matrix": ["knowledge_query_coverage_matrix"],
+        "coverage-report": ["knowledge_coverage_report"],
+        "external-knowledge-status": ["external_knowledge_status"],
+        "handoff-summary": ["knowledge_handoff_summary"],
+    }
+    if query_name == "pipeline-health":
+        return print_json_response(pipeline_health_payload(args))
+    needs = needs_by_query.get(query_name)
+    if needs is None:
+        print(json.dumps(error_payload(f"unsupported query: {args.query}"), separators=(",", ":")))
+        return 2
+    response = build_context_response(
+        context,
+        {
+            "schema": REQUEST_SCHEMA,
+            "needs": needs,
+            "maxCandidates": args.max_candidates,
+            "responseMode": "compact",
+        },
+        default_max_candidates=args.max_candidates,
+        max_response_bytes=args.max_response_bytes,
+        compact_include_source_files=args.compact_include_source_files,
+        compact_liveness_examples=args.compact_include_liveness_examples,
+    )
+    print(json.dumps(response, separators=(",", ":"), sort_keys=False))
+    return 0 if response.get("status") != "FAIL" else 1
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Read-only local context request/response sidecar for live telemetry files.")
     parser.add_argument("--session", help="Telemetry session directory.")
@@ -1584,6 +1964,37 @@ def parse_args():
     parser.add_argument("--auth-token", help="Require X-Context-Token header for requests.")
     parser.add_argument("--no-auth-token", action="store_true", help="Explicitly run without an auth token.")
     parser.add_argument("--oneshot-request", help="Process one context_request.v1 JSON string and exit.")
+    parser.add_argument("--query", help="Run a named compact query such as current-debug-context, current-blocker, or knowledge-fabric-status and exit.")
+    parser.add_argument("--capture-script-authoring-context", action="store_true", help="Capture script_authoring_context.v1 bundle and exit.")
+    parser.add_argument("--capture-replay-scenario", action="store_true", help="Capture replay_scenario.v1 bundle and exit.")
+    parser.add_argument("--replay-scenario", help="Replay a replay_scenario.v1 file offline and exit.")
+    parser.add_argument("--diff-debug-context", nargs=2, metavar=("BUNDLE_A", "BUNDLE_B"), help="Diff two debug context/replay/script-authoring bundles and exit.")
+    parser.add_argument("--handoff-summary", action="store_true", help="Print compact current handoff summary and exit.")
+    parser.add_argument("--data-quality-report", action="store_true", help="Print data_quality_report.v1 and exit.")
+    parser.add_argument("--data-source-inventory", action="store_true", help="Print data_source_inventory.v1 and exit.")
+    parser.add_argument("--query-coverage-matrix", action="store_true", help="Print query_coverage_matrix.v1 and exit.")
+    parser.add_argument("--coverage-report", action="store_true", help="Print coverage_report.v1 and exit.")
+    parser.add_argument("--pipeline-health", action="store_true", help="Print pipeline_health.v1 and exit.")
+    parser.add_argument("--probe-task", help="Run read-only task probe for a task description and exit.")
+    parser.add_argument("--probe-task-capture", action="store_true", help="Capture a script_authoring_context bundle during --probe-task.")
+    parser.add_argument("--external-knowledge-status", action="store_true", help="Print external_knowledge_status.v1 and exit.")
+    parser.add_argument("--external-lookup-item-id", help="Cache-first advisory external item-id lookup and exit.")
+    parser.add_argument("--external-search-item", help="Cache-first advisory external item name search and exit.")
+    parser.add_argument("--external-search-wiki", help="Cache-first OSRS Wiki search. Use --external-refresh to call the API explicitly.")
+    parser.add_argument("--external-lookup-object", help="Cache-first advisory external object lookup and exit.")
+    parser.add_argument("--external-get-skill-requirement", help="Cache-first advisory skill requirement lookup and exit.")
+    parser.add_argument("--external-lookup-area", help="Cache-first advisory area/location lookup and exit.")
+    parser.add_argument("--external-refresh", action="store_true", help="Allow explicit external API refresh for external lookup commands that support it.")
+    parser.add_argument("--external-refresh-item-map", action="store_true", help="Explicitly refresh OSRS Wiki price item mapping cache and exit.")
+    parser.add_argument("--external-refresh-limit", type=int, help="Optional item mapping refresh row limit for validation/tests.")
+    parser.add_argument("--profile", default="woodcutting", help="Profile for Knowledge Fabric bundle/query commands. Default: woodcutting.")
+    parser.add_argument("--task-name", help="Task name for script-authoring bundle commands.")
+    parser.add_argument("--reason", help="Reason label for captured bundle commands.")
+    parser.add_argument("--daemon-url", default="http://127.0.0.1:8890", help="Live daemon URL for live Knowledge Fabric CLI commands.")
+    parser.add_argument("--snapshot-url", default="http://127.0.0.1:8893/snapshot", help="Plugin snapshot URL for live Knowledge Fabric CLI commands.")
+    parser.add_argument("--context-json", help="Use a saved context/status JSON file for Knowledge Fabric CLI commands.")
+    parser.add_argument("--live-timeout", type=float, default=1.0, help="HTTP timeout for live Knowledge Fabric CLI commands.")
+    parser.add_argument("--world-max-objects", type=int, default=160, help="Max world objects requested by live Knowledge Fabric CLI commands.")
     parser.add_argument("--max-response-bytes", type=int, default=1_000_000, help="Compact response size guard. Default: 1000000.")
     parser.add_argument("--compact-include-source-files", action="store_true", help="Include full sourceFiles even for compact responses.")
     parser.add_argument("--compact-include-liveness-examples", type=int, default=0, help="Recently unavailable examples to include in compact liveness responses. Default: 0.")
@@ -1592,6 +2003,46 @@ def parse_args():
 
 def main() -> int:
     args = parse_args()
+    if args.capture_script_authoring_context:
+        return capture_script_authoring_context_cli(args)
+    if args.capture_replay_scenario:
+        return capture_replay_scenario_cli(args)
+    if args.replay_scenario:
+        return replay_scenario_cli(args)
+    if args.diff_debug_context:
+        return diff_debug_context_cli(args)
+    if args.handoff_summary:
+        return handoff_summary_cli(args)
+    if args.data_quality_report:
+        return data_quality_report_cli(args)
+    if args.data_source_inventory:
+        return data_source_inventory_cli(args)
+    if args.query_coverage_matrix:
+        return query_coverage_matrix_cli(args)
+    if args.coverage_report:
+        return coverage_report_cli(args)
+    if args.pipeline_health:
+        return pipeline_health_cli(args)
+    if args.probe_task:
+        return probe_task_cli(args)
+    if args.external_knowledge_status:
+        return external_knowledge_status_cli(args)
+    if args.external_lookup_item_id:
+        return external_lookup_item_id_cli(args)
+    if args.external_search_item:
+        return external_search_item_cli(args)
+    if args.external_search_wiki:
+        return external_search_wiki_cli(args)
+    if args.external_lookup_object:
+        return external_lookup_object_cli(args)
+    if args.external_get_skill_requirement:
+        return external_get_skill_requirement_cli(args)
+    if args.external_lookup_area:
+        return external_lookup_area_cli(args)
+    if args.external_refresh_item_map:
+        return external_refresh_item_map_cli(args)
+    if args.query:
+        return query_oneshot(args)
     if args.oneshot_request:
         return oneshot(args)
     return serve(args)

@@ -267,6 +267,16 @@ class LiveContextQueryTest(unittest.TestCase):
         best = query.best_candidate(candidates, "tree")
         self.assertEqual(best["qualityScore"], 99)
 
+    def test_best_tree_prefers_basic_tree_when_skill_level_unknown(self):
+        oak = candidate(10, "tree", 2, 100, name="Oak tree")
+        oak["id"] = 10820
+        tree = candidate(10, "tree", 12, 80, name="Tree")
+        tree["id"] = 1278
+
+        best = query.best_candidate([oak, tree], "tree")
+
+        self.assertEqual(best["name"], "Tree")
+
     def test_json_output_purity(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_live_session(Path(tmp))

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from candidate_core import woodcutting_resource_preference_key
 from telemetry_paths import find_newest_session, get_sessions_dir
 from live_context_format import format_context_human
 
@@ -324,7 +325,13 @@ def best_sort_key(candidate: dict) -> tuple:
     score = as_number(candidate.get("score")) or 0.0
     rank = as_number(candidate.get("rank"))
     distance = candidate_distance(candidate)
-    return (-quality, -score, rank if rank is not None else 999999, distance if distance is not None else 999999)
+    return (
+        *woodcutting_resource_preference_key(candidate),
+        -quality,
+        -score,
+        rank if rank is not None else 999999,
+        distance if distance is not None else 999999,
+    )
 
 
 def nearest_sort_key(candidate: dict) -> tuple:

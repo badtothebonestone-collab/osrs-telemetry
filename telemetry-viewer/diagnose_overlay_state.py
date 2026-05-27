@@ -557,7 +557,7 @@ def build_report(session: Path, args) -> dict:
         conclusions.append("overlay/candidate mismatch: some filtered candidates are not present in overlay target cap or key set")
     if overlay_targets and overlay_geometry.get("clickableHullAvailableCount", 0) <= 0:
         if not geometry_config.get("compactLiveIncludeClickableHull") and not geometry_config.get("compactLiveIncludeHeavyGeometry"):
-            conclusions.append("hull geometry is not being emitted by compact packets; enable compactLiveIncludeClickableHull or compactLiveIncludeHeavyGeometry")
+            conclusions.append("hull geometry is not present in the current plugin snapshot/world-model payload; request expanded geometry or inspect the projection audit")
         else:
             conclusions.append("hull geometry was requested, but overlay_debug_state has no clickbox polygons for inspected targets")
     if not filtered_candidates:

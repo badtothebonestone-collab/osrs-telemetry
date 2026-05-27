@@ -16,30 +16,30 @@ public class TelemetryPresetApplierTest
 	public void previewReturnsExpectedDailyDiffWithoutWriting()
 	{
 		FakeConfigStore store = new FakeConfigStore();
-		store.values.put("emitCompactLiveStream", "true");
+		store.values.put("enablePluginSnapshotEndpoint", "true");
 		TelemetryPresetApplier applier = new TelemetryPresetApplier(store);
 
 		Map<String, Object> response = applier.preview("DAILY_LIVE");
 
 		assertEquals("PASS", response.get("status"));
-		assertTrue(changeFor(response, "emitCompactLiveStream").contains("newValue=false"));
-		assertEquals("true", store.values.get("emitCompactLiveStream"));
+		assertTrue(changeFor(response, "enablePluginSnapshotEndpoint").contains("newValue=false"));
+		assertEquals("true", store.values.get("enablePluginSnapshotEndpoint"));
 	}
 
 	@Test
-	public void dailyPresetChangesCompactStreamOffAndCompactPacketsOn()
+	public void dailyPresetUsesLiveCacheWithoutPacketArchiveSettings()
 	{
 		FakeConfigStore store = new FakeConfigStore();
 		TelemetryPresetApplier applier = new TelemetryPresetApplier(store);
 
 		applier.apply("DAILY_LIVE");
 
-		assertEquals("LIVE_COMPACT_ONLY", store.values.get("telemetryRecordingMode"));
-		assertEquals("true", store.values.get("emitCompactLivePackets"));
-		assertEquals("false", store.values.get("emitCompactLiveStream"));
-		assertEquals("false", store.values.get("debugRecordRawTicks"));
-		assertEquals("false", store.values.get("debugRecordRawEvents"));
-		assertEquals("false", store.values.get("debugRecordFrames"));
+		assertFalse(store.values.containsKey("telemetryRecordingMode"));
+		assertFalse(store.values.containsKey("emitCompactLivePackets"));
+		assertFalse(store.values.containsKey("emitCompactLiveStream"));
+		assertFalse(store.values.containsKey("debugRecordRawTicks"));
+		assertFalse(store.values.containsKey("debugRecordRawEvents"));
+		assertFalse(store.values.containsKey("debugRecordFrames"));
 		assertEquals("32", store.values.get("telemetryDebugOverlayMaxTargets"));
 	}
 
@@ -51,68 +51,63 @@ public class TelemetryPresetApplierTest
 
 		applier.apply("VISUAL_QA");
 
-		assertEquals("LIVE_COMPACT_ONLY", store.values.get("telemetryRecordingMode"));
+		assertFalse(store.values.containsKey("telemetryRecordingMode"));
 		assertEquals("true", store.values.get("telemetryDebugOverlayEnabled"));
 		assertEquals("32", store.values.get("telemetryDebugOverlayMaxTargets"));
 		assertEquals("CLICKABLE_HULL", store.values.get("telemetryDebugOverlayGeometryMode"));
 		assertEquals("true", store.values.get("compactLiveIncludeClickableHull"));
-		assertEquals("false", store.values.get("emitCompactLiveStream"));
+		assertFalse(store.values.containsKey("emitCompactLiveStream"));
 	}
 
 	@Test
-	public void debugAuditPresetEnablesDebugRecording()
+	public void debugAuditPresetIsRetired()
 	{
 		FakeConfigStore store = new FakeConfigStore();
 		TelemetryPresetApplier applier = new TelemetryPresetApplier(store);
 
-		applier.apply("DEBUG_AUDIT");
+		Map<String, Object> response = applier.apply("DEBUG_AUDIT");
 
-		assertEquals("DEBUG_RECORDING", store.values.get("telemetryRecordingMode"));
-		assertEquals("true", store.values.get("debugRecordRawTicks"));
-		assertEquals("true", store.values.get("debugRecordRawEvents"));
-		assertEquals("true", store.values.get("debugRecordFrames"));
-		assertEquals("true", store.values.get("captureScreenshots"));
+		assertEquals("FAIL", response.get("status"));
+		assertTrue(((List<?>) response.get("warnings")).contains("unknown preset"));
+		assertTrue(store.values.isEmpty());
 	}
 
 	@Test
-	public void pluginSnapshotPresetEnablesEndpointButNotStream()
+	public void pluginSnapshotExperimentalPresetIsRetired()
 	{
 		FakeConfigStore store = new FakeConfigStore();
 		TelemetryPresetApplier applier = new TelemetryPresetApplier(store);
 
-		applier.apply("PLUGIN_SNAPSHOT_EXPERIMENTAL");
+		Map<String, Object> response = applier.apply("PLUGIN_SNAPSHOT_EXPERIMENTAL");
 
-		assertEquals("LIVE_COMPACT_ONLY", store.values.get("telemetryRecordingMode"));
-		assertEquals("true", store.values.get("emitCompactLivePackets"));
-		assertEquals("false", store.values.get("emitCompactLiveStream"));
-		assertEquals("true", store.values.get("enablePluginSnapshotEndpoint"));
-		assertEquals("127.0.0.1", store.values.get("pluginSnapshotHost"));
-		assertEquals("8893", store.values.get("pluginSnapshotPort"));
+		assertEquals("FAIL", response.get("status"));
+		assertTrue(((List<?>) response.get("warnings")).contains("unknown preset"));
+		assertTrue(store.values.isEmpty());
 	}
 
 	@Test
-	public void dailySnapshotNoFilePresetEnablesEndpointAndDisablesCompactFileMirror()
+	public void dailySnapshotNoFilePresetEnablesEndpointAndAvoidsLivePacketArchive()
 	{
 		FakeConfigStore store = new FakeConfigStore();
 		TelemetryPresetApplier applier = new TelemetryPresetApplier(store);
 
 		applier.apply("DAILY_SNAPSHOT_NO_FILE");
 
-		assertEquals("LIVE_COMPACT_ONLY", store.values.get("telemetryRecordingMode"));
-		assertEquals("false", store.values.get("emitCompactLivePackets"));
-		assertEquals("false", store.values.get("compactLivePacketsRequiredForLive"));
-		assertEquals("false", store.values.get("emitCompactLiveStream"));
+		assertFalse(store.values.containsKey("telemetryRecordingMode"));
+		assertFalse(store.values.containsKey("emitCompactLivePackets"));
+		assertFalse(store.values.containsKey("compactLivePacketsRequiredForLive"));
+		assertFalse(store.values.containsKey("emitCompactLiveStream"));
 		assertEquals("true", store.values.get("emitCompactNavigationPackets"));
 		assertEquals("true", store.values.get("compactNavigationEmitCollisionWindow"));
 		assertEquals("all", store.values.get("compactLivePacketTypes"));
 		assertEquals("true", store.values.get("enablePluginSnapshotEndpoint"));
-		assertEquals("true", store.values.get("pluginSnapshotEnabledInNormalLive"));
+		assertFalse(store.values.containsKey("pluginSnapshotEnabledInNormalLive"));
 		assertEquals("127.0.0.1", store.values.get("pluginSnapshotHost"));
 		assertEquals("8893", store.values.get("pluginSnapshotPort"));
-		assertEquals("false", store.values.get("debugRecordRawTicks"));
-		assertEquals("false", store.values.get("debugRecordRawEvents"));
-		assertEquals("false", store.values.get("debugRecordFrames"));
-		assertEquals("false", store.values.get("captureScreenshots"));
+		assertFalse(store.values.containsKey("debugRecordRawTicks"));
+		assertFalse(store.values.containsKey("debugRecordRawEvents"));
+		assertFalse(store.values.containsKey("debugRecordFrames"));
+		assertFalse(store.values.containsKey("captureScreenshots"));
 		assertEquals("32", store.values.get("telemetryDebugOverlayMaxTargets"));
 	}
 

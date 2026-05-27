@@ -29,6 +29,15 @@ SERVICE_OBJECT_ACTIONS = {"open_service", "deposit_inventory", "deposit_resource
 ROUTE_TRANSITION_ACTIONS = {"interact_service_route_object"}
 INTERFACE_DIALOGUE_ACTIONS = {"interface_dialogue_choice"}
 CLIENT_TICK_HOT_MAX_AGE_MILLIS = 1000
+NO_ACTIVE_TARGET_PHASES = {
+    "goal_complete",
+    "none",
+    "observe",
+    "no_context",
+    "stale_context",
+    "needs_more_context",
+}
+WAITING_PHASES = {"wait_for_result", "waiting_for_result", "wait_for_resource_result"}
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -173,7 +182,7 @@ def _hot_recovery_action(stale_reason: str | None) -> str:
     if stale_reason == "plugin_endpoint_not_reachable":
         return "restore RuneLite PluginSnapshotEndpoint, then restart/rebind daemon"
     if stale_reason == "plugin_snapshot_no_packets":
-        return "wait for live packets after login or restart RuneLite/daemon"
+        return "wait for fresh plugin snapshot/client tick data after login or restart RuneLite/daemon"
     if stale_reason == "plugin_hot_state_not_advancing":
         return "refocus RuneLite or restart the plugin/daemon if client ticks do not advance"
     if stale_reason == "daemon_snapshot_not_refreshing":
@@ -251,6 +260,243 @@ def _client_tick_hot_state(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _first_dict(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict) and value:
+            return value
+    return {}
+
+
+def _nested_dict(root: dict[str, Any], *keys: str) -> dict[str, Any]:
+    current: Any = root
+    for key in keys:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else {}
+
+
+def _first_value(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _resource_count_from_status(status: dict[str, Any], brain: dict[str, Any]) -> int | None:
+    progress = _first_dict(brain.get("goalProgress"), status.get("goalProgress"))
+    value = _first_value(progress.get("heldResourceCount"), progress.get("currentHeldCount"), status.get("resourceCount"))
+    return _int_or_none(value)
+
+
+def _action_need_state(
+    status: dict[str, Any],
+    *,
+    action: str | None,
+    current_intent: str,
+    proposal_payload: dict[str, Any],
+) -> dict[str, Any]:
+    brain = _dict(status.get("brain"))
+    generic = _dict(brain.get("genericTaskState"))
+    inventory = _first_dict(brain.get("inventoryContext"), _nested_dict(brain, "currentContextSummary", "inventory"))
+    service = _dict(brain.get("serviceContext"))
+    bank_operation = _dict(brain.get("bankOperationContext"))
+    phase = _text(_first_value(generic.get("phase"), status.get("phase"), status.get("brainPhase"))).lower()
+    active_intent = _text(_first_value(generic.get("activeIntent"), status.get("activeIntent"))).lower()
+    cycle_stage = _first_value(
+        status.get("cycleStage"),
+        status.get("finalCycleStage"),
+        generic.get("cycleStage"),
+        brain.get("cycleStage"),
+    )
+    free_slots = _int_or_none(_first_value(inventory.get("freeSlots"), status.get("inventoryFreeSlots")))
+    inventory_full = _first_value(inventory.get("inventoryFull"), status.get("inventoryFull"))
+    service_context_required = bool(
+        service.get("serviceNeeded") is True
+        or service.get("serviceRequired") is True
+        or status.get("serviceNeeded") is True
+    )
+    needs_service = bool(
+        phase in {"needs_service", "route_to_service", "pathing_to_service", "inventory_full"}
+        or active_intent in {"needs_service", "route_to_service", "pathing_to_service", "inventory_full"}
+        or inventory_full is True
+        or free_slots == 0
+    )
+    waiting_for_result = bool(phase in WAITING_PHASES or active_intent in WAITING_PHASES)
+    progress = _first_dict(brain.get("goalProgress"), status.get("goalProgress"))
+    goal_count = _int_or_none(progress.get("goalCount"))
+    displayed_goal = _int_or_none(progress.get("displayedGoalProgress"))
+    goal_complete = bool(
+        phase == "goal_complete"
+        or active_intent == "goal_complete"
+        or progress.get("goalComplete") is True
+        or (goal_count is not None and displayed_goal is not None and goal_count >= 0 and displayed_goal >= goal_count)
+    )
+    active_target = _dict(generic.get("activeIntentTarget"))
+    no_active_target = bool(
+        not active_target
+        and (
+            goal_complete
+            or waiting_for_result
+            or phase in NO_ACTIVE_TARGET_PHASES
+            or active_intent in NO_ACTIVE_TARGET_PHASES
+            or action in {"none", "wait_for_context", "wait_for_resource_result"}
+        )
+    )
+    action_readiness_needed = bool(
+        action not in {"none", "wait_for_context", "wait_for_resource_result"}
+        and not goal_complete
+        and not waiting_for_result
+    )
+    needs_next_target = bool(
+        action_readiness_needed
+        and current_intent == "resource_object_action"
+        and not needs_service
+        and free_slots != 0
+    )
+    return {
+        "schema": "action_need.v1",
+        "currentIntent": current_intent,
+        "proposedAction": action,
+        "cycleStage": cycle_stage,
+        "phase": phase or None,
+        "activeIntent": active_intent or None,
+        "inventoryFreeSlots": free_slots,
+        "resourceCount": _resource_count_from_status(status, brain),
+        "needsNextTarget": needs_next_target,
+        "needsService": needs_service,
+        "serviceContextRequired": service_context_required,
+        "waitingForResult": waiting_for_result,
+        "goalComplete": goal_complete,
+        "noActiveTarget": no_active_target,
+        "actionReadinessNeeded": action_readiness_needed,
+        "proposalExecutable": bool(proposal_payload.get("executable")),
+        "bankingComplete": bank_operation.get("bankingComplete"),
+    }
+
+
+def _safe_aimpoint_status(*targets: dict[str, Any]) -> str | None:
+    for target in targets:
+        safe = _dict(target.get("safeAimPoint"))
+        if safe.get("status"):
+            return str(safe.get("status"))
+    return None
+
+
+def _action_safety_evidence(
+    *,
+    proposal: Any,
+    proposal_payload: dict[str, Any],
+    proposal_target: dict[str, Any],
+    selected_target: dict[str, Any],
+    matched_target: dict[str, Any],
+    client_tick_hot: dict[str, Any],
+    freshness: dict[str, Any],
+    proposal_action_target_source: str,
+    proposal_actionability: str,
+) -> dict[str, Any]:
+    safe_status = _safe_aimpoint_status(proposal_target, selected_target, matched_target)
+    source = proposal_action_target_source or ""
+    live_target_source = source in {
+        "live_resource_candidate",
+        "live_projected_waypoint",
+        "live_route_object",
+        "live_service_object",
+        "hover_discovered_object",
+    }
+    safe_aimpoint_ready = safe_status == "PASS" or bool(proposal_payload.get("suggestedClickPoint"))
+    return {
+        "schema": "action_safety_evidence.v1",
+        "proposalExecutable": bool(getattr(proposal, "executable", False)),
+        "proposalActionTargetSource": source or None,
+        "proposalActionability": proposal_actionability or None,
+        "selectedTargetFresh": freshness.get("stale") is not True,
+        "safeAimPointStatus": safe_status,
+        "safeAimPointReady": safe_aimpoint_ready,
+        "clientTickHotFresh": bool(client_tick_hot.get("fresh")),
+        "hoverConfirmationRequired": proposal_actionability == "needs_hover_confirmation",
+        "hoverConfirmationDeferredToExecutor": proposal_actionability == "needs_hover_confirmation",
+        "liveTargetSource": live_target_source,
+        "canUseLiveTargetWithoutOverlayMarker": bool(
+            getattr(proposal, "executable", False)
+            and live_target_source
+            and safe_aimpoint_ready
+            and freshness.get("stale") is not True
+        ),
+    }
+
+
+def _overlay_health_state(
+    *,
+    marker_count: int,
+    overlay_exists: bool,
+    overlay_age_seconds: Any,
+    resource_target_required: bool,
+    matched_target: dict[str, Any],
+    action_need: dict[str, Any],
+    action_safety_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    marker_source_required = bool(
+        resource_target_required
+        and action_need.get("actionReadinessNeeded") is True
+        and not action_safety_evidence.get("canUseLiveTargetWithoutOverlayMarker")
+    )
+    marker_count_expected = bool(resource_target_required and action_need.get("actionReadinessNeeded") is True)
+    if marker_count > 0:
+        zero_status = "markers_present"
+    elif action_need.get("goalComplete") is True:
+        zero_status = "expected_goal_complete"
+        marker_count_expected = False
+        marker_source_required = False
+    elif action_need.get("waitingForResult") is True:
+        zero_status = "expected_waiting_for_result"
+        marker_count_expected = False
+        marker_source_required = False
+    elif not action_need.get("actionReadinessNeeded") or not resource_target_required:
+        zero_status = "expected_no_active_target"
+        marker_count_expected = False
+        marker_source_required = False
+    elif not overlay_exists:
+        zero_status = "unexpected_source_stale"
+    else:
+        zero_status = "unexpected_collecting_needs_target"
+    overlay_blocks = bool(marker_count == 0 and marker_source_required)
+    if marker_count > 0 and resource_target_required and marker_source_required and not matched_target:
+        overlay_blocks = True
+    warning_only = bool((marker_count == 0 or (marker_count > 0 and not matched_target)) and not overlay_blocks)
+    recovery_attempted = bool(
+        marker_count == 0
+        and resource_target_required
+        and action_safety_evidence.get("canUseLiveTargetWithoutOverlayMarker")
+    )
+    recovery_result = "fallback_from_action_proposal" if recovery_attempted else "not_attempted"
+    return {
+        "schema": "overlay_health.v1",
+        "markerCount": marker_count,
+        "markerCountExpected": marker_count_expected,
+        "markerCountExpectedReason": (
+            "current action depends on overlay marker source"
+            if marker_source_required
+            else "lifecycle or live target safety evidence does not require overlay markers"
+        ),
+        "markerCountZeroStatus": zero_status,
+        "overlayBlocksCurrentAction": overlay_blocks,
+        "overlayWarningOnly": warning_only,
+        "overlaySourceRequiredForCurrentAction": marker_source_required,
+        "overlayExists": overlay_exists,
+        "overlayAgeSeconds": overlay_age_seconds,
+        "overlayRecoveryAttempted": recovery_attempted,
+        "overlayRecoveryResult": recovery_result,
+        "recoveredMarkerCount": 1 if recovery_attempted else 0,
+        "overlayFallbackSource": "action_proposal" if recovery_attempted else None,
+        "overlayNonBlockingReason": (
+            "fresh live target evidence with safe aim point is available; hover/menu confirmation remains required"
+            if recovery_attempted
+            else None
+        ),
+    }
+
+
 def _status_from_parts(*, blockers: list[Any] | None = None, warnings: list[Any] | None = None) -> str:
     if blockers:
         return "FAIL"
@@ -292,11 +538,22 @@ def _status_payload_unavailable(error: Exception) -> dict[str, Any]:
         "contextReadiness": {
             "status": "FAIL",
             "warnings": [],
+            "applicableWarnings": [],
+            "nonApplicableContextWarnings": [],
+            "checksSkippedAsNotApplicable": [],
             "checks": {"daemonStatus": False},
         },
         "freshness": {},
         "inputGeometry": {},
         "actionExecution": {"allowed": False, "refusalReason": "daemon_status_unavailable"},
+        "applicableWarnings": [],
+        "nonApplicableContextWarnings": [],
+        "checksSkippedAsNotApplicable": [],
+        "staleFileSessionContext": False,
+        "daemonSessionFresh": False,
+        "pluginSnapshotFresh": False,
+        "selectedResourceTargetFreshnessApplicable": False,
+        "selectedResourceTargetFreshnessStatus": None,
         "readinessPassed": False,
         "blockers": blockers,
         "warnings": [],
@@ -323,6 +580,7 @@ def build_readiness_report(
     top: int = 20,
 ) -> dict[str, Any]:
     warnings: list[str] = []
+    non_applicable_context_warnings: list[str] = []
     blockers: list[dict[str, Any]] = []
     action_warnings: list[str] = []
     missing: list[str] = []
@@ -397,7 +655,10 @@ def build_readiness_report(
     service_object_required = action in SERVICE_OBJECT_ACTIONS
     route_transition_required = action in ROUTE_TRANSITION_ACTIONS
     interface_dialogue_required = action in INTERFACE_DIALOGUE_ACTIONS
+    selected_resource_target_freshness_applicable = bool(resource_target_required or resource_recovery_required)
     proposal_target = _dict(proposal_payload.get("targetExplanation"))
+    proposal_action_target_source = str(proposal_payload.get("actionTargetSource") or proposal_target.get("actionTargetSource") or "")
+    proposal_actionability = str(proposal_payload.get("actionability") or proposal_target.get("actionability") or "")
     proposal_target_class = str(proposal_target.get("classId") or "").lower()
     proposal_resource_reacquired = (
         resource_target_required
@@ -454,6 +715,31 @@ def build_readiness_report(
         required_capabilities.extend(["dialogue_state", "dialogue.expectedOption", "service_route"])
 
     tick = _latest_tick(status)
+    stale_file_session_context = bool(
+        latest_session is not None
+        and daemon_session is not None
+        and not same_path(daemon_session, latest_session)
+        and latest_live_session is not None
+        and same_path(daemon_session, latest_live_session)
+    )
+    daemon_session_fresh = bool(
+        daemon_reachable
+        and bool(status)
+        and daemon_session is not None
+        and tick is not None
+        and (latest_live_session is None or same_path(daemon_session, latest_live_session))
+    )
+    plugin_snapshot_fresh = bool(
+        not snapshot_failures
+        and (
+            not plugin_snapshot_required
+            or (
+                input_source_active == "plugin-snapshot"
+                and status.get("pluginSnapshotAvailable") is not False
+                and tick is not None
+            )
+        )
+    )
     if daemon_session is None:
         blockers.append(_blocker("daemon_session_missing", "daemon /status does not include sessionPath", action="start/restart daemon after RuneLite is logged in"))
         missing.append("daemon.sessionPath")
@@ -492,7 +778,7 @@ def build_readiness_report(
             blockers.append(_blocker("latest_live_session_missing", "no session with live overlay/candidate outputs was found", action="start daemon with --write-overlay-state"))
             missing.append("session.liveOutputs")
         else:
-            warnings.append("no session with live overlay/candidate outputs was found")
+            non_applicable_context_warnings.append("no session with live overlay/candidate outputs was found")
     elif daemon_session is not None and not same_path(daemon_session, latest_live_session):
         blockers.append(
             _blocker(
@@ -505,7 +791,9 @@ def build_readiness_report(
 
     if latest_session is not None and daemon_session is not None and not same_path(daemon_session, latest_session):
         if latest_live_session is not None and same_path(daemon_session, latest_live_session):
-            warnings.append("newest session differs from daemon session, but newest live-output session matches daemon")
+            non_applicable_context_warnings.append(
+                "latest file session differs from daemon session; daemon/plugin live-output session is the current source of truth"
+            )
         else:
             blockers.append(
                 _blocker(
@@ -528,9 +816,35 @@ def build_readiness_report(
     selected_checks = _dict(candidate_report.get("selectedTargetChecks"))
     source_health = _dict(candidate_report.get("sourceHealth"))
     counts = _dict(candidate_report.get("counts"))
+    selected_safe_aimpoint = (
+        _dict(_dict(proposal_payload.get("targetExplanation")).get("safeAimPoint"))
+        or _dict(_dict(selected_target or {}).get("safeAimPoint"))
+        or _dict(_dict(matched_target or {}).get("safeAimPoint"))
+    )
+    action_need = _action_need_state(status, action=action, current_intent=current_intent, proposal_payload=proposal_payload)
+    action_safety_evidence = _action_safety_evidence(
+        proposal=proposal,
+        proposal_payload=proposal_payload,
+        proposal_target=proposal_target,
+        selected_target=selected_target,
+        matched_target=matched_target,
+        client_tick_hot=client_tick_hot,
+        freshness=_dict(candidate_report.get("freshness")),
+        proposal_action_target_source=proposal_action_target_source,
+        proposal_actionability=proposal_actionability,
+    )
+    overlay_health = _overlay_health_state(
+        marker_count=len(markers),
+        overlay_exists=overlay_exists,
+        overlay_age_seconds=_dict(candidate_report.get("freshness")).get("highlighterOverlayAgeSeconds"),
+        resource_target_required=resource_target_required,
+        matched_target=matched_target,
+        action_need=action_need,
+        action_safety_evidence=action_safety_evidence,
+    )
 
     if resource_target_required:
-        if not overlay_exists:
+        if not overlay_exists and overlay_health.get("overlayBlocksCurrentAction"):
             blockers.append(
                 _blocker(
                     "debug_overlay_json_missing",
@@ -539,7 +853,9 @@ def build_readiness_report(
                 )
             )
             missing.append("overlay_debug_state.json")
-        if not markers:
+        elif not overlay_exists:
+            action_warnings.append(f"debug overlay JSON missing but not required for current action: {path_text(overlay_path)}")
+        if not markers and overlay_health.get("overlayBlocksCurrentAction"):
             blockers.append(
                 _blocker(
                     "highlighter_source_not_ready",
@@ -548,10 +864,14 @@ def build_readiness_report(
                 )
             )
             missing.append("highlighter.markers")
+        elif not markers:
+            action_warnings.append(
+                f"overlay/highlighter marker count is 0; {overlay_health.get('markerCountZeroStatus')}"
+            )
         if not selected_target:
             blockers.append(_blocker("selected_target_missing", "daemon has no selected resource target", action="stand near valid Tree/Oak candidates and wait for target selection"))
             missing.append("target.selected")
-        elif markers and not matched_target:
+        elif markers and not matched_target and overlay_health.get("overlayBlocksCurrentAction"):
             blockers.append(
                 _blocker(
                     "selected_target_not_in_highlighter_source",
@@ -560,6 +880,10 @@ def build_readiness_report(
                 )
             )
             missing.append("target.highlighterMatch")
+        elif markers and not matched_target:
+            action_warnings.append(
+                "daemon selected target is not present in highlighter marker source; using live action safety evidence"
+            )
 
         on_screen = _target_check_value(selected_target, matched_target, "onScreen")
         geometry_available = _target_check_value(selected_target, matched_target, "geometryAvailable")
@@ -609,7 +933,47 @@ def build_readiness_report(
             warnings.extend(str(item) for item in proposal_payload.get("warnings") or [])
     elif navigation_target_required:
         checks_missing: list[str] = []
-        if not proposal.executable:
+        specific_target_blocker = False
+        if proposal_actionability == "stale":
+            blockers.append(
+                _blocker(
+                    "stale_target",
+                    "navigation target is stale and cannot be executed",
+                    action="refresh live route context and reacquire a projected waypoint",
+                    proposalReason=proposal_payload.get("reason"),
+                    actionTargetSource=proposal_action_target_source or None,
+                    actionability=proposal_actionability,
+                )
+            )
+            missing.append("target.freshness")
+            specific_target_blocker = True
+        elif proposal_actionability == "advisory_only" or proposal_action_target_source in {"static_route_prior", "route_context_goal"}:
+            blockers.append(
+                _blocker(
+                    "static_target_not_executable",
+                    "route target is an advisory/static prior, not a fresh executable waypoint",
+                    action="refresh route context and project a live local waypoint before clicking",
+                    proposalReason=proposal_payload.get("reason"),
+                    actionTargetSource=proposal_action_target_source or None,
+                    actionability=proposal_actionability or None,
+                )
+            )
+            missing.append("route.liveProjection")
+            specific_target_blocker = True
+        elif proposal_actionability == "blocked":
+            blockers.append(
+                _blocker(
+                    "action_target_blocked",
+                    "navigation target is currently blocked",
+                    action="wait or reacquire a different live waypoint",
+                    proposalReason=proposal_payload.get("reason"),
+                    actionTargetSource=proposal_action_target_source or None,
+                    actionability=proposal_actionability,
+                )
+            )
+            missing.append("route.waypoint")
+            specific_target_blocker = True
+        if not proposal.executable and not specific_target_blocker:
             checks_missing.append("route.waypoint")
         if not isinstance(proposal.target_tile, dict):
             checks_missing.append("route.waypoint")
@@ -662,7 +1026,7 @@ def build_readiness_report(
             missing.extend(str(item) for item in proposal_payload.get("missingCapabilities") or ["click_point"])
         if proposal_payload.get("status") == "WARN":
             action_warnings.extend(str(item) for item in proposal_payload.get("warnings") or [])
-    elif action not in {"none", "wait_for_context"} and not proposal.executable:
+    elif action not in {"none", "wait_for_context", "wait_for_resource_result"} and not proposal.executable:
         blockers.append(
             _blocker(
                 "action_proposal_not_executable",
@@ -684,8 +1048,13 @@ def build_readiness_report(
         )
         missing.append("target.freshness")
     elif freshness.get("stale"):
-        warnings.append(
-            "; ".join(str(reason) for reason in freshness.get("staleReasons") or []) or "resource candidate data is stale for non-resource intent"
+        selected_resource_target_freshness_status = str(freshness.get("targetCandidateFreshness") or "stale")
+        non_applicable_context_warnings.append(
+            (
+                "; ".join(str(reason) for reason in freshness.get("staleReasons") or [])
+                or f"selected resource target freshness is {selected_resource_target_freshness_status}"
+            )
+            + f"; not applicable while current intent is {current_intent}"
         )
 
     input_geometry = input_geometry_from_status(status)
@@ -701,9 +1070,26 @@ def build_readiness_report(
 
     candidate_warnings = [str(item) for item in candidate_report.get("warnings") or []]
     if candidate_warnings:
-        warnings.extend(candidate_warnings)
+        for warning in candidate_warnings:
+            lowered = warning.lower()
+            if "latest session differs from daemon action session" in lowered and stale_file_session_context:
+                non_applicable_context_warnings.append(
+                    "latest file session differs from daemon action session; file-based --latest-session tools may be stale"
+                )
+            elif "selected daemon target is not present in highlighter" in lowered and matched_target:
+                continue
+            elif (
+                not selected_resource_target_freshness_applicable
+                and (
+                    "selected daemon target is not present in highlighter" in lowered
+                    or "selected target is visible but not actionable" in lowered
+                    or "selected target is not actionable" in lowered
+                )
+            ):
+                non_applicable_context_warnings.append(f"{warning}; not applicable while current intent is {current_intent}")
+            else:
+                warnings.append(warning)
 
-    warnings_unique = list(dict.fromkeys(warnings))
     checks_skipped: list[str] = []
     if not resource_target_required:
         checks_skipped.extend(
@@ -714,14 +1100,20 @@ def build_readiness_report(
         )
         if not resource_recovery_required:
             checks_skipped.extend(["target.selected", "target.highlighterMatch"])
+        if not selected_resource_target_freshness_applicable:
+            checks_skipped.extend(["target.candidateFreshness", "target.actionability"])
     if current_intent != "navigation_waypoint_action":
         checks_skipped.extend(["route.waypoint", "navigation.intent"])
+    checks_skipped_unique = list(dict.fromkeys(checks_skipped))
     action_blockers = list(blockers)
     action_status = _status_from_parts(blockers=action_blockers, warnings=action_warnings)
-    action_execution_allowed = action_status != "FAIL"
-    context_status = _status_from_parts(warnings=warnings_unique)
-    status_value = "FAIL" if action_status == "FAIL" else "WARN" if warnings or action_warnings else "PASS"
-    ready = action_execution_allowed
+    action_execution_allowed = bool(action_status != "FAIL" and action_need.get("actionReadinessNeeded"))
+    applicable_warnings_unique = list(dict.fromkeys(warnings))
+    non_applicable_context_warnings_unique = list(dict.fromkeys(non_applicable_context_warnings))
+    all_context_warnings = list(dict.fromkeys([*applicable_warnings_unique, *non_applicable_context_warnings_unique]))
+    context_status = _status_from_parts(warnings=all_context_warnings)
+    status_value = "FAIL" if action_status == "FAIL" else "WARN" if all_context_warnings or action_warnings else "PASS"
+    ready = action_status != "FAIL"
     missing_unique = list(dict.fromkeys(missing))
     action_warnings_unique = list(dict.fromkeys(action_warnings))
     blockers_codes = [str(blocker.get("code") or "readiness_blocker") for blocker in blockers]
@@ -759,11 +1151,12 @@ def build_readiness_report(
     selected_summary = target_summary(selected_target, profile=profile, source_session=daemon_session, source_tick=tick, status=status) if selected_target else None
     selected_highlighter_summary = target_summary(matched_target, profile=profile, source_session=highlighter_session, source_tick=tick, status=status) if matched_target else None
     selected_actionable = bool(proposal.executable) if action in RESOURCE_TARGET_ACTIONS else None
-    selected_safe_aimpoint = (
-        _dict(_dict(proposal_payload.get("targetExplanation")).get("safeAimPoint"))
-        or _dict(_dict(selected_summary or {}).get("safeAimPoint"))
-        or _dict(_dict(selected_highlighter_summary or {}).get("safeAimPoint"))
-    )
+    if resource_target_required and not overlay_health.get("overlaySourceRequiredForCurrentAction"):
+        for capability in ("overlay_debug_state.json", "highlighter.markers", "target.highlighterMatch"):
+            if capability in required_capabilities:
+                required_capabilities.remove(capability)
+            if capability not in optional_capabilities:
+                optional_capabilities.append(capability)
     return {
         "schema": SCHEMA,
         "status": status_value,
@@ -796,6 +1189,9 @@ def build_readiness_report(
             "uiBlocked": _target_check_value(selected_target, matched_target, "uiBlocked") if selected_target or matched_target else None,
             "stale": freshness.get("stale"),
         },
+        "actionNeed": action_need,
+        "overlayHealth": overlay_health,
+        "actionSafetyEvidence": action_safety_evidence,
         "actionReadiness": {
             "status": action_status,
             "executionAllowed": action_execution_allowed,
@@ -808,6 +1204,8 @@ def build_readiness_report(
                 "latestTickKnown": tick is not None,
                 "pluginSnapshotRequired": plugin_snapshot_required,
                 "pluginSnapshotAvailable": False if snapshot_failures else status.get("pluginSnapshotAvailable"),
+                "daemonSessionFresh": daemon_session_fresh,
+                "pluginSnapshotFresh": plugin_snapshot_fresh,
                 "inputGeometryAvailable": bool(input_geometry.get("inputGeometryAvailable")),
                 "clientTickHotRequired": client_tick_hot_required,
                 "clientTickHotAvailable": client_tick_hot["available"] if client_tick_hot_required else None,
@@ -819,24 +1217,49 @@ def build_readiness_report(
                 "isLoggedIn": client_tick_hot.get("isLoggedIn"),
                 "resourceTargetRequired": resource_target_required,
                 "resourceProjectionRecoveryRequired": resource_recovery_required,
+                "selectedResourceTargetFreshnessApplicable": selected_resource_target_freshness_applicable,
+                "selectedResourceTargetFreshnessStatus": freshness.get("targetCandidateFreshness"),
                 "selectedTargetInHighlighterSource": bool(matched_target) if resource_target_required else None,
                 "navigationWaypointRequired": navigation_target_required,
                 "navigationWaypointAvailable": isinstance(proposal.target_tile, dict) if navigation_target_required else None,
                 "proposalExecutable": proposal.executable,
+                "proposalActionTargetSource": proposal_action_target_source or None,
+                "proposalActionability": proposal_actionability or None,
+                "staleProposalDetected": bool(proposal_payload.get("staleProposalDetected")),
+                "actionReadinessNeeded": action_need.get("actionReadinessNeeded"),
+                "overlayBlocksCurrentAction": overlay_health.get("overlayBlocksCurrentAction"),
             },
-            "checksSkippedAsNotApplicable": list(dict.fromkeys(checks_skipped)),
+            "checksSkippedAsNotApplicable": checks_skipped_unique,
             "missingCapabilities": missing_unique,
         },
         "contextReadiness": {
             "status": context_status,
-            "warnings": warnings_unique,
+            "warnings": all_context_warnings,
+            "applicableWarnings": applicable_warnings_unique,
+            "nonApplicableContextWarnings": non_applicable_context_warnings_unique,
+            "checksSkippedAsNotApplicable": checks_skipped_unique,
             "checks": {
                 "selectedResourceTargetPresent": bool(selected_target),
                 "selectedResourceTargetInHighlighterSource": bool(matched_target) if markers else False,
                 "highlighterMarkerCount": len(markers),
                 "candidateFreshness": freshness.get("targetCandidateFreshness"),
+                "selectedResourceTargetFreshnessApplicable": selected_resource_target_freshness_applicable,
+                "selectedResourceTargetFreshnessStatus": freshness.get("targetCandidateFreshness"),
+                "staleFileSessionContext": stale_file_session_context,
+                "daemonSessionFresh": daemon_session_fresh,
+                "pluginSnapshotFresh": plugin_snapshot_fresh,
+                "overlayHealth": overlay_health,
+                "actionNeed": action_need,
             },
         },
+        "applicableWarnings": applicable_warnings_unique,
+        "nonApplicableContextWarnings": non_applicable_context_warnings_unique,
+        "checksSkippedAsNotApplicable": checks_skipped_unique,
+        "staleFileSessionContext": stale_file_session_context,
+        "daemonSessionFresh": daemon_session_fresh,
+        "pluginSnapshotFresh": plugin_snapshot_fresh,
+        "selectedResourceTargetFreshnessApplicable": selected_resource_target_freshness_applicable,
+        "selectedResourceTargetFreshnessStatus": freshness.get("targetCandidateFreshness"),
         "freshness": freshness,
         "inputGeometry": input_geometry,
         "clientTickHot": client_tick_hot,
@@ -847,6 +1270,10 @@ def build_readiness_report(
             "proposalStatus": proposal_payload.get("status"),
             "proposalReason": proposal_payload.get("reason"),
             "proposalExecutable": proposal_payload.get("executable"),
+            "proposalActionTargetSource": proposal_action_target_source or None,
+            "proposalActionability": proposal_actionability or None,
+            "staleProposalDetected": bool(proposal_payload.get("staleProposalDetected")),
+            "staleProposalSource": proposal_payload.get("staleProposalSource"),
             "proposalMissingCapabilities": proposal_payload.get("missingCapabilities") or [],
         },
         "capabilities": {
@@ -864,10 +1291,11 @@ def build_readiness_report(
                 "reason": snapshot_failures[0] if snapshot_failures else None,
             },
             "overlayDebug": {
-                "required": resource_target_required,
+                "required": bool(overlay_health.get("overlaySourceRequiredForCurrentAction")),
                 "available": overlay_exists,
                 "path": path_text(overlay_path),
                 "markerCount": len(markers),
+                "health": overlay_health,
             },
             "inputGeometry": {
                 "required": True,
@@ -897,6 +1325,6 @@ def build_readiness_report(
         "optionalCapabilities": list(dict.fromkeys(optional_capabilities)),
         "readinessPassed": ready,
         "blockers": blockers,
-        "warnings": warnings_unique,
+        "warnings": all_context_warnings,
         "missingCapabilities": missing_unique,
     }

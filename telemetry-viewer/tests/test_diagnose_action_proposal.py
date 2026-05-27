@@ -22,7 +22,7 @@ class DiagnoseActionProposalTest(unittest.TestCase):
                     "genericTaskState": {
                         "phase": "target_selected",
                         "activeIntent": "select_target",
-                        "activeIntentTarget": {"targetName": "Oak tree", "classId": "tree", "aimPoint": {"canvasX": 100, "canvasY": 120}},
+                        "activeIntentTarget": {"targetName": "Tree", "classId": "tree", "id": 1278, "aimPoint": {"canvasX": 100, "canvasY": 120}},
                     },
                     "inventoryContext": {"inventoryFull": False, "freeSlots": 15},
                     "bankUiContext": {"bankOpen": False},
@@ -42,7 +42,7 @@ class DiagnoseActionProposalTest(unittest.TestCase):
         self.assertEqual(payload["suggestedClickPoint"], {"x": 100, "y": 120})
         self.assertEqual(payload["clickPointSpace"], "canvas")
         self.assertEqual(payload["resolvedScreenClickPoint"], {"x": 1200, "y": 2240})
-        self.assertEqual(payload["targetExplanation"]["name"], "Oak tree")
+        self.assertEqual(payload["targetExplanation"]["name"], "Tree")
 
     def test_human_output_prints_expected_fields(self):
         text = diagnostic.format_human(

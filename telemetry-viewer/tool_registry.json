@@ -1,13 +1,13 @@
 {
   "schema": "osrs_telemetry_tool_registry.v1",
   "generatedFor": "daily_live_stability_cleanup",
-  "dailyArchitecture": "RuneLite plugin -> Daily Stable Compact compact-packets OR experimental Daily Snapshot No-File PluginLiveCache/PluginSnapshotEndpoint -> live_core_daemon.py -> in-memory context -> optional brain intent overlay_debug_state.json",
+  "dailyArchitecture": "RuneLite plugin -> PluginSnapshotEndpoint/WorldModelCache -> live_core_daemon.py -> in-memory context -> Knowledge Fabric/debug bundles -> optional brain intent overlay_debug_state.json",
   "categories": {
     "daily": "Shown in the main Live Control Panel daily view.",
     "advanced_debug": "Diagnostics and inspection tools; useful, but not required for daily live.",
-    "legacy_file_pipeline": "Old rolling-file live stack retained for debugging and compatibility.",
+    "legacy_file_pipeline": "Old rolling-file live stack. Live packet archive input is retired; use only explicit bounded debug files.",
     "batch_audit": "Offline/debug recording, geometry, dataset, and audit tools.",
-    "experimental": "Plugin-snapshot and compact-stream testing; hidden from daily mode.",
+    "experimental": "Explicit diagnostics hidden from daily mode. Compact stream/live packet archives are retired.",
     "deprecated": "Compatibility or uncertain tools; do not show in daily UI."
   },
   "tools": [
@@ -25,11 +25,11 @@
     {
       "name": "live_core_daemon.py",
       "category": "daily",
-      "purpose": "Daily in-memory live daemon. Stable mode uses compact-packets; experimental snapshot no-file mode uses PluginSnapshotEndpoint. Context/brain endpoints are in memory, writes are off by default, overlay state is optional, and startup --preset is a mission-preset alias.",
+      "purpose": "Daily in-memory live daemon. Snapshot no-file mode uses PluginSnapshotEndpoint/WorldModelCache. Context/brain endpoints are in memory, live packet archives are retired, overlay state is optional, and startup --preset is a mission-preset alias.",
       "dailyRequired": true,
-      "normalCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --summary --benchmark",
-      "alternateCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --summary --benchmark",
-      "input": "compact packet files for stable mode; PluginSnapshotEndpoint for explicit experimental no-file mode",
+      "normalCommand": "python telemetry-viewer\\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --summary --benchmark",
+      "alternateCommand": "python telemetry-viewer\\context_service.py --query current-debug-context",
+      "input": "PluginSnapshotEndpoint and WorldModelCache; live packet archives are retired",
       "output": "localhost context/brain/status endpoints and optional capped brain intent overlay_debug_state.json",
       "status": "daily",
       "safeToHideInUi": false
@@ -75,8 +75,8 @@
       "category": "daily",
       "purpose": "Daily daemon sanity check for context health, progress invariants, duplicate processes, and required context domains.",
       "dailyRequired": false,
-      "normalCommand": "python telemetry-viewer\\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode compact-packets --strict --check-processes",
-      "alternateCommand": "python telemetry-viewer\\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes",
+      "normalCommand": "python telemetry-viewer\\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes",
+      "alternateCommand": "python telemetry-viewer\\context_service.py --query current-debug-context",
       "input": "live_core_daemon endpoints, latest session, optional process list",
       "output": "daily_live_gauntlet.v1 PASS/WARN/FAIL report",
       "status": "daily",
@@ -183,15 +183,15 @@
       "safeToHideInUi": true
     },
     {
-      "name": "live_packet_reader.py",
-      "category": "daily",
-      "purpose": "Compact packet reader shared by daily daemon and legacy file pipeline.",
-      "dailyRequired": true,
-      "normalCommand": "imported by live_core_daemon.py and live_target_processor.py",
-      "input": "live_packets\\live-*.ndjson",
-      "output": "versioned compact packet envelopes",
-      "status": "daily",
-      "safeToHideInUi": true
+      "name": "maintenance.py",
+      "category": "advanced_debug",
+      "purpose": "Reports and prunes retired legacy live_packets/live-*.ndjson files only when explicitly requested.",
+      "dailyRequired": false,
+      "normalCommand": "python telemetry-viewer\\maintenance.py --live-packets-report",
+      "input": "legacy files under .osrs-telemetry\\sessions\\*\\live_packets only",
+      "output": "legacy cleanup report or dry-run/apply prune report",
+      "status": "advanced_debug",
+      "safeToHideInUi": false
     },
     {
       "name": "telemetry_paths.py",
@@ -240,10 +240,10 @@
     {
       "name": "check_live_setup.py",
       "category": "advanced_debug",
-      "purpose": "Compact packet and recording-mode setup check.",
+      "purpose": "Plugin snapshot/world model setup check plus legacy live packet disk warning.",
       "dailyRequired": false,
-      "normalCommand": "python telemetry-viewer\\check_live_setup.py --latest-session --require-compact-packets",
-      "input": "latest session files and manifests",
+      "normalCommand": "python telemetry-viewer\\check_live_setup.py --latest-session",
+      "input": "latest session metadata and PluginSnapshotEndpoint",
       "output": "setup PASS/WARN/FAIL report",
       "status": "advanced_debug",
       "safeToHideInUi": true
@@ -251,12 +251,12 @@
     {
       "name": "inspect_live_packets.py",
       "category": "advanced_debug",
-      "purpose": "Summarizes compact live packet segments.",
+      "purpose": "Retired compatibility shim that points to current context/debug/maintenance commands.",
       "dailyRequired": false,
-      "normalCommand": "python telemetry-viewer\\inspect_live_packets.py --latest-session --summary",
-      "input": "live_packets folder",
-      "output": "packet counts, latest tick, and packet type summary",
-      "status": "advanced_debug",
+      "normalCommand": "python telemetry-viewer\\maintenance.py --live-packets-report",
+      "input": "none",
+      "output": "retired-tool JSON with replacement commands",
+      "status": "retired",
       "safeToHideInUi": true
     },
     {
@@ -454,10 +454,10 @@
     {
       "name": "live_target_processor.py",
       "category": "legacy_file_pipeline",
-      "purpose": "Legacy compact-packet processor that writes rolling live JSON files.",
+      "purpose": "Legacy rolling live-file processor. Live packet archive inputs are retired; use plugin-snapshot if invoked directly.",
       "dailyRequired": false,
-      "normalCommand": "python telemetry-viewer\\live_target_processor.py --latest-session --input-source compact-packets --require-compact-packets --profile woodcutting --follow",
-      "input": "compact packet files or explicit debug inputs",
+      "normalCommand": "python telemetry-viewer\\live_target_processor.py --latest-session --input-source plugin-snapshot --plugin-snapshot-tier hot --profile woodcutting --follow",
+      "input": "PluginSnapshotEndpoint or explicit bounded debug inputs",
       "output": "interaction_geometry\\live rolling live files",
       "status": "legacy",
       "safeToHideInUi": true
@@ -732,7 +732,7 @@
       "purpose": "Diagnoses EXPERIMENTAL plugin-snapshot transport/conversion parity.",
       "dailyRequired": false,
       "normalCommand": "python telemetry-viewer\\diagnose_plugin_snapshot.py --latest-session --profile woodcutting --tier-sweep",
-      "input": "plugin snapshot endpoint and compact packet reference data",
+      "input": "plugin snapshot endpoint and WorldModel/Knowledge Fabric reference data",
       "output": "plugin snapshot diagnostic/tier sweep report",
       "status": "experimental",
       "safeToHideInUi": true
@@ -750,13 +750,13 @@
     },
     {
       "name": "compact_stream_testing",
-      "category": "experimental",
-      "purpose": "EXPERIMENTAL compact-stream transport testing only; never daily default.",
+      "category": "deprecated",
+      "purpose": "Retired with the live packet archive; use PluginSnapshotEndpoint/Knowledge Fabric queries instead.",
       "dailyRequired": false,
-      "normalCommand": "python telemetry-viewer\\live_target_processor.py --latest-session --input-source compact-stream --profile woodcutting --follow",
-      "input": "compact TCP stream from plugin",
-      "output": "stream diagnostics and rolling live files when explicitly tested",
-      "status": "experimental",
+      "normalCommand": "python telemetry-viewer\\maintenance.py --live-packets-report",
+      "input": "none",
+      "output": "retired-tool JSON with replacement commands",
+      "status": "retired",
       "safeToHideInUi": true
     },
     {

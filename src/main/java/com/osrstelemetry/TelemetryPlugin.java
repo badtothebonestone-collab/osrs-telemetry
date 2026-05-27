@@ -186,6 +186,7 @@ public class TelemetryPlugin extends Plugin
 	private PluginLiveCache liveCache;
 	private PluginSnapshotEndpoint pluginSnapshotEndpoint;
 	private final ClientTickHotState clientTickHotState = new ClientTickHotState();
+	private final WorldModelCache worldModelCache = new WorldModelCache();
 	private volatile Map<String, Object> latestHoverMenu;
 	private volatile Map<String, Object> lastMenuOptionClicked;
 	private long tickId = 0;
@@ -229,9 +230,44 @@ public class TelemetryPlugin extends Plugin
 		return configManager.getConfig(TelemetryConfig.class);
 	}
 
+	private void cleanupRetiredConfigKeys()
+	{
+		if (configManager == null)
+		{
+			return;
+		}
+
+		String oldEndpointAlias = configManager.getConfiguration(
+				TelemetryConfigKeys.CONFIG_GROUP,
+				"pluginSnapshotEnabledInNormalLive");
+		String currentEndpoint = configManager.getConfiguration(
+				TelemetryConfigKeys.CONFIG_GROUP,
+				"enablePluginSnapshotEndpoint");
+		if (Boolean.parseBoolean(oldEndpointAlias) && !Boolean.parseBoolean(currentEndpoint))
+		{
+			configManager.setConfiguration(TelemetryConfigKeys.CONFIG_GROUP, "enablePluginSnapshotEndpoint", true);
+		}
+
+		int removed = 0;
+		for (String key : TelemetryConfigKeys.RETIRED_KEYS)
+		{
+			if (configManager.getConfiguration(TelemetryConfigKeys.CONFIG_GROUP, key) != null)
+			{
+				configManager.unsetConfiguration(TelemetryConfigKeys.CONFIG_GROUP, key);
+				removed++;
+			}
+		}
+
+		if (removed > 0)
+		{
+			log.info("Cleaned {} retired Telemetry Collector config keys", removed);
+		}
+	}
+
 	@Override
 	protected void startUp() throws Exception
 	{
+		cleanupRetiredConfigKeys();
 		TelemetryRecordingMode recordingMode = recordingMode();
 
 		knownItemIds.clear();
@@ -246,6 +282,7 @@ public class TelemetryPlugin extends Plugin
 		lastActivityPoseAnimation = Integer.MIN_VALUE;
 		lastActivityInteractingSignature = null;
 		liveCache = new PluginLiveCache(gson);
+		worldModelCache.clear("startup");
 
 		writer = new TelemetryWriter(
 				config.outputDirectory(),
@@ -269,19 +306,6 @@ public class TelemetryPlugin extends Plugin
 				config.maxFrameQueueSize(),
 				config.frameCaptureMode(),
 				config.allowScreenRectangleFallback(),
-				compactPacketFileMirrorEnabled(recordingMode),
-				config.compactLiveSegmentMb(),
-				config.compactLiveRetentionTicks(),
-				Math.max(0L, config.compactLiveRetentionMb()) * 1024L * 1024L,
-				config.compactLiveRetentionSegments(),
-				config.compactLiveQueueSize(),
-				config.emitCompactLiveStream(),
-				config.compactLiveStreamHost(),
-				config.compactLiveStreamPort(),
-				config.compactLiveStreamQueueSize(),
-				config.compactLiveStreamCircuitBreakerEnabled(),
-				config.compactLiveStreamMaxWriteMillis(),
-				config.compactLiveStreamDisableSeconds(),
 				liveCache);
 		writer.start();
 		startPluginSnapshotEndpoint(recordingMode);
@@ -298,19 +322,6 @@ public class TelemetryPlugin extends Plugin
 	{
 		TelemetryRecordingMode mode = config.telemetryRecordingMode();
 		return mode == null ? TelemetryRecordingMode.LIVE_COMPACT_ONLY : mode;
-	}
-
-	private boolean compactPacketFileMirrorEnabled(TelemetryRecordingMode mode)
-	{
-		if (!config.emitCompactLivePackets() && !(config.compactLivePacketsRequiredForLive()
-				&& (mode == TelemetryRecordingMode.LIVE_COMPACT_ONLY
-				|| mode == TelemetryRecordingMode.LIVE_COMPACT_WITH_FRAMES
-				|| mode == TelemetryRecordingMode.HYBRID_DEBUG)))
-		{
-			return false;
-		}
-
-		return !config.emitCompactLiveStream() || config.compactLiveStreamAlsoWriteFiles();
 	}
 
 	private boolean rawTickRecordingEnabled(TelemetryRecordingMode mode)
@@ -361,6 +372,7 @@ public class TelemetryPlugin extends Plugin
 		}
 		liveCache = null;
 		clearSceneIndex("shutdown");
+		worldModelCache.clear("shutdown");
 
 		log.info("Telemetry Collector stopped");
 	}
@@ -383,25 +395,22 @@ public class TelemetryPlugin extends Plugin
 				config.pluginSnapshotAllowNonLocalHost(),
 				new TelemetryPresetApplier(configManager),
 				clientTickHotState,
-				this::pluginSnapshotTileProjections);
+				this::pluginSnapshotTileProjections,
+				this::pluginSnapshotWorldModelQuery);
 		try
 		{
 			pluginSnapshotEndpoint.start();
 		}
 		catch (Exception e)
 		{
-			log.warn("Plugin snapshot endpoint failed to start; continuing with compact packet files", e);
+			log.warn("Plugin snapshot endpoint failed to start; live runtime file archives are retired", e);
 			stopPluginSnapshotEndpoint();
 		}
 	}
 
 	private boolean pluginSnapshotEndpointEnabled(TelemetryRecordingMode recordingMode)
 	{
-		if (config.enablePluginSnapshotEndpoint())
-		{
-			return true;
-		}
-		return config.pluginSnapshotEnabledInNormalLive() && recordingMode == TelemetryRecordingMode.LIVE_COMPACT_ONLY;
+		return config.enablePluginSnapshotEndpoint();
 	}
 
 	private void stopPluginSnapshotEndpoint()
@@ -428,7 +437,7 @@ public class TelemetryPlugin extends Plugin
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
-		if (event == null || !TelemetryPresetApplier.CONFIG_GROUP.equals(event.getGroup()))
+		if (event == null || !TelemetryConfigKeys.CONFIG_GROUP.equals(event.getGroup()))
 		{
 			return;
 		}
@@ -473,9 +482,7 @@ public class TelemetryPlugin extends Plugin
 				"pluginSnapshotAuthToken",
 				"pluginSnapshotMaxProjectionRefs",
 				"pluginSnapshotMaxResponseBytes",
-				"pluginSnapshotAllowNonLocalHost",
-				"pluginSnapshotEnabledInNormalLive",
-				"telemetryRecordingMode").contains(key);
+				"pluginSnapshotAllowNonLocalHost").contains(key);
 	}
 
 	private void restartPluginSnapshotEndpoint()
@@ -562,6 +569,7 @@ public class TelemetryPlugin extends Plugin
 				|| event.getGameState() == GameState.HOPPING)
 		{
 			clearSceneIndex("gameState:" + event.getGameState());
+			worldModelCache.clear("gameState:" + event.getGameState());
 		}
 	}
 
@@ -575,48 +583,56 @@ public class TelemetryPlugin extends Plugin
 	public void onGameObjectSpawned(GameObjectSpawned event)
 	{
 		indexSceneObjectFromEvent("GAME_OBJECT", event.getGameObject(), event.getGameObject() == null ? -1 : event.getGameObject().getOrientation());
+		worldModelCache.markDirty("gameObjectSpawned");
 	}
 
 	@Subscribe
 	public void onGameObjectDespawned(GameObjectDespawned event)
 	{
 		despawnSceneObjectFromEvent("GAME_OBJECT", event.getGameObject(), event.getGameObject() == null ? -1 : event.getGameObject().getOrientation());
+		worldModelCache.markDirty("gameObjectDespawned");
 	}
 
 	@Subscribe
 	public void onWallObjectSpawned(WallObjectSpawned event)
 	{
 		indexSceneObjectFromEvent("WALL_OBJECT", event.getWallObject(), event.getWallObject() == null ? -1 : event.getWallObject().getOrientationA());
+		worldModelCache.markDirty("wallObjectSpawned");
 	}
 
 	@Subscribe
 	public void onWallObjectDespawned(WallObjectDespawned event)
 	{
 		despawnSceneObjectFromEvent("WALL_OBJECT", event.getWallObject(), event.getWallObject() == null ? -1 : event.getWallObject().getOrientationA());
+		worldModelCache.markDirty("wallObjectDespawned");
 	}
 
 	@Subscribe
 	public void onDecorativeObjectSpawned(DecorativeObjectSpawned event)
 	{
 		indexSceneObjectFromEvent("DECORATIVE_OBJECT", event.getDecorativeObject(), -1);
+		worldModelCache.markDirty("decorativeObjectSpawned");
 	}
 
 	@Subscribe
 	public void onDecorativeObjectDespawned(DecorativeObjectDespawned event)
 	{
 		despawnSceneObjectFromEvent("DECORATIVE_OBJECT", event.getDecorativeObject(), -1);
+		worldModelCache.markDirty("decorativeObjectDespawned");
 	}
 
 	@Subscribe
 	public void onGroundObjectSpawned(GroundObjectSpawned event)
 	{
 		indexSceneObjectFromEvent("GROUND_OBJECT", event.getGroundObject(), -1);
+		worldModelCache.markDirty("groundObjectSpawned");
 	}
 
 	@Subscribe
 	public void onGroundObjectDespawned(GroundObjectDespawned event)
 	{
 		despawnSceneObjectFromEvent("GROUND_OBJECT", event.getGroundObject(), -1);
+		worldModelCache.markDirty("groundObjectDespawned");
 	}
 
 	@Subscribe
@@ -1106,8 +1122,8 @@ public class TelemetryPlugin extends Plugin
 	{
 		return CompactLiveEmissionPolicy.snapshotNoFileLiveCacheOnly(
 				currentWriter.isLiveCacheEnabled(),
-				currentWriter.isCompactLivePacketFilesEnabled(),
-				currentWriter.isCompactLiveStreamEnabled(),
+				false,
+				false,
 				pluginSnapshotEndpoint != null);
 	}
 
@@ -2889,7 +2905,11 @@ public class TelemetryPlugin extends Plugin
 		payload.put("droppedRawRecords", currentWriter.getDroppedRecords());
 		payload.put("droppedFrameCount", currentWriter.getDroppedFrameCount());
 		payload.put("compactLiveEnabled", currentWriter.isCompactLivePacketsEnabled());
-		payload.put("compactLivePacketFilesEnabled", currentWriter.isCompactLivePacketFilesEnabled());
+		payload.put("livePacketsRuntimeRemoved", true);
+		payload.put("ndjsonRuntimeRemoved", true);
+		payload.put("jsonlRuntimeRemoved", true);
+		payload.put("livePacketWriterActive", false);
+		payload.put("compactLivePacketFilesEnabled", false);
 		payload.put("compactLiveQueueDepth", currentWriter.getLivePacketQueueDepth());
 		payload.put("livePacketsWritten", currentWriter.getLivePacketsWritten());
 		payload.put("livePacketsDropped", currentWriter.getLivePacketsDropped());
@@ -2898,8 +2918,8 @@ public class TelemetryPlugin extends Plugin
 		payload.put("livePacketSegmentCount", currentWriter.getLivePacketSegmentCount());
 		payload.put("livePacketTotalBytes", currentWriter.getLivePacketTotalBytes());
 		payload.put("livePacketSegmentsPruned", currentWriter.getLivePacketSegmentsPruned());
-		payload.put("livePacketRetentionBytes", Math.max(0L, config.compactLiveRetentionMb()) * 1024L * 1024L);
-		payload.put("livePacketRetentionSegments", config.compactLiveRetentionSegments());
+		payload.put("livePacketRetentionBytes", 0L);
+		payload.put("livePacketRetentionSegments", 0L);
 		payload.put("livePacketActiveSegment", currentWriter.getLivePacketActiveSegment());
 		payload.put("liveCacheEnabled", currentWriter.isLiveCacheEnabled());
 		payload.put("liveCacheUpdates", currentWriter.getLiveCacheUpdates());
@@ -2924,13 +2944,13 @@ public class TelemetryPlugin extends Plugin
 		payload.put("compactNavigationEmitCollisionWindowConfigured", config.compactNavigationEmitCollisionWindow());
 		payload.put("compactLivePacketTypesConfigured", config.compactLivePacketTypes());
 		payload.put("snapshotNoFileLiveCacheOnly", snapshotNoFileLiveCacheOnly(currentWriter));
-		payload.put("compactLiveStreamEnabled", currentWriter.isCompactLiveStreamEnabled());
-		payload.put("compactLiveStreamHost", config.compactLiveStreamHost());
-		payload.put("compactLiveStreamPort", config.compactLiveStreamPort());
-		payload.put("compactLiveStreamQueueSize", config.compactLiveStreamQueueSize());
-		payload.put("compactLiveStreamAlsoWriteFiles", config.compactLiveStreamAlsoWriteFiles());
-		payload.put("compactLiveStreamCircuitBreakerEnabled", config.compactLiveStreamCircuitBreakerEnabled());
-		payload.put("compactLiveStreamMaxWriteMillisConfigured", config.compactLiveStreamMaxWriteMillis());
+		payload.put("compactLiveStreamEnabled", false);
+		payload.put("compactLiveStreamHost", null);
+		payload.put("compactLiveStreamPort", 0);
+		payload.put("compactLiveStreamQueueSize", 0);
+		payload.put("compactLiveStreamAlsoWriteFiles", false);
+		payload.put("compactLiveStreamCircuitBreakerEnabled", false);
+		payload.put("compactLiveStreamMaxWriteMillisConfigured", 0);
 		payload.put("compactLiveStreamQueueDepth", currentWriter.getCompactLiveStreamQueueDepth());
 		payload.put("compactLiveStreamClientCount", currentWriter.getCompactLiveStreamClientCount());
 		payload.put("compactLiveStreamPacketsOffered", currentWriter.getCompactLiveStreamPacketsOffered());
@@ -5491,6 +5511,59 @@ public class TelemetryPlugin extends Plugin
 		{
 			return tileProjectionFailurePayload("tile projection interrupted: " + exceptionSummary(e));
 		}
+	}
+
+	private Map<String, Object> pluginSnapshotWorldModelQuery(List<String> needs, Map<String, Object> request)
+	{
+		if (clientThread == null)
+		{
+			return worldModelFailurePayload(needs, "client thread unavailable");
+		}
+		CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
+		clientThread.invoke(() ->
+		{
+			try
+			{
+				Map<String, Object> identity = new LinkedHashMap<>();
+				addSessionIdentity(identity);
+				future.complete(worldModelCache.query(client, needs == null ? List.of() : needs, request == null ? Map.of() : request, tickId, clientTickId, identity));
+			}
+			catch (RuntimeException e)
+			{
+				future.complete(worldModelFailurePayload(needs, "world model query failed: " + exceptionSummary(e)));
+			}
+		});
+		try
+		{
+			return future.get(250, TimeUnit.MILLISECONDS);
+		}
+		catch (TimeoutException e)
+		{
+			return worldModelFailurePayload(needs, "world model query timed out");
+		}
+		catch (Exception e)
+		{
+			return worldModelFailurePayload(needs, "world model query interrupted: " + exceptionSummary(e));
+		}
+	}
+
+	private Map<String, Object> worldModelFailurePayload(List<String> needs, String reason)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		Map<String, Object> quality = new LinkedHashMap<>();
+		quality.put("worldModelAvailable", false);
+		quality.put("worldModelAgeMs", null);
+		quality.put("objectCensusCapHit", null);
+		quality.put("collisionAvailable", false);
+		quality.put("projectionAuditAvailable", false);
+		payload.put("schema", "world_model_query_response.v1");
+		payload.put("snapshotSchema", WorldModelCache.SCHEMA);
+		payload.put("status", "WARN");
+		payload.put("needs", needs == null ? List.of() : List.copyOf(needs));
+		payload.put("payloads", Map.of());
+		payload.put("quality", quality);
+		payload.put("warnings", List.of(reason));
+		return payload;
 	}
 
 	private Map<String, Object> tileProjectionFailurePayload(String reason)

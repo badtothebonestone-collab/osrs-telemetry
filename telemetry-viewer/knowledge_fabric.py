@@ -1,0 +1,3635 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+import shutil
+import time
+import urllib.request
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import external_knowledge
+import target_view_core
+import world_model_client
+import world_model_core
+
+
+STATUS_SCHEMA = "knowledge_fabric_status.v1"
+LIVE_WORLD_INDEX_SCHEMA = "live_world_index.v1"
+SESSION_MEMORY_SCHEMA = "session_memory.v1"
+STATIC_LIBRARY_SCHEMA = "static_knowledge_library.v1"
+DEBUG_EVIDENCE_SCHEMA = "debug_evidence_index.v1"
+QUERY_SCHEMA = "knowledge_fabric_query_response.v1"
+SCRIPT_AUTHORING_CONTEXT_SCHEMA = "script_authoring_context.v1"
+SCRIPT_AUTHORING_CAPTURE_SCHEMA = "script_authoring_context_capture.v1"
+REPLAY_SCENARIO_SCHEMA = "replay_scenario.v1"
+REPLAY_RESULT_SCHEMA = "replay_scenario_result.v1"
+DATA_QUALITY_SCHEMA = "data_quality_report.v1"
+DEBUG_CONTEXT_DIFF_SCHEMA = "debug_context_diff.v1"
+HANDOFF_SUMMARY_SCHEMA = "knowledge_fabric_handoff_summary.v1"
+DATA_SOURCE_INVENTORY_SCHEMA = "data_source_inventory.v1"
+QUERY_COVERAGE_SCHEMA = "query_coverage_matrix.v1"
+COVERAGE_REPORT_SCHEMA = "coverage_report.v1"
+TASK_PROBE_SCHEMA = "task_probe_report.v1"
+
+VIEWER_DIR = Path(__file__).resolve().parent
+TARGET_PROFILES_PATH = VIEWER_DIR / "target_profiles.json"
+TARGET_LIBRARY_PATH = VIEWER_DIR / "target_library.json"
+SERVICE_ROUTES_PATH = VIEWER_DIR / "profiles" / "service_routes.json"
+LIVE_DIR = Path("interaction_geometry") / "live"
+SESSION_MEMORY_FILE = "session_memory.json"
+DEFAULT_QUERY_LIMIT = 25
+HARD_QUERY_LIMIT = 250
+SERVICE_MIN_VISIBLE_AREA_PX = 96.0
+SERVICE_MIN_VISIBLE_AREA_RATIO = 0.35
+SERVICE_MIN_EDGE_DISTANCE_PX = 32.0
+SERVICE_COMFORTABLE_REGION_FRACTION = 0.78
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _str(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _norm(value: Any) -> str:
+    return _str(value).strip().lower()
+
+
+def _safe_limit(limit: int | None) -> int:
+    if limit is None:
+        return DEFAULT_QUERY_LIMIT
+    try:
+        return max(0, min(HARD_QUERY_LIMIT, int(limit)))
+    except (TypeError, ValueError):
+        return DEFAULT_QUERY_LIMIT
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:  # noqa: BLE001
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+    temp.write_text(json.dumps(payload, indent=2, sort_keys=False, default=str) + "\n", encoding="utf-8")
+    temp.replace(path)
+
+
+def _slug(value: Any, fallback: str = "context") -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback)).strip("_")
+    return (text or fallback)[:80]
+
+
+def _json_hash(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _response_size(payload: dict[str, Any]) -> int:
+    try:
+        return len(json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _object_count_from_data(data: Any) -> int | None:
+    if isinstance(data, dict):
+        for key in ("count", "objectCount", "visibleResourceCandidateCount", "visualBundleCount"):
+            parsed = _int(data.get(key))
+            if parsed is not None:
+                return parsed
+        for key in ("objects", "items", "frontier", "candidates", "routes", "targetClasses"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return len(value)
+        nested = data.get("frontier")
+        if isinstance(nested, dict):
+            return _object_count_from_data(nested)
+    if isinstance(data, list):
+        return len(data)
+    return None
+
+
+def _perf_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    perf = _dict(payload.get("performanceStats"))
+    return {
+        "queryTimeMs": perf.get("queryTimeMs"),
+        "responseBytes": perf.get("responseBytes") or _response_size(payload),
+        "objectCount": perf.get("objectCount"),
+        "sourceAgeMs": perf.get("sourceAgeMs"),
+        "capHit": payload.get("capHit"),
+        "truncated": payload.get("truncated"),
+        "status": payload.get("status"),
+        "schema": payload.get("schema"),
+    }
+
+
+def _external_summary_compact() -> dict[str, Any]:
+    status = external_knowledge.knowledge_status()
+    data = _dict(status.get("data"))
+    return {
+        "status": status.get("status"),
+        "externalKnowledgeEnabled": data.get("externalKnowledgeEnabled"),
+        "cacheFirst": data.get("cacheFirst"),
+        "explicitRefreshOnly": data.get("explicitRefreshOnly"),
+        "cachePath": data.get("cachePath"),
+        "cacheSizeMb": data.get("cacheSizeMb"),
+        "maxCacheMb": data.get("maxCacheMb"),
+        "externalApiEnabledByDefault": data.get("externalApiEnabledByDefault"),
+        "hotRuntimeExternalApiCallsAllowed": data.get("hotRuntimeExternalApiCallsAllowed"),
+        "userAgentRequired": data.get("userAgentRequired"),
+        "sourceCount": data.get("sourceCount"),
+        "externalSourcesHealthy": data.get("externalSourcesHealthy"),
+        "externalApiDisabledReason": data.get("externalApiDisabledReason"),
+    }
+
+
+def _cap_flags(payload: Any, prefix: str = "") -> list[dict[str, Any]]:
+    flags: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            lower = key.lower()
+            current = f"{prefix}.{key}" if prefix else key
+            if lower in {"caphit", "truncated"} and value is True:
+                flags.append({"path": current, "field": key, "value": True})
+            elif lower.endswith("caphit") and value is True:
+                flags.append({"path": current, "field": key, "value": True})
+            elif isinstance(value, (dict, list)):
+                flags.extend(_cap_flags(value, current))
+    elif isinstance(payload, list):
+        for index, item in enumerate(payload[:20]):
+            if isinstance(item, (dict, list)):
+                flags.extend(_cap_flags(item, f"{prefix}[{index}]"))
+    return flags
+
+
+def _point(value: Any) -> dict[str, Any] | None:
+    value = _dict(value)
+    x = value.get("worldX", value.get("x"))
+    y = value.get("worldY", value.get("y"))
+    plane = value.get("plane")
+    if x is None or y is None:
+        return None
+    return {"worldX": x, "worldY": y, "plane": plane}
+
+
+def _object_location(obj: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("worldLocation", "location", "tile", "worldTile"):
+        point = _point(obj.get(key))
+        if point is not None:
+            return point
+    x = obj.get("worldX", obj.get("x"))
+    y = obj.get("worldY", obj.get("y"))
+    if x is None or y is None:
+        return None
+    return {"worldX": x, "worldY": y, "plane": obj.get("plane")}
+
+
+def _distance_tiles(a: dict[str, Any] | None, b: dict[str, Any] | None) -> float | None:
+    if not a or not b:
+        return None
+    ax = _float(a.get("worldX"))
+    ay = _float(a.get("worldY"))
+    bx = _float(b.get("worldX"))
+    by = _float(b.get("worldY"))
+    if ax is None or ay is None or bx is None or by is None:
+        return None
+    return math.hypot(ax - bx, ay - by)
+
+
+def _plane_matches(obj: dict[str, Any], plane: int | None) -> bool:
+    if plane is None:
+        return True
+    obj_plane = _int(obj.get("plane"))
+    return obj_plane is None or obj_plane == plane
+
+
+def _actions(obj: dict[str, Any]) -> list[str]:
+    values = obj.get("actions") or obj.get("actionNames") or obj.get("menuActions") or []
+    return [str(item) for item in _list(values) if item is not None]
+
+
+def _action_text(obj: dict[str, Any]) -> str:
+    return " ".join(_actions(obj)).lower()
+
+
+def _projection(obj: dict[str, Any]) -> dict[str, Any]:
+    return world_model_core.object_projection_status(obj)
+
+
+def _projection_classification(obj: dict[str, Any]) -> str:
+    projection = _projection(obj)
+    for key in ("classification", "status", "reason"):
+        value = projection.get(key)
+        if isinstance(value, str) and value:
+            return value
+    if projection.get("projectionSentinel") is True:
+        return "sentinel"
+    if projection.get("actionableByCanvas") is True:
+        return "actionable"
+    if projection.get("visible") is True or projection.get("onScreen") is True:
+        return "visible"
+    return "unavailable"
+
+
+def _point_xy(value: Any) -> tuple[float, float] | None:
+    value = _dict(value)
+    x = _float(value.get("canvasX", value.get("x")))
+    y = _float(value.get("canvasY", value.get("y")))
+    if x is None or y is None:
+        return None
+    return x, y
+
+
+def _service_exposure_metrics(obj: dict[str, Any]) -> dict[str, Any]:
+    projection = _projection(obj)
+    safe = _dict(obj.get("safeAimPoint"))
+    point = _point_xy(safe) or _point_xy(projection.get("aimPoint")) or _point_xy(projection.get("canvasPoint"))
+    edge_distance = _float(
+        safe.get("distanceToViewportEdgePx")
+        if safe.get("distanceToViewportEdgePx") is not None
+        else safe.get("distanceToCanvasEdgePx")
+        if safe.get("distanceToCanvasEdgePx") is not None
+        else projection.get("edgeDistancePx")
+    )
+    if edge_distance is None and point is not None:
+        x, y = point
+        edge_distance = min(x, 765.0 - x, y, 503.0 - y)
+    area_px = _float(
+        safe.get("clippedVisibleAreaPx")
+        if safe.get("clippedVisibleAreaPx") is not None
+        else projection.get("clippedVisibleAreaPx")
+        if projection.get("clippedVisibleAreaPx") is not None
+        else projection.get("visibleAreaPx")
+    )
+    ratio = _float(
+        safe.get("clippedVisibleAreaRatio")
+        if safe.get("clippedVisibleAreaRatio") is not None
+        else projection.get("clippedVisibleAreaRatio")
+        if projection.get("clippedVisibleAreaRatio") is not None
+        else projection.get("visibleAreaRatio")
+    )
+    centrality = None
+    comfortable = False
+    if point is not None:
+        x, y = point
+        centrality = max(0.0, min(1.0, 1.0 - max(abs(x - 382.5) / 382.5, abs(y - 251.5) / 251.5)))
+        margin_x = 765.0 * (1.0 - SERVICE_COMFORTABLE_REGION_FRACTION) / 2.0
+        margin_y = 503.0 * (1.0 - SERVICE_COMFORTABLE_REGION_FRACTION) / 2.0
+        comfortable = bool(margin_x <= x <= 765.0 - margin_x and margin_y <= y <= 503.0 - margin_y)
+    safe_click = bool(
+        projection.get("actionableByCanvas") is True
+        or safe.get("actionable") is True
+        or str(safe.get("status") or "").upper() == "PASS"
+    )
+    visible_area_ok = bool(area_px is None or area_px >= SERVICE_MIN_VISIBLE_AREA_PX) and bool(
+        ratio is None or ratio >= SERVICE_MIN_VISIBLE_AREA_RATIO
+    )
+    edge_ok = bool(edge_distance is not None and edge_distance >= SERVICE_MIN_EDGE_DISTANCE_PX)
+    edge_sliver = bool(
+        safe_click
+        and (
+            (edge_distance is not None and edge_distance < SERVICE_MIN_EDGE_DISTANCE_PX)
+            or (area_px is not None and area_px < SERVICE_MIN_VISIBLE_AREA_PX)
+            or (ratio is not None and ratio < SERVICE_MIN_VISIBLE_AREA_RATIO)
+        )
+    )
+    usable = bool(safe_click and visible_area_ok and edge_ok and comfortable and safe.get("uiBlocked") is not True)
+    score = 0
+    score += 30 if safe_click else 0
+    score += 20 if visible_area_ok else 0
+    score += 20 if edge_ok else 0
+    score += 20 if comfortable else 0
+    score += 10 if safe.get("uiBlocked") is not True else 0
+    return {
+        "safeClickAvailable": safe_click,
+        "usableExposureThresholdMet": usable,
+        "edgeSliverVisible": edge_sliver,
+        "visibleAreaPx": area_px,
+        "visibleAreaRatio": ratio,
+        "edgeDistancePx": edge_distance,
+        "centralityScore": round(centrality, 3) if centrality is not None else None,
+        "comfortableViewRegionMet": comfortable,
+        "usableExposureScore": max(0, min(100, score)),
+    }
+
+
+def _source_tick(payloads: dict[str, Any], daemon_status: dict[str, Any]) -> int | None:
+    quality = world_model_core.world_model_quality(payloads)
+    for value in (
+        quality.get("sourceTick"),
+        quality.get("tick"),
+        _dict(payloads.get("world_model_summary")).get("tick"),
+        daemon_status.get("latestTick"),
+        daemon_status.get("tick"),
+    ):
+        parsed = _int(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _status_view(status: dict[str, Any]) -> dict[str, Any]:
+    status = _dict(status)
+    nested = _dict(status.get("status"))
+    if not nested:
+        return status
+    merged = dict(nested)
+    for key, value in status.items():
+        if key == "status":
+            continue
+        if key not in merged or merged.get(key) is None:
+            merged[key] = value
+    return merged
+
+
+def _status_label(status: dict[str, Any]) -> Any:
+    value = _dict(status).get("status")
+    if isinstance(value, dict):
+        return value.get("status") or value.get("schema")
+    return value
+
+
+def _session_path_from_status(status: dict[str, Any]) -> Path | None:
+    status = _status_view(status)
+    for value in (
+        status.get("sessionPath"),
+        status.get("activeSessionPath"),
+        _dict(status.get("session")).get("sessionPath"),
+        _dict(status.get("session")).get("activeSessionPath"),
+        _dict(status.get("brain")).get("sessionPath"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return Path(value)
+    return None
+
+
+def _world_payloads_from_status(status: dict[str, Any]) -> dict[str, Any]:
+    status = _status_view(status)
+    payloads = dict(_dict(status.get("worldModelPayloads")))
+    mapping = {
+        "world_model_summary": ("worldModelSummary",),
+        "scene_object_census": ("worldModelSceneObjectCensus", "sceneObjectCensus"),
+        "resource_object_census": ("worldModelResourceObjectCensus", "resourceObjectCensus"),
+        "service_object_census": ("worldModelServiceObjectCensus", "serviceObjectCensus"),
+        "route_object_census": ("worldModelRouteObjectCensus", "routeObjectCensus"),
+        "projection_audit": ("worldModelProjectionAudit", "projectionAudit"),
+        "view_quality_inputs": ("worldModelViewQualityInputs", "viewQualityInputs"),
+        "pathing_frontier": ("worldModelPathingFrontier", "pathingFrontier"),
+    }
+    for key, status_keys in mapping.items():
+        if key in payloads:
+            continue
+        for status_key in status_keys:
+            if isinstance(status.get(status_key), dict):
+                payloads[key] = status[status_key]
+                break
+    quality = {
+        key: status.get(key)
+        for key in (
+            "worldModelAvailable",
+            "worldModelAgeMs",
+            "worldModelSourceTick",
+            "worldModelClientTick",
+            "worldModelObjectCensusCapHit",
+            "worldModelCollisionAvailable",
+            "worldModelProjectionAuditAvailable",
+            "worldModelProjectionCapHit",
+            "worldModelLoadedSceneOnly",
+            "worldModelFullWorldLoaded",
+        )
+        if key in status
+    }
+    if quality and "quality" not in payloads:
+        payloads["quality"] = quality
+    return payloads
+
+
+def _daemon_status_from_context(status: dict[str, Any]) -> dict[str, Any]:
+    status = _dict(status)
+    debug_context = _dict(_dict(status.get("knowledgeCurrentDebugContext")).get("data"))
+    if debug_context:
+        live = _dict(debug_context.get("liveStatus"))
+        phase = _dict(live.get("phase"))
+        location = _dict(live.get("location"))
+        inventory = _dict(live.get("inventory"))
+        merged_debug = dict(status)
+        for key, value in (
+            ("phase", phase.get("phase")),
+            ("currentCycleStage", phase.get("cycleStage")),
+            ("activeIntent", phase.get("activeIntent")),
+            ("currentIntent", phase.get("currentIntent")),
+            ("playerLocation", location.get("worldLocation")),
+            ("playerLocationSource", location.get("source")),
+            ("playerLocationConfidence", location.get("confidence")),
+            ("inventoryFreeSlots", inventory.get("freeSlots")),
+            ("inventoryOccupiedSlots", inventory.get("occupiedSlots")),
+            ("resourceCount", inventory.get("resourceCount")),
+        ):
+            if value is not None and merged_debug.get(key) is None:
+                merged_debug[key] = value
+        if live.get("sessionPath") and merged_debug.get("sessionPath") is None:
+            merged_debug["sessionPath"] = live.get("sessionPath")
+        status = merged_debug
+    nested = _dict(status.get("status"))
+    if not nested:
+        return status
+    merged = _status_view(status)
+    if status.get("warnings"):
+        merged.setdefault("contextServiceWarnings", status.get("warnings"))
+        if not merged.get("warnings"):
+            merged["warnings"] = status.get("warnings")
+    if status.get("missingFields"):
+        merged.setdefault("contextServiceMissingFields", status.get("missingFields"))
+    return merged
+
+
+def _compact_object(obj: dict[str, Any]) -> dict[str, Any]:
+    location = _object_location(obj)
+    projection = _projection(obj)
+    service_exposure = _service_exposure_metrics(obj) if obj.get("serviceObjectCandidate") is True else {}
+    compact = {
+        "objectKey": obj.get("objectKey") or obj.get("targetKey"),
+        "id": obj.get("id", obj.get("rawId")),
+        "hash": obj.get("hash"),
+        "name": obj.get("name") or obj.get("targetName") or obj.get("objectName"),
+        "kind": obj.get("kind") or obj.get("objectKind") or obj.get("targetType"),
+        "actions": _actions(obj),
+        "worldLocation": location,
+        "plane": obj.get("plane") if obj.get("plane") is not None else (location or {}).get("plane"),
+        "distanceToPlayer": obj.get("distanceToPlayer", obj.get("distanceTiles")),
+        "resourceCandidate": obj.get("resourceCandidate"),
+        "resourceType": obj.get("resourceType"),
+        "serviceObjectCandidate": obj.get("serviceObjectCandidate"),
+        "serviceObjectType": obj.get("serviceObjectType"),
+        "routeObjectCandidate": obj.get("routeObjectCandidate"),
+        "routeObjectKind": obj.get("routeObjectKind"),
+        "projectionClassification": _projection_classification(obj),
+        "projection": {
+            "visible": projection.get("visible"),
+            "onScreen": projection.get("onScreen"),
+            "geometryAvailable": projection.get("geometryAvailable"),
+            "actionableByCanvas": projection.get("actionableByCanvas"),
+            "edgeDistancePx": projection.get("edgeDistancePx"),
+            "visibleAreaRatio": projection.get("visibleAreaRatio"),
+            "aimPoint": projection.get("aimPoint"),
+            "canvasLocation": projection.get("canvasLocation"),
+            "convexHullBounds": projection.get("convexHullBounds"),
+            "canvasTileBounds": projection.get("canvasTileBounds"),
+        },
+    }
+    if isinstance(obj.get("safeAimPoint"), dict):
+        compact["safeAimPoint"] = obj.get("safeAimPoint")
+    if isinstance(obj.get("targetViewState"), dict):
+        compact["targetViewState"] = obj.get("targetViewState")
+    if service_exposure:
+        compact["serviceTargetExposure"] = service_exposure
+    for key in (
+        "requiredSkill",
+        "requiredLevel",
+        "playerLevelKnown",
+        "playerLevel",
+        "levelRequirementMet",
+        "visibleButNotExecutable",
+        "targetTemporarilyLockedReason",
+        "futureEligibleWhenLevelMet",
+    ):
+        if key in obj:
+            compact[key] = obj.get(key)
+    return {key: value for key, value in compact.items() if value is not None}
+
+
+def _compact_inventory(status: dict[str, Any]) -> dict[str, Any]:
+    status = _status_view(status)
+    brain = _dict(status.get("brain"))
+    inventory = _dict(brain.get("inventoryContext"))
+    progress = _dict(brain.get("goalProgress") or status.get("goalProgress") or status.get("brainProgress"))
+    free_slots = _first_present(inventory.get("freeSlots"), status.get("inventoryFreeSlots"))
+    occupied_slots = _first_present(inventory.get("occupiedSlots"), status.get("inventoryOccupiedSlots"))
+    resource_count = _first_present(
+        progress.get("heldResourceCount"),
+        progress.get("currentHeldCount"),
+        status.get("resourceCount"),
+        status.get("inventoryMatchingResourceCount"),
+    )
+    parsed_free_slots = _int(free_slots)
+    return {
+        "freeSlots": free_slots,
+        "occupiedSlots": occupied_slots,
+        "inventoryFull": bool(parsed_free_slots == 0 or inventory.get("inventoryFull") is True or status.get("inventoryFull") is True),
+        "resourceCount": resource_count,
+        "resourceGroup": progress.get("resourceGroup"),
+    }
+
+
+def _client_tick_fresh(status: dict[str, Any]) -> bool:
+    status = _status_view(status)
+    hot = _dict(status.get("clientTickHot"))
+    latency = _dict(hot.get("latency"))
+    age = _float(
+        _first_present(
+            hot.get("ageMillis"),
+            status.get("clientTickHotAgeMillis"),
+            status.get("clientTickPostMenuSortAgeMillis"),
+            latency.get("ageMillis"),
+            latency.get("postMenuSortAgeMillis"),
+        )
+    )
+    game_state = _first_present(hot.get("gameState"), status.get("gameState"))
+    return bool(age is not None and age <= 1000 and (not game_state or game_state == "LOGGED_IN"))
+
+
+def _compact_location(status: dict[str, Any]) -> dict[str, Any]:
+    status = _status_view(status)
+    player = _dict(status.get("playerLocation"))
+    if not player:
+        x = _first_present(status.get("playerWorldX"), status.get("worldX"))
+        y = _first_present(status.get("playerWorldY"), status.get("worldY"))
+        plane = _first_present(status.get("playerPlane"), status.get("plane"))
+        if x is not None and y is not None:
+            player = {"worldX": x, "worldY": y, "plane": plane}
+    return {
+        "worldLocation": player or None,
+        "plane": player.get("plane") if player else status.get("playerPlane"),
+        "source": status.get("playerLocationSource"),
+        "confidence": status.get("playerLocationConfidence"),
+    }
+
+
+def _compact_phase(status: dict[str, Any]) -> dict[str, Any]:
+    status = _status_view(status)
+    brain = _dict(status.get("brain"))
+    generic = _dict(brain.get("genericTaskState"))
+    return {
+        "phase": _first_present(status.get("brainPhase"), status.get("phase"), generic.get("phase")),
+        "cycleStage": _first_present(status.get("currentCycleStage"), status.get("cycleStage"), generic.get("cycleStage")),
+        "activeIntent": _first_present(status.get("activeIntent"), generic.get("activeIntent")),
+        "currentIntent": status.get("currentIntent"),
+        "latestTick": status.get("latestTick") or brain.get("latestTick"),
+    }
+
+
+def _compact_route_context(status: dict[str, Any]) -> dict[str, Any]:
+    status = _status_view(status)
+    brain = _dict(status.get("brain"))
+    service_route = _dict(brain.get("serviceRouteContext") or status.get("serviceRouteContext"))
+    pathing = _dict(brain.get("pathingContext") or status.get("pathingContext"))
+    return {
+        "routeId": _first_present(service_route.get("routeId"), status.get("serviceRouteId")),
+        "currentNodeId": _first_present(service_route.get("currentNodeId"), status.get("serviceRouteCurrentNodeId")),
+        "currentStepIndex": _first_present(service_route.get("currentStepIndex"), status.get("serviceRouteCurrentStepIndex")),
+        "nextEdgeType": _first_present(service_route.get("nextEdgeType"), status.get("serviceRouteNextEdgeType")),
+        "routeStepStatus": _first_present(service_route.get("routeStepStatus"), status.get("serviceRouteStepStatus")),
+        "actionReady": _first_present(service_route.get("actionReady"), status.get("serviceRouteActionReady")),
+        "serviceReady": _first_present(status.get("serviceReady"), service_route.get("serviceReady")),
+        "serviceReadyReason": status.get("serviceReadyReason"),
+        "pathingNeeded": _first_present(pathing.get("pathingNeeded"), status.get("pathingNeeded")),
+        "nextWaypointTile": _first_present(pathing.get("nextWaypointTile"), status.get("pathingNextWaypointTile")),
+        "destinationTile": _first_present(pathing.get("destinationTile"), status.get("pathingDestinationTile")),
+        "pathTargetTile": _first_present(pathing.get("pathTargetTile"), status.get("pathingPathTargetTile")),
+        "pathLengthTiles": _first_present(pathing.get("pathLengthTiles"), status.get("pathingPathLengthTiles")),
+        "lineOfSightToTarget": _first_present(pathing.get("lineOfSightToTarget"), status.get("pathingLineOfSightToTarget")),
+        "wallLoopDetected": _first_present(pathing.get("wallLoopDetected"), status.get("routeWallLoopDetected")),
+        "wallHuggingDetected": status.get("routeWallHuggingDetected"),
+        "rejectedApproachTileReasons": _first_present(
+            pathing.get("rejectedApproachTileReasons"),
+            status.get("pathingRejectedApproachTileReasons"),
+        ),
+        "predictedPathTiles": _list(pathing.get("predictedPathTiles") or status.get("pathingPredictedPathTiles"))[:35],
+    }
+
+
+def _dedupe_objects(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for obj in objects:
+        location = _object_location(obj) or {}
+        key = (
+            obj.get("objectKey") or obj.get("targetKey"),
+            obj.get("hash"),
+            obj.get("id", obj.get("rawId")),
+            location.get("worldX"),
+            location.get("worldY"),
+            location.get("plane"),
+            obj.get("name") or obj.get("targetName") or obj.get("objectName"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(obj)
+    return unique
+
+
+def _cap_items(items: list[dict[str, Any]], limit: int | None) -> tuple[list[dict[str, Any]], bool]:
+    cap = _safe_limit(limit)
+    if cap == 0:
+        return [], bool(items)
+    return items[:cap], len(items) > cap
+
+
+def _query_response(
+    schema: str,
+    data: Any,
+    *,
+    started: float,
+    source: str,
+    freshness: dict[str, Any],
+    warnings: list[str] | None = None,
+    cap_hit: bool = False,
+    truncated: bool = False,
+    status: str = "PASS",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema": schema,
+        "status": status,
+        "generatedAtUtc": utc_now(),
+        "source": source,
+        "freshness": freshness,
+        "data": data,
+        "warnings": list(warnings or []),
+        "capHit": bool(cap_hit),
+        "truncated": bool(truncated),
+        "performanceStats": {
+            "queryTimeMs": round((time.perf_counter() - started) * 1000.0, 3),
+            "objectCount": _object_count_from_data(data),
+            "sourceAgeMs": freshness.get("worldModelAgeMs") if isinstance(freshness, dict) else None,
+        },
+    }
+    if extra:
+        payload.update(extra)
+    payload["performanceStats"]["responseBytes"] = _response_size(payload)
+    return payload
+
+
+def static_library_paths(root: Path | None = None) -> dict[str, Path]:
+    base = Path(root) if root else VIEWER_DIR
+    return {
+        "targetProfiles": base / "target_profiles.json",
+        "targetLibrary": base / "target_library.json",
+        "serviceRoutes": base / "profiles" / "service_routes.json",
+    }
+
+
+def load_static_library(root: Path | None = None) -> dict[str, Any]:
+    paths = static_library_paths(root)
+    target_profiles = _read_json(paths["targetProfiles"])
+    target_library = _read_json(paths["targetLibrary"])
+    service_routes = _read_json(paths["serviceRoutes"])
+    skill_requirements = {
+        "Tree": {"requiredSkill": "WOODCUTTING", "requiredLevel": 1},
+        "Dead tree": {"requiredSkill": "WOODCUTTING", "requiredLevel": 1},
+        "Oak": {"requiredSkill": "WOODCUTTING", "requiredLevel": 15},
+        "Willow": {"requiredSkill": "WOODCUTTING", "requiredLevel": 30},
+    }
+    for target in _list(target_library.get("targetClasses")):
+        if not isinstance(target, dict):
+            continue
+        display = target.get("displayName") or target.get("classId")
+        required_level = target.get("requiredLevel")
+        required_skill = target.get("requiredSkill")
+        if display and required_level is not None:
+            skill_requirements[str(display)] = {
+                "requiredSkill": required_skill or "WOODCUTTING",
+                "requiredLevel": required_level,
+            }
+    routes = _list(service_routes.get("routes"))
+    service_anchors = []
+    area_hints = []
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        if route.get("areaHint"):
+            area_hints.append({"routeId": route.get("routeId"), "areaHint": route.get("areaHint")})
+        for node in _list(route.get("nodes")):
+            if not isinstance(node, dict):
+                continue
+            node_type = _norm(node.get("type"))
+            if "service" in node_type or "bank" in node_type:
+                service_anchors.append({
+                    "routeId": route.get("routeId"),
+                    "nodeId": node.get("nodeId"),
+                    "label": node.get("label"),
+                    "serviceType": route.get("serviceType"),
+                    "worldLocation": node.get("worldLocation"),
+                    "verifiedLive": node.get("verifiedLive", False),
+                    "confidence": node.get("confidence"),
+                    "advisoryOnly": not bool(node.get("verifiedLive")),
+                })
+    payload = {
+        "schema": STATIC_LIBRARY_SCHEMA,
+        "routes": routes,
+        "serviceAnchors": service_anchors,
+        "targetProfiles": _list(target_profiles.get("profiles")),
+        "targetLibrary": _list(target_library.get("targetClasses")),
+        "skillRequirements": skill_requirements,
+        "areaHints": area_hints,
+        "sourceFiles": {key: str(value) for key, value in paths.items()},
+    }
+    payload["versionHash"] = _json_hash(payload)
+    payload["summary"] = {
+        "routeCount": len(payload["routes"]),
+        "serviceAnchorCount": len(service_anchors),
+        "targetProfileCount": len(payload["targetProfiles"]),
+        "targetClassCount": len(payload["targetLibrary"]),
+        "skillRequirementCount": len(skill_requirements),
+        "staticPriorsAdvisory": True,
+    }
+    return payload
+
+
+def session_memory_path(session_path: str | Path | None) -> Path | None:
+    if not session_path:
+        return None
+    return Path(session_path) / LIVE_DIR / SESSION_MEMORY_FILE
+
+
+def load_session_memory(session_path: str | Path | None) -> dict[str, Any]:
+    path = session_memory_path(session_path)
+    if path is None or not path.exists():
+        return {"schema": SESSION_MEMORY_SCHEMA, "sessionPath": str(session_path) if session_path else None}
+    payload = _read_json(path)
+    if payload.get("schema") != SESSION_MEMORY_SCHEMA:
+        return {"schema": SESSION_MEMORY_SCHEMA, "sessionPath": str(session_path), "warnings": ["session memory schema mismatch"]}
+    return payload
+
+
+def save_session_memory(session_path: str | Path, memory: dict[str, Any]) -> Path:
+    path = session_memory_path(session_path)
+    if path is None:
+        raise ValueError("session path is required")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
+    temp.write_text(json.dumps(memory, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    temp.replace(path)
+    return path
+
+
+def _memory_list(memory: dict[str, Any], key: str) -> list[Any]:
+    values = memory.get(key)
+    if isinstance(values, list):
+        return values
+    memory[key] = []
+    return memory[key]
+
+
+def record_session_observation(
+    session_path: str | Path,
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    source_tick: int | None = None,
+    max_items: int = 200,
+) -> dict[str, Any]:
+    memory = load_session_memory(session_path)
+    memory.setdefault("schema", SESSION_MEMORY_SCHEMA)
+    memory["sessionPath"] = str(session_path)
+    memory["lastUpdatedTick"] = source_tick
+    memory["lastUpdatedUtc"] = utc_now()
+    key_by_kind = {
+        "resource_area": "observedResourceAreas",
+        "service_anchor": "observedServiceAnchors",
+        "route_object": "observedRouteObjects",
+        "successful_waypoint": "successfulWaypoints",
+        "failed_waypoint": "failedWaypoints",
+        "menu_flip_zone": "menuFlipZones",
+        "camera_view_outcome": "cameraViewOutcomes",
+        "area_label": "learnedAreaLabels",
+    }
+    key = key_by_kind.get(kind, kind)
+    item = dict(payload)
+    item.setdefault("kind", kind)
+    item.setdefault("sourceTick", source_tick)
+    item.setdefault("observedUtc", utc_now())
+    values = _memory_list(memory, key)
+    values.append(item)
+    if len(values) > max_items:
+        del values[: len(values) - max_items]
+    save_session_memory(session_path, memory)
+    return memory
+
+
+def session_memory_is_current(memory: dict[str, Any], current_session_path: str | Path | None) -> bool:
+    if not current_session_path:
+        return False
+    return str(memory.get("sessionPath") or "").lower() == str(current_session_path).lower()
+
+
+def _memory_from_status(status: dict[str, Any], session_path: Path | None) -> dict[str, Any]:
+    loaded = load_session_memory(session_path) if session_path else {"schema": SESSION_MEMORY_SCHEMA}
+    brain = _dict(status.get("brain"))
+    service_route = _dict(brain.get("serviceRouteContext") or status.get("serviceRouteContext"))
+    return_route = _dict(brain.get("returnRouteContext") or status.get("returnRouteContext"))
+    resource_memory = _dict(
+        brain.get("resourceAreaMemory")
+        or _dict(brain.get("decision")).get("resourceAreaMemory")
+        or status.get("resourceAreaMemory")
+    )
+    memory = {
+        "schema": SESSION_MEMORY_SCHEMA,
+        "sessionPath": str(session_path) if session_path else loaded.get("sessionPath"),
+        "observedResourceAreas": list(_list(loaded.get("observedResourceAreas"))),
+        "observedServiceAnchors": list(_list(loaded.get("observedServiceAnchors"))),
+        "observedRouteObjects": list(_list(loaded.get("observedRouteObjects"))),
+        "successfulWaypoints": list(_list(loaded.get("successfulWaypoints"))),
+        "failedWaypoints": list(_list(loaded.get("failedWaypoints"))),
+        "menuFlipZones": list(_list(loaded.get("menuFlipZones"))),
+        "cameraViewOutcomes": list(_list(loaded.get("cameraViewOutcomes"))),
+        "learnedAreaLabels": list(_list(loaded.get("learnedAreaLabels"))),
+        "lastUpdatedTick": loaded.get("lastUpdatedTick") or status.get("latestTick"),
+        "lastUpdatedUtc": loaded.get("lastUpdatedUtc"),
+    }
+    if resource_memory:
+        memory["observedResourceAreas"].append(resource_memory)
+    anchors = _dict(service_route.get("observedAnchors") or return_route.get("observedAnchors"))
+    for anchor in anchors.values():
+        if isinstance(anchor, dict):
+            memory["observedServiceAnchors"].append(anchor)
+    route_census = service_route.get("routeObjectCensus") or status.get("serviceRouteObjectCensus")
+    if isinstance(route_census, dict):
+        memory["observedRouteObjects"].extend(_list(route_census.get("objects") or route_census.get("topObjects")))
+    memory["summary"] = {
+        "observedResourceAreaCount": len(memory["observedResourceAreas"]),
+        "observedServiceAnchorCount": len(memory["observedServiceAnchors"]),
+        "observedRouteObjectCount": len(memory["observedRouteObjects"]),
+        "failedWaypointCount": len(memory["failedWaypoints"]),
+        "menuFlipZoneCount": len(memory["menuFlipZones"]),
+        "cameraViewOutcomeCount": len(memory["cameraViewOutcomes"]),
+        "loadedFromFile": bool(loaded.get("lastUpdatedUtc")),
+        "currentSessionOnly": True,
+        "executionUse": "advisory_prior_until_live_verified",
+    }
+    return memory
+
+
+def _debug_evidence_index(session_path: Path | None, limit: int = 10) -> dict[str, Any]:
+    if session_path is None:
+        return {"schema": DEBUG_EVIDENCE_SCHEMA, "sessionPath": None, "visualBundles": [], "latestActionTraces": []}
+    live_dir = session_path / LIVE_DIR
+    bundles_root = live_dir / "debug_bundles"
+    visual_bundles = []
+    if bundles_root.exists():
+        for bundle in sorted(bundles_root.iterdir(), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)[:limit]:
+            if not bundle.is_dir():
+                continue
+            bundle_json = _read_json(bundle / "bundle.json")
+            visual_bundles.append({
+                "bundleDir": str(bundle),
+                "reason": bundle_json.get("reason"),
+                "screenshotPath": bundle_json.get("screenshotPath"),
+                "finalDecision": bundle_json.get("finalDecision"),
+                "classification": bundle_json.get("classification"),
+            })
+    trace_paths = []
+    for name in ("last_action_trace.json", "action_trace.json"):
+        path = live_dir / name
+        if path.exists():
+            trace = _read_json(path)
+            trace_paths.append({
+                "path": str(path),
+                "classification": trace.get("finalClassification"),
+                "proposedAction": trace.get("proposedAction"),
+                "actionIntentType": trace.get("actionIntentType"),
+            })
+    failure_reasons = Counter(
+        str(item.get("reason") or item.get("classification") or "unknown")
+        for item in visual_bundles
+    )
+    return {
+        "schema": DEBUG_EVIDENCE_SCHEMA,
+        "sessionPath": str(session_path),
+        "latestActionTraces": trace_paths,
+        "visualBundles": visual_bundles,
+        "failureReasons": dict(failure_reasons),
+        "screenshots": [item.get("screenshotPath") for item in visual_bundles if item.get("screenshotPath")],
+        "relevantTelemetryFiles": {
+            "overlayDebugState": str(live_dir / "overlay_debug_state.json") if (live_dir / "overlay_debug_state.json").exists() else None,
+            "sessionMemory": str(session_memory_path(session_path)) if session_memory_path(session_path) and session_memory_path(session_path).exists() else None,
+        },
+    }
+
+
+class KnowledgeFabric:
+    def __init__(
+        self,
+        *,
+        world_model_payloads: dict[str, Any] | None = None,
+        daemon_status: dict[str, Any] | None = None,
+        static_library: dict[str, Any] | None = None,
+        session_path: str | Path | None = None,
+        source: str = "in_memory",
+    ) -> None:
+        started = time.perf_counter()
+        self.world_model_payloads = _dict(world_model_payloads)
+        self.daemon_status = _dict(daemon_status)
+        self.session_path = Path(session_path) if session_path else _session_path_from_status(self.daemon_status)
+        self.source = source
+        self.static_library = static_library or load_static_library()
+        self.session_memory = _memory_from_status(self.daemon_status, self.session_path)
+        self.debug_evidence = _debug_evidence_index(self.session_path)
+        self.objects = self._collect_objects()
+        self.index = self._build_index()
+        self.build_time_ms = round((time.perf_counter() - started) * 1000.0, 3)
+
+    @classmethod
+    def from_status(cls, status: dict[str, Any] | None, **kwargs: Any) -> "KnowledgeFabric":
+        raw_status = _dict(status)
+        daemon_status = _daemon_status_from_context(raw_status)
+        payloads = _world_payloads_from_status(daemon_status) or _world_payloads_from_status(raw_status)
+        return cls(world_model_payloads=payloads, daemon_status=daemon_status, source="daemon_status", **kwargs)
+
+    @classmethod
+    def from_snapshot_response(cls, response: dict[str, Any] | None, **kwargs: Any) -> "KnowledgeFabric":
+        payloads = world_model_core.extract_world_model_payloads(_dict(response))
+        return cls(world_model_payloads=payloads, daemon_status={}, source="plugin_snapshot_response", **kwargs)
+
+    def _collect_objects(self) -> list[dict[str, Any]]:
+        payloads = self.world_model_payloads
+        objects: list[dict[str, Any]] = []
+        for key in ("scene_object_census", "resource_object_census", "service_object_census", "route_object_census"):
+            census = _dict(payloads.get(key))
+            for obj in world_model_core.census_objects(census):
+                item = dict(obj)
+                item.setdefault("_knowledgeSource", key)
+                objects.append(item)
+        return _dedupe_objects(objects)
+
+    def _build_index(self) -> dict[str, Any]:
+        plane_counts: Counter[str] = Counter()
+        action_counts: Counter[str] = Counter()
+        name_counts: Counter[str] = Counter()
+        projection_counts: Counter[str] = Counter()
+        by_action: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        by_name_token: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        resource_objects = []
+        service_objects = []
+        route_objects = []
+        for obj in self.objects:
+            plane_counts[str(obj.get("plane", "unknown"))] += 1
+            name = _norm(obj.get("name") or obj.get("targetName") or obj.get("objectName"))
+            if name:
+                name_counts[name] += 1
+                for token in name.replace("/", " ").replace("-", " ").split():
+                    by_name_token[token].append(obj)
+            for action in _actions(obj):
+                normalized = _norm(action)
+                if normalized:
+                    action_counts[normalized] += 1
+                    by_action[normalized].append(obj)
+            projection_counts[_projection_classification(obj)] += 1
+            if obj.get("resourceCandidate") is True:
+                resource_objects.append(obj)
+            if obj.get("serviceObjectCandidate") is True:
+                service_objects.append(obj)
+            if obj.get("routeObjectCandidate") is True:
+                route_objects.append(obj)
+        frontier = _dict(self.world_model_payloads.get("pathing_frontier"))
+        projection_audit = _dict(self.world_model_payloads.get("projection_audit"))
+        view_inputs = _dict(self.world_model_payloads.get("view_quality_inputs"))
+        return {
+            "schema": LIVE_WORLD_INDEX_SCHEMA,
+            "objectCount": len(self.objects),
+            "spatialIndexSummary": {
+                "objectCount": len(self.objects),
+                "planeCounts": dict(plane_counts),
+                "indexedObjectsWithLocation": sum(1 for obj in self.objects if _object_location(obj) is not None),
+            },
+            "objectActionIndexSummary": {
+                "distinctActions": len(action_counts),
+                "actionCounts": dict(action_counts.most_common(25)),
+                "distinctNames": len(name_counts),
+            },
+            "routeObjectIndexSummary": {"count": len(route_objects)},
+            "resourceIndexSummary": {"count": len(resource_objects)},
+            "serviceIndexSummary": {"count": len(service_objects)},
+            "projectionIndexSummary": {
+                "classificationCounts": dict(projection_counts),
+                "projectionAuditAvailable": bool(projection_audit),
+                "projectionCapHit": projection_audit.get("projectionCapHit"),
+            },
+            "collisionFrontierIndexSummary": {
+                "available": bool(frontier),
+                "frontierCount": frontier.get("frontierCount") or frontier.get("candidateCount") or len(_list(frontier.get("frontier"))),
+                "capHit": frontier.get("capHit") or frontier.get("truncated"),
+            },
+            "viewQualityInputSummary": {
+                "available": bool(view_inputs),
+                "resourceCount": view_inputs.get("resourceCount") or len(_list(view_inputs.get("resources"))),
+                "routeCount": view_inputs.get("routeCount") or len(_list(view_inputs.get("routes"))),
+                "serviceCount": view_inputs.get("serviceCount") or len(_list(view_inputs.get("services"))),
+            },
+            "_byAction": by_action,
+            "_byNameToken": by_name_token,
+            "_resourceObjects": resource_objects,
+            "_serviceObjects": service_objects,
+            "_routeObjects": route_objects,
+        }
+
+    def freshness(self) -> dict[str, Any]:
+        quality = world_model_core.world_model_quality(self.world_model_payloads)
+        return {
+            "sourceTick": _source_tick(self.world_model_payloads, self.daemon_status),
+            "worldModelFresh": quality.get("worldModelAvailable") is True and quality.get("worldModelAgeMs") not in (None, ""),
+            "worldModelAgeMs": quality.get("worldModelAgeMs"),
+            "sessionPath": str(self.session_path) if self.session_path else None,
+            "sessionMemoryFresh": session_memory_is_current(self.session_memory, self.session_path),
+            "staticLibraryLoaded": bool(self.static_library.get("summary")),
+        }
+
+    def status(self) -> dict[str, Any]:
+        quality = world_model_core.world_model_quality(self.world_model_payloads)
+        stale_sources = []
+        if quality.get("worldModelAvailable") is not True:
+            stale_sources.append("world_model")
+        if not session_memory_is_current(self.session_memory, self.session_path):
+            stale_sources.append("session_memory")
+        cap_warnings = []
+        for key in ("objectCensusCapHit", "worldModelObjectCensusCapHit", "projectionCapHit", "worldModelProjectionCapHit"):
+            if quality.get(key) is True:
+                cap_warnings.append(key)
+        return {
+            "schema": STATUS_SCHEMA,
+            "status": "WARN" if stale_sources or cap_warnings else "PASS",
+            "generatedAtUtc": utc_now(),
+            "worldModelFresh": quality.get("worldModelAvailable") is True,
+            "worldModelAgeMs": quality.get("worldModelAgeMs"),
+            "sessionMemoryFresh": session_memory_is_current(self.session_memory, self.session_path),
+            "staticLibraryLoaded": bool(self.static_library.get("summary")),
+            "indexesBuilt": True,
+            "queryCapabilities": [
+                "query_world_summary",
+                "query_current_debug_context",
+                "query_objects_near",
+                "query_actions",
+                "query_resource_candidates",
+                "query_service_candidates",
+                "query_route_objects",
+                "query_path_frontier",
+                "query_view_quality",
+                "query_worksite_context",
+                "query_session_memory",
+                "query_debug_evidence",
+                "explain_current_blocker",
+                "explain_next_action_context",
+                "list_available_profiles",
+                "describe_profile",
+                "list_target_classes",
+                "list_known_actions",
+                "list_service_routes",
+                "describe_route",
+                "explain_required_telemetry_for_task",
+                "query_scene_for_new_task_keywords",
+                "suggest_profile_skeleton_from_scene",
+                "list_seen_objects_by_action",
+                "list_seen_objects_by_name",
+                "list_seen_widgets",
+                "list_seen_inventory_items",
+                "export_task_context_bundle",
+                "capture_script_authoring_context",
+                "capture_replay_scenario",
+                "data_quality_report",
+                "coverage_report",
+                "data_source_inventory",
+                "query_coverage_matrix",
+                "external_knowledge_status",
+                "external_lookup_item",
+                "external_lookup_item_id",
+                "external_lookup_object",
+                "external_lookup_area",
+                "external_get_skill_requirement",
+                "probe_task",
+                "handoff_summary",
+            ],
+            "staleSources": stale_sources,
+            "capWarnings": cap_warnings,
+            "performanceStats": {
+                "buildTimeMs": self.build_time_ms,
+                "objectCount": len(self.objects),
+                "indexObjectCount": self.index.get("objectCount"),
+            },
+            "liveWorldIndex": self.live_world_index_summary(),
+            "sessionMemorySummary": self.session_memory.get("summary", {}),
+            "staticLibrarySummary": self.static_library.get("summary", {}),
+            "externalKnowledgeSummary": _external_summary_compact(),
+            "debugEvidenceSummary": {
+                "visualBundleCount": len(_list(self.debug_evidence.get("visualBundles"))),
+                "latestActionTraceCount": len(_list(self.debug_evidence.get("latestActionTraces"))),
+            },
+        }
+
+    def live_world_index_summary(self) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in self.index.items()
+            if not key.startswith("_")
+        }
+
+    def data_source_inventory(self) -> dict[str, Any]:
+        started = time.perf_counter()
+        external_status = external_knowledge.knowledge_status()
+        data = {
+            "sources": [
+                {
+                    "sourceName": "8893 PluginSnapshotEndpoint",
+                    "sourceType": "live",
+                    "producer": "RuneLite plugin HTTP endpoint",
+                    "consumer": "live_core_daemon, Knowledge Fabric, diagnostics",
+                    "schema": "plugin_snapshot_response.v1",
+                    "freshnessField": "latestTick/sourceAgeMs/pluginSnapshotFresh",
+                    "capFields": ["capHit", "truncated", "responseSizing", "pluginSnapshotMaxResponseBytes"],
+                    "runtimeCritical": True,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "oldLivePacketReplacement": "Direct endpoint query replaces live_packets/live-*.ndjson.",
+                    "sampleQuery": "Invoke-RestMethod http://127.0.0.1:8893/health",
+                },
+                {
+                    "sourceName": "WorldModelCache",
+                    "sourceType": "live_loaded_scene",
+                    "producer": "RuneLite Java cache",
+                    "consumer": "PluginSnapshotEndpoint, Knowledge Fabric",
+                    "schema": "world_model_snapshot.v1",
+                    "freshnessField": "worldModelAgeMs/sourceTick",
+                    "capFields": ["objectCensusCapHit", "projectionCapHit", "truncated"],
+                    "runtimeCritical": True,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "python telemetry-viewer\\context_service.py --query current-debug-context",
+                },
+                {
+                    "sourceName": "8890 daemon/context service",
+                    "sourceType": "live_context",
+                    "producer": "live_core_daemon.py/context_service.py",
+                    "consumer": "Codex, executor readiness, diagnostics, MCP adapter",
+                    "schema": "context_status.v1/context_response.v1",
+                    "freshnessField": "daemonFresh/latestTick/clientTickFresh",
+                    "capFields": ["maxCandidates", "maxResponseBytes", "capHit", "truncated"],
+                    "runtimeCritical": True,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "python telemetry-viewer\\context_service.py --query current-debug-context",
+                },
+                {
+                    "sourceName": "client_tick_hot / hover/menu/click proof",
+                    "sourceType": "live_hot",
+                    "producer": "RuneLite plugin",
+                    "consumer": "hover confirmation, blocker explanation, action trace",
+                    "schema": "client_tick_hot.v1",
+                    "freshnessField": "clientTickHotFresh/sourceAgeMs",
+                    "capFields": ["menuTailLimit"],
+                    "runtimeCritical": True,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "get_current_debug_context -> liveStatus/clientTickHot",
+                },
+                {
+                    "sourceName": "overlay_debug_state",
+                    "sourceType": "bounded_debug_latest_state",
+                    "producer": "live_core_daemon overlay writer",
+                    "consumer": "RuneLite debug overlay, visual bundles",
+                    "schema": "telemetry_overlay_debug_state.v1",
+                    "freshnessField": "lastOverlayWriteAgeMs",
+                    "capFields": ["overlayDebugTargetLimit"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": True,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "get_current_debug_context -> overlayHealth",
+                },
+                {
+                    "sourceName": "input_integrity_status",
+                    "sourceType": "bounded_debug_latest_state",
+                    "producer": "input integrity monitor",
+                    "consumer": "readiness, blocker explanation, live safety audit",
+                    "schema": "input_integrity_status.v1",
+                    "freshnessField": "generatedAtUtc/sourceAgeMs",
+                    "capFields": [],
+                    "runtimeCritical": True,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "get_current_debug_context -> inputIntegrity",
+                },
+                {
+                    "sourceName": "visual_debug_bundle",
+                    "sourceType": "explicit_debug_bundle",
+                    "producer": "executor/visual_debug_bundle.py",
+                    "consumer": "Codex visual QA and replay evidence",
+                    "schema": "visual_debug_bundle_summary.v1",
+                    "freshnessField": "createdAt/generatedAtUtc",
+                    "capFields": ["maxDebugScreenshots", "summary caps"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": True,
+                    "canGrowOnDisk": True,
+                    "requiresInternet": False,
+                    "sampleQuery": "get_latest_visual_bundle",
+                },
+                {
+                    "sourceName": "replay_scenario.v1",
+                    "sourceType": "explicit_replay",
+                    "producer": "context_service.py --capture-replay-scenario",
+                    "consumer": "offline Knowledge Fabric replay",
+                    "schema": "replay_scenario.v1",
+                    "freshnessField": "createdAt/sourceTick",
+                    "capFields": ["limit", "maxCandidates"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": True,
+                    "canGrowOnDisk": True,
+                    "requiresInternet": False,
+                    "sampleQuery": "python telemetry-viewer\\context_service.py --replay-scenario <path>",
+                },
+                {
+                    "sourceName": "script_authoring_context.v1",
+                    "sourceType": "explicit_script_authoring",
+                    "producer": "Knowledge Fabric",
+                    "consumer": "Codex future script/profile authoring",
+                    "schema": "script_authoring_context.v1",
+                    "freshnessField": "createdAt",
+                    "capFields": ["limit", "queryTimes", "responseSizes"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": True,
+                    "canGrowOnDisk": True,
+                    "requiresInternet": False,
+                    "sampleQuery": "python telemetry-viewer\\context_service.py --capture-script-authoring-context --profile woodcutting",
+                },
+                {
+                    "sourceName": "session_memory",
+                    "sourceType": "session_memory",
+                    "producer": "Knowledge Fabric/session observation writers",
+                    "consumer": "Codex planning, advisory anchors",
+                    "schema": "session_memory.v1",
+                    "freshnessField": "sessionPath/lastUpdatedTick",
+                    "capFields": ["ring buffer limits"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": True,
+                    "requiresInternet": False,
+                    "sampleQuery": "search_session_memory",
+                },
+                {
+                    "sourceName": "static project libraries",
+                    "sourceType": "static_library",
+                    "producer": "target_library.json, target_profiles.json, service_routes.json",
+                    "consumer": "Knowledge Fabric, task probe, script authoring",
+                    "schema": "static_knowledge_library.v1",
+                    "freshnessField": "versionHash",
+                    "capFields": ["query limit"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "search_static_library",
+                },
+                {
+                    "sourceName": "external OSRS knowledge cache",
+                    "sourceType": "external_advisory_cache",
+                    "producer": "external_knowledge.py explicit refresh/manual seeds",
+                    "consumer": "task probe, script authoring, unknown ID/name resolver",
+                    "schema": "external_knowledge_sources.v1",
+                    "freshnessField": "lastRefresh/cacheAge/fetchedAt",
+                    "capFields": ["maxCacheMb", "query limit"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": True,
+                    "requiresInternet": "only for explicit refresh/search",
+                    "sampleQuery": "python telemetry-viewer\\context_service.py --external-knowledge-status",
+                },
+                {
+                    "sourceName": "maintenance/disk report",
+                    "sourceType": "maintenance",
+                    "producer": "maintenance.py",
+                    "consumer": "disk cleanup, legacy packet archive audit",
+                    "schema": "legacy_live_packets_report.v1",
+                    "freshnessField": "generatedAtUtc/report time",
+                    "capFields": ["top"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "python telemetry-viewer\\maintenance.py --live-packets-report",
+                },
+            ],
+            "externalKnowledge": _dict(external_status.get("data")),
+            "livePacketArchiveRemoved": True,
+            "replacementForLivePackets": {
+                "currentState": "get_current_debug_context",
+                "worldAndCandidates": "WorldModelCache + Knowledge Fabric queries",
+                "currentBlocker": "explain_current_blocker",
+                "historicalScenario": "replay_scenario.v1",
+                "scriptWriting": "script_authoring_context.v1",
+                "debugEvidence": "visual_debug_bundle",
+            },
+        }
+        return _query_response(DATA_SOURCE_INVENTORY_SCHEMA, data, started=started, source="knowledge_fabric", freshness=self.freshness())
+
+    def query_coverage_matrix(self) -> dict[str, Any]:
+        started = time.perf_counter()
+        rows = [
+            ("What is the player doing?", "get_current_debug_context", "get_current_debug_context", "daemon status/activity/client_tick_hot", "knowledge_fabric_current_debug_context.v1", "high if daemon fresh", "loaded-scene stale", "test_knowledge_fabric.py"),
+            ("Where is the player?", "get_current_debug_context", "osrs://debug/current-context", "plugin baseline/player location", "location summary", "high if source is plugin_snapshot_baseline_player", "proxy fallback confidence lower", "test_context_service.py"),
+            ("What is blocking progress?", "explain_current_blocker", "explain_current_blocker", "readiness, trace, world model, pathing", "knowledge_fabric_current_blocker_explanation.v1", "medium-high", "unknown if evidence absent", "test_knowledge_fabric.py"),
+            ("What resource targets exist?", "query_resource_candidates", "query_resource_candidates", "resource_object_census + static/external requirements", "knowledge_fabric_resource_candidates.v1", "high if world model fresh", "projection caps", "test_knowledge_fabric.py"),
+            ("What service objects exist?", "query_service_candidates", "query_service_candidates", "service_object_census + service_routes", "knowledge_fabric_service_candidates.v1", "high if loaded scene contains service", "static anchors advisory", "test_knowledge_fabric.py"),
+            ("What route objects exist?", "query_route_objects", "query_route_objects", "route_object_census", "knowledge_fabric_route_objects.v1", "high if loaded scene fresh", "off-scene objects unavailable", "test_knowledge_fabric.py"),
+            ("What pathing frontier exists?", "query_path_frontier", "query_path_frontier", "collision/pathing frontier", "knowledge_fabric_path_frontier.v1", "medium-high", "collision unavailable", "test_knowledge_fabric.py"),
+            ("What camera/view problem exists?", "query_view_quality", "query_view_quality", "view_quality_inputs/projection audit", "knowledge_fabric_view_quality.v1", "medium", "occlusion is heuristic", "test_knowledge_fabric.py"),
+            ("What widgets/dialogue/bank UI are open?", "list_seen_widgets", "list_seen_widgets", "daemon widget/bank/dialogue state", "knowledge_fabric_seen_widgets.v1", "medium", "widget sections may be compact", "test_knowledge_fabric.py"),
+            ("What target is executable?", "get_current_debug_context", "get_current_debug_context", "action proposal/readiness/hover", "actionReadiness/actionProposal", "high only after hover evidence", "must not rely on static/external only", "readiness tests"),
+            ("What action was actually clicked?", "get_latest_action_trace", "get_latest_action_trace", "action trace/MenuOptionClicked", "knowledge_fabric_latest_action_trace.v1", "high if trace present", "no click trace if skipped", "test_knowledge_fabric.py"),
+            ("What data is stale/capped/missing?", "data-quality-report", "get_data_quality_report", "world model + query perf + disk/external status", "data_quality_report.v1", "high", "requires current context", "test_knowledge_fabric.py"),
+            ("What item/object/NPC ID is this?", "external lookup commands", "external_lookup_item_id/external_lookup_object", "external cache/static library", "external_*_lookup.v1", "advisory", "cache miss until refresh", "test_knowledge_fabric.py"),
+            ("What wiki/static fact explains this?", "external-search-wiki/external lookup", "external_search_wiki", "external cache/API explicit refresh", "external_wiki_search.v1", "advisory", "internet disabled unless explicit", "test_knowledge_fabric.py"),
+            ("What should a future script profile include?", "probe-task/export_task_context_bundle", "probe_task", "scene + static + external cache", "task_probe_report.v1", "medium", "needs loaded scene for best suggestions", "test_knowledge_fabric.py"),
+        ]
+        data = {
+            "rows": [
+                {
+                    "question": question,
+                    "directQuery": direct,
+                    "mcpToolOrResource": mcp,
+                    "sourceData": source_data,
+                    "expectedSchema": schema,
+                    "confidence": confidence,
+                    "currentGaps": gaps,
+                    "testCoverage": tests,
+                }
+                for question, direct, mcp, source_data, schema, confidence, gaps, tests in rows
+            ],
+            "defaultFirstQuery": "get_current_debug_context",
+            "liveTruthRule": "RuneLite/8893/WorldModel/8890 remain live truth. External knowledge is advisory enrichment only.",
+        }
+        return _query_response(QUERY_COVERAGE_SCHEMA, data, started=started, source="knowledge_fabric_docs", freshness=self.freshness())
+
+    def query_world_summary(self) -> dict[str, Any]:
+        started = time.perf_counter()
+        data = {
+            "worldModelSummary": _dict(self.world_model_payloads.get("world_model_summary")),
+            "liveWorldIndex": self.live_world_index_summary(),
+            "staticLibrary": self.static_library.get("summary", {}),
+            "sessionMemory": self.session_memory.get("summary", {}),
+        }
+        return _query_response("knowledge_fabric_world_summary.v1", data, started=started, source=self.source, freshness=self.freshness())
+
+    def query_objects_near(
+        self,
+        location: dict[str, Any] | None,
+        radius: float = 12,
+        filters: dict[str, Any] | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        filters = _dict(filters)
+        plane = _int(filters.get("plane") if filters.get("plane") is not None else _dict(location).get("plane"))
+        name_contains = _norm(filters.get("nameContains"))
+        action_contains = _norm(filters.get("actionContains"))
+        only_kinds = {str(item).lower() for item in _list(filters.get("objectKinds"))}
+        matches = []
+        for obj in self.objects:
+            if not _plane_matches(obj, plane):
+                continue
+            if name_contains and name_contains not in _norm(obj.get("name") or obj.get("targetName") or obj.get("objectName")):
+                continue
+            if action_contains and action_contains not in _action_text(obj):
+                continue
+            if only_kinds:
+                kind = _norm(obj.get("kind") or obj.get("targetType") or obj.get("objectKind"))
+                if kind not in only_kinds:
+                    continue
+            distance = _distance_tiles(_object_location(obj), location)
+            if location is not None and (distance is None or distance > float(radius)):
+                continue
+            compact = _compact_object(obj)
+            compact["distanceToQuery"] = distance
+            matches.append(compact)
+        matches.sort(key=lambda item: (item.get("distanceToQuery") is None, item.get("distanceToQuery") or 999999))
+        capped, cap_hit = _cap_items(matches, limit)
+        return _query_response(
+            "knowledge_fabric_objects_near.v1",
+            {"objects": capped, "count": len(matches), "queryLocation": location, "radiusTiles": radius},
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def query_actions(
+        self,
+        action_contains: str,
+        *,
+        location: dict[str, Any] | None = None,
+        radius: float | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        needle = _norm(action_contains)
+        matches = []
+        for obj in self.objects:
+            if needle and needle not in _action_text(obj):
+                continue
+            distance = _distance_tiles(_object_location(obj), location)
+            if location is not None and radius is not None and (distance is None or distance > float(radius)):
+                continue
+            compact = _compact_object(obj)
+            compact["distanceToQuery"] = distance
+            matches.append(compact)
+        matches.sort(key=lambda item: (item.get("distanceToQuery") is None, item.get("distanceToQuery") or 999999))
+        capped, cap_hit = _cap_items(matches, limit)
+        return _query_response(
+            "knowledge_fabric_action_query.v1",
+            {"objects": capped, "count": len(matches), "actionContains": action_contains},
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def query_resource_candidates(
+        self,
+        profile: str = "woodcutting",
+        location: dict[str, Any] | None = None,
+        worksite: dict[str, Any] | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        worksite = _dict(worksite)
+        anchor = _point(worksite.get("anchor") or worksite.get("worldLocation")) or location
+        radius = _float(worksite.get("radiusTiles")) or None
+        matches = []
+        oak_rejected = 0
+        for obj in self.index["_resourceObjects"]:
+            distance = _distance_tiles(_object_location(obj), location)
+            worksite_distance = _distance_tiles(_object_location(obj), anchor)
+            if anchor is not None and radius is not None and (worksite_distance is None or worksite_distance > radius):
+                continue
+            compact = _compact_object(obj)
+            compact["externalKnowledge"] = external_knowledge.enrich_name(str(compact.get("name") or ""))
+            compact["distanceToQuery"] = distance
+            compact["worksiteDistanceTiles"] = worksite_distance
+            level_status = world_model_core.target_level_status(obj)
+            compact.update({k: v for k, v in level_status.items() if v is not None})
+            if compact.get("visibleButNotExecutable") is True:
+                compact["executable"] = False
+                compact["rejectionReason"] = compact.get("targetTemporarilyLockedReason") or "insufficient_level"
+                if "oak" in _norm(compact.get("name")):
+                    oak_rejected += 1
+            else:
+                projection = _projection(obj)
+                compact["executable"] = projection.get("actionableByCanvas") is True
+            score = 0.0
+            if compact["executable"]:
+                score += 50.0
+            if "tree" in _norm(compact.get("name")) and "oak" not in _norm(compact.get("name")):
+                score += 12.0
+            if worksite_distance is not None:
+                score -= worksite_distance
+            edge = _float(_projection(obj).get("edgeDistancePx"))
+            if edge is not None:
+                score += min(edge, 80.0) / 10.0
+            if compact.get("visibleButNotExecutable") is True:
+                score -= 100.0
+            compact["score"] = round(score, 3)
+            matches.append(compact)
+        matches.sort(key=lambda item: item.get("score", 0), reverse=True)
+        capped, cap_hit = _cap_items(matches, limit)
+        return _query_response(
+            "knowledge_fabric_resource_candidates.v1",
+            {
+                "profile": profile,
+                "objects": capped,
+                "count": len(matches),
+                "oakRejectedInsufficientLevelCount": oak_rejected,
+                "worksite": worksite or None,
+            },
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def query_service_candidates(
+        self,
+        service_type: str = "bank",
+        route_context: dict[str, Any] | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        service_type_norm = _norm(service_type)
+        matches = []
+        for obj in self.index["_serviceObjects"]:
+            text = " ".join((_norm(obj.get("serviceObjectType")), _norm(obj.get("name")), _action_text(obj)))
+            service_matches = service_type_norm in text or service_type_norm == "any"
+            if service_type_norm == "bank" and "deposit" in text:
+                service_matches = True
+            if service_type_norm and not service_matches:
+                continue
+            compact = _compact_object(obj)
+            compact["sourceConfidence"] = "live_loaded_scene"
+            matches.append(compact)
+        for anchor in _list(self.session_memory.get("observedServiceAnchors")):
+            if not isinstance(anchor, dict):
+                continue
+            matches.append({
+                "name": anchor.get("targetName") or anchor.get("name") or anchor.get("label"),
+                "worldLocation": _object_location(anchor),
+                "sourceConfidence": "session_observed_anchor",
+                "advisoryOnly": True,
+                "source": "session_memory",
+            })
+        for anchor in _list(self.static_library.get("serviceAnchors")):
+            matches.append({
+                "name": anchor.get("label"),
+                "worldLocation": anchor.get("worldLocation"),
+                "sourceConfidence": "static_advisory_anchor",
+                "advisoryOnly": True,
+                "source": "static_library",
+                "routeId": anchor.get("routeId"),
+            })
+        capped, cap_hit = _cap_items(matches, limit)
+        return _query_response(
+            "knowledge_fabric_service_candidates.v1",
+            {"serviceType": service_type, "routeContext": route_context or {}, "objects": capped, "count": len(matches)},
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def query_route_objects(self, route_context: dict[str, Any] | None = None, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        matches = [_compact_object(obj) for obj in self.index["_routeObjects"]]
+        for obj in matches:
+            obj["staticPriorExecutable"] = False
+            obj["executionRule"] = "live object still requires projection and hover confirmation"
+        capped, cap_hit = _cap_items(matches, limit)
+        return _query_response(
+            "knowledge_fabric_route_objects.v1",
+            {"routeContext": route_context or {}, "objects": capped, "count": len(matches)},
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def query_path_frontier(self, goal: dict[str, Any] | None = None, constraints: dict[str, Any] | None = None, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        frontier = dict(_dict(self.world_model_payloads.get("pathing_frontier")))
+        candidates = _list(frontier.get("frontier") or frontier.get("candidates") or frontier.get("items"))
+        capped_candidates, cap_hit = _cap_items([dict(item) for item in candidates if isinstance(item, dict)], limit)
+        if candidates:
+            frontier["frontier"] = capped_candidates
+        route_context = _compact_route_context(self.daemon_status)
+        latest_bundle = self._latest_visual_bundle_summary()
+        wall_reasons = []
+        if route_context.get("wallLoopDetected") or route_context.get("wallHuggingDetected"):
+            wall_reasons.append("daemon_status_wall_hugging")
+        if "wall_hugging" in _norm(latest_bundle.get("reason")) or "wall_hugging" in _norm(latest_bundle.get("classification")):
+            wall_reasons.append("latest_debug_bundle_wall_hugging")
+        status_pathing = {
+            "currentRouteNode": route_context.get("currentNodeId"),
+            "currentRouteEdge": route_context.get("nextEdgeType"),
+            "routeStepIndex": route_context.get("currentStepIndex"),
+            "nextWaypointTile": route_context.get("nextWaypointTile"),
+            "pathTargetTile": route_context.get("pathTargetTile"),
+            "destinationTile": route_context.get("destinationTile"),
+            "predictedPathTiles": route_context.get("predictedPathTiles"),
+            "rejectedApproachTileReasons": route_context.get("rejectedApproachTileReasons"),
+        }
+        data = {
+            "goal": goal or route_context.get("destinationTile") or {},
+            "constraints": constraints or {},
+            "frontier": frontier,
+            "routeContext": route_context,
+            "statusPathing": status_pathing,
+            "wallHuggingRisk": {
+                "status": "WARN" if wall_reasons else "PASS",
+                "score": 0.85 if wall_reasons else 0.0,
+                "reasons": wall_reasons,
+                "latestDebugBundle": latest_bundle,
+            },
+            "routeObjectSummary": {
+                "visible": self.daemon_status.get("serviceRouteObjectsVisible"),
+                "actionable": self.daemon_status.get("serviceRouteObjectsActionable"),
+                "selectedObjectPresent": self.daemon_status.get("serviceRouteSelectedObjectPresent"),
+                "selectedObjectAction": self.daemon_status.get("serviceRouteSelectedObjectAction"),
+                "rejectedReason": self.daemon_status.get("serviceRouteObjectRejectedReason"),
+            },
+            "frontierSource": "world_model_collision" if frontier else "daemon_status_pathing_context",
+        }
+        return _query_response(
+            "knowledge_fabric_path_frontier.v1",
+            data,
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            cap_hit=cap_hit or bool(frontier.get("capHit") or frontier.get("truncated")),
+            truncated=cap_hit,
+            status="PASS" if frontier else "WARN",
+            warnings=[] if frontier else ["pathing frontier unavailable"],
+        )
+
+    def query_view_quality(self, intent: str = "unknown", goal: dict[str, Any] | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        view = dict(_dict(self.world_model_payloads.get("view_quality_inputs")))
+        resources = self.query_resource_candidates(limit=10)["data"]
+        service_objects = _list(_dict(self.query_service_candidates(limit=20).get("data")).get("objects"))
+        projection = _dict(self.world_model_payloads.get("projection_audit"))
+        world_summary = _dict(self.world_model_payloads.get("world_model_summary"))
+        metadata = _dict(world_summary.get("metadata"))
+        overlay_summary = _dict(self.daemon_status.get("overlaySummary") or self.daemon_status.get("intentOverlaySummary"))
+        camera_reasons = []
+        if self.daemon_status.get("cameraReacquireRecommended") is True:
+            camera_reasons.append("daemon_camera_reacquire_recommended")
+        if overlay_summary.get("edgeClippedCandidates"):
+            camera_reasons.append("edge_clipped_candidates")
+        if projection.get("projectionCapHit") is True:
+            camera_reasons.append("projection_cap_hit")
+        live_service_objects = [obj for obj in service_objects if _dict(obj).get("advisoryOnly") is not True]
+        service_actionable = [
+            obj for obj in live_service_objects
+            if _dict(obj.get("serviceTargetExposure")).get("usableExposureThresholdMet") is True
+        ]
+        service_offscreen = [
+            obj for obj in live_service_objects
+            if str(_dict(obj).get("projectionClassification") or "") == "offscreen"
+            or _dict(_dict(obj).get("projection")).get("onScreen") is False
+        ]
+        service_edge = [
+            obj for obj in live_service_objects
+            if str(_dict(obj).get("projectionClassification") or "") == "edge_clipped"
+            or _dict(obj.get("serviceTargetExposure")).get("edgeSliverVisible") is True
+            or (
+                _dict(obj.get("serviceTargetExposure")).get("edgeDistancePx") is not None
+                and (_float(_dict(obj.get("serviceTargetExposure")).get("edgeDistancePx")) or 0.0) < SERVICE_MIN_EDGE_DISTANCE_PX
+            )
+        ]
+        service_visible_not_usable = [
+            obj for obj in live_service_objects
+            if _dict(obj.get("serviceTargetExposure")).get("safeClickAvailable") is True
+            and _dict(obj.get("serviceTargetExposure")).get("usableExposureThresholdMet") is not True
+        ]
+        selected_service = (
+            service_actionable[0]
+            if service_actionable
+            else service_visible_not_usable[0]
+            if service_visible_not_usable
+            else service_edge[0]
+            if service_edge
+            else service_offscreen[0]
+            if service_offscreen
+            else live_service_objects[0]
+            if live_service_objects
+            else {}
+        )
+        target_view_state = _dict(_dict(selected_service).get("targetViewState")) or _dict(
+            _dict(_dict(selected_service).get("serviceTargetExposure")).get("targetViewState")
+        )
+        if selected_service and not target_view_state:
+            viewport = dict(_dict(metadata.get("viewport")))
+            if metadata.get("cameraYaw") is not None and viewport.get("cameraYaw") is None:
+                viewport["cameraYaw"] = metadata.get("cameraYaw")
+            if metadata.get("cameraPitch") is not None and viewport.get("cameraPitch") is None:
+                viewport["cameraPitch"] = metadata.get("cameraPitch")
+            player_location = (
+                _point(self.daemon_status.get("playerLocation"))
+                or _point(_dict(self.daemon_status.get("location")).get("worldLocation"))
+                or _point(_dict(self.daemon_status.get("worldLocation")))
+            )
+            target_view_state = target_view_core.build_target_view_state(
+                selected_service,
+                target_kind="service_object",
+                player_location=player_location,
+                expected_action="Bank",
+                target_source="live_world_model",
+                target_route_relevant=True,
+                target_action_relevant=True,
+                safe_aimpoint=_dict(selected_service.get("safeAimPoint")),
+                viewport=viewport,
+                source_canvas_size=viewport,
+                status=self.daemon_status,
+            )
+        service_recovery_recommended = bool(live_service_objects and not service_actionable and (service_offscreen or service_edge or service_visible_not_usable))
+        if service_recovery_recommended:
+            camera_reasons.append("service_object_loaded_offscreen")
+        if service_actionable:
+            service_view_classification = "good_service_view"
+        elif any(_dict(obj.get("serviceTargetExposure")).get("edgeSliverVisible") is True for obj in service_edge):
+            service_view_classification = "service_object_edge_sliver"
+        elif service_visible_not_usable:
+            service_view_classification = "service_object_visible_but_not_usable"
+        elif service_offscreen:
+            service_view_classification = "service_object_loaded_offscreen"
+        elif service_edge:
+            service_view_classification = "service_object_edge_clipped"
+        elif live_service_objects:
+            service_view_classification = "poor_service_projection"
+        else:
+            service_view_classification = "service_object_not_loaded"
+        data = {
+            "intent": intent,
+            "goal": goal or {},
+            "camera": {
+                "yaw": _first_present(metadata.get("cameraYaw"), self.daemon_status.get("cameraYaw")),
+                "pitch": _first_present(metadata.get("cameraPitch"), self.daemon_status.get("cameraPitch")),
+            },
+            "currentViewGoal": intent,
+            "viewQualityInputs": view,
+            "projectionAudit": projection,
+            "routeWaypointVisibility": {
+                "navigationWaypointRequired": self.daemon_status.get("navigationWaypointRequired"),
+                "nextWaypointTile": self.daemon_status.get("pathingNextWaypointTile"),
+                "pathingReason": self.daemon_status.get("pathingReason"),
+                "edgeRouteClicksRejected": self.daemon_status.get("edgeRouteClicksRejected"),
+            },
+            "routeObjectVisibility": {
+                "visible": self.daemon_status.get("serviceRouteObjectsVisible"),
+                "actionable": self.daemon_status.get("serviceRouteObjectsActionable"),
+                "selectedObjectPresent": self.daemon_status.get("serviceRouteSelectedObjectPresent"),
+            },
+            "serviceObjectVisibility": {
+                "visible": self.daemon_status.get("serviceObjectsVisible"),
+                "actionable": self.daemon_status.get("serviceObjectsActionable"),
+                "candidateCount": self.daemon_status.get("serviceCandidateCount"),
+                "loadedSceneCount": len(live_service_objects),
+                "actionableByCanvasCount": len(service_actionable),
+                "offscreenCount": len(service_offscreen),
+                "edgeClippedCount": len(service_edge),
+                "visibleButNotUsableCount": len(service_visible_not_usable),
+                "selectedServiceObject": selected_service or None,
+            },
+            "serviceViewScore": {
+                "schema": "service_view_score.v1",
+                "loadedServiceObjects": len(live_service_objects),
+                "actionableServiceObjects": len(service_actionable),
+                "offscreenServiceObjects": len(service_offscreen),
+                "edgeClippedServiceObjects": len(service_edge),
+                "visibleButNotUsableServiceObjects": len(service_visible_not_usable),
+                "score": (
+                    100
+                    if service_actionable
+                    else max(
+                        [
+                            int(_dict(obj.get("serviceTargetExposure")).get("usableExposureScore") or 0)
+                            for obj in live_service_objects
+                        ]
+                        or [0]
+                    )
+                    if live_service_objects
+                    else 0
+                ),
+            },
+            "serviceViewClassification": service_view_classification,
+            "recommendedServiceCameraAction": "camera_reacquire_service_target" if service_recovery_recommended else None,
+            "serviceObjectProjectionStatus": _dict(selected_service).get("projectionClassification") if selected_service else None,
+            "serviceObjectHoverStatus": "requires_hover_confirmation" if service_actionable else "not_hover_ready",
+            "serviceObjectVisibleArea": _dict(_dict(selected_service).get("serviceTargetExposure")).get("visibleAreaPx") if selected_service else None,
+            "serviceObjectEdgeDistance": _dict(_dict(selected_service).get("serviceTargetExposure")).get("edgeDistancePx") if selected_service else None,
+            "serviceObjectCentrality": _dict(_dict(selected_service).get("serviceTargetExposure")).get("centralityScore") if selected_service else None,
+            "serviceViewRecoveryAvailable": bool(live_service_objects),
+            "serviceViewRecoveryRecommendedReason": (
+                "service_object_visible_but_not_usable"
+                if service_visible_not_usable
+                else "service_object_loaded_but_not_actionable"
+                if service_recovery_recommended
+                else None
+            ),
+            "targetViewScore": target_view_state.get("usableExposureScore"),
+            "targetViewClassification": target_view_state.get("viewQualityClassification") or (
+                "needs_target_camera_recovery" if service_recovery_recommended else "target_not_loaded"
+            ),
+            "targetKind": target_view_state.get("targetKind") or ("service_object" if selected_service else None),
+            "targetViewPolicy": target_view_state.get("targetViewPolicy"),
+            "recommendedCameraAction": "camera_reacquire_target" if service_recovery_recommended else None,
+            "targetVisibility": {
+                "onScreen": target_view_state.get("currentlyOnScreen"),
+                "offscreen": target_view_state.get("currentlyOffscreen"),
+                "edgeSliver": target_view_state.get("edgeSliverVisible"),
+                "usableExposure": target_view_state.get("usableExposureThresholdMet"),
+            } if target_view_state else {},
+            "targetProjectionStatus": target_view_state.get("currentProjectionStatus"),
+            "targetHoverStatus": target_view_state.get("hoverTopOption") or ("requires_hover_confirmation" if service_actionable else "not_hover_ready"),
+            "targetVisibleArea": target_view_state.get("visibleAreaPx"),
+            "targetEdgeDistance": target_view_state.get("edgeDistancePx"),
+            "targetCentrality": target_view_state.get("centralityScore"),
+            "targetBearing": target_view_state.get("targetBearing"),
+            "targetYawError": target_view_state.get("yawErrorToTarget"),
+            "cameraResponseCalibration": target_view_state.get("cameraResponseCalibration") or target_view_core.camera_response_calibration_from_status(self.daemon_status),
+            "targetViewRecoveryAvailable": bool(live_service_objects),
+            "targetViewRecoveryRecommendedReason": (
+                target_view_state.get("cameraExposureReason")
+                if target_view_state.get("shouldAttemptCameraExposure") is True
+                else None
+            ),
+            "resourceCandidateSummary": {
+                "count": resources.get("count"),
+                "top": resources.get("objects", [])[:3],
+            },
+            "visibilityCounts": {
+                "safeAimpoints": self.daemon_status.get("safeAimpoints") or overlay_summary.get("safeAimpoints"),
+                "edgeClippedCandidates": self.daemon_status.get("edgeClippedCandidates") or overlay_summary.get("edgeClippedCandidates"),
+                "offscreenCandidates": self.daemon_status.get("offscreenCandidates") or overlay_summary.get("offscreenCandidates"),
+                "occludedCandidates": self.daemon_status.get("occludedCandidates") or overlay_summary.get("occludedCandidates"),
+            },
+            "cameraRecommendation": {
+                "recommended": bool(camera_reasons),
+                "reasons": camera_reasons,
+                "minimapFallbackAvailable": self.daemon_status.get("minimapProjectionAvailable"),
+                "minimapFallbackDeferred": self.daemon_status.get("minimapFallbackDeferred"),
+            },
+            "latestVisualBundle": self._latest_visual_bundle_summary(),
+        }
+        return _query_response(
+            "knowledge_fabric_view_quality.v1",
+            data,
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            status="PASS" if view or projection or resources.get("count") else "WARN",
+            warnings=[] if view or projection or resources.get("count") else ["view quality inputs unavailable"],
+        )
+
+    def query_worksite_context(self, profile: str = "woodcutting") -> dict[str, Any]:
+        started = time.perf_counter()
+        resource_areas = _list(self.session_memory.get("observedResourceAreas"))
+        resource_query = self.query_resource_candidates(profile=profile, limit=25)
+        objects = _list(_dict(resource_query.get("data")).get("objects"))
+        locations = [_point(obj.get("worldLocation")) for obj in objects if _point(obj.get("worldLocation"))]
+        centroid = None
+        if locations:
+            centroid = {
+                "worldX": round(sum(float(item["worldX"]) for item in locations) / len(locations), 2),
+                "worldY": round(sum(float(item["worldY"]) for item in locations) / len(locations), 2),
+                "plane": locations[0].get("plane"),
+            }
+        return _query_response(
+            "knowledge_fabric_worksite_context.v1",
+            {
+                "profile": profile,
+                "observedResourceAreas": resource_areas[:10],
+                "visibleResourceCandidateCount": len(objects),
+                "candidateClusterCentroid": centroid,
+                "worksiteLeashRule": "prefer live basic Tree/Dead tree inside session/static worksite; static anchors are advisory",
+            },
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+        )
+
+    def query_session_memory(self, kind: str | None = None, filters: dict[str, Any] | None = None, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        filters = _dict(filters)
+        items: list[dict[str, Any]] = []
+        keys = [
+            "observedResourceAreas",
+            "observedServiceAnchors",
+            "observedRouteObjects",
+            "successfulWaypoints",
+            "failedWaypoints",
+            "menuFlipZones",
+            "cameraViewOutcomes",
+            "learnedAreaLabels",
+        ]
+        if kind:
+            normalized = _norm(kind)
+            keys = [key for key in keys if normalized in key.lower()]
+        for key in keys:
+            for item in _list(self.session_memory.get(key)):
+                if isinstance(item, dict):
+                    payload = dict(item)
+                    payload["_memoryKind"] = key
+                    items.append(payload)
+        contains = _norm(filters.get("contains"))
+        if contains:
+            items = [item for item in items if contains in json.dumps(item, default=str).lower()]
+        capped, cap_hit = _cap_items(items, limit)
+        return _query_response(
+            "knowledge_fabric_session_memory_query.v1",
+            {
+                "sessionMemory": {k: self.session_memory.get(k) for k in ("schema", "sessionPath", "lastUpdatedTick", "summary")},
+                "items": capped,
+                "count": len(items),
+                "canUseForExecution": False,
+                "executionRule": "session memory is advisory until a live target verifies it",
+            },
+            started=started,
+            source="session_memory",
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def query_debug_evidence(self, reason: str | None = None, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        bundles = [item for item in _list(self.debug_evidence.get("visualBundles")) if isinstance(item, dict)]
+        if reason:
+            needle = _norm(reason)
+            bundles = [item for item in bundles if needle in _norm(item.get("reason")) or needle in _norm(item.get("classification"))]
+        capped, cap_hit = _cap_items(bundles, limit)
+        data = dict(self.debug_evidence)
+        data["visualBundles"] = capped
+        data["visualBundleCount"] = len(bundles)
+        return _query_response(
+            "knowledge_fabric_debug_evidence_query.v1",
+            data,
+            started=started,
+            source="debug_bundles",
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def _latest_visual_bundle_summary(self) -> dict[str, Any]:
+        bundles = [item for item in _list(self.debug_evidence.get("visualBundles")) if isinstance(item, dict)]
+        return dict(bundles[0]) if bundles else {}
+
+    def _latest_action_trace_summary(self) -> dict[str, Any]:
+        traces = [item for item in _list(self.debug_evidence.get("latestActionTraces")) if isinstance(item, dict)]
+        return dict(traces[0]) if traces else {}
+
+    def _readiness_report(self) -> dict[str, Any]:
+        try:
+            import live_readiness_core
+
+            report = live_readiness_core.build_readiness_report(daemon_status=self.daemon_status)
+            return report if isinstance(report, dict) else {}
+        except Exception as error:  # noqa: BLE001
+            return {"schema": "live_readiness_unavailable.v1", "status": "WARN", "error": f"{type(error).__name__}: {error}"}
+
+    def _action_proposal(self) -> dict[str, Any]:
+        try:
+            from input_control.action_proposal import build_action_proposal
+
+            status = dict(self.daemon_status)
+            if self.world_model_payloads and not status.get("worldModelPayloads"):
+                status["worldModelPayloads"] = self.world_model_payloads
+            if self.world_model_payloads and not status.get("worldModelCameraViewport"):
+                viewport = _dict(world_model_core.status_fields(self.world_model_payloads).get("worldModelCameraViewport"))
+                if viewport:
+                    status["worldModelCameraViewport"] = viewport
+            proposal = build_action_proposal(status)
+            payload = proposal.to_dict() if hasattr(proposal, "to_dict") else {}
+            return payload if isinstance(payload, dict) else {}
+        except Exception as error:  # noqa: BLE001
+            return {"schema": "action_proposal_unavailable.v1", "status": "WARN", "error": f"{type(error).__name__}: {error}"}
+
+    def _input_integrity_summary(self) -> dict[str, Any]:
+        live_input = _dict(self.daemon_status.get("liveInput"))
+        monitor = _dict(live_input.get("monitor") or self.daemon_status.get("inputIntegrityStatus"))
+        if not monitor and self.session_path is not None:
+            path = self.session_path / LIVE_DIR / "input_integrity_status.json"
+            if path.exists():
+                monitor = _read_json(path)
+        if not monitor:
+            local_path = Path("interaction_geometry") / "live" / "input_integrity_status.json"
+            if local_path.exists():
+                monitor = _read_json(local_path)
+        flags = _dict(monitor.get("injectionFlags"))
+        backend = _dict(monitor.get("backend"))
+        return {
+            "status": monitor.get("status"),
+            "monitorPass": monitor.get("monitorPass"),
+            "monitorAvailable": monitor.get("monitorAvailable"),
+            "expectedVidPidMatched": monitor.get("expectedVidPidMatched"),
+            "injectedEvents": monitor.get("injectedEvents")
+            if monitor.get("injectedEvents") is not None
+            else (_int(flags.get("mouseInjectedCount")) or 0) + (_int(flags.get("keyboardInjectedCount")) or 0),
+            "lowerIlInjectedEvents": monitor.get("lowerIlInjectedEvents")
+            if monitor.get("lowerIlInjectedEvents") is not None
+            else (_int(flags.get("mouseLowerIlInjectedCount")) or 0) + (_int(flags.get("keyboardLowerIlInjectedCount")) or 0),
+            "directBackendBypassCount": backend.get("directBackendBypassCount") or self.daemon_status.get("directBackendBypassCount"),
+            "lastArduinoEventAgeMs": monitor.get("lastArduinoEventAgeMs"),
+            "warnings": _list(monitor.get("warnings")),
+            "blockers": _list(monitor.get("blockers")),
+        }
+
+    def _bootstrap_liveness_summary(self) -> dict[str, Any]:
+        hot = _dict(self.daemon_status.get("clientTickHot"))
+        game_state = _first_present(hot.get("gameState"), self.daemon_status.get("gameState"))
+        latest_tick = _first_present(self.daemon_status.get("latestTick"), hot.get("gameTickAtSample"))
+        quality = world_model_core.world_model_quality(self.world_model_payloads)
+        object_count = len(self.objects)
+        client_tick_fresh = _client_tick_fresh(self.daemon_status)
+        world_fresh = quality.get("worldModelAvailable") is True
+        loaded_scene_verified = bool(
+            str(game_state or "").upper() == "LOGGED_IN"
+            and latest_tick is not None
+            and world_fresh
+            and object_count > 0
+            and client_tick_fresh
+        )
+        stale_logged_in_no_scene = bool(str(game_state or "").upper() == "LOGGED_IN" and not loaded_scene_verified)
+        if loaded_scene_verified:
+            state = "loaded_scene"
+        elif str(game_state or "").upper() == "LOGIN_SCREEN":
+            state = "login_screen"
+        elif stale_logged_in_no_scene:
+            state = "stale_logged_in_no_scene"
+        elif self.daemon_status:
+            state = "plugin_endpoint_down" if not world_fresh else "loading"
+        else:
+            state = "unknown"
+        return {
+            "schema": "runelite_bootstrap_state.v1",
+            "state": state,
+            "loadedSceneVerified": loaded_scene_verified,
+            "loginScreenDetected": state == "login_screen",
+            "credentialRequired": False,
+            "disconnectedDialogDetected": False,
+            "savedAccountPlayNowDetected": False,
+            "clickHereToPlayDetected": False,
+            "staleLoggedInNoScene": stale_logged_in_no_scene,
+            "bootstrapRecommended": not loaded_scene_verified,
+            "bootstrapSafeActionAvailable": False,
+            "recommendedCommand": "python telemetry-viewer\\run_runelite_bootstrap.py --backend arduino --arduino-port COM6 --recover-loaded-scene --verify-loaded-scene --no-jagex-launcher --capture-debug-screenshots --execute --start-daemon",
+            "evidence": {
+                "gameState": game_state,
+                "latestTick": latest_tick,
+                "clientTickFresh": client_tick_fresh,
+                "worldModelAvailable": world_fresh,
+                "objectCount": object_count,
+            },
+        }
+
+    def _static_route(self, route_id: str | None) -> dict[str, Any]:
+        if not route_id:
+            return {}
+        route_id_norm = _norm(route_id)
+        for route in _list(self.static_library.get("routes")):
+            if not isinstance(route, dict):
+                continue
+            aliases = {_norm(item) for item in _list(route.get("aliases"))}
+            if _norm(route.get("routeId")) == route_id_norm or route_id_norm in aliases or _norm(route.get("destinationRouteId")) == route_id_norm:
+                return dict(route)
+        return {}
+
+    def _blocker_category(self, *, text: str, readiness: dict[str, Any], latest_bundle: dict[str, Any], proposal: dict[str, Any]) -> tuple[str, str, str, bool, bool]:
+        status = self.daemon_status
+        phase = _compact_phase(status)
+        route = _compact_route_context(status)
+        hot = _dict(status.get("clientTickHot"))
+        game_state = _first_present(hot.get("gameState"), status.get("gameState"))
+        latest_text = " ".join(
+            _norm(value)
+            for value in (
+                latest_bundle.get("reason"),
+                latest_bundle.get("classification"),
+                latest_bundle.get("finalDecision"),
+                proposal.get("reason"),
+            )
+        )
+        world_quality = world_model_core.world_model_quality(self.world_model_payloads)
+        bootstrap_state = self._bootstrap_liveness_summary()
+        action_readiness = _dict(readiness.get("actionReadiness"))
+        execution_allowed = bool(action_readiness.get("executionAllowed"))
+        action_blockers = _list(action_readiness.get("blockers"))
+        action_blocker_text = " ".join(json.dumps(item, default=str).lower() for item in action_blockers)
+        route_or_service_context_present = bool(
+            route.get("currentNodeId")
+            or route.get("nextEdgeType")
+            or phase.get("cycleStage") in {"pathing_to_service", "needs_service", "service"}
+            or "route" in text
+            or "path" in text
+            or "bank" in text
+            or "service" in text
+        )
+        if bootstrap_state.get("state") == "login_screen" or (
+            bootstrap_state.get("state") == "stale_logged_in_no_scene" and not route_or_service_context_present
+        ):
+            return (
+                "login/liveness",
+                f"RuneLite bootstrap state is {bootstrap_state.get('state')}; loaded scene is not verified.",
+                "Run the RuneLite bootstrap FSM to recover a loaded scene, then rebind the daemon.",
+                False,
+                False,
+            )
+        if game_state and str(game_state) != "LOGGED_IN":
+            return (
+                "login/liveness",
+                f"RuneLite is {game_state}; live scene is not ready.",
+                "Recover/login RuneLite, then wait for fresh 8893/8890 packets.",
+                False,
+                False,
+            )
+        if world_quality.get("worldModelAvailable") is not True:
+            return (
+                "plugin/daemon freshness",
+                "The live world model is unavailable or stale.",
+                "Verify 8893 health, loaded scene packets, and daemon binding.",
+                False,
+                False,
+            )
+        if (
+            "plugin_snapshot_source_not_ready" in action_blocker_text
+            or "client_tick_hot_unavailable" in action_blocker_text
+            or "plugin.snapshot" in action_blocker_text
+            or "client_tick_hot" in action_blocker_text
+        ):
+            return (
+                "plugin/daemon freshness",
+                "The plugin snapshot or client-tick hot interaction stream is not fresh enough for live action.",
+                "Wait for fresh 8893/8890 status or rebind/restart the daemon if the timeout persists.",
+                False,
+                False,
+            )
+        if "session" in text and "mismatch" in text:
+            return (
+                "session mismatch",
+                "Daemon, latest-session, or overlay sources disagree.",
+                "Use daemon-bound session data and rebind/restart stale readers.",
+                False,
+                True,
+            )
+        if "arduino" in text or "input_integrity" in text or "monitor" in text:
+            input_summary = self._input_integrity_summary()
+            safe = input_summary.get("monitorPass") is True and not input_summary.get("injectedEvents") and not input_summary.get("lowerIlInjectedEvents")
+            return (
+                "input/Arduino",
+                "Live input integrity needs attention before another action." if not safe else "Input integrity is passing; Arduino is not the current blocker.",
+                "Fix monitor/firmware safety if failing; otherwise inspect action/pathing.",
+                bool(safe),
+                not bool(safe),
+            )
+        if "hover" in text or "menu" in text:
+            return (
+                "hover/menu",
+                "Hover/menu confirmation did not match the current action intent.",
+                "Inspect latest hover sample, target stack, and screenshot before clicking.",
+                False,
+                True,
+            )
+        if ("safeaim" in text or "projection" in text) and (not execution_allowed or bool(action_blockers)):
+            return (
+                "projection/safeAimPoint",
+                "The target projection or safe aim point is not action-ready.",
+                "Use query_view_quality and candidate projection evidence; recover camera if needed.",
+                False,
+                True,
+            )
+        if "overlay" in text or "highlighter" in text:
+            return (
+                "overlay-only",
+                "Overlay/highlighter state is warning or unavailable for the current context.",
+                "Check whether overlay markers are applicable to the current intent before blocking.",
+                readiness.get("readinessPassed") is True,
+                False,
+            )
+        if "wall_hugging" in latest_text or "wall_hugging" in text or "wall hugging" in text or route.get("wallLoopDetected") or route.get("wallHuggingDetected"):
+            return (
+                "route/pathing",
+                f"Route navigation is near {route.get('currentNodeId') or 'the current route node'} and the latest evidence reports wall-hugging risk.",
+                "Inspect route context, collision frontier, and approach-node candidates before another long live run.",
+                False,
+                True,
+            )
+        if "route" in text or "path" in text or phase.get("cycleStage") in {"pathing_to_service", "needs_service"} or route.get("nextEdgeType"):
+            return (
+                "route/pathing",
+                f"Current route node is {route.get('currentNodeId') or 'unknown'} with edge {route.get('nextEdgeType') or 'unknown'}.",
+                "Query path frontier, route objects, and service candidates; run only a bounded action if readiness allows.",
+                execution_allowed,
+                False,
+            )
+        if "bank" in text or "service" in text or phase.get("cycleStage") in {"service", "needs_service"}:
+            return (
+                "service/bank",
+                "The active lifecycle needs bank/service progress.",
+                "Query service candidates and route objects, then use strict readiness before acting.",
+                execution_allowed,
+                False,
+            )
+        if "target" in text or "candidate" in text:
+            return (
+                "target/candidate",
+                "The current target/candidate evidence is incomplete or stale.",
+                "Requery live candidates and avoid static priors as executable targets.",
+                False,
+                True,
+            )
+        if proposal.get("actionTargetSource") in {"static_route_prior", "route_context_goal"}:
+            return (
+                "static prior only",
+                "The proposal is still advisory/static and lacks a fresh executable live target.",
+                "Reacquire live projection/object/hover evidence before execution.",
+                False,
+                True,
+            )
+        allowed = execution_allowed
+        return (
+            "unknown" if not allowed else "ready",
+            "No clear blocker was found." if allowed else "Action readiness is not currently allowing execution.",
+            "Use current-debug-context, then inspect the newest blocker-specific query.",
+            allowed,
+            not allowed,
+        )
+
+    def explain_current_blocker(self) -> dict[str, Any]:
+        started = time.perf_counter()
+        status = self.daemon_status
+        stored_blocker = _dict(_dict(status.get("knowledgeCurrentBlocker")).get("data"))
+        if stored_blocker and status.get("schema") == "context_response.v1":
+            data = dict(stored_blocker)
+            data.setdefault("replayedFromSavedContext", True)
+            return _query_response(
+                "knowledge_fabric_current_blocker_explanation.v1",
+                data,
+                started=started,
+                source="saved_context_response",
+                freshness=self.freshness(),
+                status="PASS" if data.get("primaryBlockerCategory") == "ready" else "WARN",
+            )
+        readiness = self._readiness_report()
+        proposal = self._action_proposal()
+        warnings = [str(item) for item in _list(status.get("warnings"))]
+        blockers = [str(item) for item in _list(status.get("blockers"))]
+        action_readiness = _dict(
+            readiness.get("actionReadiness")
+            or status.get("actionReadiness")
+            or _dict(status.get("readiness")).get("actionReadiness")
+        )
+        if action_readiness:
+            blockers.extend(str(item) for item in _list(action_readiness.get("blockers")))
+            warnings.extend(str(item) for item in _list(action_readiness.get("warnings")))
+        latest_bundle = self._latest_visual_bundle_summary()
+        latest_trace = self._latest_action_trace_summary()
+        text = " ".join(blockers + warnings + [json.dumps(latest_bundle, default=str), json.dumps(latest_trace, default=str)]).lower()
+        category, summary, recommended, safe_to_run, code_likely = self._blocker_category(
+            text=text,
+            readiness=readiness,
+            latest_bundle=latest_bundle,
+            proposal=proposal,
+        )
+        phase = _compact_phase(status)
+        route_context = _compact_route_context(status)
+        location = _compact_location(status)
+        inventory = _compact_inventory(status)
+        selected_target = _dict(proposal.get("targetExplanation"))
+        safe_aimpoint = _dict(selected_target.get("safeAimPoint"))
+        data = {
+            "humanSummary": summary,
+            "primaryBlockerCategory": category,
+            "primaryBlockerSummary": summary,
+            "recommendedNextStep": recommended,
+            "recommendedNextQuery": "query_path_frontier" if category == "route/pathing" else "get_current_debug_context",
+            "recommendedNextCodeArea": "pathing/frontier selection" if category == "route/pathing" else "none until query evidence points to a code path",
+            "safeToRunBoundedLiveAction": safe_to_run,
+            "codeChangeLikelyNeeded": code_likely,
+            "captureReplayBeforeCodeChange": category not in {"ready", "login/liveness"},
+            "externalKnowledgeWouldHelp": category in {"target/candidate", "route/pathing", "service/bank", "route object not observed", "external knowledge/cache miss"},
+            "phase": phase.get("phase"),
+            "cycleStage": phase.get("cycleStage"),
+            "currentIntent": _first_present(readiness.get("currentIntent"), phase.get("currentIntent"), phase.get("activeIntent")),
+            "location": location,
+            "inventory": inventory,
+            "blockers": blockers[:20],
+            "warnings": warnings[:20],
+            "evidence": {
+                "bootstrapState": self._bootstrap_liveness_summary(),
+                "worldModelFreshness": self.freshness(),
+                "knowledgeFabricStatus": {
+                    "status": self.status().get("status"),
+                    "capWarnings": self.status().get("capWarnings"),
+                    "objectCount": self.status().get("performanceStats", {}).get("objectCount"),
+                },
+                "actionReadiness": action_readiness,
+                "actionTargetSource": proposal.get("actionTargetSource"),
+                "actionability": proposal.get("actionability"),
+                "selectedTarget": {
+                    "name": selected_target.get("name") or proposal.get("targetName"),
+                    "targetKind": proposal.get("targetKind"),
+                    "worldLocation": selected_target.get("worldLocation") or selected_target.get("world"),
+                    "freshness": selected_target.get("freshness"),
+                },
+                "safeAimPoint": safe_aimpoint or None,
+                "hoverMenu": _dict(status.get("clientTickHot")).get("postMenuSort") or status.get("hoverMenu"),
+                "routeContext": route_context,
+                "pathingFrontier": self.query_path_frontier(limit=5).get("data"),
+                "serviceAnchor": {
+                    "selectedServiceTargetName": status.get("selectedServiceTargetName"),
+                    "selectedServiceTargetTile": status.get("selectedServiceTargetTile"),
+                    "serviceReady": status.get("serviceReady"),
+                    "serviceReadyReason": status.get("serviceReadyReason"),
+                },
+                "overlayHealth": readiness.get("overlayHealth"),
+                "inputIntegrity": self._input_integrity_summary(),
+                "latestActionClassification": latest_trace.get("classification") or latest_bundle.get("classification"),
+                "latestDebugBundlePath": latest_bundle.get("bundleDir"),
+                "latestDebugScreenshotPath": latest_bundle.get("screenshotPath"),
+                "externalKnowledge": {
+                    "status": _external_summary_compact().get("status"),
+                    "cachePath": _external_summary_compact().get("cachePath"),
+                    "couldHelpLabelBlocker": category in {"target/candidate", "route/pathing", "service/bank"},
+                },
+            },
+        }
+        return _query_response(
+            "knowledge_fabric_current_blocker_explanation.v1",
+            data,
+            started=started,
+            source="daemon_status",
+            freshness=self.freshness(),
+            status="PASS" if category == "ready" else "WARN",
+        )
+
+    def query_current_debug_context(self, *, profile: str = "woodcutting", limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        cap = _safe_limit(limit)
+        readiness = self._readiness_report()
+        proposal = self._action_proposal()
+        phase = _compact_phase(self.daemon_status)
+        current_intent = _first_present(readiness.get("currentIntent"), phase.get("currentIntent"), phase.get("activeIntent"), proposal.get("proposedAction"))
+        bootstrap_state = self._bootstrap_liveness_summary()
+        data = {
+            "liveStatus": {
+                "schema": self.daemon_status.get("schema"),
+                "status": _status_label(self.daemon_status),
+                "latestTick": self.daemon_status.get("latestTick"),
+                "sessionPath": self.daemon_status.get("sessionPath"),
+                "inputSourceActive": self.daemon_status.get("inputSourceActive"),
+                "livePacketsRuntimeRemoved": True,
+                "ndjsonRuntimeRemoved": True,
+                "jsonlRuntimeRemoved": True,
+                "livePacketWriterActive": False,
+                "legacyLivePacketFilesPresent": self.daemon_status.get("legacyLivePacketFilesPresent"),
+                "legacyLivePacketTotalMb": self.daemon_status.get("legacyLivePacketTotalMb"),
+                "cleanupRecommended": self.daemon_status.get("cleanupRecommended"),
+                "gameState": _dict(self.daemon_status.get("clientTickHot")).get("gameState"),
+                "phase": phase,
+                "location": _compact_location(self.daemon_status),
+                "inventory": _compact_inventory(self.daemon_status),
+            },
+            "readiness": readiness,
+            "bootstrapState": bootstrap_state,
+            "loadedSceneVerified": bootstrap_state.get("loadedSceneVerified"),
+            "worldModelSummary": self.query_world_summary(),
+            "knowledgeFabricStatus": self.status(),
+            "currentBlocker": self.explain_current_blocker(),
+            "actionProposal": proposal,
+            "resourceCandidates": self.query_resource_candidates(profile=profile, limit=min(cap, 15)),
+            "routeObjects": self.query_route_objects(limit=min(cap, 15)),
+            "serviceObjects": self.query_service_candidates(limit=min(cap, 15)),
+            "pathingFrontier": self.query_path_frontier(limit=min(cap, 15)),
+            "viewQuality": self.query_view_quality(intent=str(current_intent or "unknown")),
+            "overlayHealth": readiness.get("overlayHealth"),
+            "inputIntegrity": self._input_integrity_summary(),
+            "latestActionTraceSummary": self._latest_action_trace_summary(),
+            "latestVisualBundleSummary": self.query_debug_evidence(limit=3),
+            "sessionMemorySummary": {
+                "schema": self.session_memory.get("schema"),
+                "sessionPath": self.session_memory.get("sessionPath"),
+                "summary": self.session_memory.get("summary", {}),
+            },
+            "staticProfileSummary": self.static_library.get("summary", {}),
+            "externalKnowledgeSummary": _external_summary_compact(),
+            "dataQualityReport": self.data_quality_report(limit=cap),
+            "coverageReport": self.coverage_report(intent=str(current_intent or "unknown"), limit=cap),
+            "dataSourceInventorySummary": {
+                "schema": DATA_SOURCE_INVENTORY_SCHEMA,
+                "sourceCount": len(_list(_dict(self.data_source_inventory().get("data")).get("sources"))),
+                "livePacketArchiveRemoved": True,
+                "externalKnowledgeCachePath": _external_summary_compact().get("cachePath"),
+            },
+            "storageWarningSummary": {
+                "legacyLivePacketFilesPresent": self.daemon_status.get("legacyLivePacketFilesPresent"),
+                "legacyLivePacketTotalMb": self.daemon_status.get("legacyLivePacketTotalMb"),
+                "externalCacheSizeMb": _external_summary_compact().get("cacheSizeMb"),
+            },
+            "queryFirstWorkflow": [
+                "get_current_debug_context",
+                "explain_current_blocker",
+                "query_resource_candidates/query_route_objects/query_service_candidates",
+                "query_path_frontier for route issues",
+                "query_view_quality for camera/visibility issues",
+                "get_latest_action_trace and get_latest_visual_bundle for evidence",
+            ],
+            "runtimeSafety": "read-only query context; live execution remains 8890/8893 -> executor -> HumanInputController",
+        }
+        return _query_response(
+            "knowledge_fabric_current_debug_context.v1",
+            data,
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+        )
+
+    def explain_next_action_context(self) -> dict[str, Any]:
+        started = time.perf_counter()
+        status = self.daemon_status
+        brain = _dict(status.get("brain"))
+        generic = _dict(brain.get("genericTaskState"))
+        data = {
+            "phase": status.get("phase") or generic.get("phase") or status.get("currentCycleStage"),
+            "currentIntent": status.get("currentIntent") or generic.get("activeIntent") or status.get("activeIntent"),
+            "actionReadiness": status.get("actionReadiness") or _dict(status.get("readiness")).get("actionReadiness"),
+            "worldModelStatus": self.status(),
+            "resourceCandidates": self.query_resource_candidates(limit=5)["data"],
+            "serviceCandidates": self.query_service_candidates(limit=5)["data"],
+            "routeObjects": self.query_route_objects(limit=5)["data"],
+            "pathFrontier": self.query_path_frontier(limit=5)["data"],
+            "safetyRule": "MCP/Knowledge Fabric is read-only; execution still goes through readiness and HumanInputController",
+        }
+        return _query_response(
+            "knowledge_fabric_next_action_context.v1",
+            data,
+            started=started,
+            source="daemon_status",
+            freshness=self.freshness(),
+        )
+
+    def list_available_profiles(self, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        profiles = []
+        for profile in _list(self.static_library.get("targetProfiles")):
+            if not isinstance(profile, dict):
+                continue
+            profiles.append({
+                "profileId": profile.get("profileId"),
+                "displayName": profile.get("displayName"),
+                "description": profile.get("description"),
+                "includeTargetClasses": profile.get("includeTargetClasses"),
+                "defaultLimit": profile.get("defaultLimit"),
+            })
+        capped, cap_hit = _cap_items(profiles, limit)
+        return _query_response(
+            "knowledge_fabric_profiles.v1",
+            {"profiles": capped, "count": len(profiles)},
+            started=started,
+            source="static_library",
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def describe_profile(self, profile: str) -> dict[str, Any]:
+        started = time.perf_counter()
+        profile_norm = _norm(profile)
+        match = {}
+        for item in _list(self.static_library.get("targetProfiles")):
+            if isinstance(item, dict) and _norm(item.get("profileId")) == profile_norm:
+                match = dict(item)
+                break
+        target_classes = self.list_target_classes(profile)["data"].get("targetClasses", [])
+        return _query_response(
+            "knowledge_fabric_profile_description.v1",
+            {"profile": match, "targetClasses": target_classes, "found": bool(match)},
+            started=started,
+            source="static_library",
+            freshness=self.freshness(),
+            status="PASS" if match else "WARN",
+            warnings=[] if match else [f"profile not found: {profile}"],
+        )
+
+    def list_target_classes(self, profile: str | None = None, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        include: set[str] | None = None
+        if profile:
+            for item in _list(self.static_library.get("targetProfiles")):
+                if isinstance(item, dict) and _norm(item.get("profileId")) == _norm(profile):
+                    include = {str(value) for value in _list(item.get("includeTargetClasses"))}
+                    break
+        classes = []
+        for item in _list(self.static_library.get("targetLibrary")):
+            if not isinstance(item, dict):
+                continue
+            if include is not None and str(item.get("classId")) not in include:
+                continue
+            classes.append({
+                "classId": item.get("classId"),
+                "displayName": item.get("displayName"),
+                "targetTypes": item.get("targetTypes"),
+                "actions": item.get("usefulActions") or item.get("actionContains"),
+                "requiredSkill": item.get("requiredSkill"),
+                "requiredLevel": item.get("requiredLevel"),
+                "profileHints": item.get("profileHints"),
+            })
+        capped, cap_hit = _cap_items(classes, limit)
+        return _query_response(
+            "knowledge_fabric_target_classes.v1",
+            {"profile": profile, "targetClasses": capped, "count": len(classes)},
+            started=started,
+            source="static_library",
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def list_known_actions(self, target_class: str | None = None, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        actions = []
+        class_norm = _norm(target_class)
+        for item in _list(self.static_library.get("targetLibrary")):
+            if not isinstance(item, dict):
+                continue
+            if class_norm and class_norm not in {_norm(item.get("classId")), _norm(item.get("displayName"))}:
+                continue
+            values = list(dict.fromkeys(_list(item.get("usefulActions")) + _list(item.get("actionContains"))))
+            actions.append({
+                "classId": item.get("classId"),
+                "displayName": item.get("displayName"),
+                "knownActions": values,
+                "requiredSkill": item.get("requiredSkill"),
+                "requiredLevel": item.get("requiredLevel"),
+            })
+        capped, cap_hit = _cap_items(actions, limit)
+        return _query_response(
+            "knowledge_fabric_known_actions.v1",
+            {"targetClass": target_class, "items": capped, "count": len(actions)},
+            started=started,
+            source="static_library",
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def list_service_routes(self, profile: str | None = None, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        profile_norm = _norm(profile)
+        routes = []
+        for route in _list(self.static_library.get("routes")):
+            if not isinstance(route, dict):
+                continue
+            route_profiles = {_norm(route.get("profile")), *{_norm(item) for item in _list(route.get("profiles"))}}
+            if profile_norm and profile_norm not in route_profiles:
+                continue
+            routes.append({
+                "routeId": route.get("routeId"),
+                "aliases": route.get("aliases"),
+                "profile": route.get("profile"),
+                "profiles": route.get("profiles"),
+                "serviceType": route.get("serviceType"),
+                "areaHint": route.get("areaHint"),
+                "verifiedLive": route.get("verifiedLive"),
+                "confidence": route.get("confidence"),
+                "nodeCount": len(_list(route.get("nodes"))),
+                "edgeCount": len(_list(route.get("edges"))),
+                "stepCount": len(_list(route.get("steps"))),
+                "advisoryOnly": not bool(route.get("verifiedLive")),
+            })
+        capped, cap_hit = _cap_items(routes, limit)
+        return _query_response(
+            "knowledge_fabric_service_routes.v1",
+            {"profile": profile, "routes": capped, "count": len(routes)},
+            started=started,
+            source="static_library",
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def describe_route(self, route_id: str) -> dict[str, Any]:
+        started = time.perf_counter()
+        route = self._static_route(route_id)
+        route_context = _compact_route_context(self.daemon_status)
+        data = {
+            "route": route,
+            "found": bool(route),
+            "currentRouteContext": route_context,
+            "liveRouteObjects": self.query_route_objects(limit=10).get("data"),
+            "sessionMemoryRouteObjects": self.query_session_memory(kind="route", limit=10).get("data"),
+            "executionRule": "static route details are advisory until current live target/projected waypoint/hover evidence verifies them",
+        }
+        return _query_response(
+            "knowledge_fabric_route_description.v1",
+            data,
+            started=started,
+            source="static_library+daemon_status",
+            freshness=self.freshness(),
+            status="PASS" if route else "WARN",
+            warnings=[] if route else [f"route not found: {route_id}"],
+        )
+
+    def explain_required_telemetry_for_task(self, task_name: str) -> dict[str, Any]:
+        started = time.perf_counter()
+        text = _norm(task_name)
+        needs = [
+            "plugin snapshot freshness and LOGGED_IN baseline",
+            "inventory/resource-count packets",
+            "client_tick_hot PostMenuSort hover state",
+            "MenuOptionClicked proof after click",
+            "world model object census for current loaded scene",
+            "projection/safeAimPoint evidence",
+            "input integrity if executing live actions",
+        ]
+        if any(word in text for word in ("wood", "tree", "resource", "mine", "fish")):
+            needs.extend(["resource_object_census", "target profile with level requirements", "worksite/resource area memory"])
+        if any(word in text for word in ("bank", "service", "deposit")):
+            needs.extend(["service_object_census", "service route/static anchors", "bank UI and bank operation context"])
+        if any(word in text for word in ("route", "walk", "navigate", "path")):
+            needs.extend(["collision/pathing frontier", "route object census", "view quality for waypoint projection"])
+        return _query_response(
+            "knowledge_fabric_required_telemetry.v1",
+            {"taskName": task_name, "requiredTelemetry": list(dict.fromkeys(needs)), "runtimePath": "8893 snapshot -> 8890 daemon -> executor"},
+            started=started,
+            source="static_guidance",
+            freshness=self.freshness(),
+        )
+
+    def query_scene_for_new_task_keywords(self, keywords: list[str] | str, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        tokens = [_norm(item) for item in (keywords if isinstance(keywords, list) else str(keywords).replace(",", " ").split()) if _norm(item)]
+        matches = []
+        for obj in self.objects:
+            haystack = " ".join([_norm(obj.get("name") or obj.get("targetName") or obj.get("objectName")), _action_text(obj)])
+            if tokens and not any(token in haystack for token in tokens):
+                continue
+            matches.append(_compact_object(obj))
+        capped, cap_hit = _cap_items(matches, limit)
+        return _query_response(
+            "knowledge_fabric_scene_keyword_query.v1",
+            {"keywords": tokens, "objects": capped, "count": len(matches)},
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def suggest_profile_skeleton_from_scene(self, description: str | None = None, keywords: list[str] | str | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        token_source = keywords if keywords is not None else str(description or "")
+        scene = self.query_scene_for_new_task_keywords(token_source, limit=25).get("data", {})
+        objects = _list(scene.get("objects"))
+        actions = sorted({action for obj in objects for action in _list(obj.get("actions")) if action})
+        names = sorted({str(obj.get("name")) for obj in objects if obj.get("name")})
+        class_hints = []
+        for target in _list(self.static_library.get("targetLibrary")):
+            if not isinstance(target, dict):
+                continue
+            target_text = json.dumps(target, default=str).lower()
+            if any(_norm(name) and _norm(name) in target_text for name in names[:10]):
+                class_hints.append(target.get("classId"))
+        skeleton = {
+            "schema": "target_profile_skeleton.v1",
+            "profileId": "_new_profile_id_",
+            "displayName": description or "New task profile",
+            "includeTargetClasses": list(dict.fromkeys(class_hints)) or ["unknown_scene_object"],
+            "includeTargetTypes": ["sceneObject", "npc", "groundItem"],
+            "includeRoles": ["interactable"],
+            "requireOnScreen": True,
+            "requireGeometryAvailable": True,
+            "candidateNameHints": names[:12],
+            "candidateActionHints": actions[:12],
+            "notes": "Generated from loaded-scene evidence; review before execution.",
+        }
+        return _query_response(
+            "knowledge_fabric_profile_skeleton_suggestion.v1",
+            {"description": description, "sceneMatches": scene, "profileSkeleton": skeleton},
+            started=started,
+            source="live_scene+static_library",
+            freshness=self.freshness(),
+        )
+
+    def list_seen_objects_by_action(self, action: str, limit: int | None = None) -> dict[str, Any]:
+        return self.query_actions(action, limit=limit)
+
+    def list_seen_objects_by_name(self, name_contains: str, limit: int | None = None) -> dict[str, Any]:
+        return self.query_objects_near(None, filters={"nameContains": name_contains}, limit=limit)
+
+    def export_task_context_bundle(self, profile: str | None = None, task: str | None = None, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        profile_value = profile or task or "woodcutting"
+        data = {
+            "profile": profile_value,
+            "task": task,
+            "profileDescription": self.describe_profile(profile_value).get("data"),
+            "targetClasses": self.list_target_classes(profile_value).get("data"),
+            "knownActions": self.list_known_actions(limit=limit).get("data"),
+            "serviceRoutes": self.list_service_routes(profile_value).get("data"),
+            "requiredTelemetry": self.explain_required_telemetry_for_task(task or profile_value).get("data"),
+            "currentDebugContext": self.query_current_debug_context(profile=profile_value, limit=limit).get("data"),
+            "staticLibraryVersionHash": self.static_library.get("versionHash"),
+        }
+        return _query_response(
+            "knowledge_fabric_task_context_bundle.v1",
+            data,
+            started=started,
+            source="knowledge_fabric",
+            freshness=self.freshness(),
+        )
+
+    def list_seen_widgets(self, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        widgets: list[dict[str, Any]] = []
+
+        def visit(value: Any, path: str) -> None:
+            if len(widgets) > HARD_QUERY_LIMIT * 4:
+                return
+            if isinstance(value, dict):
+                lower_path = path.lower()
+                looks_widget = (
+                    "widget" in lower_path
+                    or "dialogue" in lower_path
+                    or "bankui" in lower_path
+                    or "interface" in lower_path
+                    or value.get("widgetId") is not None
+                    or value.get("componentId") is not None
+                )
+                if looks_widget and any(key in value for key in ("id", "widgetId", "componentId", "text", "name", "visible", "bounds")):
+                    widgets.append({
+                        "path": path,
+                        "id": value.get("id"),
+                        "widgetId": value.get("widgetId"),
+                        "componentId": value.get("componentId"),
+                        "name": value.get("name"),
+                        "text": value.get("text"),
+                        "visible": value.get("visible"),
+                        "bounds": value.get("bounds"),
+                        "actions": value.get("actions") or value.get("menuActions"),
+                    })
+                for key, child in value.items():
+                    if isinstance(child, (dict, list)):
+                        visit(child, f"{path}.{key}" if path else str(key))
+            elif isinstance(value, list):
+                for index, child in enumerate(value[:80]):
+                    if isinstance(child, (dict, list)):
+                        visit(child, f"{path}[{index}]")
+
+        visit(self.daemon_status, "daemonStatus")
+        capped, cap_hit = _cap_items([item for item in widgets if isinstance(item, dict)], limit)
+        return _query_response(
+            "knowledge_fabric_seen_widgets.v1",
+            {"widgets": capped, "count": len(widgets)},
+            started=started,
+            source="daemon_status",
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def list_seen_inventory_items(self, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        status = _status_view(self.daemon_status)
+        brain = _dict(status.get("brain"))
+        inventory_context = _dict(brain.get("inventoryContext") or status.get("inventoryContext"))
+        candidates: list[Any] = []
+        for value in (
+            inventory_context.get("items"),
+            inventory_context.get("inventoryItems"),
+            status.get("inventoryItems"),
+            status.get("inventory"),
+            _dict(status.get("baseline")).get("inventory"),
+            _dict(status.get("worldModelPayloads")).get("inventory"),
+            self.world_model_payloads.get("inventory"),
+        ):
+            if isinstance(value, list):
+                candidates.extend(value)
+            elif isinstance(value, dict):
+                candidates.extend(_list(value.get("items")))
+                candidates.extend(_list(_dict(value.get("inventory")).get("items")))
+        items = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            item_id = _first_present(item.get("id"), item.get("itemId"))
+            external = external_knowledge.lookup_item_id(item_id) if item_id is not None else {}
+            external_item = _dict(_dict(external.get("data")).get("item"))
+            items.append({
+                "id": item_id,
+                "name": _first_present(item.get("name"), item.get("itemName"), external_item.get("name"), external_item.get("canonicalName")),
+                "quantity": _first_present(item.get("quantity"), item.get("qty")),
+                "slot": _first_present(item.get("slot"), item.get("index")),
+                "actions": item.get("actions") or item.get("menuActions"),
+                "externalKnowledge": external,
+            })
+        capped, cap_hit = _cap_items(items, limit)
+        return _query_response(
+            "knowledge_fabric_seen_inventory_items.v1",
+            {
+                "inventorySummary": _compact_inventory(self.daemon_status),
+                "items": capped,
+                "count": len(items),
+            },
+            started=started,
+            source="daemon_status",
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def list_seen_npcs(self, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        npcs = []
+        for obj in self.objects:
+            kind = _norm(obj.get("kind") or obj.get("targetType") or obj.get("objectKind"))
+            if "npc" in kind:
+                compact = _compact_object(obj)
+                compact["externalKnowledge"] = external_knowledge.enrich_name(str(compact.get("name") or ""))
+                npcs.append(compact)
+        capped, cap_hit = _cap_items(npcs, limit)
+        return _query_response(
+            "knowledge_fabric_seen_npcs.v1",
+            {"npcs": capped, "count": len(npcs)},
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def list_seen_ground_items(self, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        items = []
+        for obj in self.objects:
+            kind = _norm(obj.get("kind") or obj.get("targetType") or obj.get("objectKind"))
+            if "ground" in kind or "item" in kind:
+                compact = _compact_object(obj)
+                compact["externalKnowledge"] = external_knowledge.enrich_name(str(compact.get("name") or ""))
+                items.append(compact)
+        capped, cap_hit = _cap_items(items, limit)
+        return _query_response(
+            "knowledge_fabric_seen_ground_items.v1",
+            {"groundItems": capped, "count": len(items)},
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            cap_hit=cap_hit,
+            truncated=cap_hit,
+        )
+
+    def external_knowledge_status(self) -> dict[str, Any]:
+        return external_knowledge.knowledge_status()
+
+    def external_lookup_item_id(self, item_id: int | str) -> dict[str, Any]:
+        return external_knowledge.lookup_item_id(item_id)
+
+    def external_search_item(self, name: str, limit: int | None = None) -> dict[str, Any]:
+        return external_knowledge.search_item(name, limit=_safe_limit(limit))
+
+    def external_lookup_object(self, name: str) -> dict[str, Any]:
+        return external_knowledge.lookup_object(name)
+
+    def external_lookup_npc(self, name: str) -> dict[str, Any]:
+        return external_knowledge.lookup_npc(name)
+
+    def external_lookup_area(self, name: str) -> dict[str, Any]:
+        return external_knowledge.lookup_area(name)
+
+    def external_lookup_area_by_coord(self, x: int | float, y: int | float, plane: int = 0) -> dict[str, Any]:
+        return external_knowledge.lookup_area_by_coord(x, y, plane)
+
+    def external_get_skill_requirement(self, name: str) -> dict[str, Any]:
+        return external_knowledge.get_skill_requirement(name)
+
+    def external_search_wiki(self, query: str, *, allow_refresh: bool = False, limit: int | None = None) -> dict[str, Any]:
+        return external_knowledge.search_wiki(query, allow_refresh=allow_refresh, limit=_safe_limit(limit))
+
+    def external_get_route_prior(self, current_area: str, service_area: str) -> dict[str, Any]:
+        return external_knowledge.route_prior_between(current_area, service_area)
+
+    def coverage_report(self, intent: str | None = None, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        phase = _compact_phase(self.daemon_status)
+        current_intent = intent or _first_present(phase.get("currentIntent"), phase.get("activeIntent"), self.daemon_status.get("currentIntent"), "unknown")
+        quality = self.data_quality_report(limit=limit)
+        quality_data = _dict(quality.get("data"))
+        needs = {
+            "resource": ["worldModelFresh", "objectCount", "projectionAuditAvailable", "clientTickFresh"],
+            "route": ["worldModelFresh", "collisionAvailable", "routeObjectCounts", "projectionAuditAvailable"],
+            "service": ["worldModelFresh", "serviceObjectCounts", "clientTickFresh"],
+            "unknown": ["worldModelFresh", "objectCount", "clientTickFresh"],
+        }
+        bucket = "resource" if "resource" in _norm(current_intent) or "target" in _norm(current_intent) else "route" if "route" in _norm(current_intent) or "nav" in _norm(current_intent) else "service" if "service" in _norm(current_intent) or "bank" in _norm(current_intent) else "unknown"
+        present = {
+            "worldModelFresh": bool(quality_data.get("worldModelFresh")),
+            "objectCount": bool((quality_data.get("objectCount") or 0) > 0),
+            "collisionAvailable": bool(quality_data.get("collisionAvailable")),
+            "projectionAuditAvailable": bool(quality_data.get("projectionAuditAvailable")),
+            "clientTickFresh": bool(quality_data.get("clientTickFresh")),
+            "routeObjectCounts": bool(_dict(self.query_route_objects(limit=1).get("data")).get("count")),
+            "serviceObjectCounts": bool(_dict(self.query_service_candidates(limit=1).get("data")).get("count")),
+        }
+        missing = [key for key in needs[bucket] if not present.get(key)]
+        data = {
+            "currentIntent": current_intent,
+            "intentBucket": bucket,
+            "requiredData": needs[bucket],
+            "presentData": present,
+            "missingData": missing,
+            "staleOrCappedData": {
+                "staleSources": quality_data.get("staleSources"),
+                "capHits": quality_data.get("capHits"),
+                "missingExpectedSections": quality_data.get("missingExpectedSections"),
+            },
+            "externalKnowledgeCouldHelp": bucket in {"resource", "service", "route"},
+            "blocksAction": bool(missing and bucket in {"resource", "route", "service"}),
+            "confidence": "high" if not missing and quality_data.get("confidence") == "high" else "medium" if not missing else "low",
+            "recommendedNextQuery": "query_path_frontier" if bucket == "route" else "query_resource_candidates" if bucket == "resource" else "query_service_candidates",
+        }
+        return _query_response(
+            COVERAGE_REPORT_SCHEMA,
+            data,
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            status="PASS" if not data["blocksAction"] else "WARN",
+            warnings=[f"missing:{key}" for key in missing],
+        )
+
+    def probe_task(
+        self,
+        task_description: str,
+        *,
+        profile: str = "woodcutting",
+        limit: int | None = None,
+        capture_bundle: bool = False,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        cap = _safe_limit(limit)
+        tokens = [token for token in re.split(r"[^A-Za-z0-9]+", task_description.lower()) if token]
+        expanded_tokens = list(tokens)
+        if any(token in {"woodcutting", "woodcut", "logs", "log", "chop", "tree"} for token in tokens):
+            expanded_tokens.extend(["tree", "oak", "chop"])
+        if any(token in {"bank", "banking", "deposit"} for token in tokens):
+            expanded_tokens.extend(["bank", "deposit"])
+        tokens = list(dict.fromkeys(expanded_tokens))
+        scene = self.query_scene_for_new_task_keywords(tokens, limit=cap)
+        candidate_objects = _list(_dict(scene.get("data")).get("objects"))
+        candidate_actions = sorted({action for obj in candidate_objects for action in _list(obj.get("actions")) if action})
+        profile_skeleton = self.suggest_profile_skeleton_from_scene(description=task_description, keywords=tokens).get("data", {}).get("profileSkeleton")
+        requirements = []
+        wiki_pages = []
+        external_used = []
+        for name in [str(obj.get("name") or "") for obj in candidate_objects[:10]]:
+            if not name:
+                continue
+            enrichment = external_knowledge.enrich_name(name)
+            if enrichment.get("externalKnowledgeAvailable"):
+                external_used.append({"name": name, "fact": enrichment})
+                if enrichment.get("wikiPage"):
+                    wiki_pages.append(enrichment.get("wikiPage"))
+                if enrichment.get("requiredSkill") or enrichment.get("requiredLevel"):
+                    requirements.append({
+                        "target": enrichment.get("canonicalName") or name,
+                        "requiredSkill": enrichment.get("requiredSkill"),
+                        "requiredLevel": enrichment.get("requiredLevel"),
+                        "provenance": enrichment.get("provenance"),
+                    })
+        if not requirements:
+            for token in tokens:
+                req = external_knowledge.get_skill_requirement(token)
+                if req.get("status") == "PASS":
+                    requirements.append(_dict(_dict(req.get("data")).get("requirement")))
+        possible_profiles = self.list_available_profiles(limit=cap).get("data", {}).get("profiles", [])
+        reusable = []
+        text = _norm(task_description)
+        if any(word in text for word in ("wood", "tree", "logs")):
+            reusable.extend(["resource_progress.py", "candidate_core.py", "action_proposal.py", "woodcutting profile"])
+        if any(word in text for word in ("bank", "deposit", "service")):
+            reusable.extend(["service_route_core.py", "bank_operation_analyzer.py", "profiles/service_routes.json"])
+        bundle = None
+        if capture_bundle:
+            bundle = self.capture_script_authoring_context(profile=profile, task_name=_slug(task_description), reason="task_probe", limit=cap)
+        data = {
+            "taskDescription": task_description,
+            "candidateObjects": candidate_objects,
+            "candidateActions": candidate_actions,
+            "candidateWidgets": self.list_seen_widgets(limit=cap).get("data", {}).get("widgets", []),
+            "candidateInventoryItems": self.list_seen_inventory_items(limit=cap).get("data", {}).get("items", []),
+            "possibleProfiles": possible_profiles,
+            "reusableAnalyzers": list(dict.fromkeys(reusable)),
+            "suggestedNewProfile": profile_skeleton,
+            "missingData": self.coverage_report(intent=task_description, limit=cap).get("data", {}).get("missingData", []),
+            "externalKnowledgeUsed": external_used,
+            "wikiPages": list(dict.fromkeys(wiki_pages)),
+            "requirements": requirements,
+            "nextImplementationSteps": [
+                "Start from current-debug-context and task_probe_report.",
+                "Review suggested profile skeleton before enabling execution.",
+                "Keep static/external facts advisory until live candidates, projection, and hover confirm the action.",
+            ],
+            "scriptAuthoringContext": _dict(bundle.get("data")) if isinstance(bundle, dict) else None,
+            "noLiveInput": True,
+        }
+        return _query_response(TASK_PROBE_SCHEMA, data, started=started, source="knowledge_fabric+external_cache", freshness=self.freshness())
+
+    def data_quality_report(self, *, limit: int | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        expected = [
+            "world_model_summary",
+            "scene_object_census",
+            "resource_object_census",
+            "service_object_census",
+            "route_object_census",
+            "pathing_frontier",
+            "projection_audit",
+            "view_quality_inputs",
+        ]
+        quality = world_model_core.world_model_quality(self.world_model_payloads)
+        status = self.status()
+        missing = [key for key in expected if not _dict(self.world_model_payloads.get(key))]
+        cap_hits = _cap_flags(self.world_model_payloads)
+        cap_hits.extend({"path": f"status.capWarnings[{index}]", "field": warning, "value": True} for index, warning in enumerate(_list(status.get("capWarnings"))))
+        sample_queries = {
+            "worldModelSummary": self.query_world_summary(),
+            "resourceCandidates": self.query_resource_candidates(limit=limit),
+            "serviceCandidates": self.query_service_candidates(limit=limit),
+            "routeObjects": self.query_route_objects(limit=limit),
+            "pathingFrontier": self.query_path_frontier(limit=limit),
+            "viewQuality": self.query_view_quality(),
+        }
+        query_failures = [
+            {"query": name, "status": payload.get("status"), "warnings": payload.get("warnings")}
+            for name, payload in sample_queries.items()
+            if payload.get("status") == "FAIL"
+        ]
+        world_fresh = quality.get("worldModelAvailable") is True
+        object_count = len(self.objects)
+        collision_available = bool(quality.get("collisionAvailable") or quality.get("worldModelCollisionAvailable") or _dict(self.world_model_payloads.get("pathing_frontier")))
+        confidence = "high"
+        if not world_fresh or object_count <= 0:
+            confidence = "low"
+        elif missing or cap_hits or query_failures:
+            confidence = "medium"
+        recommended = []
+        if not world_fresh:
+            recommended.append("Verify 8893 health, loaded scene packets, and daemon binding.")
+        if object_count <= 0:
+            recommended.append("Recover a loaded RuneLite scene before diagnosing object/pathing behavior.")
+        if missing:
+            recommended.append("Request or capture the missing world-model sections for this task.")
+        if cap_hits:
+            recommended.append("Use narrower filters or explicit debug/full snapshot for capped sections.")
+        if not collision_available:
+            recommended.append("Request collision/pathing frontier before route/pathing diagnosis.")
+        if not recommended:
+            recommended.append("Data quality is sufficient for query-first debugging.")
+        external_status = external_knowledge.knowledge_status()
+        external_data = _dict(external_status.get("data"))
+        bootstrap_state = self._bootstrap_liveness_summary()
+        data = {
+            "worldModelFresh": world_fresh,
+            "clientTickFresh": _client_tick_fresh(self.daemon_status),
+            "loadedSceneVerified": bootstrap_state.get("loadedSceneVerified"),
+            "bootstrapState": bootstrap_state.get("state"),
+            "bootstrapRecommended": bootstrap_state.get("bootstrapRecommended"),
+            "daemonFresh": self.daemon_status.get("fresh") if "fresh" in self.daemon_status else self.daemon_status.get("daemonFresh"),
+            "pluginFresh": self.daemon_status.get("pluginSnapshotFresh") or self.daemon_status.get("pluginSnapshotAvailable"),
+            "objectCount": object_count,
+            "collisionAvailable": collision_available,
+            "projectionAuditAvailable": bool(_dict(self.world_model_payloads.get("projection_audit")) or quality.get("projectionAuditAvailable")),
+            "livePacketsRuntimeRemoved": True,
+            "ndjsonRuntimeRemoved": True,
+            "jsonlRuntimeRemoved": True,
+            "livePacketWriterActive": False,
+            "legacyLivePacketFilesPresent": self.daemon_status.get("legacyLivePacketFilesPresent"),
+            "legacyLivePacketTotalMb": self.daemon_status.get("legacyLivePacketTotalMb"),
+            "cleanupRecommended": self.daemon_status.get("cleanupRecommended"),
+            "externalKnowledgeEnabled": external_data.get("externalKnowledgeEnabled"),
+            "externalCacheSizeMb": external_data.get("cacheSizeMb"),
+            "externalCacheFreshness": _dict(_dict(external_data.get("sourceInventory")).get("sourceStatus")).get("lastRefresh"),
+            "externalSourcesHealthy": external_data.get("externalSourcesHealthy"),
+            "externalCacheMisses": [],
+            "externalApiDisabledReason": external_data.get("externalApiDisabledReason"),
+            "externalRateLimitBackoff": external_data.get("externalRateLimitBackoff"),
+            "capHits": cap_hits,
+            "truncationWarnings": [item for item in _list(status.get("capWarnings")) if item],
+            "staleSources": status.get("staleSources") or [],
+            "missingExpectedSections": missing,
+            "queryFailures": query_failures,
+            "responseSizes": {name: _perf_summary(payload).get("responseBytes") for name, payload in sample_queries.items()},
+            "queryTimes": {name: _perf_summary(payload).get("queryTimeMs") for name, payload in sample_queries.items()},
+            "confidence": confidence,
+            "recommendedFixes": recommended,
+        }
+        return _query_response(
+            DATA_QUALITY_SCHEMA,
+            data,
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            warnings=[f"missing:{key}" for key in missing] + [f"cap:{item.get('path')}" for item in cap_hits[:10]],
+            cap_hit=bool(cap_hits),
+            truncated=bool(cap_hits),
+            status="PASS" if confidence == "high" else "WARN",
+        )
+
+    def _artifact_root(self, kind: str, output_root: str | Path | None = None) -> Path:
+        if output_root:
+            return Path(output_root)
+        if self.session_path is not None:
+            return self.session_path / LIVE_DIR / kind
+        return Path.cwd() / LIVE_DIR / kind
+
+    def _overlay_debug_state(self) -> dict[str, Any]:
+        if self.session_path is None:
+            return {}
+        path = self.session_path / LIVE_DIR / "overlay_debug_state.json"
+        return _read_json(path) if path.exists() else {}
+
+    def _copy_latest_screenshot(self, bundle_dir: Path) -> tuple[str | None, str]:
+        latest = self._latest_visual_bundle_summary()
+        source = latest.get("screenshotPath")
+        if not source:
+            return None, "missing_latest_debug_screenshot"
+        source_path = Path(str(source))
+        if not source_path.exists():
+            return None, "latest_debug_screenshot_path_missing"
+        target = bundle_dir / "screenshot.png"
+        try:
+            shutil.copy2(source_path, target)
+        except Exception as error:  # noqa: BLE001
+            return None, f"screenshot_copy_failed:{type(error).__name__}"
+        return str(target), "copied_latest_debug_screenshot"
+
+    def _static_excerpts(self, limit: int | None) -> dict[str, Any]:
+        cap = _safe_limit(limit)
+        return {
+            "target_library_excerpt": {
+                "schema": "target_library_excerpt.v1",
+                "items": _list(self.static_library.get("targetLibrary"))[:cap],
+                "count": len(_list(self.static_library.get("targetLibrary"))),
+            },
+            "target_profiles_excerpt": {
+                "schema": "target_profiles_excerpt.v1",
+                "items": _list(self.static_library.get("targetProfiles"))[:cap],
+                "count": len(_list(self.static_library.get("targetProfiles"))),
+            },
+            "service_routes_excerpt": {
+                "schema": "service_routes_excerpt.v1",
+                "items": _list(self.static_library.get("routes"))[:cap],
+                "count": len(_list(self.static_library.get("routes"))),
+            },
+        }
+
+    def capture_script_authoring_context(
+        self,
+        *,
+        profile: str = "woodcutting",
+        task_name: str | None = None,
+        reason: str | None = None,
+        limit: int | None = None,
+        output_root: str | Path | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        cap = _safe_limit(limit)
+        label = _slug(task_name or profile or reason or "script_authoring_context")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        bundle_dir = self._artifact_root("script_authoring_context", output_root) / f"{timestamp}_{label}"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        current_context = self.query_current_debug_context(profile=profile, limit=cap)
+        blocker = self.explain_current_blocker()
+        data_quality = self.data_quality_report(limit=cap)
+        pathing_frontier = self.query_path_frontier(limit=cap)
+        view_quality = self.query_view_quality(intent=str(_dict(current_context.get("data")).get("currentIntent") or profile))
+        static_excerpts = self._static_excerpts(cap)
+        files: dict[str, str] = {}
+        payloads: dict[str, dict[str, Any]] = {
+            "current_debug_context.json": current_context,
+            "explain_current_blocker.json": blocker,
+            "world_model_summary.json": self.query_world_summary(),
+            "knowledge_fabric_status.json": self.status(),
+            "scene_object_census.json": _dict(self.world_model_payloads.get("scene_object_census")),
+            "resource_candidates.json": self.query_resource_candidates(profile=profile, limit=cap),
+            "route_objects.json": self.query_route_objects(limit=cap),
+            "service_objects.json": self.query_service_candidates(limit=cap),
+            "pathing_frontier.json": pathing_frontier,
+            "collision_summary.json": {
+                "schema": "collision_summary.v1",
+                "collisionAvailable": _dict(data_quality.get("data")).get("collisionAvailable"),
+                "pathingFrontier": _dict(pathing_frontier.get("data")).get("frontier"),
+            },
+            "projection_audit.json": _dict(self.world_model_payloads.get("projection_audit")),
+            "view_quality.json": view_quality,
+            "overlay_debug_state.json": self._overlay_debug_state(),
+            "input_integrity_status.json": self._input_integrity_summary(),
+            "latest_action_trace_excerpt.json": self._latest_action_trace_summary(),
+            "session_memory_summary.json": self.session_memory,
+            "static_library_summary.json": self.static_library.get("summary", {}),
+            "target_library_excerpt.json": static_excerpts["target_library_excerpt"],
+            "target_profiles_excerpt.json": static_excerpts["target_profiles_excerpt"],
+            "service_routes_excerpt.json": static_excerpts["service_routes_excerpt"],
+            "data_quality_report.json": data_quality,
+            "coverage_report.json": self.coverage_report(intent=str(_dict(current_context.get("data")).get("currentIntent") or profile), limit=cap),
+            "external_knowledge_status.json": external_knowledge.knowledge_status(),
+            "external_source_inventory.json": {"schema": "external_knowledge_sources_resource.v1", "data": external_knowledge.source_inventory()},
+        }
+        for filename, payload in payloads.items():
+            if not isinstance(payload, dict):
+                payload = {"schema": "missing_payload.v1", "status": "WARN", "reason": "payload_unavailable"}
+            path = bundle_dir / filename
+            _write_json(path, payload)
+            files[filename] = str(path)
+        screenshot_path, screenshot_status = self._copy_latest_screenshot(bundle_dir)
+        if screenshot_path:
+            files["screenshot.png"] = screenshot_path
+        query_payloads = {name: payload for name, payload in payloads.items() if isinstance(payload, dict)}
+        phase = _compact_phase(self.daemon_status)
+        blocker_data = _dict(blocker.get("data"))
+        object_counts = {
+            "worldModelObjects": len(self.objects),
+            "resourceCandidates": _dict(_dict(payloads["resource_candidates.json"]).get("data")).get("count"),
+            "routeObjects": _dict(_dict(payloads["route_objects.json"]).get("data")).get("count"),
+            "serviceObjects": _dict(_dict(payloads["service_objects.json"]).get("data")).get("count"),
+        }
+        manifest = {
+            "schema": SCRIPT_AUTHORING_CONTEXT_SCHEMA,
+            "createdAt": utc_now(),
+            "sessionPath": str(self.session_path) if self.session_path else None,
+            "profile": profile,
+            "taskName": task_name,
+            "reason": reason,
+            "playerLocation": _compact_location(self.daemon_status).get("worldLocation"),
+            "plane": _compact_location(self.daemon_status).get("plane"),
+            "inventorySummary": _compact_inventory(self.daemon_status),
+            "currentPhase": phase.get("phase"),
+            "currentIntent": _first_present(phase.get("currentIntent"), phase.get("activeIntent"), blocker_data.get("currentIntent")),
+            "blockerCategory": blocker_data.get("primaryBlockerCategory"),
+            "objectCounts": object_counts,
+            "capWarnings": self.status().get("capWarnings") or [],
+            "staleWarnings": self.status().get("staleSources") or [],
+            "queryTimes": {name: _perf_summary(payload).get("queryTimeMs") for name, payload in query_payloads.items()},
+            "responseSizes": {name: _perf_summary(payload).get("responseBytes") for name, payload in query_payloads.items()},
+            "recommendedNextSteps": [blocker_data.get("recommendedNextStep"), *_list(_dict(data_quality.get("data")).get("recommendedFixes"))],
+            "files": files,
+            "screenshotStatus": screenshot_status,
+        }
+        files["manifest.json"] = str(bundle_dir / "manifest.json")
+        _write_json(bundle_dir / "manifest.json", manifest)
+        return _query_response(
+            SCRIPT_AUTHORING_CAPTURE_SCHEMA,
+            {"bundlePath": str(bundle_dir), "manifest": manifest, "files": files},
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            cap_hit=any(bool(_dict(payload).get("capHit")) for payload in payloads.values() if isinstance(payload, dict)),
+            truncated=any(bool(_dict(payload).get("truncated")) for payload in payloads.values() if isinstance(payload, dict)),
+        )
+
+    def capture_replay_scenario(
+        self,
+        *,
+        profile: str = "woodcutting",
+        reason: str | None = None,
+        limit: int | None = None,
+        output_root: str | Path | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        cap = _safe_limit(limit)
+        label = _slug(reason or profile or "replay_scenario")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        scenario_dir = self._artifact_root("replay_scenarios", output_root) / f"{timestamp}_{label}"
+        scenario_dir.mkdir(parents=True, exist_ok=True)
+        scenario = {
+            "schema": REPLAY_SCENARIO_SCHEMA,
+            "createdAt": utc_now(),
+            "sessionPath": str(self.session_path) if self.session_path else None,
+            "profile": profile,
+            "reason": reason,
+            "daemonStatus": self.daemon_status,
+            "worldModelPayloads": self.world_model_payloads,
+            "staticLibrary": {
+                "summary": self.static_library.get("summary", {}),
+                "versionHash": self.static_library.get("versionHash"),
+                **self._static_excerpts(cap),
+            },
+            "sessionMemory": self.session_memory,
+            "currentDebugContext": self.query_current_debug_context(profile=profile, limit=cap),
+            "explainCurrentBlocker": self.explain_current_blocker(),
+            "readiness": self._readiness_report(),
+            "actionProposal": self._action_proposal(),
+            "routeContext": _compact_route_context(self.daemon_status),
+            "serviceAnchorContext": self.query_service_candidates(limit=cap),
+            "resourceWorksiteContext": self.query_worksite_context(profile=profile),
+            "pathingFrontier": self.query_path_frontier(limit=cap),
+            "viewQuality": self.query_view_quality(),
+            "overlayHealth": self._readiness_report().get("overlayHealth"),
+            "inputIntegritySummary": self._input_integrity_summary(),
+            "dataQualityReport": self.data_quality_report(limit=cap),
+            "coverageReport": self.coverage_report(limit=cap),
+            "externalKnowledgeStatus": external_knowledge.knowledge_status(),
+            "noLiveInput": True,
+        }
+        scenario_path = scenario_dir / "scenario.json"
+        _write_json(scenario_path, scenario)
+        return _query_response(
+            "replay_scenario_capture.v1",
+            {"scenarioPath": str(scenario_path), "scenarioDir": str(scenario_dir), "profile": profile, "reason": reason},
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+        )
+
+    def handoff_summary(self) -> dict[str, Any]:
+        started = time.perf_counter()
+        blocker = self.explain_current_blocker()
+        blocker_data = _dict(blocker.get("data"))
+        phase = _compact_phase(self.daemon_status)
+        latest_trace = self._latest_action_trace_summary()
+        latest_bundle = self._latest_visual_bundle_summary()
+        input_integrity = self._input_integrity_summary()
+        recommended_query = "query_path_frontier" if blocker_data.get("primaryBlockerCategory") == "route/pathing" else "get_current_debug_context"
+        data = {
+            "phase": phase.get("phase"),
+            "cycleStage": phase.get("cycleStage"),
+            "currentIntent": _first_present(phase.get("currentIntent"), phase.get("activeIntent"), blocker_data.get("currentIntent")),
+            "currentBlocker": {
+                "category": blocker_data.get("primaryBlockerCategory"),
+                "summary": blocker_data.get("primaryBlockerSummary"),
+                "recommendedNextStep": blocker_data.get("recommendedNextStep"),
+            },
+            "latestSuccessfulAction": latest_trace if latest_trace.get("classification") in {"success", "resource_progress", "resource_return_progress"} else None,
+            "latestFailedOrSkippedAction": latest_trace if latest_trace.get("classification") not in {"success", "resource_progress", "resource_return_progress", None} else latest_bundle,
+            "mostRelevantBundlePath": latest_bundle.get("bundleDir"),
+            "recommendedNextDiagnosticQuery": recommended_query,
+            "recommendedNextCodingTarget": "pathing/frontier route evidence" if blocker_data.get("primaryBlockerCategory") == "route/pathing" else "inspect blocker-specific query output before code changes",
+            "safetyInputStatus": input_integrity,
+            "testsIfCodeChanges": [
+                "python -m py_compile telemetry-viewer\\knowledge_fabric.py telemetry-viewer\\mcp_server.py telemetry-viewer\\context_service.py",
+                "python telemetry-viewer\\run_stabilization_suite.py",
+            ],
+        }
+        return _query_response(
+            HANDOFF_SUMMARY_SCHEMA,
+            data,
+            started=started,
+            source=self.source,
+            freshness=self.freshness(),
+            status="PASS" if blocker_data.get("primaryBlockerCategory") == "ready" else "WARN",
+        )
+
+
+def _resolve_context_file(path: str | Path) -> Path:
+    candidate = Path(path)
+    if candidate.is_dir():
+        for name in ("current_debug_context.json", "scenario.json", "manifest.json", "explain_current_blocker.json"):
+            child = candidate / name
+            if child.exists():
+                return child
+    return candidate
+
+
+def _debug_context_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("schema") == "context_response.v1" and isinstance(payload.get("knowledgeCurrentDebugContext"), dict):
+        payload = _dict(payload.get("knowledgeCurrentDebugContext"))
+    if payload.get("schema") == REPLAY_SCENARIO_SCHEMA:
+        payload = _dict(payload.get("currentDebugContext"))
+    if payload.get("schema") == SCRIPT_AUTHORING_CONTEXT_SCHEMA:
+        return {
+            "phase": payload.get("currentPhase"),
+            "intent": payload.get("currentIntent"),
+            "location": payload.get("playerLocation"),
+            "inventory": payload.get("inventorySummary"),
+            "blockerCategory": payload.get("blockerCategory"),
+            "objectCounts": payload.get("objectCounts"),
+            "capWarnings": payload.get("capWarnings"),
+        }
+    data = _dict(payload.get("data")) if "data" in payload else payload
+    live = _dict(data.get("liveStatus"))
+    phase = _dict(live.get("phase"))
+    blocker = _dict(_dict(data.get("currentBlocker")).get("data"))
+    pathing = _dict(_dict(data.get("pathingFrontier")).get("data"))
+    route_context = _dict(pathing.get("routeContext"))
+    view_quality = _dict(_dict(data.get("viewQuality")).get("data"))
+    return {
+        "phase": phase.get("phase"),
+        "cycleStage": phase.get("cycleStage"),
+        "intent": _first_present(phase.get("currentIntent"), phase.get("activeIntent"), blocker.get("currentIntent")),
+        "location": _dict(live.get("location")).get("worldLocation"),
+        "inventory": live.get("inventory"),
+        "blockerCategory": blocker.get("primaryBlockerCategory"),
+        "blockerSummary": blocker.get("primaryBlockerSummary"),
+        "routeNode": route_context.get("currentNodeId"),
+        "routeEdge": route_context.get("nextEdgeType"),
+        "resourceCandidateCount": _dict(_dict(data.get("resourceCandidates")).get("data")).get("count"),
+        "routeObjectCount": _dict(_dict(data.get("routeObjects")).get("data")).get("count"),
+        "serviceObjectCount": _dict(_dict(data.get("serviceObjects")).get("data")).get("count"),
+        "capWarnings": _dict(data.get("knowledgeFabricStatus")).get("capWarnings"),
+        "viewCameraRecommended": _dict(view_quality.get("cameraRecommendation")).get("recommended"),
+        "sessionMemory": data.get("sessionMemorySummary"),
+    }
+
+
+def diff_debug_context(path_a: str | Path, path_b: str | Path) -> dict[str, Any]:
+    started = time.perf_counter()
+    file_a = _resolve_context_file(path_a)
+    file_b = _resolve_context_file(path_b)
+    payload_a = _read_json(file_a)
+    payload_b = _read_json(file_b)
+    snap_a = _debug_context_snapshot(payload_a)
+    snap_b = _debug_context_snapshot(payload_b)
+    differences: dict[str, dict[str, Any]] = {}
+    for key in sorted(set(snap_a) | set(snap_b)):
+        if snap_a.get(key) != snap_b.get(key):
+            differences[key] = {"before": snap_a.get(key), "after": snap_b.get(key)}
+    return _query_response(
+        DEBUG_CONTEXT_DIFF_SCHEMA,
+        {
+            "bundleA": str(file_a),
+            "bundleB": str(file_b),
+            "snapshotA": snap_a,
+            "snapshotB": snap_b,
+            "differences": differences,
+            "differenceCount": len(differences),
+        },
+        started=started,
+        source="debug_context_files",
+        freshness={"sourceFiles": [str(file_a), str(file_b)]},
+        status="PASS",
+    )
+
+
+def replay_scenario(path: str | Path, *, limit: int | None = None) -> dict[str, Any]:
+    started = time.perf_counter()
+    scenario_path = _resolve_context_file(path)
+    scenario = _read_json(scenario_path)
+    if scenario.get("schema") != REPLAY_SCENARIO_SCHEMA:
+        return _query_response(
+            REPLAY_RESULT_SCHEMA,
+            {"scenarioPath": str(scenario_path), "error": "unsupported or missing replay_scenario.v1"},
+            started=started,
+            source="replay_scenario",
+            freshness={"sourceFile": str(scenario_path)},
+            status="FAIL",
+            warnings=["replay scenario file is missing or has the wrong schema"],
+        )
+    static_library = scenario.get("staticLibrary")
+    if not isinstance(static_library, dict) or "routes" not in static_library:
+        static_library = load_static_library()
+    fabric = KnowledgeFabric(
+        world_model_payloads=_dict(scenario.get("worldModelPayloads")),
+        daemon_status=_dict(scenario.get("daemonStatus")),
+        static_library=static_library,
+        session_path=scenario.get("sessionPath"),
+        source="replay_scenario",
+    )
+    profile = str(scenario.get("profile") or "woodcutting")
+    current_debug_context = fabric.query_current_debug_context(profile=profile, limit=limit)
+    blocker = fabric.explain_current_blocker()
+    data = {
+        "scenarioPath": str(scenario_path),
+        "profile": profile,
+        "reason": scenario.get("reason"),
+        "noLiveInput": True,
+        "candidateSelection": {
+            "resourceCandidates": fabric.query_resource_candidates(profile=profile, limit=limit),
+            "serviceCandidates": fabric.query_service_candidates(limit=limit),
+            "routeObjects": fabric.query_route_objects(limit=limit),
+        },
+        "actionProposal": fabric._action_proposal(),
+        "readiness": fabric._readiness_report(),
+        "explainCurrentBlocker": blocker,
+        "pathingFrontierExplanation": fabric.query_path_frontier(limit=limit),
+        "viewQualityExplanation": fabric.query_view_quality(),
+        "currentDebugContext": current_debug_context,
+        "storedBlockerCategory": _dict(_dict(scenario.get("explainCurrentBlocker")).get("data")).get("primaryBlockerCategory"),
+        "replayedBlockerCategory": _dict(blocker.get("data")).get("primaryBlockerCategory"),
+        "replayMatchesStoredBlocker": _dict(_dict(scenario.get("explainCurrentBlocker")).get("data")).get("primaryBlockerCategory")
+        == _dict(blocker.get("data")).get("primaryBlockerCategory"),
+    }
+    return _query_response(
+        REPLAY_RESULT_SCHEMA,
+        data,
+        started=started,
+        source="replay_scenario",
+        freshness={"sourceFile": str(scenario_path), **fabric.freshness()},
+        status="PASS",
+    )
+
+
+def latest_artifact(session_path: str | Path | None, kind: str) -> dict[str, Any]:
+    started = time.perf_counter()
+    root = Path(session_path) / LIVE_DIR / kind if session_path else Path.cwd() / LIVE_DIR / kind
+    latest: Path | None = None
+    if root.exists():
+        dirs = [path for path in root.iterdir() if path.is_dir()]
+        if dirs:
+            latest = max(dirs, key=lambda item: item.stat().st_mtime)
+    data = {"root": str(root), "latestPath": str(latest) if latest else None, "exists": latest is not None}
+    if latest:
+        manifest = _read_json(latest / "manifest.json")
+        scenario = _read_json(latest / "scenario.json")
+        data["manifest"] = manifest or scenario
+    return _query_response(
+        "knowledge_fabric_latest_artifact.v1",
+        data,
+        started=started,
+        source="debug_artifacts",
+        freshness={"sessionPath": str(session_path) if session_path else None},
+        status="PASS" if latest else "WARN",
+        warnings=[] if latest else [f"no {kind} artifacts found"],
+    )
+
+
+def fetch_json(url: str, timeout: float = 1.0) -> dict[str, Any]:
+    try:
+        with urllib.request.urlopen(url, timeout=max(0.001, float(timeout))) as response:
+            value = json.loads(response.read().decode("utf-8", errors="replace"))
+        return value if isinstance(value, dict) else {}
+    except Exception as error:  # noqa: BLE001
+        return {"schema": "http_fetch_error.v1", "status": "FAIL", "url": url, "error": f"{type(error).__name__}: {error}"}
+
+
+def fabric_from_live(
+    *,
+    daemon_url: str = "http://127.0.0.1:8890",
+    snapshot_url: str = "http://127.0.0.1:8893/snapshot",
+    timeout: float = 1.0,
+    include_projection: bool = False,
+    include_collision: bool = False,
+    max_objects: int = 160,
+) -> KnowledgeFabric:
+    daemon_status = fetch_json(daemon_url.rstrip("/") + "/status", timeout=timeout)
+    request = world_model_client.build_request(
+        needs=[*world_model_core.WORLD_MODEL_NEEDS, "inventory"],
+        max_objects=max_objects,
+        include_projection=include_projection,
+        include_collision=include_collision,
+    )
+    try:
+        snapshot = world_model_client.fetch(snapshot_url, timeout=timeout, request=request)
+    except Exception as error:  # noqa: BLE001
+        snapshot = {
+            "schema": "plugin_snapshot_fetch_error.v1",
+            "status": "FAIL",
+            "error": f"{type(error).__name__}: {error}",
+        }
+    payloads = world_model_core.extract_world_model_payloads(snapshot)
+    if not payloads:
+        payloads = _world_payloads_from_status(daemon_status)
+    return KnowledgeFabric(world_model_payloads=payloads, daemon_status=daemon_status, source="live_8890_8893")
+
+
+def query_static_library(search: str | None = None, limit: int | None = None) -> dict[str, Any]:
+    started = time.perf_counter()
+    library = load_static_library()
+    items = []
+    for key in ("routes", "serviceAnchors", "targetProfiles", "targetLibrary"):
+        for item in _list(library.get(key)):
+            if isinstance(item, dict):
+                payload = dict(item)
+                payload["_libraryKind"] = key
+                items.append(payload)
+    if search:
+        needle = _norm(search)
+        items = [item for item in items if needle in json.dumps(item, default=str).lower()]
+    capped, cap_hit = _cap_items(items, limit)
+    return _query_response(
+        "knowledge_fabric_static_library_query.v1",
+        {"summary": library.get("summary"), "items": capped, "count": len(items), "versionHash": library.get("versionHash")},
+        started=started,
+        source="static_library",
+        freshness={"staticLibraryLoaded": True},
+        cap_hit=cap_hit,
+        truncated=cap_hit,
+    )

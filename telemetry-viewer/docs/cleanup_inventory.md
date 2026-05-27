@@ -18,7 +18,7 @@ This inventory classifies the current live/action/candidate surface and recommen
 | System | Canonical module or command | Notes |
 | --- | --- | --- |
 | Session/path resolution | `live_session_core.py`, `telemetry_paths.py` | Use daemon session for action source; compare with newest live-output session. |
-| Live file/cache loading | `live_file_core.py`, `live_packet_reader.py` | Use shared path/read helpers; snapshot-no-files may intentionally omit candidate files. |
+| Live file/cache loading | `live_file_core.py` | Use shared path/read helpers for explicit bounded debug/latest-state files; snapshot-no-files may intentionally omit candidate files. |
 | Candidate classification/scoring | `live_target_processor.py`, `candidate_core.py`, `target_library.json`, `target_profiles.json` | Processor owns generation/scoring; core owns explanation/source checks. |
 | Readiness/freshness validation | `live_readiness_core.py`, `diagnose_live_readiness.py` | Reusable PASS/WARN/FAIL readiness contract. |
 | Context/daemon handling | `live_core_daemon.py`, `context_service.py`, `live_context_query.py` | Daemon status is the action source of truth. |
@@ -83,14 +83,14 @@ This inventory classifies the current live/action/candidate surface and recommen
 | `diagnose_overlay_state.py` | Overlay/live candidate consistency diagnostic. | Diagnostic useful but not canonical readiness | Latest/session live files | Overlay report | Live files | No | `test_diagnose_overlay_state.py` |
 | `diagnose_overlay_geometry.py` | Overlay geometry/hull diagnostic. | Diagnostic useful but overlaps visual inspector | Session live files | Geometry report | Live files | No | `test_diagnose_overlay_geometry.py` |
 | `diagnose_target_coverage.py` | Deep raw/world/candidate coverage audit. | Diagnostic audit; not daily canonical | Raw ticks, derived geometry/candidates | Coverage report | Live/files/raw ticks | No | `test_diagnose_target_coverage.py` |
-| `diagnose_plugin_snapshot.py` | Plugin snapshot endpoint/packet diagnostic. | Diagnostic helper | Plugin endpoint, compact packets | Snapshot report | Plugin endpoint/live packets | No | Used by live target processor tests |
+| `diagnose_plugin_snapshot.py` | Plugin snapshot endpoint diagnostic. | Diagnostic helper | Plugin endpoint and bounded snapshot payloads | Snapshot report | Plugin endpoint | No | Used by live target processor tests |
 | `diagnose_brain_progress.py` | Brain/progress diagnostic. | Diagnostic helper | Session/daemon status | Progress report | Both | No | `test_diagnose_brain_progress.py` |
 | `diagnose_inventory_slots.py` | Inventory slot/resource diagnostic. | Diagnostic helper | Session/live inventory | Inventory report | Live files/session | No | `test_diagnose_inventory_slots.py` |
 | `diagnose_navigation_intent.py` | Navigation intent diagnostic. | Diagnostic helper | Daemon status | Navigation intent report | Daemon | No | Navigation tests |
 | `diagnose_pathing_matrix.py` | Synthetic pathing matrix. | Diagnostic/test helper | Synthetic scenarios | Matrix report | Synthetic/core | No | `test_pathing_matrix.py` |
 | `check_live_setup.py` | Session/plugin/process setup doctor. | Diagnostic helper | Sessions/plugin endpoint/processes | Setup report | Both | No | `test_check_live_setup.py` |
 | `live_config_doctor.py` | Live output/config health doctor. | Diagnostic helper | Session/live files | Config report | Live files | No | `test_live_config_doctor.py` |
-| `inspect_live_packets.py` | Compact live packet inspector. | Diagnostic helper | Compact packet files | Packet summary/tail | Live packet files | No | `test_inspect_live_packets.py` |
+| `inspect_live_packets.py` | Retired live packet inspector shim. | Legacy cleanup pointer | None | Retirement message and replacement commands | No runtime files | No | `test_inspect_live_packets.py` |
 | `inspect_target_geometry.py` | Static derived target geometry CLI inspector. | Deprecated candidate for live visual work; keep for static JSONL review | Derived world/UI geometry files | Compact rows/JSON | Files only | No | No direct test |
 | `inspect_perception.py` | Perception bundle inspector. | Diagnostic helper | Perception outputs | Perception report | Files | No | No direct test |
 | `inspect_tab_detection.py` | Tab detection inspector. | Diagnostic helper | Perception/tab outputs | Tab report | Files | No | No direct test |
@@ -128,7 +128,7 @@ This inventory classifies the current live/action/candidate surface and recommen
 | --- | --- | --- |
 | `telemetry_paths.py` | Session discovery, file iteration, frame state, newest live session helpers. | `test_telemetry_paths.py` |
 | `live_session_core.py` | Shared daemon/latest/live/highlighter session rules. | `test_live_core_contracts.py` |
-| `live_file_core.py` | Shared live file paths and safe JSON/JSONL loading. | `test_live_core_contracts.py` |
+| `live_file_core.py` | Shared latest-state/debug file paths and safe bounded JSON/JSONL loading for explicit diagnostics. | `test_live_core_contracts.py` |
 | `candidate_core.py` | Shared candidate identity, freshness, matching, woodcutting summary, explanation. | Candidate/readiness/action tests |
 | `live_readiness_core.py` | Shared readiness result and pre-action gate contract. | `test_live_readiness.py`, `test_live_core_contracts.py` |
 | `action_proposal_core.py` | Stable import surface for action proposal/explanation. | `test_live_core_contracts.py` |
@@ -138,7 +138,7 @@ This inventory classifies the current live/action/candidate surface and recommen
 | `live_readiness.py` | Backward-compatible wrapper to `live_readiness_core.py`. | `test_live_readiness.py` |
 | `brain_core.py` | Main task/context decision core. | `test_brain_core.py`, rehearsal/tests |
 | `task_policy.py`, `task_state.py`, `resource_progress.py`, `runtime_control.py`, `mission_presets.py`, `mission_snapshot.py` | Core task/runtime support. | Stabilization suite |
-| `live_packet_reader.py` | Compact packet reading. | `test_live_packet_reader.py` |
+| `live_packet_reader.py` | Removed with the live packet archive. | Retired; maintenance report/prune is the only legacy packet-file path. |
 | `navigation_reachability.py`, `intent_stabilizer.py`, `cycle_history.py` | Navigation/intent/history support. | Stabilization suite |
 | `capabilities.py`, `tab_detection.py`, `tab_profile_names.py`, `bootstrap_window.py`, `bootstrap_vision.py` | Supporting utilities. | Stabilization suite where listed |
 | `analyzers/*.py` | Domain analyzers for inventory, target, navigation, pathing, activity, overlay intent, service, bank UI/operation, return/reacquisition/close-bank/process inventory. | Analyzer tests |
@@ -149,7 +149,7 @@ This inventory classifies the current live/action/candidate surface and recommen
 Tests are now grouped in `run_stabilization_suite.py` by behavior:
 
 - Path/session resolution: `test_telemetry_paths.py`
-- Live file loading/cache: `test_live_packet_reader.py`, `test_live_target_processor.py`
+- Live file loading/cache: current file helpers and `test_live_target_processor.py`
 - Candidate classification/scoring: `test_target_analyzer.py`, `test_target_candidate_dedupe.py`, `test_woodcutting_candidate_diagnostic.py`, `test_live_core_contracts.py`
 - Woodcutting profile/task state: `test_task_policy.py`, `test_task_state.py`, `test_task_transitions.py`, `test_resource_progress.py`
 - Readiness gate: `test_live_readiness.py`
@@ -174,14 +174,14 @@ See `live_outputs.md` for the contract for:
 - `live_event_timeline.jsonl`
 - `overlay_debug_state.json`
 - `last_action_trace.json`
-- compact packet index/segments under `live_packets/`
+- retired packet archive index/segments under `live_packets/` are legacy cleanup only
 
 ## Duplicate Or Overlapping Responsibilities
 
 | Area | Overlap | Cleanup decision |
 | --- | --- | --- |
 | Latest-session and live-session choice | `telemetry_paths.py`, candidate diagnostic, readiness diagnostic, inspector, live processor | Shared through `live_session_core.py`; keep `telemetry_paths.py` as low-level discovery. Active live tools should use daemon session binding instead of blind newest-session selection. |
-| Live JSON/JSONL loading | Candidate diagnostic, readiness diagnostic, context query, overlay diagnostics, inspector | Shared new helpers in `live_file_core.py`; do not force every older audit script through it unless touched. |
+| Explicit debug/latest-state JSON/JSONL loading | Candidate diagnostic, readiness diagnostic, context query, overlay diagnostics, inspector | Shared new helpers in `live_file_core.py`; do not force every older audit script through it unless touched. This does not revive the retired `live_packets` archive. |
 | Candidate identity/highlighter matching | Candidate diagnostic, readiness diagnostic, action explanation | Shared through `candidate_core.py`. |
 | Candidate freshness | Action proposal and readiness/candidate diagnostics | Shared through `candidate_core.target_freshness_issue` and readiness contract. |
 | Candidate explanation | Action proposal diagnostic and woodcutting candidate diagnostic | Shared through `candidate_core.explain_candidate`. |

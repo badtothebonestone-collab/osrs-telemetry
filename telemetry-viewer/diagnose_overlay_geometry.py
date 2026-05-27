@@ -165,28 +165,11 @@ def matches_class(record: dict, class_id: str) -> bool:
 
 
 def latest_projection_refs(session: Path) -> tuple[list[dict], dict]:
-    live_dir = session / "live_packets"
-    latest_name = None
-    latest_txt = live_dir / "latest_segment.txt"
-    try:
-        latest_name = latest_txt.read_text(encoding="utf-8").strip()
-    except OSError:
-        pass
-    if not latest_name:
-        index = read_json(live_dir / "live_packet_index.json")
-        latest_name = index.get("latestSegment") or index.get("activeSegment")
-    if not latest_name:
-        return [], {}
-    segment = live_dir / latest_name
-    if not segment.exists():
-        segment = live_dir / Path(latest_name).name
-    latest_packet = {}
-    for packet in read_jsonl(segment):
-        if packet.get("packetType") == "live_projection_packet.v1":
-            latest_packet = packet
-    payload = latest_packet.get("payload") if isinstance(latest_packet.get("payload"), dict) else {}
-    refs = payload.get("visibleObjectRefs") if isinstance(payload.get("visibleObjectRefs"), list) else []
-    return [ref for ref in refs if isinstance(ref, dict)], latest_packet
+    return [], {
+        "reason": "live packet NDJSON/JSONL archive is retired; use PluginSnapshotEndpoint projection, WorldModel, or Knowledge Fabric queries",
+        "livePacketsRuntimeRemoved": True,
+        "livePacketWriterActive": False,
+    }
 
 
 def latest_candidates(session: Path, class_id: str, top: int) -> list[dict]:
@@ -331,9 +314,9 @@ def build_report(session: Path, class_id: str, top: int) -> dict:
     if not compact_hull_refs:
         conclusions.append("no Java compact projection refs in the latest segment contain hull polygons; check hull emission config or Java clickbox availability")
     elif top_with_hull == 0 and compact_hulls_unused_by_top:
-        conclusions.append("geometry cap/order mismatch: compact packets contain hulls, but they are not attached to top overlay candidates")
+        conclusions.append("geometry cap/order mismatch: projection/world-model payload contains hulls, but they are not attached to top overlay candidates")
     elif any(row["anyCompactPacketGeometryForSameTarget"] and not row["overlay"].get("hasClickableHull") for row in rows):
-        conclusions.append("parser/preservation mismatch: compact packet geometry exists for a top candidate but overlay_debug_state is bounds-only")
+        conclusions.append("parser/preservation mismatch: projection geometry exists for a top candidate but overlay_debug_state is bounds-only")
     elif top_with_hull > 0 and overlay_hulls_not_top:
         conclusions.append("overlay state has hulls for some non-top targets; verify overlay target cap and ranking order")
     elif top_with_hull > 0:

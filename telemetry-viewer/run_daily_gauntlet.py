@@ -226,7 +226,7 @@ def evaluate_daemon_payloads(
     context_payload: dict[str, Any] | None = None,
     brain_payload: dict[str, Any] | None = None,
     *,
-    daily_mode: str = "compact-packets",
+    daily_mode: str = "snapshot-no-files",
 ) -> dict:
     warnings: list[str] = []
     failures: list[str] = []
@@ -240,22 +240,19 @@ def evaluate_daemon_payloads(
             if source and source != "plugin-snapshot":
                 failures.append(f"{source} is active; snapshot no-file daily should use plugin-snapshot")
             if boolish_true(daemon_status.get("compactPacketFilesRequired")):
-                failures.append("compact packet files are still required in snapshot no-file daily")
+                failures.append("retired live packet archive files are still required in snapshot no-file daily")
             if boolish_true(daemon_status.get("compactPacketFilesWriting")):
-                failures.append("compact packet files appear to be writing in snapshot no-file daily")
+                failures.append("retired live packet archive files appear to be writing in snapshot no-file daily")
             if daemon_status.get("noFileDaily") is False:
                 failures.append("daemon status does not report noFileDaily=true")
             candidate_count = daemon_status.get("candidateCount")
             if isinstance(candidate_count, (int, float)) and candidate_count <= 0:
-                warnings.append("snapshot no-file daemon has no candidates; use stable compact if this persists")
+                warnings.append("snapshot no-file daemon has no candidates; inspect WorldModel/Knowledge Fabric context if this persists")
             active_ms = daemon_status.get("activeMs") or daemon_status.get("liveCoreActiveMillis")
             if isinstance(active_ms, (int, float)) and active_ms > 100:
-                warnings.append(f"snapshot no-file active time is {active_ms:.1f} ms; stable compact remains the safe fallback")
+                warnings.append(f"snapshot no-file active time is {active_ms:.1f} ms; inspect plugin snapshot/WorldModel timing")
         else:
-            if source and source != "compact-packets":
-                failures.append(f"{source} is active; daily daemon should use compact-packets")
-            if source == "compact-packets" and daemon_status.get("compactPacketsRecent") is False:
-                failures.append("compact-packets input is active but compact packets are not recent")
+            failures.append("live packet archive daily mode has been retired; use --daily-mode snapshot-no-files")
         if boolish_true(daemon_status.get("rawTickRecordingEnabled")):
             failures.append("raw tick recording appears enabled; daily mode should keep raw ticks off")
         if boolish_true(daemon_status.get("rawEventRecordingEnabled")):
@@ -372,10 +369,10 @@ def resolve_session(args: argparse.Namespace) -> str | None:
 
 def live_packet_dir_stats(session_path: str | None) -> dict[str, Any]:
     if not session_path:
-        return {"available": False, "count": 0, "bytes": 0}
+        return {"runtimeRemoved": True, "available": False, "count": 0, "bytes": 0}
     packet_dir = Path(session_path) / "live_packets"
     if not packet_dir.exists():
-        return {"available": False, "count": 0, "bytes": 0}
+        return {"runtimeRemoved": True, "available": False, "count": 0, "bytes": 0}
     count = 0
     total = 0
     for path in packet_dir.glob("live-*.ndjson"):
@@ -385,7 +382,7 @@ def live_packet_dir_stats(session_path: str | None) -> dict[str, Any]:
             continue
         count += 1
         total += int(stat.st_size)
-    return {"available": True, "count": count, "bytes": total}
+    return {"runtimeRemoved": True, "available": bool(count), "count": count, "bytes": total}
 
 
 def live_packet_growth_failure(before: dict[str, Any], after: dict[str, Any]) -> str | None:
@@ -397,7 +394,7 @@ def live_packet_growth_failure(before: dict[str, Any], after: dict[str, Any]) ->
     except (TypeError, ValueError):
         return None
     if after_count > before_count or after_bytes > before_bytes:
-        return "compact packet files are growing in snapshot no-file daily"
+        return "retired live packet archive files are growing in snapshot no-file daily"
     return None
 
 
@@ -526,8 +523,8 @@ def suggestions_for(messages: list[str]) -> list[str]:
         suggestions.append("Use Stop All in the Live Control Panel, then start only the Streamlined Live Daemon.")
     if "debug live files" in joined:
         suggestions.append("Start live_core_daemon without --write-debug-live-files for daily mode.")
-    if "compact-stream" in joined:
-        suggestions.append("Use compact-packets for daily mode; compact-stream remains experimental.")
+    if "compact-stream" in joined or "compact-packets" in joined or "live packet archive" in joined:
+        suggestions.append("Use snapshot-no-files with plugin-snapshot; live packet archives and compact stream are retired.")
     if "screenshot capture" in joined or "crop capture" in joined or "perception capture" in joined:
         suggestions.append("Apply Daily Live Preset and keep screenshot/crop/perception tooling under Advanced Debug.")
     if "inventory" in joined:
@@ -599,8 +596,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--latest-session", action="store_true", help="Use newest telemetry session.")
     parser.add_argument("--sessions-dir", help="Override sessions directory when using --latest-session.")
     parser.add_argument("--daemon-url", default="http://127.0.0.1:8890", help="live_core_daemon URL.")
-    parser.add_argument("--daily-mode", choices=("compact-packets", "snapshot-no-files"), default="compact-packets", help="Daily source mode to validate.")
-    parser.add_argument("--packet-growth-delay", type=float, default=0.25, help="Seconds to observe live_packets growth in snapshot no-file mode.")
+    parser.add_argument("--daily-mode", choices=("snapshot-no-files",), default="snapshot-no-files", help="Daily source mode to validate. Live packet archive modes are retired.")
+    parser.add_argument("--packet-growth-delay", type=float, default=0.25, help="Seconds to observe legacy live_packets growth in snapshot no-file mode.")
     parser.add_argument("--check-processes", action="store_true", help="Check for duplicate/conflicting live processes.")
     parser.add_argument("--strict", action="store_true", help="Treat missing daemon status as failure.")
     parser.add_argument("--json", action="store_true", help="Print JSON.")

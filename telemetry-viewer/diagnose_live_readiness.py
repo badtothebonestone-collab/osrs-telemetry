@@ -56,6 +56,9 @@ def format_human(report: dict) -> str:
         f"  highlighter session: {sessions.get('highlighterSessionPath') or 'unknown'}",
         f"  daemon matches latest live: {yn(sessions.get('matchLatestLive'))}",
         f"  daemon matches highlighter: {yn(sessions.get('matchHighlighter'))}",
+        f"  stale file session context: {yn(report.get('staleFileSessionContext'))}",
+        f"  daemon session fresh: {yn(report.get('daemonSessionFresh'))}",
+        f"  plugin snapshot fresh: {yn(report.get('pluginSnapshotFresh'))}",
         "",
         "Overlay / Highlighter:",
         f"  debug overlay JSON: {'present' if overlay.get('debugOverlayExists') else 'missing'}",
@@ -68,6 +71,7 @@ def format_human(report: dict) -> str:
         f"  highlighter markers: {candidate.get('highlighterMarkers') if candidate.get('highlighterMarkers') is not None else 'unknown'}",
         f"  known Tree/Oak candidates: {candidate.get('knownChopCandidates') if candidate.get('knownChopCandidates') is not None else 'unknown'}",
         f"  target freshness: {freshness.get('targetCandidateFreshness') or 'unknown'}",
+        f"  target freshness applicable: {yn(report.get('selectedResourceTargetFreshnessApplicable'))}",
         f"  stale: {yn(freshness.get('stale'))}",
         "",
         "Selected Target:",
@@ -116,10 +120,18 @@ def format_human(report: dict) -> str:
     else:
         lines.append("  none")
     warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
+    applicable_warnings = report.get("applicableWarnings") if isinstance(report.get("applicableWarnings"), list) else []
+    non_applicable_warnings = (
+        report.get("nonApplicableContextWarnings") if isinstance(report.get("nonApplicableContextWarnings"), list) else []
+    )
     action_warnings = action_readiness.get("warnings") if isinstance(action_readiness.get("warnings"), list) else []
     context_warnings = context_readiness.get("warnings") if isinstance(context_readiness.get("warnings"), list) else []
     lines.extend(["", "Action warnings:"])
     lines.extend(f"  WARN: {warning}" for warning in action_warnings) if action_warnings else lines.append("  none")
+    lines.extend(["", "Applicable context warnings:"])
+    lines.extend(f"  WARN: {warning}" for warning in applicable_warnings) if applicable_warnings else lines.append("  none")
+    lines.extend(["", "Non-applicable context warnings:"])
+    lines.extend(f"  WARN: {warning}" for warning in non_applicable_warnings) if non_applicable_warnings else lines.append("  none")
     lines.extend(["", "Context warnings:"])
     lines.extend(f"  WARN: {warning}" for warning in context_warnings) if context_warnings else lines.append("  none")
     lines.extend(["", "Warnings:"])

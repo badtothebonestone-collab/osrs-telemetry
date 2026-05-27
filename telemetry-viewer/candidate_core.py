@@ -23,6 +23,23 @@ CANDIDATE_EXPLANATION_SCHEMA = "candidate_explanation.v1"
 TREE_CLASSES = {"tree", "oak_tree", "willow_tree", "woodcutting_tree"}
 VALID_CHOP_NAMES = {"tree", "oak", "oak tree", "willow", "willow tree", "maple tree", "yew tree", "magic tree"}
 MAX_REASONABLE_CANVAS_COORDINATE = 100000.0
+WOODCUTTING_RESOURCE_REQUIREMENTS = (
+    ("redwood", 90),
+    ("magic", 75),
+    ("yew", 60),
+    ("arctic pine", 54),
+    ("mahogany", 50),
+    ("maple", 45),
+    ("hollow tree", 45),
+    ("teak", 35),
+    ("willow", 30),
+    ("oak", 15),
+)
+WOODCUTTING_RESOURCE_REQUIREMENTS_BY_ID = {
+    10820: 15,
+    10819: 30,
+    10829: 30,
+}
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -50,6 +67,19 @@ def _optional_int(value: Any) -> int | None:
     if isinstance(value, str):
         try:
             return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
         except ValueError:
             return None
     return None
@@ -127,6 +157,165 @@ def target_matches(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 def target_name(target: dict[str, Any]) -> str:
     return str(target.get("name") or target.get("targetName") or target.get("label") or "unknown")
+
+
+def _target_class_ids(target: dict[str, Any]) -> set[str]:
+    ids = {str(target.get("classId") or target.get("targetClass") or "").strip().lower()}
+    value = target.get("targetClassIds")
+    if isinstance(value, list):
+        ids.update(str(item).strip().lower() for item in value if str(item).strip())
+    nested = target.get("target") if isinstance(target.get("target"), dict) else {}
+    ids.add(str(nested.get("classId") or nested.get("targetClass") or "").strip().lower())
+    nested_ids = nested.get("targetClassIds")
+    if isinstance(nested_ids, list):
+        ids.update(str(item).strip().lower() for item in nested_ids if str(item).strip())
+    return {item for item in ids if item}
+
+
+def _target_int(target: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = _optional_int(target.get(key))
+        if value is not None:
+            return value
+    nested = target.get("target") if isinstance(target.get("target"), dict) else {}
+    for key in keys:
+        value = _optional_int(nested.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _target_distance(target: dict[str, Any]) -> float:
+    for key in ("distanceTiles", "targetDistanceChebyshev", "targetDistanceTiles"):
+        value = _number(target.get(key))
+        if value is not None:
+            return value
+    return 1_000_000.0
+
+
+def _target_score(target: dict[str, Any]) -> float:
+    for key in ("qualityScore", "score", "candidateScore", "rankScore"):
+        value = _number(target.get(key))
+        if value is not None:
+            return value
+    return 0.0
+
+
+def woodcutting_required_level(target: dict[str, Any] | None) -> int | None:
+    if not isinstance(target, dict) or not target:
+        return None
+    for key in ("requiredWoodcuttingLevel", "woodcuttingLevelRequired", "requiredSkillLevel"):
+        value = _optional_int(target.get(key))
+        if value is not None:
+            return max(1, value)
+    requirements = target.get("resourceRequirements") if isinstance(target.get("resourceRequirements"), dict) else {}
+    for key in ("woodcutting", "woodcuttingLevel", "level"):
+        value = _optional_int(requirements.get(key))
+        if value is not None:
+            return max(1, value)
+
+    object_id = _target_int(target, "id", "rawId", "identifier")
+    if object_id in WOODCUTTING_RESOURCE_REQUIREMENTS_BY_ID:
+        return WOODCUTTING_RESOURCE_REQUIREMENTS_BY_ID[object_id]
+
+    text = " ".join(
+        str(value or "").strip().lower()
+        for value in (
+            target.get("name"),
+            target.get("targetName"),
+            target.get("classId"),
+            target.get("targetClass"),
+            " ".join(sorted(_target_class_ids(target))),
+        )
+    )
+    for needle, level in WOODCUTTING_RESOURCE_REQUIREMENTS:
+        if needle in text:
+            return level
+    if "tree" in text or _target_class_ids(target) & TREE_CLASSES:
+        return 1
+    return None
+
+
+def woodcutting_level_from_context(*contexts: dict[str, Any] | None) -> int | None:
+    keys = (
+        "woodcuttingLevel",
+        "woodcuttingRealLevel",
+        "woodcuttingBoostedLevel",
+        "woodcuttingCurrentLevel",
+    )
+    for context in contexts:
+        if not isinstance(context, dict):
+            continue
+        stack: list[dict[str, Any]] = [context]
+        for nested_key in ("baseline", "player", "skills", "skillLevels", "stats", "brain"):
+            nested = context.get(nested_key)
+            if isinstance(nested, dict):
+                stack.append(nested)
+        for payload in stack:
+            for key in keys:
+                value = _optional_int(payload.get(key))
+                if value is not None:
+                    return value
+            skills = payload.get("skills") or payload.get("skillLevels")
+            if isinstance(skills, dict):
+                woodcutting = skills.get("woodcutting") or skills.get("Woodcutting")
+                if isinstance(woodcutting, dict):
+                    for key in ("realLevel", "level", "boostedLevel", "currentLevel"):
+                        value = _optional_int(woodcutting.get(key))
+                        if value is not None:
+                            return value
+                value = _optional_int(woodcutting)
+                if value is not None:
+                    return value
+    return None
+
+
+def woodcutting_resource_preference_key(
+    target: dict[str, Any],
+    *,
+    woodcutting_level: int | None = None,
+) -> tuple[int, int, int, float, float, str]:
+    required = woodcutting_required_level(target)
+    required_sort = required if woodcutting_level is None and required is not None else 0
+    if woodcutting_level is not None and required is not None and required > woodcutting_level:
+        required_sort = required
+    ineligible = 1 if woodcutting_level is not None and required is not None and required > woodcutting_level else 0
+    unknown_skill_higher_level = 1 if woodcutting_level is None and required is not None and required > 1 else 0
+    return (
+        ineligible,
+        unknown_skill_higher_level,
+        required_sort,
+        -_target_score(target),
+        _target_distance(target),
+        target_name(target).lower(),
+    )
+
+
+def preferred_woodcutting_resource_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    woodcutting_level: int | None = None,
+    suppressed_keys: set[str] | None = None,
+) -> dict[str, Any] | None:
+    suppressed_keys = suppressed_keys or set()
+    filtered: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        key = _target_key(candidate)
+        if key and key in suppressed_keys:
+            continue
+        required = woodcutting_required_level(candidate)
+        if required is None:
+            continue
+        if woodcutting_level is None and required > 1:
+            continue
+        if woodcutting_level is not None and required > woodcutting_level:
+            continue
+        filtered.append(candidate)
+    if not filtered:
+        return None
+    return min(filtered, key=lambda candidate: woodcutting_resource_preference_key(candidate, woodcutting_level=woodcutting_level))
 
 
 def target_tick(target: dict[str, Any]) -> int | None:
@@ -317,6 +506,11 @@ def explain_candidate(
         "aimPointStatus": aim_status,
         "safeAimPoint": safe_aimpoint,
         "aimPointSource": safe_aimpoint.get("source") if safe_aimpoint else _aim_source(target),
+        "resourceTargetAmbiguity": target.get("resourceTargetAmbiguity") if isinstance(target.get("resourceTargetAmbiguity"), dict) else None,
+        "aimpointSamplesTried": target.get("aimpointSamplesTried"),
+        "aimpointSampleResults": _list(target.get("aimpointSampleResults")),
+        "selectedAimpointSource": target.get("selectedAimpointSource"),
+        "hoverConfirmedTopExpected": target.get("hoverConfirmedTopExpected"),
         "geometryAvailable": geometry_available,
         "geometryStatus": "available" if geometry_available is True else "missing" if geometry_available is False else "unknown",
         "onScreen": on_screen,
@@ -340,6 +534,9 @@ def explain_candidate(
         "selectedApproachNode": target.get("selectedApproachNode"),
         "routeSourceMismatch": target.get("routeSourceMismatch"),
         "targetSource": target.get("source"),
+        "actionTargetSource": target.get("actionTargetSource") or target.get("action_target_source"),
+        "actionability": target.get("actionability"),
+        "advisoryTargetSource": target.get("advisoryTargetSource") or target.get("advisory_target_source"),
         "pathTargetTile": target.get("pathTargetTile"),
         "destinationTile": target.get("destinationTile"),
         "localFrontierWaypoint": target.get("localFrontierWaypoint"),

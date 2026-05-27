@@ -24,7 +24,7 @@ def write_json(path: Path, value: dict) -> None:
 def make_session(
     root: Path,
     *,
-    input_source: str = "compact-packets",
+    input_source: str = "plugin-snapshot",
     recording_mode: str = "LIVE_COMPACT_ONLY",
     raw_ticks: bool = False,
     raw_events: bool = False,
@@ -39,7 +39,7 @@ def make_session(
     budget_exceeded: bool = False,
     write_failures: int = 0,
     compact_stream_enabled: bool = False,
-    compact_packets: bool = True,
+    compact_packets: bool = False,
     compact_live_packet_files_enabled: bool | None = None,
     plugin_tier: str | None = None,
     plugin_field_mode: str | None = None,
@@ -135,20 +135,20 @@ def evaluate(session: Path, mode: str = "daily") -> dict:
 
 
 class LiveConfigDoctorTest(unittest.TestCase):
-    def test_daily_mode_passes_with_compact_live_only(self):
+    def test_daily_mode_passes_with_plugin_snapshot_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             report = evaluate(make_session(Path(tmp)), "daily")
 
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(report["summary"]["inputSourceActive"], "compact-packets")
-        self.assertTrue(report["compactPackets"]["recent"])
+        self.assertEqual(report["summary"]["inputSourceActive"], "plugin-snapshot")
+        self.assertTrue(report["summary"]["livePacketsRuntimeRemoved"])
 
-    def test_daily_mode_warns_with_plugin_snapshot_input(self):
+    def test_daily_mode_warns_with_legacy_packet_input(self):
         with tempfile.TemporaryDirectory() as tmp:
-            report = evaluate(make_session(Path(tmp), input_source="plugin-snapshot", plugin_tier="hot"), "daily")
+            report = evaluate(make_session(Path(tmp), input_source="compact-packets", plugin_tier="hot"), "daily")
 
         self.assertEqual(report["status"], "WARN")
-        self.assertIn("daily_plugin_snapshot_input", [issue["code"] for issue in report["issues"]])
+        self.assertIn("daily_input_source", [issue["code"] for issue in report["issues"]])
 
     def test_daily_mode_accepts_live_core_daemon_memory_service(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,14 +188,14 @@ class LiveConfigDoctorTest(unittest.TestCase):
                 "latestTick": 10,
                 "service": "live_core_daemon",
                 "liveCoreDaemonActive": True,
-                "inputSourceActive": "compact-packets",
+                "inputSourceActive": "plugin-snapshot",
                 "writeDebugLiveFiles": True,
                 "overlayStateWritten": True,
                 "candidateCount": 4,
                 "health": {
                     "service": "live_core_daemon",
                     "liveCoreDaemonActive": True,
-                    "inputSourceActive": "compact-packets",
+                    "inputSourceActive": "plugin-snapshot",
                     "writeDebugLiveFiles": True,
                     "overlayStateWritten": True,
                     "latestTick": 10,
@@ -215,8 +215,8 @@ class LiveConfigDoctorTest(unittest.TestCase):
         self.assertEqual(report["status"], "WARN")
         self.assertIn("daily_input_source", codes)
         self.assertIn("daily_compact_stream", codes)
-        self.assertEqual(report["presetRecommended"], "DAILY_LIVE")
-        self.assertIn("Click Apply Daily Live Preset.", report["fixSuggestions"])
+        self.assertEqual(report["presetRecommended"], "DAILY_SNAPSHOT_NO_FILE")
+        self.assertIn("Click Apply Daily Snapshot No-File Preset.", report["fixSuggestions"])
 
     def test_daily_mode_warns_with_large_window(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -317,7 +317,7 @@ class LiveConfigDoctorTest(unittest.TestCase):
         self.assertFalse(report["summary"]["compactPacketFilesWriting"])
         self.assertEqual(report["summary"]["inputSourceActive"], "plugin-snapshot")
 
-    def test_snapshot_no_file_mode_warns_if_compact_packet_files_are_writing(self):
+    def test_snapshot_no_file_mode_warns_if_legacy_packet_files_remain(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(
                 Path(tmp),
@@ -336,7 +336,7 @@ class LiveConfigDoctorTest(unittest.TestCase):
                 ):
                     report = doctor.evaluate_live_config(session, mode="snapshot_no_file", now=time.time())
 
-        self.assertIn("snapshot_no_file_compact_packet_files", [issue["code"] for issue in report["issues"]])
+        self.assertIn("legacy_live_packets_present", [issue["code"] for issue in report["issues"]])
 
     def test_json_output_is_valid(self):
         with tempfile.TemporaryDirectory() as tmp:

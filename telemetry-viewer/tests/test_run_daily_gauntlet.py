@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -59,7 +59,7 @@ class RunDailyGauntletTest(unittest.TestCase):
             {"status": "PASS"},
             {
                 "liveCoreDaemonActive": True,
-                "inputSourceActive": "compact-packets",
+                "inputSourceActive": "plugin-snapshot",
                 "writeDebugLiveFiles": False,
                 "brainTaskPolicy": "woodcutting_bank",
                 "compactPacketsRecent": True,
@@ -80,13 +80,13 @@ class RunDailyGauntletTest(unittest.TestCase):
     def test_warns_when_task_policy_missing_or_unknown(self):
         missing = gauntlet.evaluate_daemon_payloads(
             {"status": "PASS"},
-            {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets", "compactPacketsRecent": True},
+            {"liveCoreDaemonActive": True, "inputSourceActive": "plugin-snapshot", "compactPacketsRecent": True},
         )
         unknown = gauntlet.evaluate_daemon_payloads(
             {"status": "PASS"},
             {
                 "liveCoreDaemonActive": True,
-                "inputSourceActive": "compact-packets",
+                "inputSourceActive": "plugin-snapshot",
                 "compactPacketsRecent": True,
                 "brainTaskPolicy": "mystery_policy",
             },
@@ -96,7 +96,7 @@ class RunDailyGauntletTest(unittest.TestCase):
         self.assertTrue(any("unknown task policy" in warning for warning in unknown["warnings"]))
 
     def test_report_includes_active_task_policy(self):
-        args = gauntlet.parse_args(["--daily-mode", "compact-packets"])
+        args = gauntlet.parse_args(["--daily-mode", "snapshot-no-files"])
         brain = {
             "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
             "serviceContext": {"serviceNeeded": True},
@@ -110,7 +110,7 @@ class RunDailyGauntletTest(unittest.TestCase):
             "fetch_json",
             side_effect=[
                 {"status": "PASS"},
-                {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_drop"},
+                {"liveCoreDaemonActive": True, "inputSourceActive": "plugin-snapshot", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_drop"},
                 brain,
             ],
         ):
@@ -315,7 +315,7 @@ class RunDailyGauntletTest(unittest.TestCase):
     def test_fails_if_pathing_required_but_context_missing(self):
         result = gauntlet.evaluate_daemon_payloads(
             {"status": "PASS"},
-            {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_bank"},
+            {"liveCoreDaemonActive": True, "inputSourceActive": "plugin-snapshot", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_bank"},
             {"status": "PASS"},
             {
                 "genericTaskState": {"phase": "inventory_full", "activeIntent": "needs_service"},
@@ -331,7 +331,7 @@ class RunDailyGauntletTest(unittest.TestCase):
     def test_process_inventory_does_not_fail_when_pathing_not_needed(self):
         result = gauntlet.evaluate_daemon_payloads(
             {"status": "PASS"},
-            {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_firemake"},
+            {"liveCoreDaemonActive": True, "inputSourceActive": "plugin-snapshot", "compactPacketsRecent": True, "brainTaskPolicy": "woodcutting_firemake"},
             {"status": "PASS"},
             {
                 "genericTaskState": {"phase": "inventory_full", "activeIntent": "process_inventory"},
@@ -364,7 +364,7 @@ class RunDailyGauntletTest(unittest.TestCase):
             {"status": "PASS"},
             {
                 "liveCoreDaemonActive": True,
-                "inputSourceActive": "compact-packets",
+                "inputSourceActive": "plugin-snapshot",
                 "brainProgress": {
                     "currentSnapshotValid": False,
                     "progressRetainedFromPrevious": False,
@@ -375,13 +375,13 @@ class RunDailyGauntletTest(unittest.TestCase):
 
         self.assertTrue(any("invalid inventory snapshot" in failure for failure in result["failures"]))
 
-    def test_daily_requires_compact_packets_input(self):
+    def test_daily_accepts_plugin_snapshot_input(self):
         result = gauntlet.evaluate_daemon_payloads(
             {"status": "PASS"},
             {"liveCoreDaemonActive": True, "inputSourceActive": "plugin-snapshot"},
         )
 
-        self.assertTrue(any("compact-packets" in failure for failure in result["failures"]))
+        self.assertFalse(any("live packet archive" in failure for failure in result["failures"]))
 
     def test_snapshot_no_file_allows_plugin_snapshot_and_no_compact_files(self):
         result = gauntlet.evaluate_daemon_payloads(
@@ -414,7 +414,7 @@ class RunDailyGauntletTest(unittest.TestCase):
             daily_mode="snapshot-no-files",
         )
 
-        self.assertTrue(any("compact packet files" in failure for failure in result["failures"]))
+        self.assertTrue(any("retired live packet archive files" in failure for failure in result["failures"]))
 
     def test_snapshot_no_file_detects_live_packet_growth(self):
         message = gauntlet.live_packet_growth_failure(
@@ -422,14 +422,14 @@ class RunDailyGauntletTest(unittest.TestCase):
             {"count": 1, "bytes": 150},
         )
 
-        self.assertEqual(message, "compact packet files are growing in snapshot no-file daily")
+        self.assertEqual(message, "retired live packet archive files are growing in snapshot no-file daily")
 
     def test_raw_recording_flags_fail_daily(self):
         result = gauntlet.evaluate_daemon_payloads(
             {"status": "PASS"},
             {
                 "liveCoreDaemonActive": True,
-                "inputSourceActive": "compact-packets",
+                "inputSourceActive": "plugin-snapshot",
                 "rawTickRecordingEnabled": True,
                 "rawEventRecordingEnabled": True,
                 "frameRecordingEnabled": True,
@@ -445,7 +445,7 @@ class RunDailyGauntletTest(unittest.TestCase):
             {"status": "PASS"},
             {
                 "liveCoreDaemonActive": True,
-                "inputSourceActive": "compact-packets",
+                "inputSourceActive": "plugin-snapshot",
                 "captureScreenshots": True,
                 "cropCaptureEnabled": "true",
                 "perceptionCaptureEnabled": True,
@@ -461,7 +461,7 @@ class RunDailyGauntletTest(unittest.TestCase):
             {"status": "PASS"},
             {
                 "liveCoreDaemonActive": True,
-                "inputSourceActive": "compact-packets",
+                "inputSourceActive": "plugin-snapshot",
                 "overlayStateWritten": True,
                 "overlayStateFresh": False,
             },
@@ -474,7 +474,7 @@ class RunDailyGauntletTest(unittest.TestCase):
             {"status": "PASS"},
             {
                 "liveCoreDaemonActive": True,
-                "inputSourceActive": "compact-packets",
+                "inputSourceActive": "plugin-snapshot",
                 "brainProgress": {
                     "matchedSlotDetails": [{"slot": 9, "itemId": None, "counted": True}],
                     "currentSnapshotValid": True,
@@ -487,7 +487,7 @@ class RunDailyGauntletTest(unittest.TestCase):
     def test_read_only_context_field_names_do_not_fail_gauntlet(self):
         result = gauntlet.evaluate_daemon_payloads(
             {"status": "PASS"},
-            {"liveCoreDaemonActive": True, "inputSourceActive": "compact-packets"},
+            {"liveCoreDaemonActive": True, "inputSourceActive": "plugin-snapshot"},
             {"status": "PASS", "navigation": {"interactionRadiusTiles": 2, "clickbox": {"x": 1}}},
             {"goalProgress": {}, "noActionEmitted": True},
         )

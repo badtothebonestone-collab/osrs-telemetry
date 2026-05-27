@@ -53,8 +53,29 @@ public class PluginSnapshotEndpoint implements Closeable
 			"dialogue_state",
 			"interaction_hot",
 			"client_tick_tail",
+			"world_model_summary",
+			"scene_object_census",
+			"route_object_census",
+			"resource_object_census",
+			"service_object_census",
+			"pathing_frontier",
+			"projection_audit",
+			"minimap_projection",
+			"view_quality_inputs",
+			"full_world_model_debug",
 			"writer_health",
 			"watch_values");
+	private static final List<String> WORLD_MODEL_NEEDS = Arrays.asList(
+			"world_model_summary",
+			"scene_object_census",
+			"route_object_census",
+			"resource_object_census",
+			"service_object_census",
+			"pathing_frontier",
+			"projection_audit",
+			"minimap_projection",
+			"view_quality_inputs",
+			"full_world_model_debug");
 	private static final Map<String, String> NEED_TO_PACKET_TYPE = createNeedMap();
 
 	private final PluginLiveCache liveCache;
@@ -70,6 +91,7 @@ public class PluginSnapshotEndpoint implements Closeable
 	private final Supplier<Map<String, Object>> lastMenuOptionClickedSupplier;
 	private final ClientTickHotState clientTickHotState;
 	private final TileProjectionProvider tileProjectionProvider;
+	private final WorldModelQueryProvider worldModelQueryProvider;
 	private HttpServer server;
 	private ExecutorService executor;
 	private int boundPort;
@@ -78,6 +100,12 @@ public class PluginSnapshotEndpoint implements Closeable
 	interface TileProjectionProvider
 	{
 		Map<String, Object> projectTiles(List<Map<String, Object>> requests);
+	}
+
+	@FunctionalInterface
+	interface WorldModelQueryProvider
+	{
+		Map<String, Object> queryWorldModel(List<String> needs, Map<String, Object> request);
 	}
 
 	public PluginSnapshotEndpoint(
@@ -117,6 +145,7 @@ public class PluginSnapshotEndpoint implements Closeable
 				null,
 				null,
 				null,
+				null,
 				null);
 	}
 
@@ -146,6 +175,7 @@ public class PluginSnapshotEndpoint implements Closeable
 				hoverMenuSupplier,
 				lastMenuOptionClickedSupplier,
 				null,
+				null,
 				null);
 	}
 
@@ -174,6 +204,7 @@ public class PluginSnapshotEndpoint implements Closeable
 				null,
 				null,
 				clientTickHotState,
+				null,
 				null);
 	}
 
@@ -203,7 +234,39 @@ public class PluginSnapshotEndpoint implements Closeable
 				null,
 				null,
 				clientTickHotState,
-				tileProjectionProvider);
+				tileProjectionProvider,
+				null);
+	}
+
+	public PluginSnapshotEndpoint(
+			PluginLiveCache liveCache,
+			Gson gson,
+			String host,
+			int port,
+			String authToken,
+			int maxProjectionRefs,
+			int maxResponseBytes,
+			boolean allowNonLocalHost,
+			TelemetryPresetApplier presetApplier,
+			ClientTickHotState clientTickHotState,
+			TileProjectionProvider tileProjectionProvider,
+			WorldModelQueryProvider worldModelQueryProvider)
+	{
+		this(
+				liveCache,
+				gson,
+				host,
+				port,
+				authToken,
+				maxProjectionRefs,
+				maxResponseBytes,
+				allowNonLocalHost,
+				presetApplier,
+				null,
+				null,
+				clientTickHotState,
+				tileProjectionProvider,
+				worldModelQueryProvider);
 	}
 
 	private PluginSnapshotEndpoint(
@@ -219,7 +282,8 @@ public class PluginSnapshotEndpoint implements Closeable
 			Supplier<Map<String, Object>> hoverMenuSupplier,
 			Supplier<Map<String, Object>> lastMenuOptionClickedSupplier,
 			ClientTickHotState clientTickHotState,
-			TileProjectionProvider tileProjectionProvider)
+			TileProjectionProvider tileProjectionProvider,
+			WorldModelQueryProvider worldModelQueryProvider)
 	{
 		this.liveCache = liveCache;
 		this.gson = gson;
@@ -234,6 +298,7 @@ public class PluginSnapshotEndpoint implements Closeable
 		this.lastMenuOptionClickedSupplier = lastMenuOptionClickedSupplier;
 		this.clientTickHotState = clientTickHotState;
 		this.tileProjectionProvider = tileProjectionProvider;
+		this.worldModelQueryProvider = worldModelQueryProvider;
 	}
 
 	public void start() throws IOException
@@ -311,6 +376,13 @@ public class PluginSnapshotEndpoint implements Closeable
 		payload.put("clientTickHotSchema", ClientTickHotState.SCHEMA);
 		payload.put("requestControls", List.of("tileProjectionRequests"));
 		payload.put("tileProjectionSchema", "tile_projection_response.v1");
+		payload.put("worldModelSchema", WorldModelCache.SCHEMA);
+		payload.put("worldModelQueryControls", List.of(
+				"worldModel.maxObjects",
+				"worldModel.radiusTiles",
+				"worldModel.centerWorldLocation",
+				"worldModel.includeProjection",
+				"worldModel.includeCollision"));
 		payload.put("readOnlyStatement", "Returns cached telemetry observations and can apply fixed whitelisted telemetry config presets. It has no game input, command, or game-state mutation endpoints.");
 		return payload;
 	}
@@ -345,6 +417,7 @@ public class PluginSnapshotEndpoint implements Closeable
 		SnapshotHints snapshotHints = snapshotHints(request);
 		List<String> needs = requestedNeeds(request, includeCollisionWindow, includeWatchValues);
 		List<String> hotNeeds = requestedHotNeeds(request);
+		List<String> worldModelNeeds = requestedWorldModelNeeds(request);
 		Map<String, Object> clientTickHot = clientTickHotSnapshot(request, false);
 		List<Map<String, Object>> tileProjectionRequests = tileProjectionRequests(request);
 		Map<String, Object> response = new LinkedHashMap<>();
@@ -430,6 +503,22 @@ public class PluginSnapshotEndpoint implements Closeable
 		{
 			payloads.put("tile_projection", gson.toJsonTree(tileProjections));
 		}
+		Map<String, Object> worldModel = worldModelPayload(worldModelNeeds, request, warnings, missingCapabilities, responseSizing);
+		if (worldModel != null)
+		{
+			@SuppressWarnings("unchecked")
+			Map<String, Object> worldPayloads = worldModel.get("payloads") instanceof Map
+					? (Map<String, Object>) worldModel.get("payloads")
+					: Map.of();
+			for (String need : worldModelNeeds)
+			{
+				Object value = worldPayloads.get(need);
+				if (value != null)
+				{
+					payloads.put(need, gson.toJsonTree(value));
+				}
+			}
+		}
 
 		freshness.put("latestTick", latestTick);
 		freshness.put("maxAgeTicks", maxAgeTicks);
@@ -457,6 +546,15 @@ public class PluginSnapshotEndpoint implements Closeable
 		if (tileProjections != null)
 		{
 			response.put("tileProjections", tileProjections);
+		}
+		if (worldModel != null)
+		{
+			response.put("worldModel", compactWorldModelEnvelope(worldModel));
+			Object quality = worldModel.get("quality");
+			if (quality instanceof Map)
+			{
+				response.put("worldModelQuality", quality);
+			}
 		}
 		response.put("clientTickHot", clientTickHot);
 		response.put("hoverMenu", clientTickHot == null ? hotSample(hoverMenuSupplier) : clientTickHot.get("postMenuSort"));
@@ -580,6 +678,80 @@ public class PluginSnapshotEndpoint implements Closeable
 					"tiles", List.of(),
 					"warnings", List.of("tile projection provider failed: " + e.getClass().getSimpleName()));
 		}
+	}
+
+	private Map<String, Object> worldModelPayload(
+			List<String> needs,
+			JsonObject request,
+			List<String> warnings,
+			List<String> missingCapabilities,
+			Map<String, Object> responseSizing)
+	{
+		if (needs == null || needs.isEmpty())
+		{
+			return null;
+		}
+		if (worldModelQueryProvider == null)
+		{
+			missingCapabilities.add("world_model");
+			warnings.add("world model query provider unavailable");
+			return null;
+		}
+		try
+		{
+			@SuppressWarnings("unchecked")
+			Map<String, Object> requestMap = gson.fromJson(request == null ? new JsonObject() : request, Map.class);
+			Map<String, Object> payload = worldModelQueryProvider.queryWorldModel(List.copyOf(needs), requestMap == null ? Map.of() : requestMap);
+			if (payload == null)
+			{
+				missingCapabilities.add("world_model");
+				warnings.add("world model query returned no payload");
+				return null;
+			}
+			responseSizing.put("worldModelNeeds", List.copyOf(needs));
+			Object sizing = payload.get("sizing");
+			if (sizing instanceof Map)
+			{
+				responseSizing.put("worldModelSizing", sizing);
+			}
+			Object payloadWarnings = payload.get("warnings");
+			if (payloadWarnings instanceof List)
+			{
+				for (Object warning : (List<?>) payloadWarnings)
+				{
+					if (warning != null)
+					{
+						warnings.add(String.valueOf(warning));
+					}
+				}
+			}
+			return payload;
+		}
+		catch (RuntimeException e)
+		{
+			missingCapabilities.add("world_model");
+			warnings.add("world model query failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+			return null;
+		}
+	}
+
+	private Map<String, Object> compactWorldModelEnvelope(Map<String, Object> worldModel)
+	{
+		Map<String, Object> envelope = new LinkedHashMap<>();
+		for (String key : List.of("schema", "snapshotSchema", "generatedAtUtc", "status", "needs", "quality", "warnings", "sizing"))
+		{
+			if (worldModel.containsKey(key))
+			{
+				envelope.put(key, worldModel.get(key));
+			}
+		}
+		Object payloads = worldModel.get("payloads");
+		if (payloads instanceof Map)
+		{
+			envelope.put("payloadKeys", new ArrayList<>(((Map<?, ?>) payloads).keySet()));
+			envelope.put("payloadsMirroredInTopLevel", true);
+		}
+		return envelope;
 	}
 
 	private void copyStringField(JsonObject source, Map<String, Object> target, String key)
@@ -1285,6 +1457,28 @@ public class PluginSnapshotEndpoint implements Closeable
 		return needs;
 	}
 
+	private List<String> requestedWorldModelNeeds(JsonObject request)
+	{
+		JsonElement needsElement = request == null ? null : request.get("needs");
+		List<String> needs = new ArrayList<>();
+		if (needsElement != null && needsElement.isJsonArray())
+		{
+			for (JsonElement element : needsElement.getAsJsonArray())
+			{
+				if (!element.isJsonPrimitive())
+				{
+					continue;
+				}
+				String need = normalizeNeed(element.getAsString());
+				if (WORLD_MODEL_NEEDS.contains(need) && !needs.contains(need))
+				{
+					needs.add(need);
+				}
+			}
+		}
+		return needs;
+	}
+
 	private String normalizeNeed(String need)
 	{
 		if (need == null)
@@ -1298,6 +1492,16 @@ public class PluginSnapshotEndpoint implements Closeable
 				.replace("collisionWindow", "collision_window")
 				.replace("bankUi", "bank_ui")
 				.replace("dialogueState", "dialogue_state")
+				.replace("worldModelSummary", "world_model_summary")
+				.replace("sceneObjectCensus", "scene_object_census")
+				.replace("routeObjectCensus", "route_object_census")
+				.replace("resourceObjectCensus", "resource_object_census")
+				.replace("serviceObjectCensus", "service_object_census")
+				.replace("pathingFrontier", "pathing_frontier")
+				.replace("projectionAudit", "projection_audit")
+				.replace("minimapProjection", "minimap_projection")
+				.replace("viewQualityInputs", "view_quality_inputs")
+				.replace("fullWorldModelDebug", "full_world_model_debug")
 				.replace("interactionHot", "interaction_hot")
 				.replace("clientTickTail", "client_tick_tail")
 				.replace("writerHealth", "writer_health")

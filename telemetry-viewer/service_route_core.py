@@ -160,14 +160,50 @@ def _player_plane(player_context: Any) -> int | None:
     return _int(player.get("plane"))
 
 
-def _player_tile(player_context: Any) -> dict[str, Any] | None:
+def _player_location_info(player_context: Any) -> dict[str, Any]:
     player = _dict(player_context)
+    tile = player.get("worldTile") if isinstance(player.get("worldTile"), dict) else player.get("tile")
+    source = _text(player.get("location_source") or player.get("locationSource"))
+    confidence_value = player.get("location_confidence") if player.get("location_confidence") is not None else player.get("locationConfidence")
+    confidence = float(confidence_value) if isinstance(confidence_value, (int, float)) and not isinstance(confidence_value, bool) else None
+    if isinstance(tile, dict):
+        world_x = _int(tile.get("worldX", tile.get("x")))
+        world_y = _int(tile.get("worldY", tile.get("y")))
+        plane = _int(tile.get("plane"))
+        return {
+            "tile": {"worldX": world_x, "worldY": world_y, "plane": plane if plane is not None else _player_plane(player)}
+            if world_x is not None and world_y is not None
+            else None,
+            "source": source or "player_context",
+            "confidence": confidence if confidence is not None else 1.0,
+        }
     world_x = _int(player.get("worldX") if "worldX" in player else player.get("world_x"))
     world_y = _int(player.get("worldY") if "worldY" in player else player.get("world_y"))
     plane = _player_plane(player)
-    if world_x is None or world_y is None:
-        return None
-    return {"worldX": world_x, "worldY": world_y, "plane": plane if plane is not None else 0}
+    if world_x is not None and world_y is not None:
+        return {
+            "tile": {"worldX": world_x, "worldY": world_y, "plane": plane if plane is not None else 0},
+            "source": source or "player_context",
+            "confidence": confidence if confidence is not None else 1.0,
+        }
+    for key in ("collisionWindowCenterWorld", "pathingCollisionWindowCenterWorld"):
+        center = player.get(key)
+        if isinstance(center, dict):
+            center_x = _int(center.get("worldX", center.get("x")))
+            center_y = _int(center.get("worldY", center.get("y")))
+            center_plane = _int(center.get("plane"))
+            if center_x is not None and center_y is not None:
+                return {
+                    "tile": {"worldX": center_x, "worldY": center_y, "plane": center_plane if center_plane is not None else 0},
+                    "source": "collision_window_center_proxy",
+                    "confidence": confidence if confidence is not None else 0.35,
+                }
+    return {"tile": None, "source": source or None, "confidence": confidence}
+
+
+def _player_tile(player_context: Any) -> dict[str, Any] | None:
+    info = _player_location_info(player_context)
+    return info.get("tile") if isinstance(info.get("tile"), dict) else None
 
 
 def _candidate_name(candidate: dict[str, Any]) -> str:
@@ -797,10 +833,15 @@ def _candidate_lists(target_context: Any, service_context: Any) -> list[dict[str
             candidates.append(payload)
     for key in (
         "serviceCandidates",
+        "service_candidates",
         "serviceCandidateInputs",
+        "service_candidate_inputs",
         "loadedServiceScene",
+        "loaded_service_scene",
         "broadCandidates",
+        "broad_candidates",
         "profileCandidates",
+        "profile_candidates",
         "candidates",
     ):
         for item in _list(service.get(key)) + _list(target.get(key)):
@@ -1417,6 +1458,8 @@ def _route_context_payload(
     *,
     player_tile: dict[str, Any] | None,
     player_plane: int | None,
+    player_location_source: str | None = None,
+    player_location_confidence: float | None = None,
     current_node_id: str | None,
     selected_service_anchor: dict[str, Any] | None,
     selected_approach_node: dict[str, Any] | None,
@@ -1428,6 +1471,9 @@ def _route_context_payload(
     route_source_mismatch: dict[str, Any] | None,
     blocker_reason: str | None = None,
 ) -> dict[str, Any]:
+    base_confidence = 0.85 if route_source_status == "known_source" else 0.55 if route_source_status == "nearby_known_source" else 0.35
+    if player_location_source == "collision_window_center_proxy":
+        base_confidence = min(base_confidence, 0.35)
     resource_area = None
     if route_source_status == "unmapped_source" and isinstance(player_tile, dict):
         resource_area = {
@@ -1441,9 +1487,11 @@ def _route_context_payload(
     return {
         "schema": ROUTE_CONTEXT_SCHEMA,
         "currentLocation": dict(player_tile) if isinstance(player_tile, dict) else None,
+        "locationSource": player_location_source,
+        "locationConfidence": player_location_confidence,
         "currentPlane": player_plane,
         "currentAreaLabel": current_area_label,
-        "currentAreaConfidence": 0.85 if route_source_status == "known_source" else 0.55 if route_source_status == "nearby_known_source" else 0.35,
+        "currentAreaConfidence": base_confidence,
         "currentAreaSource": current_area_source,
         "resourceArea": resource_area,
         "serviceGoal": selected_service_anchor,
@@ -1621,7 +1669,10 @@ def build_service_route_context(
         )
 
     plane = _player_plane(player_context)
-    player_tile = _player_tile(player_context)
+    player_location_info = _player_location_info(player_context)
+    player_tile = player_location_info.get("tile") if isinstance(player_location_info.get("tile"), dict) else None
+    if plane is None and isinstance(player_tile, dict):
+        plane = _int(player_tile.get("plane"))
     plane_completed_steps = _completed_step_labels_for_plane(route, plane)
     location_completed_steps = _completed_navigation_step_labels_for_location(route, plane, player_tile)
     completed_reason = "navigation_progress_observed" if location_completed_steps else "plane_progress_observed"
@@ -1650,6 +1701,8 @@ def build_service_route_context(
             route,
             player_tile=player_tile,
             player_plane=plane,
+            player_location_source=player_location_info.get("source"),
+            player_location_confidence=player_location_info.get("confidence"),
             current_node_id=current_node_id,
             selected_service_anchor=service_anchor,
             selected_approach_node=selected_approach_node,

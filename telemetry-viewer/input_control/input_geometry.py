@@ -151,10 +151,19 @@ def input_geometry_from_status(status: dict[str, Any]) -> dict[str, Any]:
 
 def source_canvas_size_from_status(status: dict[str, Any]) -> dict[str, int] | None:
     status = _dict(status)
-    viewport = _dict(_dict(status.get("baseline")).get("cameraViewport"))
-    if not viewport:
-        viewport = _dict(status.get("cameraViewport"))
-    return _size_from(viewport, "canvasWidth", "canvasHeight")
+    brain = _dict(status.get("brain"))
+    for viewport in (
+        _dict(_dict(status.get("baseline")).get("cameraViewport")),
+        _dict(status.get("cameraViewport")),
+        _dict(status.get("worldModelCameraViewport")),
+        _dict(brain.get("cameraViewport")),
+        _dict(brain.get("worldModelCameraViewport")),
+    ):
+        size = _size_from(viewport, "canvasWidth", "canvasHeight")
+        if size:
+            return size
+    geometry = input_geometry_from_status(status)
+    return _dict(geometry.get("sourceCanvasSize")) or None
 
 
 def resolve_screen_click_point(
@@ -177,10 +186,18 @@ def resolve_screen_click_point(
     x = float(point["x"])
     y = float(point["y"])
     if click_point_space != "canvas":
+        screen_point = {"x": int(round(x)), "y": int(round(y))}
         return {
             "status": "PASS",
             "method": "screen_direct",
-            "screenClickPoint": {"x": int(round(x)), "y": int(round(y))},
+            "screenClickPoint": screen_point,
+            "coordinateSpace": "physical_pyautogui",
+            "scaleX": 1.0,
+            "scaleY": 1.0,
+            "screenPointBeforeScaling": dict(screen_point),
+            "screenPointAfterScaling": dict(screen_point),
+            "windowBoundsSource": "screen_direct",
+            "canvasBoundsSource": "none",
             "warnings": [],
             "missingCapabilities": [],
         }
@@ -205,20 +222,46 @@ def resolve_screen_click_point(
     canvas_height = float(canvas_size.get("height") or 1)
     source_width = float(source_size.get("width") or canvas_width or 1)
     source_height = float(source_size.get("height") or canvas_height or 1)
-    scale_x = (canvas_width / max(1.0, source_width)) * float(display_scale.get("x") or 1.0)
-    scale_y = (canvas_height / max(1.0, source_height)) * float(display_scale.get("y") or 1.0)
+    scale_x = canvas_width / max(1.0, source_width)
+    scale_y = canvas_height / max(1.0, source_height)
+    display_scale_x = float(display_scale.get("x") or 1.0)
+    display_scale_y = float(display_scale.get("y") or 1.0)
+    client_bounds = geometry.get("clientWindowBounds") if isinstance(geometry.get("clientWindowBounds"), dict) else None
+    source_matches_canvas = abs(canvas_width - source_width) < 0.5 and abs(canvas_height - source_height) < 0.5
+    # On Windows high-DPI VMs, Java/AWT can report screen locations in logical
+    # coordinates while input backends move in the cursor coordinate space. Only
+    # scale the whole resolved point when the canvas dimensions have not already
+    # been expanded from the source canvas into physical pixels.
+    logical_screen_scale_applied = bool(
+        client_bounds
+        and source_matches_canvas
+        and (abs(display_scale_x - 1.0) > 0.01 or abs(display_scale_y - 1.0) > 0.01)
+    )
+    legacy_delta_scale_applied = bool(not logical_screen_scale_applied and source_matches_canvas and (abs(display_scale_x - 1.0) > 0.01 or abs(display_scale_y - 1.0) > 0.01))
+    if legacy_delta_scale_applied:
+        scale_x *= display_scale_x
+        scale_y *= display_scale_y
+    display_scale_applied = logical_screen_scale_applied or legacy_delta_scale_applied
+    logical_x = float(origin.get("x") or 0) + x * scale_x
+    logical_y = float(origin.get("y") or 0) + y * scale_y
+    screen_point_before_scaling = {"x": int(round(logical_x)), "y": int(round(logical_y))}
     screen_point = {
-        "x": int(round(float(origin.get("x") or 0) + x * scale_x)),
-        "y": int(round(float(origin.get("y") or 0) + y * scale_y)),
+        "x": int(round(logical_x * display_scale_x if logical_screen_scale_applied else logical_x)),
+        "y": int(round(logical_y * display_scale_y if logical_screen_scale_applied else logical_y)),
     }
+    coordinate_space = "scaled_logical_to_physical" if logical_screen_scale_applied else "physical_pyautogui"
     if x < 0 or y < 0 or x > source_width or y > source_height:
         warnings.append("canvas click point outside source canvas bounds")
         missing.append("screen_click_point")
-    max_screen_x = float(origin.get("x") or 0) + canvas_width * float(display_scale.get("x") or 1.0)
-    max_screen_y = float(origin.get("y") or 0) + canvas_height * float(display_scale.get("y") or 1.0)
+    max_logical_x = float(origin.get("x") or 0) + source_width * scale_x
+    max_logical_y = float(origin.get("y") or 0) + source_height * scale_y
+    min_screen_x = float(origin.get("x") or 0) * display_scale_x if logical_screen_scale_applied else float(origin.get("x") or 0)
+    min_screen_y = float(origin.get("y") or 0) * display_scale_y if logical_screen_scale_applied else float(origin.get("y") or 0)
+    max_screen_x = max_logical_x * display_scale_x if logical_screen_scale_applied else max_logical_x
+    max_screen_y = max_logical_y * display_scale_y if logical_screen_scale_applied else max_logical_y
     if (
-        screen_point["x"] < int(origin.get("x") or 0)
-        or screen_point["y"] < int(origin.get("y") or 0)
+        screen_point["x"] < int(round(min_screen_x))
+        or screen_point["y"] < int(round(min_screen_y))
         or screen_point["x"] > int(round(max_screen_x))
         or screen_point["y"] > int(round(max_screen_y))
     ):
@@ -235,6 +278,14 @@ def resolve_screen_click_point(
         "displayScale": geometry.get("displayScale"),
         "sourceCanvasSize": source_size,
         "scale": {"x": scale_x, "y": scale_y},
+        "coordinateSpace": coordinate_space,
+        "scaleX": scale_x * display_scale_x if logical_screen_scale_applied else scale_x,
+        "scaleY": scale_y * display_scale_y if logical_screen_scale_applied else scale_y,
+        "screenPointBeforeScaling": screen_point_before_scaling,
+        "screenPointAfterScaling": dict(screen_point),
+        "windowBoundsSource": "clientWindowBounds" if client_bounds else "canvasScreenOrigin",
+        "canvasBoundsSource": "canvasSize/sourceCanvasSize",
+        "displayScaleApplied": display_scale_applied,
         "warnings": warnings,
         "missingCapabilities": missing,
     }

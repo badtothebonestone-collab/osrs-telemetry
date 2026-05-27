@@ -20,11 +20,53 @@ import live_target_processor as live
 import test_live_target_processor as fixtures
 import diagnose_brain_progress
 from analyzers import resource_return_analyzer
-from analyzers.live_state import BankOperationContext, BankUiContext, PathingContext, ResourceReturnContext, ServiceContext, TargetContext
+from analyzers.live_state import BankOperationContext, BankUiContext, InventoryContext, PathingContext, ResourceReturnContext, ServiceContext, TargetContext
 
 
 def make_args(session: Path, *extra: str):
     return daemon.parse_args(["--session", str(session), "--context-port", "0", *extra])
+
+
+class BankingCompletionRetentionTests(unittest.TestCase):
+    def test_banking_completion_retention_drops_when_new_resources_are_seen(self):
+        bank_operation = BankOperationContext(
+            operation_needed=False,
+            operation_type="unknown",
+            resource_items_held=12,
+            resource_item_quantity=12,
+            inventory_full=True,
+            banking_complete=False,
+        )
+        inventory = InventoryContext(progress={"currentHeldCount": 12, "displayedGoalProgress": 12})
+
+        self.assertFalse(
+            daemon._should_retain_banking_completion(
+                bank_operation_context=bank_operation,
+                inventory_context=inventory,
+                previous_banking_complete=True,
+                bank_open=False,
+            )
+        )
+
+    def test_banking_completion_retention_bridges_bank_close_with_empty_inventory(self):
+        bank_operation = BankOperationContext(
+            operation_needed=False,
+            operation_type="unknown",
+            resource_items_held=0,
+            resource_item_quantity=0,
+            inventory_full=False,
+            banking_complete=False,
+        )
+        inventory = InventoryContext(progress={"currentHeldCount": 0, "displayedGoalProgress": 0})
+
+        self.assertTrue(
+            daemon._should_retain_banking_completion(
+                bank_operation_context=bank_operation,
+                inventory_context=inventory,
+                previous_banking_complete=True,
+                bank_open=False,
+            )
+        )
 
 
 def synthetic_snapshot(session: Path, tick: int = 1) -> dict:
@@ -104,12 +146,12 @@ def snapshot_request_side_effect(responses: list[dict]):
 
 
 class LiveCoreDaemonTest(unittest.TestCase):
-    def test_daily_defaults_use_compact_packets_and_no_debug_writes(self):
+    def test_daily_defaults_use_plugin_snapshot_and_no_debug_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             args = make_args(session)
 
-        self.assertEqual(args.input_source, "compact-packets")
+        self.assertEqual(args.input_source, "plugin-snapshot")
         self.assertFalse(args.write_debug_live_files)
         self.assertEqual(args.overlay_mode, "intent")
         self.assertEqual(args.task_policy, "woodcutting_bank")
@@ -142,6 +184,31 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(status["canvasSize"], {"width": 800, "height": 600})
         self.assertEqual(status["sourceCanvasSize"], {"width": 400, "height": 300})
         self.assertEqual(status["displayScale"], {"x": 2.0, "y": 2.0})
+
+    def test_status_exposes_authoritative_player_location_from_snapshot_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = synthetic_snapshot(session, 1)
+            response["payloads"]["baseline"]["player"] = {
+                "worldX": 3200,
+                "worldY": 3239,
+                "plane": 0,
+                "sceneX": 48,
+                "sceneY": 55,
+            }
+            args = make_args(session, "--input-source", "plugin-snapshot")
+            core = daemon.LiveCoreDaemon(session, args)
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                core.poll_once()
+                status = core.state.status()
+
+        self.assertEqual(status["playerLocation"], {"worldX": 3200, "worldY": 3239, "plane": 0})
+        self.assertEqual(status["playerLocationSource"], "plugin_snapshot_baseline_player")
+        self.assertEqual(status["playerLocationConfidence"], 1.0)
+        self.assertEqual(status["playerWorldX"], 3200)
+        self.assertEqual(status["playerWorldY"], 3239)
+        self.assertEqual(status["playerPlane"], 0)
 
     def test_task_policy_argument_is_preserved_for_brain_context(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2142,18 +2209,11 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertEqual(overlay["summary"]["targetsWritten"], 5)
         self.assertNotIn("intentState", overlay)
 
-    def test_auto_falls_back_to_compact_packets_when_snapshot_unhealthy(self):
+    def test_auto_input_source_is_rejected_after_packet_archive_removal(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
-            tree = fixtures.raw_scene_object(10820, 3201, 3201, 140, 120, name="Oak tree", object_key="oak-1")
-            fixtures.write_compact_packets(session, {1: [tree]})
-            args = make_args(session, "--input-source", "auto")
-            with mock.patch.object(daemon, "plugin_snapshot_health_available", return_value={"available": False, "error": "connection refused"}):
-                core = daemon.LiveCoreDaemon(session, args)
-                result = core.poll_once()
-
-        self.assertEqual(result["status"]["inputSourceActive"], "compact-packets")
-        self.assertGreater(result["status"]["candidateCount"], 0)
+            with self.assertRaises(SystemExit):
+                make_args(session, "--input-source", "auto")
 
     def test_woodcutting_bank_uses_service_candidates_without_replacing_tree_best(self):
         with tempfile.TemporaryDirectory() as tmp:

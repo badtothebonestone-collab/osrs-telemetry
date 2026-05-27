@@ -5,20 +5,29 @@ This document defines the intended shape of the live Python sidecar stack. It is
 ## A. Runtime Stack
 
 1. RuneLite plugin: read-only telemetry source
-   - Produces plugin snapshot payloads and, in non snapshot-no-files modes, live packet/session artifacts.
+   - Produces plugin snapshot payloads from bounded in-memory caches.
    - `127.0.0.1:8893` is the opt-in Java `PluginSnapshotEndpoint` (`/health`, `/schema`, `/snapshot`, and preset helper endpoints). It is localhost/read-only by default and is required when the Python daemon is started with `--input-source plugin-snapshot`.
+   - The historical append-only live packet archive is retired. The plugin must not create `live_packets\`, `live-*.ndjson`, or `live-*.jsonl`, and there is no config option to enable them.
+   - The normal plugin settings UI is limited to Core, Snapshot Endpoint, and Overlay controls. Advanced bounded geometry/collision caps are hidden from the normal UI; retired workflow/raw-recording/frame-capture keys are hidden and cleaned from this plugin's config group on startup.
    - Java behavior should not change during Python cleanup unless the task explicitly requires it.
 
 2. Live target processor
-   - Canonical candidate generation and live file writer.
-   - Owns target profile filtering, dedupe, scoring, liveness interpretation, overlay debug state generation, and live file/cache materialization.
+   - Canonical candidate generation and explicit bounded debug/latest-state writer.
+   - Owns target profile filtering, dedupe, scoring, liveness interpretation, overlay debug state generation, and compact context materialization.
    - Current implementation: `live_target_processor.py` plus `target_library.json` and `target_profiles.json`.
+   - It no longer consumes or creates live packet archives. Runtime input is `plugin-snapshot`.
    - For active live validation, bind it to the daemon session with `--from-daemon --daemon-url http://127.0.0.1:8890`; do not use blind `--latest-session` when a newer empty filesystem session exists.
 
 3. Context daemon/service
    - Provides compact current state from plugin snapshots and analyzers.
    - Owns daemon `/status`, `/health`, `/control`, context service state, Mission Control state, and optional overlay writing.
    - Current implementation: `live_core_daemon.py`, `context_service.py`, `live_context_query.py`, and analyzer modules.
+   - Canonical command:
+
+     ```powershell
+     python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 32 --human-dashboard --summary --benchmark
+     ```
+
    - Service navigation can attach a `service_route_context.v1` route prior when service is needed but no bank target is visible. Route priors are low-confidence hints; live RuneLite telemetry remains authoritative for object ids, plane, geometry, menu actions, and whether an interaction is currently possible.
 
 4. Action proposer
@@ -31,7 +40,7 @@ This document defines the intended shape of the live Python sidecar stack. It is
    - Current canonical code: `input_control/executor.py`, `input_control/action_lifecycle.py`, input geometry, and backends.
    - `execute_next_action.py` is the canonical CLI for dry-run/explanation and bounded execution.
    - The executor uses `client_tick_core.py` for fast hover/menu confirmation. It does not parse RuneLite menu strings or clicked-menu events directly.
-   - Live motor output goes through `input_control/human_input_controller.py` before it reaches a backend. Backends remain the low-level adapters for `pyautogui` and `pydirectinput`.
+   - Live motor output goes through `input_control/human_input_controller.py` before it reaches a backend. Backends remain the low-level adapters; Arduino HID is the normal live backend, while `pyautogui` and `pydirectinput` are dry-run/debug override software backends.
 
 6. Client-tick interaction layer
    - Source: the RuneLite plugin samples `ClientTick`, `PostMenuSort`, and `MenuOptionClicked` into a bounded in-memory hot cache.
@@ -45,6 +54,89 @@ This document defines the intended shape of the live Python sidecar stack. It is
    - Motor output is profile-driven: mouse movement, click timing, camera key holds/drags, and reaction/reacquisition delays use `HumanInputController`.
    - Profiles are `instant_debug`, `steady`, `natural`, and reserved `manual_calibrated`. `--movement-profile` remains a lower-level path generator; `--input-profile` controls the motor envelope.
    - The governor records movement, click-hold, reaction-delay, camera-hold, and direct-backend-bypass metrics in `action_trace.v2`.
+   - Live motor output requires Arduino HID by default. For `--execute`,
+     `--hover-only`, and camera self-tests, `execute_next_action.py` selects
+     `--backend arduino` unless a backend is explicitly provided. Software
+     backends (`pyautogui` and `pydirectinput`) are allowed for dry-run,
+     screenshots, mocks, and explicit unsafe/debug override only
+     (`--allow-software-input` or `--unsafe-allow-pyautogui-live`).
+   - Arduino live flow is: action proposal -> `HumanInputController` ->
+     `ArduinoHIDBackend` -> serial bridge -> Arduino USB HID mouse/keyboard ->
+     VM desktop. The backend handshakes with `PING`, `IDENTIFY`, `CAPS`, arms a
+     session token with `ARM`, sends mouse/key/camera commands, then sends
+     `STOP_ALL` and `DISARM` at the end of the run. The required firmware
+     protocol is `arduino_hid.v1`; old firmware that returns `ERR UNKNOWN` to
+     `IDENTIFY`, `CAPS`, or `STOP_ALL` is intentionally blocked from live
+     execution.
+   - Arduino relative HID movement is behaviorally unsafe until calibrated.
+     RuneLite `--execute` and `--hover-only` with Arduino fail closed with
+     `arduino_pointer_calibration_required` until a no-click pointer
+     calibration has been reviewed or an explicit override is supplied. The
+     closed-loop absolute move path reads the Windows cursor position, sends
+     bounded relative chunks, verifies actual cursor feedback after each chunk,
+     and aborts with `STOP_ALL`/`DISARM` if the cursor leaves the allowed
+     RuneLite/calibration region, the foreground window changes, or feedback
+     error exceeds tolerance.
+   - The Arduino bridge firmware starts disarmed, releases all keyboard keys
+     and mouse buttons during `setup()`, never auto-arms after reset, clamps
+     relative movement and hold durations, and has a watchdog that releases all
+     input and disarms on timeout. `STOP_ALL` must work even while disarmed.
+     The board reset button is a secondary safety action only after this
+     firmware is flashed; physical USB unplug remains the final panic stop.
+   - When `--arduino-require-monitor` is set, the executor checks monitor
+     fields before live input: `monitorAvailable`, `arduinoRawInputSeen`,
+     `arduinoKeyboardSeen`, `arduinoMouseSeen`, `expectedVidPidMatched`,
+     `injectedEvents`, `lowerIlInjectedEvents`, `lastArduinoEventAgeMs`,
+     `monitorPass`, and `monitorBlockReason`. A failed monitor check blocks
+     action readiness for that live command.
+   - The development monitor writes `input_integrity_status.v1` and can show a
+     small always-on-top VM overlay. Raw Input proves the source device
+     identity/VID/PID/device path; low-level hook flags count
+     `LLMHF_INJECTED`, `LLMHF_LOWER_IL_INJECTED`, `LLKHF_INJECTED`, and
+     `LLKHF_LOWER_IL_INJECTED`. The executor treats this monitor as proof, not
+     as an input backend. If monitor-required mode sees stale/missing status,
+     VID/PID mismatch, injected flag deltas, Arduino unarmed state during the
+     live session, or `directBackendBypassCount > 0`, live execution fails
+     closed.
+   - `--show-input-integrity-overlay` starts the local overlay beside a live
+     check or action. `--input-integrity-self-test` performs an Arduino
+     `STOP_ALL`/handshake/status/arm/tiny-pulse/`STOP_ALL`/disarm check
+     without touching RuneLite game state.
+   - Panic/recovery order is: run
+     `python telemetry-viewer\execute_next_action.py --backend arduino --arduino-port COMx --arduino-stop-all`
+     if the VM is controllable, press the Arduino reset button, physically
+     unplug the Arduino, use VMware Ctrl+Alt to release input capture, then
+     reconnect the Arduino to the VM guest through Removable Devices.
+   - Arduino firmware safety and VM input-focus safety are separate. Firmware
+     `STATUS armed=0 keysDown=0 mouseButtonsDown=0` proves the bridge released
+     HID state, but it does not prove VMware guest focus/capture recovered.
+     Self-tests therefore report both `firmwareSafety` and
+     `vmInputFocusSafety`, restore focus to PowerShell/RuneLite/desktop when
+     requested, and leave the result at `WARN` when user-control recovery is
+     unknown.
+   - The input-integrity overlay is passive by default for self-tests:
+     `--overlay-passive --overlay-no-focus` asks Windows for click-through,
+     no-activate window styles. `--no-overlay` runs status collection without a
+     visible overlay. Temporary overlays should be closed after bounded tests.
+   - `--input-integrity-self-test-no-move` performs STOP_ALL, handshake,
+     STATUS, ARM, STOP_ALL, DISARM, and final STATUS without sending MOVE,
+     CLICK, or KEY commands. Tiny-move self-tests remain available for Raw
+     Input proof, but should run only after the no-move path is clean.
+   - `--arduino-pointer-calibration-test --allowed-window calibration
+     --no-click` moves only inside a bounded allowed region, sends no clicks or
+     keys, and reports `arduino_pointer_calibration_test.v1` plus
+     `arduino_closed_loop_move.v1` traces: cursor before/after, target,
+     allowed region, chunks, max error, foreground before/after, and abort
+     reason.
+   - Login/bootstrap recovery is RuneLite-dev-only by default. Jagex Launcher
+     automation is blocked unless `--allow-jagex-launcher-automation` is
+     supplied, and credential/MFA/account prompts stop as manual-login-required
+     states.
+   - VMware may see the Leonardo sketch and bootloader as different USB
+     devices. Normal live validation should not reset or re-upload firmware;
+     use STOP_ALL/IDENTIFY/CAPS/STATUS. If host prompts repeat, run
+     `--arduino-usb-diagnostics` and add exact sketch/bootloader VID/PID
+     autoconnect rules to the host `.vmx` while the VM is shut down.
 
 8. Diagnostics/reporting
    - Diagnostics explain current state and source agreement. They must not become new runtime sources of truth.
@@ -96,7 +188,22 @@ This document defines the intended shape of the live Python sidecar stack. It is
    - Camera reacquire must not become dense pixel scanning. It may use structured alternate route/path tiles first, then bounded same-tile camera follow. If the waypoint is still occluded or offscreen, execution must skip the click or use an explicit navigation-only fallback when available.
    - If a route object such as a staircase, ladder, door, gate, bank booth, banker, or deposit box is visible and hover-confirmable for the current service route, `interact_service_route_object` or a service action wins over another `walk_to` waypoint.
    - Open-field route navigation may select a farther structured route/path waypoint from the path horizon; transition/tight-geometry movement stays short and precise.
-   - Live execution paths should report `directBackendBypassCount=0`. Low-level backend classes are the exception because they are the adapter layer.
+   - Static route priors and route context goals are advisory only. They can
+     guide pathing, but an executable proposal must carry live evidence through
+     `actionTargetSource` and `actionability`: a projected waypoint, live route
+     object, live service object, live resource candidate, hover-discovered
+     object, or validated current route context. The executor refuses
+     `advisory_only`, `stale`, and `blocked` proposals even outside the normal
+     readiness gate.
+   - Intent-aware hover matching is the last pre-click contract. Navigation
+     waypoints require `Walk here`; resource-object actions require Tree/Oak
+     `Chop`/`Chop down`; route transitions require the expected climb/open
+     option; service actions require expected bank/use/deposit options; dialogue
+     choices require the expected option/index. Mismatches are classified with
+     structured reasons such as `hover_option_mismatch`,
+     `hover_target_mismatch`, `wrong_intent_matcher`, `stale_hover_sample`,
+     `menu_flip_mismatch`, and `target_source_mismatch`.
+   - Live execution paths should report `directBackendBypassCount=0`. Low-level backend classes are the exception because they are the adapter layer. If live execution sees `directBackendBypassCount > 0`, the result is blocked as `direct_backend_bypass_blocked`.
 
 ## C. Canonical Schemas/Contracts
 
@@ -109,7 +216,7 @@ This document defines the intended shape of the live Python sidecar stack. It is
    - Schema: `live_readiness.v2`.
    - Required top-level shape: `status`, `ready`, `currentIntent`, `actionReadiness`, `contextReadiness`, `blockers`, `warnings`, `session`, `daemon`, `liveFiles`, `candidates`, `highlighter`, `selectedTarget`, `freshness`, `inputGeometry`, `clientTickHot`, and `actionExecution`.
    - `actionReadiness` includes `status`, `executionAllowed`, `intent`, `blockers`, `warnings`, `checks`, `checksSkippedAsNotApplicable`, and `missingCapabilities`.
-   - `contextReadiness` carries non-current-context warnings such as a resource selected-target/highlighter mismatch while the active proposal is service navigation.
+   - `contextReadiness` carries non-current-context warnings such as a resource selected-target/highlighter mismatch while the active proposal is service navigation. It separates `applicableWarnings` from `nonApplicableContextWarnings` and records `staleFileSessionContext`, `daemonSessionFresh`, `pluginSnapshotFresh`, `selectedResourceTargetFreshnessApplicable`, and `selectedResourceTargetFreshnessStatus`.
    - Resource-object actions require selected resource/highlighter agreement, safe aimpoint, on-screen geometry, freshness, and hover-confirmable resource menu behavior.
    - Navigation waypoint actions require daemon/session freshness, input geometry, fresh `client_tick_hot.v1` state when the daemon uses plugin-snapshot input, an executable route/path waypoint, and an intent that allows `Walk here`; they do not require a Tree/Oak selected target to be present in the resource highlighter source.
    - Client tick hot capability details include freshness, latest PostMenuSort age, last clicked-menu age, `gameState`, logged-in status, and stale reason/recovery when unavailable for action.
@@ -125,16 +232,57 @@ This document defines the intended shape of the live Python sidecar stack. It is
    - Source: `input_control/action_proposal.py`.
    - Must include action, target kind/name, confidence, click or key action, required context, warnings, missing capabilities, input geometry, and `targetExplanation` when a target is involved.
    - Resource-target proposals must prefer `safeAimPoint` over raw object centers. If no safe visible aimpoint exists, the proposal may explain the target but must be non-executable with `safe_aimpoint` missing.
+   - Resource selection may rank Tree/Oak/Willow candidates by Woodcutting
+     eligibility. If a real Woodcutting level is available it decides whether
+     higher-level resources are eligible; if the level is unknown, a basic live
+     `Tree` is preferred over Oak/Willow when both exist. This is target
+     selection only; hover confirmation and safe aimpoint gates still decide
+     whether any click can execute.
+   - Resource selection also evaluates `resource_view_score.v1` before a
+     resource-object click. The score classifies the camera/worksite view as
+     `good_resource_view`, `usable_resource_view`,
+     `poor_edge_resource_view`, `poor_occluded_resource_view`,
+     `poor_single_candidate_view`, `needs_resource_camera_reacquire`,
+     `needs_worksite_recenter`, or `no_executable_resource_view`. Poor views
+     propose bounded `resource_view_recovery` camera input through
+     `HumanInputController`, then re-project candidates before selecting a
+     target. This is separate from projection recovery for sentinel/missing
+     geometry.
+   - Candidate ranking includes view/worksite cost: safe central aimpoint,
+     visible area ratio, viewport-edge distance, inside-worksite distance,
+     drift away from the service route, recent suppression/failure state, and
+     skill eligibility. A slightly less convenient Tree/Dead tree inside the
+     worksite should beat a far or edge-clipped candidate that pulls the player
+     away.
    - Route-transition proposals use `interact_service_route_object` only for a visible live object such as stairs/ladder/door with expected menu options. Static route anchors may drive navigation/scouting, but they are not clicked as transition objects.
    - A fresh client-tick hover sample that predicts a route transition option such as `Climb-up Staircase` may also create a route-transition proposal. Generic `Climb Staircase` is allowed only as a route-transition dialogue opener when the active route step declares it; it is not final transition success until the dialogue resolver selects the correct up/down option and live plane/location evidence changes.
    - `interface_dialogue_choice` is proposed when `dialogue_state.v1` is active and the current route step expects an up/down staircase option. Number-key selection wins when the option key is known; widget bounds are the fallback.
    - Route waypoint proposals include `routeWaypointSelection` when adaptive path selection chooses a structured route/path tile beyond the immediate next step.
    - If a static route prior is outside the local collision window, pathing can expose a bounded `local_frontier_waypoint` toward the prior. This gives the executor a nearby scout waypoint instead of a far no-projection anchor, but wall/fence corridors still stop as `route_wall_hugging_detected`.
+   - Target source/actionability fields:
+     `actionTargetSource` is one of `static_route_prior`, `retained_anchor`,
+     `route_context_goal`, `local_frontier_waypoint`,
+     `live_projected_waypoint`, `live_route_object`, `live_service_object`,
+     `live_resource_candidate`, `hover_discovered_object`, or `unknown`.
+     `actionability` is one of `advisory_only`, `needs_live_projection`,
+     `needs_hover_confirmation`, `executable`, `stale`, or `blocked`.
+     `static_route_prior` and `route_context_goal` imply `advisory_only`.
+     `local_frontier_waypoint` must be projected before execution, and
+     projected route waypoints still require `Walk here` hover confirmation.
 
 5. Action trace
    - Source: `input_control/action_lifecycle.py` and `input_control/executor.py`.
    - Schema: `action_trace.v2`.
    - Must include proposed action, action intent, selected target explanation, safe/raw aimpoint fields, game tick before action, client tick/hover samples, mouse move start/end timestamps, intended canvas/screen point, accepted/rejected hover samples, click timestamp, clicked-menu before/after samples, clicked-menu classification, target suppression/reacquisition fields when applicable, dialogue prompt/option fields when applicable, pacing delay when applied, human input governor metrics, camera input metrics, action-specific readiness used for pre-action gating, game-tick verification timeline, optional final reconcile window/result, final classification, and warnings.
+   - Stale/static proposal reacquire summaries include
+     `staleProposalDetected`, `staleProposalSource`, `reacquireAttempted`,
+     `reacquireResult`, `freshTargetFound`, `freshTargetSource`, and
+     `reasonIfNoFreshTarget`.
+   - Coordinate resolution metadata includes `coordinateSpace`, `scaleX`,
+     `scaleY`, `screenPointBeforeScaling`, `screenPointAfterScaling`,
+     `windowBoundsSource`, and `canvasBoundsSource`. On Windows high-DPI VMs,
+     `scaled_logical_to_physical` records the full-point AWT logical to
+     pyautogui physical pixel conversion.
    - Service-route navigation adds `routeStability`, `navigationInProgress`, clicked waypoint tile, player tile after the click, movement state, and any replan-suppression reason. A movement click is not considered permission to immediately click the next waypoint while pathing still reports movement.
    - Resource actions add `resourceProgressClassification` when useful:
      `resource_click_confirmed_waiting`, `resource_animation_started_pending`,
@@ -143,6 +291,12 @@ This document defines the intended shape of the live Python sidecar stack. It is
      `resource_timeout_reconciled_success`. A timeout reconciled by later
      inventory/progress evidence also records
      `delayedProgressReconciliation=true`.
+   - Resource-view recoveries can add `resourceViewScoreBefore`,
+     `resourceCameraTriggeredBy`, `resourceCameraAdjustmentCount`,
+     selected-target edge/visible-area fields, visible/executable candidate
+     counts before/after, and `resourceViewRecoveryResult`. Projection
+     recovery retains the projection-specific reason even when a view score is
+     present for diagnostics.
    - Route-transition actions add `routeTransitionProgressClassification` when
      route-transition evidence is ambiguous. Pending values such as
      `return_transition_pending` mean a clicked stair has pathing,
@@ -200,8 +354,11 @@ This document defines the intended shape of the live Python sidecar stack. It is
    - Required fields include `routeAvailable`, `routeId`, `routeVerifiedLive`, `routeStepStatus`, `routeNodes`, `routeEdges`, `currentNodeId`, `nextEdge`, `currentStep`, `currentNavigationTarget`, `visibleInteractionTarget`, `visibleServiceTarget`, `actionReady`, `interactionExpectedOptions`, `interactionExpectedTargets`, `expectedPlaneChange`, `observedAnchors`, `completedSteps`, and warnings/missing capabilities.
    - `routeContext` uses `route_context.v1` to classify the current source area
      before applying a source-specific route prior. It reports the current
-     location/plane, current-area source, selected service goal, route mode,
-     route-source status, selected approach node, and any route-source mismatch.
+     location/plane, `locationSource`, `locationConfidence`, current-area
+     source, selected service goal, route mode, route-source status, selected
+     approach node, and any route-source mismatch. Authoritative baseline
+     player location wins; `collision_window_center_proxy` is only a lower
+     confidence fallback.
    - Route modes are `explicit_route`, `reverse_route`,
      `goal_directed_fallback`, `local_frontier_to_service`, and `unknown`.
      Known west-tree collection keeps the explicit Lumbridge route. An
@@ -352,7 +509,119 @@ This document defines the intended shape of the live Python sidecar stack. It is
      client-tick hover, clicked-menu proof, route/service state, and
      HumanInputController output.
 
-16. Diagnostic report
+17. World Model v2
+   - Schema: `world_model_snapshot.v1`.
+   - Source: Java `WorldModelCache` behind the plugin snapshot endpoint.
+   - Scope: the currently loaded local RuneLite scene only. It is not a full
+     game-world map; route priors, learned anchors, and service/resource route
+     graphs still cover beyond-scene goals.
+   - Runtime contract: the Java plugin keeps richer scene/object/collision data
+     in memory, while `/snapshot` returns compact, bounded query payloads only
+     when requested with needs such as `world_model_summary`,
+     `scene_object_census`, `route_object_census`,
+     `resource_object_census`, `service_object_census`,
+     `pathing_frontier`, `projection_audit`, `minimap_projection`,
+     `view_quality_inputs`, or `full_world_model_debug`.
+   - Default live loops should consume compact query results, fresh
+     `client_tick_hot.v1`, projection/safe-aimpoint state, route/resource/service
+     censuses, and HumanInputController output. They must not request or write a
+     full local-scene dump every tick.
+   - Object censuses report game/wall/decorative/ground objects with id/hash,
+     name, actions, world/scene/local location, route/service/resource relevance,
+     skill gating, and optional projection/clickbox summaries. This lets route,
+     resource, and service scans reason from the same loaded-scene model instead
+     of depending on whichever objects survived a capped candidate lane.
+   - Collision/frontier and projection-audit queries expose local loaded-scene
+     pathing evidence, blocked/capped state, sentinel/degenerate projection
+     counts, and view-quality inputs for navigation/resource camera planning.
+   - Performance fields must make caps explicit: `worldModelAvailable`,
+     `worldModelAgeMs`, `objectCensusCapHit`, `collisionAvailable`,
+     `projectionAuditAvailable`, `projectionCapHit`,
+     `worldModelLoadedSceneOnly`, and `worldModelFullWorldLoaded`.
+   - Visual debug bundles may include `world_model_summary.json`,
+     `route_object_census.json`, `resource_object_census.json`,
+     `service_object_census.json`, `projection_audit.json`, and
+     `collision_frontier.json` as evidence. These files are sparse debug
+     artifacts, not runtime sources of truth.
+
+18. Knowledge Fabric and MCP adapter
+   - Source: `knowledge_fabric.py` plus optional `mcp_server.py`.
+   - Role: Codex/AI inspection, debugging, and planning. It must not replace
+     the daemon/plugin runtime path and must not expose click/key/camera
+     execution tools.
+   - Knowledge Fabric builds bounded indexes over current world-model payloads,
+     daemon/session status, static libraries, and sparse debug evidence:
+     spatial, object/action, route graph/object, collision/frontier,
+     projection/visibility, worksite/resource, service anchor, session memory,
+     static library, and debug evidence.
+   - Query responses are compact and structured. They include schema, status,
+     source, freshness, cap/truncation warnings, and performance fields such as
+     `queryTimeMs` and `responseBytes`.
+   - Session memory is current-session advisory memory for observed resource
+     areas, service anchors, route objects, waypoint outcomes, menu-flip zones,
+     camera outcomes, and learned area labels. It is not executable by itself;
+     fresh live target/projection/hover evidence is still required.
+   - Static knowledge summarizes `service_routes.json`,
+     `target_profiles.json`, and `target_library.json`, including skill
+     requirements and advisory route/service anchors. Oak remains visible but
+     non-executable until Woodcutting 15 is known.
+   - MCP tools/resources are read-only local inspection surfaces. Useful tools
+     include `get_current_debug_context`, `get_knowledge_fabric_status`,
+     `query_resource_candidates`,
+     `query_service_candidates`, `query_route_objects`, `query_path_frontier`,
+     `query_view_quality`, `explain_current_blocker`,
+     `search_session_memory`, and `search_static_library`.
+   - Query-first debugging starts with `get_current_debug_context`. That
+     aggregate includes live status, readiness/action readiness, world model
+     summary, Fabric status, current blocker, current action proposal,
+     resource/route/service candidates, pathing frontier, view quality,
+     overlay health, input integrity, latest action trace/bundle summaries,
+     session memory, and static profile summary. Raw logs/files should be the
+     second step, after these queries are insufficient or identify a source.
+   - `explain_current_blocker` is the compact "what is wrong right now" answer.
+     It classifies blockers as login/liveness, plugin/daemon freshness,
+     input/Arduino, readiness/action gate, target/candidate,
+     projection/safeAimPoint, hover/menu, overlay-only, route/pathing,
+     service/bank, session mismatch, static-prior-only, or unknown, and returns
+     a recommended next step plus whether a bounded live action is safe.
+   - Route/pathing queries include route context, selected service anchor,
+     current route node/edge, collision/pathing frontier, rejected frontier or
+     approach reasons, wall-hugging risk, route object visibility, and latest
+     visual-bundle evidence. View-quality queries include camera yaw/pitch,
+     route/resource/service visibility, edge/offscreen/occlusion counts,
+     safe-aimpoint counts, camera recommendation fields, and screenshot bundle
+     links when available.
+   - Script-authoring helper queries summarize profiles, target classes, known
+     actions, service routes, required telemetry for a task, loaded-scene
+     keyword matches, suggested profile skeletons, seen objects by action/name,
+     and compact task-context bundles. They are advisory and review-required.
+   - `script_authoring_context.v1` bundles are explicit, sparse artifacts for
+     future script/profile work. They gather current debug context, blocker
+     explanation, world-model/census/query evidence, data-quality report,
+     trace excerpts, session memory, static-library excerpts, and a copied
+     screenshot when available. They are not continuous runtime output.
+   - `replay_scenario.v1` captures the read-only state needed to replay
+     candidate selection, action proposal, readiness/blocker explanation,
+     pathing-frontier reasoning, and view-quality reasoning offline. Replay
+     must never send live input.
+   - `data_quality_report.v1` separates stale/missing/capped telemetry from
+     actual route, target, projection, or overlay issues. It reports confidence
+     and recommended fixes before Codex changes code.
+   - `debug_context_diff.v1` compares two captured states so before/after route
+     nodes, candidate counts, blocker categories, cap warnings, and view
+     quality changes are visible without another live run.
+   - `knowledge_fabric_handoff_summary.v1` prints the current phase/intent,
+     blocker, relevant bundle, next diagnostic query, likely coding target, and
+     safety/test reminders for the next handoff.
+   - Visual debug bundles may copy Knowledge Fabric evidence files such as
+     `knowledge_fabric_status.json`, `current_debug_context.json`,
+     `explain_current_blocker.json`, `resource_candidates.json`,
+     `service_candidates.json`, `route_objects.json`,
+     `pathing_frontier.json`, `view_quality.json`,
+     `session_memory_summary.json`, `static_library_summary.json`,
+     `data_quality_report.json`, and `handoff_summary.json`.
+
+19. Diagnostic report
    - Diagnostics should use `PASS`, `WARN`, or `FAIL`.
    - JSON diagnostics print JSON to stdout and should not write files unless an explicit output path is requested.
    - Console wording is not a source-of-truth contract; JSON schema, status, warnings, and blockers are.
@@ -376,8 +645,47 @@ Current core modules:
 - `client_tick_core.py`: `client_tick_hot.v1` parsing, generic action-intent matching, hover confirmation, and clicked-menu classification.
 - `safe_aimpoint_core.py`: visible/interactable aimpoint selection and edge-safe actionability checks.
 - `service_route_core.py`: low-confidence service route priors, live route-object matching, and bounded in-memory observed anchor state.
+- `world_model_core.py`: compact world-model query parsing, quality summaries,
+  route/service candidate adaptation, and resource level-gating helpers.
+- `knowledge_fabric.py`: read-only indexes and query helpers over world-model,
+  daemon/session, static-library, external advisory cache, and debug evidence.
+- `external_knowledge.py` and `external_knowledge_cache.py`: cache-first OSRS
+  static fact enrichment for item IDs, object/NPC labels, wiki pages, skill
+  requirements, and advisory location facts. These modules are not part of the
+  executor hot path.
 
-## E. Future Rule
+## E. Query-First Authoring And External Knowledge
+
+`get_current_debug_context` is the first query for live questions. If it does
+not answer the question, use `explain_current_blocker`, `data_quality_report`,
+`coverage_report`, and the specific resource/service/route/path/view query.
+
+The data catalog and query coverage are available through:
+
+```powershell
+python telemetry-viewer\context_service.py --query data-source-inventory
+python telemetry-viewer\context_service.py --query query-coverage-matrix
+```
+
+External OSRS data is advisory/static enrichment:
+
+- cache path: `%USERPROFILE%\.osrs-telemetry\external_knowledge_cache`
+- API calls: disabled by default and explicit-refresh only
+- User-Agent: required for OSRS Wiki/price API calls
+- rate policy: cache-first, serial requests, no executor hot-loop requests
+- live rule: RuneLite/WorldModel/daemon facts override external facts
+
+Task probes are read-only and help future script work:
+
+```powershell
+python telemetry-viewer\context_service.py --probe-task "woodcutting and bank logs" --profile woodcutting
+```
+
+They combine loaded-scene evidence, static project libraries, external cache
+facts, requirements, widgets/inventory, and route/service priors. They do not
+send mouse, keyboard, menu, or click input.
+
+## F. Future Rule
 
 Before adding a new diagnostic script, check whether the behavior belongs in:
 

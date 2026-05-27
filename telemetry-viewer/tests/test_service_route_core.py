@@ -9,6 +9,7 @@ VIEWER_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(VIEWER_DIR))
 
 import service_route_core
+from analyzers.live_state import TargetContext
 
 
 def player(world_x=3194, world_y=3249, plane=0):
@@ -287,6 +288,43 @@ class ServiceRouteCoreTest(unittest.TestCase):
         self.assertEqual(context["currentNodeId"], "lumbridge_castle_west_approach")
         self.assertEqual(context["routeContext"]["currentAreaSource"], "known_route_node")
 
+    def test_route_context_prefers_authoritative_player_location_over_collision_proxy(self):
+        context = service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context={
+                "worldX": 3196,
+                "worldY": 3248,
+                "plane": 0,
+                "collisionWindowCenterWorld": {"worldX": 3254, "worldY": 3240, "plane": 0},
+                "locationSource": "plugin_snapshot_baseline_player",
+                "locationConfidence": 1.0,
+            },
+            service_context={"serviceNeeded": True, "serviceTypeNeeded": "bank", "candidateCount": 0},
+            target_context={"serviceCandidateInputs": [], "loadedServiceScene": [], "broadCandidates": []},
+            source_tick=78,
+        )
+
+        self.assertEqual(context["routeContext"]["currentLocation"], {"worldX": 3196, "worldY": 3248, "plane": 0})
+        self.assertEqual(context["routeContext"]["locationSource"], "plugin_snapshot_baseline_player")
+        self.assertEqual(context["routeContext"]["locationConfidence"], 1.0)
+        self.assertEqual(context["routeContext"]["routeSourceStatus"], "known_source")
+
+    def test_collision_window_proxy_location_is_labeled_low_confidence(self):
+        context = service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context={"collisionWindowCenterWorld": {"worldX": 3254, "worldY": 3240, "plane": 0}},
+            service_context={"serviceNeeded": True, "serviceTypeNeeded": "bank", "candidateCount": 0},
+            target_context={"serviceCandidateInputs": [], "loadedServiceScene": [], "broadCandidates": []},
+            source_tick=78,
+        )
+
+        self.assertEqual(context["routeContext"]["currentLocation"], {"worldX": 3254, "worldY": 3240, "plane": 0})
+        self.assertEqual(context["routeContext"]["locationSource"], "collision_window_center_proxy")
+        self.assertEqual(context["routeContext"]["locationConfidence"], 0.35)
+        self.assertEqual(context["routeContext"]["currentAreaConfidence"], 0.35)
+
     def test_destination_route_alias_selects_lumbridge_bank_route(self):
         routes = service_route_core.load_service_routes()
         route = service_route_core.select_service_route(routes, profile="woodcut_bank", service_type="bank", route_id="lumbridge_castle_bank")
@@ -322,6 +360,42 @@ class ServiceRouteCoreTest(unittest.TestCase):
         self.assertEqual(census["routeTransitionCandidates"], 1)
         self.assertEqual(census["routeRelevantActionableObjects"], 1)
         self.assertEqual(census["visibleButRouteIrrelevantObjects"], 0)
+        self.assertEqual(context["selectedRouteObjectRelevance"]["relevanceStatus"], "PASS")
+
+    def test_world_model_loaded_service_scene_route_object_intercepts_goal_directed_walk(self):
+        context = service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3203, world_y=3220, plane=0),
+            service_context={"serviceNeeded": True, "serviceTypeNeeded": "bank", "candidateCount": 0},
+            target_context=TargetContext(
+                loaded_service_scene=[
+                    stair(
+                        worldX=3204,
+                        worldY=3229,
+                        plane=0,
+                        objectKey="world-model-stair-3204-3229",
+                        source="world_model_cache",
+                        actionTargetSource="live_route_object",
+                        worldModelSourceLane="worldModelRouteObjectCensus",
+                        _routeObjectScanSource="worldModelRouteObjectCensus",
+                    )
+                ],
+                loaded_service_scene_count=1,
+            ),
+            source_tick=84,
+        )
+
+        self.assertEqual(context["routeMode"], "goal_directed_fallback")
+        self.assertEqual(context["routeStepStatus"], "route_interaction_visible")
+        self.assertEqual(context["currentNodeId"], "lumbridge_ground_floor_stairs")
+        self.assertTrue(context["actionReady"])
+        self.assertEqual(context["visibleInteractionTarget"]["targetName"], "Staircase")
+        self.assertEqual(context["visibleInteractionTarget"]["actionTargetSource"], "live_route_object")
+        self.assertEqual(context["routeObjectsVisible"], 1)
+        self.assertEqual(context["routeRelevantActionableObjects"], 1)
+        self.assertTrue(context["routeObjectInterceptReady"])
+        self.assertEqual(context["routeObjectCensus"]["routeObjectScanSource"]["worldModelRouteObjectCensus"], 1)
         self.assertEqual(context["selectedRouteObjectRelevance"]["relevanceStatus"], "PASS")
 
     def test_random_visible_staircase_is_visible_but_route_irrelevant(self):

@@ -160,7 +160,7 @@
     },
     {
       "id": "diagnostics.writer_health",
-      "description": "Writer queue, drop, recording mode, compact packet, write retry, and budget health.",
+      "description": "Writer queue, drop, recording mode, retired packet-archive status, write retry, and budget health.",
       "status": "available",
       "source": ["live_writer_health_packet.v1", "live_status.json", "context_response.v1"],
       "updateFrequency": "every_tick",
@@ -172,14 +172,14 @@
     },
     {
       "id": "compact_packets.input",
-      "description": "Compact live NDJSON packet input path used by the live processor.",
-      "status": "available",
-      "source": ["live_packets", "live_packet_index.json", "live_packet_reader.py"],
-      "updateFrequency": "every_tick",
-      "latencyClass": "hot_tick",
-      "normalLiveAllowed": true,
+      "description": "Retired compact live NDJSON/JSONL packet archive. Use PluginSnapshotEndpoint, WorldModelCache, Knowledge Fabric, replay scenarios, or script authoring context bundles instead.",
+      "status": "retired",
+      "source": ["maintenance.py --live-packets-report"],
+      "updateFrequency": "none",
+      "latencyClass": "legacy_cleanup_only",
+      "normalLiveAllowed": false,
       "debugAuditOnly": false,
-      "missingReason": null,
+      "missingReason": "The append-only live packet archive was removed from runtime to avoid huge files and VM lag.",
       "relatedTasks": ["all"]
     },
     {
@@ -196,7 +196,7 @@
     },
     {
       "id": "watch_values.builtin",
-      "description": "Builtin watch values derived from existing compact packet observations.",
+      "description": "Builtin watch values derived from current daemon/plugin snapshot observations.",
       "status": "available",
       "source": ["live_watch_values.json", "context_response.v1"],
       "updateFrequency": "every_tick",

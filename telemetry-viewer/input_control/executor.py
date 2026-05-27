@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import secrets
 import time
 import urllib.request
 from copy import deepcopy
@@ -24,7 +25,9 @@ from .action_proposal import ActionProposal, build_action_proposal
 from .input_geometry import resolve_screen_click_point
 from .backend_pyautogui import PyAutoGuiBackend
 from .backend_pydirectinput import PyDirectInputBackend
+from .backend_arduino_hid import DEFAULT_COMMAND_TIMEOUT_MS, ArduinoHIDBackend, check_arduino_monitor_status
 from .human_input_controller import HumanInputController, HumanInputContext
+from .input_integrity import build_firmware_safety, input_integrity_delta
 from .mouse_movement import MouseMovementProfile, MousePoint, MouseTarget, plan_mouse_movement
 from .visual_debug_bundle import VisualDebugBundleWriter
 from live_readiness_core import build_readiness_report
@@ -207,10 +210,43 @@ def fetch_plugin_snapshot(
     return post_json(plugin_snapshot_endpoint_url(snapshot_url), request, timeout=timeout)
 
 
-def backend_from_name(name: str, **kwargs: Any):
-    if name == "pydirectinput":
+def backend_from_name(name: str | None, **kwargs: Any):
+    normalized = str(name or "pyautogui").strip().lower()
+    if normalized == "arduino":
+        return ArduinoHIDBackend(
+            port=kwargs.get("arduino_port"),
+            baud=int(kwargs.get("arduino_baud", 115200) or 115200),
+            handshake_timeout_ms=int(kwargs.get("arduino_handshake_timeout_ms", 2000) or 2000),
+            command_timeout_ms=int(kwargs.get("arduino_command_timeout_ms", DEFAULT_COMMAND_TIMEOUT_MS) or DEFAULT_COMMAND_TIMEOUT_MS),
+            session_token=kwargs.get("arduino_session_token"),
+            fail_closed=bool(kwargs.get("arduino_fail_closed", True)),
+            vid=kwargs.get("arduino_vid"),
+            pid=kwargs.get("arduino_pid"),
+        )
+    if normalized == "pydirectinput":
         return PyDirectInputBackend(**kwargs)
     return PyAutoGuiBackend(**kwargs)
+
+
+def backend_from_options(options: Any):
+    name = getattr(options, "backend", None) or "pyautogui"
+    if str(name).strip().lower() == "arduino":
+        return backend_from_name(
+            name,
+            arduino_port=getattr(options, "arduino_port", None),
+            arduino_baud=getattr(options, "arduino_baud", 115200),
+            arduino_handshake_timeout_ms=getattr(options, "arduino_handshake_timeout_ms", 2000),
+            arduino_command_timeout_ms=getattr(options, "arduino_command_timeout_ms", DEFAULT_COMMAND_TIMEOUT_MS),
+            arduino_session_token=getattr(options, "arduino_session_token", None),
+            arduino_fail_closed=getattr(options, "arduino_fail_closed", True),
+            arduino_vid=getattr(options, "arduino_vid", None),
+            arduino_pid=getattr(options, "arduino_pid", None),
+        )
+    return backend_from_name(
+        name,
+        focus_runelite=bool(getattr(options, "focus_runelite", False)),
+        window_title_filter=str(getattr(options, "window_title_filter", "RuneLite")),
+    )
 
 
 def run_camera_self_test(
@@ -223,6 +259,28 @@ def run_camera_self_test(
 ) -> dict[str, Any]:
     method_results: list[dict[str, Any]] = []
     warnings: list[str] = []
+    live_input_status: dict[str, Any] | None = None
+    try:
+        live_input_status = _start_live_input_session(options, backend)
+    except Exception as error:  # noqa: BLE001
+        status = _live_input_status(options, backend)
+        status["status"] = "FAIL"
+        status["blockReason"] = status.get("blockReason") or "live_input_blocked"
+        status["startError"] = f"{type(error).__name__}: {error}"
+        return {
+            "schema": "camera_self_test.v1",
+            "status": "FAIL",
+            "selectedMethod": None,
+            "methodResults": [],
+            "humanInput": {
+                "liveInputBackend": _backend_name(backend),
+                "liveInputBackendRequired": _live_input_required_for_backend(options, backend),
+                "softwareInputAllowed": _software_input_allowed(options),
+                "directBackendBypassCount": 0,
+            },
+            "liveInput": status,
+            "warnings": [str(status.get("blockReason") or error)],
+        }
     input_controller = _input_controller_from_options(backend, options, sleep_func=sleep_func, monotonic_func=time.monotonic)
     hold_ms = max(120, int(getattr(options, "camera_sample_interval_ms", None) or getattr(options, "camera_probe_ms", 120) or 120) * 4)
     methods = camera_control.camera_method_sequence(getattr(options, "camera_method", "auto"))
@@ -276,14 +334,18 @@ def run_camera_self_test(
             method_results.append(result)
             warnings.append(f"{method}: {result['warning']}")
     selected = next((item.get("method") for item in method_results if item.get("status") == "PASS"), None)
-    payload = {
-        "schema": "camera_self_test.v1",
-        "status": "PASS" if selected else "WARN" if method_results else "FAIL",
-        "selectedMethod": selected,
-        "methodResults": method_results,
-        "humanInput": input_controller.metrics(),
-        "warnings": warnings,
-    }
+    try:
+        _finish_live_input_session(backend, live_input_status, options=options)
+    finally:
+        payload = {
+            "schema": "camera_self_test.v1",
+            "status": "PASS" if selected else "WARN" if method_results else "FAIL",
+            "selectedMethod": selected,
+            "methodResults": method_results,
+            "humanInput": input_controller.metrics(),
+            "liveInput": live_input_status,
+            "warnings": warnings,
+        }
     output = Path("interaction_geometry") / "live" / "camera_calibration.json"
     try:
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -305,6 +367,372 @@ def _input_profile_from_options(options: Any | None) -> str:
     return str(getattr(options, "input_profile", "instant_debug") or "instant_debug")
 
 
+def _live_input_operation_requested(options: Any | None) -> bool:
+    if options is None:
+        return False
+    return bool(getattr(options, "execute", False) or getattr(options, "hover_only", False) or getattr(options, "camera_self_test", False))
+
+
+def _software_input_allowed(options: Any | None) -> bool:
+    if options is None:
+        return False
+    return bool(
+        getattr(options, "allow_software_input", False)
+        or getattr(options, "unsafe_allow_pyautogui_live", False)
+        or getattr(options, "unsafe_allow_software_live", False)
+    )
+
+
+def _backend_name(backend: Any) -> str:
+    return str(getattr(backend, "name", backend.__class__.__name__) or "unknown")
+
+
+def _is_arduino_backend(backend: Any) -> bool:
+    return bool(getattr(backend, "arduino_hid_backend", False) or _backend_name(backend).lower() == "arduino")
+
+
+def _is_software_backend(backend: Any) -> bool:
+    name = _backend_name(backend).lower()
+    return bool(getattr(backend, "software_input_backend", False) or name in {"pyautogui", "pydirectinput"})
+
+
+def _is_known_live_backend(backend: Any) -> bool:
+    return bool(_is_arduino_backend(backend) or _is_software_backend(backend))
+
+
+def _live_input_required_for_backend(options: Any | None, backend: Any) -> bool:
+    return bool(_live_input_operation_requested(options) and _is_known_live_backend(backend))
+
+
+def _arduino_monitor_status_source(options: Any | None) -> str | None:
+    if options is None:
+        return None
+    return (
+        getattr(options, "arduino_monitor_status", None)
+        or getattr(options, "arduino_monitor_status_path", None)
+        or getattr(options, "input_integrity_status_path", None)
+    )
+
+
+def _input_backend_status_path(options: Any | None) -> Path:
+    raw = getattr(options, "input_integrity_backend_status_path", None) if options is not None else None
+    return Path(raw) if raw else Path("interaction_geometry") / "live" / "arduino_backend_status.json"
+
+
+def _write_input_backend_status(options: Any | None, backend: Any, *, armed: bool, direct_backend_bypass_count: int = 0) -> None:
+    try:
+        path = _input_backend_status_path(options)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        status = backend.status() if callable(getattr(backend, "status", None)) else {}
+        payload = {
+            "schema": "arduino_backend_runtime_status.v1",
+            "generatedAtMillis": _wall_time_millis(),
+            "liveInputBackend": _backend_name(backend),
+            "arduinoArmed": bool(armed),
+            "directBackendBypassCount": int(direct_backend_bypass_count or 0),
+            "backendStatus": status if isinstance(status, dict) else None,
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _input_integrity_fail_on_injected(options: Any | None) -> bool:
+    if options is None:
+        return True
+    return bool(getattr(options, "input_integrity_fail_on_injected", True))
+
+
+def _input_integrity_fail_on_bypass(options: Any | None) -> bool:
+    if options is None:
+        return True
+    return bool(getattr(options, "input_integrity_fail_on_bypass", True))
+
+
+def _read_input_integrity_status(
+    options: Any | None,
+    backend: Any,
+    *,
+    direct_backend_bypass_count: int = 0,
+    require_armed: bool = False,
+) -> dict[str, Any]:
+    return check_arduino_monitor_status(
+        require_monitor=bool(getattr(options, "arduino_require_monitor", False)),
+        status_path=_arduino_monitor_status_source(options),
+        expected_vid=getattr(options, "arduino_vid", None),
+        expected_pid=getattr(options, "arduino_pid", None),
+        expected_com_port=getattr(options, "arduino_port", None),
+        live_input_backend=_backend_name(backend),
+        arduino_armed=bool(getattr(backend, "armed", False)),
+        software_input_allowed=_software_input_allowed(options),
+        direct_backend_bypass_count=direct_backend_bypass_count,
+        fail_on_injected=_input_integrity_fail_on_injected(options),
+        fail_on_bypass=_input_integrity_fail_on_bypass(options),
+        require_armed=require_armed,
+        max_event_age_ms=int(getattr(options, "arduino_monitor_max_age_ms", 3000) or 3000),
+    )
+
+
+def _live_input_status(options: Any | None, backend: Any) -> dict[str, Any]:
+    requested = _live_input_operation_requested(options)
+    backend_name = _backend_name(backend)
+    required = _live_input_required_for_backend(options, backend)
+    software_allowed = _software_input_allowed(options)
+    status: dict[str, Any] = {
+        "schema": "live_input_policy.v1",
+        "liveInputBackend": backend_name,
+        "liveInputBackendRequired": required,
+        "softwareInputAllowed": software_allowed,
+        "requestedLiveInput": requested,
+        "backendIsArduino": _is_arduino_backend(backend),
+        "backendIsSoftware": _is_software_backend(backend),
+        "status": "PASS",
+        "blockReason": None,
+        "monitor": None,
+        "arduino": backend.status() if callable(getattr(backend, "status", None)) else None,
+    }
+    if not requested or not required:
+        return status
+    if _is_software_backend(backend) and not software_allowed:
+        status["status"] = "FAIL"
+        status["blockReason"] = "software_input_blocked"
+        return status
+    if not _is_arduino_backend(backend) and not software_allowed:
+        status["status"] = "FAIL"
+        status["blockReason"] = "arduino_backend_required"
+        return status
+    if _is_arduino_backend(backend) and bool(getattr(options, "arduino_require_monitor", False)):
+        monitor = _read_input_integrity_status(options, backend, direct_backend_bypass_count=0, require_armed=False)
+        status["monitor"] = monitor
+        status["inputIntegrityStatus"] = monitor.get("inputIntegrityStatus") if isinstance(monitor.get("inputIntegrityStatus"), dict) else dict(monitor)
+        if not bool(monitor.get("monitorPass")):
+            status["status"] = "FAIL"
+            status["blockReason"] = monitor.get("monitorBlockReason") or "arduino_monitor_failed"
+    return status
+
+
+def _start_live_input_session(options: Any | None, backend: Any) -> dict[str, Any]:
+    status = _live_input_status(options, backend)
+    if status.get("status") == "FAIL":
+        raise RuntimeError(str(status.get("blockReason") or "live_input_blocked"))
+    if _live_input_operation_requested(options) and _is_arduino_backend(backend):
+        token = getattr(options, "arduino_session_token", None)
+        if not token or str(token).strip().lower() == "auto":
+            token = secrets.token_hex(8)
+        try:
+            arduino_status = backend.arm(str(token))
+            status["arduino"] = arduino_status
+            status["arduinoArmed"] = True
+            status["arduinoSessionTokenHash"] = arduino_status.get("sessionTokenHash") if isinstance(arduino_status, dict) else None
+            _write_input_backend_status(options, backend, armed=True, direct_backend_bypass_count=0)
+            if bool(getattr(options, "arduino_require_monitor", False)):
+                integrity_before = _read_input_integrity_status(options, backend, direct_backend_bypass_count=0, require_armed=True)
+                status["monitor"] = integrity_before
+                status["inputIntegrityStatusBefore"] = (
+                    integrity_before.get("inputIntegrityStatus") if isinstance(integrity_before.get("inputIntegrityStatus"), dict) else dict(integrity_before)
+                )
+                if not bool(integrity_before.get("monitorPass")):
+                    status["status"] = "FAIL"
+                    status["blockReason"] = integrity_before.get("monitorBlockReason") or "input_integrity_failed"
+                    try:
+                        backend.stop_all()
+                    except Exception:
+                        pass
+                    raise RuntimeError(str(status["blockReason"]))
+        except Exception as error:  # noqa: BLE001
+            status["status"] = "FAIL"
+            status["blockReason"] = status.get("blockReason") or "arduino_arm_failed"
+            status["arduinoArmError"] = f"{type(error).__name__}: {error}"
+            try:
+                backend.stop_all()
+                status["stopAllSent"] = True
+            except Exception as stop_error:  # noqa: BLE001
+                status["stopAllError"] = f"{type(stop_error).__name__}: {stop_error}"
+            raise RuntimeError(status["arduinoArmError"]) from error
+    return status
+
+
+def _finish_live_input_session(backend: Any, status: dict[str, Any] | None, *, options: Any | None = None) -> None:
+    if not isinstance(status, dict) or not _is_arduino_backend(backend):
+        return
+    if status.get("arduinoArmed") or bool(getattr(backend, "armed", False)):
+        try:
+            arduino_status = backend.stop_all()
+            status["arduino"] = arduino_status
+            status["stopAllSent"] = True
+        except Exception as error:  # noqa: BLE001
+            status["stopAllError"] = f"{type(error).__name__}: {error}"
+    try:
+        arduino_status = backend.disarm()
+        status["arduino"] = arduino_status
+        status["arduinoDisarmed"] = True
+        _write_input_backend_status(options, backend, armed=False, direct_backend_bypass_count=0)
+    except Exception as error:  # noqa: BLE001
+        status["arduinoDisarmError"] = f"{type(error).__name__}: {error}"
+    try:
+        firmware_status = backend.firmware_status()
+        status["firmwareStatusAfter"] = firmware_status
+        caps = status.get("arduino", {}).get("capabilities") if isinstance(status.get("arduino"), dict) else {}
+        status["firmwareSafety"] = build_firmware_safety(
+            {
+                "status": "OK",
+                "protocol": (status.get("arduino") or {}).get("protocol") if isinstance(status.get("arduino"), dict) else "arduino_hid.v1",
+                "resetSafe": caps.get("resetSafe") if isinstance(caps, dict) else True,
+                "stopAll": caps.get("stopAll") if isinstance(caps, dict) else True,
+                "watchdog": caps.get("watchdog") if isinstance(caps, dict) else True,
+                "watchdogMs": firmware_status.get("watchdogMs"),
+                "armed": firmware_status.get("armed"),
+                "keysDown": firmware_status.get("keysDown"),
+                "mouseButtonsDown": firmware_status.get("mouseButtonsDown"),
+            }
+        )
+    except Exception as error:  # noqa: BLE001
+        status["firmwareStatusAfterError"] = f"{type(error).__name__}: {error}"
+    try:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            close()
+            status["serialClosed"] = True
+    except Exception as error:  # noqa: BLE001
+        status["serialCloseError"] = f"{type(error).__name__}: {error}"
+
+
+def _attach_live_input_status(
+    result: ExecutionResult,
+    status: dict[str, Any] | None,
+    *,
+    options: Any | None = None,
+    backend: Any | None = None,
+) -> None:
+    if not isinstance(status, dict):
+        return
+    direct_count = _direct_backend_bypass_count(result)
+    if backend is not None and _is_arduino_backend(backend) and bool(getattr(options, "arduino_require_monitor", False)):
+        try:
+            after_monitor = _read_input_integrity_status(options, backend, direct_backend_bypass_count=direct_count, require_armed=False)
+            status["inputIntegrityStatusAfter"] = (
+                after_monitor.get("inputIntegrityStatus") if isinstance(after_monitor.get("inputIntegrityStatus"), dict) else dict(after_monitor)
+            )
+            status["monitorAfter"] = after_monitor
+            before = status.get("inputIntegrityStatusBefore") or status.get("inputIntegrityStatus")
+            after = status.get("inputIntegrityStatusAfter")
+            if isinstance(before, dict) and isinstance(after, dict):
+                status["inputIntegrityDelta"] = input_integrity_delta(before, after)
+        except Exception as error:  # noqa: BLE001
+            status["inputIntegrityReadAfterError"] = f"{type(error).__name__}: {error}"
+    if isinstance(result.action_trace, dict):
+        result.action_trace["liveInput"] = dict(status)
+        before_status = status.get("inputIntegrityStatusBefore") or status.get("inputIntegrityStatus")
+        after_status = status.get("inputIntegrityStatusAfter")
+        delta = status.get("inputIntegrityDelta") if isinstance(status.get("inputIntegrityDelta"), dict) else {}
+        if isinstance(before_status, dict):
+            result.action_trace["inputIntegrityStatusBefore"] = dict(before_status)
+        if isinstance(after_status, dict):
+            result.action_trace["inputIntegrityStatusAfter"] = dict(after_status)
+        if isinstance(delta, dict):
+            result.action_trace.update(
+                {
+                    "mouseInjectedCountDelta": delta.get("mouseInjectedCountDelta", 0),
+                    "keyboardInjectedCountDelta": delta.get("keyboardInjectedCountDelta", 0),
+                    "lowerIlInjectedCountDelta": delta.get("lowerIlInjectedCountDelta", 0),
+                    "directBackendBypassCountDelta": delta.get("directBackendBypassCountDelta", 0),
+                }
+            )
+        monitor = status.get("monitorAfter") if isinstance(status.get("monitorAfter"), dict) else status.get("monitor")
+        if isinstance(monitor, dict):
+            result.action_trace["monitorPass"] = monitor.get("monitorPass")
+            result.action_trace["arduinoRawInputSeen"] = monitor.get("arduinoRawInputSeen")
+            result.action_trace["arduinoVidPidMatched"] = monitor.get("expectedVidPidMatched")
+        result.action_trace["liveInputBackend"] = status.get("liveInputBackend")
+        result.action_trace["arduinoArmed"] = bool(status.get("arduinoArmed"))
+        human = result.action_trace.setdefault("humanInput", {})
+        if isinstance(human, dict):
+            human["liveInputBackend"] = status.get("liveInputBackend")
+            human["liveInputBackendRequired"] = status.get("liveInputBackendRequired")
+            human["softwareInputAllowed"] = status.get("softwareInputAllowed")
+    if result.readiness is not None:
+        action_readiness = result.readiness.setdefault("actionReadiness", {})
+        if isinstance(action_readiness, dict):
+            action_readiness["liveInput"] = dict(status)
+    delta = status.get("inputIntegrityDelta") if isinstance(status.get("inputIntegrityDelta"), dict) else {}
+    injected_delta = int(delta.get("mouseInjectedCountDelta") or 0) + int(delta.get("keyboardInjectedCountDelta") or 0)
+    lower_delta = int(delta.get("lowerIlInjectedCountDelta") or 0)
+    if _live_input_operation_requested(options) and _input_integrity_fail_on_injected(options) and (injected_delta > 0 or lower_delta > 0):
+        result.status = "FAIL"
+        result.warnings.append("injected_input_detected")
+        if "live_input.injected_input" not in result.missing_capabilities:
+            result.missing_capabilities.append("live_input.injected_input")
+        if isinstance(result.action_trace, dict):
+            result.action_trace["finalClassification"] = "injected_input_detected"
+
+
+def _direct_backend_bypass_count(result: ExecutionResult) -> int:
+    trace = result.action_trace if isinstance(result.action_trace, dict) else {}
+    human = trace.get("humanInput") if isinstance(trace.get("humanInput"), dict) else {}
+    try:
+        return int(human.get("directBackendBypassCount") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _enforce_no_direct_backend_bypass(result: ExecutionResult, options: Any | None) -> None:
+    if not _live_input_operation_requested(options):
+        return
+    count = _direct_backend_bypass_count(result)
+    if count <= 0:
+        return
+    result.status = "FAIL"
+    result.warnings.append(f"direct_backend_bypass_blocked: directBackendBypassCount={count}")
+    if "live_input.direct_backend_bypass" not in result.missing_capabilities:
+        result.missing_capabilities.append("live_input.direct_backend_bypass")
+    if isinstance(result.action_trace, dict):
+        result.action_trace["finalClassification"] = "direct_backend_bypass_blocked"
+        result.action_trace.setdefault("liveInput", {})["directBackendBypassBlocked"] = True
+
+
+def _live_input_blocked_result(options: Any, backend: Any, status: dict[str, Any], *, proposed_action: str = "none") -> ExecutionResult:
+    reason = str(status.get("blockReason") or "live_input_blocked")
+    action_readiness = {
+        "status": "FAIL",
+        "executionAllowed": False,
+        "intent": None,
+        "blockers": [reason],
+        "warnings": [],
+        "checks": {"liveInputBackend": dict(status)},
+        "missingCapabilities": ["live_input.arduino"] if reason != "software_input_blocked" else [],
+    }
+    result = ExecutionResult(
+        status="FAIL",
+        proposed_action=proposed_action,
+        dry_run=not bool(getattr(options, "execute", False)),
+        backend_name=_backend_name(backend),
+        movement_profile=str(getattr(options, "movement_profile", "linear_debug")),
+        warnings=[reason],
+        missing_capabilities=list(action_readiness["missingCapabilities"]),
+        readiness={
+            "schema": "live_readiness.v2",
+            "status": "FAIL",
+            "ready": False,
+            "currentIntent": None,
+            "actionReadiness": action_readiness,
+        },
+        verification_status="FAIL",
+        action_trace={
+            "schema": "action_trace.v2",
+            "liveInput": dict(status),
+            "humanInput": {
+                "liveInputBackend": status.get("liveInputBackend"),
+                "liveInputBackendRequired": status.get("liveInputBackendRequired"),
+                "softwareInputAllowed": status.get("softwareInputAllowed"),
+                "directBackendBypassCount": 0,
+                "backendCommandCount": 0,
+                "backendBlockedCommandCount": 0,
+            },
+        },
+    )
+    return result
+
+
 def _input_controller_from_options(
     backend: Any,
     options: Any | None,
@@ -318,6 +746,8 @@ def _input_controller_from_options(
         sleep_func=sleep_func,
         monotonic_func=monotonic_func,
         seed=getattr(options, "seed", None),
+        live_input_backend_required=_live_input_required_for_backend(options, backend),
+        software_input_allowed=_software_input_allowed(options),
     )
 
 
@@ -592,11 +1022,14 @@ def _menu_row_canvas_point(sample: dict[str, Any], row_index: int) -> dict[str, 
         return None
     if row_index < 0 or row_index >= count:
         return None
-    row_height = (height - 22) / count if height > 22 else height / count
-    # RuneLite reports menu bounds in the fixed game canvas space, while the
-    # row hit bands observed live are tighter than the visual menu height.
-    row_height = min(22.0, max(7.0, row_height * 0.55))
-    options_top = y + max(0.0, (height - (row_height * count)) / 2.0)
+    if height > 22:
+        natural_header_height = height - (15.0 * count)
+        header_height = min(24.0, max(16.0, natural_header_height))
+        row_height = (height - header_height) / count
+        options_top = y + header_height
+    else:
+        row_height = height / count
+        options_top = y
     row_y = options_top + row_index * row_height + row_height / 2.0
     row_x = x + width / 2.0
     if row_x < x or row_x > x + width or row_y < y or row_y > y + height:
@@ -855,6 +1288,53 @@ def _status_phase_intent(status: dict[str, Any]) -> tuple[str | None, str | None
     return (str(phase) if phase is not None else None, str(intent) if intent is not None else None)
 
 
+def _status_player_location(status: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, float | None]:
+    status = status if isinstance(status, dict) else {}
+    location = status.get("playerLocation") if isinstance(status.get("playerLocation"), dict) else {}
+    if location.get("worldX") is not None and location.get("worldY") is not None:
+        return (
+            {"worldX": location.get("worldX"), "worldY": location.get("worldY"), "plane": location.get("plane")},
+            str(status.get("playerLocationSource") or "daemon_player_location"),
+            float(status.get("playerLocationConfidence")) if isinstance(status.get("playerLocationConfidence"), (int, float)) else None,
+        )
+    brain = _status_brain(status)
+    player = brain.get("playerContext") if isinstance(brain.get("playerContext"), dict) else {}
+    tile = player.get("worldTile") if isinstance(player.get("worldTile"), dict) else player.get("tile")
+    if isinstance(tile, dict) and tile.get("worldX") is not None and tile.get("worldY") is not None:
+        return (
+            {"worldX": tile.get("worldX"), "worldY": tile.get("worldY"), "plane": tile.get("plane")},
+            str(player.get("locationSource") or player.get("location_source") or "player_context"),
+            float(player.get("locationConfidence")) if isinstance(player.get("locationConfidence"), (int, float)) else 1.0,
+        )
+    world_x = status.get("playerWorldX")
+    world_y = status.get("playerWorldY")
+    if world_x is None:
+        world_x = player.get("worldX") if "worldX" in player else player.get("world_x")
+    if world_y is None:
+        world_y = player.get("worldY") if "worldY" in player else player.get("world_y")
+    if world_x is not None and world_y is not None:
+        return (
+            {"worldX": world_x, "worldY": world_y, "plane": player.get("plane", status.get("playerPlane"))},
+            str(player.get("locationSource") or player.get("location_source") or "player_context"),
+            float(player.get("locationConfidence")) if isinstance(player.get("locationConfidence"), (int, float)) else 1.0,
+        )
+    pathing = _status_context(status, "pathingContext")
+    for value in (
+        pathing.get("playerTile"),
+        pathing.get("currentPlayerTile"),
+        pathing.get("collisionWindowCenterWorld"),
+        status.get("pathingCollisionWindowCenterWorld"),
+        status.get("collisionWindowCenterWorld"),
+    ):
+        if isinstance(value, dict) and value.get("worldX") is not None and value.get("worldY") is not None:
+            return (
+                {"worldX": value.get("worldX"), "worldY": value.get("worldY"), "plane": value.get("plane")},
+                "collision_window_center_proxy",
+                0.35,
+            )
+    return None, None, None
+
+
 def _status_inventory_free_slots(status: dict[str, Any]) -> int | None:
     inventory = _status_context(status, "inventoryContext")
     for key in ("freeSlots", "inventoryFreeSlots"):
@@ -1097,6 +1577,7 @@ def _new_loop_summary() -> dict[str, Any]:
         "skippedStaleClientTick": 0,
         "targetsSuppressed": 0,
         "targetNoProgressSuppressions": 0,
+        "targetMenuFlipSuppressions": 0,
         "suppressedTargets": [],
         "targetReacquireRounds": 0,
         "reacquireRoundsByBudget": {},
@@ -1108,6 +1589,14 @@ def _new_loop_summary() -> dict[str, Any]:
         "reacquireBudgetResets": 0,
         "stoppedByReacquireLimit": False,
         "candidateWasActionableBeforeLimit": False,
+        "staleProposalDetected": False,
+        "staleProposalSource": None,
+        "reacquireAttempted": False,
+        "reacquireResult": None,
+        "freshTargetFound": False,
+        "freshTargetSource": None,
+        "reasonIfNoFreshTarget": None,
+        "staleProposalReacquireAttempts": 0,
         "routeTransitionSuppressionOverrides": 0,
         "targetReacquireWaits": 0,
         "targetReacquireWaitMillis": 0,
@@ -1218,6 +1707,9 @@ def _new_loop_summary() -> dict[str, Any]:
         "resourceCountEnd": None,
         "progressStart": None,
         "progressEnd": None,
+        "finalLocation": None,
+        "finalLocationSource": None,
+        "finalLocationConfidence": None,
         "finalCycleStage": None,
         "finalPhase": None,
         "finalActiveIntent": None,
@@ -1251,6 +1743,11 @@ def _record_loop_status(summary: dict[str, Any], status: dict[str, Any] | None) 
     if progress_count is not None:
         summary["progressEnd"] = progress_count
     phase, intent = _status_phase_intent(status)
+    location, location_source, location_confidence = _status_player_location(status)
+    if location is not None:
+        summary["finalLocation"] = location
+        summary["finalLocationSource"] = location_source
+        summary["finalLocationConfidence"] = location_confidence
     summary["finalCycleStage"] = status.get("currentCycleStage") or status.get("cycleStage") or summary.get("finalCycleStage")
     summary["finalPhase"] = phase or summary.get("finalPhase")
     summary["finalActiveIntent"] = intent or summary.get("finalActiveIntent")
@@ -1284,6 +1781,8 @@ def _action_intent_type_from_payload(proposal: dict[str, Any] | None, proposed_a
         return "resource_object_action"
     if action == "resource_view_recovery":
         return "resource_view_recovery_action"
+    if action == "service_view_recovery":
+        return "service_view_recovery_action"
     if action in {"open_service", "deposit_inventory", "deposit_resources", "close_bank"}:
         return "service_object_action"
     if action == "interact_service_route_object":
@@ -1466,6 +1965,8 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
                 resource_projection_recovery_successes += 1
             elif recovery_classification == "resource_projection_recovery_failed":
                 resource_projection_recovery_failures += 1
+        if result.proposed_action == "service_view_recovery" and result.executed:
+            camera_adjustments += 1
         if outcome == "no_change_timeout" and result.executed:
             timeout_classification = resource_progress_classification or str(observed.get("observedResult") or "unclassified_timeout")
             timeout_classifications[timeout_classification] = timeout_classifications.get(timeout_classification, 0) + 1
@@ -1662,6 +2163,14 @@ def _refresh_loop_summary(summary: dict[str, Any], results: list[ExecutionResult
             "debugScreenshotCaptureFailures",
             "debugScreenshotBundlesSkippedByLimit",
             "debugScreenshotBundlePaths",
+            "staleProposalDetected",
+            "staleProposalSource",
+            "reacquireAttempted",
+            "reacquireResult",
+            "freshTargetFound",
+            "freshTargetSource",
+            "reasonIfNoFreshTarget",
+            "staleProposalReacquireAttempts",
         )
     }
     summary.update(counts)
@@ -2607,6 +3116,15 @@ def _target_key_from_mapping(target: dict[str, Any] | None) -> str | None:
 
 def _target_key_from_proposal(proposal: ActionProposal) -> str | None:
     explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    if proposal.target_kind == "path_tile" and isinstance(proposal.target_tile, dict):
+        target = {
+            "id": _proposal_target_id(proposal),
+            **proposal.target_tile,
+            "classId": explanation.get("classId"),
+        }
+        key = _target_key_from_mapping(target)
+        if key:
+            return key
     key = _target_key_from_mapping(explanation)
     if key:
         return key
@@ -2640,7 +3158,11 @@ def _status_with_suppressed_targets(status: dict[str, Any], keys: set[str]) -> d
     brain = dict(_dict(copied.get("brain")))
     values = sorted(keys)
     copied["suppressedResourceTargetKeys"] = values
+    copied["suppressedActionTargetKeys"] = values
+    copied["suppressedNavigationTargetKeys"] = values
     brain["suppressedResourceTargetKeys"] = values
+    brain["suppressedActionTargetKeys"] = values
+    brain["suppressedNavigationTargetKeys"] = values
     copied["brain"] = brain
     return copied
 
@@ -2678,6 +3200,45 @@ def _proposal_has_actionable_safe_target(proposal: ActionProposal) -> bool:
     if safe.get("actionable") is True or safe.get("status") == "PASS":
         return True
     return proposal.suggested_click_point is not None or proposal.executable
+
+
+def _proposal_action_target_source(proposal: ActionProposal) -> str | None:
+    if proposal.action_target_source:
+        return str(proposal.action_target_source)
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    value = explanation.get("actionTargetSource") or explanation.get("targetSource") or explanation.get("source")
+    return str(value) if value is not None else None
+
+
+def _proposal_actionability(proposal: ActionProposal) -> str | None:
+    if proposal.actionability:
+        return str(proposal.actionability)
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    value = explanation.get("actionability")
+    return str(value) if value is not None else None
+
+
+def _proposal_is_stale_or_static(proposal: ActionProposal) -> bool:
+    actionability = _proposal_actionability(proposal)
+    source = _proposal_action_target_source(proposal)
+    return actionability in {"advisory_only", "stale", "blocked"} or source in {"static_route_prior", "route_context_goal"}
+
+
+def _proposal_fresh_executable_source(proposal: ActionProposal) -> str | None:
+    if _proposal_is_stale_or_static(proposal) or not proposal.executable:
+        return None
+    source = _proposal_action_target_source(proposal)
+    if source:
+        return source
+    if proposal.target_kind == "path_tile":
+        return "live_projected_waypoint" if proposal.suggested_click_point else "local_frontier_waypoint"
+    if proposal.target_kind == "service_route_object":
+        return "live_route_object"
+    if proposal.target_kind == "service":
+        return "live_service_object"
+    if proposal.target_kind == "resource":
+        return "live_resource_candidate"
+    return "unknown"
 
 
 def _status_reacquire_scope_key(status: dict[str, Any]) -> tuple[Any, ...]:
@@ -3097,6 +3658,82 @@ def _record_target_no_progress_failure(
     }
     if isinstance(result.action_trace, dict):
         result.action_trace["targetNoProgressSuppression"] = event
+    return event
+
+
+def _is_menu_flip_mismatch_result(result: ExecutionResult) -> bool:
+    observed = _observed_from_result(result)
+    if str(observed.get("actionResultClassification") or observed.get("observedResult") or "") == "menu_flip_mismatch":
+        return True
+    trace = result.action_trace if isinstance(result.action_trace, dict) else {}
+    return str(trace.get("finalClassification") or "") == "menu_flip_mismatch"
+
+
+def _record_target_menu_flip_failure(
+    *,
+    options: Any,
+    cache: dict[str, dict[str, Any]],
+    summary: dict[str, Any],
+    result: ExecutionResult,
+    now_ms: int,
+) -> dict[str, Any] | None:
+    if not _suppression_enabled(options):
+        return None
+    proposal = result.proposal if isinstance(result.proposal, dict) else {}
+    target = proposal.get("targetExplanation") if isinstance(proposal.get("targetExplanation"), dict) else {}
+    target_key = _target_key_from_mapping(target)
+    if not target_key:
+        return None
+    window_ms = max(1, int(getattr(options, "target_suppression_ms", 0) or 1))
+    budget_type = _proposal_payload_reacquire_budget_type(proposal)
+    record = cache.setdefault(
+        target_key,
+        {
+            "targetKey": target_key,
+            "targetName": target.get("name") or proposal.get("targetName"),
+            "worldLocation": target.get("worldLocation"),
+            "hoverConfirmFailures": 0,
+            "resourceNoProgressFailures": 0,
+            "menuFlipFailures": 0,
+            "lastFailureReason": None,
+            "lastFailureTime": None,
+            "suppressionUntil": 0,
+            "reacquireBudgetType": budget_type,
+        },
+    )
+    already_suppressed = int(record.get("suppressionUntil") or 0) > now_ms
+    record["reacquireBudgetType"] = budget_type
+    record["menuFlipFailures"] = int(record.get("menuFlipFailures") or 0) + 1
+    record["lastFailureReason"] = "menu_flip_mismatch"
+    record["lastFailureTime"] = now_ms
+    record["suppressionUntil"] = now_ms + window_ms
+    suppressed_targets = summary.setdefault("suppressedTargets", [])
+    already_counted = any(isinstance(item, dict) and item.get("targetKey") == target_key for item in suppressed_targets)
+    if not already_suppressed and not already_counted:
+        summary["targetsSuppressed"] = int(summary.get("targetsSuppressed") or 0) + 1
+        summary["targetMenuFlipSuppressions"] = int(summary.get("targetMenuFlipSuppressions") or 0) + 1
+        suppressed_targets.append(
+            {
+                "targetKey": target_key,
+                "targetName": record.get("targetName"),
+                "worldLocation": record.get("worldLocation"),
+                "reason": "menu_flip_mismatch",
+                "failureCount": record.get("menuFlipFailures"),
+                "suppressionUntil": record.get("suppressionUntil"),
+                "reacquireBudgetType": budget_type,
+            }
+        )
+    event = {
+        "targetKey": target_key,
+        "reason": "menu_flip_mismatch",
+        "failureCount": record.get("menuFlipFailures"),
+        "failureLimit": 1,
+        "suppressed": True,
+        "suppressionUntil": record.get("suppressionUntil"),
+        "reacquireBudgetType": budget_type,
+    }
+    if isinstance(result.action_trace, dict):
+        result.action_trace["targetMenuFlipSuppression"] = event
     return event
 
 
@@ -4037,9 +4674,14 @@ def _apply_path_tile_projection(
 
     proposal.suggested_click_point = point
     proposal.click_point_space = "canvas"
+    proposal.action_target_source = "live_projected_waypoint"
+    proposal.actionability = "needs_hover_confirmation"
     proposal.missing_capabilities = [item for item in proposal.missing_capabilities if item not in {"click_point", "screen_click_point"}]
     proposal.warnings = [warning for warning in proposal.warnings if "missing click point" not in str(warning)]
     if isinstance(proposal.target_explanation, dict):
+        proposal.target_explanation.setdefault("advisoryTargetSource", proposal.target_explanation.get("targetSource"))
+        proposal.target_explanation["actionTargetSource"] = proposal.action_target_source
+        proposal.target_explanation["actionability"] = proposal.actionability
         proposal.target_explanation["tileProjection"] = dict(projection)
         proposal.target_explanation["routeProjectionStatus"] = projection_status
         proposal.target_explanation["aimPoint"] = {"canvasX": point["x"], "canvasY": point["y"], "source": "plugin_tile_projection"}
@@ -4062,6 +4704,15 @@ def _apply_path_tile_projection(
             "method": "plugin_tile_projection",
             "coordinateMethod": resolution.get("method"),
             "screenClickPoint": resolution.get("screenClickPoint"),
+            "coordinateSpace": resolution.get("coordinateSpace"),
+            "scaleX": resolution.get("scaleX"),
+            "scaleY": resolution.get("scaleY"),
+            "screenPointBeforeScaling": resolution.get("screenPointBeforeScaling"),
+            "screenPointAfterScaling": resolution.get("screenPointAfterScaling"),
+            "windowBoundsSource": resolution.get("windowBoundsSource"),
+            "canvasBoundsSource": resolution.get("canvasBoundsSource"),
+            "displayScale": resolution.get("displayScale"),
+            "displayScaleApplied": resolution.get("displayScaleApplied"),
             "warnings": [],
             "missingCapabilities": [],
             "tileProjection": dict(projection),
@@ -4221,6 +4872,53 @@ def _navigation_destination_tile(proposal: ActionProposal) -> dict[str, int] | N
     return {"worldX": world_x, "worldY": world_y, "plane": 0 if plane is None else plane}
 
 
+def _suppressed_route_target_keys_from_explanation(explanation: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for field in ("suppressedTargetKeysAtSelection", "suppressedActionTargetKeys", "suppressedNavigationTargetKeys"):
+        values = explanation.get(field)
+        if isinstance(values, list):
+            keys.update(str(value) for value in values if value is not None)
+    reacquisition = explanation.get("reacquisition")
+    if isinstance(reacquisition, dict):
+        values = reacquisition.get("suppressedTargetKeys")
+        if isinstance(values, list):
+            keys.update(str(value) for value in values if value is not None)
+    selection = explanation.get("routeWaypointSelection")
+    if isinstance(selection, dict):
+        values = selection.get("suppressedTargetKeys")
+        if isinstance(values, list):
+            keys.update(str(value) for value in values if value is not None)
+    return keys
+
+
+def _route_tile_target_keys(tile: dict[str, Any], explanation: dict[str, Any]) -> set[str]:
+    object_id = explanation.get("objectId", explanation.get("rawId", explanation.get("id")))
+    class_id = explanation.get("classId") or explanation.get("targetClass")
+    keys: set[str] = set()
+    id_values: list[Any] = []
+    for value in (object_id, None):
+        if value not in id_values:
+            id_values.append(value)
+    class_values: list[Any] = []
+    for value in (class_id, None):
+        if value not in class_values:
+            class_values.append(value)
+    for target_id in id_values:
+        for target_class in class_values:
+            key = _target_key_from_mapping(
+                {
+                    "id": target_id,
+                    "worldX": tile.get("worldX"),
+                    "worldY": tile.get("worldY"),
+                    "plane": tile.get("plane", 0),
+                    "classId": target_class,
+                }
+            )
+            if key:
+                keys.add(key)
+    return keys
+
+
 def _navigation_alternate_tile_requests(
     proposal: ActionProposal,
     snapshot: dict[str, Any] | None,
@@ -4240,6 +4938,7 @@ def _navigation_alternate_tile_requests(
     if player.get("plane") != destination.get("plane"):
         return []
     explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    suppressed_route_keys = _suppressed_route_target_keys_from_explanation(explanation)
     structured_tiles: list[dict[str, int]] = []
     for key in ("predictedPathTiles", "localScoutPath", "availableWaypointTiles"):
         values = explanation.get(key)
@@ -4266,6 +4965,8 @@ def _navigation_alternate_tile_requests(
     for index, tile in enumerate(structured_tiles):
         key = (tile["worldX"], tile["worldY"], tile["plane"])
         if key == primary_key or tile.get("plane") != player.get("plane"):
+            continue
+        if suppressed_route_keys and _route_tile_target_keys(tile, explanation).intersection(suppressed_route_keys):
             continue
         score = (
             max(abs(destination["worldX"] - tile["worldX"]), abs(destination["worldY"] - tile["worldY"])),
@@ -4374,6 +5075,13 @@ def _screen_click_point(proposal: ActionProposal, backend: Any) -> tuple[dict[st
                         "status": "PASS",
                         "method": "backend_fallback_window_geometry",
                         "screenClickPoint": {"x": int(round(float(converted["x"]))), "y": int(round(float(converted["y"])))},
+                        "coordinateSpace": "physical_pyautogui",
+                        "scaleX": 1.0,
+                        "scaleY": 1.0,
+                        "screenPointBeforeScaling": {"x": int(round(float(converted["x"]))), "y": int(round(float(converted["y"])))},
+                        "screenPointAfterScaling": {"x": int(round(float(converted["x"]))), "y": int(round(float(converted["y"])))},
+                        "windowBoundsSource": "backend.canvas_to_screen_point",
+                        "canvasBoundsSource": "backend.canvas_client_geometry",
                         "warnings": ["dynamic input geometry unavailable; used backend fallback window geometry"],
                         "missingCapabilities": [],
                     }
@@ -4385,6 +5093,13 @@ def _screen_click_point(proposal: ActionProposal, backend: Any) -> tuple[dict[st
         "status": "PASS",
         "method": "screen_direct",
         "screenClickPoint": {"x": int(point["x"]), "y": int(point["y"])},
+        "coordinateSpace": "physical_pyautogui",
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "screenPointBeforeScaling": {"x": int(point["x"]), "y": int(point["y"])},
+        "screenPointAfterScaling": {"x": int(point["x"]), "y": int(point["y"])},
+        "windowBoundsSource": "screen_direct",
+        "canvasBoundsSource": "none",
         "warnings": [],
         "missingCapabilities": [],
     }
@@ -4641,6 +5356,10 @@ def _is_service_object_proposal(proposal: ActionProposal) -> bool:
     return proposal.target_kind == "service" and proposal.proposed_action == "open_service"
 
 
+def _is_resource_object_proposal(proposal: ActionProposal) -> bool:
+    return proposal.target_kind == "resource" and proposal.proposed_action == "select_resource_target"
+
+
 def _supports_structured_alternate_aimpoints(proposal: ActionProposal) -> bool:
     if _is_service_object_proposal(proposal):
         return True
@@ -4695,6 +5414,312 @@ def _proposal_with_service_aimpoint(proposal: ActionProposal, canvas_point: dict
     return candidate
 
 
+def _resource_required_level_from_name(name: Any) -> int | None:
+    key = _menu_text_key(name)
+    if not key:
+        return None
+    if "oak" in key:
+        return 15
+    if "willow" in key:
+        return 30
+    if "yew" in key:
+        return 60
+    if "magic" in key:
+        return 75
+    if "tree" in key:
+        return 1
+    return None
+
+
+def _resource_level_met(required: int | None, player_level_known: bool | None, player_level: int | None) -> bool:
+    if required is None:
+        return False
+    if required <= 1:
+        return True
+    if player_level_known is False or player_level is None:
+        return False
+    return player_level >= required
+
+
+def _resource_hover_entry_summary(entry: dict[str, Any], *, player_level_known: bool | None, player_level: int | None) -> dict[str, Any]:
+    target = entry.get("target") or entry.get("topTarget")
+    required = _resource_required_level_from_name(target)
+    met = _resource_level_met(required, player_level_known, player_level)
+    return {
+        "option": entry.get("option") or entry.get("topOption"),
+        "target": target,
+        "identifier": entry.get("identifier") if entry.get("identifier") is not None else entry.get("topIdentifier"),
+        "type": entry.get("type") or entry.get("topType"),
+        "entryIndex": entry.get("entryIndex"),
+        "requiredSkill": "woodcutting" if required is not None else None,
+        "requiredLevel": required,
+        "playerLevelKnown": bool(player_level_known),
+        "playerLevel": player_level,
+        "levelRequirementMet": met,
+        "visibleButNotExecutable": bool(required is not None and not met),
+        "futureEligibleWhenLevelMet": bool(required is not None and not met),
+    }
+
+
+def _resource_target_ambiguity(
+    proposal: ActionProposal,
+    confirmation: dict[str, Any] | None,
+    *,
+    rejection_reason: str | None = None,
+) -> dict[str, Any] | None:
+    if not _is_resource_object_proposal(proposal):
+        return None
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    sample = _confirmation_hover_sample(confirmation)
+    latest_match = (confirmation or {}).get("latestMatch") if isinstance((confirmation or {}).get("latestMatch"), dict) else {}
+    match_details = latest_match.get("details") if isinstance(latest_match.get("details"), dict) else {}
+    candidate_name = proposal.target_name or explanation.get("name")
+    required = _int_or_none(explanation.get("requiredLevel")) or _resource_required_level_from_name(candidate_name)
+    player_level_known = explanation.get("playerLevelKnown")
+    player_level = _int_or_none(explanation.get("playerLevel"))
+    if player_level_known is None:
+        player_level_known = player_level is not None
+    level_met = _resource_level_met(required, bool(player_level_known), player_level)
+    left_entry = client_tick_core.get_left_click_entry(sample)
+    entries = client_tick_core.get_actionable_entries(sample)
+    expected_lower = client_tick_core.expected_entries_not_top(
+        sample,
+        client_tick_core.action_intent_from_proposal(proposal),
+    )
+    top_summary = _resource_hover_entry_summary(left_entry or {}, player_level_known=bool(player_level_known), player_level=player_level) if left_entry else None
+    entry_summaries = [
+        _resource_hover_entry_summary(entry, player_level_known=bool(player_level_known), player_level=player_level)
+        for entry in entries
+    ]
+    top_target = _menu_text_key((left_entry or {}).get("target") if isinstance(left_entry, dict) else sample.get("topTarget"))
+    candidate_key = _menu_text_key(candidate_name)
+    expected_present_not_top = bool(expected_lower or match_details.get("expectedEntryPresentButNotTop"))
+    higher_level_top = bool(
+        top_summary
+        and top_summary.get("requiredLevel") is not None
+        and required is not None
+        and int(top_summary["requiredLevel"]) > int(required)
+    )
+    non_exec_top = bool(top_summary and top_summary.get("visibleButNotExecutable"))
+    if (confirmation or {}).get("confirmed") is True:
+        ambiguity_status = "clear"
+        reason = None
+    elif higher_level_top and ("oak" in top_target or non_exec_top):
+        ambiguity_status = "ambiguous_overlap_with_higher_level_target"
+        reason = "top hover is a higher-level resource than the selected candidate"
+    elif expected_present_not_top:
+        ambiguity_status = "ambiguous_expected_entry_not_top"
+        reason = "expected resource entry is present below another left-click target"
+    elif top_target and candidate_key and candidate_key not in top_target:
+        ambiguity_status = "ambiguous_top_hover_mismatch"
+        reason = "top hover target does not match selected resource candidate"
+    elif entries and len(entries) > 1:
+        ambiguity_status = "ambiguous_object_stack"
+        reason = "multiple object actions are stacked at this aimpoint"
+    else:
+        ambiguity_status = "unsafe"
+        reason = rejection_reason or str((confirmation or {}).get("reason") or "hover confirmation failed")
+    return {
+        "schema": "resource_target_ambiguity.v1",
+        "candidateId": explanation.get("objectId") or explanation.get("id"),
+        "candidateHash": explanation.get("hash"),
+        "candidateName": candidate_name,
+        "candidateWorldLocation": explanation.get("worldLocation") or explanation.get("world"),
+        "expectedAction": "Chop down",
+        "expectedTargetClass": "basic_tree" if required in (None, 1) else candidate_name,
+        "requiredLevel": required,
+        "playerLevelKnown": bool(player_level_known),
+        "playerLevel": player_level,
+        "levelRequirementMet": level_met,
+        "topHoverOption": (left_entry or {}).get("option") if isinstance(left_entry, dict) else sample.get("topOption"),
+        "topHoverTarget": (left_entry or {}).get("target") if isinstance(left_entry, dict) else sample.get("topTarget"),
+        "lowerHoverEntries": entry_summaries[1:] if len(entry_summaries) > 1 else [],
+        "expectedEntryPresentButNotTop": expected_present_not_top,
+        "lowerMenuWouldWorkPotentially": expected_present_not_top,
+        "rightClickResourceSelectionDeferred": expected_present_not_top,
+        "overlappingCandidates": entry_summaries,
+        "overlappingExecutableCandidates": [entry for entry in entry_summaries if entry.get("levelRequirementMet")],
+        "overlappingNonExecutableCandidates": [entry for entry in entry_summaries if entry.get("visibleButNotExecutable")],
+        "overlappingHigherLevelCandidates": [
+            entry for entry in entry_summaries if required is not None and entry.get("requiredLevel") is not None and int(entry["requiredLevel"]) > int(required)
+        ],
+        "ambiguityStatus": ambiguity_status,
+        "overlapPenaltyFromNonExecutableTarget": bool(non_exec_top or (higher_level_top and not level_met)),
+        "rejectionReason": reason,
+    }
+
+
+def _resource_alternate_aimpoints(proposal: ActionProposal, current_canvas_point: dict[str, Any] | None) -> list[dict[str, int]]:
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    safe = explanation.get("safeAimPoint") if isinstance(explanation.get("safeAimPoint"), dict) else {}
+    samples = safe.get("sampledAimpoints") if isinstance(safe.get("sampledAimpoints"), list) else []
+    current_x = _int_or_none((current_canvas_point or {}).get("x"))
+    current_y = _int_or_none((current_canvas_point or {}).get("y"))
+    points: list[dict[str, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        x = _int_or_none(sample.get("x", sample.get("canvasX")))
+        y = _int_or_none(sample.get("y", sample.get("canvasY")))
+        if x is None or y is None:
+            continue
+        key = (x, y)
+        if key in seen or (current_x == x and current_y == y):
+            continue
+        seen.add(key)
+        points.append({"x": x, "y": y})
+    return points[:7]
+
+
+def _resource_ambiguity_recoverable(ambiguity: dict[str, Any] | None) -> bool:
+    if not isinstance(ambiguity, dict):
+        return False
+    return str(ambiguity.get("ambiguityStatus") or "") in {
+        "ambiguous_top_hover_mismatch",
+        "ambiguous_overlap_with_higher_level_target",
+        "ambiguous_expected_entry_not_top",
+        "ambiguous_object_stack",
+    }
+
+
+def _proposal_with_resource_aimpoint(
+    proposal: ActionProposal,
+    canvas_point: dict[str, int],
+    screen_point: dict[str, int],
+    *,
+    source: str = "alternate_hull_sample",
+    method: str = "resource_alternate_hull_sample",
+) -> ActionProposal:
+    candidate = deepcopy(proposal)
+    candidate.suggested_click_point = dict(canvas_point)
+    candidate.click_point_space = "canvas"
+    candidate.resolved_screen_click_point = dict(screen_point)
+    candidate.click_point_resolution = {
+        "status": "PASS",
+        "method": method,
+        "screenClickPoint": dict(screen_point),
+        "warnings": [],
+        "missingCapabilities": [],
+    }
+    if isinstance(candidate.target_explanation, dict):
+        safe = candidate.target_explanation.get("safeAimPoint")
+        if isinstance(safe, dict):
+            updated_safe = dict(safe)
+            updated_safe["acceptedAimpoint"] = dict(canvas_point)
+            updated_safe["canvasX"] = canvas_point["x"]
+            updated_safe["canvasY"] = canvas_point["y"]
+            updated_safe["source"] = source
+            candidate.target_explanation["safeAimPoint"] = updated_safe
+        candidate.target_explanation["selectedAimpointSource"] = source
+    return candidate
+
+
+def _hover_sample_canvas_point(sample: dict[str, Any] | None) -> dict[str, int] | None:
+    if not isinstance(sample, dict):
+        return None
+    x = _int_or_none(sample.get("mouseCanvasX"))
+    y = _int_or_none(sample.get("mouseCanvasY"))
+    if x is None or y is None:
+        return None
+    return {"x": x, "y": y}
+
+
+def _try_resource_observed_hover_retarget(
+    proposal: ActionProposal,
+    confirmation: dict[str, Any] | None,
+    *,
+    backend: Any,
+    hover_options: HoverConfirmationOptions,
+) -> dict[str, Any] | None:
+    if not _is_resource_object_proposal(proposal) or not isinstance(confirmation, dict):
+        return None
+    latest_match = confirmation.get("latestMatch") if isinstance(confirmation.get("latestMatch"), dict) else {}
+    if latest_match.get("reason") != "mouse_position_outside_tolerance":
+        return None
+    sample = _confirmation_hover_sample(confirmation)
+    observed_point = _hover_sample_canvas_point(sample)
+    if observed_point is None:
+        return {"accepted": False, "reason": "observed_hover_point_missing"}
+    intent = client_tick_core.action_intent_from_proposal(proposal, tolerance_px=hover_options.tolerance_px)
+    selected_entry = client_tick_core.get_left_click_entry(sample)
+    if not client_tick_core.menu_entry_matches_intent(selected_entry, intent):
+        return {
+            "accepted": False,
+            "reason": "observed_hover_top_not_expected",
+            "observedCanvasPoint": dict(observed_point),
+            "topOption": (selected_entry or {}).get("option"),
+            "topTarget": (selected_entry or {}).get("target"),
+        }
+    screen_point = _screen_point_from_canvas_for_proposal(proposal, backend, observed_point)
+    if not isinstance(screen_point, dict):
+        return {"accepted": False, "reason": "observed_hover_screen_point_unavailable", "observedCanvasPoint": dict(observed_point)}
+    candidate = _proposal_with_resource_aimpoint(
+        proposal,
+        observed_point,
+        screen_point,
+        source="hover_observed_same_target",
+        method="resource_observed_hover_retarget",
+    )
+    match = hover_menu_matches_target(
+        sample,
+        candidate,
+        observed_point,
+        tolerance_px=hover_options.tolerance_px,
+        min_wall_time_millis=None,
+    )
+    if not match.confirmed:
+        return {
+            "accepted": False,
+            "reason": match.reason,
+            "observedCanvasPoint": dict(observed_point),
+            "latestMatch": match.to_dict(),
+        }
+    retarget_trace = {
+        "schema": "resource_hover_observed_retarget.v1",
+        "originalCanvasPoint": dict(confirmation.get("expectedCanvasPoint") or _canvas_click_point_for_hover(proposal) or {}),
+        "observedCanvasPoint": dict(observed_point),
+        "observedScreenPoint": dict(screen_point),
+        "positionMismatch": dict((latest_match.get("details") or {}) if isinstance(latest_match.get("details"), dict) else {}),
+        "topOption": (selected_entry or {}).get("option"),
+        "topTarget": (selected_entry or {}).get("target"),
+        "selectedAimpointSource": "hover_observed_same_target",
+    }
+    retarget_confirmation = {
+        "status": "PASS",
+        "confirmed": True,
+        "reason": "resource_hover_confirmed_at_observed_point",
+        "latencyMillis": confirmation.get("latencyMillis"),
+        "requestCount": confirmation.get("requestCount"),
+        "expectedCanvasPoint": dict(observed_point),
+        "originalExpectedCanvasPoint": dict(retarget_trace["originalCanvasPoint"]),
+        "positionTolerancePx": hover_options.tolerance_px,
+        "sample": sample,
+        "matchDetails": dict(match.details),
+        "latestMatch": match.to_dict(),
+        "clientTickHot": confirmation.get("clientTickHot"),
+        "hoverConfirmationSamples": [dict(sample)] if isinstance(sample, dict) else [],
+        "rejectedHoverSamples": list(confirmation.get("rejectedHoverSamples") or []),
+        "lastMenuOptionClickedBefore": confirmation.get("lastMenuOptionClickedBefore"),
+        "resourceHoverRetarget": retarget_trace,
+    }
+    if isinstance(candidate.target_explanation, dict):
+        candidate.target_explanation["hoverConfirmedTopExpected"] = True
+        candidate.target_explanation["resourceHoverRetarget"] = dict(retarget_trace)
+        candidate.target_explanation["resourceTargetAmbiguity"] = _resource_target_ambiguity(candidate, retarget_confirmation) or {
+            "schema": "resource_target_ambiguity.v1",
+            "ambiguityStatus": "clear",
+        }
+    return {
+        "accepted": True,
+        "reason": "resource_hover_confirmed_at_observed_point",
+        "proposal": candidate,
+        "screenPoint": screen_point,
+        "canvasPoint": observed_point,
+        "confirmation": retarget_confirmation,
+    }
+
+
 def _max_waypoint_alternates(options: Any | None) -> int:
     if options is None:
         return 12
@@ -4719,6 +5744,22 @@ def _navigation_hover_failure_reason(proposal: ActionProposal, confirmation: dic
         return str((confirmation or {}).get("reason") or "hover_mismatch")
     confirmation = confirmation if isinstance(confirmation, dict) else {}
     latest_match = confirmation.get("latestMatch") if isinstance(confirmation.get("latestMatch"), dict) else {}
+    latest_details = latest_match.get("details") if isinstance(latest_match.get("details"), dict) else {}
+    structured_reason = str(latest_details.get("mismatchReason") or "")
+    raw_reason = str(latest_match.get("reason") or confirmation.get("reason") or "")
+    if structured_reason in {"hover_position_mismatch", "stale_hover_sample"}:
+        return structured_reason
+    reason_map = {
+        "hover_menu_stale": "stale_hover_sample",
+        "mouse_position_outside_tolerance": "hover_position_mismatch",
+        "top_option_not_expected": "hover_option_mismatch",
+        "top_option_not_chop": "hover_option_mismatch",
+        "top_option_rejected": "hover_option_mismatch",
+        "top_target_not_expected": "hover_target_mismatch",
+        "top_type_not_allowed": "wrong_intent_matcher",
+    }
+    if raw_reason in {"hover_menu_stale", "mouse_position_outside_tolerance"}:
+        return reason_map[raw_reason]
     samples: list[dict[str, Any]] = []
     for sample in (
         confirmation.get("latestHoverMenu"),
@@ -4740,6 +5781,10 @@ def _navigation_hover_failure_reason(proposal: ActionProposal, confirmation: dic
         return "walk_here_hover_mismatch"
     if "cancel_hover" in classes:
         return "cancel_hover"
+    if structured_reason:
+        return structured_reason
+    if raw_reason in reason_map:
+        return reason_map[raw_reason]
     return str(confirmation.get("reason") or latest_match.get("reason") or "hover_mismatch")
 
 
@@ -5526,6 +6571,103 @@ def _try_service_alternate_hover(
     return {"accepted": False, "attempts": attempts, "warning": "service object alternate aimpoints did not hover-confirm expected action"}
 
 
+def _try_resource_alternate_hover(
+    proposal: ActionProposal,
+    *,
+    backend: Any,
+    movement_profile: str | MouseMovementProfile,
+    hover_options: HoverConfirmationOptions,
+    input_controller: HumanInputController | None = None,
+    current_canvas_point: dict[str, Any] | None = None,
+    snapshot_fetch_func=fetch_plugin_snapshot,
+    sleep_func=time.sleep,
+    monotonic_func=time.monotonic,
+    wall_time_millis_func=_wall_time_millis,
+) -> dict[str, Any] | None:
+    if not _is_resource_object_proposal(proposal):
+        return None
+    attempts: list[dict[str, Any]] = []
+    for canvas_point in _resource_alternate_aimpoints(proposal, current_canvas_point):
+        screen_point = _screen_point_from_canvas_for_proposal(proposal, backend, canvas_point)
+        attempt: dict[str, Any] = {"canvasPoint": dict(canvas_point), "accepted": False}
+        if not isinstance(screen_point, dict):
+            attempt["reason"] = "screen_point_unavailable"
+            attempts.append(attempt)
+            continue
+        start = MousePoint(*_backend_position(backend))
+        if input_controller is None:
+            input_controller = HumanInputController(backend, profile="instant_debug", sleep_func=sleep_func, monotonic_func=monotonic_func)
+        candidate = _proposal_with_resource_aimpoint(proposal, canvas_point, screen_point)
+        plan = input_controller.plan_mouse_movement(
+            start,
+            _target_from_click(screen_point),
+            movement_profile,
+            context=_human_context(candidate, "resource_alternate_aimpoint"),
+        )
+        attempt["screenPoint"] = dict(screen_point)
+        attempt["movementPlan"] = plan.to_dict(include_points=False)
+        if plan.validation_status == "FAIL":
+            attempt["reason"] = "movement_plan_invalid"
+            attempt["warnings"] = list(plan.warnings)
+            attempts.append(attempt)
+            continue
+        move_started_wall_millis = int(wall_time_millis_func())
+        try:
+            input_controller.move_mouse(plan, context=_human_context(candidate, "resource_alternate_aimpoint"))
+        except Exception as error:  # noqa: BLE001
+            attempt["reason"] = "hover_movement_failed"
+            attempt["warnings"] = [f"{type(error).__name__}: {error}"]
+            attempts.append(attempt)
+            continue
+        confirmation = _confirm_hover_menu(
+            candidate,
+            hover_options,
+            canvas_point,
+            move_started_wall_millis=move_started_wall_millis,
+            snapshot_fetch_func=snapshot_fetch_func,
+            sleep_func=sleep_func,
+            monotonic_func=monotonic_func,
+        )
+        hover_sample = _confirmation_hover_sample(confirmation)
+        ambiguity = _resource_target_ambiguity(candidate, confirmation, rejection_reason=confirmation.get("reason"))
+        attempt["hoverConfirmation"] = {
+            "status": confirmation.get("status"),
+            "confirmed": confirmation.get("confirmed"),
+            "reason": confirmation.get("reason"),
+            "latencyMillis": confirmation.get("latencyMillis"),
+            "topOption": hover_sample.get("topOption") or hover_sample.get("option"),
+            "topTarget": hover_sample.get("topTarget") or hover_sample.get("target"),
+        }
+        if ambiguity:
+            attempt["resourceTargetAmbiguity"] = ambiguity
+        if confirmation.get("confirmed") is True:
+            attempt["accepted"] = True
+            attempts.append(attempt)
+            if isinstance(candidate.target_explanation, dict):
+                candidate.target_explanation["aimpointSamplesTried"] = len(attempts)
+                candidate.target_explanation["aimpointSampleResults"] = list(attempts)
+                candidate.target_explanation["hoverConfirmedTopExpected"] = True
+                candidate.target_explanation["resourceTargetAmbiguity"] = ambiguity or {"schema": "resource_target_ambiguity.v1", "ambiguityStatus": "clear"}
+            return {
+                "accepted": True,
+                "attempts": attempts,
+                "proposal": candidate,
+                "screenPoint": screen_point,
+                "canvasPoint": canvas_point,
+                "movementPlan": plan,
+                "confirmation": confirmation,
+                "moveStartedWallMillis": move_started_wall_millis,
+            }
+        attempt["reason"] = confirmation.get("reason")
+        attempts.append(attempt)
+    return {
+        "accepted": False,
+        "attempts": attempts,
+        "warning": "resource alternate aimpoints did not hover-confirm an unambiguous expected target",
+        "reason": "no_clear_low_level_resource_target" if attempts else "no_alternate_resource_aimpoints",
+    }
+
+
 def _poll_last_menu_option_clicked(
     hover_options: HoverConfirmationOptions,
     before: dict[str, Any] | None,
@@ -5627,6 +6769,47 @@ def _new_action_trace(proposal: ActionProposal) -> dict[str, Any]:
     }
 
 
+def _coordinate_trace_fields(click_resolution: dict[str, Any] | None) -> dict[str, Any]:
+    resolution = click_resolution if isinstance(click_resolution, dict) else {}
+    fields: dict[str, Any] = {}
+    for key in (
+        "coordinateSpace",
+        "scaleX",
+        "scaleY",
+        "screenPointBeforeScaling",
+        "screenPointAfterScaling",
+        "windowBoundsSource",
+        "canvasBoundsSource",
+        "displayScale",
+        "displayScaleApplied",
+        "coordinateMethod",
+    ):
+        if resolution.get(key) is not None:
+            fields[key] = resolution.get(key)
+    if fields:
+        fields["clickPointResolution"] = dict(resolution)
+    return fields
+
+
+def _set_trace_intended_point(
+    result: ExecutionResult,
+    proposal: ActionProposal,
+    *,
+    canvas_point: dict[str, Any] | None,
+    screen_point: dict[str, Any],
+    click_resolution: dict[str, Any] | None = None,
+) -> None:
+    if not isinstance(result.action_trace, dict):
+        return
+    payload = {
+        "canvas": dict(canvas_point) if isinstance(canvas_point, dict) else None,
+        "screen": dict(screen_point),
+        "clickPointSpace": proposal.click_point_space,
+    }
+    payload.update(_coordinate_trace_fields(click_resolution or proposal.click_point_resolution))
+    result.action_trace["intendedPoint"] = payload
+
+
 def _attach_human_input_trace(result: ExecutionResult, input_controller: HumanInputController | None) -> None:
     if input_controller is None or not isinstance(result.action_trace, dict):
         return
@@ -5693,6 +6876,15 @@ def _resource_camera_trigger(proposal: ActionProposal) -> str:
     return mapping.get(classification, "resource_no_safe_aimpoint")
 
 
+def _is_resource_view_recovery(proposal: ActionProposal, proposal_payload: dict[str, Any] | None = None) -> bool:
+    payload = proposal_payload if isinstance(proposal_payload, dict) else proposal.to_dict()
+    explanation = payload.get("targetExplanation") if isinstance(payload.get("targetExplanation"), dict) else {}
+    recovery_action = str(explanation.get("recoveryAction") or "")
+    if recovery_action == "camera_reacquire_resource_view":
+        return True
+    return str(payload.get("reason") or proposal.reason or "") == "resource_view_recovery_needed"
+
+
 def _resource_recovery_hold_ms(proposal: ActionProposal, navigation_options: Any | None) -> int:
     action = proposal.key_action if isinstance(proposal.key_action, dict) else {}
     value = _int_or_none(action.get("durationMs"))
@@ -5701,6 +6893,22 @@ def _resource_recovery_hold_ms(proposal: ActionProposal, navigation_options: Any
     if value is None:
         value = max(160, _camera_probe_ms(navigation_options) * 4)
     return max(80, min(900, int(value)))
+
+
+def _service_camera_trigger(proposal: ActionProposal) -> str:
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    if explanation.get("cameraTriggeredBy"):
+        return str(explanation["cameraTriggeredBy"])
+    exposure = explanation.get("serviceTargetExposure") if isinstance(explanation.get("serviceTargetExposure"), dict) else {}
+    return str(exposure.get("cameraExposureReason") or "service_screen_click_point_unavailable")
+
+
+def _service_recovery_hold_ms(proposal: ActionProposal, navigation_options: Any | None) -> int:
+    action = proposal.key_action if isinstance(proposal.key_action, dict) else {}
+    value = _int_or_none(action.get("durationMs"))
+    if value is None:
+        value = max(160, _camera_probe_ms(navigation_options) * 5)
+    return max(100, min(1000, int(value)))
 
 
 def _trace_classification_from_observed(classification: str | None) -> str:
@@ -5789,6 +6997,36 @@ def execute_action(
         monotonic_func=monotonic_func,
         seed=getattr(navigation_options, "seed", None),
     )
+    blocked_actionability = str(proposal.actionability or "")
+    if blocked_actionability in {"advisory_only", "stale", "blocked"}:
+        backend_name = getattr(backend, "name", backend.__class__.__name__)
+        reason_map = {
+            "advisory_only": "static_target_not_executable",
+            "stale": "stale_target",
+            "blocked": "action_target_blocked",
+        }
+        block_reason = reason_map.get(blocked_actionability, "action_target_blocked")
+        result = ExecutionResult(
+            status="FAIL",
+            proposed_action=proposal.proposed_action,
+            dry_run=dry_run,
+            action_id=proposal_action_id(proposal),
+            backend_name=backend_name,
+            movement_profile=movement_profile.name if isinstance(movement_profile, MouseMovementProfile) else str(movement_profile),
+            proposal=proposal.to_dict(),
+            click_point_resolution=proposal.click_point_resolution,
+            expected_result=expected_result_for_action(proposal.proposed_action),
+            warnings=[*proposal.warnings, f"{block_reason}: {blocked_actionability}"],
+            missing_capabilities=list(dict.fromkeys([*proposal.missing_capabilities, "action.live_target"])),
+            verification_status="FAIL",
+        )
+        result.action_trace = _new_action_trace(proposal)
+        lifecycle = lifecycle_state_for_proposal(proposal)
+        lifecycle.current_state = "blocked"
+        lifecycle.reason = block_reason
+        _apply_lifecycle(result, lifecycle)
+        _attach_human_input_trace(result, input_controller)
+        return result
     projection_warnings: list[str] = []
     if _path_tile_projection_request(proposal) is not None:
         proposal, projection_warnings = _resolve_path_tile_projection(
@@ -5847,6 +7085,12 @@ def execute_action(
             reacquisition = result.action_trace.setdefault("reacquisition", {})
             reacquisition["cameraTriggeredBy"] = trigger
             reacquisition["resourceProjectionRecovery"] = True
+            is_resource_view_recovery = _is_resource_view_recovery(proposal)
+            view_score = _dict((proposal.target_explanation or {}).get("resourceViewScore")) if isinstance(proposal.target_explanation, dict) else {}
+            if is_resource_view_recovery and view_score:
+                reacquisition["resourceViewScoreBefore"] = dict(view_score)
+                reacquisition["resourceCameraTriggeredBy"] = trigger
+                result.action_trace["resourceViewScoreBefore"] = dict(view_score)
             reacquisition["projectionBefore"] = dict(
                 _dict((proposal.target_explanation or {}).get("resourceProjectionStatus"))
             ) if isinstance(proposal.target_explanation, dict) else {}
@@ -5856,7 +7100,7 @@ def execute_action(
                     "keys": list(spec.keys),
                     "command": spec.command,
                     "plannedHoldDurationMs": duration_ms,
-                    "releaseReason": "bounded_resource_projection_recovery",
+                    "releaseReason": "bounded_resource_view_recovery" if is_resource_view_recovery else "bounded_resource_projection_recovery",
                 }
             )
         if not dry_run:
@@ -5885,6 +7129,86 @@ def execute_action(
             }
             result.verification_status = str(result.observed_result["verificationStatus"])
             _set_trace_final(result, "resource_projection_recovery_started" if result.executed else "resource_projection_recovery_planned")
+        _apply_lifecycle(result, lifecycle)
+        _attach_human_input_trace(result, input_controller)
+        return result
+    if proposal.proposed_action == "service_view_recovery":
+        action = proposal.key_action if isinstance(proposal.key_action, dict) else {}
+        command = str(action.get("command") or "yaw_right_pitch_up")
+        method = str(action.get("method") or _camera_method(navigation_options))
+        duration_ms = _service_recovery_hold_ms(proposal, navigation_options)
+        spec = camera_control.camera_input_spec(method=method, command=command)
+        trigger = _service_camera_trigger(proposal)
+        exposure = _dict((proposal.target_explanation or {}).get("serviceTargetExposure")) if isinstance(proposal.target_explanation, dict) else {}
+        target_view = _dict((proposal.target_explanation or {}).get("targetViewState")) if isinstance(proposal.target_explanation, dict) else {}
+        if not target_view:
+            target_view = _dict(exposure.get("targetViewState"))
+        motor = _dict(exposure.get("cameraMotorPlan"))
+        result.commands.append(
+            {
+                "type": "service_camera_reacquire",
+                "cameraMethod": spec.method,
+                "cameraCommand": spec.command,
+                "cameraKeys": list(spec.keys),
+                "durationMs": duration_ms,
+                "cameraTriggeredBy": trigger,
+                "nonClick": True,
+            }
+        )
+        if isinstance(result.action_trace, dict):
+            reacquisition = result.action_trace.setdefault("reacquisition", {})
+            reacquisition["cameraTriggeredBy"] = trigger
+            reacquisition["serviceViewRecovery"] = True
+            reacquisition["serviceTargetExposureBefore"] = dict(exposure)
+            if target_view:
+                reacquisition["targetViewStateBefore"] = dict(target_view)
+            reacquisition["serviceCameraTriggeredBy"] = trigger
+            result.action_trace["serviceTargetExposure"] = dict(exposure)
+            if target_view:
+                result.action_trace["targetViewState"] = dict(target_view)
+            result.action_trace["cameraInput"].update(
+                {
+                    "method": spec.method,
+                    "keys": list(spec.keys),
+                    "command": spec.command,
+                    "plannedHoldDurationMs": duration_ms,
+                    "releaseReason": "bounded_service_view_recovery",
+                    "cameraDirectionChosen": motor.get("cameraDirectionChosen") or spec.command,
+                    "cameraDirectionReason": motor.get("cameraDirectionReason"),
+                    "targetBearing": motor.get("targetBearing") or target_view.get("targetBearing"),
+                    "yawErrorBefore": motor.get("yawErrorBefore") or target_view.get("yawErrorToTarget"),
+                    "cameraResponseCalibration": motor.get("cameraResponseCalibration") or target_view.get("cameraResponseCalibration"),
+                    "controlLaw": motor.get("controlLaw"),
+                    "serviceViewScoreBefore": exposure.get("viewQualityClassification"),
+                }
+            )
+        if not dry_run:
+            try:
+                if spec.continuous_hover:
+                    with input_controller.hold_keys(
+                        spec.keys,
+                        context=HumanInputContext(reason="service_view_recovery", action_intent_type="service_view_recovery_action"),
+                    ):
+                        sleep_func(duration_ms / 1000.0)
+                else:
+                    input_controller.camera_drag_pulse(spec, duration_ms=duration_ms)
+                result.executed = True
+            except Exception as error:  # noqa: BLE001
+                result.status = "FAIL"
+                result.warnings.append(f"service view recovery failed: {type(error).__name__}: {error}")
+                result.missing_capabilities.append("camera.controller")
+        lifecycle = lifecycle_after_execution(proposal, executed=result.executed, dry_run=dry_run)
+        if result.status != "FAIL":
+            result.observed_result = {
+                "observedResult": "service_view_recovery_started" if result.executed else "service_view_recovery_planned",
+                "resultOutcome": "still_waiting" if result.executed else "dry_run",
+                "resultComplete": False if result.executed else True,
+                "nextActionAllowed": False if result.executed else True,
+                "verificationStatus": "PASS" if result.executed else "DRY_RUN",
+                "serviceViewRecoveryClassification": "service_view_recovery_started" if result.executed else "service_view_recovery_planned",
+            }
+            result.verification_status = str(result.observed_result["verificationStatus"])
+            _set_trace_final(result, "service_view_recovery_started" if result.executed else "service_view_recovery_planned")
         _apply_lifecycle(result, lifecycle)
         _attach_human_input_trace(result, input_controller)
         return result
@@ -6007,11 +7331,12 @@ def execute_action(
                     }
                 )
                 if isinstance(result.action_trace, dict):
-                    result.action_trace["intendedPoint"] = {
-                        "canvas": dict(camera_reacquire["canvasPoint"]),
-                        "screen": dict(screen_point),
-                        "clickPointSpace": proposal.click_point_space,
-                    }
+                    _set_trace_intended_point(
+                        result,
+                        proposal,
+                        canvas_point=camera_reacquire["canvasPoint"],
+                        screen_point=screen_point,
+                    )
                     result.action_trace.setdefault("reacquisition", {})["waypointReacquiredAfterCamera"] = True
                 _update_trace_from_hover(result, result.hover_confirmation)
     if coordinate_warnings:
@@ -6050,11 +7375,13 @@ def execute_action(
         )
         result.movement_plan = plan.to_dict(include_points=False)
     if isinstance(result.action_trace, dict):
-        result.action_trace["intendedPoint"] = {
-            "canvas": _canvas_click_point_for_hover(proposal),
-            "screen": dict(screen_point),
-            "clickPointSpace": proposal.click_point_space,
-        }
+        _set_trace_intended_point(
+            result,
+            proposal,
+            canvas_point=_canvas_click_point_for_hover(proposal),
+            screen_point=screen_point,
+            click_resolution=click_resolution,
+        )
     if plan.validation_status == "FAIL":
         result.status = "FAIL"
         result.warnings.extend(plan.warnings)
@@ -6130,6 +7457,67 @@ def execute_action(
             result.hover_confirmation = confirmation
             _update_trace_from_hover(result, confirmation)
         if confirmation.get("confirmed") is not True:
+            resource_ambiguity = _resource_target_ambiguity(proposal, confirmation, rejection_reason=confirmation.get("reason"))
+            if isinstance(resource_ambiguity, dict):
+                if isinstance(result.action_trace, dict):
+                    result.action_trace["resourceTargetAmbiguity"] = dict(resource_ambiguity)
+                    selected = result.action_trace.get("selectedTarget")
+                    if isinstance(selected, dict):
+                        selected["resourceTargetAmbiguity"] = dict(resource_ambiguity)
+                if isinstance(result.proposal, dict):
+                    explanation = result.proposal.get("targetExplanation")
+                    if isinstance(explanation, dict):
+                        explanation["resourceTargetAmbiguity"] = dict(resource_ambiguity)
+            resource_observed = _try_resource_observed_hover_retarget(
+                proposal,
+                confirmation,
+                backend=backend,
+                hover_options=hover_options,
+            )
+            if isinstance(result.action_trace, dict) and isinstance(resource_observed, dict):
+                reacquisition = result.action_trace.setdefault("reacquisition", {})
+                reacquisition["resourceObservedHoverRetarget"] = {
+                    key: value
+                    for key, value in resource_observed.items()
+                    if key not in {"proposal", "confirmation"}
+                }
+            if isinstance(resource_observed, dict) and resource_observed.get("accepted") is True:
+                proposal = resource_observed["proposal"]
+                screen_point = dict(resource_observed["screenPoint"])
+                canvas_point = dict(resource_observed["canvasPoint"])
+                confirmation = resource_observed["confirmation"]
+                plan = input_controller.plan_mouse_movement(
+                    MousePoint(*_backend_position(backend)),
+                    _target_from_click(screen_point),
+                    movement_profile,
+                    context=_human_context(proposal, "resource_observed_hover_retarget"),
+                )
+                result.proposal = proposal.to_dict()
+                result.click_point_resolution = proposal.click_point_resolution
+                result.movement_plan = plan.to_dict(include_points=False)
+                result.hover_confirmation = confirmation
+                result.commands.append(
+                    {
+                        "type": "resource_retarget_observed_hover",
+                        "reason": resource_observed.get("reason"),
+                        "selectedCanvasPoint": dict(canvas_point),
+                        "selectedScreenPoint": dict(screen_point),
+                    }
+                )
+                if isinstance(result.action_trace, dict):
+                    _set_trace_intended_point(result, proposal, canvas_point=canvas_point, screen_point=screen_point)
+                    reacquisition = result.action_trace.setdefault("reacquisition", {})
+                    reacquisition["resourceAimpointReacquired"] = True
+                    reacquisition["resourceRetargetedToObservedHover"] = True
+                    if isinstance(proposal.target_explanation, dict):
+                        result.action_trace["resourceTargetAmbiguity"] = proposal.target_explanation.get("resourceTargetAmbiguity")
+                        selected = result.action_trace.get("selectedTarget")
+                        if isinstance(selected, dict):
+                            selected["resourceTargetAmbiguity"] = proposal.target_explanation.get("resourceTargetAmbiguity")
+                            selected["resourceHoverRetarget"] = proposal.target_explanation.get("resourceHoverRetarget")
+                            selected["selectedAimpointSource"] = proposal.target_explanation.get("selectedAimpointSource")
+                            selected["hoverConfirmedTopExpected"] = proposal.target_explanation.get("hoverConfirmedTopExpected")
+                _update_trace_from_hover(result, confirmation)
             service_alternate = _try_service_alternate_hover(
                 proposal,
                 backend=backend,
@@ -6141,7 +7529,7 @@ def execute_action(
                 sleep_func=sleep_func,
                 monotonic_func=monotonic_func,
                 wall_time_millis_func=wall_time_millis_func,
-            )
+            ) if confirmation.get("confirmed") is not True else None
             if isinstance(result.action_trace, dict) and isinstance(service_alternate, dict):
                 reacquisition = result.action_trace.setdefault("reacquisition", {})
                 if proposal.proposed_action == "interact_service_route_object":
@@ -6188,16 +7576,76 @@ def execute_action(
                     }
                 )
                 if isinstance(result.action_trace, dict):
-                    result.action_trace["intendedPoint"] = {
-                        "canvas": dict(canvas_point),
-                        "screen": dict(screen_point),
-                        "clickPointSpace": proposal.click_point_space,
-                    }
+                    _set_trace_intended_point(result, proposal, canvas_point=canvas_point, screen_point=screen_point)
                     reacquisition = result.action_trace.setdefault("reacquisition", {})
                     if proposal.proposed_action == "interact_service_route_object":
                         reacquisition["routeObjectAimpointReacquired"] = True
                     else:
                         reacquisition["serviceAimpointReacquired"] = True
+                _update_trace_from_hover(result, confirmation)
+            resource_alternate = (
+                _try_resource_alternate_hover(
+                    proposal,
+                    backend=backend,
+                    movement_profile=movement_profile,
+                    hover_options=hover_options,
+                    input_controller=input_controller,
+                    current_canvas_point=canvas_point,
+                    snapshot_fetch_func=snapshot_fetch_func,
+                    sleep_func=sleep_func,
+                    monotonic_func=monotonic_func,
+                    wall_time_millis_func=wall_time_millis_func,
+                )
+                if confirmation.get("confirmed") is not True and _resource_ambiguity_recoverable(resource_ambiguity)
+                else None
+            )
+            if isinstance(result.action_trace, dict) and isinstance(resource_alternate, dict):
+                reacquisition = result.action_trace.setdefault("reacquisition", {})
+                reacquisition["resourceAlternateAimpoints"] = list(resource_alternate.get("attempts") or [])
+                reacquisition["resourceViewRecoveryResult"] = resource_alternate.get("reason")
+            if isinstance(resource_alternate, dict) and resource_alternate.get("warning"):
+                result.warnings.append(str(resource_alternate.get("warning")))
+            if isinstance(resource_alternate, dict) and resource_alternate.get("accepted") is True:
+                proposal = resource_alternate["proposal"]
+                screen_point = dict(resource_alternate["screenPoint"])
+                canvas_point = dict(resource_alternate["canvasPoint"])
+                plan = resource_alternate["movementPlan"]
+                confirmation = resource_alternate["confirmation"]
+                result.proposal = proposal.to_dict()
+                result.click_point_resolution = proposal.click_point_resolution
+                result.movement_plan = plan.to_dict(include_points=False)
+                result.hover_confirmation = confirmation
+                result.commands.append(
+                    {
+                        "type": "resource_reacquire_alternate_aimpoint",
+                        "reason": "primary_resource_hover_mismatch",
+                        "attemptCount": len(resource_alternate.get("attempts") or []),
+                        "selectedCanvasPoint": dict(canvas_point),
+                    }
+                )
+                result.commands.append(
+                    {
+                        "type": "move",
+                        "pointCount": len(plan.points),
+                        "clickPoint": plan.click_point.to_dict(),
+                    }
+                )
+                result.commands.append(
+                    {
+                        "type": "hover_confirm",
+                        "snapshotUrl": hover_options.snapshot_url,
+                        "timeoutMs": hover_options.timeout_ms,
+                        "pollMs": hover_options.poll_ms,
+                        "positionTolerancePx": hover_options.tolerance_px,
+                        "expectedCanvasPoint": dict(canvas_point),
+                    }
+                )
+                if isinstance(result.action_trace, dict):
+                    _set_trace_intended_point(result, proposal, canvas_point=canvas_point, screen_point=screen_point)
+                    reacquisition = result.action_trace.setdefault("reacquisition", {})
+                    reacquisition["resourceAimpointReacquired"] = True
+                    if isinstance(proposal.target_explanation, dict):
+                        result.action_trace["resourceTargetAmbiguity"] = proposal.target_explanation.get("resourceTargetAmbiguity")
                 _update_trace_from_hover(result, confirmation)
             alternate = (
                 _try_navigation_alternate_hover(
@@ -6256,11 +7704,7 @@ def execute_action(
                     }
                 )
                 if isinstance(result.action_trace, dict):
-                    result.action_trace["intendedPoint"] = {
-                        "canvas": dict(canvas_point),
-                        "screen": dict(screen_point),
-                        "clickPointSpace": proposal.click_point_space,
-                    }
+                    _set_trace_intended_point(result, proposal, canvas_point=canvas_point, screen_point=screen_point)
                 _update_trace_from_hover(result, confirmation)
             else:
                 failure_reason = _navigation_hover_failure_reason(proposal, confirmation)
@@ -6337,11 +7781,7 @@ def execute_action(
                                 }
                             )
                             if isinstance(result.action_trace, dict):
-                                result.action_trace["intendedPoint"] = {
-                                    "canvas": dict(canvas_point),
-                                    "screen": dict(screen_point),
-                                    "clickPointSpace": proposal.click_point_space,
-                                }
+                                _set_trace_intended_point(result, proposal, canvas_point=canvas_point, screen_point=screen_point)
                                 result.action_trace.setdefault("reacquisition", {})["waypointReacquiredAfterCamera"] = True
                             _update_trace_from_hover(result, confirmation)
                     if confirmation.get("confirmed") is not True and not _camera_reacquire_waypoint_enabled(navigation_options):
@@ -6391,11 +7831,7 @@ def execute_action(
                                         }
                                     )
                                     if isinstance(result.action_trace, dict):
-                                        result.action_trace["intendedPoint"] = {
-                                            "canvas": dict(canvas_point),
-                                            "screen": dict(screen_point),
-                                            "clickPointSpace": proposal.click_point_space,
-                                        }
+                                        _set_trace_intended_point(result, proposal, canvas_point=canvas_point, screen_point=screen_point)
                                         result.action_trace.setdefault("reacquisition", {})["waypointReacquiredAfterCamera"] = True
                                     _update_trace_from_hover(result, confirmation)
             if confirmation.get("confirmed") is not True:
@@ -6528,11 +7964,7 @@ def execute_action(
                         }
                     )
                     if isinstance(result.action_trace, dict):
-                        result.action_trace["intendedPoint"] = {
-                            "canvas": dict(canvas_point),
-                            "screen": dict(screen_point),
-                            "clickPointSpace": proposal.click_point_space,
-                        }
+                        _set_trace_intended_point(result, proposal, canvas_point=canvas_point, screen_point=screen_point)
                         result.action_trace.setdefault("reacquisition", {})["waypointReacquiredAfterVolatileHover"] = True
                     _update_trace_from_hover(result, confirmation)
                     pre_click_started_wall_millis = int(wall_time_millis_func())
@@ -6766,6 +8198,11 @@ def execute_next_action(
     monotonic_func=time.monotonic,
 ) -> ExecutionResult:
     timeout = float(getattr(options, "timeout", 3.0))
+    if backend is None:
+        backend = backend_from_options(options)
+    preflight_live_input_status = _live_input_status(options, backend)
+    if preflight_live_input_status.get("status") == "FAIL":
+        return _live_input_blocked_result(options, backend, preflight_live_input_status)
     try:
         status = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
     except Exception as error:  # noqa: BLE001
@@ -6826,27 +8263,37 @@ def execute_next_action(
         )
         if not _readiness_allows_execution(readiness):
             return _blocked_by_readiness_result(proposal, readiness=readiness, options=options)
-    backend = backend or backend_from_name(
-        getattr(options, "backend", "pyautogui"),
-        focus_runelite=bool(getattr(options, "focus_runelite", False)),
-        window_title_filter=str(getattr(options, "window_title_filter", "RuneLite")),
-    )
-    input_controller = _input_controller_from_options(backend, options, sleep_func=sleep_func, monotonic_func=monotonic_func)
-    result = execute_action(
-        proposal,
-        backend=backend,
-        movement_profile=_movement_profile_from_options(options),
-        dry_run=not bool(getattr(options, "execute", False)),
-        hover_options=hover_options_from_options(options),
-        navigation_options=options,
-        snapshot_url=str(getattr(options, "snapshot_url", "http://127.0.0.1:8893")),
-        snapshot_fetch_func=fetch_plugin_snapshot,
-        sleep_func=sleep_func,
-        monotonic_func=monotonic_func,
-        input_controller=input_controller,
-    )
+    live_input_status: dict[str, Any] | None = None
+    try:
+        live_input_status = _start_live_input_session(options, backend)
+    except Exception:  # noqa: BLE001
+        status = _live_input_status(options, backend)
+        if status.get("status") != "FAIL":
+            status["status"] = "FAIL"
+            status["blockReason"] = status.get("blockReason") or "arduino_arm_failed"
+        return _live_input_blocked_result(options, backend, status, proposed_action=proposal.proposed_action)
+    result: ExecutionResult
+    try:
+        input_controller = _input_controller_from_options(backend, options, sleep_func=sleep_func, monotonic_func=monotonic_func)
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile=_movement_profile_from_options(options),
+            dry_run=not bool(getattr(options, "execute", False)),
+            hover_options=hover_options_from_options(options),
+            navigation_options=options,
+            snapshot_url=str(getattr(options, "snapshot_url", "http://127.0.0.1:8893")),
+            snapshot_fetch_func=fetch_plugin_snapshot,
+            sleep_func=sleep_func,
+            monotonic_func=monotonic_func,
+            input_controller=input_controller,
+        )
+    finally:
+        _finish_live_input_session(backend, live_input_status, options=options)
     result.readiness = readiness
     _attach_readiness_trace(result, readiness)
+    _attach_live_input_status(result, live_input_status, options=options, backend=backend)
+    _enforce_no_direct_backend_bypass(result, options)
     if bool(getattr(options, "verify_after_action", False)) and not result.executed:
         observed = result.observed_result if isinstance(result.observed_result, dict) else {}
         if not observed:
@@ -6943,11 +8390,30 @@ def execute_action_loop(
     max_runtime_seconds = max(0.0, float(getattr(options, "max_runtime_seconds", 0.0) or 0.0))
     timeout = float(getattr(options, "timeout", 3.0))
     dry_run = not bool(getattr(options, "execute", False))
-    backend = backend or backend_from_name(
-        getattr(options, "backend", "pyautogui"),
-        focus_runelite=bool(getattr(options, "focus_runelite", False)),
-        window_title_filter=str(getattr(options, "window_title_filter", "RuneLite")),
-    )
+    backend = backend or backend_from_options(options)
+    live_input_status: dict[str, Any] | None = None
+    try:
+        live_input_status = _start_live_input_session(options, backend)
+    except Exception:  # noqa: BLE001
+        status = _live_input_status(options, backend)
+        if status.get("status") != "FAIL":
+            status["status"] = "FAIL"
+            status["blockReason"] = status.get("blockReason") or "arduino_arm_failed"
+        summary = _new_loop_summary()
+        summary["liveInput"] = dict(status)
+        summary["inputProfile"] = _input_profile_from_options(options)
+        return LoopExecutionResult(
+            status="FAIL",
+            dry_run=dry_run,
+            action_results=[],
+            lifecycle_state=ActionLifecycleState(current_state="blocked", reason=str(status.get("blockReason") or "live_input_blocked")).to_dict(),
+            loop_summary=summary,
+            reason=str(status.get("blockReason") or "live_input_blocked"),
+            warnings=[str(status.get("blockReason") or "live_input_blocked")],
+            missing_capabilities=["live_input.arduino"],
+            max_actions=max_actions,
+            max_runtime_seconds=max_runtime_seconds,
+        )
     input_controller = _input_controller_from_options(backend, options, sleep_func=sleep_func, monotonic_func=monotonic_func)
     started = _safe_monotonic(monotonic_func)
     if started is None:
@@ -6968,6 +8434,7 @@ def execute_action_loop(
     status_value = "PASS"
     loop_summary["pacingProfile"] = str(getattr(options, "pacing_profile", "instant_debug") or "instant_debug")
     loop_summary["inputProfile"] = _input_profile_from_options(options)
+    loop_summary["liveInput"] = dict(live_input_status) if isinstance(live_input_status, dict) else None
     loop_summary["finalReconcileMillis"] = _final_reconcile_ms(options)
     suppression_cache: dict[str, dict[str, Any]] = {}
     last_reacquire_scope_key: tuple[Any, ...] | None = None
@@ -7145,11 +8612,14 @@ def execute_action_loop(
                     and _status_resource_target_available(latest_status)
                 )
                 projection_recovery_failed = (lifecycle.last_action or "") == "resource_view_recovery"
+                service_view_recovery_failed = (lifecycle.last_action or "") == "service_view_recovery"
                 lifecycle.current_state = "verified" if resource_target_reacquired else "timed_out"
                 if resource_target_reacquired:
                     lifecycle.reason = "resource_no_progress_target_reacquired"
                 elif projection_recovery_failed:
                     lifecycle.reason = "resource_projection_recovery_failed"
+                elif service_view_recovery_failed:
+                    lifecycle.reason = "service_view_recovery_failed"
                 else:
                     lifecycle.reason = "action_timeout"
                 if results:
@@ -7314,6 +8784,67 @@ def execute_action_loop(
         proposal = build_action_proposal(status_for_proposal)
         budget_type = _proposal_reacquire_budget_type(proposal)
         loop_summary["reacquireBudgetType"] = budget_type
+        fresh_source = _proposal_fresh_executable_source(proposal)
+        if loop_summary.get("staleProposalDetected") and not loop_summary.get("freshTargetFound") and fresh_source:
+            loop_summary["freshTargetFound"] = True
+            loop_summary["freshTargetSource"] = fresh_source
+            loop_summary["reacquireResult"] = "live_target_reacquired"
+            _capture_debug_bundle(
+                debug_bundles,
+                loop_summary,
+                "live_target_reacquired",
+                daemon_status=before_status,
+                proposal=proposal,
+                result=None,
+                readiness=None,
+                classification="live_target_reacquired",
+            )
+        if _proposal_is_stale_or_static(proposal):
+            source = _proposal_action_target_source(proposal)
+            actionability = _proposal_actionability(proposal)
+            loop_summary["staleProposalDetected"] = True
+            loop_summary["staleProposalSource"] = source
+            loop_summary["reacquireAttempted"] = True
+            loop_summary["reacquireResult"] = "pending"
+            loop_summary["freshTargetFound"] = False
+            loop_summary["freshTargetSource"] = None
+            loop_summary["reasonIfNoFreshTarget"] = actionability or source or "stale_or_static_target"
+            _capture_debug_bundle(
+                debug_bundles,
+                loop_summary,
+                "stale_static_route_target",
+                daemon_status=before_status,
+                proposal=proposal,
+                result=None,
+                readiness=None,
+                classification="stale_static_route_target",
+                extra={
+                    "staleProposalDetected": True,
+                    "staleProposalSource": source,
+                    "actionability": actionability,
+                },
+            )
+            attempts = int(loop_summary.get("staleProposalReacquireAttempts") or 0)
+            max_rounds = max(1, _max_navigation_reacquire_rounds(options))
+            if attempts < max_rounds:
+                loop_summary["staleProposalReacquireAttempts"] = attempts + 1
+                _record_reacquire_wait(options, loop_summary, sleep_func, reason="stale_static_route_target")
+                continue
+            loop_summary["reacquireResult"] = "failed"
+            _capture_debug_bundle(
+                debug_bundles,
+                loop_summary,
+                "stale_proposal_reacquire_failed",
+                daemon_status=before_status,
+                proposal=proposal,
+                result=None,
+                readiness=None,
+                classification="stale_proposal_reacquire_failed",
+                extra={
+                    "freshTargetFound": False,
+                    "reasonIfNoFreshTarget": loop_summary.get("reasonIfNoFreshTarget"),
+                },
+            )
         if active_suppression_keys:
             loop_summary["targetReacquireRounds"] = int(loop_summary.get("targetReacquireRounds") or 0) + 1
             max_rounds = int(getattr(options, "max_candidate_reacquire_rounds", 0) or 0)
@@ -7360,6 +8891,24 @@ def execute_action_loop(
                         )
                         break
                     continue
+            elif proposal.proposed_action in {"none", "wait_for_context"} or not proposal.executable:
+                _record_reacquire_wait(options, loop_summary, sleep_func, reason="all_candidates_suppressed")
+                if max_rounds > 0 and budget_rounds >= max_rounds:
+                    loop_summary["stoppedByReacquireLimit"] = True
+                    reason = "return_transition_reacquire_limit_blocked" if budget_type == "route_transition" else "candidate_reacquire_round_limit"
+                    status_value = "WARN" if status_value == "PASS" else status_value
+                    _capture_debug_bundle(
+                        debug_bundles,
+                        loop_summary,
+                        reason,
+                        daemon_status=before_status,
+                        proposal=proposal.to_dict(),
+                        result=None,
+                        readiness=None,
+                        classification=reason,
+                    )
+                    break
+                continue
         if proposal.proposed_action in {"none", "wait_for_context"} or not proposal.executable:
             lifecycle = lifecycle_state_for_proposal(proposal, max_attempts=max_actions)
             status_value = "WARN" if status_value == "PASS" else status_value
@@ -7422,14 +8971,27 @@ def execute_action_loop(
             reason = route_stability_classification
             break
         if proposal.proposed_action == "resource_view_recovery":
+            proposal_payload = proposal.to_dict()
+            explanation = proposal_payload.get("targetExplanation") if isinstance(proposal_payload.get("targetExplanation"), dict) else {}
+            resource_view_recovery = _is_resource_view_recovery(proposal, proposal_payload)
             _capture_debug_bundle(
                 debug_bundles,
                 loop_summary,
-                "resource_projection_recovery_start",
+                "resource_camera_reacquire_start" if resource_view_recovery else "resource_projection_recovery_start",
                 daemon_status=before_status,
                 proposal=proposal,
                 readiness=readiness,
-                classification="resource_projection_recovery_started",
+                classification="resource_camera_reacquire_started" if resource_view_recovery else "resource_projection_recovery_started",
+            )
+        if proposal.proposed_action == "service_view_recovery":
+            _capture_debug_bundle(
+                debug_bundles,
+                loop_summary,
+                "service_view_recovery_start",
+                daemon_status=before_status,
+                proposal=proposal,
+                readiness=readiness,
+                classification="service_view_recovery_started",
             )
         action_result = execute_action(
             proposal,
@@ -7449,6 +9011,8 @@ def execute_action_loop(
             action_result.action_trace["actionId"] = action_result.action_id
         action_result.readiness = readiness
         _attach_readiness_trace(action_result, readiness)
+        _attach_live_input_status(action_result, live_input_status, options=options, backend=backend)
+        _enforce_no_direct_backend_bypass(action_result, options)
         if action_result.executed and action_result.proposed_action in NAVIGATION_ACTIONS:
             waypoint_key = _executed_navigation_waypoint_key(proposal, action_result)
             if waypoint_key is not None:
@@ -7516,6 +9080,63 @@ def execute_action_loop(
                 readiness=readiness,
                 classification=action_result.action_trace.get("finalClassification") if isinstance(action_result.action_trace, dict) else None,
             )
+        if _is_menu_flip_mismatch_result(action_result):
+            menu_flip_suppression = _record_target_menu_flip_failure(
+                options=options,
+                cache=suppression_cache,
+                summary=loop_summary,
+                result=action_result,
+                now_ms=int(now * 1000),
+            )
+            observed = dict(_observed_from_result(action_result))
+            observed["observedResult"] = "menu_flip_mismatch"
+            observed["resultOutcome"] = "menu_mismatch"
+            observed["resultComplete"] = True
+            observed["nextActionAllowed"] = True
+            observed["verificationStatus"] = "FAIL"
+            observed["actionResultClassification"] = "menu_flip_mismatch"
+            if menu_flip_suppression is not None:
+                observed["targetSuppressedForReacquire"] = bool(menu_flip_suppression.get("suppressed"))
+                observed["targetSuppression"] = dict(menu_flip_suppression)
+            action_result.status = "WARN"
+            action_result.observed_result = observed
+            action_result.verification_status = "FAIL"
+            if "clicked menu did not match expected action; target suppressed for reacquisition" not in action_result.warnings:
+                action_result.warnings.append("clicked menu did not match expected action; target suppressed for reacquisition")
+            _set_trace_final(action_result, "menu_flip_mismatch")
+            lifecycle = ActionLifecycleState(
+                current_state="verified",
+                last_action=proposal.proposed_action,
+                last_action_tick=proposal.source_tick,
+                expected_result=expected_result_for_action(proposal.proposed_action),
+                observed_result=observed,
+                observed_signals=[],
+                attempts=len(results),
+                max_attempts=max_actions,
+                reason="menu_flip_mismatch",
+                warnings=list(action_result.warnings),
+            )
+            lifecycle.result_complete = True
+            lifecycle.result_outcome = "menu_mismatch"
+            lifecycle.next_action_allowed = True
+            _apply_lifecycle(action_result, lifecycle, cooldown_remaining_ms=0)
+            _refresh_loop_summary(loop_summary, results)
+            _capture_debug_bundle(
+                debug_bundles,
+                loop_summary,
+                "hover_intent_mismatch",
+                daemon_status=before_status,
+                proposal=proposal,
+                result=action_result,
+                readiness=readiness,
+                classification="menu_flip_mismatch",
+            )
+            if bool(getattr(options, "stop_on_fail", False)):
+                status_value = "FAIL"
+                reason = "menu_flip_mismatch"
+                break
+            status_value = "WARN" if status_value == "PASS" else status_value
+            continue
         if action_result.status == "FAIL":
             status_value = "FAIL"
             lifecycle = ActionLifecycleState(
@@ -7649,15 +9270,42 @@ def execute_action_loop(
                 _refresh_loop_summary(loop_summary, results)
                 if action_result.proposed_action == "resource_view_recovery":
                     observed = _observed_from_result(action_result)
+                    proposal_payload = action_result.proposal if isinstance(action_result.proposal, dict) else proposal.to_dict()
+                    explanation = proposal_payload.get("targetExplanation") if isinstance(proposal_payload.get("targetExplanation"), dict) else {}
+                    resource_view_recovery = _is_resource_view_recovery(proposal, proposal_payload)
                     _capture_debug_bundle(
                         debug_bundles,
                         loop_summary,
-                        "resource_projection_recovery_end",
+                        "resource_camera_reacquire_end" if resource_view_recovery else "resource_projection_recovery_end",
                         daemon_status=after_status,
                         proposal=proposal,
                         result=action_result,
                         readiness=readiness,
-                        classification=str(observed.get("resourceProjectionRecoveryClassification") or observed.get("observedResult") or "resource_projection_recovery_end"),
+                        classification=str(
+                            observed.get("resourceProjectionRecoveryClassification")
+                            or observed.get("observedResult")
+                            or ("resource_camera_reacquire_end" if resource_view_recovery else "resource_projection_recovery_end")
+                        ),
+                    )
+                if action_result.proposed_action == "service_view_recovery":
+                    observed = _observed_from_result(action_result)
+                    _capture_debug_bundle(
+                        debug_bundles,
+                        loop_summary,
+                        "service_view_recovery_success"
+                        if str(observed.get("serviceViewRecoveryClassification") or "").endswith("success")
+                        else "service_view_recovery_failed"
+                        if str(observed.get("serviceViewRecoveryClassification") or "") == "service_view_recovery_failed"
+                        else "service_view_recovery_end",
+                        daemon_status=after_status,
+                        proposal=proposal,
+                        result=action_result,
+                        readiness=readiness,
+                        classification=str(
+                            observed.get("serviceViewRecoveryClassification")
+                            or observed.get("observedResult")
+                            or "service_view_recovery_end"
+                        ),
                     )
                 if action_result.proposed_action == "resource_view_recovery" and lifecycle.current_state == "timed_out":
                     _capture_debug_bundle(
@@ -7815,6 +9463,9 @@ def execute_action_loop(
             readiness=results[-1].readiness if results else None,
             classification=reason,
         )
+    _finish_live_input_session(backend, live_input_status, options=options)
+    if isinstance(live_input_status, dict):
+        loop_summary["liveInput"] = dict(live_input_status)
     _update_debug_bundle_summary(loop_summary, debug_bundles)
     return LoopExecutionResult(
         status=status_value,

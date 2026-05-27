@@ -22,6 +22,7 @@ import mission_presets
 import runtime_control
 import service_route_core
 import task_policy as task_policy_module
+import world_model_core
 from analyzers import activity_analyzer
 from analyzers import bank_operation_analyzer
 from analyzers import bank_ui_analyzer
@@ -66,9 +67,8 @@ DEFAULT_CONTEXT_NEEDS = [
     "task_summary",
 ]
 OVERLAY_MODES = intent_overlay_analyzer.OVERLAY_MODES
-DAILY_MODE_COMPACT_PACKETS = "compact-packets"
 DAILY_MODE_SNAPSHOT_NO_FILES = "snapshot-no-files"
-DAILY_MODES = {DAILY_MODE_COMPACT_PACKETS, DAILY_MODE_SNAPSHOT_NO_FILES}
+DAILY_MODES = {DAILY_MODE_SNAPSHOT_NO_FILES}
 
 
 def utc_now() -> str:
@@ -77,6 +77,93 @@ def utc_now() -> str:
 
 def json_bytes(payload: Any) -> bytes:
     return json.dumps(payload, separators=(",", ":"), sort_keys=False).encode("utf-8")
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _inventory_resource_count(inventory_context: InventoryContext | dict[str, Any] | None) -> int | None:
+    progress: dict[str, Any] = {}
+    if isinstance(inventory_context, InventoryContext):
+        progress = inventory_context.progress if isinstance(inventory_context.progress, dict) else {}
+    elif isinstance(inventory_context, dict):
+        progress = inventory_context.get("progress") if isinstance(inventory_context.get("progress"), dict) else {}
+        if not progress:
+            progress = inventory_context.get("goalProgress") if isinstance(inventory_context.get("goalProgress"), dict) else {}
+    for key in ("currentHeldCount", "heldResourceCount", "displayedGoalProgress"):
+        value = _int_or_none(progress.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _should_retain_banking_completion(
+    *,
+    bank_operation_context: BankOperationContext,
+    inventory_context: InventoryContext | dict[str, Any] | None,
+    previous_banking_complete: bool,
+    bank_open: bool,
+) -> bool:
+    if bank_operation_context.banking_complete or not previous_banking_complete or bank_open:
+        return False
+    resource_quantity = _int_or_none(bank_operation_context.resource_item_quantity)
+    resource_slots = _int_or_none(bank_operation_context.resource_items_held)
+    inventory_resources = _inventory_resource_count(inventory_context)
+    if any(value is not None and value > 0 for value in (resource_quantity, resource_slots, inventory_resources)):
+        return False
+    if bank_operation_context.inventory_full is True:
+        return False
+    return True
+
+
+def _player_context_from_baseline(player: dict[str, Any], navigation: dict[str, Any]) -> PlayerContext:
+    world_x = _int_or_none(player.get("worldX"))
+    world_y = _int_or_none(player.get("worldY"))
+    plane = _int_or_none(player.get("plane"))
+    scene_x = _int_or_none(player.get("sceneX"))
+    scene_y = _int_or_none(player.get("sceneY"))
+    source = "plugin_snapshot_baseline_player"
+    confidence = 1.0
+    if world_x is None or world_y is None:
+        center = navigation.get("collisionWindowCenterWorld")
+        if not isinstance(center, dict):
+            collision = navigation.get("collisionWindow") or navigation.get("collision_window") or navigation.get("collision")
+            if isinstance(collision, dict):
+                center = collision.get("centerWorld")
+        if isinstance(center, dict):
+            world_x = _int_or_none(center.get("worldX", center.get("x")))
+            world_y = _int_or_none(center.get("worldY", center.get("y")))
+            plane = _int_or_none(center.get("plane")) if _int_or_none(center.get("plane")) is not None else plane
+            source = "collision_window_center_proxy"
+            confidence = 0.35
+    return PlayerContext(
+        world_x=world_x,
+        world_y=world_y,
+        plane=plane,
+        scene_x=scene_x,
+        scene_y=scene_y,
+        location_source=source if world_x is not None and world_y is not None else None,
+        location_confidence=confidence if world_x is not None and world_y is not None else None,
+        raw=dict(player),
+    )
+
+
+def _player_location_payload(player: PlayerContext | None) -> dict[str, Any] | None:
+    if player is None or player.world_x is None or player.world_y is None:
+        return None
+    return {"worldX": player.world_x, "worldY": player.world_y, "plane": player.plane if player.plane is not None else 0}
 
 
 def resolve_session(args: argparse.Namespace) -> Path:
@@ -94,8 +181,7 @@ def resolve_session(args: argparse.Namespace) -> Path:
 
 
 def compact_packet_available(session: Path) -> bool:
-    state = live.compact_packet_state(session)
-    return bool(state.get("available") and state.get("recent"))
+    return False
 
 
 def boolish(value: Any) -> bool | None:
@@ -125,18 +211,26 @@ def safe_json_dict(path: Path) -> dict:
 def compact_packet_file_write_state(session: Path) -> dict:
     manifest = safe_json_dict(session / "manifest.json")
     packet_dir = session / "live_packets"
-    packet_state = live.compact_packet_state(session)
-    manifest_enabled = boolish(manifest.get("compactLivePacketFilesEnabled"))
-    if manifest_enabled is not None:
-        writing = manifest_enabled
-    else:
-        writing = False
+    legacy_files = list(packet_dir.glob("live-*.ndjson")) + list(packet_dir.glob("live-*.jsonl")) if packet_dir.exists() else []
+    legacy_bytes = 0
+    for path in legacy_files:
+        try:
+            legacy_bytes += path.stat().st_size
+        except OSError:
+            pass
     return {
-        "compactPacketFilesWriting": writing,
-        "compactPacketFilesEnabledInManifest": manifest_enabled,
-        "compactPacketFilesAvailable": bool(packet_state.get("available")),
-        "compactPacketFilesRecent": bool(packet_state.get("recent")),
-        "compactPacketFileCount": len(list(packet_dir.glob("live-*.ndjson"))) if packet_dir.exists() else 0,
+        "livePacketsRuntimeRemoved": True,
+        "ndjsonRuntimeRemoved": True,
+        "jsonlRuntimeRemoved": True,
+        "livePacketWriterActive": False,
+        "compactPacketFilesWriting": False,
+        "compactPacketFilesEnabledInManifest": boolish(manifest.get("compactLivePacketFilesEnabled")),
+        "compactPacketFilesAvailable": False,
+        "compactPacketFilesRecent": False,
+        "compactPacketFileCount": len(legacy_files),
+        "legacyLivePacketFilesPresent": bool(legacy_files),
+        "legacyLivePacketTotalMb": round(legacy_bytes / (1024 * 1024), 3),
+        "cleanupRecommended": bool(legacy_files),
     }
 
 
@@ -328,7 +422,7 @@ def processor_args(args: argparse.Namespace, input_source: str, *, suppress_outp
         plugin_snapshot_min_candidates=1,
         auto_prefer_plugin_snapshot=False,
         compare_input_sources=False,
-        require_compact_packets=input_source == live.COMPACT_PACKET_SOURCE,
+        require_compact_packets=False,
         profile=args.profile,
         task_policy=getattr(args, "task_policy", None),
         preset=getattr(args, "preset", None),
@@ -511,6 +605,13 @@ class LiveCoreState:
                 "performance": result.get("performance") or {},
                 "candidates": result.get("candidates") or [],
                 "loadedServiceScene": result.get("loadedServiceScene") or [],
+                "worldModelPayloads": result.get("worldModelPayloads") or {},
+                "worldModelSummary": result.get("worldModelSummary") or {},
+                "worldModelResourceObjectCensus": result.get("worldModelResourceObjectCensus") or {},
+                "worldModelServiceObjectCensus": result.get("worldModelServiceObjectCensus") or {},
+                "worldModelRouteObjectCensus": result.get("worldModelRouteObjectCensus") or {},
+                "worldModelProjectionAudit": result.get("worldModelProjectionAudit") or {},
+                "worldModelPathingFrontier": result.get("worldModelPathingFrontier") or {},
                 "warnings": list(self.warnings),
                 "missingFields": [],
                 "sourceFiles": [],
@@ -841,6 +942,12 @@ class LiveCoreState:
             "collisionWindowPlane",
             "collisionWindowAgeTicks",
             "collisionWindowMissingReason",
+            "playerLocation",
+            "playerLocationSource",
+            "playerLocationConfidence",
+            "playerWorldX",
+            "playerWorldY",
+            "playerPlane",
             "processInventoryNeeded",
             "processTypeNeeded",
             "navigationIntentNeeded",
@@ -928,6 +1035,7 @@ class LiveCoreState:
             "canvasScreenOrigin",
             "canvasSize",
             "sourceCanvasSize",
+            "worldModelCameraViewport",
             "clientWindowBounds",
             "displayScale",
             "inputGeometryReason",
@@ -1119,19 +1227,7 @@ class LiveCoreDaemon:
         return processor
 
     def initial_source(self) -> str:
-        requested = self.args.input_source
-        if requested == live.PLUGIN_SNAPSHOT_SOURCE:
-            return live.PLUGIN_SNAPSHOT_SOURCE
-        if requested == live.COMPACT_PACKET_SOURCE:
-            return live.COMPACT_PACKET_SOURCE
-        if requested != "auto":
-            return live.COMPACT_PACKET_SOURCE
-
-        health = plugin_snapshot_health_available(self.args)
-        if health.get("available"):
-            return live.PLUGIN_SNAPSHOT_SOURCE
-        self.fallback_reason = health.get("error") or "plugin snapshot endpoint is not healthy; using compact packet files"
-        return live.COMPACT_PACKET_SOURCE
+        return live.PLUGIN_SNAPSHOT_SOURCE
 
     def should_accept_plugin_snapshot(self, result: dict, active_millis: float) -> bool:
         status = result.get("status") if isinstance(result, dict) else {}
@@ -1141,7 +1237,7 @@ class LiveCoreDaemon:
             self.fallback_reason = status.get("pluginSnapshotLastError") or "plugin snapshot endpoint unavailable"
             return False
         if status.get("candidateCount", 0) <= 0:
-            self.fallback_reason = "plugin snapshot produced no candidates; using compact packet files"
+            self.fallback_reason = "plugin snapshot produced no candidates; no live packet fallback is available"
             return False
         if active_millis > float(self.args.target_update_ms):
             self.fallback_reason = f"plugin snapshot active time {active_millis:.1f} ms exceeded daily target"
@@ -1155,12 +1251,17 @@ class LiveCoreDaemon:
         player = baseline.get("player") if isinstance(baseline.get("player"), dict) else {}
         candidates = context.get("candidates") if isinstance(context.get("candidates"), list) else []
         loaded_service_scene = context.get("loadedServiceScene") if isinstance(context.get("loadedServiceScene"), list) else []
+        world_model_payloads = context.get("worldModelPayloads") if isinstance(context.get("worldModelPayloads"), dict) else {}
+        world_model_route_service = world_model_core.route_service_candidates_from_payloads(world_model_payloads)
+        if world_model_route_service:
+            loaded_service_scene = world_model_core.dedupe_candidates(list(loaded_service_scene) + world_model_route_service)
         navigation = context.get("navigation") if isinstance(context.get("navigation"), dict) else {}
         bank_ui = context.get("bankUi") if isinstance(context.get("bankUi"), dict) else {}
         dialogue_state = context.get("dialogueState") if isinstance(context.get("dialogueState"), dict) else {}
         activity = context.get("activity") if isinstance(context.get("activity"), dict) else {}
         events = context.get("events") if isinstance(context.get("events"), list) else []
         latest_tick = status.get("lastProcessedTick") or status.get("latestTickProcessed") or status.get("latestTick")
+        player_context = _player_context_from_baseline(player, navigation)
         analysis = LiveAnalysisResult(
             input_snapshot=LiveInputSnapshot(
                 source=status.get("inputSourceActive"),
@@ -1174,14 +1275,7 @@ class LiveCoreDaemon:
                 fresh=status.get("fresh"),
                 diagnostics=dict(status),
             ),
-            player=PlayerContext(
-                world_x=player.get("worldX"),
-                world_y=player.get("worldY"),
-                plane=player.get("plane"),
-                scene_x=player.get("sceneX"),
-                scene_y=player.get("sceneY"),
-                raw=dict(player),
-            ),
+            player=player_context,
             targets=target_analyzer.analyze_targets(
                 candidates,
                 class_id="tree" if self.args.profile == "woodcutting" else None,
@@ -1248,6 +1342,15 @@ class LiveCoreDaemon:
             "collisionWindowAgeTicks": analysis.navigation.collision_window_age_ticks,
             "collisionWindowMissingReason": analysis.navigation.collision_window_missing_reason,
         }
+        player_location = _player_location_payload(analysis.player)
+        player_fields = {
+            "playerLocation": player_location,
+            "playerLocationSource": analysis.player.location_source if analysis.player else None,
+            "playerLocationConfidence": analysis.player.location_confidence if analysis.player else None,
+            "playerWorldX": analysis.player.world_x if analysis.player and analysis.player.location_source != "collision_window_center_proxy" else None,
+            "playerWorldY": analysis.player.world_y if analysis.player and analysis.player.location_source != "collision_window_center_proxy" else None,
+            "playerPlane": analysis.player.plane if analysis.player and analysis.player.location_source != "collision_window_center_proxy" else None,
+        }
         dialogue_fields = {
             "dialogueState": dialogue_state,
             "dialogueStateActive": bool(dialogue_state.get("active") is True),
@@ -1265,19 +1368,26 @@ class LiveCoreDaemon:
             analysis.targets.service_candidate_visibility = "possibly_capped_or_filtered"
         self.state.source_status.update(target_fields)
         self.state.source_status.update(navigation_fields)
+        self.state.source_status.update(player_fields)
         self.state.source_status.update(dialogue_fields)
+        self.state.source_status.update(world_model_core.status_fields(world_model_payloads))
         if isinstance(result.get("status"), dict):
             result["status"].update(target_fields)
             result["status"].update(navigation_fields)
+            result["status"].update(player_fields)
             result["status"].update(dialogue_fields)
+            result["status"].update(world_model_core.status_fields(world_model_payloads))
         if isinstance(self.state.latest_context.get("status"), dict):
             self.state.latest_context["status"].update(target_fields)
             self.state.latest_context["status"].update(navigation_fields)
+            self.state.latest_context["status"].update(player_fields)
             self.state.latest_context["status"].update(dialogue_fields)
+            self.state.latest_context["status"].update(world_model_core.status_fields(world_model_payloads))
         self.state.latest_context["profileCandidates"] = list(analysis.targets.profile_candidates)
         self.state.latest_context["broadCandidates"] = list(analysis.targets.broad_candidates)
         self.state.latest_context["loadedServiceScene"] = list(analysis.targets.loaded_service_scene)
         self.state.latest_context["serviceCandidateInputs"] = list(analysis.targets.service_candidate_inputs)
+        self.state.latest_context["worldModelPayloads"] = dict(world_model_payloads)
         return analysis
 
     def stabilize_intent(self, brain_decision: dict | None) -> tuple[intent_stabilizer.IntentResult, dict]:
@@ -1365,29 +1475,26 @@ class LiveCoreDaemon:
         _added, result = processor.poll_once()
         active_millis = (time.perf_counter() - start) * 1000.0
 
-        if self.args.input_source == "auto" and source == live.PLUGIN_SNAPSHOT_SOURCE and not self.should_accept_plugin_snapshot(result, active_millis):
-            if compact_packet_available(self.session):
-                source = live.COMPACT_PACKET_SOURCE
-                processor = self.make_processor(source)
-                start = time.perf_counter()
-                _added, result = processor.poll_once()
-                active_millis = (time.perf_counter() - start) * 1000.0
-            else:
-                self.fallback_reason = (self.fallback_reason or "plugin snapshot was not accepted") + "; compact packet fallback unavailable"
-
         self.active_source = source
         no_file_daily = self.args.daily_mode == DAILY_MODE_SNAPSHOT_NO_FILES
         packet_write_state = compact_packet_file_write_state(self.session)
         daily_fields = {
             "dailyMode": self.args.daily_mode,
             "noFileDaily": bool(no_file_daily),
-            "compactPacketFilesRequired": source == live.COMPACT_PACKET_SOURCE,
+            "compactPacketFilesRequired": False,
             "compactPacketFilesWriting": packet_write_state.get("compactPacketFilesWriting"),
             "compactPacketFilesEnabledInManifest": packet_write_state.get("compactPacketFilesEnabledInManifest"),
             "compactPacketFilesAvailable": packet_write_state.get("compactPacketFilesAvailable"),
             "compactPacketFilesRecent": packet_write_state.get("compactPacketFilesRecent"),
             "compactPacketFileCount": packet_write_state.get("compactPacketFileCount"),
-            "debugMirrorEnabled": bool(no_file_daily and packet_write_state.get("compactPacketFilesWriting") is True),
+            "livePacketsRuntimeRemoved": True,
+            "ndjsonRuntimeRemoved": True,
+            "jsonlRuntimeRemoved": True,
+            "livePacketWriterActive": False,
+            "legacyLivePacketFilesPresent": packet_write_state.get("legacyLivePacketFilesPresent"),
+            "legacyLivePacketTotalMb": packet_write_state.get("legacyLivePacketTotalMb"),
+            "cleanupRecommended": packet_write_state.get("cleanupRecommended"),
+            "debugMirrorEnabled": False,
         }
         if isinstance(result.get("status"), dict):
             result["status"] = dict(result["status"])
@@ -1512,8 +1619,12 @@ class LiveCoreDaemon:
         payload = request if isinstance(request, dict) else self.default_context_request()
         if payload.get("schema") != context_service.REQUEST_SCHEMA:
             return context_service.error_payload(f"unsupported schema: {payload.get('schema')}", request_id=payload.get("requestId"))
+        context = self.state.context()
+        if self.state.brain_decision:
+            context = dict(context)
+            context["status"] = self.state.status()
         response = context_service.build_context_response(
-            self.state.context(),
+            context,
             payload,
             default_max_candidates=max(1, int(self.args.max_candidates)),
             max_response_bytes=int(self.args.max_response_bytes),
@@ -1748,10 +1859,11 @@ class LiveCoreDaemon:
                     and previous_post_bank.get("reason") == "bank_ui_still_open"
                 )
             )
-            if (
-                not bank_operation_context.banking_complete
-                and previous_banking_complete
-                and bank_ui_context.bank_open is False
+            if _should_retain_banking_completion(
+                bank_operation_context=bank_operation_context,
+                inventory_context=inventory_context,
+                previous_banking_complete=previous_banking_complete,
+                bank_open=bank_ui_context.bank_open is True,
             ):
                 bank_operation_context = BankOperationContext(
                     status="PASS",
@@ -2373,13 +2485,10 @@ class LiveCoreDaemon:
             print(f"  brain={'on' if self.runtime_control.brainEnabled else 'off'}")
             print(f"  task policy={self.effective_task_policy()}")
             print(f"  debug files={'on' if self.args.write_debug_live_files else 'off'}")
+            print("  live packet archive=retired")
             print(
-                "  compact packet files required="
-                f"{'no' if self.args.input_source == live.PLUGIN_SNAPSHOT_SOURCE else 'yes'}"
-            )
-            print(
-                "  experimental snapshot/stream="
-                f"{'on' if self.args.input_source == live.PLUGIN_SNAPSHOT_SOURCE else 'off'}/off"
+                "  plugin snapshot="
+                f"{'on' if self.args.input_source == live.PLUGIN_SNAPSHOT_SOURCE else 'off'}"
             )
         while not self.stop_event.is_set():
             started = time.perf_counter()
@@ -2606,15 +2715,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     session.add_argument("--latest-session", action="store_true", help="Use newest telemetry session.")
     parser.add_argument("--sessions-dir", help="Override sessions root.")
     parser.add_argument("--profile", default="woodcutting", choices=["woodcutting", "broad_qa", "navigation_qa", "npc_qa", "ground_item_qa", "ui_qa"])
-    parser.add_argument("--daily-mode", choices=sorted(DAILY_MODES), default=DAILY_MODE_COMPACT_PACKETS)
-    parser.add_argument("--input-source", choices=["plugin-snapshot", "compact-packets", "auto"], default="compact-packets")
+    parser.add_argument("--daily-mode", choices=sorted(DAILY_MODES), default=DAILY_MODE_SNAPSHOT_NO_FILES)
+    parser.add_argument("--input-source", choices=["plugin-snapshot"], default="plugin-snapshot")
     parser.add_argument("--plugin-snapshot-host", default="127.0.0.1")
     parser.add_argument("--plugin-snapshot-port", type=int, default=8893)
     parser.add_argument("--plugin-snapshot-token", default="")
     parser.add_argument("--plugin-snapshot-timeout", type=float, default=0.5)
     parser.add_argument("--plugin-snapshot-tier", choices=sorted(live.PLUGIN_SNAPSHOT_TIERS), default="hot")
     parser.add_argument("--plugin-snapshot-max-projection-refs", type=int)
-    parser.add_argument("--plugin-snapshot-fallback", choices=["none", "compact-packets"], default="none")
+    parser.add_argument("--plugin-snapshot-fallback", choices=["none"], default="none")
     parser.add_argument("--poll-interval", type=float, default=0.2)
     parser.add_argument("--context-host", default="127.0.0.1")
     parser.add_argument("--context-port", type=int, default=8890)
@@ -2661,11 +2770,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if not overlay_backup_explicit:
             args.overlay_backup_candidates = int(preset_fields.get("overlayBackupCandidates") or args.overlay_backup_candidates)
     if daily_mode_explicit:
-        if args.daily_mode == DAILY_MODE_SNAPSHOT_NO_FILES:
-            args.input_source = live.PLUGIN_SNAPSHOT_SOURCE
-            args.plugin_snapshot_tier = "hot"
-        elif args.daily_mode == DAILY_MODE_COMPACT_PACKETS:
-            args.input_source = live.COMPACT_PACKET_SOURCE
+        args.input_source = live.PLUGIN_SNAPSHOT_SOURCE
+        args.plugin_snapshot_tier = "hot"
     return args
 
 

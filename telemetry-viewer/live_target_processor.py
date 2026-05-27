@@ -17,12 +17,12 @@ from types import SimpleNamespace
 
 import build_world_target_geometry as world_builder
 import inspect_target_geometry as geometry
-import live_packet_reader
 import navigation_reachability
 import mission_presets
 import safe_aimpoint_core
 import select_target_candidates as candidate_builder
 import task_policy as task_policy_module
+import world_model_core
 from live_session_core import resolve_session_for_args
 from telemetry_paths import get_sessions_dir, list_tick_files
 
@@ -74,12 +74,13 @@ WORLD_TARGET_TYPES = {"npc", "player", "sceneObject", "groundItem", "tile"}
 LATENCY_MODES = {"realtime", "complete"}
 CANDIDATE_OUTPUT_WINDOWS = {"latest", "rolling"}
 LIVENESS_MODES = {"off", "basic", "delta", "full"}
-INPUT_SOURCES = {"raw-ticks", "compact-packets", "compact-stream", "plugin-snapshot", "auto"}
+INPUT_SOURCES = {"plugin-snapshot"}
 COMPACT_PACKET_SOURCE = "compact-packets"
 COMPACT_STREAM_SOURCE = "compact-stream"
 PLUGIN_SNAPSHOT_SOURCE = "plugin-snapshot"
 RAW_TICK_SOURCE = "raw-ticks"
-COMPACT_INPUT_SOURCES = {COMPACT_PACKET_SOURCE, COMPACT_STREAM_SOURCE}
+COMPACT_INPUT_SOURCES: set[str] = set()
+LEGACY_LIVE_PACKET_SCHEMA = "osrs_telemetry_live_packet.v1"
 ENABLE_MAX_DRAW = True
 MAX_DRAW_LIMIT = 50
 MAX_DRAW_HULL_LIMIT = 10
@@ -155,6 +156,10 @@ PLUGIN_SNAPSHOT_DEFAULT_NEEDS = [
     "writer_health",
     "watch_values",
 ]
+PLUGIN_SNAPSHOT_WORLD_MODEL_NEEDS = list(world_model_core.WORLD_MODEL_NEEDS)
+for _world_model_need in PLUGIN_SNAPSHOT_WORLD_MODEL_NEEDS:
+    if _world_model_need not in PLUGIN_SNAPSHOT_DEFAULT_NEEDS:
+        PLUGIN_SNAPSHOT_DEFAULT_NEEDS.append(_world_model_need)
 COMPACT_STREAM_TICK_BUFFER_LIMIT = 64
 COMPARE_INPUT_SOURCE_MODES = {"raw-vs-file", "stream-vs-file", "plugin-snapshot-vs-file"}
 ALL_LIVE_TARGET_TYPES = WORLD_TARGET_TYPES | {
@@ -271,29 +276,32 @@ def raw_ticks_available(session: Path) -> bool:
 
 
 def compact_packet_state(session: Path) -> dict:
-    index = live_packet_reader.read_index(session)
-    index_path = live_packet_reader.live_packet_index_path(session)
-    latest = live_packet_reader.latest_segment_path(session, index=index)
-    if latest is None:
-        files = live_packet_reader.list_live_packet_files(session, latest_only=True, use_index=False)
-        latest = files[-1] if files else None
-    age_seconds = None
-    if latest is not None:
+    packet_dir = session / "live_packets"
+    legacy_files = list(packet_dir.glob("live-*.ndjson")) + list(packet_dir.glob("live-*.jsonl")) if packet_dir.exists() else []
+    latest = max(legacy_files, key=lambda path: path.stat().st_mtime, default=None) if legacy_files else None
+    legacy_bytes = 0
+    for path in legacy_files:
         try:
-            age_seconds = max(0.0, time.time() - latest.stat().st_mtime)
+            legacy_bytes += path.stat().st_size
         except OSError:
-            age_seconds = None
-    available = latest is not None and latest.exists()
-    recent = bool(available and age_seconds is not None and age_seconds <= COMPACT_PACKET_RECENT_SECONDS)
+            pass
     return {
-        "available": available,
-        "recent": recent,
-        "indexPath": str(index_path),
-        "indexExists": index_path.exists(),
+        "available": False,
+        "recent": False,
+        "runtimeRemoved": True,
+        "livePacketsRuntimeRemoved": True,
+        "ndjsonRuntimeRemoved": True,
+        "jsonlRuntimeRemoved": True,
+        "livePacketWriterActive": False,
+        "legacyLivePacketFilesPresent": bool(legacy_files),
+        "legacyLivePacketTotalMb": round(legacy_bytes / (1024 * 1024), 3),
+        "cleanupRecommended": bool(legacy_files),
+        "indexPath": str(packet_dir / "live_packet_index.json"),
+        "indexExists": False,
         "latestSegment": str(latest) if latest else None,
-        "latestTick": index.get("latestTick") if isinstance(index, dict) else None,
-        "latestSequence": index.get("latestSequence") if isinstance(index, dict) else None,
-        "ageSeconds": age_seconds,
+        "latestTick": None,
+        "latestSequence": None,
+        "ageSeconds": None,
     }
 
 
@@ -377,49 +385,12 @@ def choose_input_source(
 ) -> tuple[str, bool, bool, str | None]:
     compact_state = compact_packet_state(session)
     compact_available = bool(compact_state.get("available"))
-    compact_recent = bool(compact_state.get("recent"))
-    stream_available = bool((stream_state or {}).get("available"))
-    plugin_snapshot_available = bool((plugin_snapshot_state_value or {}).get("available"))
     raw_available = raw_ticks_available(session)
 
-    if requested == RAW_TICK_SOURCE:
-        reason = None if raw_available else "raw tick files are not available"
-        return RAW_TICK_SOURCE, compact_available, raw_available, reason
+    if requested != PLUGIN_SNAPSHOT_SOURCE:
+        return PLUGIN_SNAPSHOT_SOURCE, compact_available, raw_available, "live packet/archive input sources are retired; using plugin-snapshot"
 
-    if requested == COMPACT_PACKET_SOURCE:
-        reason = None if compact_available else "compact live packets are not available"
-        return COMPACT_PACKET_SOURCE, compact_available, raw_available, reason
-
-    if requested == COMPACT_STREAM_SOURCE:
-        reason = None if stream_available else "compact live stream is not connected yet; waiting for reconnect"
-        return COMPACT_STREAM_SOURCE, compact_available, raw_available, reason
-
-    if requested == PLUGIN_SNAPSHOT_SOURCE:
-        return PLUGIN_SNAPSHOT_SOURCE, compact_available, raw_available, None
-
-    if auto_prefer_plugin_snapshot and plugin_snapshot_available:
-        return PLUGIN_SNAPSHOT_SOURCE, compact_available, raw_available, "auto-prefer-plugin-snapshot selected the experimental plugin snapshot endpoint"
-
-    if compact_available and compact_recent:
-        return COMPACT_PACKET_SOURCE, compact_available, raw_available, None
-
-    if stream_available:
-        return COMPACT_STREAM_SOURCE, compact_available, raw_available, (
-            "compact live packet files are unavailable or stale; using experimental compact stream"
-            if compact_available
-            else "compact live packet files are unavailable; using experimental compact stream"
-        )
-
-    if compact_available and raw_available:
-        return RAW_TICK_SOURCE, compact_available, raw_available, "compact live packets are stale; falling back to raw tick JSONL"
-
-    if compact_available:
-        return COMPACT_PACKET_SOURCE, compact_available, raw_available, "compact live packets are stale, but raw tick fallback is unavailable"
-
-    if raw_available:
-        return RAW_TICK_SOURCE, compact_available, raw_available, "compact live packets unavailable; falling back to raw tick JSONL"
-
-    return RAW_TICK_SOURCE, compact_available, raw_available, "neither compact live packets nor raw tick JSONL were found"
+    return PLUGIN_SNAPSHOT_SOURCE, compact_available, raw_available, None
 
 
 def live_output_dir(session: Path) -> Path:
@@ -1116,7 +1087,7 @@ def unwrap_packet_payload(value):
     payload = value.get("payload")
     if isinstance(payload, dict) and (
         value.get("packetType")
-        or value.get("schema") == live_packet_reader.PACKET_SCHEMA
+        or value.get("schema") == LEGACY_LIVE_PACKET_SCHEMA
         or value.get("schema") == "osrs_telemetry_live_packet.v1"
     ):
         return payload
@@ -1573,6 +1544,13 @@ def plugin_snapshot_request_body(args) -> dict:
         "responseMode": getattr(args, "plugin_snapshot_response_mode", "compact") or "compact",
         "projectionFieldMode": projection_field_mode,
         "snapshotTier": tier,
+        "worldModel": {
+            "maxObjects": 160 if tier == "hot" else (500 if tier == "expanded" else 1200),
+            "radiusTiles": 48 if tier == "hot" else 72,
+            "includeProjection": tier != "hot",
+            "includeCollision": tier != "hot",
+            "includeActors": tier == "audit",
+        },
     }
     body.update(plugin_snapshot_request_hints(args))
     return body
@@ -1663,7 +1641,7 @@ def plugin_snapshot_to_tick(response: dict) -> dict | None:
             sequence = fallback_sequence
         packets.append(
             {
-                "schema": live_packet_reader.PACKET_SCHEMA,
+                "schema": LEGACY_LIVE_PACKET_SCHEMA,
                 "packetType": packet_type,
                 "sessionId": response.get("sessionId"),
                 "tick": tick,
@@ -1690,6 +1668,17 @@ def plugin_snapshot_to_tick(response: dict) -> dict | None:
     tick["_pluginSnapshotServiceTimingMillis"] = response.get("serviceTimingMillis")
     tick["_pluginSnapshotFreshness"] = response.get("freshness") if isinstance(response.get("freshness"), dict) else {}
     tick["_clientTickHot"] = response.get("clientTickHot") if isinstance(response.get("clientTickHot"), dict) else {}
+    world_model_payloads = world_model_core.extract_world_model_payloads(response)
+    if world_model_payloads:
+        tick["_worldModelPayloads"] = world_model_payloads
+        tick["worldModelSummary"] = world_model_payloads.get("world_model_summary")
+        tick["worldModelResourceObjectCensus"] = world_model_payloads.get("resource_object_census")
+        tick["worldModelServiceObjectCensus"] = world_model_payloads.get("service_object_census")
+        tick["worldModelRouteObjectCensus"] = world_model_payloads.get("route_object_census")
+        tick["worldModelProjectionAudit"] = world_model_payloads.get("projection_audit")
+        tick["worldModelViewQualityInputs"] = world_model_payloads.get("view_quality_inputs")
+        tick["worldModelPathingFrontier"] = world_model_payloads.get("pathing_frontier")
+        tick["worldModelQuality"] = world_model_core.world_model_quality(world_model_payloads)
     return tick
 
 
@@ -1738,13 +1727,13 @@ class CompactPacketTailer:
         self.last_compact_packet_read_errors = 0
 
     def files(self) -> list[Path]:
-        return live_packet_reader.list_live_packet_files(self.session)
+        return []
 
     def partial_line_files(self) -> list[str]:
         return [str(path) for path, state in self.states.items() if state.pending]
 
     def _note_latest_segment(self) -> None:
-        latest = live_packet_reader.latest_segment_path(self.session)
+        latest = None
         self.last_compact_packet_latest_segment = str(latest) if latest else None
         if latest and self._current_latest_segment and latest != self._current_latest_segment:
             self.last_compact_packet_rollover_count += 1
@@ -1786,7 +1775,7 @@ class CompactPacketTailer:
             tick = compact_packets_to_tick(packets)
             if not tick:
                 continue
-            path, line_number = packet_sources.get(tick_id, (live_packet_reader.live_packet_dir(self.session), 0))
+            path, line_number = packet_sources.get(tick_id, (self.session / "retired_live_packets", 0))
             records.append((path, line_number, tick))
 
         self.last_raw_records_fully_parsed = len(records)
@@ -1802,13 +1791,13 @@ class CompactPacketTailer:
 
         packet_groups: dict[int, list[dict]] = {}
         packet_sources: dict[int, tuple[Path, int]] = {}
-        for result in live_packet_reader.iter_live_packets(self.files(), ignore_partial_last_line=True):
+        for result in []:
             if result.error:
                 self.malformed_counts[str(result.path)] += 1
                 self.malformed_total += 1
                 continue
             packet = result.record
-            if not isinstance(packet, dict) or packet.get("schema") != live_packet_reader.PACKET_SCHEMA:
+            if not isinstance(packet, dict) or packet.get("schema") != LEGACY_LIVE_PACKET_SCHEMA:
                 continue
             self.last_compact_packets_seen += 1
             tick = packet_tick(packet)
@@ -1899,7 +1888,7 @@ class CompactPacketTailer:
                 self.malformed_total += 1
                 continue
             self.last_json_parse_millis += (time.perf_counter() - parse_started) * 1000.0
-            if not isinstance(packet, dict) or packet.get("schema") != live_packet_reader.PACKET_SCHEMA:
+            if not isinstance(packet, dict) or packet.get("schema") != LEGACY_LIVE_PACKET_SCHEMA:
                 self.malformed_counts[str(path)] += 1
                 self.malformed_total += 1
                 continue
@@ -2241,7 +2230,7 @@ class CompactStreamTailer:
                 self.malformed_total += 1
                 continue
             self.last_json_parse_millis += (time.perf_counter() - parse_started) * 1000.0
-            if not isinstance(packet, dict) or packet.get("schema") != live_packet_reader.PACKET_SCHEMA:
+            if not isinstance(packet, dict) or packet.get("schema") != LEGACY_LIVE_PACKET_SCHEMA:
                 self.malformed_counts[source] += 1
                 self.malformed_total += 1
                 continue
@@ -2340,6 +2329,8 @@ class PluginSnapshotTailer:
         self.snapshot_projection_diagnostics: dict = {}
         self.snapshot_response_sizing: dict = {}
         self.snapshot_client_tick_hot: dict = {}
+        self.snapshot_world_model_payloads: dict = {}
+        self.snapshot_world_model_quality: dict = {}
         self.snapshot_error_code = None
         self.snapshot_request_millis = 0.0
         self.snapshot_http_request_millis = 0.0
@@ -2384,6 +2375,8 @@ class PluginSnapshotTailer:
         self.snapshot_response_bytes = 0
         self.snapshot_response_sizing = {}
         self.snapshot_client_tick_hot = {}
+        self.snapshot_world_model_payloads = {}
+        self.snapshot_world_model_quality = {}
         self.snapshot_error_code = None
         self.snapshot_http_connection_reused = False
         self.last_snapshot_unchanged_this_poll = False
@@ -2507,6 +2500,8 @@ class PluginSnapshotTailer:
         self.snapshot_error_code = response.get("errorCode") if isinstance(response.get("errorCode"), str) else None
         self.snapshot_response_sizing = response.get("responseSizing") if isinstance(response.get("responseSizing"), dict) else {}
         self.snapshot_client_tick_hot = response.get("clientTickHot") if isinstance(response.get("clientTickHot"), dict) else {}
+        self.snapshot_world_model_payloads = world_model_core.extract_world_model_payloads(response)
+        self.snapshot_world_model_quality = world_model_core.world_model_quality(self.snapshot_world_model_payloads)
         service_timing = response.get("serviceTimingMillis")
         self.snapshot_endpoint_service_millis = float(service_timing) if isinstance(service_timing, (int, float)) and not isinstance(service_timing, bool) else 0.0
         self.snapshot_missing_capabilities = (
@@ -5382,7 +5377,7 @@ def navigation_summary_for(tick: dict | None, processed_at: str) -> dict:
         "fullCollisionGridAvailable": bool(grid_collision.get("flags")),
         "notes": notes,
         "warnings": warnings,
-        "source": "compact-packets" if navigation_packet else tick.get("_inputSource", RAW_TICK_SOURCE),
+        "source": tick.get("_inputSource") or ("plugin-snapshot" if navigation_packet else "unknown"),
         "sourceDetails": source,
     }
 
@@ -5972,7 +5967,7 @@ class LiveTargetProcessor:
             return None
         return (
             "compact stream did not deliver live_projection_packet.v1 within "
-            f"{self.args.stream_required_types_timeout:g}s; falling back to compact packet files"
+            f"{self.args.stream_required_types_timeout:g}s; live packet fallback is retired"
         )
 
     def activate_compact_packet_fallback(self, reason: str) -> None:
@@ -6000,7 +5995,7 @@ class LiveTargetProcessor:
         if diag.get("available") and not diag.get("lastIncompleteReason"):
             return None
         reason = diag.get("lastIncompleteReason") or diag.get("lastError") or "plugin snapshot endpoint unavailable"
-        return f"{reason}; falling back to compact packet files"
+        return f"{reason}; live packet fallback is retired"
 
     def activate_plugin_snapshot_compact_packet_fallback(self, reason: str) -> None:
         self.last_plugin_snapshot_diagnostics = self.plugin_snapshot_diagnostics()
@@ -6151,8 +6146,8 @@ class LiveTargetProcessor:
         unsupported = sorted(target_types - {"sceneObject"})
         if unsupported:
             warnings.append(
-                "compact input currently builds live candidates from scene projection/delta packets; "
-                f"these target types may be missing until compact packets include them: {', '.join(unsupported)}"
+                "plugin snapshot currently builds live candidates from loaded-scene projection data; "
+                f"these target types may need additional world-model support: {', '.join(unsupported)}"
             )
         if self.stream_fallback_to_file and self.stream_fallback_reason:
             warnings.append(self.stream_fallback_reason)
@@ -6188,9 +6183,9 @@ class LiveTargetProcessor:
                 warnings.append(self.plugin_snapshot_fallback_reason)
             return warnings
         if not self.compact_packets_available:
-            warnings.append("compact packet input selected but no compact live packet files are currently available")
+            warnings.append("retired live packet input was requested; use plugin-snapshot")
         elif not self.compact_packets_recent:
-            warnings.append("compact packet input is available but stale; collect fresh packets for normal live mode")
+            warnings.append("legacy live packet files are stale and ignored by current runtime")
         return warnings
 
     def memory_limit(self) -> int:
@@ -7630,6 +7625,10 @@ class LiveTargetProcessor:
             if isinstance(latest_tick_record, dict) and isinstance(latest_tick_record.get("serviceSceneObjects"), list)
             else []
         )
+        world_model_payloads = world_model_core.world_model_payloads_for_tick(latest_tick_record)
+        world_model_route_service_candidates = world_model_core.route_service_candidates_from_payloads(world_model_payloads)
+        if world_model_route_service_candidates:
+            loaded_service_scene = world_model_core.dedupe_candidates(list(loaded_service_scene) + world_model_route_service_candidates)
         navigation = navigation_summary_for(latest_tick_record, processed_at)
         candidates = apply_navigation_to_candidates(candidates, navigation)
         candidate_signature = candidate_output_signature(candidates)
@@ -7698,6 +7697,16 @@ class LiveTargetProcessor:
             status["pluginSnapshotCandidateOutputSkippedUnchanged"] = skip_plugin_candidate_outputs
             status["pluginSnapshotLoadedServiceSceneCount"] = len(loaded_service_scene)
         status["loadedServiceSceneCount"] = len(loaded_service_scene)
+        world_model_status_fields = world_model_core.status_fields(world_model_payloads)
+        status.update(world_model_status_fields)
+        status["worldModelSummary"] = world_model_payloads.get("world_model_summary") or {}
+        status["worldModelResourceObjectCensus"] = world_model_payloads.get("resource_object_census") or {}
+        status["worldModelServiceObjectCensus"] = world_model_payloads.get("service_object_census") or {}
+        status["worldModelRouteObjectCensus"] = world_model_payloads.get("route_object_census") or {}
+        status["worldModelProjectionAudit"] = world_model_payloads.get("projection_audit") or {}
+        status["worldModelPathingFrontier"] = world_model_payloads.get("pathing_frontier") or {}
+        status["worldModelRouteServiceCandidateCount"] = len(world_model_route_service_candidates)
+        status["worldModelOakRejectedInsufficientLevelCount"] = world_model_core.oak_level_rejected_count(world_model_payloads)
         watch_values = live_watch_values_state(latest_tick_record, inventory_state, activity, status, processed_at)
         bank_ui = bank_ui_state_for(latest_tick_record, inventory_state)
         dialogue_state = dialogue_state_for(latest_tick_record)
@@ -7912,6 +7921,13 @@ class LiveTargetProcessor:
             "uiRecords": ui_records,
             "candidates": candidates,
             "loadedServiceScene": loaded_service_scene,
+            "worldModelPayloads": world_model_payloads,
+            "worldModelSummary": world_model_payloads.get("world_model_summary"),
+            "worldModelResourceObjectCensus": world_model_payloads.get("resource_object_census"),
+            "worldModelServiceObjectCensus": world_model_payloads.get("service_object_census"),
+            "worldModelRouteObjectCensus": world_model_payloads.get("route_object_census"),
+            "worldModelProjectionAudit": world_model_payloads.get("projection_audit"),
+            "worldModelPathingFrontier": world_model_payloads.get("pathing_frontier"),
             "tickSummaries": tick_summaries,
             "baseline": baseline,
             "activity": activity,
@@ -8466,13 +8482,13 @@ def print_startup(session: Path, args, processor: LiveTargetProcessor | None = N
     if active_input == COMPACT_STREAM_SOURCE:
         print(f"Live input: compact stream ({args.compact_stream_host}:{args.compact_stream_port})")
     elif active_input == PLUGIN_SNAPSHOT_SOURCE:
-        print(f"Live input: plugin snapshot EXPERIMENTAL ({args.plugin_snapshot_host}:{args.plugin_snapshot_port})")
+        print(f"Live input: plugin snapshot ({args.plugin_snapshot_host}:{args.plugin_snapshot_port})")
     elif active_input == COMPACT_PACKET_SOURCE:
-        print("Live input: compact packets")
+        print("Live input: retired compact packets (forced to plugin snapshot)")
     elif args.input_source == RAW_TICK_SOURCE:
-        print("Live input: raw ticks explicitly requested")
+        print("Live input: retired raw ticks request (forced to plugin snapshot)")
     else:
-        print("Live input: raw ticks fallback because compact inputs were unavailable")
+        print("Live input: plugin snapshot; live packet/raw fallback is retired")
     print(f"input source: {active_input} (requested {args.input_source})")
     if processor and processor.input_fallback_reason:
         print(f"input fallback: {processor.input_fallback_reason}")
@@ -8574,7 +8590,7 @@ def print_follow_update(added: int, result: dict) -> None:
             f" missingTypes={','.join(missing) if missing else '-'}"
         )
     elif status.get("streamFallbackToFile"):
-        stream_suffix = " streamFallback=compact-packets"
+        stream_suffix = " streamFallback=retired-live-packets-blocked"
     elif status.get("inputSourceActive") == PLUGIN_SNAPSHOT_SOURCE:
         missing = status.get("pluginSnapshotMissingCapabilities") or []
         bottleneck = status.get("pluginSnapshotBottleneck")
@@ -8587,7 +8603,7 @@ def print_follow_update(added: int, result: dict) -> None:
             f" bottleneck={bottleneck or '-'}"
         )
     elif status.get("pluginSnapshotFallbackToFile"):
-        stream_suffix = " snapshotFallback=compact-packets"
+        stream_suffix = " snapshotFallback=retired-live-packets-blocked"
     print(
         f"latestTick={status['lastProcessedTick']} "
         f"input={status.get('inputSourceActive')} "
@@ -8859,7 +8875,7 @@ def recommended_plugin_snapshot_tier(tier_summaries: dict) -> str:
         return "hot"
     if expanded.get("viableForBestNearest") or int(expanded.get("candidateCount") or 0) > int(hot.get("candidateCount") or 0):
         return "expanded"
-    return "compact-packets"
+    return PLUGIN_SNAPSHOT_SOURCE
 
 
 def compare_input_sources(session: Path, args) -> int:
@@ -8892,7 +8908,7 @@ def compare_input_sources(session: Path, args) -> int:
     if not left_summary.get("available"):
         failures.append(f"{left_source} source unavailable")
     if not right_summary.get("available"):
-        failures.append("compact packet source unavailable")
+        failures.append("legacy live packet source unavailable")
 
     status = "FAIL" if failures else "PASS"
     if status == "PASS":
@@ -8903,7 +8919,7 @@ def compare_input_sources(session: Path, args) -> int:
             stream_dropped_types = left_summary.get("compactLiveStreamPacketsDroppedByType") or {}
             file_candidate_count = int(right_summary.get("candidateCount") or 0)
             if COMPACT_PACKET_TYPES["projection"] not in stream_types and file_candidate_count > 0:
-                failures.append("stream has no projection packets while compact packet file mode has candidates")
+                failures.append("retired stream comparison has no projection payload while legacy packet files have candidates")
             if stream_offered_types and COMPACT_PACKET_TYPES["projection"] not in stream_offered_types and file_candidate_count > 0:
                 failures.append("Java stream publisher has not offered projection packets")
             if stream_offered_types.get(COMPACT_PACKET_TYPES["projection"]) and not stream_sent_types.get(COMPACT_PACKET_TYPES["projection"]):
@@ -8923,17 +8939,17 @@ def compare_input_sources(session: Path, args) -> int:
             file_candidate_count = int(right_summary.get("candidateCount") or 0)
             snapshot_payload_types = set(left_summary.get("pluginSnapshotPayloadTypes") or [])
             if "projection" not in snapshot_payload_types and file_candidate_count > 0:
-                failures.append("plugin snapshot has no projection payload while compact packet file mode has candidates")
+                failures.append("plugin snapshot has no projection payload while legacy packet files have candidates")
             if left_summary.get("pluginSnapshotProjectionRefListPath") is None and file_candidate_count > 0:
                 failures.append("plugin snapshot projection payload shape mismatch: no recognized projection ref list")
             if int(left_summary.get("pluginSnapshotRefsConverted") or 0) <= 0 and file_candidate_count > 0:
-                failures.append("plugin snapshot converted no projection refs while compact packet file mode has candidates")
+                failures.append("plugin snapshot converted no projection refs while legacy packet files have candidates")
             if int(left_summary.get("pluginSnapshotVisibleRefsExpectedPathCount") or 0) <= 0 and int(left_summary.get("pluginSnapshotRefsConverted") or 0) > 0:
                 failures.append("plugin snapshot converted refs but did not place them at visibleSceneObjectRefs")
             if int(left_summary.get("pluginSnapshotRefsAcceptedForWorldTargets") or 0) <= 0 and int(left_summary.get("pluginSnapshotVisibleRefsExpectedPathCount") or 0) > 0:
                 failures.append("plugin snapshot visible refs were not accepted by the world-target source reader")
             if int(left_summary.get("pluginSnapshotWorldTargetsBuilt") or 0) <= 0 and file_candidate_count > 0:
-                failures.append("plugin snapshot built no world targets while compact packet file mode has candidates")
+                failures.append("plugin snapshot built no world targets while legacy packet files have candidates")
             if not left_summary.get("pluginSnapshotAvailable"):
                 failures.append("plugin snapshot endpoint unavailable")
             if left_summary.get("pluginSnapshotStatus") == "FAIL":
@@ -9036,17 +9052,16 @@ def compare_input_sources(session: Path, args) -> int:
 
 def compact_required_error() -> str:
     return (
-        "A compact live input is required but unavailable. Enable compact live stream or compact live packet files "
-        "in the RuneLite telemetry config, collect fresh telemetry, then verify stream mode or run "
-        "inspect_live_packets.py --latest-session --summary for the file bridge."
+        "The compact live packet archive has been retired. Use the plugin snapshot endpoint, "
+        "WorldModel/Knowledge Fabric queries, or explicit replay/debug bundles instead."
     )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Tail compact live packets or raw tick JSONL files and write rolling read-only target context/candidate outputs. "
-            "This does not interact with RuneLite or generate actions."
+            "Read the plugin snapshot endpoint and optionally write explicit bounded target context/candidate debug outputs. "
+            "The live packet NDJSON/JSONL archive has been retired."
         )
     )
     parser.add_argument("--session", help="Explicit telemetry session directory.")
@@ -9055,12 +9070,14 @@ def parse_args():
     parser.add_argument("--from-daemon", action="store_true", help="Use the session currently reported by the live core daemon.")
     parser.add_argument("--daemon-url", default="http://127.0.0.1:8890", help="Daemon URL for --from-daemon.")
     parser.add_argument("--daemon-timeout", type=float, default=3.0, help="Seconds to wait for daemon status when --from-daemon is used.")
-    parser.add_argument("--input-source", choices=sorted(INPUT_SOURCES), default="auto", help="Read source for live processing. Auto prefers compact packet files, then experimental compact stream, then raw ticks. plugin-snapshot is experimental and only used when explicitly selected or --auto-prefer-plugin-snapshot is passed. Default: auto.")
-    parser.add_argument("--compact-stream-host", default="127.0.0.1", help="Local compact stream host. Default: 127.0.0.1.")
-    parser.add_argument("--compact-stream-port", type=int, default=8891, help="Local compact stream TCP port. Default: 8891.")
-    parser.add_argument("--compact-stream-timeout", type=positive_float, default=0.1, help="Compact stream connect/read timeout in seconds. Default: 0.1.")
-    parser.add_argument("--stream-fallback-to-compact-packets", action="store_true", help="Allow explicit compact-stream mode to fall back to compact packet files when required stream packet types do not arrive.")
-    parser.add_argument("--stream-required-types-timeout", type=positive_float, default=2.0, help="Seconds to wait after first stream packet before fallback/warning when required stream packet types are missing. Default: 2.")
+    parser.add_argument("--input-source", choices=sorted(INPUT_SOURCES), default=PLUGIN_SNAPSHOT_SOURCE, help="Read source for live processing. Only plugin-snapshot is supported; live packet archives are retired.")
+    parser.set_defaults(
+        compact_stream_host="127.0.0.1",
+        compact_stream_port=8891,
+        compact_stream_timeout=0.1,
+        stream_fallback_to_compact_packets=False,
+        stream_required_types_timeout=2.0,
+    )
     parser.add_argument("--plugin-snapshot-host", default="127.0.0.1", help="Experimental plugin snapshot endpoint host. Default: 127.0.0.1.")
     parser.add_argument("--plugin-snapshot-port", type=int, default=8893, help="Experimental plugin snapshot endpoint port. Default: 8893.")
     parser.add_argument("--plugin-snapshot-token", default="", help="Optional X-Plugin-Snapshot-Token header value.")
@@ -9075,18 +9092,12 @@ def parse_args():
     parser.add_argument("--plugin-snapshot-include-geometry", action="store_true", help="Ask the experimental plugin snapshot endpoint to include debug geometry when available.")
     parser.add_argument("--plugin-snapshot-response-mode", choices=["compact", "normal", "full"], default="compact", help="Plugin snapshot response mode. Default: compact.")
     parser.add_argument("--plugin-snapshot-projection-field-mode", choices=sorted(PLUGIN_SNAPSHOT_PROJECTION_FIELD_MODES), default="compact", help="Projection ref field set requested from the experimental plugin snapshot endpoint. Default: compact.")
-    parser.add_argument("--plugin-snapshot-fallback", choices=["none", COMPACT_PACKET_SOURCE], default="none", help="Fallback for explicit plugin-snapshot mode when the endpoint is unavailable or incomplete. Default: none.")
+    parser.add_argument("--plugin-snapshot-fallback", choices=["none"], default="none", help="Fallback for plugin-snapshot mode. Live packet fallback is retired, so only none is supported.")
     parser.add_argument("--plugin-snapshot-auto-escalate", action="store_true", help="Retry one plugin-snapshot poll at expanded tier when hot tier returns too few candidates. Experimental; default off.")
     parser.add_argument("--plugin-snapshot-min-candidates", type=non_negative_int, default=1, help="Candidate count threshold used by --plugin-snapshot-auto-escalate. Default: 1.")
-    parser.add_argument("--auto-prefer-plugin-snapshot", action="store_true", help="Experimental: allow --input-source auto to prefer plugin-snapshot when its endpoint probes healthy.")
-    parser.add_argument(
-        "--compare-input-sources",
-        nargs="?",
-        const="raw-vs-file",
-        choices=sorted(COMPARE_INPUT_SOURCE_MODES),
-        help="Compare input sources for the selected/latest window, then exit. Modes: raw-vs-file (default flag behavior), stream-vs-file, or plugin-snapshot-vs-file.",
-    )
-    parser.add_argument("--require-compact-packets", action="store_true", help="Fail fast unless compact live packets are available and recent; do not fall back to raw ticks.")
+    parser.set_defaults(auto_prefer_plugin_snapshot=False)
+    parser.set_defaults(compare_input_sources=False)
+    parser.set_defaults(require_compact_packets=False)
     parser.add_argument(
         "--profile",
         default="broad_qa",
@@ -9145,10 +9156,6 @@ def parse_args():
     if args.once and args.follow:
         parser.error("--once and --follow are mutually exclusive")
 
-    if args.require_compact_packets and args.input_source == RAW_TICK_SOURCE:
-        parser.error("--require-compact-packets cannot be combined with --input-source raw-ticks")
-    if args.compact_stream_port < 1 or args.compact_stream_port > 65535:
-        parser.error("--compact-stream-port must be between 1 and 65535")
     if args.plugin_snapshot_port < 1 or args.plugin_snapshot_port > 65535:
         parser.error("--plugin-snapshot-port must be between 1 and 65535")
 

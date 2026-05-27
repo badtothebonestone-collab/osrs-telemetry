@@ -608,6 +608,61 @@ class ContextServiceTest(unittest.TestCase):
             self.assertIn("taskSummary", response)
             self.assertEqual(response["taskSummary"]["task"], "woodcutting")
 
+    def test_named_current_debug_context_query_outputs_aggregate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--session",
+                    str(session),
+                    "--query",
+                    "current-debug-context",
+                    "--max-candidates",
+                    "2",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            payload = json.loads(result.stdout)
+            self.assertIn(result.returncode, {0, 1})
+            self.assertEqual(payload["schema"], "context_response.v1")
+            self.assertIn("knowledgeCurrentDebugContext", payload)
+            self.assertIn("currentBlocker", payload["knowledgeCurrentDebugContext"]["data"])
+
+    def test_named_data_quality_and_handoff_queries_output_structured_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            for query_name, expected_key in (
+                ("data-quality-report", "knowledgeDataQualityReport"),
+                ("data-source-inventory", "knowledgeDataSourceInventory"),
+                ("query-coverage-matrix", "knowledgeQueryCoverageMatrix"),
+                ("coverage-report", "knowledgeCoverageReport"),
+                ("external-knowledge-status", "externalKnowledgeStatus"),
+                ("handoff-summary", "knowledgeHandoffSummary"),
+            ):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--session",
+                        str(session),
+                        "--query",
+                        query_name,
+                        "--max-candidates",
+                        "2",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                payload = json.loads(result.stdout)
+                self.assertIn(result.returncode, {0, 1})
+                self.assertEqual(payload["schema"], "context_response.v1")
+                self.assertIn(expected_key, payload)
+
     def test_context_response_includes_navigation_readiness_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp))
@@ -800,7 +855,7 @@ class ContextServiceTest(unittest.TestCase):
                 self.assertEqual(code, 200)
                 self.assertEqual(capabilities["schema"], "capability_registry.v1")
                 by_id = {item["id"]: item for item in capabilities["capabilities"]}
-                self.assertEqual(by_id["compact_packets.input"]["runtimeStatus"], "available")
+                self.assertEqual(by_id["compact_packets.input"]["runtimeStatus"], "retired")
                 self.assertIn("runtimeSummary", capabilities)
 
                 code, watches = server.get("/watches")
@@ -962,6 +1017,30 @@ class ContextServiceTest(unittest.TestCase):
             self.assertEqual(payload["schema"], "context_response.v1")
             self.assertIn("bestCandidates", payload)
             self.assertEqual(result.stderr, "")
+
+    def test_pipeline_health_reports_manifest_config_and_legacy_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = Path(tmp) / "sessions"
+            legacy = sessions / "s1" / "live_packets" / "live-000001.ndjson"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text("{}\n", encoding="utf-8")
+            args = SimpleNamespace(
+                daemon_url="http://127.0.0.1:1",
+                snapshot_url="http://127.0.0.1:2/snapshot",
+                live_timeout=0.001,
+                sessions_dir=str(sessions),
+            )
+
+            payload = service.pipeline_health_payload(args)
+
+            self.assertEqual(payload["schema"], "pipeline_health.v1")
+            self.assertIn("plugin_snapshot_endpoint_8893", payload["activeComponents"])
+            self.assertIn("legacy_live_packet_archive", payload["disabledRemovedComponents"])
+            self.assertIn("enabled", payload["configUi"]["activeExposedKeys"])
+            self.assertIn("debugRecordRawTicks", payload["configUi"]["retiredKeys"])
+            self.assertTrue(payload["legacyLivePackets"]["legacyLivePacketFilesPresent"])
+            self.assertTrue(payload["livePacketsRuntimeRemoved"])
+            self.assertFalse(payload["livePacketWriterActive"])
 
 
 if __name__ == "__main__":

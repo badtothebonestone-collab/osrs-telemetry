@@ -1,176 +1,29 @@
-# Tool Registry
+# Tool Registry Notes
 
-The daily workflow has one stable lane and one explicit experimental no-file
-lane:
+This is the human-readable daily tool summary. The machine-readable registry is
+`telemetry-viewer\tool_registry.json`.
 
-```text
-RuneLite plugin -> compact-packets -> live_core_daemon.py -> in-memory context -> brain intent overlay
-RuneLite plugin -> PluginLiveCache / PluginSnapshotEndpoint -> live_core_daemon.py -> in-memory context -> brain intent overlay
-```
-
-The machine-readable registry lives at:
+## Current Daily Flow
 
 ```text
-telemetry-viewer\tool_registry.json
+RuneLite plugin -> PluginSnapshotEndpoint / WorldModelCache -> live_core_daemon.py -> Knowledge Fabric -> readiness/action proposal
 ```
 
-It classifies tools into the same groups used by the Live Control Panel. Daily
-mode should show only the daily tools. Everything else stays available under
-Advanced or as command-line debug/audit tooling.
-
-## Daily
-
-These are the only tools that belong in the main daily view.
+## Canonical Commands
 
 | Tool | Purpose | Command |
 | --- | --- | --- |
-| `live_control_panel.py` | Simple launcher, Mission Control status view, and runtime-control surface for the daily daemon. | `python telemetry-viewer\live_control_panel.py` |
-| `live_core_daemon.py` | Streamlined daily daemon: stable compact-packets input or explicit experimental snapshot no-file input, in-memory context, writes off by default, optional brain intent overlay state. Accepts startup `--preset` as a mission-preset alias. | `python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode compact-packets --input-source compact-packets --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 10 --human-dashboard --summary --benchmark` |
-| `control_live_daemon.py` | Local read-only runtime control for daemon mission presets, task policy, goal count, observe-only mode, and baseline reset. Prints JSON to stdout only when requested. | `python telemetry-viewer\control_live_daemon.py --get` |
-| `mission_snapshot.py` | One-shot Mission Snapshot diagnostic for bug reports and before/after comparisons. Reads `/health`, `/status`, and `/control` once, prints to stdout by default, and writes one JSON file only when `--output` is explicit. | `python telemetry-viewer\mission_snapshot.py --daemon-url http://127.0.0.1:8890` |
-| `live_config_doctor.py` | Preset-aware PASS/WARN/FAIL check for daily settings. | `python telemetry-viewer\live_config_doctor.py --latest-session --mode daily --fix-suggestions` or `--mode snapshot_no_file` |
-| `run_daily_gauntlet.py` | Strict daily sanity check for daemon health, process conflicts, progress invariants, and required context domains. | `python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode compact-packets --strict --check-processes` |
-| `run_woodcut_bank_live_qa.py` | One-command woodcut_bank live QA runner. Checks plugin snapshot login, daemon health, full cycle context, history, resource-return state, and gauntlet-style semantic deferrals. | `python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20` |
-| `run_runelite_bootstrap.py` | RuneLite dev bootstrap helper for already-authenticated Play/Continue/CLICK HERE TO PLAY startup flow. It launches/focuses RuneLite when requested, can move it to a secondary monitor, waits for `LOGGED_IN`, starts/reuses the daemon, and can run live QA. It does not type credentials, change account settings, or select worlds. | `python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --move-to-secondary-monitor --start-daemon --run-live-qa --print-candidates --timeout-seconds 180` |
-| `diagnose_live_readiness.py` | One-shot pre-action readiness check for daemon/session/highlighter/overlay/candidate/input-geometry synchronization. Prints to stdout and blocks unsafe action attempts through `execute_next_action.py --wait-for-ready`. | `python telemetry-viewer\diagnose_live_readiness.py --latest-session --daemon-url http://127.0.0.1:8890 --profile woodcutting` |
+| `live_core_daemon.py` | Snapshot No-File daemon on `8890`. | `python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 32 --human-dashboard --summary --benchmark` |
+| `context_service.py` | Query-first current context and blocker explanations. | `python telemetry-viewer\context_service.py --query current-debug-context` |
+| `diagnose_live_readiness.py` | Action readiness and execution gate diagnostics. | `python telemetry-viewer\diagnose_live_readiness.py --latest-session --daemon-url http://127.0.0.1:8890 --profile woodcutting` |
+| `run_daily_gauntlet.py` | Strict daily sanity check. | `python telemetry-viewer\run_daily_gauntlet.py --latest-session --daemon-url http://127.0.0.1:8890 --daily-mode snapshot-no-files --strict --check-processes` |
+| `maintenance.py` | Legacy live packet disk report/prune only. | `python telemetry-viewer\maintenance.py --live-packets-report` |
 
-Daily support modules are hidden from the UI but remain part of the daily lane:
+## Removed Tooling
 
-- `resource_progress.py`: single source of truth for woodcutting progress.
-- `brain_core.py`: read-only brain interpretation.
-- `task_policy.py` and `task_policies.json`: read-only task policy model for
-  interpreting conditions such as a full inventory.
-- `runtime_control.py`: in-memory model and validation for daemon
-  `/control` updates.
-- `mission_presets.py`: named sidecar brain/context presets for runtime
-  control updates; no game actions.
-- `capabilities.py`: capability status/alias registry for analyzer and output
-  consistency.
-- `analyzers\*.py`: in-memory daemon analyzers for inventory, targets,
-  navigation, navigation intent, pathing context, activity, service/process
-  context, brain context, and intent overlay marker construction.
-- `live_context_format.py`: human output formatting.
-- `live_packet_reader.py`, `telemetry_paths.py`, and
-  `navigation_reachability.py`: compact-packet/session/reachability helpers.
+`inspect_live_packets.py` is a retired compatibility shim. The old packet
+reader/runtime fallback is gone; use maintenance for old disk files and
+Knowledge Fabric/current debug context for live state.
 
-## Advanced Debug
-
-Diagnostics and inspectors that are useful when daily output looks wrong:
-
-- `check_live_setup.py`
-- `inspect_live_packets.py`
-- `diagnose_brain_progress.py`
-- `diagnose_inventory_slots.py`
-- `diagnose_overlay_state.py`
-- `diagnose_overlay_geometry.py`
-- `diagnose_pathing_context.py`
-- `diagnose_pathing_matrix.py`
-- `diagnose_service_context.py`
-- `diagnose_bank_ui_context.py`
-- `diagnose_resource_return_context.py`
-- `diagnose_woodcut_bank_cycle.py`
-- `diagnose_woodcut_bank_scenarios.py`
-- `diagnose_cycle_history.py`
-- `diagnose_live_readiness.py`
-- `diagnose_woodcutting_candidates.py`
-- `run_woodcut_bank_live_qa.py`
-- `diagnose_target_coverage.py`
-- `run_stabilization_suite.py`
-- visual/perception/tab inspection helpers
-
-These tools are safe to hide from the daily view because they are not required
-to start or watch the daily daemon.
-
-Pathing matrix examples:
-
-```text
-python telemetry-viewer\diagnose_pathing_matrix.py
-python telemetry-viewer\diagnose_pathing_matrix.py --json
-python telemetry-viewer\diagnose_pathing_context.py --from-daemon --daemon-url http://127.0.0.1:8890
-```
-
-Bank UI / Service State Context examples:
-
-```text
-python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890
-python telemetry-viewer\diagnose_bank_ui_context.py --from-daemon --daemon-url http://127.0.0.1:8890 --json
-```
-
-Full woodcut-bank cycle example:
-
-```text
-python telemetry-viewer\diagnose_resource_return_context.py --from-daemon --daemon-url http://127.0.0.1:8890
-python telemetry-viewer\diagnose_woodcut_bank_cycle.py --from-daemon --daemon-url http://127.0.0.1:8890
-python telemetry-viewer\diagnose_cycle_history.py --from-daemon --daemon-url http://127.0.0.1:8890 --tail 20
-python telemetry-viewer\run_woodcut_bank_live_qa.py --daemon-url http://127.0.0.1:8890 --tail 20
-python telemetry-viewer\diagnose_woodcut_bank_scenarios.py
-python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --scenario bank_closed_return_memory
-python telemetry-viewer\diagnose_woodcut_bank_scenarios.py --json
-python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --dry-run
-python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --start-daemon --run-live-qa
-python telemetry-viewer\run_runelite_bootstrap.py --skip-runelite-launch --execute --start-daemon --run-live-qa
-python telemetry-viewer\run_runelite_bootstrap.py --launch-runelite --execute --move-to-secondary-monitor --start-daemon --run-live-qa --print-candidates --timeout-seconds 180
-python telemetry-viewer\diagnose_live_readiness.py --latest-session --daemon-url http://127.0.0.1:8890 --profile woodcutting
-python telemetry-viewer\diagnose_woodcutting_candidates.py --latest-session --profile woodcutting --top 20 --show-rejections
-python telemetry-viewer\execute_next_action.py --daemon-url http://127.0.0.1:8890 --backend pyautogui --movement-profile linear_debug --hover-only --hover-confirm-target --hover-confirm-timeout-ms 120 --hover-poll-ms 10 --hover-position-tolerance 3
-python telemetry-viewer\execute_next_action.py --daemon-url http://127.0.0.1:8890 --backend pyautogui --movement-profile linear_debug --execute --verify-after-action --wait-for-ready 30 --hover-confirm-target --hover-confirm-timeout-ms 120 --hover-poll-ms 10 --hover-position-tolerance 3 --click-hold-ms 60 --stop-after-inventory-changes 5 --summary-every-action --final-reconcile-ms 2000 --final-reconcile-game-ticks 6 --pacing-profile steady --target-switch-min-ms 400 --target-switch-max-ms 1400
-```
-
-## Legacy File Pipeline
-
-The old three-process chain is retained for compatibility and debugging, but it
-is not the daily workflow:
-
-| Tool | Role |
-| --- | --- |
-| `live_target_processor.py` | Reads compact packets and writes rolling live JSON files. |
-| `context_service.py` | Serves context from those rolling files. |
-| `live_context_query.py` | Human query/dashboard helper over rolling files or context service. |
-| `mock_brain_rehearsal.py` | Legacy context-service rehearsal client. |
-
-Use these only when you intentionally need rolling files such as
-`live_status.json`, `live_candidates.jsonl`, or `live_context_index.json`.
-
-## Batch Audit
-
-Batch/debug tools remain in place for DEBUG_RECORDING sessions, replay, visual
-QA, geometry building, and dataset work:
-
-- `run_target_geometry_pipeline.py`
-- `build_world_target_geometry.py`
-- `build_ui_target_geometry.py`
-- `select_target_candidates.py`
-- `target_geometry_inspector.py`
-- `inspect_target_geometry.py`
-- dataset builders and inspectors
-- replay/viewer/export/validation tools
-
-These are disk-heavy or offline tools and should not be part of the daily
-button set.
-
-## Experimental
-
-These paths are intentionally hidden from daily mode and must be labelled
-`EXPERIMENTAL` in the UI:
-
-- Daily Snapshot No-File / plugin-snapshot input mode and
-  `diagnose_plugin_snapshot.py`
-- compact-stream transport testing
-
-`compact-packets` remains the daily stable source/fallback. Daily Snapshot
-No-File is experimental and must be selected explicitly; it expects the compact
-NDJSON file mirror to be disabled and the plugin snapshot endpoint to pass
-health checks. Compact-stream should only be selected explicitly for transport
-or comparison testing.
-
-## Deprecated
-
-Compatibility tools and uncertain scripts are not deleted automatically. They
-stay out of the daily UI until a reference check proves they can be moved or
-removed.
-
-- `telemetry_launcher.py`
-- top-level `test_telemetry_paths.py`
-
-See `docs\cleanup_report.md` for what was kept, moved, or left alone.
-See `docs\runtime_cleanup_report.md` for the Daily Live runtime audit.
+No current canonical command should enable a live packet archive, packet stream,
+or packet-file fallback.

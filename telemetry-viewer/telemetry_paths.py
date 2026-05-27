@@ -108,14 +108,9 @@ def file_mtime(path: Path) -> float:
 def session_mtime(session_path: Path) -> float:
     manifest = session_path / "manifest.json"
     files = list_tick_files(session_path) + list_event_files(session_path)
-    live_packets = session_path / "live_packets"
-    compact_index = live_packets / "live_packet_index.json"
-    compact_latest = live_packets / "latest_segment.txt"
     mtimes = [file_mtime(manifest)] if manifest.exists() else []
     mtimes.extend(file_mtime(path) for path in files)
-    mtimes.extend(file_mtime(path) for path in (compact_index, compact_latest) if path.exists())
-    if live_packets.exists():
-        mtimes.append(file_mtime(live_packets))
+    mtimes.append(live_output_mtime(session_path))
     return max(mtimes) if mtimes else file_mtime(session_path)
 
 
@@ -161,7 +156,7 @@ def find_newest_live_session(
     if not sessions:
         return None
 
-    return max(sessions, key=live_output_mtime)
+    return max(sessions, key=lambda path: (live_output_mtime(path), str(path).lower()))
 
 
 def find_newest_session(
@@ -184,7 +179,7 @@ def find_newest_session(
         has_session_data = bool(
             list_tick_files(path)
             or list_event_files(path)
-            or (path / "live_packets" / "live_packet_index.json").exists()
+            or session_has_live_outputs(path)
             or manifest
         )
 
@@ -199,7 +194,7 @@ def find_newest_session(
     if not sessions:
         return None
 
-    return max(sessions, key=session_mtime)
+    return max(sessions, key=lambda path: (session_mtime(path), str(path).lower()))
 
 
 def iter_jsonl(files: list[Path], *, with_errors: bool = False):

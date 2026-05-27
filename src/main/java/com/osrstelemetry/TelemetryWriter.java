@@ -130,6 +130,10 @@ public class TelemetryWriter implements Closeable
 		boolean frameRecordingEnabled;
 		boolean rawRecordingEnabled;
 		boolean compactPacketRecordingEnabled;
+		boolean livePacketsRuntimeRemoved;
+		boolean ndjsonRuntimeRemoved;
+		boolean jsonlRuntimeRemoved;
+		boolean livePacketWriterActive;
 		long rawTicksWritten;
 		long rawTicksSuppressedByMode;
 		long rawEventsWritten;
@@ -231,20 +235,6 @@ public class TelemetryWriter implements Closeable
 	private final long frameCleanupIntervalMillis;
 	private final String frameCaptureMode;
 	private final boolean allowScreenRectangleFallback;
-	private final boolean compactLivePacketsEnabled;
-	private final boolean compactLivePacketFilesEnabled;
-	private final boolean compactLiveStreamEnabled;
-	private final String compactLiveStreamHost;
-	private final int compactLiveStreamPort;
-	private final int compactLiveStreamQueueSize;
-	private final boolean compactLiveStreamCircuitBreakerEnabled;
-	private final int compactLiveStreamMaxWriteMillis;
-	private final int compactLiveStreamDisableSeconds;
-	private final int compactLiveSegmentMb;
-	private final long compactLiveRetentionTicks;
-	private final long compactLiveRetentionBytes;
-	private final long compactLiveRetentionSegments;
-	private final int compactLiveQueueSize;
 	private final PluginLiveCache liveCache;
 	private final AtomicLong droppedRecords = new AtomicLong();
 	private final AtomicLong droppedFrameCount = new AtomicLong();
@@ -257,16 +247,12 @@ public class TelemetryWriter implements Closeable
 	private final Map<Integer, String> npcDictionary = new ConcurrentHashMap<>();
 	private final Map<Integer, String> objectDictionary = new ConcurrentHashMap<>();
 	private final Manifest manifest = new Manifest();
-	private LivePacketWriter livePacketWriter;
-	private CompactLiveStreamPublisher compactLiveStreamPublisher;
 
 	private volatile boolean running = false;
 	private Thread worker;
 	private BufferedWriter tickWriter;
 	private BufferedWriter eventWriter;
 	private BufferedWriter frameIndexWriter;
-	private long livePacketStartupErrors;
-	private long liveStreamStartupErrors;
 	private Path currentTickSegment;
 	private Path currentEventSegment;
 	private long currentTickBytes;
@@ -298,19 +284,6 @@ public class TelemetryWriter implements Closeable
 			int maxFrameQueueSize,
 			String frameCaptureMode,
 			boolean allowScreenRectangleFallback,
-			boolean compactLivePacketFilesEnabled,
-			int compactLiveSegmentMb,
-			long compactLiveRetentionTicks,
-			long compactLiveRetentionBytes,
-			long compactLiveRetentionSegments,
-			int compactLiveQueueSize,
-			boolean compactLiveStreamEnabled,
-			String compactLiveStreamHost,
-			int compactLiveStreamPort,
-			int compactLiveStreamQueueSize,
-			boolean compactLiveStreamCircuitBreakerEnabled,
-			int compactLiveStreamMaxWriteMillis,
-			int compactLiveStreamDisableSeconds,
 			PluginLiveCache liveCache)
 	{
 		this.gson = gson;
@@ -345,21 +318,7 @@ public class TelemetryWriter implements Closeable
 		this.frameCleanupIntervalMillis = Duration.ofSeconds(Math.max(1L, frameCleanupIntervalSeconds)).toMillis();
 		this.frameCaptureMode = normalizeFrameCaptureMode(frameCaptureMode);
 		this.allowScreenRectangleFallback = allowScreenRectangleFallback;
-		this.compactLivePacketFilesEnabled = compactLivePacketFilesEnabled;
-		this.compactLiveStreamEnabled = compactLiveStreamEnabled;
-		this.compactLivePacketsEnabled = compactLivePacketFilesEnabled || compactLiveStreamEnabled || liveCache != null;
-		this.compactLiveStreamHost = compactLiveStreamHost == null || compactLiveStreamHost.isBlank() ? "127.0.0.1" : compactLiveStreamHost.trim();
-		this.compactLiveStreamPort = Math.max(0, Math.min(65535, compactLiveStreamPort));
-		this.compactLiveStreamQueueSize = Math.max(1, compactLiveStreamQueueSize);
-		this.compactLiveStreamCircuitBreakerEnabled = compactLiveStreamCircuitBreakerEnabled;
-		this.compactLiveStreamMaxWriteMillis = Math.max(1, compactLiveStreamMaxWriteMillis);
-		this.compactLiveStreamDisableSeconds = Math.max(1, compactLiveStreamDisableSeconds);
 		this.liveCache = liveCache;
-		this.compactLiveSegmentMb = Math.max(1, compactLiveSegmentMb);
-		this.compactLiveRetentionTicks = Math.max(0L, compactLiveRetentionTicks);
-		this.compactLiveRetentionBytes = Math.max(0L, compactLiveRetentionBytes);
-		this.compactLiveRetentionSegments = Math.max(0L, compactLiveRetentionSegments);
-		this.compactLiveQueueSize = Math.max(1, compactLiveQueueSize);
 	}
 
 	public void start() throws IOException
@@ -390,27 +349,31 @@ public class TelemetryWriter implements Closeable
 		manifest.frameRecordingEnabled = frameRecordingEnabled;
 		manifest.rawRecordingEnabled = rawTickRecordingEnabled || rawEventRecordingEnabled;
 		manifest.compactPacketRecordingEnabled = isCompactLivePacketsEnabled();
-		manifest.compactLivePacketFilesEnabled = compactLivePacketFilesEnabled;
-		manifest.compactLiveStreamEnabled = compactLiveStreamEnabled;
-		manifest.compactLiveStreamHost = this.compactLiveStreamHost;
-		manifest.compactLiveStreamPort = this.compactLiveStreamPort;
-		manifest.compactLiveStreamQueueSize = this.compactLiveStreamQueueSize;
-		manifest.compactLiveStreamCircuitBreakerEnabled = this.compactLiveStreamCircuitBreakerEnabled;
-		manifest.compactLiveStreamMaxWriteMillisConfigured = this.compactLiveStreamMaxWriteMillis;
+		manifest.livePacketsRuntimeRemoved = true;
+		manifest.ndjsonRuntimeRemoved = true;
+		manifest.jsonlRuntimeRemoved = true;
+		manifest.livePacketWriterActive = false;
+		manifest.compactLivePacketFilesEnabled = false;
+		manifest.compactLiveStreamEnabled = false;
+		manifest.compactLiveStreamHost = null;
+		manifest.compactLiveStreamPort = 0;
+		manifest.compactLiveStreamQueueSize = 0;
+		manifest.compactLiveStreamCircuitBreakerEnabled = false;
+		manifest.compactLiveStreamMaxWriteMillisConfigured = 0L;
 		manifest.screenshotEveryTicks = screenshotEveryTicks;
 		manifest.screenshotFormat = this.screenshotFormat;
 		manifest.maxFrameStorageMb = (int) (maxFrameStorageBytes / (1024L * 1024L));
 		manifest.frameCleanupIntervalSeconds = (int) (frameCleanupIntervalMillis / 1000L);
 		manifest.frameCaptureMode = frameCaptureMode;
 		manifest.allowScreenRectangleFallback = allowScreenRectangleFallback;
-		manifest.compactLivePacketsEnabled = compactLivePacketsEnabled;
-		manifest.livePacketDir = compactLivePacketFilesEnabled ? LivePacketWriter.LIVE_PACKETS_DIR : null;
-		manifest.livePacketSchema = compactLivePacketsEnabled ? LivePacket.ENVELOPE_SCHEMA : null;
-		manifest.livePacketSegmentMb = compactLiveSegmentMb;
-		manifest.compactLiveRetentionTicks = compactLiveRetentionTicks;
-		manifest.compactLiveRetentionBytes = compactLiveRetentionBytes;
-		manifest.compactLiveRetentionSegments = compactLiveRetentionSegments;
-		manifest.compactLiveQueueSize = compactLiveQueueSize;
+		manifest.compactLivePacketsEnabled = isCompactLivePacketsEnabled();
+		manifest.livePacketDir = null;
+		manifest.livePacketSchema = null;
+		manifest.livePacketSegmentMb = 0;
+		manifest.compactLiveRetentionTicks = 0L;
+		manifest.compactLiveRetentionBytes = 0L;
+		manifest.compactLiveRetentionSegments = 0L;
+		manifest.compactLiveQueueSize = 0;
 		manifest.liveCacheEnabled = isLiveCacheEnabled();
 		manifest.liveCacheUpdates = getLiveCacheUpdates();
 		manifest.liveCacheUpdateErrors = getLiveCacheUpdateErrors();
@@ -430,50 +393,6 @@ public class TelemetryWriter implements Closeable
 		if (frameRecordingEnabled)
 		{
 			openFrameIndex();
-		}
-		if (compactLiveStreamEnabled)
-		{
-			try
-			{
-				compactLiveStreamPublisher = new CompactLiveStreamPublisher(
-						sessionId,
-						gson,
-						this.compactLiveStreamHost,
-						this.compactLiveStreamPort,
-						this.compactLiveStreamQueueSize,
-						this.compactLiveStreamCircuitBreakerEnabled,
-						this.compactLiveStreamMaxWriteMillis,
-						this.compactLiveStreamDisableSeconds);
-				compactLiveStreamPublisher.start();
-			}
-			catch (IOException e)
-			{
-				compactLiveStreamPublisher = null;
-				liveStreamStartupErrors++;
-				log.warn("Compact live stream failed to start; continuing with other telemetry outputs", e);
-			}
-		}
-		if (compactLivePacketFilesEnabled)
-		{
-			try
-			{
-				livePacketWriter = new LivePacketWriter(
-						sessionId,
-						sessionDir,
-						gson,
-					compactLiveSegmentMb,
-					compactLiveRetentionTicks,
-					compactLiveRetentionBytes,
-					compactLiveRetentionSegments,
-					compactLiveQueueSize);
-				livePacketWriter.start();
-			}
-			catch (IOException e)
-			{
-				livePacketWriter = null;
-				livePacketStartupErrors++;
-				log.warn("Compact live packet writer failed to start; continuing with raw telemetry only", e);
-			}
 		}
 		writeManifest();
 
@@ -510,27 +429,8 @@ public class TelemetryWriter implements Closeable
 
 	public boolean enqueueLivePacket(String packetType, long tick, String timestampUtc, Object payload)
 	{
-		LivePacketWriter liveWriter = livePacketWriter;
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
 		PluginLiveCache cache = liveCache;
-		boolean accepted = false;
-
-		if (cache != null)
-		{
-			accepted = cache.update(packetType, tick, timestampUtc, payload);
-		}
-
-		if (streamPublisher != null)
-		{
-			accepted = streamPublisher.enqueue(packetType, tick, timestampUtc, payload) || accepted;
-		}
-
-		if (liveWriter != null)
-		{
-			accepted = liveWriter.enqueue(packetType, tick, timestampUtc, payload) || accepted;
-		}
-
-		return accepted;
+		return cache != null && cache.update(packetType, tick, timestampUtc, payload);
 	}
 
 	public boolean updateLiveCache(String packetType, long tick, String timestampUtc, Object payload)
@@ -541,7 +441,7 @@ public class TelemetryWriter implements Closeable
 
 	public boolean isCompactLivePacketsEnabled()
 	{
-		return livePacketWriter != null || compactLiveStreamPublisher != null || liveCache != null;
+		return liveCache != null;
 	}
 
 	public boolean isLiveCacheEnabled()
@@ -551,12 +451,12 @@ public class TelemetryWriter implements Closeable
 
 	public boolean isCompactLivePacketFilesEnabled()
 	{
-		return livePacketWriter != null;
+		return false;
 	}
 
 	public boolean isCompactLiveStreamEnabled()
 	{
-		return compactLiveStreamPublisher != null;
+		return false;
 	}
 
 	public String getRecordingMode()
@@ -746,56 +646,47 @@ public class TelemetryWriter implements Closeable
 
 	public int getLivePacketQueueDepth()
 	{
-		LivePacketWriter liveWriter = livePacketWriter;
-		return liveWriter == null ? 0 : liveWriter.getQueueDepth();
+		return 0;
 	}
 
 	public long getLivePacketsDropped()
 	{
-		LivePacketWriter liveWriter = livePacketWriter;
-		return liveWriter == null ? 0L : liveWriter.getDroppedPackets();
+		return 0L;
 	}
 
 	public long getLivePacketsWritten()
 	{
-		LivePacketWriter liveWriter = livePacketWriter;
-		return liveWriter == null ? 0L : liveWriter.getWrittenPackets();
+		return 0L;
 	}
 
 	public long getLivePacketWriteErrors()
 	{
-		LivePacketWriter liveWriter = livePacketWriter;
-		return livePacketStartupErrors + (liveWriter == null ? 0L : liveWriter.getWriteErrors());
+		return 0L;
 	}
 
 	public long getLivePacketLastWriteMillis()
 	{
-		LivePacketWriter liveWriter = livePacketWriter;
-		return liveWriter == null ? -1L : liveWriter.getLastWriteMillis();
+		return -1L;
 	}
 
 	public long getLivePacketSegmentCount()
 	{
-		LivePacketWriter liveWriter = livePacketWriter;
-		return liveWriter == null ? 0L : liveWriter.getSegmentCount();
+		return 0L;
 	}
 
 	public long getLivePacketTotalBytes()
 	{
-		LivePacketWriter liveWriter = livePacketWriter;
-		return liveWriter == null ? 0L : liveWriter.getTotalBytes();
+		return 0L;
 	}
 
 	public long getLivePacketSegmentsPruned()
 	{
-		LivePacketWriter liveWriter = livePacketWriter;
-		return liveWriter == null ? 0L : liveWriter.getPrunedSegments();
+		return 0L;
 	}
 
 	public String getLivePacketActiveSegment()
 	{
-		LivePacketWriter liveWriter = livePacketWriter;
-		return liveWriter == null ? null : liveWriter.getActiveSegmentName();
+		return null;
 	}
 
 	public long getLiveCacheUpdates()
@@ -835,134 +726,112 @@ public class TelemetryWriter implements Closeable
 
 	public int getCompactLiveStreamQueueDepth()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? 0 : streamPublisher.getQueueDepth();
+		return 0;
 	}
 
 	public int getCompactLiveStreamClientCount()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? 0 : streamPublisher.getClientCount();
+		return 0;
 	}
 
 	public long getCompactLiveStreamPacketsOffered()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? 0L : streamPublisher.getOfferedPackets();
+		return 0L;
 	}
 
 	public long getCompactLiveStreamPacketsWritten()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? 0L : streamPublisher.getStreamedPackets();
+		return 0L;
 	}
 
 	public long getCompactLiveStreamPacketsDropped()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? 0L : streamPublisher.getDroppedPackets();
+		return 0L;
 	}
 
 	public long getCompactLiveStreamPacketsDroppedNoClients()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? 0L : streamPublisher.getDroppedNoClients();
+		return 0L;
 	}
 
 	public long getCompactLiveStreamPacketsDroppedByCircuitBreaker()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? 0L : streamPublisher.getDroppedByCircuitBreaker();
+		return 0L;
 	}
 
 	public long getCompactLiveStreamWriteErrors()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return liveStreamStartupErrors + (streamPublisher == null ? 0L : streamPublisher.getWriteErrors());
+		return 0L;
 	}
 
 	public long getCompactLiveStreamAcceptedClients()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? 0L : streamPublisher.getAcceptedClients();
+		return 0L;
 	}
 
 	public long getCompactLiveStreamDisconnectedClients()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? 0L : streamPublisher.getDisconnectedClients();
+		return 0L;
 	}
 
 	public long getCompactLiveStreamLastWriteMillis()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? -1L : streamPublisher.getLastWriteMillis();
+		return -1L;
 	}
 
 	public long getCompactLiveStreamMaxWriteMillisObserved()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? 0L : streamPublisher.getMaxWriteMillisObserved();
+		return 0L;
 	}
 
 	public boolean isCompactLiveStreamCircuitBreakerTripped()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher != null && streamPublisher.isCircuitBreakerTripped();
+		return false;
 	}
 
 	public String getCompactLiveStreamCircuitBreakerReason()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? null : streamPublisher.getCircuitBreakerReason();
+		return null;
 	}
 
 	public String getCompactLiveStreamDisabledUntilUtc()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? null : streamPublisher.getDisabledUntilUtc();
+		return null;
 	}
 
 	public long getCompactLiveStreamCircuitBreakerTrips()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? 0L : streamPublisher.getCircuitBreakerTrips();
+		return 0L;
 	}
 
 	public Map<String, Long> getCompactLiveStreamPacketsByType()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? Map.of() : streamPublisher.getStreamedPacketsByType();
+		return Map.of();
 	}
 
 	public Map<String, Long> getCompactLiveStreamPacketsOfferedByType()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? Map.of() : streamPublisher.getOfferedPacketsByType();
+		return Map.of();
 	}
 
 	public Map<String, Long> getCompactLiveStreamPacketsSentByType()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? Map.of() : streamPublisher.getStreamedPacketsByType();
+		return Map.of();
 	}
 
 	public Map<String, Long> getCompactLiveStreamPacketsDroppedByType()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? Map.of() : streamPublisher.getDroppedPacketsByType();
+		return Map.of();
 	}
 
 	public Map<String, Long> getCompactLiveStreamLatestOfferedTickByType()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? Map.of() : streamPublisher.getLatestOfferedTickByType();
+		return Map.of();
 	}
 
 	public Map<String, Long> getCompactLiveStreamLatestTickByType()
 	{
-		CompactLiveStreamPublisher streamPublisher = compactLiveStreamPublisher;
-		return streamPublisher == null ? Map.of() : streamPublisher.getLatestSentTickByType();
+		return Map.of();
 	}
 
 	public void rememberItem(int id, String name)
@@ -1045,7 +914,6 @@ public class TelemetryWriter implements Closeable
 			closeWriter(tickWriter, "ticks");
 			closeWriter(eventWriter, "events");
 			closeWriter(frameIndexWriter, "frame index");
-			closeLivePacketWriter();
 			manifest.active = false;
 			manifest.endedAtUtc = Instant.now().toString();
 			manifest.droppedRecords = droppedRecords.get();
@@ -1323,35 +1191,12 @@ public class TelemetryWriter implements Closeable
 	public void close()
 	{
 		running = false;
-		closeLivePacketWriter();
-		closeCompactLiveStreamPublisher();
 
 		if (worker != null)
 		{
 			worker.interrupt();
 			worker = null;
 		}
-	}
-
-	private void closeLivePacketWriter()
-	{
-		if (livePacketWriter == null)
-		{
-			return;
-		}
-
-		livePacketWriter.close();
-	}
-
-	private void closeCompactLiveStreamPublisher()
-	{
-		if (compactLiveStreamPublisher == null)
-		{
-			return;
-		}
-
-		compactLiveStreamPublisher.close();
-		compactLiveStreamPublisher = null;
 	}
 
 	private void drainQueue()
@@ -1478,9 +1323,13 @@ public class TelemetryWriter implements Closeable
 		manifest.framesSuppressedByMode = framesSuppressedByMode.get();
 		manifest.rawRecordingEnabled = rawTickRecordingEnabled || rawEventRecordingEnabled;
 		manifest.compactPacketRecordingEnabled = isCompactLivePacketsEnabled();
-		manifest.compactLivePacketFilesEnabled = compactLivePacketFilesEnabled;
-		manifest.compactLiveStreamEnabled = compactLiveStreamEnabled;
-		manifest.compactLiveStreamRunning = compactLiveStreamPublisher != null;
+		manifest.livePacketsRuntimeRemoved = true;
+		manifest.ndjsonRuntimeRemoved = true;
+		manifest.jsonlRuntimeRemoved = true;
+		manifest.livePacketWriterActive = false;
+		manifest.compactLivePacketFilesEnabled = false;
+		manifest.compactLiveStreamEnabled = false;
+		manifest.compactLiveStreamRunning = false;
 		manifest.compactLiveStreamClientCount = getCompactLiveStreamClientCount();
 		manifest.compactLiveStreamPacketsOffered = getCompactLiveStreamPacketsOffered();
 		manifest.compactLiveStreamPacketsWritten = getCompactLiveStreamPacketsWritten();
@@ -1508,8 +1357,8 @@ public class TelemetryWriter implements Closeable
 		manifest.livePacketSegmentCount = getLivePacketSegmentCount();
 		manifest.livePacketTotalBytes = getLivePacketTotalBytes();
 		manifest.livePacketSegmentsPruned = getLivePacketSegmentsPruned();
-		manifest.livePacketRetentionBytes = compactLiveRetentionBytes;
-		manifest.livePacketRetentionSegments = compactLiveRetentionSegments;
+		manifest.livePacketRetentionBytes = 0L;
+		manifest.livePacketRetentionSegments = 0L;
 		manifest.livePacketActiveSegment = getLivePacketActiveSegment();
 		manifest.liveCacheEnabled = isLiveCacheEnabled();
 		manifest.liveCacheUpdates = getLiveCacheUpdates();
