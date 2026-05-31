@@ -76,6 +76,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--calibration-window-center", dest="calibration_window_center", action="store_true", default=True, help="Place the fallback calibration window near the screen center.")
     parser.add_argument("--calibration-window-near-cursor", dest="calibration_window_center", action="store_false", help="Place the fallback calibration window near the current cursor for diagnostics.")
     parser.add_argument("--calibration-staging-max-distance-px", type=int, default=150, help="Maximum no-click Arduino staging distance into the calibration region.")
+    parser.add_argument("--arduino-pointer-calibration-path", help="Path for the persisted Arduino pointer calibration record.")
+    parser.add_argument("--arduino-pointer-calibration-max-age-hours", type=float, default=8.0, help="Maximum age for a persisted Arduino pointer calibration record used by live movement.")
     parser.add_argument("--allow-uncalibrated-arduino-movement", action="store_true", help="Explicit override for Arduino RuneLite movement before pointer calibration has been reviewed.")
     parser.add_argument("--input-integrity-self-test", action="store_true", help="Run an Arduino monitor/arming/tiny-pulse self-test without game actions.")
     parser.add_argument("--input-integrity-self-test-no-move", action="store_true", help="Run the Arduino integrity self-test without sending MOVE/CLICK/KEY commands.")
@@ -1686,7 +1688,8 @@ def _calibration_movement_metrics(traces: list[Any]) -> dict[str, Any]:
     for trace in traces:
         if not isinstance(trace, dict):
             continue
-        trace_total = int(trace.get("totalChunks") or trace.get("chunkCount") or 0)
+        chunks = trace.get("movementChunks") if isinstance(trace.get("movementChunks"), list) else []
+        trace_total = int(trace.get("totalChunks") or trace.get("chunkCount") or len(chunks) or 0)
         trace_success = int(trace.get("successfulChunks") or (trace_total if trace.get("status") == "PASS" and "successfulChunks" not in trace else 0))
         metrics["totalChunks"] += trace_total
         metrics["successfulChunks"] += trace_success
@@ -1731,6 +1734,212 @@ def _input_integrity_has_blocking_counts(monitor_payload: dict[str, Any] | None)
     if bypass:
         warnings.append("direct_backend_bypass_detected_after_calibration")
     return bool(warnings), warnings
+
+
+POINTER_CALIBRATION_RECORD_SCHEMA = "arduino_pointer_calibration_record.v1"
+POINTER_CALIBRATION_MIN_SUCCESS_RATE = 0.80
+POINTER_CALIBRATION_MAX_FINAL_ERROR_PX = 6
+POINTER_CALIBRATION_MAX_CONSECUTIVE_NOEFFECT = 3
+
+
+def _safe_path_token(value: Any) -> str:
+    text = str(value or "unknown").strip() or "unknown"
+    return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in text)
+
+
+def _pointer_calibration_path(args: argparse.Namespace) -> Path:
+    configured = getattr(args, "arduino_pointer_calibration_path", None)
+    if configured:
+        return Path(configured)
+    port = _safe_path_token(getattr(args, "arduino_port", None) or "unknown").upper()
+    return Path("interaction_geometry") / "live" / f"arduino_pointer_calibration_{port}.json"
+
+
+def _utc_now_text() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _calibration_summary_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "schema",
+        "status",
+        "backend",
+        "arduinoPort",
+        "allowedWindow",
+        "allowedRegion",
+        "expandedStagingRegion",
+        "calibrationWindow",
+        "runeliteWindow",
+        "fallbackCalibrationWindow",
+        "targetPoints",
+        "movementMetrics",
+        "totalChunks",
+        "successfulChunks",
+        "retryChunks",
+        "noEffectChunks",
+        "consecutiveNoEffectChunks",
+        "movementSuccessRate",
+        "maxPositionErrorPx",
+        "finalPositionErrorPx",
+        "cursorLeftAllowedRegion",
+        "clickSent",
+        "keySent",
+        "directBackendBypassCount",
+        "firmwareStatusAfter",
+        "monitorAfter",
+        "foregroundWindowBefore",
+        "foregroundWindowAfter",
+        "warnings",
+    )
+    return {field: payload.get(field) for field in fields if field in payload}
+
+
+def _build_pointer_calibration_record(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str, Any]:
+    now_ms = int(time.time() * 1000)
+    return {
+        "schema": POINTER_CALIBRATION_RECORD_SCHEMA,
+        "status": payload.get("status"),
+        "writtenAtUtc": _utc_now_text(),
+        "writtenAtMillis": now_ms,
+        "arduinoPort": payload.get("arduinoPort") or getattr(args, "arduino_port", None),
+        "arduinoVid": getattr(args, "arduino_vid", None),
+        "arduinoPid": getattr(args, "arduino_pid", None),
+        "allowedWindow": payload.get("allowedWindow"),
+        "movementMetrics": payload.get("movementMetrics"),
+        "totalChunks": payload.get("totalChunks"),
+        "successfulChunks": payload.get("successfulChunks"),
+        "retryChunks": payload.get("retryChunks"),
+        "noEffectChunks": payload.get("noEffectChunks"),
+        "consecutiveNoEffectChunks": payload.get("consecutiveNoEffectChunks"),
+        "movementSuccessRate": payload.get("movementSuccessRate"),
+        "maxPositionErrorPx": payload.get("maxPositionErrorPx"),
+        "finalPositionErrorPx": payload.get("finalPositionErrorPx"),
+        "clickSent": bool(payload.get("clickSent")),
+        "keySent": bool(payload.get("keySent")),
+        "directBackendBypassCount": int(payload.get("directBackendBypassCount") or 0),
+        "cursorLeftAllowedRegion": bool(payload.get("cursorLeftAllowedRegion")),
+        "firmwareStatusAfter": payload.get("firmwareStatusAfter"),
+        "monitorAfter": payload.get("monitorAfter"),
+        "calibrationPayload": _calibration_summary_payload(payload),
+    }
+
+
+def _pointer_calibration_validation(args: argparse.Namespace, record: dict[str, Any], *, enforce_age: bool) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not isinstance(record, dict):
+        return {"status": "FAIL", "blockers": ["calibration_record_not_json"], "warnings": warnings}
+    if record.get("schema") != POINTER_CALIBRATION_RECORD_SCHEMA:
+        blockers.append("calibration_record_schema_mismatch")
+    if record.get("status") != "PASS":
+        blockers.append("calibration_status_not_pass")
+    expected_port = str(getattr(args, "arduino_port", None) or "").strip().upper()
+    record_port = str(record.get("arduinoPort") or "").strip().upper()
+    if expected_port and record_port and expected_port != record_port:
+        blockers.append("calibration_port_mismatch")
+    elif expected_port and not record_port:
+        blockers.append("calibration_port_missing")
+    now_ms = int(time.time() * 1000)
+    written_ms = record.get("writtenAtMillis")
+    if enforce_age:
+        try:
+            age_ms = now_ms - int(written_ms)
+        except (TypeError, ValueError):
+            blockers.append("calibration_written_time_missing")
+        else:
+            max_age_hours = float(getattr(args, "arduino_pointer_calibration_max_age_hours", 8.0) or 0)
+            if max_age_hours > 0 and age_ms > max_age_hours * 60 * 60 * 1000:
+                blockers.append("calibration_record_stale")
+    total = int(record.get("totalChunks") or 0)
+    if total <= 0:
+        blockers.append("calibration_no_movement_chunks")
+    success_rate = record.get("movementSuccessRate")
+    try:
+        success_value = float(success_rate)
+    except (TypeError, ValueError):
+        blockers.append("calibration_success_rate_missing")
+    else:
+        if success_value < POINTER_CALIBRATION_MIN_SUCCESS_RATE:
+            blockers.append("calibration_success_rate_too_low")
+    for field in ("finalPositionErrorPx", "maxPositionErrorPx"):
+        value = record.get(field)
+        if value is None:
+            blockers.append(f"{field}_missing")
+            continue
+        try:
+            if int(value) > POINTER_CALIBRATION_MAX_FINAL_ERROR_PX:
+                blockers.append(f"{field}_too_large")
+        except (TypeError, ValueError):
+            blockers.append(f"{field}_invalid")
+    if int(record.get("consecutiveNoEffectChunks") or 0) > POINTER_CALIBRATION_MAX_CONSECUTIVE_NOEFFECT:
+        blockers.append("calibration_too_many_consecutive_no_effect_chunks")
+    if bool(record.get("cursorLeftAllowedRegion")):
+        blockers.append("calibration_cursor_left_allowed_region")
+    if bool(record.get("clickSent")):
+        blockers.append("calibration_sent_click")
+    if bool(record.get("keySent")):
+        blockers.append("calibration_sent_key")
+    if int(record.get("directBackendBypassCount") or 0) != 0:
+        blockers.append("calibration_backend_bypass_detected")
+    firmware = record.get("firmwareStatusAfter") if isinstance(record.get("firmwareStatusAfter"), dict) else {}
+    if firmware:
+        if firmware.get("armed") or int(firmware.get("keysDown") or 0) != 0 or int(firmware.get("mouseButtonsDown") or 0) != 0:
+            blockers.append("calibration_firmware_not_safe")
+    else:
+        blockers.append("calibration_firmware_status_missing")
+    integrity_blocked, integrity_warnings = _input_integrity_has_blocking_counts(record.get("monitorAfter"))
+    if integrity_blocked:
+        blockers.extend(integrity_warnings)
+    return {
+        "status": "PASS" if not blockers else "FAIL",
+        "blockers": blockers,
+        "warnings": warnings,
+        "path": str(_pointer_calibration_path(args)),
+        "writtenAtUtc": record.get("writtenAtUtc"),
+        "arduinoPort": record.get("arduinoPort"),
+        "totalChunks": total,
+        "successfulChunks": int(record.get("successfulChunks") or 0),
+        "retryChunks": int(record.get("retryChunks") or 0),
+        "noEffectChunks": int(record.get("noEffectChunks") or 0),
+        "movementSuccessRate": record.get("movementSuccessRate"),
+        "maxPositionErrorPx": record.get("maxPositionErrorPx"),
+        "finalPositionErrorPx": record.get("finalPositionErrorPx"),
+    }
+
+
+def _persist_pointer_calibration_record(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str, Any]:
+    path = _pointer_calibration_path(args)
+    record = _build_pointer_calibration_record(args, payload)
+    validation = _pointer_calibration_validation(args, record, enforce_age=False)
+    payload["calibrationPath"] = str(path)
+    payload["calibrationValidation"] = validation
+    if payload.get("status") != "PASS" or validation.get("status") != "PASS":
+        payload["calibrationPersisted"] = False
+        return validation
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+        payload["calibrationPersisted"] = True
+    except Exception as error:  # noqa: BLE001
+        payload["status"] = "FAIL"
+        payload["calibrationPersisted"] = False
+        payload["warnings"].append(f"calibration_persist_failed: {type(error).__name__}: {error}")
+        validation = {**validation, "status": "FAIL", "blockers": [*validation.get("blockers", []), "calibration_persist_failed"]}
+        payload["calibrationValidation"] = validation
+    return validation
+
+
+def _load_pointer_calibration_for_live_movement(args: argparse.Namespace) -> dict[str, Any]:
+    path = _pointer_calibration_path(args)
+    if not path.exists():
+        return {"status": "FAIL", "path": str(path), "blockers": ["calibration_record_missing"], "warnings": []}
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as error:  # noqa: BLE001
+        return {"status": "FAIL", "path": str(path), "blockers": [f"calibration_record_read_failed:{type(error).__name__}"], "warnings": []}
+    validation = _pointer_calibration_validation(args, record, enforce_age=True)
+    validation["path"] = str(path)
+    return validation
 
 
 def run_arduino_pointer_calibration_test(args: argparse.Namespace, backend: Any) -> dict[str, Any]:
@@ -2014,6 +2223,7 @@ def run_arduino_pointer_calibration_test(args: argparse.Namespace, backend: Any)
             payload["warnings"].append("user_control_confirmation_missing")
     else:
         payload["userControlConfirmation"] = {"required": False, "confirmed": None, "status": "SKIPPED"}
+    _persist_pointer_calibration_record(args, payload)
     return payload
 
 
@@ -2183,26 +2393,29 @@ def main(argv: list[str] | None = None) -> int:
         and (args.execute or args.hover_only)
         and not bool(getattr(args, "allow_uncalibrated_arduino_movement", False))
     ):
-        payload = {
-            "schema": "arduino_live_movement_block.v1",
-            "status": "FAIL",
-            "reason": "arduino_pointer_calibration_required",
-            "executed": False,
-            "clickSent": False,
-            "keySent": False,
-            "liveRuneLiteClicksBlocked": True,
-            "overrideFlag": "--allow-uncalibrated-arduino-movement",
-            "warnings": [
-                "Arduino live RuneLite movement is blocked until closed-loop pointer calibration is reviewed."
-            ],
-        }
-        print(
-            json.dumps(payload, indent=2, sort_keys=False)
-            if args.json
-            else "Live action blocked: Arduino pointer calibration is required before RuneLite movement.\n",
-            end="",
-        )
-        return 1
+        calibration_status = _load_pointer_calibration_for_live_movement(args)
+        if calibration_status.get("status") != "PASS":
+            payload = {
+                "schema": "arduino_live_movement_block.v1",
+                "status": "FAIL",
+                "reason": "arduino_pointer_calibration_required",
+                "executed": False,
+                "clickSent": False,
+                "keySent": False,
+                "liveRuneLiteClicksBlocked": True,
+                "overrideFlag": "--allow-uncalibrated-arduino-movement",
+                "pointerCalibration": calibration_status,
+                "warnings": [
+                    "Arduino live RuneLite movement is blocked until a closed-loop pointer calibration record is present and valid."
+                ],
+            }
+            print(
+                json.dumps(payload, indent=2, sort_keys=False)
+                if args.json
+                else "Live action blocked: Arduino pointer calibration is required before RuneLite movement.\n",
+                end="",
+            )
+            return 1
     if args.require_user_control_confirmation and (args.execute or args.hover_only or args.camera_self_test):
         confirmation = _prompt_user_control_confirmation()
         if not confirmation.get("confirmed"):

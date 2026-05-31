@@ -370,15 +370,18 @@ def _candidate_projection_status(candidate: dict[str, Any]) -> dict[str, Any]:
     degenerate = bool(has_point and abs(float(canvas_x)) < 0.001 and abs(float(canvas_y)) < 0.001)
     on_screen = candidate.get("onScreen")
     ui_blocked = bool(candidate.get("uiBlocked") or (isinstance(aim, dict) and aim.get("uiBlocked") is True))
-    visible = bool((on_screen is True or has_point) and not degenerate)
+    explicitly_offscreen = on_screen is False
+    visible = bool((on_screen is True or (on_screen is None and has_point)) and not degenerate and not explicitly_offscreen)
+    in_canvas = True if has_point and not degenerate and not explicitly_offscreen else (False if has_point else None)
+    actionable_by_canvas = bool(visible and in_canvas is True and not ui_blocked)
     return {
         "schema": "route_projection_status.v1",
         "canvasPoint": {"canvasX": canvas_x, "canvasY": canvas_y} if has_point else None,
         "projectionAvailable": has_point,
         "visible": visible,
-        "inCanvas": True if has_point and not degenerate else None,
+        "inCanvas": in_canvas,
         "inViewport": True if on_screen is True else (None if on_screen is None else False),
-        "offscreen": on_screen is False,
+        "offscreen": explicitly_offscreen,
         "degenerateProjection": degenerate,
         "tinyProjection": False,
         "uiBlocked": ui_blocked,
@@ -386,7 +389,7 @@ def _candidate_projection_status(candidate: dict[str, Any]) -> dict[str, Any]:
         "hoverOption": candidate.get("hoverTopOption") or candidate.get("topOption"),
         "hoverTarget": candidate.get("hoverTopTarget") or candidate.get("topTarget"),
         "projectionSource": (aim or {}).get("source") if isinstance(aim, dict) else None,
-        "actionableByCanvas": bool(visible and not ui_blocked),
+        "actionableByCanvas": actionable_by_canvas,
         "actionableByMinimap": None,
         "rejectionReason": "uiBlocked" if ui_blocked else ("degenerateProjection" if degenerate else ("offscreen" if on_screen is False else None)),
     }
@@ -702,6 +705,7 @@ def _route_object_census(
         key=lambda item: (
             0 if item.get("routeRelevanceStatus") == "PASS" else 1,
             0 if _dict(item.get("projectionStatus")).get("visible") else 1,
+            0 if _dict(item.get("projectionStatus")).get("actionableByCanvas") is True else 1,
             item.get("distanceToPlayer") if isinstance(item.get("distanceToPlayer"), int) else 9999,
             str(item.get("name") or ""),
         ),

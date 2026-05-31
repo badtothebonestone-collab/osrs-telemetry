@@ -284,9 +284,49 @@ def _first_value(*values: Any) -> Any:
 
 
 def _resource_count_from_status(status: dict[str, Any], brain: dict[str, Any]) -> int | None:
-    progress = _first_dict(brain.get("goalProgress"), status.get("goalProgress"))
-    value = _first_value(progress.get("heldResourceCount"), progress.get("currentHeldCount"), status.get("resourceCount"))
+    progress = _first_dict(
+        brain.get("goalProgress"),
+        _nested_dict(brain, "genericTaskState", "goalProgress"),
+        status.get("goalProgress"),
+    )
+    value = _first_value(
+        progress.get("heldResourceCount"),
+        progress.get("currentHeldCount"),
+        status.get("resourceCount"),
+        status.get("inventoryMatchingResourceCount"),
+        status.get("bankResourceItemsHeld"),
+    )
     return _int_or_none(value)
+
+
+def _banking_complete(bank_operation: dict[str, Any]) -> bool:
+    resource_items_held = _int_or_none(bank_operation.get("resourceItemsHeld"))
+    resource_item_quantity = _int_or_none(bank_operation.get("resourceItemQuantity"))
+    if (resource_items_held is not None and resource_items_held > 0) or (
+        resource_item_quantity is not None and resource_item_quantity > 0
+    ):
+        return False
+    if bank_operation.get("bankingComplete") is True:
+        return True
+    if bank_operation.get("operationNeeded") is False and resource_items_held == 0:
+        return True
+    return False
+
+
+def _service_action_context_ready(status: dict[str, Any], service: dict[str, Any]) -> bool:
+    if _first_value(service.get("serviceReady"), status.get("serviceReady")) is True:
+        return True
+    route_context = _first_dict(service.get("serviceRouteContext"), status.get("serviceRouteContext"))
+    route_action_ready = _first_value(route_context.get("actionReady"), status.get("serviceRouteActionReady")) is True
+    if not route_action_ready:
+        return False
+    if _first_dict(route_context.get("visibleServiceTarget"), route_context.get("selectedServiceObject"), route_context.get("visibleInteractionTarget")):
+        return True
+    return _first_value(
+        route_context.get("serviceObjectInterceptReady"),
+        status.get("serviceObjectInterceptReady"),
+        status.get("serviceRouteObjectInterceptReady"),
+    ) is True
 
 
 def _action_need_state(
@@ -316,11 +356,20 @@ def _action_need_state(
         or service.get("serviceRequired") is True
         or status.get("serviceNeeded") is True
     )
+    resource_count = _resource_count_from_status(status, brain)
+    service_needed_at_current_target = bool(
+        service_context_required
+        and resource_count is not None
+        and resource_count > 0
+        and not _banking_complete(bank_operation)
+        and _service_action_context_ready(status, service)
+    )
     needs_service = bool(
         phase in {"needs_service", "route_to_service", "pathing_to_service", "inventory_full"}
         or active_intent in {"needs_service", "route_to_service", "pathing_to_service", "inventory_full"}
         or inventory_full is True
         or free_slots == 0
+        or service_needed_at_current_target
     )
     waiting_for_result = bool(phase in WAITING_PHASES or active_intent in WAITING_PHASES)
     progress = _first_dict(brain.get("goalProgress"), status.get("goalProgress"))
@@ -362,7 +411,7 @@ def _action_need_state(
         "phase": phase or None,
         "activeIntent": active_intent or None,
         "inventoryFreeSlots": free_slots,
-        "resourceCount": _resource_count_from_status(status, brain),
+        "resourceCount": resource_count,
         "needsNextTarget": needs_next_target,
         "needsService": needs_service,
         "serviceContextRequired": service_context_required,

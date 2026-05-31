@@ -263,17 +263,20 @@ class ArduinoLiveInputPolicyTest(unittest.TestCase):
     def test_arduino_live_execute_blocked_until_pointer_calibrated(self):
         original_stdout = sys.stdout
         capture = StringIO()
-        try:
-            sys.stdout = capture
-            rc = execute_cli.main(["--execute", "--backend", "arduino", "--json"])
-        finally:
-            sys.stdout = original_stdout
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_path = str(Path(tmp) / "missing_pointer_calibration.json")
+            try:
+                sys.stdout = capture
+                rc = execute_cli.main(["--execute", "--backend", "arduino", "--json", "--arduino-pointer-calibration-path", missing_path])
+            finally:
+                sys.stdout = original_stdout
 
         payload = json.loads(capture.getvalue())
         self.assertEqual(rc, 1)
         self.assertEqual(payload["reason"], "arduino_pointer_calibration_required")
         self.assertTrue(payload["liveRuneLiteClicksBlocked"])
         self.assertFalse(payload["clickSent"])
+        self.assertIn("calibration_record_missing", payload["pointerCalibration"]["blockers"])
 
     def test_arduino_stop_all_cli_sends_stop_all(self):
         serials = []
@@ -389,70 +392,88 @@ class ArduinoLiveInputPolicyTest(unittest.TestCase):
         self.assertFalse(backend.status()["connected"])
 
     def test_pointer_calibration_sends_no_click_or_key(self):
-        args = execute_cli.parse_args(["--arduino-pointer-calibration-test", "--allowed-window", "calibration", "--arduino-port", "COM9"])
-        execute_cli.apply_focus_default(args)
-        backend = FakeCalibrationBackend()
-        original_context = execute_cli._calibration_window_context
-        original_cursor = execute_cli._cursor_position
-        original_foreground = execute_cli._foreground_window_info
-        try:
-            execute_cli._calibration_window_context = lambda _args: (
-                None,
-                {"type": "calibration", "window": {"title": "Arduino Cursor Calibration"}, "fallbackCalibrationWindow": True},
-                {"x": 10, "y": 10, "width": 100, "height": 80},
-                ["Arduino Cursor Calibration"],
-            )
-            execute_cli._cursor_position = lambda: {"x": 20, "y": 20}
-            execute_cli._foreground_window_info = lambda: {"available": True, "title": "Arduino Cursor Calibration", "pid": 123}
+        with tempfile.TemporaryDirectory() as tmp:
+            calibration_path = Path(tmp) / "pointer_calibration.json"
+            args = execute_cli.parse_args([
+                "--arduino-pointer-calibration-test",
+                "--allowed-window",
+                "calibration",
+                "--arduino-port",
+                "COM9",
+                "--arduino-pointer-calibration-path",
+                str(calibration_path),
+            ])
+            execute_cli.apply_focus_default(args)
+            backend = FakeCalibrationBackend()
+            original_context = execute_cli._calibration_window_context
+            original_cursor = execute_cli._cursor_position
+            original_foreground = execute_cli._foreground_window_info
+            try:
+                execute_cli._calibration_window_context = lambda _args: (
+                    None,
+                    {"type": "calibration", "window": {"title": "Arduino Cursor Calibration"}, "fallbackCalibrationWindow": True},
+                    {"x": 10, "y": 10, "width": 100, "height": 80},
+                    ["Arduino Cursor Calibration"],
+                )
+                execute_cli._cursor_position = lambda: {"x": 20, "y": 20}
+                execute_cli._foreground_window_info = lambda: {"available": True, "title": "Arduino Cursor Calibration", "pid": 123}
 
-            payload = execute_cli.run_arduino_pointer_calibration_test(args, backend)
-        finally:
-            execute_cli._calibration_window_context = original_context
-            execute_cli._cursor_position = original_cursor
-            execute_cli._foreground_window_info = original_foreground
+                payload = execute_cli.run_arduino_pointer_calibration_test(args, backend)
+                calibration_exists = calibration_path.exists()
+                loaded = execute_cli._load_pointer_calibration_for_live_movement(args)
+            finally:
+                execute_cli._calibration_window_context = original_context
+                execute_cli._cursor_position = original_cursor
+                execute_cli._foreground_window_info = original_foreground
 
         self.assertEqual(payload["status"], "PASS")
         self.assertFalse(payload["clickSent"])
         self.assertFalse(payload["keySent"])
         self.assertEqual(payload["directBackendBypassCount"], 0)
         self.assertEqual(len(payload["movementTraces"]), 5)
+        self.assertTrue(payload["calibrationPersisted"])
+        self.assertTrue(calibration_exists)
+        self.assertEqual(loaded["status"], "PASS")
         self.assertIn(("stop_all",), backend.calls)
         self.assertIn(("disarm",), backend.calls)
         self.assertNotIn(("click_at",), backend.calls)
         self.assertFalse(any(call[0] == "press" for call in backend.calls))
 
     def test_pointer_calibration_stages_when_cursor_near_allowed_region(self):
-        args = execute_cli.parse_args(
-            [
-                "--arduino-pointer-calibration-test",
-                "--allowed-window",
-                "calibration",
-                "--arduino-port",
-                "COM9",
-                "--calibration-staging-max-distance-px",
-                "150",
-            ]
-        )
-        execute_cli.apply_focus_default(args)
-        backend = FakeCalibrationBackend()
-        original_context = execute_cli._calibration_window_context
-        original_cursor = execute_cli._cursor_position
-        original_foreground = execute_cli._foreground_window_info
-        try:
-            execute_cli._calibration_window_context = lambda _args: (
-                None,
-                {"type": "calibration", "window": {"title": "Arduino Cursor Calibration"}, "fallbackCalibrationWindow": True},
-                {"x": 100, "y": 100, "width": 100, "height": 80},
-                ["Arduino Cursor Calibration"],
+        with tempfile.TemporaryDirectory() as tmp:
+            args = execute_cli.parse_args(
+                [
+                    "--arduino-pointer-calibration-test",
+                    "--allowed-window",
+                    "calibration",
+                    "--arduino-port",
+                    "COM9",
+                    "--calibration-staging-max-distance-px",
+                    "150",
+                    "--arduino-pointer-calibration-path",
+                    str(Path(tmp) / "pointer_calibration.json"),
+                ]
             )
-            execute_cli._cursor_position = lambda: {"x": 40, "y": 120}
-            execute_cli._foreground_window_info = lambda: {"available": True, "title": "Arduino Cursor Calibration", "pid": 123}
+            execute_cli.apply_focus_default(args)
+            backend = FakeCalibrationBackend()
+            original_context = execute_cli._calibration_window_context
+            original_cursor = execute_cli._cursor_position
+            original_foreground = execute_cli._foreground_window_info
+            try:
+                execute_cli._calibration_window_context = lambda _args: (
+                    None,
+                    {"type": "calibration", "window": {"title": "Arduino Cursor Calibration"}, "fallbackCalibrationWindow": True},
+                    {"x": 100, "y": 100, "width": 100, "height": 80},
+                    ["Arduino Cursor Calibration"],
+                )
+                execute_cli._cursor_position = lambda: {"x": 40, "y": 120}
+                execute_cli._foreground_window_info = lambda: {"available": True, "title": "Arduino Cursor Calibration", "pid": 123}
 
-            payload = execute_cli.run_arduino_pointer_calibration_test(args, backend)
-        finally:
-            execute_cli._calibration_window_context = original_context
-            execute_cli._cursor_position = original_cursor
-            execute_cli._foreground_window_info = original_foreground
+                payload = execute_cli.run_arduino_pointer_calibration_test(args, backend)
+            finally:
+                execute_cli._calibration_window_context = original_context
+                execute_cli._cursor_position = original_cursor
+                execute_cli._foreground_window_info = original_foreground
 
         self.assertEqual(payload["status"], "PASS")
         self.assertTrue(payload["stagingUsed"])

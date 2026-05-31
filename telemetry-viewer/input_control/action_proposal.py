@@ -921,6 +921,8 @@ def _resource_candidate_view_metrics(
         or (edge_distance is not None and edge_distance < 18)
         or (ratio is not None and ratio < 0.45)
     )
+    if central:
+        edge_clipped = False
     offscreen = bool(projection.get("offscreen") is True or projection.get("classification") == "offscreen")
     occluded = bool(
         projection.get("classification") in {"no_safe_aimpoint", "no_visible_interactable_geometry", "raw_aimpoint_outside_interactable_region"}
@@ -997,11 +999,11 @@ def _preferred_resource_candidate_for_view(
         distance = _number(candidate.get("distanceTiles", candidate.get("targetDistanceChebyshev")), 1_000_000.0)
         quality = _number(candidate.get("qualityScore", candidate.get("score")), 0.0)
         key = (
-            0 if metrics.get("insideWorksite") else 1,
             1 if metrics.get("ambiguousResourceTarget") else 0,
             1 if metrics.get("overlapPenaltyFromNonExecutableTarget") else 0,
             0 if metrics.get("safeAimpoint") else 1,
             0 if metrics.get("centralSafeAimpoint") else 1,
+            0 if metrics.get("insideWorksite") else 1,
             1 if metrics.get("edgeClipped") else 0,
             1 if metrics.get("occluded") else 0,
             metrics.get("distanceFromWorksite") if metrics.get("distanceFromWorksite") is not None else 999,
@@ -1932,11 +1934,59 @@ def _close_bank_target(close_bank: dict[str, Any], bank_ui: dict[str, Any]) -> d
 
 
 def _banking_complete(bank_operation: dict[str, Any]) -> bool:
+    resource_items_held = _int(bank_operation.get("resourceItemsHeld"), None)
+    resource_item_quantity = _int(bank_operation.get("resourceItemQuantity"), None)
+    if (resource_items_held is not None and resource_items_held > 0) or (
+        resource_item_quantity is not None and resource_item_quantity > 0
+    ):
+        return False
     if _bool(bank_operation.get("bankingComplete")) is True:
         return True
     if _bool(bank_operation.get("operationNeeded")) is False and _int(bank_operation.get("resourceItemsHeld"), -1) == 0:
         return True
     return False
+
+
+def _held_resource_count(
+    *,
+    generic: dict[str, Any],
+    inventory: dict[str, Any],
+    bank_operation: dict[str, Any],
+    status: dict[str, Any],
+) -> int | None:
+    progress = _dict(generic.get("goalProgress"))
+    for value in (
+        bank_operation.get("resourceItemsHeld"),
+        bank_operation.get("resourceItemQuantity"),
+        progress.get("heldResourceCount"),
+        progress.get("currentHeldCount"),
+        inventory.get("resourceCount"),
+        status.get("resourceCount"),
+        status.get("inventoryMatchingResourceCount"),
+        status.get("bankResourceItemsHeld"),
+    ):
+        count = _int(value, None)
+        if count is not None:
+            return count
+    return None
+
+
+def _service_action_context_ready(service: dict[str, Any], status: dict[str, Any]) -> bool:
+    if _bool(_first_present(service.get("serviceReady"), status.get("serviceReady"))) is True:
+        return True
+    route_context = _dict(service.get("serviceRouteContext") or status.get("serviceRouteContext"))
+    route_action_ready = _bool(_first_present(route_context.get("actionReady"), status.get("serviceRouteActionReady"))) is True
+    if not route_action_ready:
+        return False
+    if _dict(route_context.get("visibleServiceTarget") or route_context.get("selectedServiceObject") or route_context.get("visibleInteractionTarget")):
+        return True
+    return _bool(
+        _first_present(
+            route_context.get("serviceObjectInterceptReady"),
+            status.get("serviceObjectInterceptReady"),
+            status.get("serviceRouteObjectInterceptReady"),
+        )
+    ) is True
 
 
 def _service_required(
@@ -1960,6 +2010,26 @@ def _service_required(
         return True
     if _banking_complete(_dict(bank_operation)):
         return False
+    service_policy_needed = (
+        _bool(service.get("serviceNeeded")) is True
+        or _bool(service.get("serviceRequired")) is True
+        or _bool(status.get("serviceNeeded")) is True
+    )
+    held_resource_count = _held_resource_count(
+        generic=generic,
+        inventory=inventory,
+        bank_operation=_dict(bank_operation),
+        status=status,
+    )
+    if (
+        service_policy_needed
+        and held_resource_count is not None
+        and held_resource_count > 0
+        and _service_action_context_ready(service, status)
+    ):
+        return True
+    if service_policy_needed and _bool(_dict(bank_operation).get("operationNeeded")) is True:
+        return True
     # serviceNeeded/serviceRequired in serviceContext means the task policy has
     # a banking service available. It is not, by itself, an immediate lifecycle
     # demand to leave the resource area while inventory still has room.
@@ -2335,7 +2405,19 @@ def _resource_selection_proposal(
             status=status,
             brain=brain,
         )
-    if resource_view.get("cameraRecoveryRecommended") is True and _tile_from(target):
+    hover_ready_for_selected = resource_view.get("selectedTargetHoverReady") is True
+    selected_projection_safe = (
+        hover_ready_for_selected
+        and projection_status.get("classification") == "safe"
+        and projection_status.get("safeAimPointAvailable") is True
+    )
+    recovery_reason = str(resource_view.get("classification") or "")
+    if (
+        resource_view.get("cameraRecoveryRecommended") is True
+        and _tile_from(target)
+        and not selected_projection_safe
+        and not (hover_ready_for_selected and recovery_reason == "needs_worksite_recenter")
+    ):
         return _resource_view_recovery_proposal(
             target=target,
             projection_status=projection_status,

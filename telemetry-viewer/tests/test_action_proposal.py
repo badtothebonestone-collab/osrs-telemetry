@@ -134,6 +134,64 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.proposed_action, "select_resource_target")
         self.assertEqual(proposal.target_kind, "resource")
 
+    def test_logs_held_at_actionable_service_target_proposes_open_service_with_free_slots(self):
+        service_target = {
+            "targetName": "Bank Deposit Box",
+            "name": "Bank Deposit Box",
+            "classId": "bank_related",
+            "targetType": "sceneObject",
+            "source": "live_route_object",
+            "worldX": 3210,
+            "worldY": 3217,
+            "plane": 2,
+            "bounds": bounds(293, 92, 67, 133),
+            "aimPoint": aim(326, 158),
+            "safeAimPoint": {
+                "status": "PASS",
+                "canvasX": 326,
+                "canvasY": 158,
+                "distanceToViewportEdgePx": 100,
+                "rawCenterInsideViewport": True,
+            },
+            "expectedOptions": ["Bank", "Use", "Deposit"],
+            "projectionStatus": {"actionableByCanvas": True, "visible": True, "visibleAreaRatio": 1.0},
+        }
+        status = status_for(
+            phase="needs_more_context",
+            active_intent="observe",
+            free_slots=8,
+            inventory_full=False,
+            service={
+                "serviceNeeded": True,
+                "serviceRequired": True,
+                "serviceReady": False,
+                "serviceRouteContext": {
+                    "schema": "service_route_context.v1",
+                    "routeStepStatus": "service_target_actionable",
+                    "actionReady": True,
+                    "currentStep": {
+                        "type": "service_interact",
+                        "expectedOptions": ["Bank", "Use", "Deposit"],
+                        "expectedTargetContains": ["Bank", "Deposit"],
+                    },
+                    "visibleServiceTarget": service_target,
+                },
+            },
+            bank_ui={"bankOpen": False, "bankReadable": False},
+            bank_operation={"operationNeeded": False, "bankingComplete": False, "resourceItemsHeld": None},
+        )
+        status["brain"]["genericTaskState"]["activeIntentTarget"] = None
+        status["brain"]["genericTaskState"]["goalProgress"] = {"heldResourceCount": 7}
+        status["brain"]["intentOverlayContext"] = {"selectedMarker": None}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "open_service")
+        self.assertEqual(proposal.target_kind, "service")
+        self.assertEqual(proposal.target_name, "Bank Deposit Box")
+        self.assertEqual(proposal.reason, "service_target_actionable")
+        self.assertTrue(proposal.executable)
+
     def test_static_index_resource_candidate_is_live_resource_source(self):
         proposal = build_action_proposal(
             status_for(
@@ -1086,6 +1144,31 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_kind, "bank_ui")
         self.assertEqual(proposal.suggested_click_point, {"x": 310, "y": 405})
 
+    def test_banking_complete_true_does_not_suppress_known_held_resources(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="service_open",
+                active_intent="bank_operation_pending",
+                active_target=None,
+                bank_ui={
+                    "bankOpen": True,
+                    "bankReadable": True,
+                    "depositInventoryButtonVisible": True,
+                    "depositInventoryButtonBounds": bounds(300, 400, 20, 10),
+                },
+                bank_operation={
+                    "operationNeeded": False,
+                    "operationType": "none",
+                    "bankingComplete": True,
+                    "resourceItemsHeld": 3,
+                    "depositInventoryAvailable": True,
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "deposit_inventory")
+        self.assertEqual(proposal.reason, "deposit_inventory_available")
+
     def test_bank_readable_non_resource_item_uses_selective_resource_deposit(self):
         proposal = build_action_proposal(
             status_for(
@@ -1362,6 +1445,72 @@ class ActionProposalTest(unittest.TestCase):
 
         self.assertEqual(proposal.proposed_action, "select_resource_target")
         self.assertEqual(proposal.target_name, "Tree")
+
+    def test_return_route_prefers_safe_visible_resource_over_offscreen_worksite_memory(self):
+        visible_tree = {
+            "targetName": "Tree",
+            "name": "Tree",
+            "classId": "tree",
+            "targetType": "sceneObject",
+            "id": 1278,
+            "actions": ["Chop down"],
+            "aimPoint": aim(438, 152),
+            "bounds": bounds(356, 45, 165, 214),
+            "safeAimPoint": {
+                "status": "PASS",
+                "canvasX": 438,
+                "canvasY": 152,
+                "distanceToViewportEdgePx": 78,
+                "clippedVisibleAreaRatio": 0.93,
+            },
+            "worldX": 3213,
+            "worldY": 3238,
+            "plane": 0,
+            "distanceTiles": 2,
+            "qualityScore": 100,
+            "targetTick": 42,
+        }
+        offscreen_memory_tree = {
+            "targetName": "Tree",
+            "name": "Tree",
+            "classId": "tree",
+            "targetType": "sceneObject",
+            "id": 1278,
+            "actions": ["Chop down"],
+            "aimPoint": {"x": 25.5, "y": -5},
+            "bounds": bounds(7, -16, 37, 22),
+            "worldX": 3200,
+            "worldY": 3246,
+            "plane": 0,
+            "distanceTiles": 11,
+            "qualityScore": 96,
+            "targetTick": 42,
+        }
+        status = status_for(
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+            active_target=visible_tree,
+            bank_ui={"bankOpen": False},
+            bank_operation={"bankingComplete": True, "resourceItemsHeld": 0},
+            resource_return={
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "resourceTargetCurrentlyVisible": True,
+            },
+            return_route={
+                "schema": "return_route_context.v1",
+                "returnRouteId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                "state": "return_route_ready",
+                "currentNavigationTarget": {"worldX": 3203, "worldY": 3238, "plane": 0},
+            },
+            overlay={"selectedMarker": visible_tree, "markers": [visible_tree, offscreen_memory_tree]},
+        )
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertEqual(proposal.target_tile, {"worldX": 3213, "worldY": 3238, "plane": 0})
+        self.assertTrue(proposal.executable)
 
     def test_return_route_keeps_navigating_when_reacquired_resource_is_not_actionable(self):
         status = status_for(
@@ -1698,6 +1847,51 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.proposed_action, "select_resource_target")
         self.assertIn(proposal.target_explanation["resourceViewClassification"], {"good_resource_view", "usable_resource_view"})
         self.assertFalse(proposal.target_explanation["resourceCameraRecoveryRecommended"])
+
+    def test_safe_selected_resource_remains_clickable_in_poor_single_candidate_view(self):
+        selected = {
+            "targetName": "Tree",
+            "classId": "tree",
+            "id": 1278,
+            "worldX": 3213,
+            "worldY": 3238,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(352, 167),
+            "safeAimPoint": {
+                "status": "PASS",
+                "canvasX": 352,
+                "canvasY": 167,
+                "distanceToViewportEdgePx": 163,
+                "clippedVisibleAreaRatio": None,
+            },
+            "qualityScore": 100,
+        }
+        edge_candidate = {
+            "targetName": "Tree",
+            "classId": "tree",
+            "id": 1278,
+            "worldX": 3212,
+            "worldY": 3232,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(4, 349),
+            "clickboxBounds": {"x": 0, "y": 330, "width": 8, "height": 40},
+            "qualityScore": 50,
+        }
+        status = status_for(
+            active_target=selected,
+            overlay={"selectedMarker": selected, "markers": [selected, edge_candidate]},
+        )
+        status["brain"]["profileCandidates"] = [selected, edge_candidate]
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertEqual(proposal.target_tile, {"worldX": 3213, "worldY": 3238, "plane": 0})
+        self.assertTrue(proposal.executable)
 
     def test_candidate_inside_worksite_outranks_far_visible_tree(self):
         far = {

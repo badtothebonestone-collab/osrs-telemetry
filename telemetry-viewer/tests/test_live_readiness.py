@@ -318,6 +318,72 @@ class LiveReadinessTest(unittest.TestCase):
             self.assertTrue(report["actionNeed"]["serviceContextRequired"])
             self.assertTrue(report["actionNeed"]["needsNextTarget"])
 
+    def test_held_resources_at_actionable_service_target_are_immediate_service_need(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
+            status = enable_plugin_snapshot(status_for(session))
+            service_target = {
+                "targetName": "Bank Deposit Box",
+                "name": "Bank Deposit Box",
+                "classId": "bank_related",
+                "targetType": "sceneObject",
+                "source": "live_route_object",
+                "worldX": 3210,
+                "worldY": 3217,
+                "plane": 2,
+                "bounds": {"x": 293, "y": 92, "width": 67, "height": 133},
+                "aimPoint": {"canvasX": 326, "canvasY": 158},
+                "safeAimPoint": {
+                    "status": "PASS",
+                    "canvasX": 326,
+                    "canvasY": 158,
+                    "distanceToViewportEdgePx": 100,
+                    "rawCenterInsideViewport": True,
+                },
+                "expectedOptions": ["Bank", "Use", "Deposit"],
+                "projectionStatus": {"actionableByCanvas": True, "visible": True, "visibleAreaRatio": 1.0},
+            }
+            brain = status["brain"]
+            brain["genericTaskState"] = {
+                "phase": "needs_more_context",
+                "activeIntent": "observe",
+                "activeIntentTarget": None,
+                "blockingConditions": [],
+                "goalProgress": {"heldResourceCount": 7},
+            }
+            brain["inventoryContext"] = {"inventoryFull": False, "freeSlots": 8}
+            brain["serviceContext"] = {
+                "serviceNeeded": True,
+                "serviceRequired": True,
+                "serviceReady": False,
+                "serviceRouteContext": {
+                    "schema": "service_route_context.v1",
+                    "routeStepStatus": "service_target_actionable",
+                    "actionReady": True,
+                    "currentStep": {
+                        "type": "service_interact",
+                        "expectedOptions": ["Bank", "Use", "Deposit"],
+                        "expectedTargetContains": ["Bank", "Deposit"],
+                    },
+                    "visibleServiceTarget": service_target,
+                },
+            }
+            brain["bankOperationContext"] = {"operationNeeded": False, "bankingComplete": False, "resourceItemsHeld": None}
+            brain["intentOverlayContext"] = {"selectedMarker": None}
+            status["serviceNeeded"] = True
+            status["serviceRouteActionReady"] = True
+            status["inventoryFreeSlots"] = 8
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertEqual(report["proposedAction"], "open_service")
+            self.assertTrue(report["actionNeed"]["needsService"])
+            self.assertEqual(report["actionNeed"]["resourceCount"], 7)
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+
     def test_overlay_marker_source_is_required_when_target_source_is_overlay_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "sessions"

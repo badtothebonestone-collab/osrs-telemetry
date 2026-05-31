@@ -120,6 +120,59 @@ class ServiceRouteCoreTest(unittest.TestCase):
         self.assertEqual(context["visibleInteractionTarget"]["expectedPlaneChange"], "-1")
         self.assertIn("Climb-down", context["visibleInteractionTarget"]["expectedOptions"])
 
+    def test_return_route_ignores_offscreen_staircase_projection_with_canvas_point(self):
+        offscreen_stair = stair(
+            id=56231,
+            plane=2,
+            actions=["Climb-down", "Bottom-floor"],
+            worldX=3206,
+            worldY=3221,
+            objectKey="offscreen-staircase",
+            onScreen=False,
+            aimPoint={"canvasX": -1566, "canvasY": 2762},
+        )
+        visible_stair = stair(
+            id=56231,
+            plane=2,
+            actions=["Climb-down", "Bottom-floor"],
+            worldX=3206,
+            worldY=3221,
+            objectKey="visible-staircase",
+            onScreen=True,
+            aimPoint={"canvasX": 127, "canvasY": 35},
+        )
+
+        context = service_route_core.build_return_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3209, world_y=3220, plane=2),
+            target_context={"broadCandidates": [offscreen_stair, visible_stair]},
+            service_context={},
+            resource_return_context={
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "returnDestinationSource": "profile_anchor",
+            },
+            route_state=service_route_core.ServiceRouteState(),
+            routes=service_route_core.load_service_routes(),
+            source_tick=91,
+        )
+
+        self.assertEqual(context["state"], "return_transition_actionable")
+        self.assertEqual(context["visibleInteractionTarget"]["objectKey"], "visible-staircase")
+        self.assertEqual(context["routeObjectsVisible"], 1)
+        self.assertEqual(context["routeRelevantObjects"], 2)
+        self.assertEqual(context["routeRelevantActionableObjects"], 1)
+        offscreen_projection = next(
+            item["projectionStatus"]
+            for item in context["routeObjectCensus"]["topRouteObjects"]
+            if item.get("objectKey") == "offscreen-staircase"
+        )
+        self.assertFalse(offscreen_projection["visible"])
+        self.assertFalse(offscreen_projection["inCanvas"])
+        self.assertFalse(offscreen_projection["actionableByCanvas"])
+        self.assertEqual(offscreen_projection["rejectionReason"], "offscreen")
+
     def test_return_route_after_ground_floor_descend_targets_west_approach(self):
         context = service_route_core.build_return_route_context(
             profile="woodcut_bank",
