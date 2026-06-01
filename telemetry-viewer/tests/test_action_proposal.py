@@ -192,6 +192,154 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.reason, "service_target_actionable")
         self.assertTrue(proposal.executable)
 
+    def test_logs_held_do_not_route_to_service_from_observe_context_with_free_slots(self):
+        staircase = {
+            "targetName": "Staircase",
+            "classId": "route_transition",
+            "targetType": "sceneObject",
+            "worldX": 3204,
+            "worldY": 3229,
+            "plane": 1,
+            "actions": ["Climb", "Climb-up", "Climb-down"],
+            "aimPoint": aim(208, 191),
+            "routeRelevance": {"relevanceStatus": "PASS", "candidateWouldAdvanceRoute": True},
+        }
+        status = status_for(
+            phase="needs_more_context",
+            active_intent="observe",
+            free_slots=15,
+            inventory_full=False,
+            service={
+                "serviceNeeded": True,
+                "serviceRequired": True,
+                "serviceReady": False,
+                "serviceRouteContext": {
+                    "schema": "service_route_context.v1",
+                    "routeStepStatus": "route_interaction_visible",
+                    "actionReady": True,
+                    "visibleInteractionTarget": staircase,
+                    "selectedRouteObject": staircase,
+                },
+            },
+            bank_operation={"operationNeeded": False, "bankingComplete": False, "resourceItemsHeld": None},
+            bank_ui={"bankOpen": False, "bankReadable": False},
+        )
+        status["brain"]["genericTaskState"]["activeIntentTarget"] = None
+        status["brain"]["genericTaskState"]["goalProgress"] = {"heldResourceCount": 1}
+        status["brain"]["intentOverlayContext"] = {"selectedMarker": None}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertFalse(proposal.executable)
+        self.assertNotEqual(proposal.target_name, "Staircase")
+
+    def test_logs_held_observe_context_continues_active_service_route_progress(self):
+        staircase = {
+            "targetName": "Staircase",
+            "classId": "route_transition",
+            "targetType": "sceneObject",
+            "worldX": 3204,
+            "worldY": 3229,
+            "plane": 1,
+            "actions": ["Climb", "Climb-up", "Climb-down"],
+            "aimPoint": aim(208, 191),
+            "routeRelevance": {"relevanceStatus": "PASS", "candidateWouldAdvanceRoute": True},
+        }
+        status = status_for(
+            phase="needs_more_context",
+            active_intent="observe",
+            free_slots=15,
+            inventory_full=False,
+            service={
+                "serviceNeeded": True,
+                "serviceRequired": True,
+                "serviceReady": False,
+                "serviceRouteContext": {
+                    "schema": "service_route_context.v1",
+                    "routeStepStatus": "route_interaction_visible",
+                    "completedSteps": ["first stairs up"],
+                    "actionReady": True,
+                    "currentStep": {
+                        "type": "interact_object",
+                        "expectedOptions": ["Climb-up", "Top-floor"],
+                        "expectedTargetContains": ["Stair", "Stairs", "Staircase"],
+                    },
+                    "visibleInteractionTarget": staircase,
+                    "selectedRouteObject": staircase,
+                },
+            },
+            bank_operation={"operationNeeded": False, "bankingComplete": False, "resourceItemsHeld": None},
+            bank_ui={"bankOpen": False, "bankReadable": False},
+            overlay={"selectedMarker": None},
+        )
+        status["brain"]["genericTaskState"]["activeIntentTarget"] = None
+        status["brain"]["genericTaskState"]["goalProgress"] = {"heldResourceCount": 1}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "interact_service_route_object")
+        self.assertEqual(proposal.target_kind, "service_route_object")
+        self.assertEqual(proposal.target_name, "Staircase")
+
+    def test_logs_held_active_resource_target_prefers_live_service_route_transition(self):
+        tree = {
+            "targetName": "Tree",
+            "classId": "tree",
+            "id": 1278,
+            "worldX": 3212,
+            "worldY": 3232,
+            "plane": 0,
+            "distanceTiles": 7,
+            "aimPoint": aim(358, 60),
+        }
+        staircase = {
+            "targetName": "Staircase",
+            "classId": "route_transition",
+            "targetType": "sceneObject",
+            "worldX": 3204,
+            "worldY": 3229,
+            "plane": 0,
+            "actions": ["Climb-up", "Top-floor"],
+            "aimPoint": aim(224, 160),
+            "routeRelevance": {"relevanceStatus": "PASS", "candidateWouldAdvanceRoute": True},
+        }
+        status = status_for(
+            phase="target_selected",
+            active_intent="continue_current_target",
+            active_target=tree,
+            free_slots=15,
+            inventory_full=False,
+            service={
+                "serviceNeeded": True,
+                "serviceRequired": True,
+                "serviceReady": False,
+                "serviceRouteContext": {
+                    "schema": "service_route_context.v1",
+                    "routeStepStatus": "route_interaction_visible",
+                    "actionReady": True,
+                    "currentStep": {
+                        "type": "interact_object",
+                        "expectedOptions": ["Climb-up", "Top-floor"],
+                        "expectedTargetContains": ["Stair", "Stairs", "Staircase"],
+                    },
+                    "visibleInteractionTarget": staircase,
+                    "selectedRouteObject": staircase,
+                },
+            },
+            bank_operation={"operationNeeded": False, "bankingComplete": False, "resourceItemsHeld": None},
+            bank_ui={"bankOpen": False, "bankReadable": False},
+            overlay={"selectedMarker": tree},
+        )
+        status["brain"]["genericTaskState"]["goalProgress"] = {"heldResourceCount": 1}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "interact_service_route_object")
+        self.assertEqual(proposal.target_kind, "service_route_object")
+        self.assertEqual(proposal.target_name, "Staircase")
+        self.assertEqual(proposal.suggested_click_point, {"x": 224, "y": 160})
+
     def test_static_index_resource_candidate_is_live_resource_source(self):
         proposal = build_action_proposal(
             status_for(
@@ -369,6 +517,44 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.proposed_action, "navigate_to_service")
         self.assertEqual(proposal.target_kind, "path_tile")
         self.assertEqual(proposal.suggested_click_point, {"x": 260, "y": 280})
+
+    def test_service_path_without_live_waypoint_is_not_executable(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={
+                    "serviceNeeded": True,
+                    "serviceReady": False,
+                    "bestServiceCandidate": {
+                        "targetName": "Closed bank booth",
+                        "classId": "bank_booth",
+                        "worldX": 3268,
+                        "worldY": 3170,
+                        "plane": 0,
+                        "source": "initialFullPlaneScan",
+                    },
+                },
+                pathing={
+                    "pathingNeeded": True,
+                    "pathCompleted": False,
+                    "pathingBudgetExceeded": True,
+                    "reason": "pathing_budget_exceeded",
+                    "predictedPathTiles": [],
+                },
+            )
+        )
+
+        payload = proposal.to_dict()
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_kind, "path_tile")
+        self.assertFalse(proposal.executable)
+        self.assertEqual(payload["actionTargetSource"], "initialFullPlaneScan")
+        self.assertEqual(payload["actionability"], "needs_live_projection")
+        self.assertIn("click_point", payload["missingCapabilities"])
 
     def test_service_needed_by_phase_and_free_slots_outranks_post_bank_resource_target(self):
         proposal = build_action_proposal(
@@ -678,6 +864,176 @@ class ActionProposalTest(unittest.TestCase):
         self.assertIsInstance(safe, dict)
         self.assertEqual(safe.get("status"), "PASS")
         self.assertGreater(len(safe.get("sampledAimpoints") or []), 1)
+
+    def test_offscreen_service_route_transition_triggers_view_recovery(self):
+        route_target = {
+            "targetName": "Staircase",
+            "classId": "service_route_transition",
+            "targetType": "sceneObject",
+            "id": 56230,
+            "worldX": 3204,
+            "worldY": 3229,
+            "plane": 0,
+            "aimPoint": {"canvasX": 208, "canvasY": -4},
+            "actions": ["Climb-up", "Top-floor"],
+            "expectedOptions": ["Climb-up", "Climb up"],
+            "expectedTargets": ["Stair", "Staircase"],
+            "expectedPlaneChange": "+1",
+            "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+            "routeStepIndex": 1,
+            "routeStepType": "interact_object",
+            "projectionStatus": {
+                "geometryAvailable": True,
+                "onScreen": False,
+                "visible": False,
+                "actionableByCanvas": False,
+                "aimPoint": {"canvasX": 208, "canvasY": -4, "source": "canvasLocation"},
+                "classification": "offscreen",
+            },
+            "routeRelevance": {"relevanceStatus": "PASS"},
+        }
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 0},
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeAvailable": True,
+                    "routeStepStatus": "route_interaction_visible",
+                    "actionReady": True,
+                    "visibleInteractionTarget": route_target,
+                },
+                bank_ui={"bankOpen": False},
+                camera_viewport={
+                    "canvasWidth": 765,
+                    "canvasHeight": 503,
+                    "viewportXOffset": 0,
+                    "viewportYOffset": 0,
+                    "viewportWidth": 765,
+                    "viewportHeight": 503,
+                    "cameraYaw": 32,
+                    "cameraPitch": 383,
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "service_view_recovery")
+        self.assertEqual(proposal.target_kind, "service_recovery")
+        exposure = proposal.target_explanation["serviceTargetExposure"]
+        self.assertTrue(exposure["serviceObjectActionRelevant"])
+        self.assertTrue(exposure["shouldAttemptCameraExposure"])
+        self.assertEqual(exposure["currentProjectionStatus"], "offscreen")
+
+    def test_offscreen_route_census_transition_blocks_visible_random_door_fallback(self):
+        route_census = {
+            "topRouteObjects": [
+                {
+                    "name": "Staircase",
+                    "routeObjectKind": "route_transition",
+                    "routeRelevanceStatus": "PASS",
+                    "matchedRouteStepIndex": 0,
+                    "rejectionReason": "offscreen",
+                    "source": "worldModelRouteObjectCensus",
+                    "projectionStatus": {
+                        "geometryAvailable": True,
+                        "onScreen": False,
+                        "visible": False,
+                        "actionableByCanvas": False,
+                        "aimPoint": {"canvasX": 59, "canvasY": 381, "source": "canvasLocation"},
+                        "classification": "offscreen",
+                    },
+                    "routeRelevance": {"relevanceStatus": "PASS"},
+                    "candidate": {
+                        "targetName": "Staircase",
+                        "classId": "route_transition",
+                        "targetType": "sceneObject",
+                        "id": 56231,
+                        "worldX": 3205,
+                        "worldY": 3229,
+                        "plane": 2,
+                        "actions": ["Climb-down", "Bottom-floor"],
+                        "source": "world_model_cache",
+                        "worldModelSource": True,
+                    },
+                },
+                {
+                    "name": "route_transition",
+                    "routeObjectKind": "route_transition",
+                    "routeRelevanceStatus": "FAIL",
+                    "matchedRouteStepIndex": None,
+                    "rejectionReason": "randomTransitionObject",
+                    "projectionStatus": {
+                        "geometryAvailable": True,
+                        "onScreen": True,
+                        "visible": True,
+                        "actionableByCanvas": True,
+                        "aimPoint": {"canvasX": 318, "canvasY": 97, "source": "canvasLocation"},
+                    },
+                    "routeRelevance": {"relevanceStatus": "FAIL", "rejectionReason": "randomTransitionObject"},
+                    "candidate": {
+                        "targetName": "route_transition",
+                        "classId": "route_transition",
+                        "targetType": "sceneObject",
+                        "id": 27270,
+                        "worldX": 3210,
+                        "worldY": 3216,
+                        "plane": 2,
+                        "actions": ["Open", "Toggle XP"],
+                    },
+                },
+            ]
+        }
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 0},
+            service_route={
+                "schema": "service_route_context.v1",
+                "routeAvailable": True,
+                "routeStepStatus": "route_anchor_missing",
+                "actionReady": False,
+                "currentStepIndex": 0,
+                "currentStep": {
+                    "type": "interact_object",
+                    "label": "bank floor stairs down",
+                    "expectedOptions": ["Climb-down", "Climb down"],
+                    "dialogueOpenerOptions": ["Climb"],
+                    "expectedTargetContains": ["Stair", "Staircase", "Ladder"],
+                    "planeChange": "-1",
+                },
+                "routeObjectCensus": route_census,
+            },
+            pathing={
+                "pathingNeeded": True,
+                "destinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+            },
+            camera_viewport={
+                "canvasWidth": 765,
+                "canvasHeight": 503,
+                "viewportXOffset": 0,
+                "viewportYOffset": 0,
+                "viewportWidth": 765,
+                "viewportHeight": 503,
+                "cameraYaw": 32,
+                "cameraPitch": 383,
+            },
+        )
+        status["playerLocation"] = {"worldX": 3208, "worldY": 3220, "plane": 2}
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "service_view_recovery")
+        self.assertEqual(proposal.reason, "service_route_transition_view_recovery_needed")
+        self.assertEqual(proposal.target_name, "Staircase")
+        exposure = proposal.target_explanation["serviceTargetExposure"]
+        self.assertTrue(exposure["shouldAttemptCameraExposure"])
+        self.assertEqual(exposure["currentProjectionStatus"], "offscreen")
 
     def test_route_ready_bank_service_target_proposes_open_service(self):
         service_target = {
@@ -1083,6 +1439,127 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_tile, predicted[0])
         self.assertEqual(proposal.target_explanation["routeWaypointSelection"]["reason"], "near_transition_precision")
 
+    def test_adaptive_return_route_keeps_short_step_when_close_destination_detours(self):
+        predicted = [
+            {"worldX": 3205, "worldY": 3231, "plane": 0},
+            {"worldX": 3204, "worldY": 3231, "plane": 0},
+            {"worldX": 3203, "worldY": 3231, "plane": 0},
+            {"worldX": 3203, "worldY": 3230, "plane": 0},
+            {"worldX": 3203, "worldY": 3229, "plane": 0},
+            {"worldX": 3203, "worldY": 3228, "plane": 0},
+            {"worldX": 3203, "worldY": 3227, "plane": 0},
+            {"worldX": 3203, "worldY": 3226, "plane": 0},
+            {"worldX": 3203, "worldY": 3225, "plane": 0},
+            {"worldX": 3203, "worldY": 3224, "plane": 0},
+            {"worldX": 3203, "worldY": 3223, "plane": 0},
+            {"worldX": 3203, "worldY": 3222, "plane": 0},
+            {"worldX": 3203, "worldY": 3221, "plane": 0},
+        ]
+        route_target = {
+            "targetName": "Lumbridge Castle west approach return",
+            "targetType": "tile",
+            "classId": "resource_return",
+            "worldX": 3203,
+            "worldY": 3238,
+            "plane": 0,
+            "source": "static_route_prior",
+        }
+        proposal = build_action_proposal(
+            status_for(
+                phase="return_to_resource",
+                active_intent="return_to_resource_area",
+                active_target=route_target,
+                service={"serviceNeeded": True, "serviceRequired": True, "serviceReady": False},
+                return_route={
+                    "state": "return_route_ready",
+                    "routeAvailable": True,
+                    "returnActionReady": True,
+                    "currentNavigationTarget": route_target,
+                },
+                pathing={
+                    "pathingNeeded": True,
+                    "nextWaypointTile": predicted[0],
+                    "predictedPathTiles": predicted,
+                    "destinationTile": {"worldX": 3203, "worldY": 3238, "plane": 0},
+                    "pathTargetTile": {"worldX": 3203, "worldY": 3238, "plane": 0},
+                    "distanceToDestination": 7,
+                    "routeWaypointDistanceMode": "adaptive",
+                    "routeWaypointLookaheadTiles": 12,
+                    "routeWaypointMaxHorizonTiles": 25,
+                    "minRouteProgressTiles": 3,
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "return_to_resource_area")
+        self.assertEqual(proposal.target_tile, predicted[0])
+        self.assertEqual(proposal.target_explanation["routeWaypointSelection"]["reason"], "close_destination_detour_precision")
+
+    def test_adaptive_return_route_blocks_close_destination_sideways_detour(self):
+        predicted = [
+            {"worldX": 3206, "worldY": 3228, "plane": 0},
+            {"worldX": 3207, "worldY": 3228, "plane": 0},
+            {"worldX": 3208, "worldY": 3228, "plane": 0},
+            {"worldX": 3209, "worldY": 3228, "plane": 0},
+            {"worldX": 3210, "worldY": 3228, "plane": 0},
+            {"worldX": 3211, "worldY": 3228, "plane": 0},
+            {"worldX": 3212, "worldY": 3228, "plane": 0},
+            {"worldX": 3213, "worldY": 3228, "plane": 0},
+            {"worldX": 3214, "worldY": 3227, "plane": 0},
+            {"worldX": 3215, "worldY": 3226, "plane": 0},
+            {"worldX": 3215, "worldY": 3225, "plane": 0},
+            {"worldX": 3215, "worldY": 3224, "plane": 0},
+            {"worldX": 3215, "worldY": 3223, "plane": 0},
+            {"worldX": 3215, "worldY": 3222, "plane": 0},
+            {"worldX": 3215, "worldY": 3221, "plane": 0},
+            {"worldX": 3215, "worldY": 3220, "plane": 0},
+            {"worldX": 3215, "worldY": 3219, "plane": 0},
+        ]
+        route_target = {
+            "targetName": "Lumbridge Castle entrance or ground-floor courtyard return",
+            "targetType": "tile",
+            "classId": "resource_return",
+            "worldX": 3205,
+            "worldY": 3232,
+            "plane": 0,
+            "source": "static_route_prior",
+        }
+        proposal = build_action_proposal(
+            status_for(
+                phase="return_to_resource",
+                active_intent="return_to_resource_area",
+                active_target=route_target,
+                service={"serviceNeeded": True, "serviceRequired": True, "serviceReady": False},
+                return_route={
+                    "state": "return_route_ready",
+                    "routeAvailable": True,
+                    "returnActionReady": True,
+                    "currentNavigationTarget": route_target,
+                },
+                pathing={
+                    "pathingNeeded": True,
+                    "nextWaypointTile": predicted[0],
+                    "predictedPathTiles": predicted,
+                    "destinationTile": {"worldX": 3205, "worldY": 3232, "plane": 0},
+                    "pathTargetTile": {"worldX": 3205, "worldY": 3232, "plane": 0},
+                    "distanceToDestination": 4,
+                    "routeWaypointDistanceMode": "adaptive",
+                    "routeWaypointLookaheadTiles": 12,
+                    "routeWaypointMaxHorizonTiles": 25,
+                    "minRouteProgressTiles": 3,
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "return_to_resource_area")
+        self.assertFalse(proposal.executable)
+        self.assertEqual(proposal.action_target_source, "route_detour_safety_block")
+        self.assertEqual(proposal.target_explanation["actionability"], "blocked")
+        self.assertEqual(
+            proposal.target_explanation["routeWaypointSelection"]["reason"],
+            "close_destination_detour_safety_block",
+        )
+
     def test_suppressed_navigation_waypoint_selects_alternate_route_tile(self):
         predicted = [{"worldX": 3236 + step, "worldY": 3223, "plane": 0} for step in range(3)]
         status = status_for(
@@ -1359,6 +1836,156 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_kind, "path_tile")
         self.assertEqual(proposal.suggested_click_point, {"x": 700, "y": 710})
 
+    def test_return_intent_without_post_bank_context_uses_pathing_waypoint(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="return_to_resource",
+                active_intent="return_to_resource_area",
+                active_target={
+                    "targetName": "Resource return",
+                    "classId": "resource_return",
+                    "targetType": "tile",
+                    "worldX": 3196,
+                    "worldY": 3248,
+                    "plane": 0,
+                },
+                bank_ui={"bankOpen": False},
+                bank_operation={"bankingComplete": False, "resourceItemsHeld": 0},
+                pathing={
+                    "pathingNeeded": True,
+                    "reason": "path_reachable",
+                    "nextWaypointTile": {"worldX": 3209, "worldY": 3235, "plane": 0},
+                    "nextWaypointAimPoint": aim(360, 340),
+                    "predictedPathTiles": [
+                        {"worldX": 3209, "worldY": 3235, "plane": 0},
+                        {"worldX": 3207, "worldY": 3236, "plane": 0},
+                    ],
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "return_to_resource_area")
+        self.assertEqual(proposal.target_kind, "path_tile")
+        self.assertEqual(proposal.target_tile, {"worldX": 3207, "worldY": 3236, "plane": 0})
+        self.assertEqual(proposal.suggested_click_point, {"x": 360, "y": 340})
+
+    def test_return_intent_with_stale_service_route_uses_resource_waypoint(self):
+        staircase = {
+            "targetName": "Staircase",
+            "classId": "route_transition",
+            "targetType": "sceneObject",
+            "id": 56230,
+            "worldX": 3204,
+            "worldY": 3229,
+            "plane": 0,
+            "actions": ["Climb-up", "Top-floor"],
+            "aimPoint": aim(8, 315),
+            "expectedOptions": ["Climb-up", "Top-floor"],
+            "expectedPlaneChange": "+1",
+        }
+        status = status_for(
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+            active_target={
+                "targetName": "Resource return",
+                "classId": "resource_return",
+                "targetType": "tile",
+                "worldX": 3196,
+                "worldY": 3248,
+                "plane": 0,
+            },
+            service={
+                "serviceNeeded": True,
+                "serviceRequired": True,
+                "serviceReady": False,
+            },
+            service_route={
+                "schema": "service_route_context.v1",
+                "actionReady": True,
+                "routeStepStatus": "route_interaction_visible",
+                "currentStep": {
+                    "type": "interact_object",
+                    "expectedOptions": ["Climb-up", "Top-floor"],
+                    "expectedTargetContains": ["Staircase"],
+                    "planeChange": "+1",
+                },
+                "visibleInteractionTarget": staircase,
+            },
+            bank_ui={"bankOpen": False},
+            bank_operation={"bankingComplete": False, "resourceItemsHeld": None},
+            pathing={
+                "pathingNeeded": True,
+                "reason": "path_reachable",
+                "nextWaypointTile": {"worldX": 3210, "worldY": 3231, "plane": 0},
+                "nextWaypointAimPoint": aim(260, 280),
+                "predictedPathTiles": [
+                    {"worldX": 3210, "worldY": 3231, "plane": 0},
+                    {"worldX": 3209, "worldY": 3231, "plane": 0},
+                ],
+            },
+        )
+        status["brain"]["genericTaskState"]["goalProgress"] = {"heldResourceCount": 1}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "return_to_resource_area")
+        self.assertEqual(proposal.target_kind, "path_tile")
+        self.assertNotEqual(proposal.target_name, "Staircase")
+
+    def test_stale_post_bank_tree_target_does_not_override_return_destination(self):
+        castle_tree = {
+            "targetName": "Tree",
+            "name": "Tree",
+            "classId": "tree",
+            "targetType": "sceneObject",
+            "objectId": 1278,
+            "actions": ["Chop down"],
+            "aimPoint": aim(202, 154),
+            "worldX": 3212,
+            "worldY": 3232,
+            "plane": 0,
+            "targetTick": 42,
+        }
+        status = status_for(
+            phase="target_selected",
+            active_intent="select_target",
+            active_target=castle_tree,
+            bank_ui={"bankOpen": False},
+            bank_operation={"bankingComplete": True, "resourceItemsHeld": 0},
+            resource_return={
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "returnDestinationSource": "profile_anchor",
+                "resourceTargetCurrentlyVisible": True,
+                "reason": "using_profile_resource_anchor",
+            },
+            return_route={
+                "schema": "return_route_context.v1",
+                "returnRouteId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                "state": "return_route_ready",
+                "currentNavigationTarget": {
+                    "targetType": "tile",
+                    "classId": "resource_return",
+                    "targetName": "Lumbridge Castle west approach return",
+                    "worldX": 3203,
+                    "worldY": 3238,
+                    "plane": 0,
+                    "source": "static_route_prior",
+                },
+            },
+            pathing={
+                "destination": castle_tree,
+                "localReachability": "reachable",
+                "reason": "target_reachable",
+            },
+        )
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "return_to_resource_area")
+        self.assertEqual(proposal.target_kind, "path_tile")
+        self.assertNotEqual(proposal.target_name, "Tree")
+
     def test_return_route_yields_to_visible_resource_candidate_after_service(self):
         status = status_for(
             phase="return_to_resource",
@@ -1496,6 +2123,7 @@ class ActionProposalTest(unittest.TestCase):
                 "returnDestinationAvailable": True,
                 "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
                 "resourceTargetCurrentlyVisible": True,
+                "reason": "resource_target_visible",
             },
             return_route={
                 "schema": "return_route_context.v1",
@@ -1601,6 +2229,98 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.suggested_click_point, {"x": 431, "y": 214})
         self.assertEqual(proposal.target_explanation["expectedPlaneChange"], "-1")
         self.assertEqual(proposal.target_explanation["dialogueOpenerOptions"], ["Climb"])
+
+    def test_return_route_offscreen_transition_outranks_final_resource_destination(self):
+        status = status_for(
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+            active_target={
+                "targetName": "Resource return",
+                "classId": "resource_return",
+                "targetType": "tile",
+                "worldX": 3196,
+                "worldY": 3248,
+                "plane": 0,
+            },
+            bank_ui={"bankOpen": False},
+            bank_operation={"bankingComplete": True, "resourceItemsHeld": 0},
+            resource_return={
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "reason": "using_profile_resource_anchor",
+            },
+            return_route={
+                "schema": "return_route_context.v1",
+                "state": "return_blocked",
+                "returnActionReady": False,
+                "currentStepIndex": 0,
+                "currentStep": {
+                    "type": "interact_object",
+                    "label": "bank floor stairs down",
+                    "expectedOptions": ["Climb-down", "Climb down"],
+                    "dialogueOpenerOptions": ["Climb"],
+                    "expectedTargetContains": ["Stair", "Staircase", "Ladder"],
+                    "planeChange": "-1",
+                },
+                "routeObjectCensus": {
+                    "topRouteObjects": [
+                        {
+                            "name": "Staircase",
+                            "routeObjectKind": "route_transition",
+                            "routeRelevanceStatus": "PASS",
+                            "matchedRouteStepIndex": 0,
+                            "rejectionReason": "offscreen",
+                            "projectionStatus": {
+                                "geometryAvailable": True,
+                                "onScreen": False,
+                                "visible": False,
+                                "actionableByCanvas": False,
+                                "aimPoint": {"canvasX": 59, "canvasY": 381, "source": "canvasLocation"},
+                                "classification": "offscreen",
+                            },
+                            "routeRelevance": {"relevanceStatus": "PASS"},
+                            "candidate": {
+                                "targetName": "Staircase",
+                                "classId": "route_transition",
+                                "targetType": "sceneObject",
+                                "id": 56231,
+                                "worldX": 3205,
+                                "worldY": 3229,
+                                "plane": 2,
+                                "actions": ["Climb-down", "Bottom-floor"],
+                                "source": "world_model_cache",
+                                "worldModelSource": True,
+                            },
+                        }
+                    ]
+                },
+            },
+            pathing={
+                "pathingNeeded": True,
+                "destinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+            },
+            camera_viewport={
+                "canvasWidth": 765,
+                "canvasHeight": 503,
+                "viewportXOffset": 0,
+                "viewportYOffset": 0,
+                "viewportWidth": 765,
+                "viewportHeight": 503,
+                "cameraYaw": 32,
+                "cameraPitch": 383,
+            },
+        )
+        status["playerLocation"] = {"worldX": 3208, "worldY": 3220, "plane": 2}
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "service_view_recovery")
+        self.assertEqual(proposal.reason, "return_route_transition_view_recovery_needed")
+        self.assertEqual(proposal.target_name, "Staircase")
+        self.assertEqual(proposal.suggested_world_tile, {"worldX": 3205, "worldY": 3229, "plane": 2})
+        exposure = proposal.target_explanation["serviceTargetExposure"]
+        self.assertTrue(exposure["serviceObjectRouteRelevant"])
+        self.assertTrue(exposure["serviceObjectActionRelevant"])
+        self.assertEqual(exposure["currentProjectionStatus"], "offscreen")
 
     def test_return_route_dialogue_proposes_climb_down_number_key_choice(self):
         proposal = build_action_proposal(
@@ -1937,6 +2657,42 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.proposed_action, "select_resource_target")
         self.assertEqual(proposal.target_name, "Dead tree")
         self.assertEqual(proposal.target_explanation["resourceViewScore"]["selectedTargetDistanceFromWorksite"], 1)
+
+    def test_safe_resource_far_from_memory_worksite_triggers_view_recovery(self):
+        far_tree = {
+            "targetName": "Dead tree",
+            "classId": "tree",
+            "id": 1286,
+            "worldX": 3216,
+            "worldY": 3194,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(360, 220),
+            "clickboxBounds": {"x": 344, "y": 196, "width": 36, "height": 48},
+            "qualityScore": 100,
+        }
+        status = status_for(
+            active_target=far_tree,
+            overlay={"selectedMarker": far_tree, "markers": [far_tree]},
+            camera_viewport={"canvasWidth": 765, "canvasHeight": 503, "viewportXOffset": 0, "viewportYOffset": 0, "viewportWidth": 765, "viewportHeight": 503},
+        )
+        status["brain"]["resourceAreaMemory"] = {
+            "resourceMemoryValid": True,
+            "lastResourceTargetTile": {"worldX": 3213, "worldY": 3238, "plane": 0},
+            "lastResourceClusterCenter": {"worldX": 3213, "worldY": 3238, "plane": 0},
+            "lastResourceProfile": "woodcutting",
+        }
+        status["brain"]["profileCandidates"] = [far_tree]
+        status["profileCandidates"] = [far_tree]
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "resource_view_recovery")
+        score = proposal.target_explanation["resourceViewScore"]
+        self.assertEqual(score["worksiteAnchor"], {"worldX": 3213, "worldY": 3238, "plane": 0})
+        self.assertEqual(score["classification"], "needs_worksite_recenter")
+        self.assertTrue(score["selectedTargetPullsAwayFromWorksite"])
 
     def test_oak_becomes_executable_when_woodcutting_level_is_sufficient(self):
         oak = {

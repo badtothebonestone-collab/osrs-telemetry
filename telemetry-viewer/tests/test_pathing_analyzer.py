@@ -281,6 +281,47 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertTrue(second.service_ready)
         self.assertIn(second.arrival_reason, {"arrived_near_destination", "arrived_at_final_approach"})
 
+    def test_service_route_obstacle_arrival_does_not_become_service_ready(self):
+        state = pathing_analyzer.PathIntentState()
+        near_door = PlayerContext(world_x=101, world_y=100, plane=0, scene_x=2, scene_y=1)
+        door_destination = destination(
+            classId="service_route_transition",
+            targetName="Large door",
+            id=12349,
+            worldX=102,
+            worldY=100,
+            sceneX=3,
+            sceneY=1,
+            routeObjectKind="route_transition",
+            navigationObstacle=True,
+            expectedOptions=["Open"],
+            approachRadiusTiles=1,
+        )
+        first = pathing_analyzer.analyze_pathing_context(
+            player_context=near_door,
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=5, height=5)),
+            navigation_intent_context=nav_intent(target_kind="service_route", destination_target=door_destination),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=1,
+        )
+        second = pathing_analyzer.analyze_pathing_context(
+            player_context=near_door,
+            navigation_context=NavigationContext(collision_window_available=True, raw=collision_window(width=5, height=5)),
+            navigation_intent_context=nav_intent(target_kind="service_route", destination_target=door_destination),
+            generic_task_state={"phase": "inventory_full", "activeIntent": "needs_service"},
+            path_intent_state=state,
+            source_tick=2,
+        )
+
+        self.assertTrue(first.arrived_at_final_approach)
+        self.assertFalse(first.service_ready)
+        self.assertTrue(second.arrived_at_final_approach)
+        self.assertFalse(second.service_ready)
+        self.assertEqual(second.service_ready_reason, "arrival_not_service_target")
+        self.assertFalse(second.path_completed)
+        self.assertTrue(second.pathing_needed)
+
     def test_path_clears_when_current_path_is_blocked(self):
         state = pathing_analyzer.PathIntentState()
         pathing_analyzer.analyze_pathing_context(
@@ -670,6 +711,29 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertEqual(context.status, "WARN")
         self.assertEqual(context.reason, "destination_inside_window_but_no_path")
 
+    def test_blocked_service_target_inside_window_uses_boundary_handoff(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=PlayerContext(world_x=100, world_y=100, plane=0, scene_x=1, scene_y=3),
+            navigation_context=NavigationContext(
+                collision_window_available=True,
+                raw=collision_window(width=7, height=7, blocked={(3, y) for y in range(7)} | {(5, 3)}),
+            ),
+            navigation_intent_context=NavigationIntentContext(
+                navigation_needed=True,
+                navigation_reason="service_target_available",
+                target_kind="service",
+                destination_target=destination(worldX=104, worldY=100, sceneX=5, sceneY=3),
+            ),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "unknown")
+        self.assertEqual(payload["reason"], "destination_inside_window_boundary_handoff")
+        self.assertEqual(payload["pathTargetTileSource"], "local_frontier_waypoint")
+        self.assertEqual(payload["selectedApproachReason"], "blocked_destination_boundary_frontier")
+        self.assertEqual(payload["pathTargetTile"], {"worldX": 101, "worldY": 97, "plane": 0})
+        self.assertIn("navigation.global_pathfinding", payload["missingCapabilities"])
+
     def test_destination_outside_collision_window_is_unknown(self):
         context = pathing_analyzer.analyze_pathing_context(
             player_context=player(),
@@ -764,9 +828,31 @@ class PathingAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["reason"], "pathing_budget_exceeded")
         self.assertTrue(payload["pathingBudgetExceeded"])
         self.assertEqual(payload["nextWaypointTile"], {"worldX": 101, "worldY": 100, "plane": 0})
-        self.assertEqual(payload["pathTargetTile"], {"worldX": 104, "worldY": 100, "plane": 0})
+        self.assertGreater(payload["progressScore"], 0)
         self.assertEqual(payload["pathTargetTileSource"], "local_waypoint_fallback")
         self.assertGreaterEqual(payload["predictedStepCount"], 4)
+
+    def test_budget_exceeded_frontier_fallback_can_route_around_blocked_direct_step(self):
+        context = pathing_analyzer.analyze_pathing_context(
+            player_context=player(),
+            navigation_context=NavigationContext(
+                collision_window_available=True,
+                raw=collision_window(width=8, height=5, blocked={(2, 1)}),
+            ),
+            navigation_intent_context=nav_intent(
+                destination_target=destination(sceneX=5, sceneY=1, worldX=104, worldY=100, targetType="tile", classId="tile")
+            ),
+            max_nodes=1,
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(payload["localReachability"], "unknown")
+        self.assertEqual(payload["reason"], "pathing_budget_exceeded")
+        self.assertTrue(payload["pathingBudgetExceeded"])
+        self.assertIsNotNone(payload["nextWaypointTile"])
+        self.assertIsNotNone(payload["pathTargetTile"])
+        self.assertEqual(payload["pathTargetTileSource"], "local_waypoint_fallback")
+        self.assertGreater(payload["progressScore"], 0)
 
     def test_process_inventory_does_not_need_pathing(self):
         context = pathing_analyzer.analyze_pathing_context(

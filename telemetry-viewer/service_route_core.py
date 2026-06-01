@@ -26,6 +26,9 @@ SERVICE_OBJECT_WORDS = ("bank", "bank booth", "banker", "deposit", "deposit box"
 SERVICE_ACTION_WORDS = ("bank", "use", "deposit")
 ROUTE_OBJECT_SCAN_LIMIT = 64
 ROUTE_RELEVANCE_SEARCH_RADIUS_TILES = 12
+NAVIGATION_OBSTACLE_MAX_DISTANCE_TILES = 6
+NAVIGATION_OBSTACLE_CORRIDOR_MARGIN_TILES = 3
+NAVIGATION_OBSTACLE_DESTINATION_SLACK_TILES = 2
 KNOWN_ROUTE_SOURCE_RADIUS_TILES = 10
 NEARBY_ROUTE_SOURCE_RADIUS_TILES = 20
 KNOWN_ROUTE_NODE_RADIUS_TILES = 6
@@ -35,6 +38,9 @@ GOAL_DIRECTED_APPROACH_NODE_IDS = (
     "lumbridge_castle_south_entrance_approach",
     "lumbridge_castle_entrance_or_courtyard",
     "lumbridge_castle_west_approach",
+)
+GOAL_DIRECTED_POST_APPROACH_NODE_IDS = (
+    "lumbridge_first_stairs_search_area",
 )
 
 
@@ -451,6 +457,162 @@ def _candidate_matching_steps(route: dict[str, Any], candidate: dict[str, Any], 
     ]
 
 
+def _candidate_is_openable_navigation_obstacle(candidate: dict[str, Any]) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    name = _candidate_name(candidate)
+    classes = _candidate_class_ids(candidate)
+    is_door_like = (
+        _contains_any(name, ["door", "gate"])
+        or "door" in classes
+        or "gate" in classes
+    )
+    if not is_door_like:
+        return False
+    actions = _candidate_actions(candidate)
+    if not actions:
+        return True
+    return any(_norm(action) == "open" or "open" in _norm(action).split() for action in actions)
+
+
+def _navigation_obstacle_in_corridor(
+    *,
+    candidate_tile: dict[str, Any] | None,
+    player_tile: dict[str, Any] | None,
+    destination_tile: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(candidate_tile, dict) or not isinstance(player_tile, dict) or not isinstance(destination_tile, dict):
+        return False
+    margin = NAVIGATION_OBSTACLE_CORRIDOR_MARGIN_TILES
+    cand_x = _int(candidate_tile.get("worldX"))
+    cand_y = _int(candidate_tile.get("worldY"))
+    player_x = _int(player_tile.get("worldX"))
+    player_y = _int(player_tile.get("worldY"))
+    dest_x = _int(destination_tile.get("worldX"))
+    dest_y = _int(destination_tile.get("worldY"))
+    if None in {cand_x, cand_y, player_x, player_y, dest_x, dest_y}:
+        return False
+    route_dx = dest_x - player_x
+    route_dy = dest_y - player_y
+    candidate_dx = cand_x - player_x
+    candidate_dy = cand_y - player_y
+    route_len_sq = route_dx * route_dx + route_dy * route_dy
+    if route_len_sq <= 0:
+        return False
+    progress_dot = route_dx * candidate_dx + route_dy * candidate_dy
+    if progress_dot <= 0:
+        return False
+    cross = route_dx * candidate_dy - route_dy * candidate_dx
+    if cross * cross > margin * margin * route_len_sq:
+        return False
+    return (
+        min(player_x, dest_x) - margin <= cand_x <= max(player_x, dest_x) + margin
+        and min(player_y, dest_y) - margin <= cand_y <= max(player_y, dest_y) + margin
+    )
+
+
+def _navigation_obstacle_step(nav_step: dict[str, Any], nav_index: int | None) -> dict[str, Any]:
+    node_id = _step_node_id(nav_step, nav_index)
+    location = _dict(nav_step.get("worldLocation"))
+    return {
+        "type": "interact_object",
+        "nodeId": f"{node_id or 'route_navigation'}_obstacle",
+        "label": f"Open obstacle before {nav_step.get('label') or node_id or 'route navigation'}",
+        "expectedOptions": ["Open"],
+        "expectedTargetContains": ["Door", "Gate", "Large door"],
+        "plane": nav_step.get("plane") if nav_step.get("plane") is not None else location.get("plane"),
+        "required": False,
+        "confidence": 0.55,
+        "navigationObstacle": True,
+        "routeNavigationStepIndex": nav_index,
+        "routeNavigationStepLabel": nav_step.get("label"),
+        "routeNavigationStepNodeId": node_id,
+        "routeNavigationDestination": dict(location) if location else None,
+    }
+
+
+def _candidate_navigation_obstacle_relevance(
+    route: dict[str, Any],
+    candidate: dict[str, Any],
+    nav_step: dict[str, Any],
+    nav_index: int | None,
+    *,
+    player_plane: int | None,
+    player_tile: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    obstacle_step = _navigation_obstacle_step(nav_step, nav_index)
+    candidate_tile = _candidate_world_tile(candidate)
+    destination_tile = _dict(nav_step.get("worldLocation"))
+    candidate_plane = _int(candidate.get("plane"))
+    expected_plane = _int(obstacle_step.get("plane") if obstacle_step.get("plane") is not None else destination_tile.get("plane"))
+    distance_to_player = _tile_distance(candidate_tile, player_tile)
+    distance_to_destination = _tile_distance(candidate_tile, destination_tile)
+    player_to_destination = _tile_distance(player_tile, destination_tile)
+    status = "PASS"
+    reason = None
+
+    if nav_step.get("type") != "navigate_world":
+        status = "FAIL"
+        reason = "wrongRouteStep"
+    elif not _candidate_is_openable_navigation_obstacle(candidate):
+        status = "FAIL"
+        reason = "wrongObjectKind"
+    elif expected_plane is not None and player_plane is not None and expected_plane != player_plane:
+        status = "FAIL"
+        reason = "wrongPlane"
+    elif expected_plane is not None and candidate_plane is not None and candidate_plane != expected_plane:
+        status = "FAIL"
+        reason = "wrongPlane"
+    elif distance_to_player is None or distance_to_player > NAVIGATION_OBSTACLE_MAX_DISTANCE_TILES:
+        status = "FAIL"
+        reason = "outsideSearchArea"
+    elif distance_to_destination is None or player_to_destination is None:
+        status = "FAIL"
+        reason = "navigationObstacleLocationUnknown"
+    elif distance_to_destination > player_to_destination + NAVIGATION_OBSTACLE_DESTINATION_SLACK_TILES:
+        status = "FAIL"
+        reason = "outsideRouteCorridor"
+    elif not _navigation_obstacle_in_corridor(
+        candidate_tile=candidate_tile,
+        player_tile=player_tile,
+        destination_tile=destination_tile,
+    ):
+        status = "FAIL"
+        reason = "outsideRouteCorridor"
+
+    would_advance = status == "PASS"
+    return obstacle_step, {
+        "schema": ROUTE_RELEVANCE_SCHEMA,
+        "routeId": route.get("routeId"),
+        "currentNodeId": obstacle_step.get("nodeId"),
+        "currentEdgeId": (_edge_for_step(route, nav_step, nav_index) or {}).get("edgeId"),
+        "expectedStepType": "navigation_obstacle",
+        "expectedObjectKinds": list(_list(obstacle_step.get("expectedTargetContains"))),
+        "expectedActions": list(_list(obstacle_step.get("expectedOptions"))),
+        "dialogueOpenerActions": [],
+        "expectedPlane": expected_plane,
+        "expectedPlaneChange": None,
+        "expectedArea": destination_tile if destination_tile else None,
+        "candidateName": _candidate_name(candidate),
+        "candidateActions": _candidate_actions(candidate),
+        "candidatePlane": candidate_plane,
+        "candidateWorldLocation": candidate_tile,
+        "candidateDistanceToRouteNode": distance_to_destination,
+        "candidateDistanceToRouteCorridor": distance_to_destination,
+        "candidateDistanceToPlayer": distance_to_player,
+        "candidateWouldAdvanceRoute": would_advance,
+        "candidateIsBackward": False if would_advance else None,
+        "candidateIsWrongSideOfWall": None,
+        "candidateIsRandomTransitionObject": status == "FAIL" and reason in {"outsideRouteCorridor", "wrongRouteStep", "outsideSearchArea"},
+        "navigationObstacle": True,
+        "routeNavigationStepIndex": nav_index,
+        "routeNavigationStepLabel": nav_step.get("label"),
+        "routeNavigationDestination": dict(destination_tile) if destination_tile else None,
+        "relevanceStatus": status,
+        "rejectionReason": reason,
+    }
+
+
 def _first_pending_interaction_index_for_plane(route: dict[str, Any], player_plane: int | None, completed_steps: list[str] | None = None) -> int | None:
     completed = {_norm(value) for value in (completed_steps or []) if _norm(value)}
     for index, step in _interaction_steps(route):
@@ -563,13 +725,34 @@ def _service_object_type(candidate: dict[str, Any]) -> str:
     return "unknown"
 
 
-def _service_object_priority(candidate: dict[str, Any]) -> int:
-    service_type = _service_object_type(candidate)
-    if service_type == "deposit_box":
+def _service_object_policy_rank(candidate: dict[str, Any]) -> int:
+    rank = _int(candidate.get("serviceCandidatePolicyGroupRank"))
+    return rank if rank is not None else 0
+
+
+def _service_object_priority(candidate: dict[str, Any], service_type: str | None = None) -> int:
+    candidate_service_type = _service_object_type(candidate)
+    requested = _norm(service_type)
+    if requested == "bank_full":
+        if candidate_service_type in {"bank_booth", "bank_chest"}:
+            return 0
+        if candidate_service_type == "banker_npc":
+            return 1
+        if candidate_service_type == "deposit_box":
+            return 3
+    if "deposit" in requested:
+        if candidate_service_type == "deposit_box":
+            return 0
+        if candidate_service_type in {"bank_booth", "bank_chest"}:
+            return 1
+        if candidate_service_type == "banker_npc":
+            return 2
+        return 3
+    if candidate_service_type == "deposit_box":
         return 0
-    if service_type in {"bank_booth", "bank_chest"}:
+    if candidate_service_type in {"bank_booth", "bank_chest"}:
         return 1
-    if service_type == "banker_npc":
+    if candidate_service_type == "banker_npc":
         return 2
     return 3
 
@@ -578,9 +761,12 @@ def _route_object_census(
     route: dict[str, Any],
     candidates: list[dict[str, Any]],
     *,
+    service_type: str | None = None,
     player_plane: int | None,
     player_tile: dict[str, Any] | None,
     completed_steps: list[str] | None = None,
+    navigation_step_index: int | None = None,
+    navigation_step: dict[str, Any] | None = None,
     scan_limit: int = ROUTE_OBJECT_SCAN_LIMIT,
 ) -> dict[str, Any]:
     route_objects: list[dict[str, Any]] = []
@@ -603,6 +789,7 @@ def _route_object_census(
         relevance = None
         matched_index = None
         matched_step = None
+        navigation_obstacle = False
         if matching_steps:
             ranked: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
             for step_index, step in matching_steps:
@@ -623,6 +810,17 @@ def _route_object_census(
                 )
             )
             matched_index, matched_step, relevance = ranked[0]
+        elif kind == "route_transition" and isinstance(navigation_step, dict) and _candidate_is_openable_navigation_obstacle(candidate):
+            matched_step, relevance = _candidate_navigation_obstacle_relevance(
+                route,
+                candidate,
+                navigation_step,
+                navigation_step_index,
+                player_plane=player_plane,
+                player_tile=player_tile,
+            )
+            matched_index = navigation_step_index
+            navigation_obstacle = bool(relevance.get("navigationObstacle"))
         else:
             rejection = "wrongObjectKind"
             if kind == "route_transition" and _candidate_has_route_transition_shape(candidate):
@@ -655,6 +853,8 @@ def _route_object_census(
                 "source": candidate.get("_routeObjectScanSource") or candidate.get("source"),
                 "matchedRouteStepIndex": matched_index,
                 "matchedRouteStepLabel": matched_step.get("label") if isinstance(matched_step, dict) else None,
+                "matchedRouteStep": dict(matched_step) if isinstance(matched_step, dict) and navigation_obstacle else None,
+                "navigationObstacle": navigation_obstacle,
                 "projectionStatus": projection,
                 "routeRelevance": relevance,
                 "routeRelevanceStatus": relevance.get("relevanceStatus"),
@@ -716,7 +916,9 @@ def _route_object_census(
             0 if item.get("routeRelevanceStatus") == "PASS" else 1,
             0 if _dict(item.get("projectionStatus")).get("visible") else 1,
             0 if _dict(item.get("projectionStatus")).get("actionableByCanvas") is True else 1,
-            _service_object_priority(_dict(item.get("candidate"))),
+            1 if _dict(item.get("candidate")).get("policyEligible") is False else 0,
+            _service_object_policy_rank(_dict(item.get("candidate"))),
+            _service_object_priority(_dict(item.get("candidate")), service_type or route.get("serviceType")),
             item.get("distanceToPlayer") if isinstance(item.get("distanceToPlayer"), int) else 9999,
             str(item.get("name") or ""),
         ),
@@ -780,12 +982,14 @@ def _best_route_interaction_from_census(
         index = _int(item.get("matchedRouteStepIndex"))
         if index is None:
             continue
-        step = _route_step(route, index)
+        step = _dict(item.get("matchedRouteStep")) or _route_step(route, index)
         candidate = _dict(item.get("candidate"))
         if step and candidate:
             candidate["routeRelevance"] = item.get("routeRelevance")
             candidate["projectionStatus"] = item.get("projectionStatus")
             candidate["routeObjectSource"] = item.get("source")
+            if item.get("navigationObstacle") is True:
+                candidate["navigationObstacle"] = True
             candidate["selectedAction"] = _preferred_candidate_action(candidate, step)
             return index, step, candidate
     return None, None, None
@@ -803,6 +1007,8 @@ def _best_service_interaction_from_census(
         if item.get("routeObjectKind") != "service_object":
             continue
         if item.get("routeRelevanceStatus") != "PASS":
+            continue
+        if _dict(item.get("candidate")).get("policyEligible") is False:
             continue
         if _dict(item.get("projectionStatus")).get("actionableByCanvas") is not True:
             continue
@@ -868,6 +1074,39 @@ def _visible_service_target(service_context: Any) -> dict[str, Any] | None:
     service = _dict(service_context)
     best = service.get("bestServiceCandidate")
     return dict(best) if isinstance(best, dict) and best else None
+
+
+def _service_target_relevance(
+    route: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    player_plane: int | None,
+    player_tile: dict[str, Any] | None,
+    completed_steps: list[str] | None,
+) -> tuple[int | None, dict[str, Any] | None, dict[str, Any]]:
+    index, step = _service_step(route)
+    step = step if isinstance(step, dict) else None
+    if index is None or step is None:
+        return None, None, {
+            "schema": ROUTE_RELEVANCE_SCHEMA,
+            "routeId": route.get("routeId"),
+            "candidateName": _candidate_name(candidate),
+            "candidateActions": _candidate_actions(candidate),
+            "candidatePlane": _int(candidate.get("plane")),
+            "candidateWorldLocation": _candidate_world_tile(candidate),
+            "relevanceStatus": "FAIL",
+            "rejectionReason": "serviceStepMissing",
+            "candidateWouldAdvanceRoute": False,
+        }
+    return index, step, _candidate_route_relevance(
+        route,
+        candidate,
+        step,
+        index,
+        player_plane=player_plane,
+        player_tile=player_tile,
+        completed_steps=completed_steps,
+    )
 
 
 def _route_step(route: dict[str, Any], index: int) -> dict[str, Any]:
@@ -1089,7 +1328,7 @@ def _interaction_target_from_candidate(route: dict[str, Any], step: dict[str, An
     target["expectedPlaneChange"] = step.get("planeChange")
     target["verifiedLive"] = True
     target["source"] = "live_route_object"
-    if not _candidate_actions(target) and isinstance(step.get("expectedOptions"), list):
+    if not _list(target.get("actions")) and isinstance(step.get("expectedOptions"), list):
         target["actions"] = list(step["expectedOptions"]) + list(_list(step.get("dialogueOpenerOptions")))
     return target
 
@@ -1114,6 +1353,9 @@ def _record_anchor(
         "routeStepType": step.get("type"),
         "nodeId": _step_node_id(step, index),
         "objectId": _candidate_id(candidate),
+        "classId": candidate.get("classId") or candidate.get("targetClass"),
+        "targetClass": candidate.get("targetClass") or candidate.get("classId"),
+        "targetType": candidate.get("targetType"),
         "name": _candidate_name(candidate),
         "targetName": _candidate_name(candidate),
         "worldX": candidate.get("worldX"),
@@ -1138,6 +1380,8 @@ def _retained_service_anchor(
     route: dict[str, Any],
     service_type: str | None,
     player_plane: int | None,
+    player_tile: dict[str, Any] | None = None,
+    completed_steps: list[str] | None = None,
 ) -> dict[str, Any] | None:
     if state is None:
         return None
@@ -1152,6 +1396,15 @@ def _retained_service_anchor(
         if player_plane is not None and _int(anchor.get("plane")) is not None and _int(anchor.get("plane")) != player_plane:
             continue
         if service_type and not _service_type_matches(anchor.get("serviceType"), service_type):
+            continue
+        _index, _step, relevance = _service_target_relevance(
+            route,
+            anchor,
+            player_plane=player_plane,
+            player_tile=player_tile,
+            completed_steps=completed_steps,
+        )
+        if relevance.get("relevanceStatus") != "PASS":
             continue
         candidates.append(anchor)
     if not candidates:
@@ -1171,6 +1424,75 @@ def _retained_service_anchor(
         "plane": best.get("plane"),
         "actions": list(_list(best.get("actions"))),
         "verifiedLive": True,
+        "confidence": best.get("confidence"),
+        "lastSeenTick": best.get("lastSeenTick"),
+        "source": "observed_route_anchor",
+    }
+
+
+def _retained_route_interaction_anchor(
+    state: ServiceRouteState | None,
+    *,
+    route: dict[str, Any],
+    player_plane: int | None,
+    player_tile: dict[str, Any] | None = None,
+    completed_steps: list[str] | None = None,
+) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    pending_index = _first_pending_interaction_index_for_plane(route, player_plane, completed_steps)
+    if pending_index is None:
+        return None
+    pending_step = _route_step(route, pending_index)
+    if not isinstance(pending_step, dict):
+        return None
+    candidates: list[dict[str, Any]] = []
+    for anchor in state.observed_anchors.values():
+        if not isinstance(anchor, dict):
+            continue
+        if anchor.get("routeId") != route.get("routeId"):
+            continue
+        if anchor.get("routeStepType") != "interact_object":
+            continue
+        if _int(anchor.get("routeStepIndex")) != pending_index:
+            continue
+        if player_plane is not None and _int(anchor.get("plane")) is not None and _int(anchor.get("plane")) != player_plane:
+            continue
+        relevance_candidate = dict(anchor)
+        if not relevance_candidate.get("classId") and "stair" in str(relevance_candidate.get("targetName") or relevance_candidate.get("name") or "").lower():
+            relevance_candidate["classId"] = "staircase"
+            relevance_candidate["targetClass"] = "staircase"
+            relevance_candidate["targetType"] = "sceneObject"
+        relevance = _candidate_route_relevance(
+            route,
+            relevance_candidate,
+            pending_step,
+            pending_index,
+            player_plane=player_plane,
+            player_tile=player_tile,
+            completed_steps=completed_steps,
+        )
+        if relevance.get("relevanceStatus") != "PASS":
+            continue
+        candidates.append(anchor)
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda item: (_int(item.get("lastSeenTick")) or -1, float(item.get("confidence") or 0.0)))
+    return {
+        "targetType": "service_route_anchor",
+        "classId": "service_route_anchor",
+        "targetName": best.get("targetName") or best.get("name") or pending_step.get("label") or "Observed route anchor",
+        "routeId": route.get("routeId"),
+        "routeStepIndex": best.get("routeStepIndex"),
+        "routeStepType": best.get("routeStepType"),
+        "nodeId": best.get("nodeId"),
+        "objectId": best.get("objectId"),
+        "worldX": best.get("worldX"),
+        "worldY": best.get("worldY"),
+        "plane": best.get("plane"),
+        "actions": [],
+        "verifiedLive": False,
+        "previouslyVerifiedLive": True,
         "confidence": best.get("confidence"),
         "lastSeenTick": best.get("lastSeenTick"),
         "source": "observed_route_anchor",
@@ -1280,6 +1602,52 @@ def _goal_directed_preference(node_id: str | None) -> int:
     return GOAL_DIRECTED_APPROACH_NODE_IDS.index(node_id) if node_id in GOAL_DIRECTED_APPROACH_NODE_IDS else 999
 
 
+def _route_step_candidate_by_node(
+    route: dict[str, Any],
+    node_id: str,
+    player_plane: int | None,
+) -> tuple[int, dict[str, Any], dict[str, Any]] | None:
+    for index, step in enumerate(_list(route.get("steps"))):
+        if not isinstance(step, dict):
+            continue
+        if _step_node_id(step, index) != node_id:
+            continue
+        node = _route_node_by_id(route, node_id) or step
+        node_location = _node_world_location(node) or _dict(step.get("worldLocation"))
+        node_plane = _int(step.get("plane") if step.get("plane") is not None else _dict(node_location).get("plane"))
+        if player_plane is not None and node_plane is not None and player_plane != node_plane:
+            return None
+        return index, dict(step), dict(node)
+    return None
+
+
+def _goal_directed_post_approach_candidate(
+    route: dict[str, Any],
+    player_tile: dict[str, Any] | None,
+    player_plane: int | None,
+) -> tuple[int, dict[str, Any], dict[str, Any]] | None:
+    for node_id in GOAL_DIRECTED_POST_APPROACH_NODE_IDS:
+        candidate = _route_step_candidate_by_node(route, node_id, player_plane)
+        if candidate is None:
+            continue
+        _index, step, node = candidate
+        node_location = _node_world_location(node) or _dict(step.get("worldLocation"))
+        distance = _tile_distance(player_tile, node_location)
+        if distance is None or distance <= 16:
+            return candidate
+    return None
+
+
+def _goal_directed_post_approach_unlocked(player_tile: dict[str, Any] | None) -> bool:
+    if not isinstance(player_tile, dict):
+        return False
+    world_x = _int(player_tile.get("worldX"))
+    world_y = _int(player_tile.get("worldY"))
+    if world_x is None or world_y is None:
+        return False
+    return world_x <= 3215 and 3221 <= world_y <= 3234
+
+
 def _goal_directed_lateral_distance_sq(
     *,
     player_tile: dict[str, Any] | None,
@@ -1359,6 +1727,10 @@ def _selected_goal_directed_approach(route: dict[str, Any], player_tile: dict[st
             not_arrived.append(item)
     if arrived:
         furthest_arrived = max(item[3] for item in arrived)
+        if furthest_arrived >= _goal_directed_preference("lumbridge_castle_south_entrance_approach") and _goal_directed_post_approach_unlocked(player_tile):
+            post_approach_candidate = _goal_directed_post_approach_candidate(route, player_tile, player_plane)
+            if post_approach_candidate is not None:
+                return post_approach_candidate
         next_candidates = [
             item
             for item in candidates
@@ -1367,6 +1739,10 @@ def _selected_goal_directed_approach(route: dict[str, Any], player_tile: dict[st
         if next_candidates:
             candidates = next_candidates
             not_arrived = next_candidates
+        else:
+            post_approach_candidate = _goal_directed_post_approach_candidate(route, player_tile, player_plane)
+            if post_approach_candidate is not None:
+                return post_approach_candidate
     candidates_to_score = not_arrived or candidates
 
     def score(item: tuple[int, dict[str, Any], dict[str, Any]]) -> tuple[int, int, int]:
@@ -1699,6 +2075,15 @@ def build_service_route_context(
         approach_index, approach_step, approach_node = _selected_goal_directed_approach(route, player_tile, plane)
         selected_approach_node = _node_summary(approach_node or approach_step, source="route_profile")
     route_mode = "goal_directed_fallback" if use_goal_directed else "explicit_route"
+    obstacle_nav_index = approach_index
+    obstacle_nav_step = approach_step
+    if obstacle_nav_step is None:
+        obstacle_nav_index, obstacle_nav_step = _navigation_step_for_plane(
+            route,
+            plane,
+            player_tile=player_tile,
+            completed_steps=completed_steps,
+        )
 
     def make_route_context(current_node_id: str | None, *, blocker_reason: str | None = None) -> dict[str, Any]:
         return _route_context_payload(
@@ -1723,10 +2108,14 @@ def build_service_route_context(
     route_object_census = _route_object_census(
         route,
         candidates,
+        service_type=service_type,
         player_plane=plane,
         player_tile=player_tile,
         completed_steps=completed_steps,
+        navigation_step_index=obstacle_nav_index,
+        navigation_step=obstacle_nav_step,
     )
+    service_target_warnings: list[str] = []
     service_index, service_step, service_candidate = _best_service_interaction_from_census(route, route_object_census)
     if service_step is not None and service_candidate is not None and service_index is not None:
         target = _interaction_target_from_candidate(route, service_step, service_index, service_candidate)
@@ -1753,31 +2142,41 @@ def build_service_route_context(
         )
     service_target = _visible_service_target(service_context)
     if service_target:
-        index, step = _service_step(route)
-        if step is None:
-            step = {"type": "service_interact", "label": "Visible service target", "serviceType": service_type}
-        if index is None:
-            index = len(_list(route.get("steps")))
-        _record_anchor(working_state, route=route, step=step, index=index, candidate=service_target, source_tick=source_tick)
-        return _context_payload(
-            route=route,
-            status="PASS",
-            route_step_status="service_target_visible",
-            current_step_index=index,
-            current_step=step,
-            visible_service_target=service_target,
-            action_ready=False,
-            current_node_id=_step_node_id(step, index),
-            next_edge=_edge_for_step(route, step, index),
+        index, step, relevance = _service_target_relevance(
+            route,
+            service_target,
+            player_plane=plane,
+            player_tile=player_tile,
             completed_steps=completed_steps,
-            route_state=working_state,
-            source_tick=source_tick,
-            started=started,
-            route_object_census=route_object_census,
-            route_context=make_route_context(_step_node_id(step, index)),
-            selected_service_anchor=service_anchor,
-            selected_approach_node=selected_approach_node,
-            route_source_mismatch=route_source_mismatch,
+        )
+        service_target["routeRelevance"] = relevance
+        service_target["routeRelevanceStatus"] = relevance.get("relevanceStatus")
+        service_target["routeRelevanceRejectionReason"] = relevance.get("rejectionReason")
+        if relevance.get("relevanceStatus") == "PASS" and step is not None and index is not None:
+            _record_anchor(working_state, route=route, step=step, index=index, candidate=service_target, source_tick=source_tick)
+            return _context_payload(
+                route=route,
+                status="PASS",
+                route_step_status="service_target_visible",
+                current_step_index=index,
+                current_step=step,
+                visible_service_target=service_target,
+                action_ready=False,
+                current_node_id=_step_node_id(step, index),
+                next_edge=_edge_for_step(route, step, index),
+                completed_steps=completed_steps,
+                route_state=working_state,
+                source_tick=source_tick,
+                started=started,
+                route_object_census=route_object_census,
+                route_context=make_route_context(_step_node_id(step, index)),
+                selected_service_anchor=service_anchor,
+                selected_approach_node=selected_approach_node,
+                route_source_mismatch=route_source_mismatch,
+            )
+        service_target_warnings.append(
+            "visible service target ignored because it does not match the selected route"
+            f": {relevance.get('rejectionReason') or 'route_relevance_failed'}"
         )
 
     index, step, candidate = _best_route_interaction_from_census(route, route_object_census)
@@ -1805,7 +2204,49 @@ def build_service_route_context(
             route_source_mismatch=route_source_mismatch,
         )
 
-    retained_anchor = _retained_service_anchor(working_state, route=route, service_type=service_type, player_plane=plane)
+    retained_route_anchor = _retained_route_interaction_anchor(
+        working_state,
+        route=route,
+        player_plane=plane,
+        player_tile=player_tile,
+        completed_steps=completed_steps,
+    )
+    if retained_route_anchor is not None:
+        retained_index = _int(retained_route_anchor.get("routeStepIndex"))
+        retained_step = _route_step(route, retained_index) if retained_index is not None else None
+        retained_step = retained_step or {"type": "interact_object", "label": retained_route_anchor.get("targetName")}
+        return _context_payload(
+            route=route,
+            status="WARN",
+            route_step_status="retained_route_interaction_anchor",
+            current_step_index=retained_index,
+            current_step=retained_step,
+            current_navigation_target=retained_route_anchor,
+            warnings=[
+                *service_target_warnings,
+                "using previously observed route interaction anchor for navigation; live visibility is still required before interaction",
+            ],
+            current_node_id=retained_route_anchor.get("nodeId") or _step_node_id(retained_step, retained_index or 0),
+            next_edge=_edge_for_step(route, retained_step, retained_index or 0),
+            completed_steps=completed_steps,
+            route_state=working_state,
+            source_tick=source_tick,
+            started=started,
+            route_object_census=route_object_census,
+            route_context=make_route_context(retained_route_anchor.get("nodeId") or _step_node_id(retained_step, retained_index or 0)),
+            selected_service_anchor=service_anchor,
+            selected_approach_node=selected_approach_node,
+            route_source_mismatch=route_source_mismatch,
+        )
+
+    retained_anchor = _retained_service_anchor(
+        working_state,
+        route=route,
+        service_type=service_type,
+        player_plane=plane,
+        player_tile=player_tile,
+        completed_steps=completed_steps,
+    )
     if retained_anchor is not None:
         index, step = _service_step(route)
         step = step or {"type": "service_interact", "label": "Observed service target", "serviceType": service_type}
@@ -1861,6 +2302,7 @@ def build_service_route_context(
                 current_step=approach_step,
                 current_navigation_target=target,
                 warnings=[
+                    *service_target_warnings,
                     "current resource area is outside the known route source; using destination-centered service approach",
                     "route prior is unverified; use as a scouting/navigation target until live anchors are observed",
                 ],
@@ -1889,7 +2331,10 @@ def build_service_route_context(
                 current_step_index=nav_index,
                 current_step=nav_step,
                 current_navigation_target=target,
-                warnings=["route prior is unverified; use as a scouting/navigation target until live anchors are observed"],
+                warnings=[
+                    *service_target_warnings,
+                    "route prior is unverified; use as a scouting/navigation target until live anchors are observed",
+                ],
                 current_node_id=_step_node_id(nav_step, nav_index),
                 next_edge=_edge_for_step(route, nav_step, nav_index),
                 completed_steps=completed_steps,
@@ -1910,7 +2355,10 @@ def build_service_route_context(
         route_step_status="route_anchor_missing",
         current_step_index=0 if first_step else None,
         current_step=first_step or None,
-        warnings=["service route exists but no live route object or static world anchor is currently available"],
+        warnings=[
+            *service_target_warnings,
+            "service route exists but no live route object or static world anchor is currently available",
+        ],
         missing_capabilities=["service.route.anchor"],
         current_node_id=_step_node_id(first_step, 0) if first_step else None,
         next_edge=_edge_for_step(route, first_step, 0) if first_step else None,
@@ -2039,6 +2487,9 @@ def build_return_route_context(
 
     plane = _player_plane(player_context)
     player_tile = _player_tile(player_context)
+    location_completed_steps = _completed_navigation_step_labels_for_location(return_route, plane, player_tile)
+    if location_completed_steps:
+        _merge_completed_steps(working_state, location_completed_steps, source_tick, reason="return_navigation_progress_observed")
     candidates = _candidate_lists(target_context, service_context)
     route_object_census = _route_object_census(
         return_route,

@@ -228,13 +228,13 @@ def resolve_screen_click_point(
     display_scale_y = float(display_scale.get("y") or 1.0)
     client_bounds = geometry.get("clientWindowBounds") if isinstance(geometry.get("clientWindowBounds"), dict) else None
     source_matches_canvas = abs(canvas_width - source_width) < 0.5 and abs(canvas_height - source_height) < 0.5
-    # On Windows high-DPI VMs, Java/AWT can report screen locations in logical
-    # coordinates while input backends move in the cursor coordinate space. Only
-    # scale the whole resolved point when the canvas dimensions have not already
-    # been expanded from the source canvas into physical pixels.
+    # On Windows high-DPI VMs, Java/AWT can report window/canvas locations in
+    # logical coordinates while HID and DPI-aware cursor APIs move in physical
+    # pixels. Component size can still be expanded relative to the source canvas,
+    # so client window bounds are the stronger signal that the final screen point
+    # must be promoted into physical cursor space.
     logical_screen_scale_applied = bool(
         client_bounds
-        and source_matches_canvas
         and (abs(display_scale_x - 1.0) > 0.01 or abs(display_scale_y - 1.0) > 0.01)
     )
     legacy_delta_scale_applied = bool(not logical_screen_scale_applied and source_matches_canvas and (abs(display_scale_x - 1.0) > 0.01 or abs(display_scale_y - 1.0) > 0.01))

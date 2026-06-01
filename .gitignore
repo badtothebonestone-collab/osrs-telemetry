@@ -27,4 +27,9 @@ replay_scenarios/
 script_authoring_context/
 credentials.properties
 interaction_geometry/live/
+**/interaction_geometry/live/
+*arduino*calibration*.json
+*arduino*status*.json
+input_integrity_status.json
+camera_calibration.json
 telemetry-viewer/assets/bootstrap_templates/bootstrap_debug_screenshot.png

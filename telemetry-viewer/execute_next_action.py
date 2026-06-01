@@ -1943,7 +1943,145 @@ def _load_pointer_calibration_for_live_movement(args: argparse.Namespace) -> dic
         return {"status": "FAIL", "path": str(path), "blockers": [f"calibration_record_read_failed:{type(error).__name__}"], "warnings": []}
     validation = _pointer_calibration_validation(args, record, enforce_age=True)
     validation["path"] = str(path)
+    validation["movementSafety"] = _live_movement_safety_from_calibration(record)
     return validation
+
+
+def _valid_rect(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        x = int(value.get("x"))
+        y = int(value.get("y"))
+        width = int(value.get("width"))
+        height = int(value.get("height"))
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
+def _scale_rect_between_bounds(
+    rect: dict[str, int],
+    *,
+    source_bounds: dict[str, int] | None,
+    destination_bounds: dict[str, int] | None,
+) -> tuple[dict[str, int], dict[str, Any] | None]:
+    source = _valid_rect(source_bounds)
+    destination = _valid_rect(destination_bounds)
+    if source is None or destination is None:
+        return rect, None
+    scale_x = float(destination["width"]) / max(1.0, float(source["width"]))
+    scale_y = float(destination["height"]) / max(1.0, float(source["height"]))
+    transformed = {
+        "x": int(round(float(destination["x"]) + (float(rect["x"]) - float(source["x"])) * scale_x)),
+        "y": int(round(float(destination["y"]) + (float(rect["y"]) - float(source["y"])) * scale_y)),
+        "width": max(1, int(round(float(rect["width"]) * scale_x))),
+        "height": max(1, int(round(float(rect["height"]) * scale_y))),
+    }
+    transform = {
+        "schema": "runelite_window_region_transform.v1",
+        "sourceBounds": dict(source),
+        "destinationBounds": dict(destination),
+        "scaleX": scale_x,
+        "scaleY": scale_y,
+        "translated": source["x"] != destination["x"] or source["y"] != destination["y"],
+        "scaled": abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01,
+    }
+    return transformed, transform
+
+
+def _live_movement_safety_from_calibration(record: dict[str, Any]) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    payload = record.get("calibrationPayload") if isinstance(record.get("calibrationPayload"), dict) else {}
+    allowed_window = str(record.get("allowedWindow") or payload.get("allowedWindow") or "").strip().lower()
+    if allowed_window != "runelite":
+        blockers.append("calibration_allowed_window_not_runelite")
+    allowed_region = _valid_rect(payload.get("allowedRegion"))
+    if allowed_region is None:
+        blockers.append("calibration_allowed_region_missing")
+    titles: list[str] = []
+    runelite_window = payload.get("runeliteWindow") if isinstance(payload.get("runeliteWindow"), dict) else {}
+    current_runelite_window = None
+    coordinate_transform = None
+    source_allowed_region = dict(allowed_region) if isinstance(allowed_region, dict) else None
+    title = str(runelite_window.get("title") or "").strip()
+    if title:
+        titles.append(title)
+    if allowed_region is not None and runelite_window:
+        current_runelite_window = _window_info_matching(title or "RuneLite")
+        current_bounds = current_runelite_window.get("bounds") if isinstance(current_runelite_window, dict) else None
+        source_bounds = runelite_window.get("bounds") if isinstance(runelite_window.get("bounds"), dict) else None
+        allowed_region, coordinate_transform = _scale_rect_between_bounds(
+            allowed_region,
+            source_bounds=_valid_rect(source_bounds),
+            destination_bounds=_valid_rect(current_bounds),
+        )
+        if coordinate_transform and (coordinate_transform.get("scaled") or coordinate_transform.get("translated")):
+            warnings.append("calibration_allowed_region_transformed_to_current_runelite_window")
+    titles.append("RuneLite")
+    return {
+        "schema": "arduino_live_movement_safety_from_calibration.v1",
+        "status": "PASS" if not blockers else "FAIL",
+        "blockers": blockers,
+        "warnings": warnings,
+        "allowedWindow": allowed_window or None,
+        "allowedRegion": allowed_region,
+        "sourceAllowedRegion": source_allowed_region,
+        "calibrationRuneliteWindow": runelite_window or None,
+        "currentRuneliteWindow": current_runelite_window,
+        "coordinateTransform": coordinate_transform,
+        "allowedForegroundTitles": list(dict.fromkeys(titles)),
+        "source": "pointer_calibration_record",
+    }
+
+
+def _configure_live_arduino_movement_safety(
+    args: argparse.Namespace,
+    backend: Any,
+    calibration_status: dict[str, Any],
+) -> dict[str, Any]:
+    safety = calibration_status.get("movementSafety") if isinstance(calibration_status.get("movementSafety"), dict) else {}
+    blockers = list(safety.get("blockers") or [])
+    if safety.get("status") != "PASS":
+        blockers.append("calibration_movement_safety_unavailable")
+    configure = getattr(backend, "configure_movement_safety", None)
+    if not callable(configure):
+        blockers.append("backend_movement_safety_unavailable")
+    allowed_region = _valid_rect(safety.get("allowedRegion"))
+    if allowed_region is None:
+        blockers.append("live_allowed_region_missing")
+    if blockers:
+        return {
+            "schema": "arduino_live_movement_safety.v1",
+            "status": "FAIL",
+            "blockers": list(dict.fromkeys(blockers)),
+            "warnings": list(safety.get("warnings") or []),
+            "movementSafety": safety,
+        }
+    configured = configure(
+        allowed_region=allowed_region,
+        allowed_foreground_titles=list(safety.get("allowedForegroundTitles") or ["RuneLite"]),
+        enabled=True,
+        margin_px=0,
+        move_settle_ms=int(getattr(args, "arduino_move_settle_ms", 80) or 80),
+        move_poll_ms=int(getattr(args, "arduino_move_poll_ms", 10) or 10),
+        move_noeffect_timeout_ms=int(getattr(args, "arduino_move_noeffect_timeout_ms", 200) or 200),
+        move_noeffect_retries=int(getattr(args, "arduino_move_noeffect_retries", 2) or 2),
+        move_min_effective_px=int(getattr(args, "arduino_min_effective_move_px", 2) or 2),
+        move_retry_scale=float(getattr(args, "arduino_retry_scale", 1.25) or 1.25),
+        move_max_consecutive_noeffect=int(getattr(args, "arduino_move_max_consecutive_noeffect", 3) or 3),
+    )
+    return {
+        "schema": "arduino_live_movement_safety.v1",
+        "status": "PASS",
+        "blockers": [],
+        "warnings": list(safety.get("warnings") or []),
+        "configured": configured,
+        "movementSafety": safety,
+    }
 
 
 def run_arduino_pointer_calibration_test(args: argparse.Namespace, backend: Any) -> dict[str, Any]:
@@ -2438,6 +2576,29 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(payload, indent=2, sort_keys=False)
                 if args.json
                 else "Live action blocked: Arduino pointer calibration is required before RuneLite movement.\n",
+                end="",
+            )
+            return 1
+        movement_safety = _configure_live_arduino_movement_safety(args, backend, calibration_status)
+        if movement_safety.get("status") != "PASS":
+            payload = {
+                "schema": "arduino_live_movement_block.v1",
+                "status": "FAIL",
+                "reason": "arduino_live_movement_safety_unavailable",
+                "executed": False,
+                "clickSent": False,
+                "keySent": False,
+                "liveRuneLiteClicksBlocked": True,
+                "pointerCalibration": calibration_status,
+                "movementSafety": movement_safety,
+                "warnings": [
+                    "Arduino live RuneLite movement is blocked because the pointer calibration could not be applied as a closed-loop movement guard."
+                ],
+            }
+            print(
+                json.dumps(payload, indent=2, sort_keys=False)
+                if args.json
+                else "Live action blocked: Arduino movement safety could not be configured from pointer calibration.\n",
                 end="",
             )
             return 1

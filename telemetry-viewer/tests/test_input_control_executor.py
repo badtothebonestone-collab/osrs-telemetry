@@ -22,9 +22,13 @@ from input_control.executor import (
     HoverConfirmationOptions,
     _apply_reconciled_observation,
     _maybe_reset_reacquire_budget_on_scope_change,
+    _confirm_hover_menu,
+    _hover_failure_category,
     _loop_counts,
     _loop_stop_reason,
     _new_loop_summary,
+    _no_click_safety_skip_observed,
+    _proposal_has_actionable_safe_target,
     _proposal_reacquire_budget_type,
     _record_loop_status,
     _record_target_no_progress_failure,
@@ -89,6 +93,24 @@ class FakeBackend:
 
     def move_relative(self, dx, dy, *, duration_ms=0):
         self.calls.append(("move_relative", dx, dy, duration_ms))
+
+
+class MovementSafetyBackend(FakeBackend):
+    def __init__(self, allowed_region, *, canvas_offset=(0, 0)):
+        super().__init__()
+        self.allowed_region = dict(allowed_region)
+        self.canvas_offset = tuple(canvas_offset)
+
+    def movement_safety(self):
+        return {
+            "enabled": True,
+            "allowedRegion": dict(self.allowed_region),
+            "marginPx": 0,
+        }
+
+    def canvas_to_screen_point(self, point):
+        self.converted_points.append(dict(point))
+        return {"x": int(point["x"]) + int(self.canvas_offset[0]), "y": int(point["y"]) + int(self.canvas_offset[1])}
 
 
 class FakeImage:
@@ -309,6 +331,74 @@ class IncrementingClock:
 
 
 class InputControlExecutorTest(unittest.TestCase):
+    def test_unsafe_geometry_skip_counts_as_suppressible_failure(self):
+        result = ExecutionResult(
+            status="WARN",
+            dry_run=False,
+            proposed_action="interact_service_route_object",
+            executed=False,
+            missing_capabilities=["screen_click_point"],
+            lifecycle_state={"reason": "screen_click_point_unavailable"},
+        )
+
+        self.assertEqual(_hover_failure_category(result), "unsafe_geometry")
+
+    def test_movement_safety_block_is_fatal_not_suppressed_hover_failure(self):
+        result = ExecutionResult(
+            status="FAIL",
+            dry_run=False,
+            proposed_action="navigate_to_service",
+            executed=False,
+            missing_capabilities=["screen_click_point"],
+            lifecycle_state={"reason": "screen_click_point_outside_movement_safety_region"},
+        )
+
+        self.assertIsNone(_hover_failure_category(result))
+        observed = _no_click_safety_skip_observed(result)
+        self.assertEqual(observed["observedResult"], "no_click_safety_block")
+        self.assertEqual(observed["resultOutcome"], "blocked")
+        self.assertFalse(observed["nextActionAllowed"])
+        self.assertEqual(observed["verificationStatus"], "FAIL")
+
+    def test_live_movement_safety_blocks_off_region_screen_point_before_move(self):
+        backend = MovementSafetyBackend({"x": 100, "y": 100, "width": 500, "height": 500})
+        proposal = ActionProposal(
+            status="PASS",
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_name="Service waypoint",
+            target_tile={"worldX": 3223, "worldY": 3219, "plane": 0},
+            suggested_click_point={"x": 50, "y": 700},
+            click_point_space="screen",
+            resolved_screen_click_point={"x": 50, "y": 700},
+            click_point_resolution={"status": "PASS", "screenClickPoint": {"x": 50, "y": 700}},
+            confidence=0.7,
+        )
+
+        result = execute_action(proposal, backend=backend, movement_profile="instant_test", dry_run=False)
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.executed)
+        self.assertEqual(backend.calls, [])
+        self.assertIn("screen_click_point", result.missing_capabilities)
+        self.assertEqual(result.lifecycle_state["reason"], "screen_click_point_outside_movement_safety_region")
+        self.assertFalse(result.observed_result["nextActionAllowed"])
+
+    def test_failed_screen_resolution_is_not_actionable_for_suppression_override(self):
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Staircase",
+            suggested_click_point={"x": 354, "y": 61},
+            missing_capabilities=["screen_click_point"],
+            target_explanation={
+                "name": "Staircase",
+                "safeAimPoint": {"status": "PASS", "actionable": True},
+            },
+        )
+
+        self.assertFalse(_proposal_has_actionable_safe_target(proposal))
+
     def test_dry_run_never_calls_backend_execute(self):
         backend = FakeBackend()
         proposal = ActionProposal(
@@ -1014,6 +1104,32 @@ class InputControlExecutorTest(unittest.TestCase):
 
         self.assertEqual(_executed_navigation_waypoint_key(proposal, result), (3211, 3228, 0))
 
+    def test_route_stability_allows_repeat_after_navigation_progress(self):
+        proposal = ActionProposal(
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_tile={"worldX": 3231, "worldY": 3218, "plane": 0},
+        )
+        last_result = ExecutionResult(
+            status="PASS",
+            proposed_action="navigate_to_service",
+            dry_run=False,
+            executed=True,
+            observed_result={
+                "observedResult": "service_navigation_progress",
+                "resultOutcome": "progress",
+                "observedSignals": ["player_tile_changed", "destination_distance_decreased"],
+            },
+        )
+
+        issue = _route_stability_issue(
+            proposal,
+            [(3231, 3218, 0)],
+            last_result=last_result,
+        )
+
+        self.assertIsNone(issue)
+
     def test_navigation_no_progress_marks_route_barrier(self):
         proposal = ActionProposal(
             proposed_action="navigate_to_service",
@@ -1228,6 +1344,158 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(result.status, "PASS")
         self.assertEqual(len(request_batches), 2)
         self.assertIn(result.proposal["targetTile"], [{"worldX": 3201, "worldY": 3239, "plane": 0}, {"worldX": 3202, "worldY": 3238, "plane": 0}])
+        self.assertEqual(result.proposal["suggestedClickPoint"], {"x": 260, "y": 190})
+        self.assertTrue(any("selected structured alternate" in warning for warning in result.warnings))
+
+    def test_navigation_path_tile_projection_skips_alternate_outside_movement_safety(self):
+        backend = MovementSafetyBackend({"x": 100, "y": 100, "width": 500, "height": 500})
+        proposal = ActionProposal(
+            status="WARN",
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_name="Service waypoint",
+            target_tile={"worldX": 3203, "worldY": 3238, "plane": 0},
+            target_explanation={
+                "destinationTile": {"worldX": 3203, "worldY": 3238, "plane": 0},
+                "predictedPathTiles": [
+                    {"worldX": 3196, "worldY": 3240, "plane": 0},
+                    {"worldX": 3197, "worldY": 3240, "plane": 0},
+                    {"worldX": 3198, "worldY": 3240, "plane": 0},
+                    {"worldX": 3199, "worldY": 3239, "plane": 0},
+                    {"worldX": 3200, "worldY": 3239, "plane": 0},
+                    {"worldX": 3201, "worldY": 3239, "plane": 0},
+                    {"worldX": 3202, "worldY": 3239, "plane": 0},
+                    {"worldX": 3203, "worldY": 3238, "plane": 0},
+                ],
+            },
+            confidence=0.72,
+            missing_capabilities=["click_point"],
+            warnings=["missing click point or key action"],
+        )
+        alternate_batch = {"seen": False}
+
+        def tile_payload(request, *, on_screen=True, x=240, y=180):
+            return {
+                "status": "PASS" if on_screen else "WARN",
+                "worldX": request["worldX"],
+                "worldY": request["worldY"],
+                "plane": request.get("plane", 0),
+                "geometryAvailable": True,
+                "onScreen": on_screen,
+                "aimPoint": {"canvasX": x, "canvasY": y, "source": "tileProjectionCenter"},
+                "canvasTileBounds": {"x": x - 10, "y": y - 10, "w": 20, "h": 20},
+                "canvasTilePolygon": [[x - 10, y - 10], [x + 10, y - 10], [x + 10, y + 10], [x - 10, y + 10]],
+                "reason": "tile projection is outside the visible viewport" if not on_screen else None,
+            }
+
+        def snapshot_fetch(_url, **kwargs):
+            requests = kwargs.get("tile_projection_requests") or []
+            if len(requests) == 1:
+                return {
+                    "payloads": {"baseline": {"player": {"worldX": 3195, "worldY": 3240, "plane": 0}}},
+                    "tileProjections": {
+                        "schema": "tile_projection_response.v1",
+                        "status": "WARN",
+                        "tiles": [tile_payload(requests[0], on_screen=False, x=816, y=359)],
+                    },
+                }
+            if requests:
+                alternate_batch["seen"] = True
+                tiles = []
+                for index, request in enumerate(requests):
+                    tiles.append(tile_payload(request, x=50, y=300) if index == 0 else tile_payload(request, x=260, y=190))
+                return {"tileProjections": {"schema": "tile_projection_response.v1", "status": "PASS", "tiles": tiles}}
+            return {"payloads": {"baseline": {"player": {"worldX": 3195, "worldY": 3240, "plane": 0}}}}
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile="instant_test",
+            dry_run=True,
+            snapshot_fetch_func=snapshot_fetch,
+            navigation_options=Namespace(max_waypoint_alternates=3),
+        )
+
+        self.assertEqual(result.status, "PASS", result.warnings)
+        self.assertTrue(alternate_batch["seen"])
+        self.assertEqual(backend.converted_points[:2], [{"x": 50, "y": 300}, {"x": 260, "y": 190}])
+        self.assertEqual(result.proposal["suggestedClickPoint"], {"x": 260, "y": 190})
+        self.assertTrue(result.click_point_resolution["movementSafetyPreflight"]["targetInsideAllowedRegion"])
+
+    def test_navigation_path_tile_alternates_without_seed_player_tile(self):
+        backend = FakeBackend()
+        proposal = ActionProposal(
+            status="WARN",
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_name="Service waypoint",
+            target_tile={"worldX": 3203, "worldY": 3238, "plane": 0},
+            target_explanation={
+                "destinationTile": {"worldX": 3203, "worldY": 3238, "plane": 0},
+                "predictedPathTiles": [
+                    {"worldX": 3196, "worldY": 3240, "plane": 0},
+                    {"worldX": 3197, "worldY": 3240, "plane": 0},
+                    {"worldX": 3198, "worldY": 3240, "plane": 0},
+                    {"worldX": 3199, "worldY": 3239, "plane": 0},
+                    {"worldX": 3200, "worldY": 3239, "plane": 0},
+                    {"worldX": 3201, "worldY": 3239, "plane": 0},
+                    {"worldX": 3202, "worldY": 3239, "plane": 0},
+                    {"worldX": 3203, "worldY": 3238, "plane": 0},
+                ],
+            },
+            confidence=0.72,
+            missing_capabilities=["click_point"],
+            warnings=["missing click point or key action"],
+        )
+        request_batches = []
+
+        def tile_payload(request, *, on_screen=True, x=240, y=180):
+            return {
+                "status": "PASS" if on_screen else "WARN",
+                "worldX": request["worldX"],
+                "worldY": request["worldY"],
+                "plane": request.get("plane", 0),
+                "geometryAvailable": True,
+                "onScreen": on_screen,
+                "aimPoint": {"canvasX": x, "canvasY": y, "source": "tileProjectionCenter"},
+                "canvasTileBounds": {"x": x - 10, "y": y - 10, "w": 20, "h": 20},
+                "canvasTilePolygon": [[x - 10, y - 10], [x + 10, y - 10], [x + 10, y + 10], [x - 10, y + 10]],
+                "reason": "tile projection is outside the visible viewport" if not on_screen else None,
+            }
+
+        def snapshot_fetch(_url, **kwargs):
+            requests = kwargs.get("tile_projection_requests") or []
+            if requests:
+                request_batches.append(list(requests))
+                if len(requests) == 1:
+                    return {
+                        "tileProjections": {
+                            "schema": "tile_projection_response.v1",
+                            "status": "WARN",
+                            "tiles": [tile_payload(requests[0], on_screen=False, x=816, y=359)],
+                        },
+                    }
+                return {
+                    "tileProjections": {
+                        "schema": "tile_projection_response.v1",
+                        "status": "PASS",
+                        "tiles": [tile_payload(request, x=260, y=190) for request in requests],
+                    },
+                }
+            return {}
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile="instant_test",
+            dry_run=True,
+            snapshot_fetch_func=snapshot_fetch,
+            navigation_options=Namespace(max_waypoint_alternates=3),
+        )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(len(request_batches), 2)
+        self.assertEqual(result.proposal["targetTile"], {"worldX": 3196, "worldY": 3240, "plane": 0})
         self.assertEqual(result.proposal["suggestedClickPoint"], {"x": 260, "y": 190})
         self.assertTrue(any("selected structured alternate" in warning for warning in result.warnings))
 
@@ -2946,7 +3214,7 @@ class InputControlExecutorTest(unittest.TestCase):
 
         self.assertEqual(result.status, "PASS")
         self.assertTrue(result.executed)
-        self.assertEqual([call[0] for call in backend.calls], ["move", "click_at"])
+        self.assertEqual([call[0] for call in backend.calls], ["move", "mouse_down", "mouse_up"])
         self.assertEqual(result.readiness["actionReadiness"]["status"], "PASS")
 
     def test_execute_next_action_refuses_when_action_readiness_fails_even_if_legacy_passed(self):
@@ -3051,7 +3319,7 @@ class InputControlExecutorTest(unittest.TestCase):
 
         ensure.assert_called_once()
         self.assertEqual(result.status, "PASS")
-        self.assertEqual([call[0] for call in backend.calls], ["move", "click_at"])
+        self.assertEqual([call[0] for call in backend.calls], ["move", "mouse_down", "mouse_up"])
         self.assertEqual(result.readiness["livenessRecoveryLastResult"], recovery)
 
     def test_execute_next_action_auto_recovers_when_daemon_status_initially_down(self):
@@ -3106,7 +3374,7 @@ class InputControlExecutorTest(unittest.TestCase):
         ensure.assert_called_once()
         self.assertEqual(calls["count"], 2)
         self.assertEqual(result.status, "PASS")
-        self.assertEqual([call[0] for call in backend.calls], ["move", "click_at"])
+        self.assertEqual([call[0] for call in backend.calls], ["move", "mouse_down", "mouse_up"])
         self.assertEqual(result.readiness["livenessRecoveryLastResult"], recovery)
 
     def test_execute_next_action_blocks_when_auto_recovery_fails(self):
@@ -4076,6 +4344,45 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertFalse(result.confirmed)
         self.assertEqual(result.reason, "hover_menu_stale")
 
+    def test_navigation_pre_click_accepts_stationary_walk_here_at_request_limit(self):
+        proposal = ActionProposal(
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_name="Bank booth",
+            target_tile={"worldX": 3206, "worldY": 3228, "plane": 2},
+            suggested_click_point={"x": 464, "y": 385},
+            click_point_space="canvas",
+        )
+        sample = {
+            "clientTick": 20,
+            "wallTimeMillis": 500,
+            "mouseCanvasX": 464,
+            "mouseCanvasY": 385,
+            "menuOpen": False,
+            "topOption": "Walk here",
+            "topTarget": "",
+            "topType": "WALK",
+            "topIdentifier": 0,
+            "entries": [
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+            ],
+        }
+
+        result = _confirm_hover_menu(
+            proposal,
+            HoverConfirmationOptions(enabled=True, timeout_ms=0, poll_ms=1, tolerance_px=3, menu_entry_limit=5),
+            {"x": 464, "y": 385},
+            move_started_wall_millis=1000,
+            max_requests=1,
+            snapshot_fetch_func=lambda *_args, **_kwargs: {"clientTickHot": {"hoverMenu": sample, "postMenuSort": sample}},
+            sleep_func=lambda _seconds: None,
+            monotonic_func=IncrementingClock(start=0.0, step=0.01),
+        )
+
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(result["reason"], "stationary_navigation_hover_confirmed")
+        self.assertTrue(result["matchDetails"]["staleSampleAccepted"])
+
     def test_hover_menu_parser_rejects_position_outside_tolerance(self):
         proposal = ActionProposal(
             proposed_action="select_resource_target",
@@ -4470,8 +4777,8 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(result.hover_confirmation["rightClickMenuSelection"]["selectedEntry"]["option"], "Climb-up")
         self.assertIn(("mouse_down", "right"), backend.calls)
         self.assertIn(("mouse_up", "right"), backend.calls)
-        click_buttons = [call[3] for call in backend.calls if call[0] == "click_at"]
-        self.assertIn("left", click_buttons)
+        self.assertIn(("mouse_down", "left"), backend.calls)
+        self.assertIn(("mouse_up", "left"), backend.calls)
 
     def test_route_transition_falls_back_to_generic_opener_when_right_click_menu_fails(self):
         backend = FakeBackend()
@@ -4551,7 +4858,8 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(result.hover_confirmation["rightClickMenuSelectionFallback"], "left_click_dialogue_opener")
         self.assertEqual(result.hover_confirmation["clickClassification"], "clicked_expected_action")
         self.assertIn(("mouse_down", "right"), backend.calls)
-        self.assertIn(("click_at", 1100, 2100, "left", 0), backend.calls)
+        self.assertIn(("mouse_down", "left"), backend.calls)
+        self.assertIn(("mouse_up", "left"), backend.calls)
 
     def test_route_transition_uses_structured_alternate_aimpoint_after_cancel_hover(self):
         backend = FakeBackend()
@@ -4639,7 +4947,8 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertTrue(result.executed)
         self.assertEqual(result.hover_confirmation["clickClassification"], "clicked_expected_action")
         self.assertEqual(result.proposal["suggestedClickPoint"], {"x": 120, "y": 100})
-        self.assertIn(("click_at", 1120, 2100, "left", 0), backend.calls)
+        self.assertIn(("mouse_down", "left"), backend.calls)
+        self.assertIn(("mouse_up", "left"), backend.calls)
         reacquisition = result.action_trace.get("reacquisition", {})
         self.assertTrue(reacquisition.get("routeObjectAimpointReacquired"))
         self.assertEqual(reacquisition["routeObjectAlternateAimpoints"][0]["hoverConfirmation"]["topOption"], "Climb-up")
@@ -4731,7 +5040,7 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertIn(("mouse_down", "right"), backend.calls)
         self.assertEqual(result.hover_confirmation["rightClickMenuSelection"]["selectedEntry"]["option"], "Climb-down")
 
-    def test_return_route_transition_uses_generic_opener_when_no_direct_row_is_available(self):
+    def test_return_route_transition_opens_menu_when_hover_only_shows_generic_climb(self):
         backend = FakeBackend()
         hover_sample = {
             "clientTick": 20,
@@ -4748,6 +5057,110 @@ class InputControlExecutorTest(unittest.TestCase):
                 {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
             ],
         }
+        menu_open_sample = {
+            **hover_sample,
+            "clientTick": 21,
+            "wallTimeMillis": 2100,
+            "menuOpen": True,
+            "menuBounds": {"x": 90, "y": 90, "width": 160, "height": 97},
+            "entries": [
+                {"option": "Climb", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 16672},
+                {"option": "Climb-up", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_SECOND_OPTION", "identifier": 16672},
+                {"option": "Climb-down", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_THIRD_OPTION", "identifier": 16672},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+            ],
+        }
+        clicked_sample = {
+            "clientTick": 22,
+            "wallTimeMillis": 2200,
+            "option": "Climb-down",
+            "target": "<col=ffff>Staircase",
+            "type": "GAME_OBJECT_THIRD_OPTION",
+            "identifier": 16672,
+        }
+        snapshots = iter(
+            [
+                {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample}},
+                {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample}},
+                {"clientTickHot": {"hoverMenu": menu_open_sample, "postMenuSort": menu_open_sample}},
+                {"clientTickHot": {"hoverMenu": menu_open_sample, "postMenuSort": menu_open_sample, "lastMenuOptionClicked": clicked_sample}},
+            ]
+        )
+
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Staircase",
+            suggested_click_point={"x": 100, "y": 100},
+            click_point_space="canvas",
+            resolved_screen_click_point={"x": 1100, "y": 2100},
+            input_geometry={
+                "inputGeometryAvailable": True,
+                "canvasScreenOrigin": {"x": 3932, "y": 107},
+                "canvasSize": {"width": 1834, "height": 1205},
+                "sourceCanvasSize": {"width": 765, "height": 503},
+                "displayScale": {"x": 1.0, "y": 1.0},
+            },
+            target_explanation={
+                "name": "Staircase",
+                "objectId": 16672,
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                "expectedOptions": ["Climb-down", "Climb down"],
+                "expectedTargets": ["Staircase"],
+                "dialogueOpenerOptions": ["Climb"],
+                "expectedPlaneChange": "-1",
+            },
+        )
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile=MouseMovementProfile(name="instant_test", min_duration_ms=1, max_duration_ms=1, waypoint_count=2),
+            hover_options=HoverConfirmationOptions(enabled=True, timeout_ms=0, poll_ms=1, tolerance_px=3, menu_entry_limit=5),
+            dry_run=False,
+            snapshot_fetch_func=lambda *_args, **_kwargs: next(snapshots),
+            sleep_func=lambda _seconds: None,
+            monotonic_func=IncrementingClock(start=0.0, step=0.05),
+            wall_time_millis_func=lambda: 1000,
+            input_controller=HumanInputController(backend, profile="instant_debug", sleep_func=lambda _seconds: None, monotonic_func=IncrementingClock()),
+        )
+
+        self.assertEqual(result.status, "PASS")
+        selection = result.hover_confirmation["rightClickMenuSelection"]
+        self.assertTrue(selection["expectedEntry"]["syntheticEntry"])
+        self.assertEqual(selection["selectedEntry"]["option"], "Climb-down")
+        self.assertNotIn("rightClickMenuSelectionFallback", result.hover_confirmation)
+        self.assertIn(("mouse_down", "right"), backend.calls)
+
+    def test_return_route_transition_blocks_when_right_click_reports_generic_climb(self):
+        backend = FakeBackend()
+        hover_sample = {
+            "clientTick": 20,
+            "wallTimeMillis": 500,
+            "mouseCanvasX": 94,
+            "mouseCanvasY": 101,
+            "menuOpen": False,
+            "topOption": "Climb",
+            "topTarget": "<col=ffff>Staircase",
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "topIdentifier": 16672,
+            "entries": [
+                {"option": "Climb", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 16672},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+            ],
+        }
+        menu_open_sample = {
+            **hover_sample,
+            "clientTick": 21,
+            "wallTimeMillis": 2100,
+            "menuOpen": True,
+            "menuBounds": {"x": 90, "y": 90, "width": 160, "height": 97},
+            "entries": [
+                {"option": "Climb", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 16672},
+                {"option": "Climb-down", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_THIRD_OPTION", "identifier": 16672},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+            ],
+        }
         clicked_sample = {
             "clientTick": 22,
             "wallTimeMillis": 2200,
@@ -4760,7 +5173,8 @@ class InputControlExecutorTest(unittest.TestCase):
             [
                 {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample}},
                 {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample}},
-                {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample, "lastMenuOptionClicked": clicked_sample}},
+                {"clientTickHot": {"hoverMenu": menu_open_sample, "postMenuSort": menu_open_sample}},
+                {"clientTickHot": {"hoverMenu": menu_open_sample, "postMenuSort": menu_open_sample, "lastMenuOptionClicked": clicked_sample}},
             ]
         )
 
@@ -4802,10 +5216,85 @@ class InputControlExecutorTest(unittest.TestCase):
             input_controller=HumanInputController(backend, profile="instant_debug", sleep_func=lambda _seconds: None, monotonic_func=IncrementingClock()),
         )
 
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.hover_confirmation["rightClickMenuSelection"]["reason"], "clicked_direct_menu_mismatch")
+        self.assertEqual(result.action_trace["finalClassification"], "clicked_direct_menu_mismatch")
+        self.assertFalse(any(command.get("type") == "route_transition_dialogue_opener_fallback" for command in result.commands))
+
+    def test_return_route_transition_uses_generic_opener_when_no_direct_row_is_available(self):
+        backend = FakeBackend()
+        hover_sample = {
+            "clientTick": 20,
+            "wallTimeMillis": 500,
+            "mouseCanvasX": 94,
+            "mouseCanvasY": 101,
+            "menuOpen": False,
+            "topOption": "Climb",
+            "topTarget": "<col=ffff>Staircase",
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "topIdentifier": 16672,
+            "entries": [
+                {"option": "Climb", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 16672},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+            ],
+        }
+        clicked_sample = {
+            "clientTick": 22,
+            "wallTimeMillis": 2200,
+            "option": "Climb",
+            "target": "<col=ffff>Staircase",
+            "type": "GAME_OBJECT_FIRST_OPTION",
+            "identifier": 16672,
+        }
+        def snapshot_fetch(*_args, **_kwargs):
+            if any(call[0] == "mouse_up" and call[1] == "left" for call in backend.calls):
+                return {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample, "lastMenuOptionClicked": clicked_sample}}
+            return {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample}}
+
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Staircase",
+            suggested_click_point={"x": 100, "y": 100},
+            click_point_space="canvas",
+            resolved_screen_click_point={"x": 1100, "y": 2100},
+            input_geometry={
+                "inputGeometryAvailable": True,
+                "canvasScreenOrigin": {"x": 3932, "y": 107},
+                "canvasSize": {"width": 1834, "height": 1205},
+                "sourceCanvasSize": {"width": 765, "height": 503},
+                "displayScale": {"x": 1.0, "y": 1.0},
+            },
+            target_explanation={
+                "name": "Staircase",
+                "objectId": 16672,
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                "expectedOptions": ["Climb-down", "Climb down"],
+                "expectedTargets": ["Staircase"],
+                "dialogueOpenerOptions": ["Climb"],
+                "expectedPlaneChange": "-1",
+            },
+        )
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile=MouseMovementProfile(name="instant_test", min_duration_ms=1, max_duration_ms=1, waypoint_count=2),
+            hover_options=HoverConfirmationOptions(enabled=True, timeout_ms=0, poll_ms=1, tolerance_px=3, menu_entry_limit=5),
+            dry_run=False,
+            snapshot_fetch_func=snapshot_fetch,
+            sleep_func=lambda _seconds: None,
+            monotonic_func=IncrementingClock(start=0.0, step=0.05),
+            wall_time_millis_func=lambda: 1000,
+            input_controller=HumanInputController(backend, profile="instant_debug", sleep_func=lambda _seconds: None, monotonic_func=IncrementingClock()),
+        )
+
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.hover_confirmation["reason"], "stationary_route_hover_confirmed")
+        self.assertEqual(result.hover_confirmation["rightClickMenuSelection"]["reason"], "menu_open_not_observed")
+        self.assertEqual(result.hover_confirmation["rightClickMenuSelectionFallback"], "left_click_dialogue_opener")
         self.assertEqual(result.hover_confirmation["clickClassification"], "clicked_expected_action")
-        self.assertNotIn(("mouse_down", "right"), backend.calls)
+        self.assertIn(("mouse_down", "right"), backend.calls)
 
     def test_route_transition_uses_menu_opened_sample_when_menu_open_flag_is_false(self):
         backend = FakeBackend()
@@ -5346,7 +5835,8 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(summary["targetReacquireRounds"], 6)
         self.assertEqual(summary["walkHereClicks"], 0)
         self.assertEqual(summary["cancelClicks"], 0)
-        self.assertIn(("click_at", 1300, 2150, "left", 0), backend.calls)
+        self.assertIn(("mouse_down", "left"), backend.calls)
+        self.assertIn(("mouse_up", "left"), backend.calls)
         self.assertEqual(payload["actionResults"][-1]["proposal"]["targetTile"]["worldX"], 3197)
         self.assertEqual(payload["actionResults"][1]["actionTrace"]["targetSuppression"]["suppressed"], True)
 
@@ -5978,7 +6468,7 @@ class InputControlExecutorTest(unittest.TestCase):
             fetch_json_func=lambda *_args, **_kwargs: statuses.pop(0),
             backend=backend,
             sleep_func=lambda _seconds: None,
-            monotonic_func=iter([0.0, 0.01, 0.02]).__next__,
+            monotonic_func=IncrementingClock(step=0.01),
         )
 
         payload = result.to_dict()
@@ -6034,7 +6524,7 @@ class InputControlExecutorTest(unittest.TestCase):
             fetch_json_func=lambda *_args, **_kwargs: statuses.pop(0),
             backend=backend,
             sleep_func=lambda seconds: sleeps.append(seconds),
-            monotonic_func=iter([0.0, 0.01, 0.02, 1.03, 1.04, 1.05]).__next__,
+            monotonic_func=iter([0.0, 0.01, 0.02, 0.03, 1.03, 1.04, 1.05, 1.06]).__next__,
         )
 
         payload = result.to_dict()
@@ -6068,7 +6558,7 @@ class InputControlExecutorTest(unittest.TestCase):
 
         self.assertEqual(result.status, "PASS")
         self.assertTrue(result.executed)
-        self.assertEqual(backend.calls[-1], ("click_at", 1100, 2100, "left", 82))
+        self.assertEqual(backend.calls[-2:], [("mouse_down", "left"), ("mouse_up", "left")])
         human = result.action_trace["humanInput"]
         self.assertEqual(human["profile"], "steady")
         self.assertEqual(human["averageClickHoldMs"], 82)
@@ -6110,7 +6600,7 @@ class InputControlExecutorTest(unittest.TestCase):
             fetch_json_func=lambda *_args, **_kwargs: status_payload_for_loop(),
             backend=backend,
             sleep_func=lambda _seconds: None,
-            monotonic_func=iter([0.0, 0.01, 0.02]).__next__,
+            monotonic_func=IncrementingClock(step=0.01),
         )
 
         summary = result.to_dict()["loopSummary"]

@@ -12,6 +12,7 @@ from analyzers.live_state import BankOperationContext, BankUiContext, InventoryC
 
 DEFAULT_MEMORY_MAX_AGE_TICKS = 1200
 RESOURCE_AREA_REACHED_DISTANCE_TILES = 8
+RESOURCE_MEMORY_DRIFT_THRESHOLD_TILES = 18
 RESOURCE_CLASSES = {"tree", "woodcutting_tree"}
 SERVICE_CLASSES = {"bank_booth", "banker", "bank_chest", "deposit_box", "deposit_chest", "bank_related", "bank_service"}
 SERVICE_INTENTS = {"needs_service", "navigate_to_service", "service_available", "service_open", "bank_operation_pending", "close_service_context", "wait_for_world_view"}
@@ -332,6 +333,19 @@ def update_resource_area_memory(
     target_tile = _tile_from_payload(target)
     player_tile = _player_tile(player_context)
     cluster = _resource_cluster_center(_candidate_lists(target_context), target_tile)
+    previous_destination, _previous_source = memory.destination_tile()
+    if (
+        isinstance(previous_destination, dict)
+        and isinstance(target_tile, dict)
+        and not _near_tile(target_tile, previous_destination, threshold=RESOURCE_MEMORY_DRIFT_THRESHOLD_TILES)
+    ):
+        return memory
+    if (
+        isinstance(previous_destination, dict)
+        and isinstance(cluster, dict)
+        and not _near_tile(cluster, previous_destination, threshold=RESOURCE_MEMORY_DRIFT_THRESHOLD_TILES)
+    ):
+        return memory
     memory.last_resource_activity_tick = tick
     memory.last_resource_player_tile = player_tile
     memory.last_resource_target_tile = target_tile
@@ -393,20 +407,6 @@ def analyze_resource_return_context(
     destination_tile, destination_source = memory.destination_tile() if memory_valid else (None, "none")
     profile_anchor = _profile_resource_anchor(resolved_policy)
     profile_tile = _tile_from_payload(_context_value(profile_anchor, "worldLocation")) if isinstance(profile_anchor, dict) else None
-    if (
-        memory_valid
-        and target_visible
-        and profile_tile
-        and destination_tile
-        and not _near_tile(destination_tile, profile_tile, threshold=12)
-        and memory_age is not None
-        and memory_age <= 30
-    ):
-        memory_valid = False
-        invalid_reason = "recent_resource_memory_far_from_profile_anchor"
-        destination_tile = None
-        destination_source = "none"
-
     base_kwargs = {
         "source_tick": tick,
         "timing_millis": timing(),

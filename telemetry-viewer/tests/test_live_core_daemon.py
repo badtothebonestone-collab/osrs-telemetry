@@ -68,6 +68,76 @@ class BankingCompletionRetentionTests(unittest.TestCase):
             )
         )
 
+    def test_observe_context_on_castle_floor_recovers_to_profile_resource_anchor(self):
+        policy = daemon.task_policy_module.resolve_task_policy("woodcutting_bank")
+        target = daemon._should_recover_to_profile_resource_area_from_observe(
+            policy,
+            {"phase": "needs_more_context", "activeIntent": "observe"},
+            daemon.PlayerContext(world_x=3206, world_y=3229, plane=1, location_confidence=1.0),
+            BankOperationContext(operation_needed=False, inventory_full=False, inventory_free_slots=15),
+            BankUiContext(bank_open=False),
+        )
+
+        self.assertIsNotNone(target)
+        self.assertEqual(target["worldX"], 3196)
+        self.assertEqual(target["worldY"], 3248)
+        self.assertEqual(target["returnDestinationSource"], "profile_anchor")
+
+    def test_observe_context_recovery_does_not_override_full_inventory_banking(self):
+        policy = daemon.task_policy_module.resolve_task_policy("woodcutting_bank")
+        target = daemon._should_recover_to_profile_resource_area_from_observe(
+            policy,
+            {"phase": "needs_more_context", "activeIntent": "observe"},
+            daemon.PlayerContext(world_x=3206, world_y=3229, plane=1, location_confidence=1.0),
+            BankOperationContext(operation_needed=True, inventory_full=True, inventory_free_slots=0),
+            BankUiContext(bank_open=False),
+        )
+
+        self.assertIsNone(target)
+
+    def test_profile_recovery_does_not_override_fresh_resource_memory(self):
+        policy = daemon.task_policy_module.resolve_task_policy("woodcutting_bank")
+        memory = resource_return_analyzer.ResourceAreaMemoryState(
+            last_resource_activity_tick=120,
+            last_resource_player_tile={"worldX": 3205, "worldY": 3228, "plane": 0},
+            last_resource_target_tile={"worldX": 3212, "worldY": 3232, "plane": 0},
+            last_resource_target_name="Tree",
+            last_resource_target_id=1278,
+            last_resource_target_class="tree",
+            last_resource_cluster_center={"worldX": 3213, "worldY": 3238, "plane": 0},
+            last_resource_plane=0,
+            last_resource_profile="woodcutting",
+            last_resource_target={
+                "targetName": "Tree",
+                "targetType": "sceneObject",
+                "classId": "tree",
+                "worldX": 3212,
+                "worldY": 3232,
+                "plane": 0,
+            },
+        )
+
+        target = daemon._should_return_to_profile_resource_area(
+            policy,
+            {
+                "phase": "target_selected",
+                "activeIntent": "select_target",
+                "activeIntentTarget": {
+                    "targetName": "Tree",
+                    "targetType": "sceneObject",
+                    "classId": "tree",
+                    "worldX": 3212,
+                    "worldY": 3232,
+                    "plane": 0,
+                },
+            },
+            daemon.PlayerContext(world_x=3205, world_y=3228, plane=0, location_confidence=1.0),
+            memory,
+            source_tick=121,
+        )
+
+        self.assertIsNone(target)
+
 
 def synthetic_snapshot(session: Path, tick: int = 1) -> dict:
     tree = fixtures.raw_scene_object(
@@ -966,8 +1036,8 @@ class LiveCoreDaemonTest(unittest.TestCase):
             session = Path(tmp) / "session"
             tree = fixtures.raw_scene_object(
                 10820,
-                3214,
-                3232,
+                3197,
+                3248,
                 160,
                 135,
                 name="Oak tree",
@@ -1143,7 +1213,7 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertFalse(core.state.brain_decision["closeBankContext"]["closeBankNeeded"])
         self.assertNotIn("no_target_observed", generic.get("blockingConditions", []))
 
-    def test_bank_closed_after_banking_complete_uses_return_anchor_when_visible_tree_is_far_from_resource_area(self):
+    def test_bank_closed_after_banking_complete_accepts_visible_tree_over_static_anchor(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"
             distant_tree = fixtures.raw_scene_object(
@@ -1220,18 +1290,87 @@ class LiveCoreDaemonTest(unittest.TestCase):
                             "bankOperationContext": {"bankingComplete": True, "completionReason": "no_resource_items_held"},
                             "postBankReacquisitionContext": {"postBankReacquisitionNeeded": True, "reason": "bank_ui_still_open"},
                         }
+                        core.state.cycle_history.update(
+                            {
+                                "tick": 1,
+                                "cycleStage": "resource_target_selected",
+                                "phase": "target_selected",
+                                "activeIntent": "select_target",
+                                "resourceTargetAvailable": True,
+                                "bankingComplete": True,
+                            }
+                        )
                         core.poll_once()
 
         generic = core.state.brain_decision["genericTaskState"]
         return_context = core.state.brain_decision["resourceReturnContext"]
-        return_route = core.state.brain_decision["returnRouteContext"]
-        self.assertEqual(return_context["reason"], "using_profile_resource_anchor")
+        self.assertEqual(return_context["reason"], "resource_target_visible")
         self.assertTrue(return_context["resourceTargetCurrentlyVisible"])
-        self.assertEqual(generic["phase"], "return_to_resource")
-        self.assertEqual(generic["activeIntent"], "return_to_resource_area")
-        self.assertEqual(generic["activeIntentTarget"], return_route["currentNavigationTarget"])
-        self.assertNotEqual(generic["activeIntentTarget"].get("objectKey"), "castle-tree-after-bank")
-        self.assertTrue(any(state.get("activeIntent") == "return_to_resource_area" for state in pathing_generic_states))
+        self.assertNotEqual(generic.get("activeIntent"), "return_to_resource_area")
+        self.assertNotIn("resourceAreaRecoveryReason", core.state.brain_decision)
+
+    def test_off_worksite_resource_without_memory_does_not_force_static_anchor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            castle_tree = fixtures.raw_scene_object(
+                10820,
+                3212,
+                3232,
+                220,
+                160,
+                name="Oak tree",
+                object_key="castle-tree-after-recovery",
+            )
+            response = snapshot_with_logs(session, 2, [0], objects=[castle_tree])
+            response["payloads"]["baseline"]["player"] = {
+                "worldX": 3214,
+                "worldY": 3232,
+                "plane": 0,
+                "sceneX": 50,
+                "sceneY": 50,
+            }
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            no_service = ServiceContext(service_required=False, source_tick=2)
+            pathing_generic_states: list[dict] = []
+
+            def fake_pathing_context(**kwargs):
+                generic = dict(kwargs.get("generic_task_state") or {})
+                pathing_generic_states.append(generic)
+                active_target = generic.get("activeIntentTarget") if isinstance(generic.get("activeIntentTarget"), dict) else None
+                tile = (
+                    {"worldX": active_target.get("worldX"), "worldY": active_target.get("worldY"), "plane": active_target.get("plane")}
+                    if active_target
+                    else None
+                )
+                return PathingContext(
+                    pathing_needed=bool(active_target and generic.get("activeIntent") == "return_to_resource_area"),
+                    destination=active_target,
+                    destination_tile=tile,
+                    local_reachability="unknown" if active_target else "unknown",
+                    reason="profile_resource_return" if active_target else "not_needed_for_current_phase",
+                    source_tick=2,
+                )
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=no_service):
+                    with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", side_effect=fake_pathing_context):
+                        core = daemon.LiveCoreDaemon(session, args)
+                        core.poll_once()
+
+        generic = core.state.brain_decision["genericTaskState"]
+        return_context = core.state.brain_decision["resourceReturnContext"]
+        self.assertNotEqual(generic.get("phase"), "return_to_resource")
+        self.assertNotIn("resourceAreaRecoveryReason", core.state.brain_decision)
+        self.assertNotEqual(return_context["reason"], "using_profile_resource_anchor_for_resource_recovery")
+        self.assertFalse(any(state.get("activeIntent") == "return_to_resource_area" for state in pathing_generic_states))
 
     def test_bank_closed_after_banking_complete_without_tree_uses_resource_memory_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1493,6 +1632,8 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertIs(kwargs["path_intent_state"], core.state.path_intent_state)
         self.assertIsNotNone(kwargs["activity_context"])
         self.assertEqual(kwargs["generic_task_state"]["activeIntent"], "needs_service")
+        self.assertGreaterEqual(kwargs["max_nodes"], 8192)
+        self.assertGreaterEqual(kwargs["budget_millis"], 25.0)
 
     def test_daemon_passes_in_memory_service_target_state_to_service_analyzer(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1588,6 +1729,157 @@ class LiveCoreDaemonTest(unittest.TestCase):
         self.assertFalse(public_status["serviceRouteSelectedObjectPresent"])
         self.assertGreaterEqual(pathing_calls[0]["max_nodes"], 8192)
         self.assertGreaterEqual(pathing_calls[0]["budget_millis"], 25.0)
+
+    def test_active_service_route_progress_blocks_profile_resource_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 2, [0], objects=[])
+            response["payloads"]["baseline"]["player"] = {
+                "worldX": 3206,
+                "worldY": 3229,
+                "plane": 1,
+                "sceneX": 52,
+                "sceneY": 53,
+            }
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--human-dashboard",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            service = ServiceContext(service_required=True, service_type_needed="bank_full", candidate_count=0)
+            route_context = {
+                "schema": "service_route_context.v1",
+                "status": "PASS",
+                "routeAvailable": True,
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "routeStepStatus": "route_interaction_visible",
+                "currentNodeId": "lumbridge_first_floor_stairs",
+                "completedSteps": ["first stairs up"],
+                "actionReady": True,
+                "visibleInteractionTarget": {
+                    "targetType": "sceneObject",
+                    "classId": "route_transition",
+                    "targetName": "Staircase",
+                    "worldX": 3204,
+                    "worldY": 3229,
+                    "plane": 1,
+                    "aimPoint": {"canvasX": 208, "canvasY": 191},
+                    "actions": ["Climb-up", "Climb-down"],
+                },
+            }
+            pathing_generic_states: list[dict] = []
+
+            def fake_pathing_context(**kwargs):
+                generic = dict(kwargs.get("generic_task_state") or {})
+                pathing_generic_states.append(generic)
+                return PathingContext(
+                    pathing_needed=False,
+                    local_reachability="reachable",
+                    reason="route_transition_visible",
+                    source_tick=2,
+                )
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
+                    with mock.patch.object(daemon.service_route_core, "build_service_route_context", return_value=route_context):
+                        with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", side_effect=fake_pathing_context):
+                            core = daemon.LiveCoreDaemon(session, args)
+                            core.poll_once()
+
+        generic = core.state.brain_decision["genericTaskState"]
+        self.assertNotEqual(generic.get("activeIntent"), "return_to_resource_area")
+        self.assertNotIn("resourceAreaRecoveryReason", core.state.brain_decision)
+        self.assertEqual(core.state.brain_decision["serviceRouteContext"]["routeStepStatus"], "route_interaction_visible")
+        self.assertFalse(any(state.get("activeIntent") == "return_to_resource_area" for state in pathing_generic_states))
+        self.assertNotEqual(
+            core.state.brain_decision["resourceReturnContext"]["reason"],
+            "using_profile_resource_anchor_for_resource_recovery",
+        )
+
+    def test_active_service_route_progress_binds_service_intent_for_final_approach(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            response = snapshot_with_logs(session, 2, [0], objects=[])
+            response["payloads"]["baseline"]["player"] = {
+                "worldX": 3206,
+                "worldY": 3229,
+                "plane": 2,
+                "sceneX": 52,
+                "sceneY": 53,
+            }
+            args = make_args(
+                session,
+                "--input-source",
+                "plugin-snapshot",
+                "--human-dashboard",
+                "--goal-count",
+                "5",
+                "--task-policy",
+                "woodcutting_bank",
+            )
+            bank_booth = {
+                "targetType": "sceneObject",
+                "classId": "bank_booth",
+                "targetName": "Bank booth",
+                "worldX": 3208,
+                "worldY": 3221,
+                "plane": 2,
+                "source": "initialFullPlaneScan",
+                "geometryAvailable": False,
+                "onScreen": False,
+            }
+            service = ServiceContext(
+                service_required=True,
+                service_type_needed="bank_full",
+                best_service_candidate=bank_booth,
+                service_candidates=[bank_booth],
+                candidate_count=1,
+            )
+            route_context = {
+                "schema": "service_route_context.v1",
+                "status": "PASS",
+                "routeAvailable": True,
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "routeStepStatus": "service_target_visible",
+                "currentNodeId": "lumbridge_castle_bank",
+                "completedSteps": ["first stairs up", "second stairs up"],
+                "actionReady": False,
+                "visibleServiceTarget": bank_booth,
+            }
+            pathing_generic_states: list[dict] = []
+
+            def fake_pathing_context(**kwargs):
+                pathing_generic_states.append(dict(kwargs.get("generic_task_state") or {}))
+                return PathingContext(
+                    pathing_needed=True,
+                    destination=bank_booth,
+                    destination_tile={"worldX": 3208, "worldY": 3221, "plane": 2},
+                    next_waypoint_tile={"worldX": 3206, "worldY": 3228, "plane": 2},
+                    local_reachability="reachable",
+                    reason="path_reachable",
+                    source_tick=2,
+                )
+
+            with mock.patch.object(live.PluginSnapshotTailer, "_request_snapshot", return_value=(response, len(json.dumps(response)))):
+                with mock.patch.object(daemon.service_analyzer, "analyze_service_context", return_value=service):
+                    with mock.patch.object(daemon.service_route_core, "build_service_route_context", return_value=route_context):
+                        with mock.patch.object(daemon.pathing_analyzer, "analyze_pathing_context", side_effect=fake_pathing_context):
+                            core = daemon.LiveCoreDaemon(session, args)
+                            core.poll_once()
+
+        generic = core.state.brain_decision["genericTaskState"]
+        self.assertEqual(generic.get("activeIntent"), "needs_service")
+        self.assertEqual(generic.get("activeIntentTarget", {}).get("targetName"), "Bank booth")
+        self.assertEqual(core.state.brain_decision["phase"], "needs_service")
+        self.assertEqual(core.state.brain_decision["navigationIntentContext"]["targetKind"], "service")
+        self.assertTrue(pathing_generic_states)
+        self.assertEqual(pathing_generic_states[0].get("activeIntent"), "needs_service")
+        self.assertEqual(pathing_generic_states[0].get("activeIntentTarget", {}).get("targetName"), "Bank booth")
 
     def test_new_service_cycle_clears_stale_service_route_progress(self):
         with tempfile.TemporaryDirectory() as tmp:

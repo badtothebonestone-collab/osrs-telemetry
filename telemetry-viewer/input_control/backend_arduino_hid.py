@@ -31,6 +31,7 @@ DEFAULT_MOVE_NOEFFECT_RETRIES = 2
 DEFAULT_MOVE_MIN_EFFECTIVE_PX = 2
 DEFAULT_MOVE_RETRY_SCALE = 1.25
 DEFAULT_MOVE_MAX_CONSECUTIVE_NOEFFECT = 3
+DEFAULT_CURSOR_START_REGION_TOLERANCE_PX = 8
 DEFAULT_COMMAND_TIMEOUT_MS = 2000
 DEFAULT_SERIAL_LOCK_TIMEOUT_MS = 1500
 DEFAULT_SERIAL_LOCK_STALE_MS = 120000
@@ -434,6 +435,18 @@ def _point_in_region(point: tuple[int, int] | dict[str, Any] | None, region: dic
     return (
         int(rect["x"]) + margin_i <= int(point_dict["x"]) <= int(rect["right"]) - margin_i
         and int(rect["y"]) + margin_i <= int(point_dict["y"]) <= int(rect["bottom"]) - margin_i
+    )
+
+
+def _point_near_region(point: tuple[int, int] | dict[str, Any] | None, region: dict[str, Any] | None, *, tolerance: int = 0) -> bool:
+    rect = _rect_from_region(region)
+    point_dict = _point_dict(point)
+    if not rect or not point_dict:
+        return False
+    tolerance_i = max(0, int(tolerance or 0))
+    return (
+        int(rect["x"]) - tolerance_i <= int(point_dict["x"]) <= int(rect["right"]) + tolerance_i
+        and int(rect["y"]) - tolerance_i <= int(point_dict["y"]) <= int(rect["bottom"]) + tolerance_i
     )
 
 
@@ -1032,6 +1045,11 @@ class ArduinoHIDBackend:
         }
         return dict(self._movement_safety)
 
+    def movement_safety(self) -> dict[str, Any] | None:
+        if not isinstance(self._movement_safety, dict):
+            return None
+        return dict(self._movement_safety)
+
     def clear_movement_safety(self) -> None:
         self._movement_safety = None
 
@@ -1089,6 +1107,8 @@ class ArduinoHIDBackend:
             "movementAbortedReason": None,
             "targetInsideAllowedRegion": bool(_point_in_region(target, region, margin=max(0, int(margin_px or 0)))) if target and region else False,
             "cursorInsideAllowedRegion": None,
+            "cursorNearAllowedRegion": None,
+            "cursorStartRegionTolerancePx": DEFAULT_CURSOR_START_REGION_TOLERANCE_PX,
             "foregroundWindowAllowed": _foreground_allowed(foreground_before, allowed_foreground_titles),
             "noClick": True,
             "moveSettleMs": max(0, int(move_settle_ms if move_settle_ms is not None else DEFAULT_MOVE_SETTLE_MS)),
@@ -1120,8 +1140,15 @@ class ArduinoHIDBackend:
         current = self.current_position()
         trace["cursorPositionBefore"] = {"x": current[0], "y": current[1]}
         trace["cursorInsideAllowedRegion"] = _point_in_region(current, region, margin=0)
-        if not trace["cursorInsideAllowedRegion"]:
+        trace["cursorNearAllowedRegion"] = _point_near_region(
+            current,
+            region,
+            tolerance=DEFAULT_CURSOR_START_REGION_TOLERANCE_PX,
+        )
+        if not trace["cursorInsideAllowedRegion"] and not trace["cursorNearAllowedRegion"]:
             self._abort_movement("cursor_start_outside_allowed_region", trace)
+        if not trace["cursorInsideAllowedRegion"]:
+            trace.setdefault("warnings", []).append("cursor_start_near_allowed_region")
         max_chunk = int(trace["maxChunkSize"])
         tolerance = max(0, int(tolerance_px or DEFAULT_CLOSED_LOOP_TOLERANCE_PX))
         feedback_tolerance = max(0, int(feedback_tolerance_px or DEFAULT_CLOSED_LOOP_FEEDBACK_TOLERANCE_PX))
@@ -1202,9 +1229,18 @@ class ArduinoHIDBackend:
                 foreground_after = _foreground_window_info()
                 result["foregroundWindow"] = foreground_after
                 result["insideAllowedRegion"] = _point_in_region(position, region, margin=0)
+                result["nearAllowedRegion"] = _point_near_region(
+                    position,
+                    region,
+                    tolerance=DEFAULT_CURSOR_START_REGION_TOLERANCE_PX,
+                )
                 if not result["insideAllowedRegion"]:
-                    result["abortReason"] = "cursor_left_allowed_region"
-                    return position, result
+                    expected_inside = _point_in_region(expected_after, region, margin=0)
+                    if result["nearAllowedRegion"] and expected_inside:
+                        result["transientNearAllowedRegion"] = True
+                    else:
+                        result["abortReason"] = "cursor_left_allowed_region"
+                        return position, result
                 if not _foreground_allowed(foreground_after, allowed_foreground_titles):
                     result["abortReason"] = "foreground_window_changed"
                     return position, result

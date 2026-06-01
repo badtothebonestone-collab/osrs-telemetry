@@ -70,6 +70,23 @@ def deposit_box(**overrides):
     return candidate
 
 
+def door(**overrides):
+    candidate = {
+        "targetName": "Large door",
+        "classId": "route_transition",
+        "targetType": "sceneObject",
+        "id": 12349,
+        "worldX": 3213,
+        "worldY": 3222,
+        "plane": 0,
+        "actions": ["Open"],
+        "aimPoint": {"canvasX": 277, "canvasY": 295},
+        "onScreen": True,
+    }
+    candidate.update(overrides)
+    return candidate
+
+
 class ServiceRouteCoreTest(unittest.TestCase):
     def test_default_lumbridge_route_loads_as_unverified_static_prior(self):
         routes = service_route_core.load_service_routes()
@@ -119,6 +136,51 @@ class ServiceRouteCoreTest(unittest.TestCase):
         self.assertEqual(context["visibleInteractionTarget"]["targetName"], "Staircase")
         self.assertEqual(context["visibleInteractionTarget"]["expectedPlaneChange"], "-1")
         self.assertIn("Climb-down", context["visibleInteractionTarget"]["expectedOptions"])
+
+    def test_return_route_ground_floor_uses_entrance_before_west_approach(self):
+        context = service_route_core.build_return_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3205, world_y=3228, plane=0),
+            target_context={"broadCandidates": []},
+            service_context={},
+            resource_return_context={
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "returnDestinationSource": "profile_anchor",
+            },
+            route_state=service_route_core.ServiceRouteState(),
+            routes=service_route_core.load_service_routes(),
+            source_tick=91,
+        )
+
+        self.assertEqual(context["state"], "return_route_ready")
+        self.assertEqual(context["currentNodeId"], "lumbridge_castle_entrance_or_courtyard")
+        self.assertEqual(context["currentStep"]["worldLocation"], {"worldX": 3205, "worldY": 3232, "plane": 0})
+        self.assertEqual(context["nextEdge"]["edgeId"], "first_stairs_search_to_entrance_return")
+
+    def test_return_route_does_not_backtrack_to_stairs_search_after_reaching_entrance(self):
+        state = service_route_core.ServiceRouteState()
+        context = service_route_core.build_return_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3205, world_y=3232, plane=0),
+            target_context={"broadCandidates": []},
+            service_context={},
+            resource_return_context={
+                "returnDestinationAvailable": True,
+                "returnDestinationTile": {"worldX": 3196, "worldY": 3248, "plane": 0},
+                "returnDestinationSource": "profile_anchor",
+            },
+            route_state=state,
+            routes=service_route_core.load_service_routes(),
+            source_tick=92,
+        )
+
+        self.assertEqual(context["state"], "return_route_ready")
+        self.assertEqual(context["currentNodeId"], "lumbridge_castle_west_approach")
+        self.assertEqual(context["currentStep"]["worldLocation"], {"worldX": 3203, "worldY": 3238, "plane": 0})
+        self.assertIn("Lumbridge Castle entrance or ground-floor courtyard return", context["completedSteps"])
 
     def test_return_route_ignores_offscreen_staircase_projection_with_canvas_point(self):
         offscreen_stair = stair(
@@ -173,7 +235,7 @@ class ServiceRouteCoreTest(unittest.TestCase):
         self.assertFalse(offscreen_projection["actionableByCanvas"])
         self.assertEqual(offscreen_projection["rejectionReason"], "offscreen")
 
-    def test_return_route_after_ground_floor_descend_targets_west_approach(self):
+    def test_return_route_after_ground_floor_descend_targets_entrance(self):
         context = service_route_core.build_return_route_context(
             profile="woodcut_bank",
             service_type="bank",
@@ -191,9 +253,9 @@ class ServiceRouteCoreTest(unittest.TestCase):
         )
 
         self.assertEqual(context["state"], "return_route_ready")
-        self.assertEqual(context["currentNodeId"], "lumbridge_castle_west_approach")
-        self.assertEqual(context["currentNavigationTarget"]["worldX"], 3203)
-        self.assertEqual(context["currentNavigationTarget"]["worldY"], 3238)
+        self.assertEqual(context["currentNodeId"], "lumbridge_castle_entrance_or_courtyard")
+        self.assertEqual(context["currentNavigationTarget"]["worldX"], 3205)
+        self.assertEqual(context["currentNavigationTarget"]["worldY"], 3232)
 
     def test_route_prior_provides_scout_navigation_anchor_when_service_target_missing(self):
         context = service_route_core.build_service_route_context(
@@ -310,6 +372,89 @@ class ServiceRouteCoreTest(unittest.TestCase):
         self.assertEqual(context["routeMode"], "goal_directed_fallback")
         self.assertEqual(context["selectedApproachNode"]["nodeId"], "lumbridge_castle_entrance_or_courtyard")
         self.assertEqual(context["currentNodeId"], "lumbridge_castle_entrance_or_courtyard")
+
+    def test_goal_directed_castle_entry_opens_near_route_door_obstacle(self):
+        context = service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3216, world_y=3223, plane=0),
+            service_context={"serviceNeeded": True, "serviceTypeNeeded": "bank", "candidateCount": 0},
+            target_context={
+                "broadCandidates": [
+                    door(actions=[]),
+                    door(targetName="Door", id=1535, worldX=3226, worldY=3214, aimPoint={"canvasX": 521, "canvasY": 154}),
+                ]
+            },
+            source_tick=85,
+        )
+
+        self.assertEqual(context["routeMode"], "goal_directed_fallback")
+        self.assertEqual(context["routeStepStatus"], "route_interaction_visible")
+        self.assertTrue(context["actionReady"])
+        self.assertTrue(context["routeObjectInterceptReady"])
+        self.assertEqual(context["visibleInteractionTarget"]["targetName"], "Large door")
+        self.assertTrue(context["visibleInteractionTarget"]["navigationObstacle"])
+        self.assertEqual(context["visibleInteractionTarget"]["actions"], ["Open"])
+        self.assertEqual(context["selectedRouteObjectAction"], "Open")
+        self.assertEqual(context["interactionExpectedOptions"], ["Open"])
+        self.assertEqual(context["selectedRouteObjectRelevance"]["relevanceStatus"], "PASS")
+        self.assertTrue(context["selectedRouteObjectRelevance"]["navigationObstacle"])
+        self.assertEqual(context["selectedRouteObjectRelevance"]["routeNavigationStepLabel"], "Lumbridge Castle entrance or ground-floor courtyard")
+        self.assertEqual(context["routeObjectCensus"]["routeRelevantActionableObjects"], 1)
+        self.assertEqual(context["routeObjectCensus"]["rejectedRouteObjectsByReason"]["outsideSearchArea"], 1)
+
+    def test_goal_directed_castle_entry_ignores_far_random_door(self):
+        context = service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3216, world_y=3223, plane=0),
+            service_context={"serviceNeeded": True, "serviceTypeNeeded": "bank", "candidateCount": 0},
+            target_context={"broadCandidates": [door(targetName="Door", id=1535, worldX=3226, worldY=3214)]},
+            source_tick=86,
+        )
+
+        self.assertEqual(context["routeStepStatus"], "goal_directed_route_prior")
+        self.assertFalse(context["actionReady"])
+        self.assertIsNone(context["visibleInteractionTarget"])
+        self.assertEqual(context["routeObjectCensus"]["routeRelevantActionableObjects"], 0)
+        self.assertEqual(context["routeObjectCensus"]["rejectedRouteObjectsByReason"]["outsideSearchArea"], 1)
+
+    def test_goal_directed_inside_castle_targets_stairs_not_south_door(self):
+        context = service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3212, world_y=3221, plane=0),
+            service_context={"serviceNeeded": True, "serviceTypeNeeded": "bank", "candidateCount": 0},
+            target_context={
+                "broadCandidates": [
+                    door(worldX=3213, worldY=3221, actions=[]),
+                ]
+            },
+            source_tick=87,
+        )
+
+        self.assertEqual(context["routeMode"], "goal_directed_fallback")
+        self.assertEqual(context["routeStepStatus"], "goal_directed_route_prior")
+        self.assertEqual(context["selectedApproachNode"]["nodeId"], "lumbridge_first_stairs_search_area")
+        self.assertEqual(context["currentNodeId"], "lumbridge_first_stairs_search_area")
+        self.assertEqual(context["currentNavigationTarget"]["targetName"], "Lumbridge Castle first stairs search area")
+        self.assertFalse(context["actionReady"])
+        self.assertIsNone(context["visibleInteractionTarget"])
+
+    def test_goal_directed_inside_castle_corridor_does_not_backtrack_to_entry(self):
+        context = service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3215, world_y=3225, plane=0),
+            service_context={"serviceNeeded": True, "serviceTypeNeeded": "bank", "candidateCount": 0},
+            target_context={"serviceCandidateInputs": [], "loadedServiceScene": [], "broadCandidates": []},
+            source_tick=88,
+        )
+
+        self.assertEqual(context["routeMode"], "goal_directed_fallback")
+        self.assertEqual(context["selectedApproachNode"]["nodeId"], "lumbridge_first_stairs_search_area")
+        self.assertEqual(context["currentNodeId"], "lumbridge_first_stairs_search_area")
+        self.assertEqual(context["currentNavigationTarget"]["targetName"], "Lumbridge Castle first stairs search area")
 
     def test_goal_directed_fallback_does_not_target_first_stairs_before_entry(self):
         context = service_route_core.build_service_route_context(
@@ -559,6 +704,39 @@ class ServiceRouteCoreTest(unittest.TestCase):
         self.assertIn("first stairs up", context["completedSteps"])
         self.assertEqual(context["currentNodeId"], "lumbridge_first_floor_stairs")
 
+    def test_retained_route_interaction_anchor_guides_back_to_stair_search(self):
+        state = service_route_core.ServiceRouteState()
+        service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3207, world_y=3231, plane=0),
+            service_context={"serviceNeeded": True, "serviceTypeNeeded": "bank"},
+            target_context={"broadCandidates": [stair(worldX=3204, worldY=3229, plane=0)]},
+            route_state=state,
+            source_tick=100,
+        )
+
+        context = service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3212, world_y=3229, plane=0),
+            service_context={
+                "serviceNeeded": True,
+                "serviceTypeNeeded": "bank",
+                "bestServiceCandidate": bank_booth(targetName="Bank table", worldX=3266, worldY=3172, plane=0, actions=[]),
+                "candidateCount": 1,
+            },
+            target_context={"broadCandidates": []},
+            route_state=state,
+            source_tick=101,
+        )
+
+        self.assertEqual(context["routeStepStatus"], "retained_route_interaction_anchor")
+        self.assertEqual(context["currentNavigationTarget"]["worldX"], 3204)
+        self.assertEqual(context["currentNavigationTarget"]["worldY"], 3229)
+        self.assertEqual(context["currentNavigationTarget"]["routeStepType"], "interact_object")
+        self.assertIn("previously observed route interaction anchor", " ".join(context["warnings"]))
+
     def test_plane_one_without_visible_second_stair_does_not_reuse_ground_floor_anchor(self):
         context = service_route_core.build_service_route_context(
             profile="woodcut_bank",
@@ -686,6 +864,52 @@ class ServiceRouteCoreTest(unittest.TestCase):
         self.assertEqual(context["visibleServiceTarget"]["targetName"], "Bank Deposit Box")
         self.assertEqual(context["selectedServiceAction"], "Deposit")
 
+    def test_bank_full_policy_keeps_ineligible_deposit_box_below_bank_booth(self):
+        context = service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank_full",
+            player_context=player(world_x=3206, world_y=3228, plane=2),
+            service_context={
+                "serviceNeeded": True,
+                "serviceTypeNeeded": "bank_full",
+                "bestServiceCandidate": bank_booth(
+                    onScreen=True,
+                    geometryAvailable=True,
+                    policyEligible=True,
+                    serviceCandidatePolicyGroupRank=0,
+                    serviceCandidateType="bank_booth",
+                    serviceGroup="full_bank",
+                ),
+                "serviceCandidates": [
+                    bank_booth(
+                        onScreen=True,
+                        geometryAvailable=True,
+                        policyEligible=True,
+                        serviceCandidatePolicyGroupRank=0,
+                        serviceCandidateType="bank_booth",
+                        serviceGroup="full_bank",
+                    ),
+                    deposit_box(
+                        onScreen=True,
+                        geometryAvailable=True,
+                        policyEligible=False,
+                        ineligibleReason="deposit_fallback_blocked_by_visible_primary",
+                        serviceCandidatePolicyGroupRank=10,
+                        serviceCandidateType="deposit_box",
+                        serviceGroup="deposit_only",
+                    ),
+                ],
+                "candidateCount": 2,
+            },
+            target_context={"broadCandidates": []},
+            source_tick=45,
+        )
+
+        self.assertEqual(context["routeStepStatus"], "service_target_actionable")
+        self.assertEqual(context["visibleServiceTarget"]["targetName"], "Bank booth")
+        self.assertEqual(context["selectedServiceAction"], "Bank")
+        self.assertEqual(context["serviceObjectCensus"]["topServiceObjects"][0]["name"], "Bank booth")
+
     def test_offscreen_bank_booth_is_reported_in_service_census_not_absent(self):
         booth = bank_booth(onScreen=False, aimPoint=None)
         context = service_route_core.build_service_route_context(
@@ -710,6 +934,79 @@ class ServiceRouteCoreTest(unittest.TestCase):
         self.assertEqual(census["routeRelevantServiceObjects"], 1)
         self.assertEqual(census["routeRelevantActionableServiceObjects"], 0)
         self.assertEqual(census["topServiceObjects"][0]["projectionStatus"]["offscreen"], True)
+
+    def test_off_route_bank_candidate_is_not_recorded_as_lumbridge_anchor(self):
+        state = service_route_core.ServiceRouteState()
+        al_kharid_booth = bank_booth(
+            targetName="Closed bank booth",
+            id=10528,
+            worldX=3268,
+            worldY=3170,
+            plane=0,
+            actions=[],
+            onScreen=False,
+            aimPoint=None,
+        )
+
+        context = service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3246, world_y=3185, plane=0),
+            service_context={
+                "serviceNeeded": True,
+                "serviceTypeNeeded": "bank",
+                "bestServiceCandidate": al_kharid_booth,
+                "candidateCount": 1,
+            },
+            target_context={"broadCandidates": [al_kharid_booth]},
+            route_state=state,
+            source_tick=10707,
+        )
+
+        self.assertEqual(context["routeStepStatus"], "goal_directed_route_prior")
+        self.assertEqual(context["observedAnchors"], {})
+        target = context["currentNavigationTarget"]
+        self.assertNotEqual(target["worldX"], 3268)
+        self.assertNotEqual(target["worldY"], 3170)
+        self.assertEqual(context["routeSourceMismatch"]["classification"], "route_source_mismatch")
+        self.assertTrue(any("visible service target ignored" in warning for warning in context["warnings"]))
+
+    def test_stale_off_route_service_anchor_is_not_retained(self):
+        state = service_route_core.ServiceRouteState()
+        state.reset_for_route("lumbridge_west_trees_to_lumbridge_castle_bank")
+        state.observed_anchors["5:bad-bank"] = {
+            "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+            "routeStepIndex": 5,
+            "routeStepLabel": "Lumbridge Castle bank",
+            "routeStepType": "service_interact",
+            "nodeId": "lumbridge_castle_bank",
+            "objectId": 10528,
+            "targetName": "Closed bank booth",
+            "worldX": 3268,
+            "worldY": 3170,
+            "plane": 0,
+            "actions": [],
+            "lastSeenTick": 10707,
+            "verifiedLive": True,
+            "confidence": 1.0,
+            "source": "observed_route_anchor",
+            "serviceType": "bank",
+        }
+
+        context = service_route_core.build_service_route_context(
+            profile="woodcut_bank",
+            service_type="bank",
+            player_context=player(world_x=3246, world_y=3185, plane=0),
+            service_context={"serviceNeeded": True, "serviceTypeNeeded": "bank", "candidateCount": 0},
+            target_context={"broadCandidates": []},
+            route_state=state,
+            source_tick=10708,
+        )
+
+        self.assertNotEqual(context["routeStepStatus"], "retained_service_anchor")
+        target = context["currentNavigationTarget"]
+        self.assertNotEqual(target["worldX"], 3268)
+        self.assertNotEqual(target["worldY"], 3170)
 
     def test_observed_service_anchor_is_reused_as_verified_navigation_target(self):
         state = service_route_core.ServiceRouteState()

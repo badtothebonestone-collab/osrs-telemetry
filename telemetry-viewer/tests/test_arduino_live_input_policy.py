@@ -6,6 +6,7 @@ import unittest
 from io import StringIO
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 
 VIEWER_DIR = Path(__file__).resolve().parents[1]
@@ -230,6 +231,48 @@ def live_options(**overrides):
     return Namespace(**values)
 
 
+def pointer_calibration_record(*, allowed_window="runelite"):
+    return {
+        "schema": execute_cli.POINTER_CALIBRATION_RECORD_SCHEMA,
+        "status": "PASS",
+        "writtenAtUtc": execute_cli._utc_now_text(),
+        "writtenAtMillis": execute_cli.time.time() * 1000,
+        "arduinoPort": "COM9",
+        "allowedWindow": allowed_window,
+        "movementMetrics": {"movementSuccessRate": 1.0},
+        "totalChunks": 5,
+        "successfulChunks": 5,
+        "retryChunks": 0,
+        "noEffectChunks": 0,
+        "consecutiveNoEffectChunks": 0,
+        "movementSuccessRate": 1.0,
+        "maxPositionErrorPx": 1,
+        "finalPositionErrorPx": 0,
+        "clickSent": False,
+        "keySent": False,
+        "directBackendBypassCount": 0,
+        "cursorLeftAllowedRegion": False,
+        "firmwareStatusAfter": {"armed": False, "keysDown": 0, "mouseButtonsDown": 0, "watchdogMs": 1000},
+        "monitorAfter": {
+            "schema": "input_integrity_status.v1",
+            "status": "PASS",
+            "monitorPass": True,
+            "injectionFlags": {
+                "mouseInjectedCount": 0,
+                "mouseLowerIlInjectedCount": 0,
+                "keyboardInjectedCount": 0,
+                "keyboardLowerIlInjectedCount": 0,
+            },
+            "backend": {"directBackendBypassCount": 0},
+        },
+        "calibrationPayload": {
+            "allowedWindow": allowed_window,
+            "allowedRegion": {"x": 100, "y": 120, "width": 640, "height": 480},
+            "runeliteWindow": {"title": "RuneLite - Test", "bounds": {"x": 90, "y": 100, "width": 700, "height": 540}},
+        },
+    }
+
+
 class ArduinoLiveInputPolicyTest(unittest.TestCase):
     def test_cli_live_execution_defaults_to_arduino(self):
         args = execute_cli.parse_args(["--execute"])
@@ -277,6 +320,72 @@ class ArduinoLiveInputPolicyTest(unittest.TestCase):
         self.assertTrue(payload["liveRuneLiteClicksBlocked"])
         self.assertFalse(payload["clickSent"])
         self.assertIn("calibration_record_missing", payload["pointerCalibration"]["blockers"])
+
+    def test_arduino_live_movement_safety_uses_pointer_calibration_region(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calibration_path = Path(tmp) / "pointer_calibration.json"
+            calibration_path.write_text(json.dumps(pointer_calibration_record()), encoding="utf-8")
+            args = execute_cli.parse_args([
+                "--execute",
+                "--backend",
+                "arduino",
+                "--arduino-port",
+                "COM9",
+                "--arduino-pointer-calibration-path",
+                str(calibration_path),
+            ])
+            backend = FakeCalibrationBackend()
+
+            calibration = execute_cli._load_pointer_calibration_for_live_movement(args)
+            configured = execute_cli._configure_live_arduino_movement_safety(args, backend, calibration)
+
+        self.assertEqual(calibration["status"], "PASS")
+        self.assertEqual(configured["status"], "PASS")
+        configure_calls = [call for call in backend.calls if call[0] == "configure_movement_safety"]
+        self.assertEqual(len(configure_calls), 1)
+        kwargs = configure_calls[0][1]
+        self.assertEqual(kwargs["allowed_region"], {"x": 100, "y": 120, "width": 640, "height": 480})
+        self.assertIn("RuneLite - Test", kwargs["allowed_foreground_titles"])
+        self.assertTrue(kwargs["enabled"])
+
+    def test_arduino_live_movement_safety_scales_region_to_current_runelite_window(self):
+        record = pointer_calibration_record()
+
+        with patch.object(
+            execute_cli,
+            "_window_info_matching",
+            return_value={"title": "RuneLite - Test", "bounds": {"x": 180, "y": 200, "width": 1400, "height": 1080}},
+        ):
+            safety = execute_cli._live_movement_safety_from_calibration(record)
+
+        self.assertEqual(safety["status"], "PASS")
+        self.assertEqual(safety["sourceAllowedRegion"], {"x": 100, "y": 120, "width": 640, "height": 480})
+        self.assertEqual(safety["allowedRegion"], {"x": 200, "y": 240, "width": 1280, "height": 960})
+        self.assertTrue(safety["coordinateTransform"]["scaled"])
+        self.assertIn("calibration_allowed_region_transformed_to_current_runelite_window", safety["warnings"])
+
+    def test_arduino_live_movement_safety_rejects_non_runelite_calibration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calibration_path = Path(tmp) / "pointer_calibration.json"
+            calibration_path.write_text(json.dumps(pointer_calibration_record(allowed_window="calibration")), encoding="utf-8")
+            args = execute_cli.parse_args([
+                "--execute",
+                "--backend",
+                "arduino",
+                "--arduino-port",
+                "COM9",
+                "--arduino-pointer-calibration-path",
+                str(calibration_path),
+            ])
+            backend = FakeCalibrationBackend()
+
+            calibration = execute_cli._load_pointer_calibration_for_live_movement(args)
+            configured = execute_cli._configure_live_arduino_movement_safety(args, backend, calibration)
+
+        self.assertEqual(calibration["status"], "PASS")
+        self.assertEqual(configured["status"], "FAIL")
+        self.assertIn("calibration_allowed_window_not_runelite", configured["blockers"])
+        self.assertFalse(any(call[0] == "configure_movement_safety" for call in backend.calls))
 
     def test_arduino_stop_all_cli_sends_stop_all(self):
         serials = []

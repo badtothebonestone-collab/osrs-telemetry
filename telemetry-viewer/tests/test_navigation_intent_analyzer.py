@@ -135,6 +135,110 @@ class NavigationIntentAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["destinationTarget"]["worldX"], 3205)
         self.assertIn("route prior", " ".join(payload["warnings"]).lower())
 
+    def test_goal_directed_route_overrides_off_route_visible_service_target(self):
+        visible_al_kharid_booth = service_candidate(
+            targetName="Closed bank booth",
+            id=10528,
+            worldX=3268,
+            worldY=3170,
+            plane=0,
+            distanceTiles=24,
+            navigation={"directReachability": "unknown"},
+        )
+        service = ServiceContext(
+            service_required=True,
+            service_type_needed="bank",
+            best_service_candidate=visible_al_kharid_booth,
+            candidate_count=1,
+            source_tick=22,
+            service_route_context={
+                "schema": "service_route_context.v1",
+                "status": "WARN",
+                "routeAvailable": True,
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "routeStepStatus": "goal_directed_route_prior",
+                "routeMode": "goal_directed_fallback",
+                "goalDirectedFallback": True,
+                "currentNavigationTarget": {
+                    "targetType": "service_route_anchor",
+                    "classId": "service_route_anchor",
+                    "targetName": "Lumbridge bridge east approach",
+                    "worldX": 3236,
+                    "worldY": 3223,
+                    "plane": 0,
+                    "verifiedLive": False,
+                },
+                "routeSourceMismatch": {"classification": "route_source_mismatch"},
+                "warnings": ["visible service target ignored because it does not match the selected route: outsideRouteCorridor"],
+            },
+        )
+
+        context = navigation_intent_analyzer.analyze_navigation_intent(
+            "woodcutting_bank",
+            service_context=service,
+            navigation_context=NavigationContext(collision_window_available=True),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(context.status, "WARN")
+        self.assertTrue(payload["navigationNeeded"])
+        self.assertEqual(payload["navigationReason"], "service_route_prior")
+        self.assertEqual(payload["targetKind"], "service_route")
+        self.assertEqual(payload["destinationTarget"]["worldX"], 3236)
+        self.assertEqual(payload["destinationTarget"]["worldY"], 3223)
+
+    def test_route_interaction_overrides_far_visible_service_target(self):
+        visible_al_kharid_booth = service_candidate(
+            targetName="Bank table",
+            id=591,
+            worldX=3266,
+            worldY=3172,
+            plane=0,
+            distanceTiles=59,
+            navigation={"directReachability": "unknown"},
+        )
+        service = ServiceContext(
+            service_required=True,
+            service_type_needed="bank",
+            best_service_candidate=visible_al_kharid_booth,
+            candidate_count=1,
+            source_tick=23,
+            service_route_context={
+                "schema": "service_route_context.v1",
+                "status": "PASS",
+                "routeAvailable": True,
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "routeStepStatus": "route_interaction_visible",
+                "actionReady": True,
+                "routeObjectInterceptReady": True,
+                "visibleInteractionTarget": {
+                    "targetType": "sceneObject",
+                    "classId": "route_transition",
+                    "targetName": "Staircase",
+                    "worldX": 3204,
+                    "worldY": 3229,
+                    "plane": 0,
+                    "verifiedLive": True,
+                    "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                },
+            },
+        )
+
+        context = navigation_intent_analyzer.analyze_navigation_intent(
+            "woodcutting_bank",
+            service_context=service,
+            navigation_context=NavigationContext(collision_window_available=True),
+        )
+
+        payload = context.to_dict()
+        self.assertEqual(context.status, "PASS")
+        self.assertTrue(payload["navigationNeeded"])
+        self.assertEqual(payload["navigationReason"], "service_route_prior")
+        self.assertEqual(payload["targetKind"], "service_route")
+        self.assertEqual(payload["destinationTarget"]["targetName"], "Staircase")
+        self.assertEqual(payload["destinationTarget"]["worldX"], 3204)
+        self.assertEqual(payload["destinationTarget"]["worldY"], 3229)
+
     def test_needs_service_intent_without_service_context_waits_for_context(self):
         context = navigation_intent_analyzer.analyze_navigation_intent(
             "woodcutting_bank",

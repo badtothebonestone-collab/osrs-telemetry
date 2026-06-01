@@ -117,6 +117,38 @@ class ResourceReturnAnalyzerTest(unittest.TestCase):
 
         self.assertFalse(updated.to_dict(source_tick=102)["resourceMemoryValid"])
 
+    def test_resource_memory_does_not_drift_to_far_visible_tree(self):
+        memory = resource_return_analyzer.ResourceAreaMemoryState(
+            last_resource_activity_tick=100,
+            last_resource_player_tile={"worldX": 3212, "worldY": 3238, "plane": 0},
+            last_resource_target_tile={"worldX": 3213, "worldY": 3238, "plane": 0},
+            last_resource_target_name="Tree",
+            last_resource_target_id=1278,
+            last_resource_target_class="tree",
+            last_resource_cluster_center={"worldX": 3213, "worldY": 3238, "plane": 0},
+            last_resource_plane=0,
+            last_resource_profile="woodcutting",
+            last_resource_target=tree_target(name="Tree", x=3213, y=3238),
+        )
+        far_tree = tree_target(name="Dead tree", x=3216, y=3194)
+
+        updated = resource_return_analyzer.update_resource_area_memory(
+            "woodcutting_bank",
+            memory,
+            inventory_context=inventory_context(free_slots=20),
+            target_context=TargetContext(raw_best_target=far_tree, candidates=[far_tree], source_tick=103),
+            bank_ui_context=BankUiContext(bank_open=False, source_tick=103),
+            current_task_state={"phase": "target_selected", "activeIntent": "select_target", "activeIntentTarget": far_tree},
+            player_context=player_context(x=3216, y=3194),
+            source_tick=103,
+        )
+
+        payload = updated.to_dict(source_tick=103)
+        self.assertTrue(payload["resourceMemoryValid"])
+        self.assertEqual(payload["lastResourceTargetName"], "Tree")
+        self.assertEqual(payload["lastResourceTargetTile"], {"worldX": 3213, "worldY": 3238, "plane": 0})
+        self.assertEqual(payload["lastResourceClusterCenter"], {"worldX": 3213, "worldY": 3238, "plane": 0})
+
     def test_banking_complete_bank_closed_no_target_uses_valid_memory(self):
         memory = resource_return_analyzer.ResourceAreaMemoryState()
         resource_return_analyzer.update_resource_area_memory(
@@ -242,7 +274,7 @@ class ResourceReturnAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["returnDestinationTile"], {"worldX": 3196, "worldY": 3248, "plane": 0})
         self.assertEqual(payload["reason"], "using_profile_resource_anchor")
 
-    def test_recent_post_bank_resource_memory_far_from_profile_anchor_is_not_treated_as_return_area(self):
+    def test_recent_post_bank_resource_memory_far_from_profile_anchor_still_beats_static_anchor(self):
         visible = tree_target(name="Tree", x=3212, y=3232)
         memory = resource_return_analyzer.ResourceAreaMemoryState(
             last_resource_activity_tick=100,
@@ -264,9 +296,37 @@ class ResourceReturnAnalyzerTest(unittest.TestCase):
         )
 
         payload = context.to_dict()
+        self.assertFalse(payload["returnDestinationNeeded"])
+        self.assertFalse(payload["returnDestinationAvailable"])
+        self.assertTrue(payload["resourceMemoryValid"])
+        self.assertEqual(payload["reason"], "resource_target_visible")
+
+    def test_bank_closed_without_visible_target_uses_recent_memory_far_from_static_anchor(self):
+        memory = resource_return_analyzer.ResourceAreaMemoryState(
+            last_resource_activity_tick=100,
+            last_resource_target_tile={"worldX": 3212, "worldY": 3232, "plane": 0},
+            last_resource_target_name="Tree",
+            last_resource_plane=0,
+            last_resource_profile="woodcutting",
+            last_resource_target=tree_target(name="Tree", x=3212, y=3232),
+        )
+
+        context = resource_return_analyzer.analyze_resource_return_context(
+            "woodcutting_bank",
+            bank_operation_context=BankOperationContext(banking_complete=True, inventory_free_slots=15, source_tick=104),
+            bank_ui_context=BankUiContext(bank_open=False, source_tick=104),
+            target_context=TargetContext(raw_best_target=None, candidates=[], candidate_count=0, source_tick=104),
+            resource_memory_state=memory,
+            player_context=player_context(x=3205, y=3228, plane=0),
+            source_tick=104,
+        )
+
+        payload = context.to_dict()
         self.assertTrue(payload["returnDestinationAvailable"])
-        self.assertEqual(payload["returnDestinationSource"], "profile_anchor")
-        self.assertEqual(payload["reason"], "using_profile_resource_anchor")
+        self.assertTrue(payload["resourceMemoryValid"])
+        self.assertEqual(payload["returnDestinationSource"], "last_resource_target")
+        self.assertEqual(payload["returnDestinationTile"], {"worldX": 3212, "worldY": 3232, "plane": 0})
+        self.assertEqual(payload["reason"], "using_remembered_resource_area")
 
 
 if __name__ == "__main__":

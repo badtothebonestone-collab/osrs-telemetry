@@ -267,6 +267,15 @@ RuneLite plugin
   tree-hover/volatile-frontier diagnostics, try another local frontier or
   approach when available, or stop safely instead of clicking a resource object
   with a full inventory.
+- Off-route visible bank/service objects are diagnostics, not Lumbridge Castle
+  anchors. If a visible service candidate does not match the selected service
+  route and is far from the route's service goal, navigation stays on the
+  route/goal-directed recovery target instead of walking toward the unrelated
+  bank-looking object.
+- Resource-area memory is sticky inside a bounded worksite. While collecting,
+  a sudden far-away visible tree does not replace the remembered worksite, and
+  a safe-looking resource click that pulls away from that worksite triggers
+  resource view recovery instead of a chop.
 - Degenerate or off-viewport route tile projections are non-actionable even
   when the plugin can compute a world/local tile. A projected `(0,0)` or tiny
   degenerate tile polygon must not become a click target; the executor should

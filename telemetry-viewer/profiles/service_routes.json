@@ -210,11 +210,27 @@
           "verifiedLive": false
         },
         {
-          "edgeId": "ground_floor_to_west_approach",
+          "edgeId": "ground_floor_to_first_stairs_search_return",
           "type": "walk_to",
           "fromNode": "lumbridge_ground_floor_stairs",
-          "toNode": "lumbridge_castle_west_approach",
+          "toNode": "lumbridge_first_stairs_search_area",
           "stepIndex": 2,
+          "verifiedLive": false
+        },
+        {
+          "edgeId": "first_stairs_search_to_entrance_return",
+          "type": "walk_to",
+          "fromNode": "lumbridge_first_stairs_search_area",
+          "toNode": "lumbridge_castle_entrance_or_courtyard",
+          "stepIndex": 3,
+          "verifiedLive": false
+        },
+        {
+          "edgeId": "entrance_to_west_approach_return",
+          "type": "walk_to",
+          "fromNode": "lumbridge_castle_entrance_or_courtyard",
+          "toNode": "lumbridge_castle_west_approach",
+          "stepIndex": 4,
           "verifiedLive": false
         },
         {
@@ -222,7 +238,7 @@
           "type": "walk_to",
           "fromNode": "lumbridge_castle_west_approach",
           "toNode": "lumbridge_west_trees",
-          "stepIndex": 3,
+          "stepIndex": 5,
           "verifiedLive": false
         }
       ],
@@ -332,6 +348,28 @@
           "planeChange": "-1",
           "required": true,
           "confidence": 0.45,
+          "verifiedLive": false
+        },
+        {
+          "type": "navigate_world",
+          "nodeId": "lumbridge_first_stairs_search_area",
+          "label": "Lumbridge Castle first stairs search area return",
+          "worldLocation": {"worldX": 3205, "worldY": 3229, "plane": 0},
+          "plane": 0,
+          "arrivalRadiusTiles": 2,
+          "required": true,
+          "confidence": 0.35,
+          "verifiedLive": false
+        },
+        {
+          "type": "navigate_world",
+          "nodeId": "lumbridge_castle_entrance_or_courtyard",
+          "label": "Lumbridge Castle entrance or ground-floor courtyard return",
+          "worldLocation": {"worldX": 3205, "worldY": 3232, "plane": 0},
+          "plane": 0,
+          "arrivalRadiusTiles": 2,
+          "required": true,
+          "confidence": 0.35,
           "verifiedLive": false
         },
         {

@@ -17,6 +17,7 @@ from input_control.action_lifecycle import (
     build_lifecycle_diagnostic,
     verify_expected_result,
 )
+from input_control.action_proposal import ActionProposal
 from input_control.executor import execute_action_loop, execute_next_action
 from diagnose_action_lifecycle import format_human as format_lifecycle_human
 
@@ -451,6 +452,52 @@ class ActionLifecycleTest(unittest.TestCase):
         self.assertIn("player_tile_changed", observed["observedSignals"])
         self.assertIn("service_distance_decreased", observed["observedSignals"])
         self.assertIn("path_target_distance_decreased", observed["observedSignals"])
+
+    def test_return_navigation_rejects_movement_away_from_clicked_waypoint(self):
+        before = navigation_status(
+            tick=10,
+            x=3206,
+            y=3231,
+            service_distance=12,
+            path_distance=1,
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+        )
+        after = navigation_status(
+            tick=12,
+            x=3212,
+            y=3231,
+            service_distance=8,
+            path_distance=7,
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+        )
+        before["brain"]["pathingContext"]["distanceToDestination"] = 1
+        after["brain"]["pathingContext"]["distanceToDestination"] = 7
+        proposal = ActionProposal(
+            proposed_action="return_to_resource_area",
+            target_kind="path_tile",
+            target_tile={"worldX": 3205, "worldY": 3231, "plane": 0},
+        )
+
+        observed = verify_expected_result(
+            "return_to_resource_area",
+            before,
+            after,
+            elapsed_ms=1800,
+            timeout_ms=3000,
+            wait_started_tick=10,
+            timeout_ticks=4,
+            progress_min_distance=1,
+            proposal=proposal,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "FAIL")
+        self.assertEqual(observed["observedResult"], "resource_return_wrong_way")
+        self.assertEqual(observed["resultOutcome"], "no_change_timeout")
+        self.assertIn("clicked_waypoint_distance_increased", observed["observedSignals"])
+        self.assertIn("route_wrong_way", observed["observedSignals"])
+        self.assertIn("service_distance_decreased", observed["observedSignals"])
 
     def test_navigation_progress_reads_player_from_current_context_summary(self):
         before = navigation_status(tick=10, x=3241, y=3248, service_distance=36, path_distance=3)

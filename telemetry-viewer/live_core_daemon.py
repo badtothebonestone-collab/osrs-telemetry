@@ -38,7 +38,7 @@ from analyzers import resource_return_analyzer
 from analyzers import return_to_resource_analyzer
 from analyzers import service_analyzer
 from analyzers import target_analyzer
-from analyzers.live_state import BankOperationContext, InventoryContext, LiveAnalysisResult, LiveInputSnapshot, LiveSourceStatus, PlayerContext
+from analyzers.live_state import BankOperationContext, InventoryContext, LiveAnalysisResult, LiveInputSnapshot, LiveSourceStatus, PlayerContext, ResourceReturnContext
 from input_control.input_geometry import input_geometry_from_status
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
@@ -126,6 +126,352 @@ def _should_retain_banking_completion(
     if bank_operation_context.inventory_full is True:
         return False
     return True
+
+
+def _uses_expanded_pathing_budget(navigation_intent_context: Any, generic_state: dict[str, Any] | None) -> bool:
+    target_kind = ""
+    if isinstance(navigation_intent_context, dict):
+        target_kind = str(navigation_intent_context.get("targetKind") or navigation_intent_context.get("target_kind") or "")
+    else:
+        target_kind = str(getattr(navigation_intent_context, "target_kind", "") or getattr(navigation_intent_context, "targetKind", "") or "")
+    generic_state = generic_state if isinstance(generic_state, dict) else {}
+    active_navigation_intent = str(generic_state.get("activeIntent") or generic_state.get("phase") or "")
+    return (
+        target_kind in {navigation_intent_analyzer.TARGET_KIND_SERVICE_ROUTE, navigation_intent_analyzer.TARGET_KIND_SERVICE}
+        or active_navigation_intent in {"needs_service", "navigate_to_service", "service_available", "return_to_resource_area", "navigate_to_resource_area"}
+    )
+
+
+def _tile_from_payload(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    world = payload.get("worldLocation") or payload.get("world")
+    if isinstance(world, dict):
+        payload = {**payload, **world}
+    world_x = _int_or_none(payload.get("worldX"))
+    world_y = _int_or_none(payload.get("worldY"))
+    plane = _int_or_none(payload.get("plane"))
+    if world_x is None or world_y is None:
+        return None
+    return {"worldX": world_x, "worldY": world_y, "plane": 0 if plane is None else plane}
+
+
+def _tile_distance(left: dict[str, Any] | None, right: dict[str, Any] | None) -> int | None:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return None
+    left_x = _int_or_none(left.get("worldX"))
+    left_y = _int_or_none(left.get("worldY"))
+    left_plane = _int_or_none(left.get("plane"))
+    right_x = _int_or_none(right.get("worldX"))
+    right_y = _int_or_none(right.get("worldY"))
+    right_plane = _int_or_none(right.get("plane"))
+    if None in (left_x, left_y, right_x, right_y):
+        return None
+    if left_plane is not None and right_plane is not None and left_plane != right_plane:
+        return None
+    assert left_x is not None and left_y is not None and right_x is not None and right_y is not None
+    return max(abs(left_x - right_x), abs(left_y - right_y))
+
+
+def _resource_target_matches_return_destination(resource_target: dict[str, Any] | None, resource_return_context: Any) -> bool:
+    if not isinstance(resource_target, dict) or not resource_target:
+        return False
+    destination_available = bool(getattr(resource_return_context, "return_destination_available", False))
+    if not destination_available:
+        return True
+    if str(getattr(resource_return_context, "reason", "") or "") == "resource_target_visible":
+        return True
+    destination = _tile_from_payload(getattr(resource_return_context, "return_destination_tile", None))
+    target_tile = _tile_from_payload(resource_target)
+    distance = _tile_distance(target_tile, destination)
+    return distance is not None and distance <= resource_return_analyzer.RESOURCE_AREA_REACHED_DISTANCE_TILES
+
+
+def _is_resource_target_payload(target: Any) -> bool:
+    if not isinstance(target, dict) or not target:
+        return False
+    class_id = str(target.get("classId") or target.get("targetClass") or "").lower()
+    target_type = str(target.get("targetType") or target.get("type") or "").lower()
+    name = str(target.get("targetName") or target.get("name") or "").lower()
+    if class_id in {"resource_return", "path_tile", "service_route_anchor"} or target_type in {"tile", "path_tile"}:
+        return False
+    return class_id in {"tree", "woodcutting_tree"} or (target_type == "sceneobject" and "tree" in name)
+
+
+def _profile_resource_return_target(policy: task_policy_module.TaskPolicy) -> dict[str, Any] | None:
+    anchor = resource_return_analyzer._profile_resource_anchor(policy)  # Uses the same anchor table as return-after-bank.
+    if not isinstance(anchor, dict):
+        return None
+    tile = _tile_from_payload(anchor.get("worldLocation"))
+    if not tile:
+        return None
+    return {
+        "targetType": "tile",
+        "classId": "resource_return",
+        "targetName": "Resource return",
+        "name": "Resource return",
+        "worldX": tile.get("worldX"),
+        "worldY": tile.get("worldY"),
+        "plane": tile.get("plane"),
+        "objectKey": f"profile-resource-return-{tile.get('worldX')}-{tile.get('worldY')}-{tile.get('plane')}",
+        "returnDestinationSource": "profile_anchor",
+        "resourceAnchor": anchor,
+        "navigation": {"directReachability": "unknown"},
+    }
+
+
+PROFILE_RESOURCE_RECOVERY_ROUTE_RADIUS_TILES = 14
+PROFILE_RESOURCE_RECOVERY_ROUTE_TILES = (
+    {"worldX": 3203, "worldY": 3238, "plane": 0},
+    {"worldX": 3205, "worldY": 3232, "plane": 0},
+    {"worldX": 3205, "worldY": 3229, "plane": 0},
+)
+
+
+def _player_tile_from_context(player_context: PlayerContext | None) -> dict[str, Any] | None:
+    if player_context is None:
+        return None
+    world_x = _int_or_none(getattr(player_context, "world_x", None))
+    world_y = _int_or_none(getattr(player_context, "world_y", None))
+    if world_x is None or world_y is None:
+        return None
+    confidence = getattr(player_context, "location_confidence", None)
+    if confidence is not None and confidence < 0.5:
+        return None
+    plane = _int_or_none(getattr(player_context, "plane", None))
+    return {"worldX": world_x, "worldY": world_y, "plane": 0 if plane is None else plane}
+
+
+def _near_profile_recovery_route(policy: task_policy_module.TaskPolicy, *tiles: dict[str, Any] | None) -> bool:
+    policy_name = str(getattr(policy, "name", "") or "").lower()
+    if policy_name not in {"woodcutting_bank", "woodcut_bank"}:
+        return False
+    for tile in tiles:
+        if not isinstance(tile, dict):
+            continue
+        for route_tile in PROFILE_RESOURCE_RECOVERY_ROUTE_TILES:
+            distance = _tile_distance(tile, route_tile)
+            if distance is None:
+                same_floor_tile = dict(tile)
+                same_floor_tile["plane"] = route_tile.get("plane")
+                distance = _tile_distance(same_floor_tile, route_tile)
+            if distance is not None and distance <= PROFILE_RESOURCE_RECOVERY_ROUTE_RADIUS_TILES:
+                return True
+    return False
+
+
+def _profile_return_candidate_from_generic_state(generic_state: dict[str, Any]) -> dict[str, Any] | None:
+    active_intent = str(generic_state.get("activeIntent") or generic_state.get("phase") or "")
+    active_target = generic_state.get("activeIntentTarget")
+    if active_intent in {"select_target", "continue_current_target", "target_selected", "continue_task"} and _is_resource_target_payload(active_target):
+        return active_target
+    available_target = generic_state.get("availableTarget")
+    if active_intent in {"observe", "blocked"} or generic_state.get("phase") == "blocked":
+        if _is_resource_target_payload(available_target):
+            return available_target
+    return None
+
+
+def _valid_resource_memory_destination(
+    memory_state: resource_return_analyzer.ResourceAreaMemoryState | None,
+    player_context: PlayerContext | None,
+    *,
+    source_tick: int | None,
+) -> dict[str, Any] | None:
+    if not isinstance(memory_state, resource_return_analyzer.ResourceAreaMemoryState):
+        return None
+    current_plane = _int_or_none(getattr(player_context, "plane", None)) if player_context is not None else None
+    valid, _reason = memory_state.is_valid(source_tick=source_tick, current_plane=current_plane)
+    if not valid:
+        return None
+    destination, _source = memory_state.destination_tile()
+    return destination if isinstance(destination, dict) else None
+
+
+def _resource_memory_return_target(
+    memory_state: resource_return_analyzer.ResourceAreaMemoryState | None,
+    player_context: PlayerContext | None,
+    *,
+    source_tick: int | None,
+) -> dict[str, Any] | None:
+    tile = _valid_resource_memory_destination(memory_state, player_context, source_tick=source_tick)
+    if not tile:
+        return None
+    return {
+        "targetType": "tile",
+        "classId": "resource_return",
+        "targetName": "Resource return",
+        "name": "Resource return",
+        "worldX": tile.get("worldX"),
+        "worldY": tile.get("worldY"),
+        "plane": tile.get("plane"),
+        "objectKey": f"memory-resource-return-{tile.get('worldX')}-{tile.get('worldY')}-{tile.get('plane')}",
+        "returnDestinationSource": "resource_area_memory",
+        "navigation": {"directReachability": "unknown"},
+    }
+
+
+def _service_route_progress_active(service_context: Any) -> bool:
+    if service_context is None or getattr(service_context, "service_required", False) is not True:
+        return False
+    route_context = getattr(service_context, "service_route_context", None)
+    if not isinstance(route_context, dict):
+        return False
+    route_status = str(route_context.get("routeStepStatus") or route_context.get("state") or "")
+    if route_context.get("actionReady") is True:
+        return True
+    if route_status in {
+        "route_interaction_visible",
+        "service_target_actionable",
+        "service_target_visible",
+        "retained_route_interaction_anchor",
+        "retained_service_anchor",
+    }:
+        return True
+    return bool(route_context.get("completedSteps"))
+
+
+def _should_return_to_profile_resource_area(
+    policy: task_policy_module.TaskPolicy,
+    generic_state: dict[str, Any],
+    player_context: PlayerContext | None,
+    resource_memory_state: resource_return_analyzer.ResourceAreaMemoryState | None = None,
+    *,
+    source_tick: int | None = None,
+) -> dict[str, Any] | None:
+    active_target = _profile_return_candidate_from_generic_state(generic_state)
+    if not active_target:
+        return None
+    memory_return_target = _resource_memory_return_target(
+        resource_memory_state,
+        player_context,
+        source_tick=source_tick,
+    )
+    if not memory_return_target:
+        return None
+    return_target = _profile_resource_return_target(policy)
+    if not return_target:
+        return None
+    target_tile = _tile_from_payload(active_target)
+    player_tile = _player_tile_from_context(player_context)
+    memory_tile = _tile_from_payload(memory_return_target)
+    target_to_memory = _tile_distance(target_tile, memory_tile)
+    player_to_memory = _tile_distance(player_tile, memory_tile)
+    if target_to_memory is None or target_to_memory <= resource_return_analyzer.RESOURCE_MEMORY_DRIFT_THRESHOLD_TILES:
+        return None
+    if player_to_memory is not None and player_to_memory <= resource_return_analyzer.RESOURCE_MEMORY_DRIFT_THRESHOLD_TILES:
+        return None
+    anchor_tile = _tile_from_payload(return_target)
+    player_distance = _tile_distance(player_tile, anchor_tile)
+    if player_distance is None or player_distance <= resource_return_analyzer.RESOURCE_AREA_REACHED_DISTANCE_TILES:
+        return None
+    if not _near_profile_recovery_route(policy, player_tile, target_tile):
+        return None
+    return dict(memory_return_target)
+
+
+def _should_recover_to_profile_resource_area_from_observe(
+    policy: task_policy_module.TaskPolicy,
+    generic_state: dict[str, Any],
+    player_context: PlayerContext | None,
+    bank_operation_context: BankOperationContext,
+    bank_ui_context: Any,
+    resource_memory_state: resource_return_analyzer.ResourceAreaMemoryState | None = None,
+    *,
+    source_tick: int | None = None,
+) -> dict[str, Any] | None:
+    phase = str(generic_state.get("phase") or "").lower()
+    active_intent = str(generic_state.get("activeIntent") or "").lower()
+    allowed_states = {"observe", "needs_more_context", "no_context", "stale_context", "wait_for_context"}
+    if phase not in allowed_states and active_intent not in allowed_states:
+        return None
+    if getattr(bank_ui_context, "bank_open", False) is True:
+        return None
+    if getattr(bank_operation_context, "banking_complete", False) is True:
+        return None
+    if getattr(bank_operation_context, "operation_needed", False) is True:
+        return None
+    if getattr(bank_operation_context, "inventory_full", None) is True:
+        return None
+    free_slots = _int_or_none(getattr(bank_operation_context, "inventory_free_slots", None))
+    if free_slots == 0:
+        return None
+    return_target = _profile_resource_return_target(policy)
+    if not return_target:
+        return None
+    anchor_tile = _tile_from_payload(return_target)
+    player_tile = _player_tile_from_context(player_context)
+    if not player_tile or not anchor_tile:
+        return None
+    memory_tile = _valid_resource_memory_destination(resource_memory_state, player_context, source_tick=source_tick)
+    if memory_tile:
+        player_to_memory = _tile_distance(player_tile, memory_tile)
+        if player_to_memory is not None and player_to_memory <= resource_return_analyzer.RESOURCE_MEMORY_DRIFT_THRESHOLD_TILES:
+            return None
+    player_distance = _tile_distance(player_tile, anchor_tile)
+    if player_distance is not None and player_distance <= resource_return_analyzer.RESOURCE_AREA_REACHED_DISTANCE_TILES:
+        return None
+    if not _near_profile_recovery_route(policy, player_tile):
+        return None
+    return dict(return_target)
+
+
+def _profile_resource_recovery_context(
+    target: dict[str, Any] | None,
+    previous_context: ResourceReturnContext,
+    *,
+    source_tick: int | None,
+    bank_open: bool | None,
+) -> ResourceReturnContext | None:
+    tile = _tile_from_payload(target)
+    if not isinstance(target, dict) or not tile:
+        return None
+    destination = dict(target)
+    destination["worldX"] = tile["worldX"]
+    destination["worldY"] = tile["worldY"]
+    destination["plane"] = tile["plane"]
+    destination.setdefault("targetType", "tile")
+    destination.setdefault("classId", "resource_return")
+    destination.setdefault("targetName", "Resource return")
+    destination.setdefault("name", "Resource return")
+    destination.setdefault("returnDestinationSource", "profile_anchor")
+    return_source = str(destination.get("returnDestinationSource") or "profile_anchor")
+    warnings = [str(item) for item in getattr(previous_context, "warnings", []) or [] if item]
+    recovery_warning = (
+        "using remembered resource area as a staged recovery destination after off-worksite resource selection"
+        if return_source == "resource_area_memory"
+        else "using profile resource anchor as a staged recovery destination after off-worksite resource selection"
+    )
+    if recovery_warning not in warnings:
+        warnings.append(recovery_warning)
+    return ResourceReturnContext(
+        status="WARN",
+        warnings=warnings,
+        source_tick=source_tick,
+        return_destination_needed=True,
+        return_destination_available=True,
+        return_destination_tile=tile,
+        return_destination_source=return_source,
+        resource_memory_valid=False,
+        resource_memory_age_ticks=getattr(previous_context, "resource_memory_age_ticks", None),
+        resource_memory_invalid_reason=(
+            getattr(previous_context, "resource_memory_invalid_reason", None)
+            or (
+                "selected_resource_far_from_memory"
+                if return_source == "resource_area_memory"
+                else "selected_resource_far_from_profile_anchor"
+            )
+        ),
+        resource_target_currently_visible=bool(getattr(previous_context, "resource_target_currently_visible", False)),
+        reason=(
+            "using_remembered_resource_area_for_resource_recovery"
+            if return_source == "resource_area_memory"
+            else "using_profile_resource_anchor_for_resource_recovery"
+        ),
+        destination_target=destination,
+        banking_complete=bool(getattr(previous_context, "banking_complete", False)),
+        bank_open=bank_open,
+    )
 
 
 def _player_context_from_baseline(player: dict[str, Any], navigation: dict[str, Any]) -> PlayerContext:
@@ -1743,12 +2089,64 @@ class LiveCoreDaemon:
             if process_context:
                 brain_context.decision["processInventoryContext"] = process_context.to_dict()
             generic_state = brain_context.decision.get("genericTaskState") if isinstance(brain_context.decision.get("genericTaskState"), dict) else {}
-            if generic_state.get("activeIntent") == "needs_service" and service_context and service_context.best_service_candidate:
+            resource_area_recovery_target: dict[str, Any] | None = None
+            resource_area_recovery_reason: str | None = None
+            service_route_progress_active = _service_route_progress_active(service_context)
+            if service_context and service_context.service_required and service_context.best_service_candidate:
+                active_service_intent = str(generic_state.get("activeIntent") or generic_state.get("phase") or "").lower()
+                should_bind_service_target = active_service_intent == "needs_service" or service_route_progress_active
+                if service_route_progress_active and active_service_intent not in {
+                    "needs_service",
+                    "navigate_to_service",
+                    "service_available",
+                    "bank_operation_pending",
+                    "service_interaction_pending",
+                }:
+                    generic_state["phase"] = "needs_service"
+                    generic_state["activeIntent"] = "needs_service"
+                    brain_context.decision["phase"] = "needs_service"
+                    should_bind_service_target = True
+                if should_bind_service_target:
+                    active_target = dict(service_context.best_service_candidate)
+                    target_type = active_target.get("targetType") or "sceneObject"
+                    generic_state["activeIntentTarget"] = active_target
+                    generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(active_target, str(target_type))
+                    brain_context.decision["genericTaskState"] = generic_state
+            elif generic_state.get("activeIntent") == "needs_service" and service_context and service_context.best_service_candidate:
                 active_target = dict(service_context.best_service_candidate)
                 target_type = active_target.get("targetType") or "sceneObject"
                 generic_state["activeIntentTarget"] = active_target
                 generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(active_target, str(target_type))
                 brain_context.decision["genericTaskState"] = generic_state
+            profile_return_target = None
+            if not service_route_progress_active:
+                profile_return_target = _should_return_to_profile_resource_area(
+                    policy,
+                    generic_state,
+                    self.state.analysis_result.player,
+                    self.state.resource_area_memory,
+                    source_tick=source_tick,
+                )
+            if profile_return_target:
+                resource_area_recovery_target = dict(profile_return_target)
+                if resource_area_recovery_reason is None:
+                    resource_area_recovery_reason = (
+                        "selected_resource_far_from_memory"
+                        if profile_return_target.get("returnDestinationSource") == "resource_area_memory"
+                        else "selected_resource_far_from_profile_anchor"
+                    )
+                generic_state["phase"] = "return_to_resource"
+                generic_state["activeIntent"] = "return_to_resource_area"
+                generic_state["activeIntentTarget"] = profile_return_target
+                generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(profile_return_target, "tile")
+                generic_state["availableTarget"] = None
+                generic_state["pathingNeeded"] = True
+                generic_state["returnNeeded"] = True
+                generic_state["returnReady"] = False
+                generic_state["returnToResourceReason"] = resource_area_recovery_reason
+                brain_context.decision["phase"] = "return_to_resource"
+                brain_context.decision["genericTaskState"] = generic_state
+                brain_context.decision["resourceAreaRecoveryReason"] = resource_area_recovery_reason
             self.state.analysis_result.navigation_intent = navigation_intent_analyzer.analyze_navigation_intent(
                 policy,
                 player_context=self.state.analysis_result.player,
@@ -1763,13 +2161,9 @@ class LiveCoreDaemon:
             pathing_kwargs = {
                 "movement_model": "osrs_like_predicted",
             }
-            active_navigation_intent = str(generic_state.get("activeIntent") or generic_state.get("phase") or "")
-            if (
-                self.state.analysis_result.navigation_intent.target_kind == navigation_intent_analyzer.TARGET_KIND_SERVICE_ROUTE
-                or active_navigation_intent in {"return_to_resource_area", "navigate_to_resource_area"}
-            ):
+            if _uses_expanded_pathing_budget(self.state.analysis_result.navigation_intent, generic_state):
                 pathing_kwargs["max_nodes"] = max(pathing_analyzer.DEFAULT_MAX_NODES, 8192)
-                pathing_kwargs["budget_millis"] = max(pathing_analyzer.DEFAULT_BUDGET_MILLIS, 25.0)
+                pathing_kwargs["budget_millis"] = max(pathing_analyzer.DEFAULT_BUDGET_MILLIS, 75.0)
             self.state.analysis_result.pathing = pathing_analyzer.analyze_pathing_context(
                 player_context=self.state.analysis_result.player,
                 navigation_context=self.state.analysis_result.navigation,
@@ -1914,6 +2308,33 @@ class LiveCoreDaemon:
             )
             close_bank_context = self.state.analysis_result.close_bank
             brain_context.decision["closeBankContext"] = close_bank_context.to_dict()
+            if not resource_area_recovery_target and not service_route_progress_active:
+                profile_return_target = _should_recover_to_profile_resource_area_from_observe(
+                    policy,
+                    generic_state,
+                    self.state.analysis_result.player,
+                    bank_operation_context,
+                    bank_ui_context,
+                    self.state.resource_area_memory,
+                    source_tick=source_tick,
+                )
+                if profile_return_target:
+                    resource_area_recovery_target = dict(profile_return_target)
+                    resource_area_recovery_reason = "profile_resource_recovery_from_observe_context"
+                    generic_state["phase"] = "return_to_resource"
+                    generic_state["activeIntent"] = "return_to_resource_area"
+                    generic_state["activeIntentTarget"] = profile_return_target
+                    generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(profile_return_target, "tile")
+                    generic_state["availableTarget"] = None
+                    generic_state["pathingNeeded"] = True
+                    generic_state["returnNeeded"] = True
+                    generic_state["returnReady"] = False
+                    generic_state["returnToResourceReason"] = resource_area_recovery_reason
+                    brain_context.decision["phase"] = "return_to_resource"
+                    brain_context.decision["genericTaskState"] = generic_state
+                    brain_context.decision["resourceAreaRecoveryReason"] = resource_area_recovery_reason
+            if resource_area_recovery_target and bank_operation_context.banking_complete:
+                resource_area_recovery_target = None
             self.state.analysis_result.resource_return = resource_return_analyzer.analyze_resource_return_context(
                 policy,
                 bank_operation_context=bank_operation_context,
@@ -1925,6 +2346,16 @@ class LiveCoreDaemon:
                 source_tick=source_tick,
             )
             resource_return_context = self.state.analysis_result.resource_return
+            if resource_area_recovery_target:
+                recovery_return_context = _profile_resource_recovery_context(
+                    resource_area_recovery_target,
+                    resource_return_context,
+                    source_tick=source_tick,
+                    bank_open=bank_ui_context.bank_open,
+                )
+                if recovery_return_context is not None:
+                    resource_return_context = recovery_return_context
+                    self.state.analysis_result.resource_return = resource_return_context
             brain_context.decision["resourceAreaMemory"] = self.state.resource_area_memory.to_dict(
                 source_tick=source_tick,
                 current_plane=self.state.analysis_result.player.plane if self.state.analysis_result.player else None,
@@ -1957,13 +2388,9 @@ class LiveCoreDaemon:
                 recompute_pathing_kwargs = {
                     "movement_model": "osrs_like_predicted",
                 }
-                active_navigation_intent = str(generic_state.get("activeIntent") or generic_state.get("phase") or "")
-                if (
-                    self.state.analysis_result.navigation_intent.target_kind == navigation_intent_analyzer.TARGET_KIND_SERVICE_ROUTE
-                    or active_navigation_intent in {"return_to_resource_area", "navigate_to_resource_area"}
-                ):
+                if _uses_expanded_pathing_budget(self.state.analysis_result.navigation_intent, generic_state):
                     recompute_pathing_kwargs["max_nodes"] = max(pathing_analyzer.DEFAULT_MAX_NODES, 8192)
-                    recompute_pathing_kwargs["budget_millis"] = max(pathing_analyzer.DEFAULT_BUDGET_MILLIS, 25.0)
+                    recompute_pathing_kwargs["budget_millis"] = max(pathing_analyzer.DEFAULT_BUDGET_MILLIS, 75.0)
                 self.state.analysis_result.pathing = pathing_analyzer.analyze_pathing_context(
                     player_context=self.state.analysis_result.player,
                     navigation_context=self.state.analysis_result.navigation,
@@ -1977,6 +2404,45 @@ class LiveCoreDaemon:
                     source_tick=source_tick,
                     **recompute_pathing_kwargs,
                 )
+
+            if resource_area_recovery_target:
+                resource_return_target = (
+                    resource_return_context.destination_target
+                    if isinstance(resource_return_context.destination_target, dict)
+                    else None
+                )
+                return_route_navigation_target = (
+                    return_route_context.get("currentNavigationTarget")
+                    if isinstance(return_route_context.get("currentNavigationTarget"), dict)
+                    else None
+                )
+                active_return_target = dict(return_route_navigation_target or resource_return_target or resource_area_recovery_target)
+                generic_state["phase"] = "return_to_resource"
+                generic_state["activeIntent"] = "return_to_resource_area"
+                generic_state["activeIntentTarget"] = active_return_target
+                generic_state["selectedTargetKey"] = intent_stabilizer.build_target_key(
+                    active_return_target,
+                    str(active_return_target.get("targetType") or "tile"),
+                )
+                generic_state["availableTarget"] = None
+                generic_state["pathingNeeded"] = True
+                generic_state["returnNeeded"] = True
+                generic_state["returnReady"] = False
+                generic_state["returnToResourceReason"] = resource_area_recovery_reason or "profile_resource_recovery"
+                generic_state["resourceReturnDestinationNeeded"] = resource_return_context.return_destination_needed
+                generic_state["resourceReturnDestinationAvailable"] = resource_return_context.return_destination_available
+                generic_state["resourceReturnReason"] = resource_return_context.reason
+                generic_state["returnRouteAvailable"] = bool(return_route_context.get("routeAvailable"))
+                generic_state["returnRouteId"] = return_route_context.get("returnRouteId") or return_route_context.get("routeId")
+                generic_state["returnCurrentNode"] = return_route_context.get("currentNodeId")
+                generic_state["returnNextEdge"] = return_route_context.get("nextEdge")
+                generic_state["returnActionReady"] = bool(return_route_context.get("returnActionReady"))
+                generic_state["returnBlockedReason"] = return_route_context.get("returnBlockedReason")
+                blocking = [str(item) for item in generic_state.get("blockingConditions") or [] if item and item != "no_target_observed"]
+                generic_state["blockingConditions"] = blocking
+                brain_context.decision["phase"] = "return_to_resource"
+                brain_context.decision["genericTaskState"] = generic_state
+                recompute_navigation_for_generic_state()
 
             if service_context and service_context.service_ready:
                 service_target = service_context.best_service_candidate if isinstance(service_context.best_service_candidate, dict) else None
@@ -2063,20 +2529,10 @@ class LiveCoreDaemon:
                 generic_state["returnNextEdge"] = return_route_context.get("nextEdge")
                 generic_state["returnActionReady"] = bool(return_route_context.get("returnActionReady"))
                 generic_state["returnBlockedReason"] = return_route_context.get("returnBlockedReason")
-                cycle_stage = self.state.cycle_history.summary(tail=1).get("currentCycleStage")
-                cycle_indicates_resource_reacquired = str(cycle_stage or "") in {
-                    "resource_target_selected",
-                    "collecting_resources",
-                    "resource_reacquired",
-                }
                 resource_target_reacquired = (
                     return_context.return_ready
                     and resource_target
-                    and (
-                        resource_return_context.return_destination_available is not True
-                        or resource_return_context.reason == "resource_target_visible"
-                        or cycle_indicates_resource_reacquired
-                    )
+                    and _resource_target_matches_return_destination(resource_target, resource_return_context)
                 )
                 if resource_target_reacquired:
                     target_type = resource_target.get("targetType") or "sceneObject"

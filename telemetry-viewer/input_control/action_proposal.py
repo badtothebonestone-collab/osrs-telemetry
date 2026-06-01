@@ -26,6 +26,8 @@ SERVICE_MIN_VISIBLE_AREA_RATIO = 0.35
 SERVICE_MIN_EDGE_DISTANCE_PX = 32.0
 SERVICE_COMFORTABLE_EDGE_DISTANCE_PX = 48.0
 SERVICE_COMFORTABLE_REGION_FRACTION = 0.78
+RESOURCE_MEMORY_WORKSITE_RADIUS_TILES = 18
+RESOURCE_RETURN_REACQUIRE_RADIUS_TILES = 8
 
 KNOWN_ACTIONS = {
     "none",
@@ -80,7 +82,9 @@ class ActionProposal:
             and isinstance(self.target_tile, dict)
             and self.proposed_action in {"navigate_to_service", "return_to_resource_area"}
         ):
-            return True
+            if self.suggested_click_point:
+                return True
+            return self.action_target_source in {"local_frontier_waypoint", "live_projected_waypoint"}
         return bool(self.key_action or self.suggested_click_point)
 
     def to_dict(self) -> dict[str, Any]:
@@ -808,6 +812,68 @@ def _tile_distance(a: dict[str, Any] | None, b: dict[str, Any] | None) -> int | 
     return int(max(abs(ax - bx), abs(ay - by)))
 
 
+def _is_resource_return_navigation_target(target: Any) -> bool:
+    target = _dict(target)
+    if not target:
+        return False
+    class_id = _lower(target.get("classId") or target.get("targetClass"))
+    target_type = _lower(target.get("targetType") or target.get("type"))
+    name = _lower(target.get("targetName") or target.get("name"))
+    return (
+        class_id in {"resource_return", "service_route_anchor", "path_tile"}
+        or target_type in {"tile", "path_tile", "resource_return"}
+        or "resource return" in name
+        or "return waypoint" in name
+    )
+
+
+def _return_resource_target_reacquired(
+    *,
+    status: dict[str, Any],
+    resource_return: dict[str, Any],
+    active_target: dict[str, Any],
+    overlay_selected: dict[str, Any],
+) -> bool:
+    visible = (
+        _bool(resource_return.get("resourceTargetCurrentlyVisible")) is True
+        or _bool(status.get("postBankResourceTargetAvailable")) is True
+    )
+    if not visible:
+        return False
+    if _bool(resource_return.get("returnDestinationAvailable")) is not True:
+        return True
+    if str(resource_return.get("reason") or "") == "resource_target_visible":
+        return True
+    destination = _world_tile(resource_return.get("returnDestinationTile"))
+    for target in (
+        _dict(status.get("returnBestResourceTarget")),
+        active_target,
+        overlay_selected,
+    ):
+        target_tile = _world_tile(target)
+        distance = _tile_distance(target_tile, destination)
+        if distance is not None and distance <= RESOURCE_RETURN_REACQUIRE_RADIUS_TILES:
+            return True
+    return False
+
+
+def _pathing_for_resource_return(pathing: dict[str, Any]) -> dict[str, Any]:
+    clean = dict(pathing)
+    for key in ("nextWaypointTarget", "destination"):
+        if key in clean and not _is_resource_return_navigation_target(clean.get(key)):
+            clean.pop(key, None)
+    return clean
+
+
+def _resource_return_fallback_target(active_target: dict[str, Any], resource_return: dict[str, Any]) -> dict[str, Any]:
+    if _is_resource_return_navigation_target(active_target):
+        return active_target
+    destination_target = _dict(resource_return.get("destinationTarget"))
+    if destination_target:
+        return destination_target
+    return {"returnDestinationTile": resource_return.get("returnDestinationTile")}
+
+
 def _player_world_tile(status: dict[str, Any], brain: dict[str, Any]) -> dict[str, Any] | None:
     for value in (
         status.get("playerLocation"),
@@ -855,9 +921,9 @@ def _resource_worksite_context(status: dict[str, Any], brain: dict[str, Any]) ->
                     context.get("resourceRadiusTiles"),
                     anchor.get("radiusTiles"),
                     anchor.get("radius"),
-                    12,
+                    RESOURCE_MEMORY_WORKSITE_RADIUS_TILES,
                 ),
-                12,
+                RESOURCE_MEMORY_WORKSITE_RADIUS_TILES,
             )
             return {
                 "worksiteId": context.get("worksiteId") or context.get("returnNodeId") or anchor.get("anchorId") or anchor.get("id"),
@@ -865,6 +931,42 @@ def _resource_worksite_context(status: dict[str, Any], brain: dict[str, Any]) ->
                 "radiusTiles": max(3, radius),
                 "source": context.get("returnDestinationSource") or context.get("source") or anchor.get("type"),
             }
+    for memory in (
+        _dict(status.get("resourceAreaMemory")),
+        _dict(brain.get("resourceAreaMemory")),
+    ):
+        if not memory:
+            continue
+        if _bool(memory.get("resourceMemoryValid")) is False:
+            continue
+        tile = (
+            _world_tile(memory.get("lastResourceClusterCenter"))
+            or _world_tile(memory.get("lastResourceTargetTile"))
+            or _world_tile(memory.get("lastResourcePlayerTile"))
+        )
+        if tile:
+            return {
+                "worksiteId": memory.get("lastResourceProfile") or "resource_area_memory",
+                "anchor": tile,
+                "radiusTiles": RESOURCE_MEMORY_WORKSITE_RADIUS_TILES,
+                "source": "resource_area_memory",
+            }
+    policy_name = _lower(
+        _first_present(
+            status.get("brainTaskPolicy"),
+            brain.get("taskPolicy"),
+            brain.get("task_policy"),
+            brain.get("preset"),
+            status.get("preset"),
+        )
+    )
+    if policy_name in {"woodcutting_bank", "woodcut_bank"}:
+        return {
+            "worksiteId": "lumbridge_west_tree_area",
+            "anchor": {"worldX": 3196, "worldY": 3248, "plane": 0},
+            "radiusTiles": RESOURCE_MEMORY_WORKSITE_RADIUS_TILES,
+            "source": "profile_anchor",
+        }
     return {}
 
 
@@ -1403,6 +1505,60 @@ def _service_route_interaction_target(route_context: dict[str, Any]) -> dict[str
     return merged
 
 
+def _route_census_recovery_target(route_context: dict[str, Any]) -> dict[str, Any]:
+    census = _dict(route_context.get("routeObjectCensus"))
+    top_objects = _list(census.get("topRouteObjects"))
+    current_step = _current_route_step(route_context)
+    for item in top_objects:
+        if not isinstance(item, dict):
+            continue
+        if item.get("routeObjectKind") != "route_transition":
+            continue
+        if item.get("routeRelevanceStatus") != "PASS":
+            continue
+        projection = _dict(item.get("projectionStatus"))
+        if projection.get("actionableByCanvas") is True:
+            continue
+        rejection = _lower(item.get("rejectionReason") or projection.get("rejectionReason"))
+        if rejection in {"wrongobjectkind", "randomtransitionobject", "backwardrouteobject", "wrongplane"}:
+            continue
+        candidate = _dict(item.get("candidate"))
+        if not candidate:
+            continue
+        merged = dict(candidate)
+        if route_context.get("routeId") is not None:
+            merged.setdefault("routeId", route_context.get("routeId"))
+        route_step_index = _first_present(route_context.get("currentStepIndex"), item.get("matchedRouteStepIndex"))
+        if route_step_index is not None:
+            merged.setdefault("routeStepIndex", route_step_index)
+        if current_step:
+            merged.setdefault("routeStepType", current_step.get("type"))
+            merged.setdefault("routeStepLabel", current_step.get("label"))
+            if isinstance(current_step.get("expectedOptions"), list):
+                merged.setdefault("expectedOptions", list(current_step["expectedOptions"]))
+            if isinstance(current_step.get("dialogueOpenerOptions"), list):
+                merged.setdefault("dialogueOpenerOptions", list(current_step["dialogueOpenerOptions"]))
+            if isinstance(current_step.get("dialogueExpectedPromptContains"), list):
+                merged.setdefault("dialogueExpectedPromptContains", list(current_step["dialogueExpectedPromptContains"]))
+            if isinstance(current_step.get("expectedTargetContains"), list):
+                merged.setdefault("expectedTargets", list(current_step["expectedTargetContains"]))
+            if current_step.get("planeChange") is not None:
+                merged.setdefault("expectedPlaneChange", current_step.get("planeChange"))
+        if isinstance(merged.get("expectedOptions"), list):
+            merged["actions"] = list(
+                dict.fromkeys(list(_list(merged.get("actions"))) + list(merged["expectedOptions"]) + list(_list(merged.get("dialogueOpenerOptions"))))
+            )
+        merged.setdefault("targetName", item.get("name") or candidate.get("targetName") or candidate.get("name"))
+        merged.setdefault("classId", candidate.get("classId") or candidate.get("targetClass") or "service_route_transition")
+        merged["routeRelevance"] = _dict(item.get("routeRelevance")) or _dict(candidate.get("routeRelevance"))
+        merged["projectionStatus"] = projection
+        merged["routeObjectSource"] = item.get("source") or candidate.get("source")
+        merged["routeObjectRecoveryCandidate"] = True
+        merged["routeObjectRecoveryReason"] = rejection or "route_transition_not_actionable"
+        return merged
+    return {}
+
+
 def _service_route_service_target(route_context: dict[str, Any]) -> dict[str, Any]:
     target = _dict(route_context.get("visibleServiceTarget") or route_context.get("selectedServiceObject"))
     if not target:
@@ -1671,12 +1827,21 @@ def _service_target_exposure(
         and exposure_metrics.get("edgeDistanceThresholdMet") is False
     )
     loaded = bool(target)
-    action_relevant = bool(_contains_any(_candidate_actions(target), ["bank", "deposit", "use", "collect"]))
     route_relevance = _dict(target.get("routeRelevance"))
     route_relevant = route_relevance.get("relevanceStatus") in {None, "", "PASS"} or bool(target.get("routeId"))
+    route_action_relevant = route_relevant and bool(
+        target.get("routeId")
+        or target.get("routeStepType")
+        or str(target.get("classId") or "") == "service_route_transition"
+        or _contains_any(_candidate_actions(target), ["climb", "open", "cross", "enter", "exit"])
+    )
+    action_relevant = bool(_contains_any(_candidate_actions(target), ["bank", "deposit", "use", "collect"]) or route_action_relevant)
     expected_action = None
     for action in _candidate_actions(target):
-        if _lower(action) in {"bank", "deposit", "deposit-box", "use", "collect"}:
+        lowered_action = _lower(action)
+        if lowered_action in {"bank", "deposit", "deposit-box", "use", "collect"} or (
+            route_action_relevant and lowered_action not in {"examine", "cancel"}
+        ):
             expected_action = str(action)
             break
     target_view_state = target_view_core.build_target_view_state(
@@ -1989,6 +2154,18 @@ def _service_action_context_ready(service: dict[str, Any], status: dict[str, Any
     ) is True
 
 
+def _service_target_action_context_ready(service: dict[str, Any], status: dict[str, Any]) -> bool:
+    if _bool(_first_present(service.get("serviceReady"), status.get("serviceReady"))) is True:
+        return True
+    route_context = _dict(service.get("serviceRouteContext") or status.get("serviceRouteContext"))
+    route_action_ready = _bool(_first_present(route_context.get("actionReady"), status.get("serviceRouteActionReady"))) is True
+    if not route_action_ready:
+        return False
+    if _dict(route_context.get("visibleServiceTarget") or route_context.get("selectedServiceObject")):
+        return True
+    return _bool(_first_present(route_context.get("serviceObjectInterceptReady"), status.get("serviceObjectInterceptReady"))) is True
+
+
 def _service_required(
     *,
     generic: dict[str, Any],
@@ -2025,9 +2202,27 @@ def _service_required(
         service_policy_needed
         and held_resource_count is not None
         and held_resource_count > 0
-        and _service_action_context_ready(service, status)
     ):
-        return True
+        if _service_target_action_context_ready(service, status):
+            return True
+        route_context = _dict(service.get("serviceRouteContext") or status.get("serviceRouteContext"))
+        route_progress_active = bool(route_context.get("completedSteps")) or str(route_context.get("routeStepStatus") or "") in {
+            "retained_route_interaction_anchor",
+            "retained_service_anchor",
+        }
+        resource_collection_intent = phase in {
+            "select_target",
+            "target_selected",
+            "continue_current_target",
+            "continue_task",
+        } or active_intent in {
+            "select_target",
+            "target_selected",
+            "continue_current_target",
+            "continue_task",
+        }
+        if (resource_collection_intent or route_progress_active) and _service_action_context_ready(service, status):
+            return True
     if service_policy_needed and _bool(_dict(bank_operation).get("operationNeeded")) is True:
         return True
     # serviceNeeded/serviceRequired in serviceContext means the task policy has
@@ -2260,6 +2455,47 @@ def _selected_route_waypoint(
                 "minRouteProgressTiles": min_progress,
                 "suppressedTargetKeys": sorted(suppressed_keys),
             }
+    direct_distance = _int(pathing.get("distanceToDestination"), None)
+    if direct_distance is not None and direct_distance <= lookahead and len(tiles) > lookahead:
+        destination_tile = _normalise_tile(pathing.get("destinationTile") or pathing.get("pathTargetTile"))
+        next_distance = _tile_distance(next_tile, destination_tile)
+        detour_threshold = max(lookahead, max(1, direct_distance) * 4)
+        if (
+            direct_distance <= 4
+            and len(tiles) > detour_threshold
+            and next_distance is not None
+            and next_distance >= direct_distance
+        ):
+            return None, {
+                "schema": "route_waypoint_selection.v1",
+                "mode": "adaptive",
+                "reason": "close_destination_detour_safety_block",
+                "blocked": True,
+                "blockedReason": "close destination path detours without immediate progress",
+                "waypointDistanceTiles": None,
+                "consideredTiles": len(tiles),
+                "lookaheadTiles": lookahead,
+                "maxHorizonTiles": max_horizon,
+                "minRouteProgressTiles": min_progress,
+                "directDistanceToDestination": direct_distance,
+                "nextWaypointTile": dict(next_tile) if next_tile else None,
+                "nextWaypointDistanceToDestination": next_distance,
+                "destinationTile": dict(destination_tile) if destination_tile else None,
+                "suppressedTargetKeys": sorted(suppressed_keys) if suppressed_keys else [],
+            }
+        return next_tile, {
+            "schema": "route_waypoint_selection.v1",
+            "mode": "adaptive",
+            "reason": "close_destination_detour_precision",
+            "waypointDistanceTiles": 1 if next_tile else None,
+            "consideredTiles": len(tiles),
+            "lookaheadTiles": lookahead,
+            "maxHorizonTiles": max_horizon,
+            "minRouteProgressTiles": min_progress,
+            "directDistanceToDestination": direct_distance,
+            "selectedTile": dict(next_tile) if next_tile else None,
+            "suppressedTargetKeys": sorted(suppressed_keys) if suppressed_keys else [],
+        }
     index = min(len(tiles), max_horizon, lookahead) - 1
     if index < min_progress - 1 and len(tiles) >= min_progress:
         index = min(len(tiles), max_horizon, min_progress) - 1
@@ -2290,13 +2526,17 @@ def _path_target(pathing: dict[str, Any], fallback: dict[str, Any], name: str) -
     target_id = target.get("objectId", target.get("rawId", target.get("id")))
     class_id = target.get("classId") or target.get("targetClass")
     selected_waypoint, selection = _selected_route_waypoint(pathing, class_id=class_id, target_id=target_id)
+    if selection:
+        merged["routeWaypointSelection"] = selection
     if isinstance(selected_waypoint, dict):
         merged["targetTile"] = dict(selected_waypoint)
-        merged["routeWaypointSelection"] = selection
         merged["actionTargetSource"] = "local_frontier_waypoint"
         merged["actionability"] = "needs_live_projection"
         if selection.get("suppressedTargetKeys"):
             merged["suppressedTargetKeysAtSelection"] = list(selection.get("suppressedTargetKeys") or [])
+    elif selection.get("blocked"):
+        merged.setdefault("actionTargetSource", "route_detour_safety_block")
+        merged.setdefault("actionability", "blocked")
     elif str(advisory_source or "").lower() in {"static_route_prior", "route_context_goal"}:
         merged.setdefault("actionTargetSource", str(advisory_source))
         merged.setdefault("actionability", "advisory_only")
@@ -2412,11 +2652,11 @@ def _resource_selection_proposal(
         and projection_status.get("safeAimPointAvailable") is True
     )
     recovery_reason = str(resource_view.get("classification") or "")
+    worksite_drift = recovery_reason == "needs_worksite_recenter"
     if (
         resource_view.get("cameraRecoveryRecommended") is True
         and _tile_from(target)
-        and not selected_projection_safe
-        and not (hover_ready_for_selected and recovery_reason == "needs_worksite_recenter")
+        and (worksite_drift or not selected_projection_safe)
     ):
         return _resource_view_recovery_proposal(
             target=target,
@@ -2491,6 +2731,7 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
     source_tick = status.get("latestTick") if isinstance(status.get("latestTick"), int) else None
     phase = _lower(generic.get("phase") or status.get("phase") or status.get("brainPhase"))
     active_intent = _lower(generic.get("activeIntent") or status.get("activeIntent"))
+    returning_to_resource_intent = phase == "return_to_resource" or active_intent in {"return_to_resource_area", "navigate_to_resource_area"}
     if phase == "goal_complete" or active_intent == "goal_complete":
         return _proposal(
             "none",
@@ -2607,7 +2848,7 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
         )
 
     dialogue_state = _dialogue_state(status, brain)
-    dialogue_route = service_route if service_required and service_route else (return_route or service_route)
+    dialogue_route = return_route if returning_to_resource_intent and return_route else (service_route if service_required and service_route else (return_route or service_route))
     if dialogue_state.get("active") is True:
         dialogue_choice = dialogue_core.route_dialogue_choice(dialogue_state, _current_route_step(dialogue_route))
         if isinstance(dialogue_choice, dict) and dialogue_choice.get("status") == "PASS":
@@ -2649,7 +2890,7 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
     return_route_target = _service_route_interaction_target(return_route)
     if not return_route_target:
         return_route_target = _route_hover_interaction_target(status=status, brain=brain, route_context=return_route)
-    if not service_required:
+    if returning_to_resource_intent or not service_required:
         if (_bool(return_route.get("returnActionReady")) is True or _bool(return_route.get("actionReady")) is True) and return_route_target:
             return_route_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
                 return_route_target,
@@ -2657,6 +2898,26 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 status=status,
                 brain=brain,
             )
+            if not isinstance(_safe_aimpoint, dict) or _safe_aimpoint.get("status") != "PASS":
+                exposure = _service_target_exposure(
+                    return_route_target,
+                    _safe_aimpoint,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                )
+                if exposure.get("shouldAttemptCameraExposure") is True:
+                    return _service_view_recovery_proposal(
+                        target=return_route_target,
+                        exposure=exposure,
+                        input_geometry=input_geometry,
+                        source_canvas_size=source_canvas_size,
+                        source_tick=source_tick,
+                        status=status,
+                        brain=brain,
+                        reason="service_view_recovery_needed",
+                        confidence=0.76,
+                    )
             return _proposal(
                 "interact_service_route_object",
                 target_kind="service_route_object",
@@ -2692,11 +2953,41 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 brain=brain,
             )
 
-    post_bank_resource_visible = (
-        _bool(resource_return.get("resourceTargetCurrentlyVisible")) is True
-        or _bool(status.get("postBankResourceTargetAvailable")) is True
+        return_recovery_target = _route_census_recovery_target(return_route)
+        if return_recovery_target:
+            return_recovery_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
+                return_recovery_target,
+                source_canvas_size=source_canvas_size,
+                status=status,
+                brain=brain,
+            )
+            exposure = _service_target_exposure(
+                return_recovery_target,
+                _safe_aimpoint,
+                source_canvas_size=source_canvas_size,
+                status=status,
+                brain=brain,
+            )
+            if exposure.get("shouldAttemptCameraExposure") is True:
+                return _service_view_recovery_proposal(
+                    target=return_recovery_target,
+                    exposure=exposure,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    source_tick=source_tick,
+                    status=status,
+                    brain=brain,
+                    reason="return_route_transition_view_recovery_needed",
+                    confidence=0.74,
+                )
+
+    post_bank_resource_reacquired = _return_resource_target_reacquired(
+        status=status,
+        resource_return=resource_return,
+        active_target=active_target,
+        overlay_selected=overlay_selected,
     )
-    if not service_required and banking_complete and _bool(bank_ui.get("bankOpen")) is not True and post_bank_resource_visible:
+    if not service_required and banking_complete and _bool(bank_ui.get("bankOpen")) is not True and post_bank_resource_reacquired:
         resource_proposal = _resource_selection_proposal(
             status=status,
             brain=brain,
@@ -2712,10 +3003,10 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
         if resource_proposal is not None and resource_proposal.executable and resource_proposal.proposed_action == "select_resource_target":
             return resource_proposal
 
-    if not service_required:
+    if returning_to_resource_intent or not service_required:
         return_navigation_target = _dict(return_route.get("currentNavigationTarget"))
         if return_navigation_target:
-            target = _path_target(pathing, return_navigation_target, "Resource return")
+            target = _path_target(_pathing_for_resource_return(pathing), return_navigation_target, "Resource return")
             return _proposal(
                 "return_to_resource_area",
                 target_kind="path_tile",
@@ -2730,8 +3021,25 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 brain=brain,
             )
 
+        if active_intent in {"return_to_resource_area", "navigate_to_resource_area"} and _bool(pathing.get("pathingNeeded")) is True:
+            target = _path_target(_pathing_for_resource_return(pathing), active_target, "Resource return")
+            return _proposal(
+                "return_to_resource_area",
+                target_kind="path_tile",
+                target=target,
+                reason=str(pathing.get("reason") or "resource_return_pathing"),
+                confidence=0.78,
+                required_context=["pathing"],
+                source_tick=source_tick,
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
+                status=status,
+                brain=brain,
+            )
+
         if _bool(resource_return.get("returnDestinationAvailable")) is True:
-            target = _path_target(pathing, active_target or {"returnDestinationTile": resource_return.get("returnDestinationTile")}, "Resource return")
+            fallback_target = _resource_return_fallback_target(active_target, resource_return)
+            target = _path_target(_pathing_for_resource_return(pathing), fallback_target, "Resource return")
             return _proposal(
                 "return_to_resource_area",
                 target_kind="path_tile",
@@ -2875,6 +3183,26 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 status=status,
                 brain=brain,
             )
+            if not isinstance(_safe_aimpoint, dict) or _safe_aimpoint.get("status") != "PASS":
+                exposure = _service_target_exposure(
+                    route_target,
+                    _safe_aimpoint,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                )
+                if exposure.get("shouldAttemptCameraExposure") is True:
+                    return _service_view_recovery_proposal(
+                        target=route_target,
+                        exposure=exposure,
+                        input_geometry=input_geometry,
+                        source_canvas_size=source_canvas_size,
+                        source_tick=source_tick,
+                        status=status,
+                        brain=brain,
+                        reason="service_view_recovery_needed",
+                        confidence=0.76,
+                    )
             return _proposal(
                 "interact_service_route_object",
                 target_kind="service_route_object",
@@ -2909,6 +3237,34 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 status=status,
                 brain=brain,
             )
+
+        service_recovery_target = _route_census_recovery_target(service_route)
+        if service_recovery_target:
+            service_recovery_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
+                service_recovery_target,
+                source_canvas_size=source_canvas_size,
+                status=status,
+                brain=brain,
+            )
+            exposure = _service_target_exposure(
+                service_recovery_target,
+                _safe_aimpoint,
+                source_canvas_size=source_canvas_size,
+                status=status,
+                brain=brain,
+            )
+            if exposure.get("shouldAttemptCameraExposure") is True:
+                return _service_view_recovery_proposal(
+                    target=service_recovery_target,
+                    exposure=exposure,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    source_tick=source_tick,
+                    status=status,
+                    brain=brain,
+                    reason="service_route_transition_view_recovery_needed",
+                    confidence=0.74,
+                )
 
         if _bool(pathing.get("pathingNeeded")) is True:
             route_navigation_target = _dict(service_route.get("currentNavigationTarget"))

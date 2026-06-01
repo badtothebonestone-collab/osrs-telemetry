@@ -448,6 +448,62 @@ def _tile_like_key(value: Any) -> tuple[int, int, int] | None:
     return (world_x, world_y, 0 if plane is None else plane)
 
 
+def _player_tile_tuple(status: dict[str, Any]) -> tuple[int, int, int] | None:
+    player = _player_context(status)
+    for value in (
+        player.get("tile"),
+        player.get("worldTile"),
+        status.get("playerTile"),
+        status.get("playerWorldTile"),
+    ):
+        tile = _tile_like_key(value)
+        if tile is not None:
+            return tile
+    world_x = _int(player.get("worldX") if "worldX" in player else player.get("x"))
+    world_y = _int(player.get("worldY") if "worldY" in player else player.get("y"))
+    plane = _int(player.get("plane"))
+    if world_x is None or world_y is None:
+        return None
+    return (world_x, world_y, 0 if plane is None else plane)
+
+
+def _tile_key_distance(left: tuple[int, int, int] | None, right: tuple[int, int, int] | None) -> int | None:
+    if left is None or right is None:
+        return None
+    if left[2] != right[2]:
+        return None
+    return max(abs(left[0] - right[0]), abs(left[1] - right[1]))
+
+
+def _navigation_waypoint_movement(
+    proposal: ActionProposal | None,
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> dict[str, Any] | None:
+    target = _tile_like_key(proposal.target_tile) if isinstance(proposal, ActionProposal) else None
+    before_tile = _player_tile_tuple(before)
+    after_tile = _player_tile_tuple(after)
+    before_distance = _tile_key_distance(before_tile, target)
+    after_distance = _tile_key_distance(after_tile, target)
+    if before_distance is None or after_distance is None:
+        return None
+    return {
+        "clickedWaypointTile": {"worldX": target[0], "worldY": target[1], "plane": target[2]},
+        "playerTileBefore": {"worldX": before_tile[0], "worldY": before_tile[1], "plane": before_tile[2]},
+        "playerTileAfter": {"worldX": after_tile[0], "worldY": after_tile[1], "plane": after_tile[2]},
+        "distanceBefore": before_distance,
+        "distanceAfter": after_distance,
+        "distanceDelta": after_distance - before_distance,
+    }
+
+
+def _relevant_navigation_decreased_metrics(action: str, decreased_metrics: list[str]) -> list[str]:
+    if action == "return_to_resource_area":
+        allowed = {"destination_distance", "path_target_distance", "navigation_intent_distance"}
+        return [name for name in decreased_metrics if name in allowed]
+    return list(decreased_metrics)
+
+
 def _local_destination_key(status: dict[str, Any]) -> tuple[int, int, int] | None:
     pathing = _pathing_context(status)
     for key in ("localDestination", "currentLocalDestination", "destinationTile", "pathTargetTile", "nextWaypointTile"):
@@ -1002,6 +1058,7 @@ def verify_expected_result(
     wait_started_tick: int | None = None,
     timeout_ticks: int | None = None,
     progress_min_distance: float | None = None,
+    proposal: ActionProposal | None = None,
 ) -> dict[str, Any]:
     before = before_status if isinstance(before_status, dict) else {}
     after = after_status if isinstance(after_status, dict) else {}
@@ -1274,10 +1331,20 @@ def verify_expected_result(
             if before_metric - after_metric >= min_distance and after_metric < before_metric:
                 decreased_metrics.append(name)
                 _add_signal(observed, f"{name}_decreased")
+        relevant_decreased_metrics = _relevant_navigation_decreased_metrics(action, decreased_metrics)
         before_tile = _player_tile_key(before)
         after_tile = _player_tile_key(after)
         if before_tile is not None and after_tile is not None and after_tile != before_tile:
             _add_signal(observed, "player_tile_changed")
+        waypoint_movement = _navigation_waypoint_movement(proposal, before, after)
+        waypoint_distance_increased = False
+        if isinstance(waypoint_movement, dict):
+            observed["clickedWaypointMovement"] = waypoint_movement
+            if waypoint_movement["distanceAfter"] < waypoint_movement["distanceBefore"]:
+                _add_signal(observed, "clicked_waypoint_distance_decreased")
+            elif waypoint_movement["distanceAfter"] > waypoint_movement["distanceBefore"]:
+                waypoint_distance_increased = True
+                _add_signal(observed, "clicked_waypoint_distance_increased")
         before_node = _route_node_id(before)
         after_node = _route_node_id(after)
         if before_node is not None and after_node is not None and after_node != before_node:
@@ -1310,7 +1377,11 @@ def verify_expected_result(
                 return _finish(observed, status="PASS", result="service_navigation_reached_node", outcome="progress", complete=True, next_allowed=True)
             if "route_object_reacquired" in signals:
                 return _finish(observed, status="PASS", result="service_route_object_reacquired", outcome="progress", complete=True, next_allowed=True)
-            if "player_tile_changed" in signals or "route_node_changed" in signals or "route_step_index_changed" in signals or decreased_metrics:
+            if waypoint_distance_increased and not relevant_decreased_metrics and "route_node_changed" not in signals and "route_step_index_changed" not in signals:
+                _add_signal(observed, "route_wrong_way")
+                observed["warnings"].append("navigation moved away from the clicked waypoint without service-route progress")
+                return _finish(observed, status="FAIL", result="service_navigation_wrong_way", outcome="no_change_timeout", complete=True, next_allowed=False)
+            if "player_tile_changed" in signals or "route_node_changed" in signals or "route_step_index_changed" in signals or relevant_decreased_metrics:
                 return _finish(observed, status="PASS", result="service_navigation_progress", outcome="progress", complete=True, next_allowed=True)
             if "movement_or_wait_state" in signals or changed_metrics:
                 if timed_out:
@@ -1320,7 +1391,11 @@ def verify_expected_result(
         else:
             if "resource_target_visible" in signals:
                 return _finish(observed, status="PASS", result="resource_return_reached_node", outcome="progress", complete=True, next_allowed=True)
-            if "player_tile_changed" in signals or decreased_metrics:
+            if waypoint_distance_increased and not relevant_decreased_metrics:
+                _add_signal(observed, "route_wrong_way")
+                observed["warnings"].append("resource return moved away from the clicked waypoint without return-route progress")
+                return _finish(observed, status="FAIL", result="resource_return_wrong_way", outcome="no_change_timeout", complete=True, next_allowed=False)
+            if "player_tile_changed" in signals or relevant_decreased_metrics:
                 return _finish(observed, status="PASS", result="resource_return_progress", outcome="progress", complete=True, next_allowed=True)
             if "movement_or_wait_state" in signals or changed_metrics:
                 if timed_out:
@@ -1448,6 +1523,7 @@ def lifecycle_after_execution(
             wait_started_tick=proposal.source_tick,
             timeout_ticks=timeout_ticks,
             progress_min_distance=progress_min_distance,
+            proposal=proposal,
         )
         if after_status is not None
         else None

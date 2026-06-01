@@ -525,6 +525,24 @@ def approach_radius_tiles(destination: dict[str, Any] | None) -> int:
     return 1
 
 
+def destination_is_route_transition(destination: dict[str, Any] | None) -> bool:
+    if not isinstance(destination, dict):
+        return False
+    if destination.get("navigationObstacle") is True:
+        return True
+    for key in ("routeObjectKind", "classId", "class_id", "targetKind", "target_kind"):
+        value = str(destination.get(key) or "").lower()
+        if value in {"route_transition", "service_route_transition", "service_route"}:
+            return True
+    return False
+
+
+def destination_allows_service_ready(destination: dict[str, Any] | None, target_kind: str) -> bool:
+    if target_kind != "service":
+        return False
+    return not destination_is_route_transition(destination)
+
+
 def update_arrival_context(
     context: PathingContext,
     *,
@@ -533,6 +551,7 @@ def update_arrival_context(
     movement_state: str,
     intent_key: str | None,
     tick: int | None,
+    service_ready_allowed: bool,
 ) -> None:
     context.distance_to_final_approach = tile_distance(
         current_player_tile,
@@ -599,6 +618,17 @@ def update_arrival_context(
         context.service_ready_reason = "waiting_for_player_to_stop"
         state.service_ready = False
         state.service_ready_stable_for_ticks = 0
+        return
+
+    if not service_ready_allowed:
+        state.service_ready = False
+        state.service_ready_last_tick = None
+        state.service_ready_started_tick = None
+        state.service_ready_stable_for_ticks = 0
+        context.arrival_reason = base_reason if state.arrived_stable_for_ticks >= ARRIVAL_READY_STABLE_TICKS else "arrival_stabilizing"
+        context.service_ready = False
+        context.service_ready_reason = "arrival_not_service_target"
+        context.service_ready_stable_for_ticks = 0
         return
 
     if state.arrived_stable_for_ticks < ARRIVAL_READY_STABLE_TICKS:
@@ -679,6 +709,7 @@ def stabilize_path_intent(
     current_player_tile: dict[str, Any] | None,
     movement_state: str,
     tick: int | None,
+    service_ready_allowed: bool = True,
 ) -> PathingContext:
     destination_key = destination_target_key(context.destination)
     current_phase_key = phase_key(generic_task_state)
@@ -695,6 +726,7 @@ def stabilize_path_intent(
             movement_state=movement_state,
             intent_key=intent_key,
             tick=tick,
+            service_ready_allowed=service_ready_allowed,
         )
         annotate_path_intent(
             context,
@@ -717,6 +749,7 @@ def stabilize_path_intent(
             movement_state=movement_state,
             intent_key=key if key is not None else intent_key,
             tick=tick,
+            service_ready_allowed=service_ready_allowed,
         )
         if context.service_ready:
             complete_path_after_arrival(context)
@@ -1306,6 +1339,77 @@ def local_frontier_path_to_external_destination(
     return path if len(path) > 1 else [], expanded, start_cheb, after_cheb, start_cheb - after_cheb, budget_exceeded
 
 
+def local_boundary_path_for_unreachable_destination(
+    window: navigation_reachability.CollisionWindow,
+    *,
+    start: tuple[int, int],
+    destination: tuple[int, int],
+    movement_model: str,
+    max_nodes: int = 2048,
+    budget_millis: float = 8.0,
+    started: float | None = None,
+) -> tuple[list[tuple[int, int]], int, int | None, int | None, int | None, bool]:
+    if not navigation_reachability.contains(window, start[0], start[1]):
+        return [], 0, None, None, None, False
+    if not navigation_reachability.tile_walkable(window, start[0], start[1]):
+        return [], 0, None, None, None, False
+    start_cheb = max(abs(destination[0] - start[0]), abs(destination[1] - start[1]))
+    start_manhattan = abs(destination[0] - start[0]) + abs(destination[1] - start[1])
+    queue = deque([start])
+    parent: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
+    depth: dict[tuple[int, int], int] = {start: 0}
+    best_tile: tuple[int, int] | None = None
+    best_score: tuple[int, int, int, int, int, int] | None = None
+    expanded = 0
+    budget_exceeded = False
+    directions = direction_order_for_model(movement_model)
+    start_time = started if started is not None else time.perf_counter()
+    while queue:
+        if expanded >= max(1, int(max_nodes)) or (time.perf_counter() - start_time) * 1000.0 > max(0.1, float(budget_millis)):
+            budget_exceeded = True
+            break
+        current = queue.popleft()
+        expanded += 1
+        current_depth = depth[current]
+        is_boundary = (
+            current[0] in {window.min_scene_x, window.max_scene_x}
+            or current[1] in {window.min_scene_y, window.max_scene_y}
+        )
+        if is_boundary and current_depth > 0:
+            tile_cheb = max(abs(destination[0] - current[0]), abs(destination[1] - current[1]))
+            tile_manhattan = abs(destination[0] - current[0]) + abs(destination[1] - current[1])
+            cheb_progress = start_cheb - tile_cheb
+            manhattan_progress = start_manhattan - tile_manhattan
+            if cheb_progress > 0 or manhattan_progress > 0:
+                score = (
+                    cheb_progress,
+                    manhattan_progress,
+                    -tile_cheb,
+                    -tile_manhattan,
+                    -current_depth,
+                    -(current[0] * 256 + current[1]),
+                )
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_tile = current
+        for dx, dy in directions:
+            next_tile = (current[0] + dx, current[1] + dy)
+            if next_tile in parent:
+                continue
+            if not navigation_reachability.contains(window, next_tile[0], next_tile[1]):
+                continue
+            if not step_allowed_for_model(window, current[0], current[1], next_tile[0], next_tile[1], movement_model):
+                continue
+            parent[next_tile] = current
+            depth[next_tile] = current_depth + 1
+            queue.append(next_tile)
+    if best_tile is None:
+        return [], expanded, start_cheb, None, None, budget_exceeded
+    path = reconstruct_path(parent, best_tile)
+    after_cheb = max(abs(destination[0] - best_tile[0]), abs(destination[1] - best_tile[1]))
+    return path if len(path) > 1 else [], expanded, start_cheb, after_cheb, start_cheb - after_cheb, budget_exceeded
+
+
 def budget_exceeded_local_path_result(
     window: navigation_reachability.CollisionWindow,
     *,
@@ -1316,25 +1420,45 @@ def budget_exceeded_local_path_result(
     final_approach_candidate_count: int = 0,
     rejected_approach_tile_reasons: dict[str, int] | None = None,
 ) -> LocalPathResult:
-    fallback_path = local_waypoint_fallback_path(
+    fallback_path, frontier_expanded, distance_before, distance_after, progress_score, _frontier_budget = local_frontier_path_to_external_destination(
         window,
         start=start,
         destination=destination,
         movement_model=movement_model,
+        max_steps=12,
+        max_nodes=max(64, min(2048, max(1, int(expanded or 0)))),
+        budget_millis=8.0,
     )
+    selected_reason = "budget_exceeded_local_frontier" if fallback_path else None
+    if not fallback_path:
+        fallback_path = local_waypoint_fallback_path(
+            window,
+            start=start,
+            destination=destination,
+            movement_model=movement_model,
+        )
+        selected_reason = "budget_exceeded_local_waypoint" if fallback_path else None
+        distance_before = max(abs(destination[0] - start[0]), abs(destination[1] - start[1]))
+        if fallback_path:
+            last = fallback_path[-1]
+            distance_after = max(abs(destination[0] - last[0]), abs(destination[1] - last[1]))
+            progress_score = distance_before - distance_after
     path_target = fallback_path[-1] if len(fallback_path) > 1 else None
     return LocalPathResult(
         "unknown",
         "pathing_budget_exceeded",
         fallback_path,
-        expanded,
+        max(expanded, frontier_expanded, max(0, len(fallback_path) - 1)),
         True,
         False,
         final_approach_candidate_count=final_approach_candidate_count,
         rejected_approach_tile_reasons=rejected_approach_tile_reasons,
         path_target_scene_tile=path_target,
         path_target_tile_source="local_waypoint_fallback" if path_target is not None else None,
-        selected_approach_reason="budget_exceeded_local_waypoint" if path_target is not None else None,
+        selected_approach_reason=selected_reason if path_target is not None else None,
+        frontier_distance_before=distance_before,
+        frontier_distance_after_estimate=distance_after,
+        progress_score=progress_score,
     )
 
 
@@ -1539,6 +1663,35 @@ def local_scene_path(
                 side_access_valid=False,
                 line_of_sight_to_target=False,
             )
+        fallback_path, frontier_expanded, distance_before, distance_after, progress_score, frontier_budget = local_boundary_path_for_unreachable_destination(
+            window,
+            start=start,
+            destination=destination,
+            movement_model=movement_model,
+            max_nodes=max_nodes,
+            budget_millis=8.0,
+        )
+        path_target = fallback_path[-1] if len(fallback_path) > 1 else None
+        if path_target is not None:
+            return LocalPathResult(
+                "unknown",
+                "destination_inside_window_boundary_handoff",
+                fallback_path,
+                max(total_expanded, frontier_expanded, max(0, len(fallback_path) - 1)),
+                frontier_budget,
+                False,
+                final_approach_candidate_count=len(candidates),
+                rejected_approach_tile_reasons=dict(rejected_counter),
+                path_target_scene_tile=path_target,
+                path_target_tile_source="local_frontier_waypoint",
+                selected_approach_reason="blocked_destination_boundary_frontier",
+                frontier_distance_before=distance_before,
+                frontier_distance_after_estimate=distance_after,
+                progress_score=progress_score,
+                approach_candidates_tested=len(candidates),
+                approach_candidates_rejected_by_blocked_side=rejected_counter.get("blocked_side_access", 0),
+                approach_candidates_rejected_by_no_line_of_sight=rejected_counter.get("no_line_of_sight", 0),
+            )
         return LocalPathResult(
             "blocked",
             "no_local_path",
@@ -1643,6 +1796,7 @@ def analyze_pathing_context(
     navigation_reason = str(context_value(navigation_intent_context, "navigation_reason", "navigationReason") or "")
     target_kind = str(context_value(navigation_intent_context, "target_kind", "targetKind") or "none")
     destination = destination_from_navigation_intent(navigation_intent_context)
+    service_ready_allowed = destination_allows_service_ready(destination, target_kind)
     generic_task_state = generic_task_state if generic_task_state is not None else {}
     current_player_tile = player_tile(player_context)
     movement_state = infer_movement_state(
@@ -1660,6 +1814,7 @@ def analyze_pathing_context(
             current_player_tile=current_player_tile,
             movement_state=movement_state,
             tick=tick,
+            service_ready_allowed=service_ready_allowed,
         )
 
     if target_kind == "process_inventory":
@@ -1886,6 +2041,9 @@ def analyze_pathing_context(
         warnings.append("player is outside the local collision window")
     elif reason == "pathing_budget_exceeded":
         warnings.append("pathing search budget exceeded")
+    elif reason == "destination_inside_window_boundary_handoff":
+        missing.append("navigation.global_pathfinding")
+        warnings.append("local target is blocked inside the collision window; routing to a reachable boundary handoff tile")
     elif reason == "invalid_path_segment":
         warnings.append("predicted path contains a movement segment blocked by collision data")
     elif reason == "approach_side_access_blocked":

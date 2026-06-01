@@ -350,6 +350,44 @@ class HumanInputController:
         if post_ms > 0:
             self.sleep_func(post_ms / 1000.0)
 
+    def click_current_position(
+        self,
+        *,
+        button: str = "left",
+        hold_ms: int | None = None,
+        context: HumanInputContext | None = None,
+    ) -> None:
+        self._ensure_live_command_allowed("mouse_click_current")
+        pre_ms = _midpoint(self.profile.pre_click_settle_ms)
+        if pre_ms > 0:
+            self.sleep_func(pre_ms / 1000.0)
+        effective_hold = max(0, int(hold_ms or 0))
+        if effective_hold <= 0:
+            effective_hold = _midpoint(self.profile.click_hold_ms)
+        mouse_down = getattr(self.backend, "mouse_down", None)
+        mouse_up = getattr(self.backend, "mouse_up", None)
+        if not callable(mouse_down) or not callable(mouse_up):
+            raise RuntimeError(f"backend does not support governed current-position click: {getattr(self.backend, 'name', self.backend.__class__.__name__)}")
+        started = float(self.monotonic_func())
+        pressed = False
+        try:
+            mouse_down(button=button)
+            pressed = True
+            if effective_hold > 0:
+                self.sleep_func(effective_hold / 1000.0)
+        finally:
+            if pressed:
+                try:
+                    mouse_up(button=button)
+                except Exception:  # noqa: BLE001
+                    pass
+        elapsed_ms = max(0, int(round((float(self.monotonic_func()) - started) * 1000.0)))
+        self._metrics.click_hold_durations_ms.append(max(effective_hold, elapsed_ms))
+        self._metrics.click_count += 1
+        post_ms = _midpoint(self.profile.post_click_settle_ms)
+        if post_ms > 0:
+            self.sleep_func(post_ms / 1000.0)
+
     def move_and_click(
         self,
         plan: MouseMovementPlan,
@@ -359,7 +397,7 @@ class HumanInputController:
         context: HumanInputContext | None = None,
     ) -> None:
         self._ensure_live_command_allowed("mouse_move_and_click")
-        if not callable(getattr(self.backend, "move", None)) or not callable(getattr(self.backend, "click_at", None)):
+        if not callable(getattr(self.backend, "move", None)):
             combined = getattr(self.backend, "move_and_click", None)
             if not callable(combined):
                 raise RuntimeError(
@@ -372,6 +410,9 @@ class HumanInputController:
             self._metrics.click_count += 1
             return
         self.move_mouse(plan, context=context)
+        if callable(getattr(self.backend, "mouse_down", None)) and callable(getattr(self.backend, "mouse_up", None)):
+            self.click_current_position(button=button, hold_ms=hold_ms, context=context)
+            return
         self.click_at(plan.click_point.x, plan.click_point.y, button=button, hold_ms=hold_ms, context=context)
 
     @contextmanager

@@ -60,6 +60,12 @@ class HoverConfirmationOptions:
 
 NAVIGATION_ACTIONS = {"navigate_to_service", "return_to_resource_area"}
 ROUTE_TRANSITION_ACTIONS = {"interact_service_route_object"}
+MOVEMENT_SAFETY_BLOCK_REASONS = {
+    "movement_safety_screen_point_unavailable",
+    "movement_safety_region_unavailable",
+    "screen_click_point_outside_movement_safety_region",
+}
+FATAL_NO_CLICK_BLOCK_REASONS = {*MOVEMENT_SAFETY_BLOCK_REASONS, "hover_movement_failed"}
 
 
 HoverMenuMatchResult = client_tick_core.HoverMenuMatchResult
@@ -968,9 +974,19 @@ def _route_transition_direct_menu_entry(
     selected = client_tick_core.get_left_click_entry(sample)
     if isinstance(selected, dict) and _entry_matches_route_transition_direct_option(selected, proposal):
         return None
+    expected_options = _route_transition_direct_expected_options(proposal)
+    synthetic_direct_entry = None
+    if expected_options and _route_transition_left_click_is_dialogue_opener(proposal, {"sample": sample}):
+        synthetic_direct_entry = {
+            "option": expected_options[0],
+            "target": proposal.target_name or "",
+            "identifier": _proposal_target_id(proposal),
+            "syntheticEntry": True,
+            "reason": "left_click_is_generic_dialogue_opener",
+        }
     entries = sample.get("entries")
     if not isinstance(entries, list):
-        return None
+        return synthetic_direct_entry
     for index, raw_entry in enumerate(entries):
         if not isinstance(raw_entry, dict):
             continue
@@ -978,7 +994,7 @@ def _route_transition_direct_menu_entry(
         entry["entryIndex"] = index
         if _entry_matches_route_transition_direct_option(entry, proposal):
             return entry
-    return None
+    return synthetic_direct_entry
 
 
 def _route_transition_left_click_is_dialogue_opener(
@@ -1003,6 +1019,30 @@ def _route_transition_left_click_is_dialogue_opener(
         "param1": sample.get("topParam1"),
     }
     return _entry_matches_route_transition_dialogue_opener(raw_top, proposal)
+
+
+def _route_transition_should_prefer_dialogue_opener(
+    proposal: ActionProposal,
+    confirmation: dict[str, Any] | None,
+) -> bool:
+    if not _route_transition_left_click_is_dialogue_opener(proposal, confirmation):
+        return False
+    resolution = proposal.click_point_resolution if isinstance(proposal.click_point_resolution, dict) else {}
+    if resolution.get("displayScaleApplied") is True:
+        return True
+    geometry = proposal.input_geometry if isinstance(proposal.input_geometry, dict) else {}
+    display_scale = resolution.get("displayScale") if isinstance(resolution.get("displayScale"), dict) else geometry.get("displayScale")
+    if isinstance(display_scale, dict):
+        def number(value: Any) -> float | None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        scale_x = number(display_scale.get("x"))
+        scale_y = number(display_scale.get("y"))
+        return bool((scale_x is not None and abs(scale_x - 1.0) > 0.01) or (scale_y is not None and abs(scale_y - 1.0) > 0.01))
+    return False
 
 
 def _menu_row_canvas_point(sample: dict[str, Any], row_index: int) -> dict[str, int] | None:
@@ -1153,14 +1193,19 @@ def _execute_route_transition_direct_menu_selection(
         }
     )
     right_click_started_wall_ms = int(wall_time_millis_func())
-    with input_controller.hold_mouse_button(button="right", context=_human_context(proposal, "right_click_menu_open")):
-        menu_sample = _poll_menu_open_sample(
-            hover_options,
-            minimum_wall_time_millis=right_click_started_wall_ms,
-            snapshot_fetch_func=snapshot_fetch_func,
-            sleep_func=sleep_func,
-            monotonic_func=monotonic_func,
-        )
+    _click_confirmed_current_position(
+        input_controller,
+        button="right",
+        hold_ms=max(50, int(hover_options.click_hold_ms or 0)),
+        context=_human_context(proposal, "right_click_menu_open"),
+    )
+    menu_sample = _poll_menu_open_sample(
+        hover_options,
+        minimum_wall_time_millis=right_click_started_wall_ms,
+        snapshot_fetch_func=snapshot_fetch_func,
+        sleep_func=sleep_func,
+        monotonic_func=monotonic_func,
+    )
     event["menuOpenSample"] = menu_sample
     if not isinstance(menu_sample, dict) or not _is_observed_menu_open_sample(
         menu_sample,
@@ -1222,7 +1267,13 @@ def _execute_route_transition_direct_menu_selection(
             "pointCount": len(row_plan.points),
         }
     )
-    input_controller.move_and_click(row_plan, button="left", hold_ms=hover_options.click_hold_ms, context=_human_context(proposal, "right_click_menu_select"))
+    input_controller.move_mouse(row_plan, context=_human_context(proposal, "right_click_menu_row"))
+    _click_confirmed_current_position(
+        input_controller,
+        button="left",
+        hold_ms=hover_options.click_hold_ms,
+        context=_human_context(proposal, "right_click_menu_select"),
+    )
     result.executed = True
     event["status"] = "PASS"
     event["selectedAtWallMillis"] = int(wall_time_millis_func())
@@ -1238,6 +1289,16 @@ def _execute_route_transition_direct_menu_selection(
     result.hover_confirmation["clickClassification"] = click_classification
     event["actualClickedMenu"] = after_click
     event["clickClassification"] = click_classification
+    direct_option_clicked = _entry_matches_route_transition_direct_option(after_click or {}, proposal)
+    event["directOptionClicked"] = bool(direct_option_clicked)
+    if not direct_option_clicked:
+        event["status"] = "FAIL"
+        event["reason"] = "clicked_direct_menu_mismatch"
+        result.warnings.append("right-click menu selection clicked a route option, but not the expected direct route option")
+        result.hover_confirmation["rightClickMenuSelection"] = event
+        if isinstance(result.action_trace, dict):
+            result.action_trace["rightClickMenuSelection"] = event
+        return False
     result.hover_confirmation["rightClickMenuSelection"] = event
     if isinstance(result.action_trace, dict):
         result.action_trace["rightClickMenuSelection"] = event
@@ -2861,6 +2922,14 @@ def _maybe_final_reconcile(
     if wait_started_tick is None and isinstance(result.action_trace, dict):
         trace_tick = result.action_trace.get("gameTickBeforeAction")
         wait_started_tick = trace_tick if isinstance(trace_tick, int) else None
+    result_proposal = result.proposal if isinstance(result.proposal, dict) else {}
+    reconcile_proposal = None
+    if result_proposal:
+        reconcile_proposal = ActionProposal(
+            proposed_action=str(result_proposal.get("proposedAction") or result.proposed_action or "none"),
+            target_kind=str(result_proposal.get("targetKind") or "none"),
+            target_tile=result_proposal.get("targetTile") if isinstance(result_proposal.get("targetTile"), dict) else None,
+        )
     elapsed_ms = 0
     last_observed: dict[str, Any] | None = None
     while True:
@@ -2879,6 +2948,7 @@ def _maybe_final_reconcile(
             wait_started_tick=wait_started_tick,
             timeout_ticks=reconcile_ticks if reconcile_ticks > 0 else None,
             progress_min_distance=_nav_progress_min_distance(options) if result.proposed_action in NAVIGATION_ACTIONS else None,
+            proposal=reconcile_proposal,
         )
         last_observed = reconciled
         _record_loop_status(loop_summary, latest_status)
@@ -2940,6 +3010,7 @@ def _verify_action_after_execution(
             timeout_ms=timeout_ms,
             wait_started_tick=_status_tick(before_status),
             progress_min_distance=progress_min_distance,
+            proposal=proposal,
         )
         locked = _navigation_motion_lock_observation(
             action=action,
@@ -2981,6 +3052,7 @@ def _verify_action_after_execution(
             wait_started_tick=wait_started_tick,
             timeout_ticks=timeout_ticks if timeout_ticks > 0 else None,
             progress_min_distance=progress_min_distance,
+            proposal=proposal,
         )
         locked = _navigation_motion_lock_observation(
             action=action,
@@ -3195,6 +3267,13 @@ def _proposal_reacquire_budget_type(proposal: ActionProposal) -> str:
 
 
 def _proposal_has_actionable_safe_target(proposal: ActionProposal) -> bool:
+    missing = {str(item) for item in (proposal.missing_capabilities or [])}
+    if missing.intersection({"click_point", "screen_click_point", "canvas_hover_point", "safe_aimpoint"}):
+        return False
+    payload = proposal.to_dict()
+    resolution = payload.get("clickPointResolution") if isinstance(payload.get("clickPointResolution"), dict) else {}
+    if resolution and resolution.get("status") not in {None, "PASS"}:
+        return False
     explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
     safe = explanation.get("safeAimPoint") if isinstance(explanation.get("safeAimPoint"), dict) else {}
     if safe.get("actionable") is True or safe.get("status") == "PASS":
@@ -3312,7 +3391,31 @@ def _world_tile_key(tile: dict[str, Any] | None) -> tuple[int, int, int] | None:
     return (world_x, world_y, 0 if plane is None else plane)
 
 
-def _route_stability_issue(proposal: ActionProposal, recent_waypoints: list[tuple[int, int, int]]) -> dict[str, Any] | None:
+def _navigation_progress_observed(result: ExecutionResult | None) -> bool:
+    if result is None:
+        return False
+    observed = result.observed_result if isinstance(result.observed_result, dict) else {}
+    outcome = str(observed.get("resultOutcome") or "")
+    if outcome in {"progress", "success"}:
+        return True
+    signals = {str(signal) for signal in observed.get("observedSignals") or []}
+    progress_signals = {
+        "player_tile_changed",
+        "destination_distance_decreased",
+        "path_target_distance_decreased",
+        "service_distance_decreased",
+        "final_approach_distance_decreased",
+        "resource_destination_distance_decreased",
+    }
+    return bool(signals.intersection(progress_signals))
+
+
+def _route_stability_issue(
+    proposal: ActionProposal,
+    recent_waypoints: list[tuple[int, int, int]],
+    *,
+    last_result: ExecutionResult | None = None,
+) -> dict[str, Any] | None:
     if proposal.proposed_action not in NAVIGATION_ACTIONS or proposal.target_kind != "path_tile":
         return None
     key = _world_tile_key(proposal.target_tile)
@@ -3331,6 +3434,8 @@ def _route_stability_issue(proposal: ActionProposal, recent_waypoints: list[tupl
             ],
         }
     if recent_waypoints and key == recent_waypoints[-1]:
+        if _navigation_progress_observed(last_result):
+            return None
         return {
             "classification": "route_wall_hugging_detected",
             "barrierDetected": True,
@@ -3444,6 +3549,18 @@ def _hover_failure_category(result: ExecutionResult) -> str | None:
     hover = result.hover_confirmation if isinstance(result.hover_confirmation, dict) else {}
     trace = result.action_trace if isinstance(result.action_trace, dict) else {}
     client_tick_trace = trace.get("clientTick") if isinstance(trace.get("clientTick"), dict) else {}
+    if not result.executed:
+        missing = {str(item) for item in (result.missing_capabilities or [])}
+        lifecycle = result.lifecycle_state if isinstance(result.lifecycle_state, dict) else {}
+        reason = str(lifecycle.get("reason") or "")
+        if reason in FATAL_NO_CLICK_BLOCK_REASONS:
+            return None
+        if missing.intersection({"click_point", "screen_click_point", "canvas_hover_point", "safe_aimpoint"}) or reason in {
+            "click_point_unavailable",
+            "screen_click_point_unavailable",
+            "hover_canvas_point_unavailable",
+        }:
+            return "unsafe_geometry"
     if client_tick_trace.get("volatileHoverZone") is True and not result.executed:
         return "volatile_hover_zone"
     if not hover or hover.get("confirmed") is True or result.executed:
@@ -3469,6 +3586,15 @@ def _no_click_safety_skip_observed(result: ExecutionResult) -> dict[str, Any] | 
     missing = {str(item) for item in (result.missing_capabilities or [])}
     lifecycle = result.lifecycle_state if isinstance(result.lifecycle_state, dict) else {}
     reason = str(lifecycle.get("reason") or "")
+    if reason in FATAL_NO_CLICK_BLOCK_REASONS:
+        return {
+            "observedResult": "no_click_safety_block",
+            "resultOutcome": "blocked",
+            "resultComplete": True,
+            "nextActionAllowed": False,
+            "verificationStatus": "FAIL",
+            "skipReason": reason,
+        }
     if missing.intersection({"click_point", "screen_click_point", "canvas_hover_point", "safe_aimpoint"}):
         skip_reason = "unsafe_geometry"
     elif reason in {"click_point_unavailable", "screen_click_point_unavailable", "hover_canvas_point_unavailable"}:
@@ -4712,6 +4838,127 @@ def route_projection_status(
     }
 
 
+def _movement_safety_config(backend: Any) -> dict[str, Any] | None:
+    getter = getattr(backend, "movement_safety", None)
+    safety = None
+    if callable(getter):
+        try:
+            safety = getter()
+        except Exception:  # noqa: BLE001
+            safety = None
+    if safety is None:
+        safety = getattr(backend, "_movement_safety", None)
+    if not isinstance(safety, dict) or not safety.get("enabled"):
+        return None
+    return dict(safety)
+
+
+def _movement_safety_rect(region: dict[str, Any] | None) -> dict[str, int] | None:
+    if not isinstance(region, dict):
+        return None
+    x = region.get("x", region.get("left"))
+    y = region.get("y", region.get("top"))
+    width = region.get("width")
+    height = region.get("height")
+    right = region.get("right")
+    bottom = region.get("bottom")
+    try:
+        left_i = int(round(float(x)))
+        top_i = int(round(float(y)))
+        if width is not None and height is not None:
+            width_i = int(round(float(width)))
+            height_i = int(round(float(height)))
+            right_i = left_i + width_i
+            bottom_i = top_i + height_i
+        elif right is not None and bottom is not None:
+            right_i = int(round(float(right)))
+            bottom_i = int(round(float(bottom)))
+            width_i = right_i - left_i
+            height_i = bottom_i - top_i
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    if width_i <= 0 or height_i <= 0:
+        return None
+    return {"x": left_i, "y": top_i, "width": width_i, "height": height_i, "right": right_i, "bottom": bottom_i}
+
+
+def _movement_safety_point(point: dict[str, Any] | None) -> dict[str, int] | None:
+    if not isinstance(point, dict):
+        return None
+    try:
+        return {"x": int(round(float(point.get("x")))), "y": int(round(float(point.get("y"))))}
+    except (TypeError, ValueError):
+        return None
+
+
+def _movement_safety_preflight(screen_point: dict[str, Any] | None, backend: Any) -> dict[str, Any] | None:
+    safety = _movement_safety_config(backend)
+    if safety is None:
+        return None
+    point = _movement_safety_point(screen_point)
+    rect = _movement_safety_rect(safety.get("allowedRegion"))
+    margin = max(0, int(safety.get("marginPx") or 0))
+    preflight = {
+        "schema": "movement_safety_preflight.v1",
+        "status": "PASS",
+        "reason": None,
+        "screenPoint": dict(point) if point else None,
+        "allowedRegion": dict(rect) if rect else None,
+        "marginPx": margin,
+    }
+    if point is None:
+        preflight["status"] = "FAIL"
+        preflight["reason"] = "movement_safety_screen_point_unavailable"
+        return preflight
+    if rect is None:
+        preflight["status"] = "FAIL"
+        preflight["reason"] = "movement_safety_region_unavailable"
+        return preflight
+    inside = (
+        int(rect["x"]) + margin <= int(point["x"]) <= int(rect["right"]) - margin
+        and int(rect["y"]) + margin <= int(point["y"]) <= int(rect["bottom"]) - margin
+    )
+    preflight["targetInsideAllowedRegion"] = bool(inside)
+    if not inside:
+        preflight["status"] = "FAIL"
+        preflight["reason"] = "screen_click_point_outside_movement_safety_region"
+    return preflight
+
+
+def _movement_safety_preflight_failed(preflight: dict[str, Any] | None) -> bool:
+    return isinstance(preflight, dict) and str(preflight.get("status") or "").upper() == "FAIL"
+
+
+def _movement_safety_preflight_warning(preflight: dict[str, Any] | None) -> str:
+    preflight = preflight if isinstance(preflight, dict) else {}
+    reason = str(preflight.get("reason") or "movement_safety_preflight_failed")
+    point = preflight.get("screenPoint")
+    region = preflight.get("allowedRegion")
+    if reason == "movement_safety_region_unavailable":
+        return f"{reason}: configured live movement safety region is unavailable"
+    if reason == "movement_safety_screen_point_unavailable":
+        return f"{reason}: screen point is unavailable for live movement safety validation"
+    return f"{reason}: screen point {point or 'unknown'} is outside configured live movement safety region {region or 'unknown'}"
+
+
+def _can_camera_reacquire_movement_safety_failure(
+    proposal: ActionProposal,
+    preflight: dict[str, Any] | None,
+    navigation_options: Any | None,
+) -> str | None:
+    if not _is_navigation_path_proposal(proposal) or not _movement_safety_preflight_failed(preflight):
+        return None
+    if str((preflight or {}).get("reason") or "") != "screen_click_point_outside_movement_safety_region":
+        return None
+    if not _camera_reacquire_on_edge_projection(navigation_options):
+        return None
+    if not _camera_reacquire_waypoint_enabled(navigation_options):
+        return None
+    return "screen_point_outside_movement_safety_region"
+
+
 def _apply_path_tile_projection(
     proposal: ActionProposal,
     projection: dict[str, Any],
@@ -4816,6 +5063,23 @@ def _apply_path_tile_projection(
             warnings.append(f"path tile screen conversion failed: {type(error).__name__}: {error}")
             resolution = None
     if isinstance(resolution, dict) and isinstance(resolution.get("screenClickPoint"), dict):
+        movement_preflight = _movement_safety_preflight(resolution.get("screenClickPoint"), backend)
+        if _movement_safety_preflight_failed(movement_preflight):
+            warning = _movement_safety_preflight_warning(movement_preflight)
+            warnings.append(warning)
+            resolution = dict(resolution)
+            resolution["status"] = "FAIL"
+            resolution["movementSafetyPreflight"] = dict(movement_preflight or {})
+            resolution["warnings"] = list(dict.fromkeys([*(resolution.get("warnings") or []), warning]))
+            resolution["missingCapabilities"] = list(dict.fromkeys([*(resolution.get("missingCapabilities") or []), "screen_click_point"]))
+            proposal.click_point_resolution = resolution
+            proposal.status = "FAIL"
+            if "screen_click_point" not in proposal.missing_capabilities:
+                proposal.missing_capabilities.append("screen_click_point")
+            return proposal, warnings
+        if isinstance(movement_preflight, dict):
+            resolution = dict(resolution)
+            resolution["movementSafetyPreflight"] = dict(movement_preflight)
         proposal.click_point_resolution = resolution
         proposal.resolved_screen_click_point = {
             "x": int(round(float(resolution["screenClickPoint"]["x"]))),
@@ -5005,13 +5269,19 @@ def _navigation_alternate_tile_requests(
         return []
     if max_requests <= 0:
         return []
-    player = _snapshot_player_tile(snapshot)
     destination = _navigation_destination_tile(proposal)
     primary = proposal.target_tile if isinstance(proposal.target_tile, dict) else {}
-    if player is None or destination is None:
+    if destination is None:
         return []
-    if player.get("plane") != destination.get("plane"):
+    player = _snapshot_player_tile(snapshot)
+    if player is not None and player.get("plane") != destination.get("plane"):
         return []
+    fallback_plane = _int_or_none(primary.get("plane"))
+    if fallback_plane is None:
+        fallback_plane = _int_or_none(destination.get("plane"))
+    reference_plane = _int_or_none(player.get("plane")) if player is not None else fallback_plane
+    if reference_plane is None:
+        reference_plane = 0
     explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
     suppressed_route_keys = _suppressed_route_target_keys_from_explanation(explanation)
     structured_tiles: list[dict[str, int]] = []
@@ -5026,11 +5296,7 @@ def _navigation_alternate_tile_requests(
             plane = _int_or_none(tile.get("plane"))
             if world_x is None or world_y is None:
                 continue
-            structured_tiles.append({"worldX": world_x, "worldY": world_y, "plane": player["plane"] if plane is None else plane})
-    start_score = (
-        max(abs(destination["worldX"] - player["worldX"]), abs(destination["worldY"] - player["worldY"])),
-        abs(destination["worldX"] - player["worldX"]) + abs(destination["worldY"] - player["worldY"]),
-    )
+            structured_tiles.append({"worldX": world_x, "worldY": world_y, "plane": reference_plane if plane is None else plane})
     primary_key = (
         _int_or_none(primary.get("worldX")),
         _int_or_none(primary.get("worldY")),
@@ -5039,7 +5305,11 @@ def _navigation_alternate_tile_requests(
     candidates: list[tuple[int, dict[str, int], tuple[int, int], int]] = []
     for index, tile in enumerate(structured_tiles):
         key = (tile["worldX"], tile["worldY"], tile["plane"])
-        if key == primary_key or tile.get("plane") != player.get("plane"):
+        if key == primary_key:
+            continue
+        if player is not None and tile.get("plane") != player.get("plane"):
+            continue
+        if player is None and tile.get("plane") != reference_plane:
             continue
         if suppressed_route_keys and _route_tile_target_keys(tile, explanation).intersection(suppressed_route_keys):
             continue
@@ -5047,7 +5317,10 @@ def _navigation_alternate_tile_requests(
             max(abs(destination["worldX"] - tile["worldX"]), abs(destination["worldY"] - tile["worldY"])),
             abs(destination["worldX"] - tile["worldX"]) + abs(destination["worldY"] - tile["worldY"]),
         )
-        step_distance = max(abs(tile["worldX"] - player["worldX"]), abs(tile["worldY"] - player["worldY"]))
+        if player is not None:
+            step_distance = max(abs(tile["worldX"] - player["worldX"]), abs(tile["worldY"] - player["worldY"]))
+        else:
+            step_distance = index + 1
         if step_distance <= 0:
             continue
         max_distance = int(getattr(navigation_options, "max_route_waypoint_distance", 0) or 0)
@@ -5064,6 +5337,8 @@ def _navigation_alternate_tile_requests(
     if max_distance > 0:
         max_horizon = min(max_horizon, max_distance)
     distance_targets: list[int] = []
+    if player is None:
+        distance_targets.append(1)
     for value in (min_progress, 6, max(min_progress, lookahead // 2), lookahead, max_horizon):
         value = max(1, int(value))
         if value not in distance_targets:
@@ -5216,6 +5491,23 @@ def _backend_click_at(backend: Any, x: int, y: int, *, button: str = "left", hol
     raise RuntimeError(f"backend does not support separated hover-confirm click: {getattr(backend, 'name', backend.__class__.__name__)}")
 
 
+def _click_confirmed_current_position(
+    input_controller: HumanInputController,
+    *,
+    button: str = "left",
+    hold_ms: int = 0,
+    context: Any | None = None,
+) -> None:
+    click_current = getattr(input_controller, "click_current_position", None)
+    if callable(click_current):
+        click_current(button=button, hold_ms=hold_ms, context=context)
+        return
+    hold = max(0, int(hold_ms or 0))
+    with input_controller.hold_mouse_button(button=button, context=context):
+        if hold > 0:
+            input_controller.sleep_func(hold / 1000.0)
+
+
 def _confirm_hover_menu(
     proposal: ActionProposal,
     hover_options: HoverConfirmationOptions,
@@ -5262,7 +5554,27 @@ def _confirm_hover_menu(
                 tolerance_px=hover_options.tolerance_px,
                 min_wall_time_millis=move_started_wall_millis,
             )
-            if latest_match.reason == "hover_menu_stale" and proposal.proposed_action in ROUTE_TRANSITION_ACTIONS:
+            if latest_match.reason == "hover_menu_stale" and _is_navigation_path_proposal(proposal):
+                stationary_match = hover_menu_matches_target(
+                    sample,
+                    proposal,
+                    canvas_point,
+                    tolerance_px=hover_options.tolerance_px,
+                    min_wall_time_millis=None,
+                )
+                if stationary_match.confirmed:
+                    latest_match = HoverMenuMatchResult(
+                        True,
+                        "stationary_navigation_hover_confirmed",
+                        stationary_match.sample,
+                        {
+                            **stationary_match.details,
+                            "staleSampleAccepted": True,
+                            "staleSampleReason": "mouse_already_at_navigation_waypoint",
+                            "minimumWallTimeMillis": move_started_wall_millis,
+                        },
+                    )
+            elif latest_match.reason == "hover_menu_stale" and proposal.proposed_action in ROUTE_TRANSITION_ACTIONS:
                 stationary_match = hover_menu_matches_target(
                     sample,
                     proposal,
@@ -5900,6 +6212,8 @@ def _camera_trigger_from_navigation_failure(reason: str | None) -> str | None:
     value = str(reason or "")
     if value == "waypoint_edge_projection":
         return "edge_projection"
+    if value == "screen_point_outside_movement_safety_region":
+        return "movement_safety_region_edge"
     if value == "waypoint_occluded_by_object":
         return "object_occlusion"
     if value == "waypoint_offscreen":
@@ -7319,8 +7633,17 @@ def execute_action(
     screen_point, coordinate_warnings, click_resolution = _screen_click_point(proposal, backend)
     if click_resolution:
         result.click_point_resolution = click_resolution
+    movement_safety_preflight = _movement_safety_preflight(screen_point, backend) if screen_point else None
     projection_camera_reason = _can_camera_reacquire_projection_failure(proposal, projection_warnings, navigation_options)
-    if hover_options is not None and projection_camera_reason and (coordinate_warnings or not screen_point):
+    movement_safety_camera_reason = _can_camera_reacquire_movement_safety_failure(
+        proposal,
+        movement_safety_preflight,
+        navigation_options,
+    )
+    camera_reacquire_reason = projection_camera_reason or movement_safety_camera_reason
+    if hover_options is not None and camera_reacquire_reason and (
+        coordinate_warnings or not screen_point or _movement_safety_preflight_failed(movement_safety_preflight)
+    ):
         camera_reacquire = _try_navigation_camera_guided_reacquire(
             proposal,
             backend=backend,
@@ -7329,7 +7652,10 @@ def execute_action(
             snapshot_url=snapshot_url,
             navigation_options=navigation_options,
             input_controller=input_controller,
-            primary_confirmation={"reason": projection_camera_reason},
+            primary_confirmation={
+                "reason": camera_reacquire_reason,
+                "movementSafetyPreflight": dict(movement_safety_preflight) if isinstance(movement_safety_preflight, dict) else None,
+            },
             snapshot_fetch_func=snapshot_fetch_func,
             sleep_func=sleep_func,
             monotonic_func=monotonic_func,
@@ -7338,8 +7664,10 @@ def execute_action(
         if isinstance(camera_reacquire, dict):
             if isinstance(result.action_trace, dict):
                 reacquisition = result.action_trace.setdefault("reacquisition", {})
-                reacquisition["primaryWaypointFailure"] = projection_camera_reason
-                trigger = _camera_trigger_from_navigation_failure(projection_camera_reason)
+                reacquisition["primaryWaypointFailure"] = camera_reacquire_reason
+                if isinstance(movement_safety_preflight, dict):
+                    reacquisition["movementSafetyPreflightBefore"] = dict(movement_safety_preflight)
+                trigger = _camera_trigger_from_navigation_failure(camera_reacquire_reason)
                 if trigger:
                     reacquisition["cameraTriggeredBy"] = trigger
                 projection_before = _proposal_projection(proposal)
@@ -7359,6 +7687,7 @@ def execute_action(
                 screen_point = dict(camera_reacquire["screenPoint"])
                 coordinate_warnings = []
                 click_resolution = proposal.click_point_resolution
+                movement_safety_preflight = _movement_safety_preflight(screen_point, backend) if screen_point else None
                 result.proposal = proposal.to_dict()
                 result.click_point_resolution = proposal.click_point_resolution
                 if isinstance(result.action_trace, dict):
@@ -7383,7 +7712,7 @@ def execute_action(
                 result.commands.append(
                     {
                         "type": "navigation_reacquire_camera_waypoint",
-                        "reason": projection_camera_reason,
+                        "reason": camera_reacquire_reason,
                         "attemptCount": len(camera_reacquire.get("attempts") or []),
                         "selectedTargetTile": dict(proposal.target_tile or {}),
                     }
@@ -7438,6 +7767,39 @@ def execute_action(
         _apply_lifecycle(result, lifecycle)
         _attach_human_input_trace(result, input_controller)
         return result
+    if _movement_safety_preflight_failed(movement_safety_preflight):
+        warning = _movement_safety_preflight_warning(movement_safety_preflight)
+        result.status = "FAIL"
+        if warning not in result.warnings:
+            result.warnings.append(warning)
+        if "screen_click_point" not in result.missing_capabilities:
+            result.missing_capabilities.append("screen_click_point")
+        if isinstance(result.action_trace, dict):
+            result.action_trace["movementSafetyPreflight"] = dict(movement_safety_preflight or {})
+            _set_trace_final(result, "blocked_movement_safety_region")
+        if isinstance(result.click_point_resolution, dict):
+            result.click_point_resolution = dict(result.click_point_resolution)
+            result.click_point_resolution["movementSafetyPreflight"] = dict(movement_safety_preflight or {})
+        result.observed_result = {
+            "observedResult": "no_click_safety_block",
+            "resultOutcome": "blocked",
+            "resultComplete": True,
+            "nextActionAllowed": False,
+            "verificationStatus": "FAIL",
+            "skipReason": str((movement_safety_preflight or {}).get("reason") or "movement_safety_preflight_failed"),
+            "movementSafetyPreflight": dict(movement_safety_preflight or {}),
+        }
+        result.verification_status = "FAIL"
+        lifecycle = lifecycle_state_for_proposal(proposal)
+        lifecycle.current_state = "blocked"
+        lifecycle.reason = str((movement_safety_preflight or {}).get("reason") or "movement_safety_preflight_failed")
+        lifecycle.observed_result = result.observed_result
+        lifecycle.result_complete = True
+        lifecycle.result_outcome = "blocked"
+        lifecycle.next_action_allowed = False
+        _apply_lifecycle(result, lifecycle)
+        _attach_human_input_trace(result, input_controller)
+        return result
     start = MousePoint(*_backend_position(backend))
     if camera_reacquired_before_hover is not None:
         plan = camera_reacquired_before_hover["movementPlan"]
@@ -7478,7 +7840,43 @@ def execute_action(
             _apply_lifecycle(result, lifecycle)
             _attach_human_input_trace(result, input_controller)
             return result
-        if camera_reacquired_before_hover is not None:
+        current_x, current_y = _backend_position(backend)
+        already_at_screen_point = (
+            abs(int(current_x) - int(screen_point["x"])) <= 3
+            and abs(int(current_y) - int(screen_point["y"])) <= 3
+        )
+        pre_hover_started_wall_millis = int(wall_time_millis_func())
+        pre_move_confirmation = (
+            _confirm_hover_menu(
+                proposal,
+                hover_options,
+                canvas_point,
+                move_started_wall_millis=pre_hover_started_wall_millis,
+                max_requests=1,
+                snapshot_fetch_func=snapshot_fetch_func,
+                sleep_func=sleep_func,
+                monotonic_func=monotonic_func,
+            )
+            if already_at_screen_point
+            else {}
+        )
+        confirmation: dict[str, Any] | None = None
+        if pre_move_confirmation.get("confirmed") is True:
+            result.commands.append(
+                {
+                    "type": "hover_confirm",
+                    "snapshotUrl": hover_options.snapshot_url,
+                    "timeoutMs": hover_options.timeout_ms,
+                    "pollMs": hover_options.poll_ms,
+                    "positionTolerancePx": hover_options.tolerance_px,
+                    "expectedCanvasPoint": dict(canvas_point),
+                    "preMove": True,
+                }
+            )
+            confirmation = pre_move_confirmation
+            result.hover_confirmation = confirmation
+            _update_trace_from_hover(result, confirmation)
+        elif camera_reacquired_before_hover is not None:
             move_started_wall_millis = int(camera_reacquired_before_hover.get("moveStartedWallMillis") or wall_time_millis_func())
             confirmation = result.hover_confirmation if isinstance(result.hover_confirmation, dict) else camera_reacquired_before_hover["confirmation"]
         else:
@@ -7500,37 +7898,77 @@ def execute_action(
                     result.action_trace["mouseMove"]["endWallTimeMillis"] = int(wall_time_millis_func())
                     _attach_human_input_trace(result, input_controller)
             except Exception as error:  # noqa: BLE001
-                result.status = "FAIL"
-                result.warnings.append(f"hover movement failed: {type(error).__name__}: {error}")
-                result.missing_capabilities.append("hover_movement")
-                lifecycle = lifecycle_state_for_proposal(proposal)
-                lifecycle.current_state = "blocked"
-                lifecycle.reason = "hover_movement_failed"
-                _apply_lifecycle(result, lifecycle)
-                _attach_human_input_trace(result, input_controller)
-                return result
-            result.commands.append(
-                {
-                    "type": "hover_confirm",
-                    "snapshotUrl": hover_options.snapshot_url,
-                    "timeoutMs": hover_options.timeout_ms,
-                    "pollMs": hover_options.poll_ms,
-                    "positionTolerancePx": hover_options.tolerance_px,
-                    "expectedCanvasPoint": dict(canvas_point),
-                }
-            )
-            confirmation = _confirm_hover_menu(
-                proposal,
-                hover_options,
-                canvas_point,
-                move_started_wall_millis=move_started_wall_millis,
-                max_requests=_max_hover_checks_per_waypoint(navigation_options) if _is_navigation_path_proposal(proposal) else None,
-                snapshot_fetch_func=snapshot_fetch_func,
-                sleep_func=sleep_func,
-                monotonic_func=monotonic_func,
-            )
-            result.hover_confirmation = confirmation
-            _update_trace_from_hover(result, confirmation)
+                fallback_confirmation = _confirm_hover_menu(
+                    proposal,
+                    hover_options,
+                    canvas_point,
+                    move_started_wall_millis=move_started_wall_millis,
+                    max_requests=1,
+                    snapshot_fetch_func=snapshot_fetch_func,
+                    sleep_func=sleep_func,
+                    monotonic_func=monotonic_func,
+                )
+                if fallback_confirmation.get("confirmed") is True:
+                    result.warnings.append(
+                        f"hover movement reported {type(error).__name__} after reaching target; using confirmed hover proof"
+                    )
+                    result.commands.append(
+                        {
+                            "type": "hover_confirm",
+                            "snapshotUrl": hover_options.snapshot_url,
+                            "timeoutMs": hover_options.timeout_ms,
+                            "pollMs": hover_options.poll_ms,
+                            "positionTolerancePx": hover_options.tolerance_px,
+                            "expectedCanvasPoint": dict(canvas_point),
+                            "postMoveFailure": True,
+                        }
+                    )
+                    confirmation = fallback_confirmation
+                    result.hover_confirmation = confirmation
+                    _update_trace_from_hover(result, confirmation)
+                else:
+                    result.status = "FAIL"
+                    result.warnings.append(f"hover movement failed: {type(error).__name__}: {error}")
+                    result.missing_capabilities.append("hover_movement")
+                    lifecycle = lifecycle_state_for_proposal(proposal)
+                    lifecycle.current_state = "blocked"
+                    lifecycle.reason = "hover_movement_failed"
+                    _apply_lifecycle(result, lifecycle)
+                    _attach_human_input_trace(result, input_controller)
+                    return result
+            if confirmation is None:
+                result.commands.append(
+                    {
+                        "type": "hover_confirm",
+                        "snapshotUrl": hover_options.snapshot_url,
+                        "timeoutMs": hover_options.timeout_ms,
+                        "pollMs": hover_options.poll_ms,
+                        "positionTolerancePx": hover_options.tolerance_px,
+                        "expectedCanvasPoint": dict(canvas_point),
+                    }
+                )
+                confirmation = _confirm_hover_menu(
+                    proposal,
+                    hover_options,
+                    canvas_point,
+                    move_started_wall_millis=move_started_wall_millis,
+                    max_requests=_max_hover_checks_per_waypoint(navigation_options) if _is_navigation_path_proposal(proposal) else None,
+                    snapshot_fetch_func=snapshot_fetch_func,
+                    sleep_func=sleep_func,
+                    monotonic_func=monotonic_func,
+                )
+                result.hover_confirmation = confirmation
+                _update_trace_from_hover(result, confirmation)
+        if confirmation is None:
+            result.status = "FAIL"
+            result.warnings.append("hover confirmation did not run")
+            result.missing_capabilities.append("hover_confirmation")
+            lifecycle = lifecycle_state_for_proposal(proposal)
+            lifecycle.current_state = "blocked"
+            lifecycle.reason = "hover_confirmation_missing"
+            _apply_lifecycle(result, lifecycle)
+            _attach_human_input_trace(result, input_controller)
+            return result
         if confirmation.get("confirmed") is not True:
             resource_ambiguity = _resource_target_ambiguity(proposal, confirmation, rejection_reason=confirmation.get("reason"))
             if isinstance(resource_ambiguity, dict):
@@ -8095,7 +8533,20 @@ def execute_action(
                     _attach_human_input_trace(result, input_controller)
                     return result
             direct_menu_entry = _route_transition_direct_menu_entry(proposal, pre_click_confirmation)
-            if direct_menu_entry is not None:
+            prefer_dialogue_opener = False
+            if direct_menu_entry is not None and prefer_dialogue_opener:
+                result.commands.append(
+                    {
+                        "type": "route_transition_dialogue_opener_preferred",
+                        "reason": "left_click_dialogue_opener_top_option",
+                        "directEntryAvailable": dict(direct_menu_entry),
+                    }
+                )
+                if isinstance(result.hover_confirmation, dict):
+                    result.hover_confirmation["rightClickMenuSelectionFallback"] = "left_click_dialogue_opener"
+                if isinstance(result.action_trace, dict):
+                    result.action_trace["rightClickMenuSelectionFallback"] = "left_click_dialogue_opener"
+            if direct_menu_entry is not None and not prefer_dialogue_opener:
                 if isinstance(result.action_trace, dict):
                     result.action_trace["routeTransitionDirectMenuCandidate"] = dict(direct_menu_entry)
                 before_click = pre_click_confirmation.get("lastMenuOptionClickedBefore") if isinstance(pre_click_confirmation.get("lastMenuOptionClickedBefore"), dict) else None
@@ -8128,6 +8579,17 @@ def execute_action(
                     _attach_human_input_trace(result, input_controller)
                     return result
                 if not direct_selected:
+                    direct_selection = result.hover_confirmation.get("rightClickMenuSelection") if isinstance(result.hover_confirmation, dict) else {}
+                    direct_selection_reason = str(direct_selection.get("reason") or "") if isinstance(direct_selection, dict) else ""
+                    if direct_selection_reason == "clicked_direct_menu_mismatch":
+                        result.status = "FAIL"
+                        lifecycle = lifecycle_state_for_proposal(proposal)
+                        lifecycle.current_state = "blocked"
+                        lifecycle.reason = "clicked_direct_menu_mismatch"
+                        _apply_lifecycle(result, lifecycle)
+                        _set_trace_final(result, "clicked_direct_menu_mismatch")
+                        _attach_human_input_trace(result, input_controller)
+                        return result
                     if _route_transition_left_click_is_dialogue_opener(proposal, pre_click_confirmation):
                         result.commands.append(
                             {
@@ -8164,9 +8626,8 @@ def execute_action(
                 }
             )
             try:
-                input_controller.click_at(
-                    int(plan.click_point.x),
-                    int(plan.click_point.y),
+                _click_confirmed_current_position(
+                    input_controller,
                     button="left",
                     hold_ms=hover_options.click_hold_ms,
                     context=_human_context(proposal, "hover_confirmed_click"),
@@ -8613,6 +9074,14 @@ def execute_action_loop(
                 continue
             elapsed = now - (wait_started if wait_started is not None else started)
             timeout_seconds = _action_timeout_seconds(options)
+            latest_proposal = results[-1].proposal if results and isinstance(results[-1].proposal, dict) else {}
+            lock_proposal = None
+            if latest_proposal:
+                lock_proposal = ActionProposal(
+                    proposed_action=str(latest_proposal.get("proposedAction") or lifecycle.last_action or "none"),
+                    target_kind=str(latest_proposal.get("targetKind") or "none"),
+                    target_tile=latest_proposal.get("targetTile") if isinstance(latest_proposal.get("targetTile"), dict) else None,
+                )
             observed = verify_expected_result(
                 lifecycle.last_action or "none",
                 wait_before_status,
@@ -8622,15 +9091,8 @@ def execute_action_loop(
                 wait_started_tick=lifecycle.wait_started_tick,
                 timeout_ticks=_action_timeout_ticks_for_verification(lifecycle.last_action or "none", options),
                 progress_min_distance=_nav_progress_min_distance(options) if (lifecycle.last_action or "") in NAVIGATION_ACTIONS else None,
+                proposal=lock_proposal,
             )
-            latest_proposal = results[-1].proposal if results and isinstance(results[-1].proposal, dict) else {}
-            lock_proposal = None
-            if latest_proposal:
-                lock_proposal = ActionProposal(
-                    proposed_action=str(latest_proposal.get("proposedAction") or lifecycle.last_action or "none"),
-                    target_kind=str(latest_proposal.get("targetKind") or "none"),
-                    target_tile=latest_proposal.get("targetTile") if isinstance(latest_proposal.get("targetTile"), dict) else None,
-                )
             locked = _navigation_motion_lock_observation(
                 action=lifecycle.last_action or "none",
                 proposal=lock_proposal,
@@ -9093,7 +9555,11 @@ def execute_action_loop(
                 _apply_lifecycle(action_result, lifecycle)
                 reason = "pre_action_readiness_failed"
                 break
-        route_stability_issue = _route_stability_issue(proposal, recent_navigation_waypoints)
+        route_stability_issue = _route_stability_issue(
+            proposal,
+            recent_navigation_waypoints,
+            last_result=results[-1] if results else None,
+        )
         if route_stability_issue is not None:
             action_result = _blocked_by_route_stability_result(proposal, route_stability_issue, options=options)
             action_result.readiness = readiness
@@ -9177,20 +9643,33 @@ def execute_action_loop(
         )
         if suppression_event and not action_result.executed:
             action_result.status = "WARN"
+            skip_label = "unsafe geometry" if suppression_event.get("reason") == "unsafe_geometry" else "hover mismatch"
             action_result.warnings.append(
-                "hover mismatch skipped without click"
+                f"{skip_label} skipped without click"
                 + ("; target suppressed for reacquisition" if suppression_event.get("suppressed") else "")
             )
         safety_skip = _no_click_safety_skip_observed(action_result)
+        fatal_safety_block = False
         if safety_skip is not None:
-            action_result.status = "WARN"
-            action_result.observed_result = safety_skip
-            action_result.verification_status = "SKIPPED"
+            fatal_safety_block = safety_skip.get("nextActionAllowed") is False
+            action_result.status = "FAIL" if fatal_safety_block else "WARN"
+            observed_before = action_result.observed_result if isinstance(action_result.observed_result, dict) else {}
+            merged_skip = dict(observed_before)
+            merged_skip.update(safety_skip)
+            action_result.observed_result = merged_skip
+            action_result.verification_status = str(safety_skip.get("verificationStatus") or ("FAIL" if fatal_safety_block else "SKIPPED"))
             if isinstance(action_result.action_trace, dict):
-                action_result.action_trace.setdefault("safetySkip", dict(safety_skip))
-                _set_trace_final(action_result, "hover_mismatch_skipped" if safety_skip.get("skipReason") == "volatile_hover_zone" else "skipped_unsafe_geometry")
+                action_result.action_trace.setdefault("safetySkip", dict(merged_skip))
+                if fatal_safety_block:
+                    _set_trace_final(action_result, "blocked_movement_safety_region")
+                else:
+                    _set_trace_final(action_result, "hover_mismatch_skipped" if safety_skip.get("skipReason") == "volatile_hover_zone" else "skipped_unsafe_geometry")
         results.append(action_result)
         _refresh_loop_summary(loop_summary, results)
+        if fatal_safety_block:
+            status_value = "FAIL"
+            reason = str(safety_skip.get("skipReason") or safety_skip.get("observedResult") or "no_click_safety_block")
+            break
         if _route_edge_reject_result(action_result):
             _capture_debug_bundle(
                 debug_bundles,

@@ -80,6 +80,26 @@ def target_path_length(target: dict[str, Any] | None) -> int | float | None:
     return value if isinstance(value, (int, float)) else None
 
 
+def world_tile_from(payload: Any) -> dict[str, int] | None:
+    if not isinstance(payload, dict):
+        return None
+    world = payload.get("worldLocation") or payload.get("world")
+    if isinstance(world, dict):
+        payload = {**world, "plane": world.get("plane", payload.get("plane", 0))}
+    world_x = payload.get("worldX")
+    world_y = payload.get("worldY")
+    plane = payload.get("plane", 0)
+    if isinstance(world_x, int) and isinstance(world_y, int) and isinstance(plane, int):
+        return {"worldX": world_x, "worldY": world_y, "plane": plane}
+    return None
+
+
+def tile_distance(left: dict[str, int] | None, right: dict[str, int] | None) -> int | None:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return None
+    return max(abs(left["worldX"] - right["worldX"]), abs(left["worldY"] - right["worldY"]))
+
+
 def collision_window_available(navigation_context: Any) -> bool | None:
     value = context_value(navigation_context, "collision_window_available", "collisionWindowAvailable")
     if isinstance(value, bool):
@@ -101,6 +121,79 @@ def active_target_from(generic_task_state: Any, target_context: Any) -> dict[str
         return generic_task_state["activeIntentTarget"]
     target = context_value(target_context, "raw_best_target", "rawBestTarget")
     return target if isinstance(target, dict) else None
+
+
+def service_route_context_from(service_context: Any) -> dict[str, Any]:
+    route_context = context_value(service_context, "service_route_context", "serviceRouteContext")
+    return route_context if isinstance(route_context, dict) else {}
+
+
+def service_route_destination(route_context: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("currentNavigationTarget", "visibleInteractionTarget", "visibleServiceTarget"):
+        route_destination = route_context.get(key)
+        if isinstance(route_destination, dict) and route_destination:
+            return route_destination
+    return None
+
+
+def service_route_interaction_ready(route_context: dict[str, Any]) -> bool:
+    status = str(route_context.get("routeStepStatus") or "")
+    if status in {"route_interaction_visible", "route_transition_visible", "route_interaction_reacquired"}:
+        return True
+    if route_context.get("routeObjectInterceptReady") is True:
+        return True
+    target = route_context.get("visibleInteractionTarget")
+    return bool(route_context.get("actionReady") is True and isinstance(target, dict) and target)
+
+
+def prefer_service_route_destination(route_context: dict[str, Any], service_destination: dict[str, Any] | None) -> bool:
+    if not service_route_destination(route_context):
+        return False
+    if service_route_interaction_ready(route_context):
+        return True
+    if not isinstance(service_destination, dict) or not service_destination:
+        return True
+    warnings = " ".join(str(item).lower() for item in route_context.get("warnings") or [])
+    service_target_ignored = "visible service target ignored" in warnings
+    if service_target_ignored:
+        route_goal = route_context.get("selectedServiceAnchor")
+        nested_route_context = route_context.get("routeContext")
+        if not isinstance(route_goal, dict) and isinstance(nested_route_context, dict):
+            route_goal = nested_route_context.get("serviceGoal")
+        distance_to_goal = tile_distance(world_tile_from(service_destination), world_tile_from(route_goal))
+        if distance_to_goal is not None and distance_to_goal > 20:
+            return True
+    direct = target_reachability(service_destination)
+    path_length = target_path_length(service_destination)
+    if direct in {"reachable", "adjacent"} or path_length is not None:
+        return False
+    return service_target_ignored
+
+
+def service_route_navigation_context(
+    *,
+    policy: task_policy_module.TaskPolicy,
+    route_context: dict[str, Any],
+    navigation_context: Any,
+    source_tick: int | None,
+    started: float,
+) -> NavigationIntentContext:
+    route_destination = service_route_destination(route_context)
+    warnings = [str(item) for item in route_context.get("warnings") or [] if item]
+    if route_destination and not warnings and route_destination.get("verifiedLive") is not True:
+        warnings.append("service route prior is unverified; live telemetry must verify route objects before interaction")
+    return with_target_fields(
+        policy=policy,
+        navigation_reason=SERVICE_ROUTE_PRIOR,
+        target_kind=TARGET_KIND_SERVICE_ROUTE,
+        destination=route_destination,
+        navigation_context=navigation_context,
+        source_tick=source_tick,
+        started=started,
+        navigation_needed=True,
+        warnings=warnings,
+        status="WARN" if warnings or (route_destination or {}).get("verifiedLive") is not True else "PASS",
+    )
 
 
 def with_target_fields(
@@ -158,26 +251,24 @@ def service_navigation_context(
     source_tick: int | None,
     started: float,
 ) -> NavigationIntentContext:
+    route_context = service_route_context_from(service_context)
     destination = context_value(service_context, "best_service_candidate", "bestServiceCandidate")
+    if prefer_service_route_destination(route_context, destination):
+        return service_route_navigation_context(
+            policy=policy,
+            route_context=route_context,
+            navigation_context=navigation_context,
+            source_tick=source_tick,
+            started=started,
+        )
     if not isinstance(destination, dict) or not destination:
-        route_context = context_value(service_context, "service_route_context", "serviceRouteContext")
-        route_context = route_context if isinstance(route_context, dict) else {}
-        route_destination = route_context.get("currentNavigationTarget")
-        if isinstance(route_destination, dict) and route_destination:
-            warnings = [str(item) for item in route_context.get("warnings") or [] if item]
-            if not warnings and route_destination.get("verifiedLive") is not True:
-                warnings.append("service route prior is unverified; live telemetry must verify route objects before interaction")
-            return with_target_fields(
+        if service_route_destination(route_context):
+            return service_route_navigation_context(
                 policy=policy,
-                navigation_reason=SERVICE_ROUTE_PRIOR,
-                target_kind=TARGET_KIND_SERVICE_ROUTE,
-                destination=route_destination,
+                route_context=route_context,
                 navigation_context=navigation_context,
                 source_tick=source_tick,
                 started=started,
-                navigation_needed=True,
-                warnings=warnings,
-                status="WARN" if warnings or route_destination.get("verifiedLive") is not True else "PASS",
             )
         return with_target_fields(
             policy=policy,
