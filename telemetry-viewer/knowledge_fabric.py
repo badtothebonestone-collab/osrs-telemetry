@@ -472,6 +472,41 @@ def _world_payloads_from_status(status: dict[str, Any]) -> dict[str, Any]:
     return payloads
 
 
+def _world_model_summary_payload(payloads: dict[str, Any] | None, status: dict[str, Any] | None = None) -> dict[str, Any]:
+    payloads = _dict(payloads)
+    status = _status_view(_dict(status))
+    summary = _dict(payloads.get("world_model_summary") or status.get("worldModelSummary"))
+    if not summary:
+        return {}
+    nested_data = _dict(summary.get("data"))
+    nested_summary = _dict(nested_data.get("worldModelSummary") or summary.get("worldModelSummary"))
+    if nested_summary:
+        return nested_summary
+    nested_payloads = _dict(summary.get("payloads"))
+    payload_summary = _dict(nested_payloads.get("world_model_summary"))
+    if payload_summary:
+        return payload_summary
+    return summary
+
+
+def _world_model_object_total(payloads: dict[str, Any] | None, status: dict[str, Any] | None = None) -> int | None:
+    status = _status_view(_dict(status))
+    explicit_total = _int(status.get("worldModelObjectTotal"))
+    if explicit_total is not None:
+        return explicit_total
+    summary = _world_model_summary_payload(payloads, status)
+    objects = _dict(summary.get("objects"))
+    total = _int(objects.get("total"))
+    if total is not None:
+        return total
+    projection = _dict(summary.get("projection"))
+    total = _int(projection.get("objectCount"))
+    if total is not None:
+        return total
+    sizing = _dict(summary.get("sizing"))
+    return _int(sizing.get("objectCount"))
+
+
 def _daemon_status_from_context(status: dict[str, Any]) -> dict[str, Any]:
     status = _dict(status)
     debug_context = _dict(_dict(status.get("knowledgeCurrentDebugContext")).get("data"))
@@ -2114,11 +2149,27 @@ class KnowledgeFabric:
         traces = [item for item in _list(self.debug_evidence.get("latestActionTraces")) if isinstance(item, dict)]
         return dict(traces[0]) if traces else {}
 
+    def _status_with_world_model_context(self) -> dict[str, Any]:
+        status = dict(self.daemon_status)
+        if self.world_model_payloads and not status.get("worldModelPayloads"):
+            status["worldModelPayloads"] = self.world_model_payloads
+        summary = _world_model_summary_payload(self.world_model_payloads, status)
+        if summary and not status.get("worldModelSummary"):
+            status["worldModelSummary"] = summary
+        object_total = _world_model_object_total(self.world_model_payloads, status)
+        if object_total is not None and status.get("worldModelObjectTotal") is None:
+            status["worldModelObjectTotal"] = object_total
+        if self.world_model_payloads:
+            for key, value in world_model_core.status_fields(self.world_model_payloads).items():
+                if value is not None and status.get(key) is None:
+                    status[key] = value
+        return status
+
     def _readiness_report(self) -> dict[str, Any]:
         try:
             import live_readiness_core
 
-            report = live_readiness_core.build_readiness_report(daemon_status=self.daemon_status)
+            report = live_readiness_core.build_readiness_report(daemon_status=self._status_with_world_model_context())
             return report if isinstance(report, dict) else {}
         except Exception as error:  # noqa: BLE001
             return {"schema": "live_readiness_unavailable.v1", "status": "WARN", "error": f"{type(error).__name__}: {error}"}
@@ -2127,13 +2178,7 @@ class KnowledgeFabric:
         try:
             from input_control.action_proposal import build_action_proposal
 
-            status = dict(self.daemon_status)
-            if self.world_model_payloads and not status.get("worldModelPayloads"):
-                status["worldModelPayloads"] = self.world_model_payloads
-            if self.world_model_payloads and not status.get("worldModelCameraViewport"):
-                viewport = _dict(world_model_core.status_fields(self.world_model_payloads).get("worldModelCameraViewport"))
-                if viewport:
-                    status["worldModelCameraViewport"] = viewport
+            status = self._status_with_world_model_context()
             proposal = build_action_proposal(status)
             payload = proposal.to_dict() if hasattr(proposal, "to_dict") else {}
             return payload if isinstance(payload, dict) else {}
@@ -2171,18 +2216,22 @@ class KnowledgeFabric:
         }
 
     def _bootstrap_liveness_summary(self) -> dict[str, Any]:
-        hot = _dict(self.daemon_status.get("clientTickHot"))
-        game_state = _first_present(hot.get("gameState"), self.daemon_status.get("gameState"))
-        latest_tick = _first_present(self.daemon_status.get("latestTick"), hot.get("gameTickAtSample"))
+        status_with_world = self._status_with_world_model_context()
+        hot = _dict(status_with_world.get("clientTickHot"))
+        game_state = _first_present(hot.get("gameState"), status_with_world.get("gameState"))
+        latest_tick = _first_present(status_with_world.get("latestTick"), hot.get("gameTickAtSample"))
         quality = world_model_core.world_model_quality(self.world_model_payloads)
-        object_count = len(self.objects)
-        client_tick_fresh = _client_tick_fresh(self.daemon_status)
+        world_object_total = _world_model_object_total(self.world_model_payloads, status_with_world)
+        liveness_object_count = _first_present(world_object_total, len(self.objects))
+        local_object_count = len(self.objects)
+        client_tick_fresh = _client_tick_fresh(status_with_world)
         world_fresh = quality.get("worldModelAvailable") is True
         loaded_scene_verified = bool(
             str(game_state or "").upper() == "LOGGED_IN"
             and latest_tick is not None
             and world_fresh
-            and object_count > 0
+            and _int(liveness_object_count) is not None
+            and (_int(liveness_object_count) or 0) > 0
             and client_tick_fresh
         )
         stale_logged_in_no_scene = bool(str(game_state or "").upper() == "LOGGED_IN" and not loaded_scene_verified)
@@ -2201,8 +2250,9 @@ class KnowledgeFabric:
 
             recovery_hint = liveness_recovery_core.liveness_hint_from_daemon_status(
                 {
-                    **self.daemon_status,
-                    "worldModelSummary": self.world_model_payloads.get("world_model_summary"),
+                    **status_with_world,
+                    "worldModelSummary": _world_model_summary_payload(self.world_model_payloads, status_with_world),
+                    "worldModelObjectTotal": world_object_total,
                 }
             )
         except Exception:  # noqa: BLE001
@@ -2217,9 +2267,10 @@ class KnowledgeFabric:
                     "loadedSceneVerified": loaded_scene_verified,
                     "gameState": game_state,
                     "clientTickHotFresh": client_tick_fresh,
-                    "worldModelObjectTotal": object_count,
+                    "worldModelObjectTotal": world_object_total,
                 },
             }
+        loaded_scene_verified = bool(loaded_scene_verified or _dict(recovery_hint.get("loadedSceneProof")).get("loadedSceneVerified"))
         return {
             "schema": "runelite_bootstrap_state.v1",
             "state": recovery_hint.get("livenessState") or state,
@@ -2243,7 +2294,12 @@ class KnowledgeFabric:
                 "latestTick": latest_tick,
                 "clientTickFresh": client_tick_fresh,
                 "worldModelAvailable": world_fresh,
-                "objectCount": object_count,
+                "objectCount": liveness_object_count,
+                "localObjectCount": local_object_count,
+                "worldModelObjectTotal": world_object_total,
+                "worldModelSummarySource": status_with_world.get("worldModelSummarySource"),
+                "broadFetchTimedOut": status_with_world.get("broadFetchTimedOut"),
+                "minimalLiveLivenessFallbackUsed": status_with_world.get("minimalLiveLivenessFallbackUsed"),
                 "loadedSceneProof": recovery_hint.get("loadedSceneProof"),
             },
         }
@@ -2416,7 +2472,10 @@ class KnowledgeFabric:
                 execution_allowed,
                 False,
             )
-        if "target" in text or "candidate" in text:
+        proposal_executable = proposal.get("executable")
+        if ("target" in text or "candidate" in text) and (
+            not execution_allowed or bool(action_blockers) or proposal_executable is False
+        ):
             return (
                 "target/candidate",
                 "The current target/candidate evidence is incomplete or stale.",
@@ -3795,17 +3854,47 @@ def fabric_from_live(
         include_projection=include_projection,
         include_collision=include_collision,
     )
+    broad_fetch_timed_out = False
     try:
         snapshot = world_model_client.fetch(snapshot_url, timeout=timeout, request=request)
     except Exception as error:  # noqa: BLE001
+        broad_fetch_timed_out = "timeout" in type(error).__name__.lower() or "timed out" in str(error).lower()
         snapshot = {
             "schema": "plugin_snapshot_fetch_error.v1",
             "status": "FAIL",
             "error": f"{type(error).__name__}: {error}",
         }
     payloads = world_model_core.extract_world_model_payloads(snapshot)
+    world_summary_source = "broad_live_snapshot" if _dict(payloads.get("world_model_summary")) else None
+    minimal_fallback_used = False
+    if not _dict(payloads.get("world_model_summary")):
+        minimal_request = world_model_client.build_request(
+            needs=["baseline", "client_tick_hot", "world_model_summary"],
+            max_objects=0,
+            include_projection=False,
+            include_collision=False,
+        )
+        try:
+            minimal_snapshot = world_model_client.fetch(snapshot_url, timeout=timeout, request=minimal_request)
+            minimal_payloads = world_model_core.extract_world_model_payloads(minimal_snapshot)
+        except Exception:  # noqa: BLE001
+            minimal_payloads = {}
+        if _dict(minimal_payloads.get("world_model_summary")):
+            payloads = {**minimal_payloads, **payloads}
+            minimal_fallback_used = True
+            world_summary_source = "minimal_live_liveness_fallback"
     if not payloads:
         payloads = _world_payloads_from_status(daemon_status)
+        if _dict(payloads.get("world_model_summary")) and world_summary_source is None:
+            world_summary_source = "daemon_status"
+    if isinstance(daemon_status, dict):
+        object_total = _world_model_object_total(payloads, daemon_status)
+        if object_total is not None:
+            daemon_status.setdefault("worldModelObjectTotal", object_total)
+        if world_summary_source:
+            daemon_status.setdefault("worldModelSummarySource", world_summary_source)
+        daemon_status.setdefault("broadFetchTimedOut", broad_fetch_timed_out)
+        daemon_status.setdefault("minimalLiveLivenessFallbackUsed", minimal_fallback_used)
     return KnowledgeFabric(world_model_payloads=payloads, daemon_status=daemon_status, source="live_8890_8893")
 
 

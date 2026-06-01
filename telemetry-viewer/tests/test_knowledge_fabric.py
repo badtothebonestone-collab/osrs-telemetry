@@ -175,6 +175,67 @@ def make_route_blocker_fabric():
     return knowledge_fabric.KnowledgeFabric.from_status(status)
 
 
+def loaded_liveness_status():
+    return {
+        "schema": "context_status.v1",
+        "status": "ok",
+        "latestTick": 99,
+        "gameState": "LOGGED_IN",
+        "clientTickHot": {
+            "gameState": "LOGGED_IN",
+            "sourceEvent": "PostMenuSort",
+            "latency": {"ageMillis": 5, "postMenuSortAgeMillis": 5},
+        },
+    }
+
+
+def loaded_world_summary_payloads(total=7619):
+    return {
+        "quality": {
+            "worldModelAvailable": True,
+            "worldModelAgeMs": 8,
+            "sourceTick": 99,
+            "collisionAvailable": True,
+            "projectionAuditAvailable": True,
+        },
+        "world_model_summary": {
+            "schema": "world_model_summary.v1",
+            "tick": 99,
+            "quality": {
+                "worldModelAvailable": True,
+                "worldModelAgeMs": 8,
+                "sourceTick": 99,
+                "collisionAvailable": True,
+                "projectionAuditAvailable": True,
+            },
+            "objects": {"total": total},
+        },
+    }
+
+
+def passing_action_readiness():
+    return {
+        "currentIntent": "resource_object_action",
+        "proposedAction": "select_resource_target",
+        "readinessPassed": True,
+        "actionReadiness": {"status": "PASS", "executionAllowed": True, "blockers": [], "warnings": []},
+    }
+
+
+def executable_resource_proposal():
+    return {
+        "proposedAction": "select_resource_target",
+        "executable": True,
+        "actionTargetSource": "live_resource_candidate",
+        "actionability": "needs_hover_confirmation",
+        "targetExplanation": {
+            "name": "Tree",
+            "worldLocation": {"worldX": 3213, "worldY": 3238, "plane": 0},
+            "safeAimPoint": {"status": "PASS", "actionable": True},
+        },
+    }
+
+
 def test_indexes_build_from_synthetic_world_model():
     fabric = make_fabric()
     status = fabric.status()
@@ -295,6 +356,26 @@ def test_current_debug_context_reads_nested_context_status_shape():
     assert fabric.explain_current_blocker()["data"]["primaryBlockerCategory"] == "route/pathing"
 
 
+def test_current_debug_context_liveness_uses_world_summary_total_without_census_objects():
+    fabric = knowledge_fabric.KnowledgeFabric(
+        world_model_payloads=loaded_world_summary_payloads(total=7619),
+        daemon_status=loaded_liveness_status(),
+        source="live_8890_8893",
+    )
+
+    with patch.object(fabric, "_readiness_report", wraps=fabric._readiness_report), patch.object(
+        fabric, "_action_proposal", return_value=executable_resource_proposal()
+    ):
+        result = fabric.query_current_debug_context(limit=3)
+
+    data = result["data"]
+    assert data["loadedSceneVerified"] is True
+    assert data["livenessState"] == "loaded_scene"
+    assert data["loadedSceneProof"]["worldModelObjectTotal"] == 7619
+    assert data["readiness"]["loadedSceneProof"]["worldModelObjectTotal"] == 7619
+    assert data["readiness"]["loadedSceneProof"]["loadedSceneVerified"] is True
+
+
 def test_fabric_reads_saved_context_response_world_model_keys():
     raw_context_response = {
         "schema": "context_response.v1",
@@ -311,6 +392,57 @@ def test_fabric_reads_saved_context_response_world_model_keys():
 
     assert fabric.status()["performanceStats"]["objectCount"] == 5
     assert fabric.query_resource_candidates()["data"]["count"] == 2
+
+
+def test_current_blocker_ignores_generic_candidate_warning_when_readiness_passes():
+    status = loaded_liveness_status()
+    status["warnings"] = [
+        "plugin snapshot currently builds live candidates from loaded-scene projection data",
+        "projection refs capped; increase maxProjectionRefs if candidate refs are missing",
+    ]
+    fabric = knowledge_fabric.KnowledgeFabric(
+        world_model_payloads=loaded_world_summary_payloads(total=7619),
+        daemon_status=status,
+        source="live_8890_8893",
+    )
+
+    with patch.object(fabric, "_readiness_report", return_value=passing_action_readiness()), patch.object(
+        fabric, "_action_proposal", return_value=executable_resource_proposal()
+    ):
+        result = fabric.explain_current_blocker()
+
+    data = result["data"]
+    assert data["primaryBlockerCategory"] == "ready"
+    assert data["safeToRunBoundedLiveAction"] is True
+    assert data["evidence"]["bootstrapState"]["loadedSceneVerified"] is True
+
+
+def test_fabric_from_live_uses_minimal_liveness_fallback_when_broad_fetch_times_out():
+    minimal_snapshot = {
+        "schema": "world_model_query_response.v1",
+        "status": "PASS",
+        "payloads": {
+            "world_model_summary": loaded_world_summary_payloads(total=7619)["world_model_summary"],
+        },
+        "worldModelQuality": loaded_world_summary_payloads(total=7619)["quality"],
+    }
+
+    with patch("knowledge_fabric.fetch_json", return_value=loaded_liveness_status()), patch(
+        "knowledge_fabric.world_model_client.fetch",
+        side_effect=[TimeoutError("timed out"), minimal_snapshot],
+    ) as fetch_mock:
+        fabric = knowledge_fabric.fabric_from_live(
+            daemon_url="http://daemon.test:8890",
+            snapshot_url="http://snapshot.test:8893/snapshot",
+            timeout=1.0,
+        )
+
+    assert fetch_mock.call_count == 2
+    assert fabric.world_model_payloads["world_model_summary"]["objects"]["total"] == 7619
+    assert fabric.daemon_status["worldModelObjectTotal"] == 7619
+    assert fabric.daemon_status["broadFetchTimedOut"] is True
+    assert fabric.daemon_status["minimalLiveLivenessFallbackUsed"] is True
+    assert fabric.daemon_status["worldModelSummarySource"] == "minimal_live_liveness_fallback"
 
 
 def test_seen_inventory_items_parse_snapshot_inventory_and_external_names():
