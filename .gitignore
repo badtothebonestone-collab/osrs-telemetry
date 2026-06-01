@@ -19,6 +19,7 @@ exports/
 *.jsonl
 latest/
 live_logs/
+telemetry-viewer/logs/
 .osrs-telemetry/
 external_knowledge_cache/
 live_packets/

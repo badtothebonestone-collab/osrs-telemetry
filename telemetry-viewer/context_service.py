@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -30,6 +31,8 @@ WATCH_LIBRARY_PATH = Path(__file__).resolve().with_name("watch_library.json")
 PIPELINE_MANIFEST_PATH = Path(__file__).resolve().with_name("pipeline_manifest.json")
 CONFIG_KEYS_PATH = Path(__file__).resolve().with_name("config_keys.json")
 PIPELINE_HEALTH_SCHEMA = "pipeline_health.v1"
+DEFAULT_DAEMON_URL = "http://127.0.0.1:8890"
+DEFAULT_SNAPSHOT_URL = "http://127.0.0.1:8893/snapshot"
 WATCH_REQUEST_DIR = "live_requests"
 WATCH_REQUEST_FILE = "watch_requests.json"
 WATCH_REQUEST_LIMIT = 32
@@ -95,6 +98,18 @@ SUPPORTED_NEEDS = [
     "reachability:<classId>",
 ]
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+NAMED_QUERY_NEEDS = {
+    "current-debug-context": ["knowledge_current_debug_context"],
+    "current-blocker": ["knowledge_current_blocker"],
+    "explain-current-blocker": ["knowledge_current_blocker"],
+    "knowledge-fabric-status": ["knowledge_fabric_status"],
+    "data-quality-report": ["knowledge_data_quality_report"],
+    "data-source-inventory": ["knowledge_data_source_inventory"],
+    "query-coverage-matrix": ["knowledge_query_coverage_matrix"],
+    "coverage-report": ["knowledge_coverage_report"],
+    "external-knowledge-status": ["external_knowledge_status"],
+    "handoff-summary": ["knowledge_handoff_summary"],
+}
 
 
 def utc_now() -> str:
@@ -1712,6 +1727,198 @@ def print_json_response(payload: dict[str, Any]) -> int:
     return 0 if payload.get("status") != "FAIL" else 1
 
 
+def _arg_was_supplied(option: str, argv: list[str] | None = None) -> bool:
+    values = sys.argv[1:] if argv is None else argv
+    return any(value == option or value.startswith(option + "=") for value in values)
+
+
+def _daemon_query_error(fabric: knowledge_fabric.KnowledgeFabric) -> str | None:
+    status = fabric.daemon_status if isinstance(fabric.daemon_status, dict) else {}
+    if not status:
+        return "daemon /status returned an empty payload"
+    if status.get("schema") == "http_fetch_error.v1" or status.get("status") == "FAIL":
+        return str(status.get("error") or status.get("message") or "daemon /status request failed")
+    if not status.get("sessionPath"):
+        return "daemon /status did not include sessionPath"
+    if status.get("latestTick") is None:
+        return "daemon /status did not include latestTick"
+    return None
+
+
+def _add_live_query_metadata(
+    response: dict[str, Any],
+    *,
+    context_source: str,
+    daemon_url: str | None = None,
+    snapshot_url: str | None = None,
+    fallback_used: bool = False,
+    fallback_reason: str | None = None,
+    daemon_query_error: str | None = None,
+) -> dict[str, Any]:
+    response["contextSource"] = context_source
+    response["daemonUrl"] = daemon_url
+    response["snapshotUrl"] = snapshot_url
+    response["fileSessionFallbackUsed"] = fallback_used
+    if fallback_reason:
+        response["fileSessionFallbackReason"] = fallback_reason
+    if daemon_query_error:
+        response["daemonQueryError"] = daemon_query_error
+    return response
+
+
+def _status_from_payloads(payloads: list[dict[str, Any]]) -> str:
+    status = "PASS"
+    for payload in payloads:
+        if isinstance(payload, dict):
+            status = combine_status(status, str(payload.get("status") or "PASS"))
+    return status
+
+
+def build_live_named_query_response(args, query_name: str, needs: list[str]) -> tuple[dict[str, Any] | None, str | None]:
+    daemon_url = str(getattr(args, "daemon_url", None) or DEFAULT_DAEMON_URL)
+    snapshot_url = str(getattr(args, "snapshot_url", None) or DEFAULT_SNAPSHOT_URL)
+    max_candidates = int(getattr(args, "max_candidates", 3) or 3)
+    max_response_bytes = int(getattr(args, "max_response_bytes", 1_000_000) or 1_000_000)
+    try:
+        fabric = knowledge_fabric.fabric_from_live(
+            daemon_url=daemon_url,
+            snapshot_url=snapshot_url,
+            timeout=getattr(args, "live_timeout", 1.0),
+            include_projection=True,
+            include_collision=True,
+            max_objects=getattr(args, "world_max_objects", 160),
+        )
+    except Exception as error:  # noqa: BLE001
+        return None, f"{type(error).__name__}: {error}"
+
+    daemon_error = _daemon_query_error(fabric)
+    if daemon_error:
+        return None, daemon_error
+
+    payloads: list[dict[str, Any]] = []
+    response: dict[str, Any] = {
+        "schema": RESPONSE_SCHEMA,
+        "requestId": None,
+        "generatedAtUtc": query.utc_now(),
+        "latestTick": fabric.daemon_status.get("latestTick"),
+        "status": "PASS",
+        "freshness": fabric.freshness(),
+        "warnings": [],
+        "missingCapabilities": [],
+        "sourceFilesSummary": {
+            "allRequiredPresent": True,
+            "missingFiles": [],
+            "staleFiles": [],
+            "liveFilesPresent": False,
+            "fileCount": 0,
+        },
+    }
+    _add_live_query_metadata(
+        response,
+        context_source="live_daemon",
+        daemon_url=daemon_url,
+        snapshot_url=snapshot_url,
+        fallback_used=False,
+    )
+
+    if "knowledge_fabric_status" in needs:
+        payload = fabric.status()
+        response["knowledgeFabricStatus"] = payload
+        payloads.append(payload)
+    if "knowledge_current_debug_context" in needs:
+        payload = fabric.query_current_debug_context(profile=getattr(args, "profile", "woodcutting"), limit=max_candidates)
+        response["knowledgeCurrentDebugContext"] = payload
+        payloads.append(payload)
+    if "knowledge_current_blocker" in needs:
+        payload = fabric.explain_current_blocker()
+        response["knowledgeCurrentBlocker"] = payload
+        payloads.append(payload)
+    if "knowledge_data_quality_report" in needs:
+        payload = fabric.data_quality_report(limit=max_candidates)
+        response["knowledgeDataQualityReport"] = payload
+        payloads.append(payload)
+    if "knowledge_data_source_inventory" in needs:
+        payload = fabric.data_source_inventory()
+        response["knowledgeDataSourceInventory"] = payload
+        payloads.append(payload)
+    if "knowledge_query_coverage_matrix" in needs:
+        payload = fabric.query_coverage_matrix()
+        response["knowledgeQueryCoverageMatrix"] = payload
+        payloads.append(payload)
+    if "knowledge_coverage_report" in needs:
+        payload = fabric.coverage_report(limit=max_candidates)
+        response["knowledgeCoverageReport"] = payload
+        payloads.append(payload)
+    if "external_knowledge_status" in needs:
+        payload = external_knowledge.knowledge_status()
+        response["externalKnowledgeStatus"] = payload
+        payloads.append(payload)
+    if "knowledge_handoff_summary" in needs:
+        payload = fabric.handoff_summary()
+        response["knowledgeHandoffSummary"] = payload
+        payloads.append(payload)
+
+    response["status"] = _status_from_payloads(payloads)
+    response["confidence"] = 0.7 if response["status"] == "PASS" else 0.4 if response["status"] == "WARN" else 0.0
+    warnings: list[str] = []
+    missing: list[str] = []
+    for payload in payloads:
+        warnings.extend(str(item) for item in (payload.get("warnings") or []) if item)
+        missing.extend(str(item) for item in (payload.get("missingCapabilities") or []) if item)
+    response["warnings"] = sorted(set(warnings))
+    response["missingCapabilities"] = sorted(set(missing))
+    response["serviceTimingMillis"] = round(sum(float((payload.get("performanceStats") or {}).get("queryTimeMs") or 0.0) for payload in payloads), 3)
+    return enforce_response_size(response, max_response_bytes, "compact"), None
+
+
+def build_file_named_query_response(
+    args,
+    needs: list[str],
+    *,
+    context_source: str,
+    daemon_query_error: str | None = None,
+) -> dict[str, Any]:
+    state = ContextState(args)
+    context = state.load_context(force=True)
+    response = build_context_response(
+        context,
+        {
+            "schema": REQUEST_SCHEMA,
+            "needs": needs,
+            "maxCandidates": args.max_candidates,
+            "responseMode": "compact",
+        },
+        default_max_candidates=args.max_candidates,
+        max_response_bytes=args.max_response_bytes,
+        compact_include_source_files=args.compact_include_source_files,
+        compact_liveness_examples=args.compact_include_liveness_examples,
+    )
+    fallback_used = context_source == "file_session_fallback"
+    return _add_live_query_metadata(
+        response,
+        context_source=context_source,
+        daemon_url=getattr(args, "daemon_url", None),
+        snapshot_url=getattr(args, "snapshot_url", None),
+        fallback_used=fallback_used,
+        fallback_reason="live daemon query failed; using file-session context" if fallback_used else None,
+        daemon_query_error=daemon_query_error,
+    )
+
+
+def build_named_query_response(args, query_name: str, needs: list[str]) -> dict[str, Any]:
+    if getattr(args, "daemon_url_explicit", False):
+        live_response, daemon_query_error = build_live_named_query_response(args, query_name, needs)
+        if live_response is not None:
+            return live_response
+        return build_file_named_query_response(
+            args,
+            needs,
+            context_source="file_session_fallback",
+            daemon_query_error=daemon_query_error,
+        )
+    return build_file_named_query_response(args, needs, context_source="file_session")
+
+
 def capture_script_authoring_context_cli(args) -> int:
     fabric = fabric_for_cli(args)
     payload = fabric.capture_script_authoring_context(
@@ -1928,40 +2135,14 @@ def ensure_loaded_scene_cli(args) -> int:
 
 
 def query_oneshot(args) -> int:
-    state = ContextState(args)
-    context = state.load_context(force=True)
     query_name = str(args.query or "").strip().lower().replace("_", "-")
-    needs_by_query = {
-        "current-debug-context": ["knowledge_current_debug_context"],
-        "current-blocker": ["knowledge_current_blocker"],
-        "explain-current-blocker": ["knowledge_current_blocker"],
-        "knowledge-fabric-status": ["knowledge_fabric_status"],
-        "data-quality-report": ["knowledge_data_quality_report"],
-        "data-source-inventory": ["knowledge_data_source_inventory"],
-        "query-coverage-matrix": ["knowledge_query_coverage_matrix"],
-        "coverage-report": ["knowledge_coverage_report"],
-        "external-knowledge-status": ["external_knowledge_status"],
-        "handoff-summary": ["knowledge_handoff_summary"],
-    }
     if query_name == "pipeline-health":
         return print_json_response(pipeline_health_payload(args))
-    needs = needs_by_query.get(query_name)
+    needs = NAMED_QUERY_NEEDS.get(query_name)
     if needs is None:
         print(json.dumps(error_payload(f"unsupported query: {args.query}"), separators=(",", ":")))
         return 2
-    response = build_context_response(
-        context,
-        {
-            "schema": REQUEST_SCHEMA,
-            "needs": needs,
-            "maxCandidates": args.max_candidates,
-            "responseMode": "compact",
-        },
-        default_max_candidates=args.max_candidates,
-        max_response_bytes=args.max_response_bytes,
-        compact_include_source_files=args.compact_include_source_files,
-        compact_liveness_examples=args.compact_include_liveness_examples,
-    )
+    response = build_named_query_response(args, query_name, needs)
     print(json.dumps(response, separators=(",", ":"), sort_keys=False))
     return 0 if response.get("status") != "FAIL" else 1
 
@@ -2008,8 +2189,8 @@ def parse_args():
     parser.add_argument("--profile", default="woodcutting", help="Profile for Knowledge Fabric bundle/query commands. Default: woodcutting.")
     parser.add_argument("--task-name", help="Task name for script-authoring bundle commands.")
     parser.add_argument("--reason", help="Reason label for captured bundle commands.")
-    parser.add_argument("--daemon-url", default="http://127.0.0.1:8890", help="Live daemon URL for live Knowledge Fabric CLI commands.")
-    parser.add_argument("--snapshot-url", default="http://127.0.0.1:8893/snapshot", help="Plugin snapshot URL for live Knowledge Fabric CLI commands.")
+    parser.add_argument("--daemon-url", default=DEFAULT_DAEMON_URL, help="Live daemon URL for live Knowledge Fabric CLI commands.")
+    parser.add_argument("--snapshot-url", default=DEFAULT_SNAPSHOT_URL, help="Plugin snapshot URL for live Knowledge Fabric CLI commands.")
     parser.add_argument("--arduino-port", default="COM6", help="Arduino serial bridge port used by --ensure-loaded-scene.")
     parser.add_argument("--allow-jagex-launcher-automation", action="store_true", help="Allow Jagex Launcher automation for --ensure-loaded-scene; credentials are still never typed.")
     parser.add_argument("--liveness-max-total-seconds", type=float, default=120.0, help="Maximum total seconds for --ensure-loaded-scene.")
@@ -2020,7 +2201,9 @@ def parse_args():
     parser.add_argument("--max-response-bytes", type=int, default=1_000_000, help="Compact response size guard. Default: 1000000.")
     parser.add_argument("--compact-include-source-files", action="store_true", help="Include full sourceFiles even for compact responses.")
     parser.add_argument("--compact-include-liveness-examples", type=int, default=0, help="Recently unavailable examples to include in compact liveness responses. Default: 0.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.daemon_url_explicit = _arg_was_supplied("--daemon-url")
+    return args
 
 
 def main() -> int:

@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -631,6 +632,122 @@ class ContextServiceTest(unittest.TestCase):
             self.assertEqual(payload["schema"], "context_response.v1")
             self.assertIn("knowledgeCurrentDebugContext", payload)
             self.assertIn("currentBlocker", payload["knowledgeCurrentDebugContext"]["data"])
+
+    def live_query_args(self, *, session: Path | None = None, query: str = "current-debug-context") -> SimpleNamespace:
+        return SimpleNamespace(
+            query=query,
+            session=str(session) if session else None,
+            latest_session=False,
+            sessions_dir=None,
+            reload_interval=0,
+            max_candidates=2,
+            max_response_bytes=1_000_000,
+            compact_include_source_files=False,
+            compact_include_liveness_examples=0,
+            daemon_url="http://daemon.test:8890",
+            snapshot_url="http://snapshot.test:8893/snapshot",
+            live_timeout=1.25,
+            world_max_objects=77,
+            profile="woodcutting",
+            daemon_url_explicit=True,
+            auth_token=None,
+            no_auth_token=True,
+            debug=False,
+        )
+
+    def live_fabric(self, session: Path) -> service.knowledge_fabric.KnowledgeFabric:
+        return service.knowledge_fabric.KnowledgeFabric(
+            world_model_payloads={},
+            daemon_status={
+                "schema": "context_status.v1",
+                "status": "ok",
+                "sessionPath": str(session),
+                "latestTick": 42,
+                "inputSourceActive": "plugin-snapshot",
+                "noFileDaily": True,
+                "compactPacketFilesRequired": False,
+                "compactPacketFilesWriting": False,
+                "candidateCount": 0,
+            },
+            source="live_8890_8893",
+        )
+
+    def test_current_debug_context_with_explicit_daemon_url_uses_live_daemon_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live_session = Path(tmp) / "live-session"
+            args = self.live_query_args()
+            with mock.patch.object(service.knowledge_fabric, "fabric_from_live", return_value=self.live_fabric(live_session)) as live_mock:
+                payload = service.build_named_query_response(args, "current-debug-context", ["knowledge_current_debug_context"])
+
+            self.assertEqual(payload["schema"], "context_response.v1")
+            self.assertEqual(payload["contextSource"], "live_daemon")
+            self.assertEqual(payload["daemonUrl"], "http://daemon.test:8890")
+            self.assertEqual(payload["snapshotUrl"], "http://snapshot.test:8893/snapshot")
+            self.assertFalse(payload["fileSessionFallbackUsed"])
+            self.assertEqual(payload["latestTick"], 42)
+            self.assertIn("knowledgeCurrentDebugContext", payload)
+            self.assertEqual(payload["knowledgeCurrentDebugContext"]["source"], "live_8890_8893")
+            self.assertEqual(payload["knowledgeCurrentDebugContext"]["freshness"]["sessionPath"], str(live_session))
+            self.assertNotIn("No --session or --latest-session supplied.", payload["warnings"])
+            self.assertEqual(payload["sourceFilesSummary"]["fileCount"], 0)
+            self.assertTrue(payload["sourceFilesSummary"]["allRequiredPresent"])
+            live_mock.assert_called_once()
+            _, kwargs = live_mock.call_args
+            self.assertEqual(kwargs["daemon_url"], "http://daemon.test:8890")
+            self.assertEqual(kwargs["snapshot_url"], "http://snapshot.test:8893/snapshot")
+            self.assertEqual(kwargs["timeout"], 1.25)
+            self.assertTrue(kwargs["include_projection"])
+            self.assertTrue(kwargs["include_collision"])
+            self.assertEqual(kwargs["max_objects"], 77)
+
+    def test_current_blocker_with_explicit_daemon_url_uses_live_daemon_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live_session = Path(tmp) / "live-session"
+            args = self.live_query_args(query="current-blocker")
+            with mock.patch.object(service.knowledge_fabric, "fabric_from_live", return_value=self.live_fabric(live_session)):
+                payload = service.build_named_query_response(args, "current-blocker", ["knowledge_current_blocker"])
+
+            self.assertEqual(payload["contextSource"], "live_daemon")
+            self.assertFalse(payload["fileSessionFallbackUsed"])
+            self.assertIn("knowledgeCurrentBlocker", payload)
+            blocker = payload["knowledgeCurrentBlocker"]
+            self.assertEqual(blocker["freshness"]["sessionPath"], str(live_session))
+            self.assertEqual(blocker["freshness"]["sourceTick"], 42)
+            blocker_text = json.dumps(blocker)
+            self.assertNotIn("daemon_session_missing", blocker_text)
+            self.assertNotIn("No telemetry session selected", blocker_text)
+
+    def test_live_daemon_named_query_does_not_require_latest_session_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live_session = Path(tmp) / "live-session"
+            args = self.live_query_args(session=None)
+            with mock.patch.object(service.knowledge_fabric, "fabric_from_live", return_value=self.live_fabric(live_session)):
+                payload = service.build_named_query_response(args, "current-debug-context", ["knowledge_current_debug_context"])
+
+            self.assertNotEqual(payload["status"], "FAIL")
+            self.assertEqual(payload["contextSource"], "live_daemon")
+            self.assertFalse(payload["fileSessionFallbackUsed"])
+            self.assertFalse((Path(tmp) / "live_packets").exists())
+            self.assertEqual(list(Path(tmp).rglob("*.ndjson")), [])
+            self.assertEqual(list(Path(tmp).rglob("*.jsonl")), [])
+
+    def test_daemon_url_query_fallback_is_labeled_when_daemon_status_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            args = self.live_query_args(session=session)
+            failed_fabric = service.knowledge_fabric.KnowledgeFabric(
+                world_model_payloads={},
+                daemon_status={"schema": "http_fetch_error.v1", "status": "FAIL", "error": "connection refused"},
+                source="live_8890_8893",
+            )
+            with mock.patch.object(service.knowledge_fabric, "fabric_from_live", return_value=failed_fabric):
+                payload = service.build_named_query_response(args, "current-debug-context", ["knowledge_current_debug_context"])
+
+            self.assertEqual(payload["contextSource"], "file_session_fallback")
+            self.assertTrue(payload["fileSessionFallbackUsed"])
+            self.assertEqual(payload["fileSessionFallbackReason"], "live daemon query failed; using file-session context")
+            self.assertIn("connection refused", payload["daemonQueryError"])
+            self.assertIn("knowledgeCurrentDebugContext", payload)
 
     def test_named_data_quality_and_handoff_queries_output_structured_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:
