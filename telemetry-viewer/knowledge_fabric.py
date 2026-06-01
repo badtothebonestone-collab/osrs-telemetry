@@ -507,6 +507,29 @@ def _world_model_object_total(payloads: dict[str, Any] | None, status: dict[str,
     return _int(sizing.get("objectCount"))
 
 
+def _copy_snapshot_liveness_fields(status: dict[str, Any], snapshot: dict[str, Any] | None, *, source: str) -> None:
+    snapshot = _dict(snapshot)
+    if not snapshot:
+        return
+    hot = _dict(snapshot.get("clientTickHot"))
+    if hot and not _dict(status.get("clientTickHot")):
+        status["clientTickHot"] = hot
+        status.setdefault("clientTickHotSource", source)
+    hover = _dict(snapshot.get("hoverMenu"))
+    if hover and not _dict(status.get("hoverMenu")):
+        status["hoverMenu"] = hover
+    clicked = _dict(snapshot.get("lastMenuOptionClicked"))
+    if clicked and not _dict(status.get("lastMenuOptionClicked")):
+        status["lastMenuOptionClicked"] = clicked
+    baseline = _dict(_dict(snapshot.get("payloads")).get("baseline"))
+    game_state = _first_present(hot.get("gameState"), baseline.get("gameState"))
+    if game_state is not None and status.get("gameState") is None:
+        status["gameState"] = game_state
+    latest_tick = _int(_first_present(snapshot.get("latestTick"), baseline.get("tick"), hot.get("gameTickAtSample")))
+    if latest_tick is not None and status.get("pluginSnapshotLatestTick") is None:
+        status["pluginSnapshotLatestTick"] = latest_tick
+
+
 def _daemon_status_from_context(status: dict[str, Any]) -> dict[str, Any]:
     status = _dict(status)
     debug_context = _dict(_dict(status.get("knowledgeCurrentDebugContext")).get("data"))
@@ -3864,6 +3887,8 @@ def fabric_from_live(
             "status": "FAIL",
             "error": f"{type(error).__name__}: {error}",
         }
+    if isinstance(daemon_status, dict):
+        _copy_snapshot_liveness_fields(daemon_status, snapshot, source="broad_live_snapshot")
     payloads = world_model_core.extract_world_model_payloads(snapshot)
     world_summary_source = "broad_live_snapshot" if _dict(payloads.get("world_model_summary")) else None
     minimal_fallback_used = False
@@ -3878,11 +3903,14 @@ def fabric_from_live(
             minimal_snapshot = world_model_client.fetch(snapshot_url, timeout=timeout, request=minimal_request)
             minimal_payloads = world_model_core.extract_world_model_payloads(minimal_snapshot)
         except Exception:  # noqa: BLE001
+            minimal_snapshot = {}
             minimal_payloads = {}
         if _dict(minimal_payloads.get("world_model_summary")):
             payloads = {**minimal_payloads, **payloads}
             minimal_fallback_used = True
             world_summary_source = "minimal_live_liveness_fallback"
+        if isinstance(daemon_status, dict):
+            _copy_snapshot_liveness_fields(daemon_status, minimal_snapshot, source="minimal_live_liveness_fallback")
     if not payloads:
         payloads = _world_payloads_from_status(daemon_status)
         if _dict(payloads.get("world_model_summary")) and world_summary_source is None:

@@ -421,7 +421,10 @@ def test_fabric_from_live_uses_minimal_liveness_fallback_when_broad_fetch_times_
     minimal_snapshot = {
         "schema": "world_model_query_response.v1",
         "status": "PASS",
+        "latestTick": 99,
+        "clientTickHot": loaded_liveness_status()["clientTickHot"],
         "payloads": {
+            "baseline": {"tick": 99, "gameState": "LOGGED_IN"},
             "world_model_summary": loaded_world_summary_payloads(total=7619)["world_model_summary"],
         },
         "worldModelQuality": loaded_world_summary_payloads(total=7619)["quality"],
@@ -443,6 +446,9 @@ def test_fabric_from_live_uses_minimal_liveness_fallback_when_broad_fetch_times_
     assert fabric.daemon_status["broadFetchTimedOut"] is True
     assert fabric.daemon_status["minimalLiveLivenessFallbackUsed"] is True
     assert fabric.daemon_status["worldModelSummarySource"] == "minimal_live_liveness_fallback"
+    assert fabric.daemon_status["clientTickHot"]["gameState"] == "LOGGED_IN"
+    assert fabric.daemon_status["clientTickHotSource"] == "minimal_live_liveness_fallback"
+    assert fabric.daemon_status["gameState"] == "LOGGED_IN"
 
 
 def test_seen_inventory_items_parse_snapshot_inventory_and_external_names():
