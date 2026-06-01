@@ -404,6 +404,19 @@ def _status_label(status: dict[str, Any]) -> Any:
     return value
 
 
+def _source_metadata(status: dict[str, Any], *, fallback_source: str = "daemon_status") -> dict[str, Any]:
+    status = _status_view(status)
+    metadata = _dict(status.get("sourceMetadata") or status.get("_liveQueryMetadata"))
+    return {
+        "sourceUsed": metadata.get("sourceUsed") or status.get("sourceUsed") or fallback_source,
+        "daemonUrl": metadata.get("daemonUrl") or status.get("daemonUrl"),
+        "snapshotUrl": metadata.get("snapshotUrl") or status.get("snapshotUrl"),
+        "contextSource": metadata.get("contextSource") or status.get("contextSource") or fallback_source,
+        "fileSessionFallbackUsed": bool(metadata.get("fileSessionFallbackUsed", status.get("fileSessionFallbackUsed", False))),
+        "freshnessSource": metadata.get("freshnessSource") or status.get("freshnessSource") or fallback_source,
+    }
+
+
 def _session_path_from_status(status: dict[str, Any]) -> Path | None:
     status = _status_view(status)
     for value in (
@@ -650,6 +663,99 @@ def _compact_route_context(status: dict[str, Any]) -> dict[str, Any]:
             status.get("pathingRejectedApproachTileReasons"),
         ),
         "predictedPathTiles": _list(pathing.get("predictedPathTiles") or status.get("pathingPredictedPathTiles"))[:35],
+    }
+
+
+def _route_context_applicability(
+    status: dict[str, Any],
+    *,
+    readiness: dict[str, Any] | None = None,
+    proposal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    status = _status_view(status)
+    readiness = _dict(readiness)
+    proposal = _dict(proposal)
+    route = _compact_route_context(status)
+    phase = _compact_phase(status)
+    inventory = _compact_inventory(status)
+    action_need = _dict(readiness.get("actionNeed"))
+    current_intent = str(_first_present(readiness.get("currentIntent"), phase.get("currentIntent"), phase.get("activeIntent"), "") or "")
+    proposed_action = str(_first_present(readiness.get("proposedAction"), proposal.get("proposedAction"), "") or "")
+    cycle_stage = str(_first_present(action_need.get("cycleStage"), phase.get("cycleStage"), "") or "").lower()
+    phase_name = str(_first_present(action_need.get("phase"), phase.get("phase"), "") or "").lower()
+    active_intent = str(_first_present(action_need.get("activeIntent"), phase.get("activeIntent"), "") or "").lower()
+    route_context_present = any(
+        route.get(key) is not None
+        for key in ("routeId", "currentNodeId", "currentStepIndex", "nextEdgeType", "routeStepStatus")
+    )
+    if action_need:
+        needs_service = action_need.get("needsService") is True
+    else:
+        needs_service = bool(status.get("serviceNeeded") is True)
+    inventory_full = bool(inventory.get("inventoryFull") is True or action_need.get("inventoryFreeSlots") == 0)
+    route_intents = {
+        "navigation_waypoint_action",
+        "route_transition_action",
+        "service_object_action",
+        "interface_dialogue_choice_action",
+    }
+    route_phases = {
+        "needs_service",
+        "route_to_service",
+        "pathing_to_service",
+        "inventory_full",
+        "service",
+        "return_to_resource",
+        "return_to_resource_area",
+    }
+    active_route_action = bool(current_intent in route_intents or proposed_action in {"navigate_to_service", "return_to_resource_area", "open_service", "interact_service_route_object", "interface_dialogue_choice"})
+    route_phase_active = bool(cycle_stage in route_phases or phase_name in route_phases or active_intent in route_phases)
+    selected_target = _dict(proposal.get("targetExplanation"))
+    safe_aimpoint = _dict(selected_target.get("safeAimPoint"))
+    selected_resource_actionable = bool(
+        proposal.get("executable") is True
+        and (safe_aimpoint.get("status") in {None, "PASS"} or safe_aimpoint.get("actionable") is True)
+    )
+    resource_collection_ready = bool(
+        route_context_present
+        and current_intent == "resource_object_action"
+        and proposed_action == "select_resource_target"
+        and selected_resource_actionable
+        and not needs_service
+        and not inventory_full
+    )
+    applicable = bool(route_context_present and (needs_service or inventory_full or active_route_action or route_phase_active))
+    if resource_collection_ready:
+        applicable = False
+        reason = "collecting_resources_resource_target_ready"
+    elif not route_context_present:
+        reason = "route_context_absent"
+    elif applicable:
+        reason = (
+            "route_intent_active"
+            if active_route_action
+            else "service_needed"
+            if needs_service
+            else "inventory_full"
+            if inventory_full
+            else "route_phase_active"
+        )
+    else:
+        reason = "route_context_not_required_for_current_intent"
+    age_ms = _first_present(
+        status.get("routeContextAgeMs"),
+        status.get("serviceRouteContextAgeMs"),
+        _dict(_dict(status.get("brain")).get("serviceRouteContext")).get("ageMs"),
+        _dict(_dict(status.get("brain")).get("pathingContext")).get("ageMs"),
+    )
+    return {
+        "routeContextPresent": bool(route_context_present),
+        "routeContextApplicable": bool(applicable),
+        "routeContextApplicabilityReason": reason,
+        "routeContextWarningOnly": bool(route_context_present and not applicable),
+        "staleRouteContextSuppressed": bool(route_context_present and not applicable),
+        "routeContextSource": "daemon_status" if route_context_present else None,
+        "routeContextAgeMs": age_ms,
     }
 
 
@@ -2175,14 +2281,18 @@ class KnowledgeFabric:
         execution_allowed = bool(action_readiness.get("executionAllowed"))
         action_blockers = _list(action_readiness.get("blockers"))
         action_blocker_text = " ".join(json.dumps(item, default=str).lower() for item in action_blockers)
+        route_applicability = _route_context_applicability(status, readiness=readiness, proposal=proposal)
         route_or_service_context_present = bool(
-            route.get("currentNodeId")
-            or route.get("nextEdgeType")
-            or phase.get("cycleStage") in {"pathing_to_service", "needs_service", "service"}
-            or "route" in text
-            or "path" in text
-            or "bank" in text
-            or "service" in text
+            route_applicability.get("routeContextApplicable")
+            and (
+                route.get("currentNodeId")
+                or route.get("nextEdgeType")
+                or phase.get("cycleStage") in {"pathing_to_service", "needs_service", "service"}
+                or "route" in text
+                or "path" in text
+                or "bank" in text
+                or "service" in text
+            )
         )
         if bootstrap_state.get("state") == "login_screen" or (
             bootstrap_state.get("state") == "stale_logged_in_no_scene" and not route_or_service_context_present
@@ -2265,7 +2375,17 @@ class KnowledgeFabric:
                 readiness.get("readinessPassed") is True,
                 False,
             )
-        if "wall_hugging" in latest_text or "wall_hugging" in text or "wall hugging" in text or route.get("wallLoopDetected") or route.get("wallHuggingDetected"):
+        if action_blockers and not execution_allowed and not route_applicability.get("routeContextApplicable"):
+            return (
+                "readiness",
+                "Action readiness is blocking execution.",
+                "Inspect actionReadiness blockers in current-debug-context before any live action.",
+                False,
+                True,
+            )
+        if route_applicability.get("routeContextApplicable") and (
+            "wall_hugging" in latest_text or "wall_hugging" in text or "wall hugging" in text or route.get("wallLoopDetected") or route.get("wallHuggingDetected")
+        ):
             return (
                 "route/pathing",
                 f"Route navigation is near {route.get('currentNodeId') or 'the current route node'} and the latest evidence reports wall-hugging risk.",
@@ -2273,7 +2393,12 @@ class KnowledgeFabric:
                 False,
                 True,
             )
-        if "route" in text or "path" in text or phase.get("cycleStage") in {"pathing_to_service", "needs_service"} or route.get("nextEdgeType"):
+        if route_applicability.get("routeContextApplicable") and (
+            "route" in text
+            or "path" in text
+            or phase.get("cycleStage") in {"pathing_to_service", "needs_service"}
+            or route.get("nextEdgeType")
+        ):
             return (
                 "route/pathing",
                 f"Current route node is {route.get('currentNodeId') or 'unknown'} with edge {route.get('nextEdgeType') or 'unknown'}.",
@@ -2281,7 +2406,9 @@ class KnowledgeFabric:
                 execution_allowed,
                 False,
             )
-        if "bank" in text or "service" in text or phase.get("cycleStage") in {"service", "needs_service"}:
+        if route_applicability.get("routeContextApplicable") and (
+            "bank" in text or "service" in text or phase.get("cycleStage") in {"service", "needs_service"}
+        ):
             return (
                 "service/bank",
                 "The active lifecycle needs bank/service progress.",
@@ -2350,8 +2477,18 @@ class KnowledgeFabric:
             latest_bundle=latest_bundle,
             proposal=proposal,
         )
+        execution_allowed = _dict(action_readiness).get("executionAllowed") is True
+        proposed_action = _first_present(readiness.get("proposedAction"), proposal.get("proposedAction"))
+        non_click_recovery_allowed = bool(
+            proposed_action in {"resource_view_recovery"}
+            and _dict(action_readiness).get("status") == "PASS"
+        )
+        if not execution_allowed and not non_click_recovery_allowed:
+            safe_to_run = False
         phase = _compact_phase(status)
         route_context = _compact_route_context(status)
+        route_context_applicability = _route_context_applicability(status, readiness=readiness, proposal=proposal)
+        source_metadata = _source_metadata(status, fallback_source="daemon_status")
         location = _compact_location(status)
         inventory = _compact_inventory(status)
         selected_target = _dict(proposal.get("targetExplanation"))
@@ -2367,11 +2504,13 @@ class KnowledgeFabric:
             "codeChangeLikelyNeeded": code_likely,
             "captureReplayBeforeCodeChange": category not in {"ready", "login/liveness"},
             "externalKnowledgeWouldHelp": category in {"target/candidate", "route/pathing", "service/bank", "route object not observed", "external knowledge/cache miss"},
+            **source_metadata,
             "phase": phase.get("phase"),
             "cycleStage": phase.get("cycleStage"),
             "currentIntent": _first_present(readiness.get("currentIntent"), phase.get("currentIntent"), phase.get("activeIntent")),
             "location": location,
             "inventory": inventory,
+            **route_context_applicability,
             "blockers": blockers[:20],
             "warnings": warnings[:20],
             "evidence": {
@@ -2394,6 +2533,7 @@ class KnowledgeFabric:
                 "safeAimPoint": safe_aimpoint or None,
                 "hoverMenu": _dict(status.get("clientTickHot")).get("postMenuSort") or status.get("hoverMenu"),
                 "routeContext": route_context,
+                "routeContextApplicability": route_context_applicability,
                 "pathingFrontier": self.query_path_frontier(limit=5).get("data"),
                 "serviceAnchor": {
                     "selectedServiceTargetName": status.get("selectedServiceTargetName"),
@@ -2420,6 +2560,7 @@ class KnowledgeFabric:
             source="daemon_status",
             freshness=self.freshness(),
             status="PASS" if category == "ready" else "WARN",
+            extra=source_metadata,
         )
 
     def query_current_debug_context(self, *, profile: str = "woodcutting", limit: int | None = None) -> dict[str, Any]:
@@ -2430,6 +2571,8 @@ class KnowledgeFabric:
         phase = _compact_phase(self.daemon_status)
         current_intent = _first_present(readiness.get("currentIntent"), phase.get("currentIntent"), phase.get("activeIntent"), proposal.get("proposedAction"))
         bootstrap_state = self._bootstrap_liveness_summary()
+        route_context_applicability = _route_context_applicability(self.daemon_status, readiness=readiness, proposal=proposal)
+        source_metadata = _source_metadata(self.daemon_status, fallback_source=self.source)
         data = {
             "liveStatus": {
                 "schema": self.daemon_status.get("schema"),
@@ -2449,6 +2592,7 @@ class KnowledgeFabric:
                 "location": _compact_location(self.daemon_status),
                 "inventory": _compact_inventory(self.daemon_status),
             },
+            **source_metadata,
             "readiness": readiness,
             "bootstrapState": bootstrap_state,
             "loadedSceneVerified": bootstrap_state.get("loadedSceneVerified"),
@@ -2458,6 +2602,7 @@ class KnowledgeFabric:
             "livenessState": bootstrap_state.get("state"),
             "loadedSceneProof": _dict(bootstrap_state.get("evidence")).get("loadedSceneProof"),
             "knownRecoverableState": bootstrap_state.get("knownRecoverableState"),
+            **route_context_applicability,
             "manualLoginRequired": bootstrap_state.get("manualLoginRequired"),
             "unknownScreen": bootstrap_state.get("unknownScreen"),
             "worldModelSummary": self.query_world_summary(),
@@ -2509,6 +2654,7 @@ class KnowledgeFabric:
             started=started,
             source=self.source,
             freshness=self.freshness(),
+            extra=source_metadata,
         )
 
     def explain_next_action_context(self) -> dict[str, Any]:
@@ -3628,6 +3774,21 @@ def fabric_from_live(
     max_objects: int = 160,
 ) -> KnowledgeFabric:
     daemon_status = fetch_json(daemon_url.rstrip("/") + "/status", timeout=timeout)
+    if isinstance(daemon_status, dict):
+        daemon_status["sourceMetadata"] = {
+            "sourceUsed": "live_daemon",
+            "daemonUrl": daemon_url,
+            "snapshotUrl": snapshot_url,
+            "contextSource": "live_daemon",
+            "fileSessionFallbackUsed": False,
+            "freshnessSource": "daemon_status+plugin_snapshot",
+        }
+        daemon_status.setdefault("sourceUsed", "live_daemon")
+        daemon_status.setdefault("daemonUrl", daemon_url)
+        daemon_status.setdefault("snapshotUrl", snapshot_url)
+        daemon_status.setdefault("contextSource", "live_daemon")
+        daemon_status.setdefault("fileSessionFallbackUsed", False)
+        daemon_status.setdefault("freshnessSource", "daemon_status+plugin_snapshot")
     request = world_model_client.build_request(
         needs=[*world_model_core.WORLD_MODEL_NEEDS, "inventory"],
         max_objects=max_objects,

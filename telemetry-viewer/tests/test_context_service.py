@@ -680,10 +680,12 @@ class ContextServiceTest(unittest.TestCase):
                 payload = service.build_named_query_response(args, "current-debug-context", ["knowledge_current_debug_context"])
 
             self.assertEqual(payload["schema"], "context_response.v1")
+            self.assertEqual(payload["sourceUsed"], "live_daemon")
             self.assertEqual(payload["contextSource"], "live_daemon")
             self.assertEqual(payload["daemonUrl"], "http://daemon.test:8890")
             self.assertEqual(payload["snapshotUrl"], "http://snapshot.test:8893/snapshot")
             self.assertFalse(payload["fileSessionFallbackUsed"])
+            self.assertEqual(payload["freshnessSource"], "daemon_status+plugin_snapshot")
             self.assertEqual(payload["latestTick"], 42)
             self.assertIn("knowledgeCurrentDebugContext", payload)
             self.assertEqual(payload["knowledgeCurrentDebugContext"]["source"], "live_8890_8893")
@@ -708,7 +710,9 @@ class ContextServiceTest(unittest.TestCase):
                 payload = service.build_named_query_response(args, "current-blocker", ["knowledge_current_blocker"])
 
             self.assertEqual(payload["contextSource"], "live_daemon")
+            self.assertEqual(payload["sourceUsed"], "live_daemon")
             self.assertFalse(payload["fileSessionFallbackUsed"])
+            self.assertEqual(payload["freshnessSource"], "daemon_status+plugin_snapshot")
             self.assertIn("knowledgeCurrentBlocker", payload)
             blocker = payload["knowledgeCurrentBlocker"]
             self.assertEqual(blocker["freshness"]["sessionPath"], str(live_session))

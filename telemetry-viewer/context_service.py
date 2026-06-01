@@ -1755,10 +1755,12 @@ def _add_live_query_metadata(
     fallback_reason: str | None = None,
     daemon_query_error: str | None = None,
 ) -> dict[str, Any]:
+    response["sourceUsed"] = context_source
     response["contextSource"] = context_source
     response["daemonUrl"] = daemon_url
     response["snapshotUrl"] = snapshot_url
     response["fileSessionFallbackUsed"] = fallback_used
+    response["freshnessSource"] = "daemon_status+plugin_snapshot" if context_source == "live_daemon" else context_source
     if fallback_reason:
         response["fileSessionFallbackReason"] = fallback_reason
     if daemon_query_error:

@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import subprocess
@@ -5,13 +6,16 @@ import sys
 import tempfile
 import unittest
 from argparse import Namespace
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 
 VIEWER_DIR = Path(__file__).resolve().parents[1]
 SCRIPT = VIEWER_DIR / "diagnose_live_readiness.py"
 sys.path.insert(0, str(VIEWER_DIR))
 
+import diagnose_live_readiness
 import live_readiness
 from input_control.executor import execute_next_action
 
@@ -448,6 +452,61 @@ class LiveReadinessTest(unittest.TestCase):
             self.assertEqual(report["capabilities"]["pluginSnapshot"]["url"], "http://127.0.0.1:8893/snapshot")
             self.assertTrue(report["capabilities"]["pluginSnapshot"]["required"])
             self.assertFalse(report["capabilities"]["pluginSnapshot"]["available"])
+
+    def test_fresh_daemon_suppresses_historical_plugin_snapshot_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target()
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [marker]})
+            status = enable_plugin_snapshot(status_for(session, marker), post_menu_age_ms=25)
+            status["warnings"] = ["plugin snapshot request failed: TimeoutError: timed out"]
+            status["liveProcessorFreshness"] = {
+                "candidateTick": 10,
+                "latestTick": 10,
+                "freshByTicks": True,
+                "freshByMillis": True,
+            }
+            status["sourceMetadata"] = {
+                "sourceUsed": "live_daemon",
+                "daemonUrl": "http://127.0.0.1:8890",
+                "snapshotUrl": "http://127.0.0.1:8893/snapshot",
+                "contextSource": "live_daemon",
+                "fileSessionFallbackUsed": False,
+                "freshnessSource": "daemon_status+plugin_snapshot",
+            }
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertEqual(report["status"], "WARN")
+            self.assertTrue(report["readinessPassed"])
+            self.assertTrue(report["pluginSnapshotFresh"])
+            self.assertNotIn("plugin_snapshot_source_not_ready", [item["code"] for item in report["blockers"]])
+            self.assertTrue(report["capabilities"]["pluginSnapshot"]["warningSuppressed"])
+            self.assertEqual(report["sourceUsed"], "live_daemon")
+            self.assertEqual(report["contextSource"], "live_daemon")
+            self.assertFalse(report["fileSessionFallbackUsed"])
+            self.assertEqual(report["freshnessSource"], "daemon_status+plugin_snapshot")
+
+    def test_explicit_fresh_client_tick_hot_status_prevents_unavailable_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target()
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [marker]})
+            status = status_for(session, marker)
+            status["inputSourceActive"] = "plugin-snapshot"
+            status["clientTickHotFresh"] = True
+            status["clientTickHotAvailable"] = True
+            status["gameState"] = "LOGGED_IN"
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertEqual(report["actionReadiness"]["status"], "PASS")
+            self.assertTrue(report["actionReadiness"]["checks"]["clientTickHotFresh"])
+            self.assertNotIn("client_tick_hot_unavailable", [item["code"] for item in report["blockers"]])
 
     def test_plugin_snapshot_warning_is_optional_when_not_active_input_source(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -893,6 +952,55 @@ class LiveReadinessTest(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["schema"], "live_readiness.v2")
         self.assertEqual(before, after)
+
+    def test_human_output_uses_safe_next_step_when_readiness_fails(self):
+        report = {
+            "schema": "live_readiness.v2",
+            "status": "FAIL",
+            "daemonUrl": "http://127.0.0.1:8890",
+            "livenessRecoveryRecommended": True,
+            "actionReadiness": {
+                "status": "FAIL",
+                "executionAllowed": False,
+                "blockers": [{"code": "client_tick_hot_stale", "message": "stale"}],
+            },
+            "clientTickHot": {"recovery": "run ensure_loaded_scene once"},
+        }
+
+        text = diagnose_live_readiness.format_human(report)
+
+        self.assertIn("--ensure-loaded-scene", text)
+        self.assertIn("--arduino-port COM6", text)
+        self.assertNotIn("pyautogui", text)
+        self.assertNotIn("--execute", text)
+
+    def test_human_output_uses_arduino_backend_when_execution_is_allowed(self):
+        report = {
+            "schema": "live_readiness.v2",
+            "status": "PASS",
+            "daemonUrl": "http://127.0.0.1:8890",
+            "actionReadiness": {"status": "PASS", "executionAllowed": True},
+        }
+
+        text = diagnose_live_readiness.format_human(report)
+
+        self.assertIn("--backend arduino", text)
+        self.assertIn("--execute", text)
+        self.assertNotIn("pyautogui", text)
+
+    def test_cli_exits_nonzero_when_execution_is_blocked(self):
+        report = {
+            "schema": "live_readiness.v2",
+            "status": "WARN",
+            "daemonUrl": "http://127.0.0.1:8890",
+            "actionReadiness": {"status": "WARN", "executionAllowed": False},
+        }
+
+        with patch.object(diagnose_live_readiness, "build_readiness_report", return_value=report):
+            with redirect_stdout(io.StringIO()):
+                result = diagnose_live_readiness.main([])
+
+        self.assertEqual(result, 1)
 
 
 class ExecutorReadinessGateTest(unittest.TestCase):

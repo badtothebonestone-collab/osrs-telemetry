@@ -46,6 +46,12 @@ def format_human(report: dict) -> str:
         f"  execution allowed: {yn(action_readiness.get('executionAllowed'))}",
         "",
         "Daemon:",
+        f"  source used: {report.get('sourceUsed') or 'unknown'}",
+        f"  daemon URL: {report.get('daemonUrl') or 'unknown'}",
+        f"  snapshot URL: {report.get('snapshotUrl') or 'unknown'}",
+        f"  context source: {report.get('contextSource') or 'unknown'}",
+        f"  file session fallback used: {yn(report.get('fileSessionFallbackUsed'))}",
+        f"  freshness source: {report.get('freshnessSource') or 'unknown'}",
         f"  reachable: {yn(daemon.get('reachable'))}",
         f"  latest tick: {daemon.get('latestTick') if daemon.get('latestTick') is not None else 'unknown'}",
         f"  session: {daemon.get('sessionPath') or 'unknown'}",
@@ -136,13 +142,18 @@ def format_human(report: dict) -> str:
     lines.extend(f"  WARN: {warning}" for warning in context_warnings) if context_warnings else lines.append("  none")
     lines.extend(["", "Warnings:"])
     lines.extend(f"  WARN: {warning}" for warning in warnings) if warnings else lines.append("  none")
-    lines.extend(
-        [
-            "",
-            "Next action command:",
-            "  python telemetry-viewer\\execute_next_action.py --daemon-url http://127.0.0.1:8890 --backend pyautogui --movement-profile linear_debug --execute --verify-after-action --wait-for-ready 30",
-        ]
-    )
+    daemon_url = report.get("daemonUrl") or "http://127.0.0.1:8890"
+    lines.extend(["", "Next safe step:"])
+    if action_readiness.get("executionAllowed") is True:
+        lines.append(
+            f"  python telemetry-viewer\\execute_next_action.py --daemon-url {daemon_url} --backend arduino --arduino-port COM6 --execute --verify-after-action --wait-for-ready 30"
+        )
+    elif report.get("livenessRecoveryRecommended") or report.get("livenessRecoveryAvailable") or client_hot.get("recovery"):
+        lines.append(
+            f"  python telemetry-viewer\\context_service.py --ensure-loaded-scene --arduino-port COM6 --daemon-url {daemon_url}"
+        )
+    else:
+        lines.append("  no live action command: readiness is blocked")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -166,7 +177,8 @@ def main(argv: list[str] | None = None) -> int:
         profile=args.profile,
     )
     print(json.dumps(report, indent=2, sort_keys=False) if args.json else format_human(report), end="")
-    return 1 if report.get("status") == "FAIL" else 0
+    action_readiness = report.get("actionReadiness") if isinstance(report.get("actionReadiness"), dict) else {}
+    return 1 if report.get("status") == "FAIL" or action_readiness.get("executionAllowed") is False else 0
 
 
 if __name__ == "__main__":

@@ -105,6 +105,47 @@ def _plugin_snapshot_source(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _daemon_live_fresh(status: dict[str, Any]) -> bool:
+    freshness = _dict(
+        status.get("liveProcessorFreshness")
+        or status.get("liveFreshness")
+        or status.get("daemonFreshness")
+    )
+    if not freshness:
+        return _latest_tick(status) is not None and status.get("liveProcessorFresh") is True
+    fresh_by_ticks = freshness.get("freshByTicks")
+    fresh_by_millis = freshness.get("freshByMillis")
+    if fresh_by_ticks is None and fresh_by_millis is None:
+        return _latest_tick(status) is not None
+    return bool(fresh_by_ticks is not False and fresh_by_millis is not False)
+
+
+def _snapshot_failure_warnings(status: dict[str, Any]) -> list[str]:
+    failures = []
+    for warning in [str(item) for item in status.get("warnings") or [] if item is not None]:
+        lowered = warning.lower()
+        if (
+            "plugin snapshot request failed" in lowered
+            or "snapshot endpoint unreachable" in lowered
+            or ("plugin snapshot endpoint" in lowered and "failed" in lowered)
+        ):
+            failures.append(warning)
+    return failures
+
+
+def _current_snapshot_failures(status: dict[str, Any], failures: list[str]) -> tuple[list[str], list[str]]:
+    if not failures:
+        return [], []
+    if status.get("pluginSnapshotAvailable") is False:
+        return failures, []
+    if _latest_tick(status) is None or not _daemon_live_fresh(status):
+        return failures, []
+    # Daemon /status can retain an old snapshot timeout warning after the live
+    # in-memory stream has moved on. Do not let that historical warning override
+    # fresh daemon truth in Snapshot No-File mode.
+    return [], failures
+
+
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
@@ -223,8 +264,16 @@ def _client_tick_hot_state(status: dict[str, Any]) -> dict[str, Any]:
     daemon_tick_age = _int_or_none(status.get("daemonLatestTickAgeMillis") or status.get("latestTickAgeMillis"))
     game_state = _game_state_from_hot(status, hot, hover)
     is_logged_in = _is_logged_in_game_state(game_state)
-    available = bool(hot) and bool(hover)
-    fresh_by_age = bool(available and age_millis is not None and age_millis <= CLIENT_TICK_HOT_MAX_AGE_MILLIS)
+    explicit_available = status.get("clientTickHotAvailable")
+    explicit_fresh = status.get("clientTickHotFresh")
+    available = bool((bool(hot) and bool(hover)) or explicit_available is True or explicit_fresh is True)
+    fresh_by_age = bool(
+        available
+        and (
+            explicit_fresh is True
+            or (age_millis is not None and age_millis <= CLIENT_TICK_HOT_MAX_AGE_MILLIS)
+        )
+    )
     stale_reason = _hot_stale_reason(
         status,
         available=available,
@@ -232,7 +281,7 @@ def _client_tick_hot_state(status: dict[str, Any]) -> dict[str, Any]:
         game_state=game_state,
         is_logged_in=is_logged_in,
     )
-    fresh = bool(fresh_by_age and stale_reason is None)
+    fresh = bool(explicit_fresh is True or (fresh_by_age and stale_reason is None))
     return {
         "available": available,
         "fresh": fresh,
@@ -424,6 +473,98 @@ def _action_need_state(
     }
 
 
+def _route_context_applicability(
+    status: dict[str, Any],
+    *,
+    action_need: dict[str, Any],
+    current_intent: str,
+    action: str | None,
+    selected_actionable: bool,
+) -> dict[str, Any]:
+    brain = _dict(status.get("brain"))
+    service_route = _dict(brain.get("serviceRouteContext") or status.get("serviceRouteContext"))
+    pathing = _dict(brain.get("pathingContext") or status.get("pathingContext"))
+    route_context_present = bool(
+        service_route
+        or status.get("serviceRouteId")
+        or status.get("serviceRouteCurrentNodeId")
+        or status.get("serviceRouteNextEdgeType")
+        or status.get("routeContext")
+    )
+    cycle_stage = str(action_need.get("cycleStage") or "").lower()
+    phase = str(action_need.get("phase") or "").lower()
+    active_intent = str(action_need.get("activeIntent") or "").lower()
+    inventory_full = bool(
+        _first_value(status.get("inventoryFull"), _dict(brain.get("inventoryContext")).get("inventoryFull")) is True
+        or action_need.get("inventoryFreeSlots") == 0
+    )
+    needs_service = action_need.get("needsService") is True
+    route_intents = {
+        "navigation_waypoint_action",
+        "route_transition_action",
+        "service_object_action",
+        "interface_dialogue_choice_action",
+    }
+    route_phases = {
+        "needs_service",
+        "route_to_service",
+        "pathing_to_service",
+        "inventory_full",
+        "service",
+        "return_to_resource",
+        "return_to_resource_area",
+    }
+    active_route_action = bool(
+        current_intent in route_intents
+        or action in NAVIGATION_ACTIONS
+        or action in SERVICE_OBJECT_ACTIONS
+        or action in ROUTE_TRANSITION_ACTIONS
+        or action in INTERFACE_DIALOGUE_ACTIONS
+    )
+    route_phase_active = bool(cycle_stage in route_phases or phase in route_phases or active_intent in route_phases)
+    collecting_safe_resource = bool(
+        route_context_present
+        and not needs_service
+        and not inventory_full
+        and current_intent == "resource_object_action"
+        and action == "select_resource_target"
+        and selected_actionable
+    )
+    applicable = bool(route_context_present and (needs_service or inventory_full or active_route_action or route_phase_active))
+    if collecting_safe_resource:
+        applicable = False
+        reason = "collecting_resources_resource_target_ready"
+    elif not route_context_present:
+        reason = "route_context_absent"
+    elif applicable:
+        reason = (
+            "route_intent_active"
+            if active_route_action
+            else "service_needed"
+            if needs_service
+            else "inventory_full"
+            if inventory_full
+            else "route_phase_active"
+        )
+    else:
+        reason = "route_context_not_required_for_current_intent"
+    age = _first_value(
+        status.get("routeContextAgeMs"),
+        status.get("serviceRouteContextAgeMs"),
+        service_route.get("ageMs"),
+        pathing.get("ageMs"),
+    )
+    return {
+        "routeContextPresent": route_context_present,
+        "routeContextApplicable": applicable,
+        "routeContextApplicabilityReason": reason,
+        "routeContextWarningOnly": bool(route_context_present and not applicable),
+        "staleRouteContextSuppressed": bool(route_context_present and not applicable),
+        "routeContextSource": "daemon_status" if route_context_present else None,
+        "routeContextAgeMs": age,
+    }
+
+
 def _safe_aimpoint_status(*targets: dict[str, Any]) -> str | None:
     for target in targets:
         safe = _dict(target.get("safeAimPoint"))
@@ -554,13 +695,19 @@ def _status_from_parts(*, blockers: list[Any] | None = None, warnings: list[Any]
     return "PASS"
 
 
-def _status_payload_unavailable(error: Exception) -> dict[str, Any]:
+def _status_payload_unavailable(error: Exception, *, daemon_url: str = "http://127.0.0.1:8890") -> dict[str, Any]:
     message = f"daemon status unavailable: {type(error).__name__}: {error}"
     blockers = [_blocker("daemon_status_unavailable", message, action="start or restart live_core_daemon.py")]
     payload = {
         "schema": SCHEMA,
         "status": "FAIL",
         "ready": False,
+        "sourceUsed": "live_daemon",
+        "daemonUrl": daemon_url,
+        "snapshotUrl": _plugin_snapshot_source({})["snapshotUrl"],
+        "contextSource": "daemon_unavailable",
+        "fileSessionFallbackUsed": False,
+        "freshnessSource": "daemon_unavailable",
         "profile": "woodcutting",
         "proposedAction": "unknown",
         "daemon": {"reachable": False, "latestTick": None, "sessionPath": None},
@@ -639,7 +786,7 @@ def build_readiness_report(
         try:
             status = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
         except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError, ValueError) as error:
-            return _status_payload_unavailable(error)
+            return _status_payload_unavailable(error, daemon_url=daemon_url)
     else:
         status = daemon_status if isinstance(daemon_status, dict) else {}
 
@@ -652,13 +799,18 @@ def build_readiness_report(
     input_source_active = str(status.get("inputSourceActive") or "").lower()
     plugin_snapshot_required = input_source_active == "plugin-snapshot"
     plugin_snapshot_source = _plugin_snapshot_source(status)
-    snapshot_failures = [
-        warning
-        for warning in status_warnings
-        if "plugin snapshot request failed" in warning.lower()
-        or "snapshot endpoint unreachable" in warning.lower()
-        or "plugin snapshot endpoint" in warning.lower() and "failed" in warning.lower()
-    ]
+    source_metadata = _dict(status.get("sourceMetadata") or status.get("_liveQueryMetadata"))
+    source_used = str(source_metadata.get("sourceUsed") or ("provided_daemon_status" if daemon_status is not None else "live_daemon"))
+    context_source = str(source_metadata.get("contextSource") or ("live_daemon" if daemon_reachable else "daemon_unavailable"))
+    file_session_fallback_used = bool(source_metadata.get("fileSessionFallbackUsed", False))
+    freshness_source = str(
+        source_metadata.get("freshnessSource")
+        or ("daemon_status.liveProcessorFreshness" if _daemon_live_fresh(status) else "daemon_status")
+    )
+    effective_daemon_url = str(source_metadata.get("daemonUrl") or daemon_url)
+    effective_snapshot_url = str(source_metadata.get("snapshotUrl") or plugin_snapshot_source["snapshotUrl"])
+    raw_snapshot_failures = _snapshot_failure_warnings(status)
+    snapshot_failures, suppressed_snapshot_failures = _current_snapshot_failures(status, raw_snapshot_failures)
     if plugin_snapshot_required and snapshot_failures:
         blockers.append(
             _blocker(
@@ -673,6 +825,10 @@ def build_readiness_report(
             )
         )
         missing.append("plugin.snapshot")
+    for warning in suppressed_snapshot_failures:
+        non_applicable_context_warnings.append(
+            f"historical plugin snapshot warning suppressed because daemon live status is fresh: {warning}"
+        )
 
     root = get_sessions_dir(sessions_dir)
     latest_session = find_newest_session(root)
@@ -1155,6 +1311,19 @@ def build_readiness_report(
             else:
                 warnings.append(warning)
 
+    selected_actionable = bool(proposal.executable) if action in RESOURCE_TARGET_ACTIONS else False
+    route_context_applicability = _route_context_applicability(
+        status,
+        action_need=action_need,
+        current_intent=current_intent,
+        action=action,
+        selected_actionable=selected_actionable,
+    )
+    if route_context_applicability.get("routeContextWarningOnly"):
+        non_applicable_context_warnings.append(
+            "service route context present but non-applicable while resource collection target is ready"
+        )
+
     checks_skipped: list[str] = []
     if not resource_target_required:
         checks_skipped.extend(
@@ -1215,7 +1384,6 @@ def build_readiness_report(
     }
     selected_summary = target_summary(selected_target, profile=profile, source_session=daemon_session, source_tick=tick, status=status) if selected_target else None
     selected_highlighter_summary = target_summary(matched_target, profile=profile, source_session=highlighter_session, source_tick=tick, status=status) if matched_target else None
-    selected_actionable = bool(proposal.executable) if action in RESOURCE_TARGET_ACTIONS else None
     if resource_target_required and not overlay_health.get("overlaySourceRequiredForCurrentAction"):
         for capability in ("overlay_debug_state.json", "highlighter.markers", "target.highlighterMatch"):
             if capability in required_capabilities:
@@ -1226,6 +1394,12 @@ def build_readiness_report(
         "schema": SCHEMA,
         "status": status_value,
         "ready": ready,
+        "sourceUsed": source_used,
+        "daemonUrl": effective_daemon_url,
+        "snapshotUrl": effective_snapshot_url,
+        "contextSource": context_source,
+        "fileSessionFallbackUsed": file_session_fallback_used,
+        "freshnessSource": freshness_source,
         "profile": profile,
         "proposedAction": action,
         "currentIntent": current_intent,
@@ -1249,7 +1423,7 @@ def build_readiness_report(
             "onScreen": _target_check_value(selected_target, matched_target, "onScreen") if selected_target or matched_target else None,
             "geometryAvailable": _target_check_value(selected_target, matched_target, "geometryAvailable") if selected_target or matched_target else None,
             "hasAimPoint": _has_aim_point(selected_target) or _has_aim_point(matched_target) or bool(selected_checks.get("hasAimPoint")),
-            "actionable": selected_actionable,
+            "actionable": selected_actionable if action in RESOURCE_TARGET_ACTIONS else None,
             "safeAimPointStatus": selected_safe_aimpoint.get("status") if selected_safe_aimpoint else None,
             "uiBlocked": _target_check_value(selected_target, matched_target, "uiBlocked") if selected_target or matched_target else None,
             "stale": freshness.get("stale"),
@@ -1263,6 +1437,7 @@ def build_readiness_report(
         "knownRecoverableState": bool(liveness_recovery.get("knownRecoverableState")),
         "manualLoginRequired": bool(liveness_recovery.get("manualLoginRequired")),
         "unknownScreen": bool(liveness_recovery.get("unknownScreen")),
+        **route_context_applicability,
         "overlayHealth": overlay_health,
         "actionSafetyEvidence": action_safety_evidence,
         "actionReadiness": {
@@ -1367,6 +1542,8 @@ def build_readiness_report(
                 "status": status.get("pluginSnapshotStatus"),
                 "inputSourceActive": status.get("inputSourceActive"),
                 "reason": snapshot_failures[0] if snapshot_failures else None,
+                "suppressedWarnings": suppressed_snapshot_failures,
+                "warningSuppressed": bool(suppressed_snapshot_failures),
             },
             "overlayDebug": {
                 "required": bool(overlay_health.get("overlaySourceRequiredForCurrentAction")),

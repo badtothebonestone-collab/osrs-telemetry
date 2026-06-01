@@ -431,6 +431,96 @@ def test_client_tick_hot_blocker_is_freshness_not_hover_menu():
     assert result["data"]["safeToRunBoundedLiveAction"] is False
 
 
+def test_stale_route_context_is_warning_only_during_resource_collection():
+    status = {
+        "schema": "context_status.v1",
+        "latestTick": 45,
+        "gameState": "LOGGED_IN",
+        "warnings": ["route anchor missing from previous service route"],
+        "worldModelPayloads": synthetic_payloads(),
+        "brain": {
+            "genericTaskState": {
+                "phase": "target_selected",
+                "cycleStage": "collecting_resources",
+                "activeIntent": "select_target",
+            },
+            "inventoryContext": {"freeSlots": 14, "occupiedSlots": 14, "inventoryFull": False},
+            "goalProgress": {"heldResourceCount": 2, "resourceGroup": "logs"},
+            "serviceRouteContext": {
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "currentNodeId": "lumbridge_castle_west_approach",
+                "currentStepIndex": 0,
+                "nextEdgeType": "walk_to",
+                "routeStepStatus": "route_anchor_missing",
+            },
+        },
+    }
+    fabric = knowledge_fabric.KnowledgeFabric.from_status(status)
+    readiness = {
+        "currentIntent": "resource_object_action",
+        "proposedAction": "select_resource_target",
+        "actionNeed": {
+            "cycleStage": "collecting_resources",
+            "phase": "target_selected",
+            "activeIntent": "select_target",
+            "inventoryFreeSlots": 14,
+            "needsService": False,
+        },
+        "actionReadiness": {"status": "PASS", "executionAllowed": True, "blockers": [], "warnings": []},
+        "readinessPassed": True,
+    }
+    proposal = {
+        "proposedAction": "select_resource_target",
+        "executable": True,
+        "actionTargetSource": "live_resource_candidate",
+        "actionability": "needs_hover_confirmation",
+        "targetExplanation": {
+            "name": "Tree",
+            "worldLocation": {"worldX": 3213, "worldY": 3238, "plane": 0},
+            "safeAimPoint": {"status": "PASS", "actionable": True},
+        },
+    }
+
+    with patch.object(fabric, "_readiness_report", return_value=readiness), patch.object(fabric, "_action_proposal", return_value=proposal):
+        result = fabric.explain_current_blocker()
+
+    data = result["data"]
+    assert data["primaryBlockerCategory"] == "ready"
+    assert data["safeToRunBoundedLiveAction"] is True
+    assert data["routeContextPresent"] is True
+    assert data["routeContextApplicable"] is False
+    assert data["routeContextWarningOnly"] is True
+    assert data["staleRouteContextSuppressed"] is True
+    assert data["routeContextApplicabilityReason"] == "collecting_resources_resource_target_ready"
+
+
+def test_current_blocker_safe_to_run_follows_action_readiness_failure():
+    fabric = make_fabric()
+    readiness = {
+        "currentIntent": "resource_object_action",
+        "proposedAction": "select_resource_target",
+        "actionReadiness": {
+            "status": "FAIL",
+            "executionAllowed": False,
+            "blockers": [{"code": "selected_target_not_actionable", "message": "safe aim point missing"}],
+            "warnings": [],
+        },
+    }
+    proposal = {
+        "proposedAction": "select_resource_target",
+        "executable": True,
+        "actionTargetSource": "live_resource_candidate",
+        "targetExplanation": {"name": "Tree", "safeAimPoint": {"status": "PASS"}},
+    }
+
+    with patch.object(fabric, "_readiness_report", return_value=readiness), patch.object(fabric, "_action_proposal", return_value=proposal):
+        result = fabric.explain_current_blocker()
+
+    assert result["data"]["primaryBlockerCategory"] == "readiness"
+    assert result["data"]["safeToRunBoundedLiveAction"] is False
+    assert "selected_target_not_actionable" in " ".join(result["data"]["blockers"])
+
+
 def test_pathing_blocker_query_includes_route_context_and_frontier():
     fabric = make_route_blocker_fabric()
 
