@@ -97,6 +97,8 @@ class ClientTickHotState
 		payload.put("monotonicTimeNanos", longValue(metadata, "monotonicTimeNanos"));
 		payload.put("gameTickAtSample", longValue(metadata, "gameTickAtSample"));
 		payload.put("gameState", metadata == null ? null : metadata.get("gameState"));
+		payload.put("sampleSource", metadata == null ? null : metadata.get("sampleSource"));
+		payload.put("sourceEvent", metadata == null ? null : metadata.get("sourceEvent"));
 		payload.put("sessionId", metadata == null ? null : metadata.get("sessionId"));
 		payload.put("sessionPath", metadata == null ? null : metadata.get("sessionPath"));
 		payload.put("mouse", mousePayload(clientTick, postMenuSort, clicked));

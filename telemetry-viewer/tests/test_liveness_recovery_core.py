@@ -10,8 +10,22 @@ import liveness_recovery_core as recovery
 import run_runelite_bootstrap as bootstrap
 
 
-def snapshot(game_state="LOGIN_SCREEN", *, object_total=0, hot_age_ms=25, baseline_state=None, world_state=None):
+def snapshot(game_state="LOGIN_SCREEN", *, object_total=0, hot_age_ms=25, baseline_state=None, world_state=None, source_event=None):
     baseline = {"gameState": baseline_state or game_state}
+    hot = {
+        "schema": "client_tick_hot.v1",
+        "gameState": game_state,
+        "postMenuSort": {
+            "topOption": "Walk here",
+            "topTarget": "",
+            "topType": "WALK",
+            "gameState": game_state,
+        },
+        "latency": {"ageMillis": hot_age_ms, "postMenuSortAgeMillis": hot_age_ms},
+    }
+    if source_event:
+        hot["sourceEvent"] = source_event
+        hot["sampleSource"] = source_event
     payload = {
         "status": "PASS",
         "latestTick": 42,
@@ -22,17 +36,7 @@ def snapshot(game_state="LOGIN_SCREEN", *, object_total=0, hot_age_ms=25, baseli
                 "metadata": {"gameState": world_state or game_state},
                 "objects": {"total": object_total},
             },
-            "client_tick_hot": {
-                "schema": "client_tick_hot.v1",
-                "gameState": game_state,
-                "postMenuSort": {
-                    "topOption": "Walk here",
-                    "topTarget": "",
-                    "topType": "WALK",
-                    "gameState": game_state,
-                },
-                "latency": {"ageMillis": hot_age_ms, "postMenuSortAgeMillis": hot_age_ms},
-            },
+            "client_tick_hot": hot,
         },
     }
     return payload
@@ -99,6 +103,17 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         self.assertTrue(fresh["clientTickHotFresh"])
         self.assertFalse(stale["loadedSceneVerified"])
         self.assertFalse(stale["clientTickHotFresh"])
+
+    def test_loaded_scene_proof_rejects_game_state_changed_only_hot_sample(self):
+        proof = recovery.loaded_scene_proof(
+            snapshot("LOGGED_IN", object_total=12, hot_age_ms=25, source_event="GameStateChanged"),
+            reachable=True,
+        )
+
+        self.assertFalse(proof["loadedSceneVerified"])
+        self.assertFalse(proof["clientTickHotFresh"])
+        self.assertEqual(proof["gameState"], "LOGGED_IN")
+        self.assertEqual(proof["worldModelObjectTotal"], 12)
 
     def test_login_screen_with_disconnected_candidate_classifies_dialog(self):
         state = recovery.classify_state(

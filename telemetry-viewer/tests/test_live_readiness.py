@@ -137,11 +137,18 @@ def dialogue_status_for(session: Path, *, latest_tick=10):
     return status
 
 
-def enable_plugin_snapshot(status: dict, *, post_menu_age_ms=25, client_tick_age_ms=None, game_state="LOGGED_IN"):
+def enable_plugin_snapshot(
+    status: dict,
+    *,
+    post_menu_age_ms=25,
+    client_tick_age_ms=None,
+    game_state="LOGGED_IN",
+    source_event=None,
+):
     status["inputSourceActive"] = "plugin-snapshot"
     status["pluginSnapshotHost"] = "127.0.0.1"
     status["pluginSnapshotPort"] = 8893
-    status["clientTickHot"] = {
+    hot = {
         "schema": "client_tick_hot.v1",
         "clientTick": 100,
         "gameTickAtSample": status.get("latestTick"),
@@ -156,6 +163,10 @@ def enable_plugin_snapshot(status: dict, *, post_menu_age_ms=25, client_tick_age
         },
         "latency": {"postMenuSortAgeMillis": post_menu_age_ms, "ageMillis": post_menu_age_ms if client_tick_age_ms is None else client_tick_age_ms},
     }
+    if source_event:
+        hot["sourceEvent"] = source_event
+        hot["sampleSource"] = source_event
+    status["clientTickHot"] = hot
     return status
 
 
@@ -819,6 +830,44 @@ class LiveReadinessTest(unittest.TestCase):
             self.assertTrue(report["actionReadiness"]["executionAllowed"])
             self.assertTrue(report["capabilities"]["clientTickHot"]["fresh"])
             self.assertEqual(report["capabilities"]["clientTickHot"]["latestPostMenuSortAgeMillis"], 100_000)
+
+    def test_game_state_changed_hot_sample_does_not_allow_action_readiness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            selected = target(key="selected")
+            other = target(key="other")
+            other["worldX"] = 3300
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [other]})
+
+            status = enable_plugin_snapshot(
+                navigation_status_for(session, resource_marker=selected),
+                post_menu_age_ms=100_000,
+                client_tick_age_ms=25,
+                game_state="LOGGED_IN",
+                source_event="GameStateChanged",
+            )
+            report = live_readiness.build_readiness_report(
+                daemon_status=status,
+                sessions_dir=root,
+            )
+
+            self.assertEqual(report["currentIntent"], "navigation_waypoint_action")
+            self.assertEqual(report["actionReadiness"]["status"], "FAIL")
+            self.assertFalse(report["actionReadiness"]["executionAllowed"])
+            self.assertIn("client_tick_hot_stale", [item["code"] for item in report["blockers"]])
+            self.assertEqual(report["clientTickHot"]["gameState"], "LOGGED_IN")
+            self.assertTrue(report["clientTickHot"]["livenessGameStateFresh"])
+            self.assertFalse(report["clientTickHot"]["actionHotFresh"])
+            self.assertFalse(report["clientTickHot"]["clientTickHotUsableForAction"])
+            self.assertEqual(report["clientTickHot"]["clientTickHotSource"], "GameStateChanged")
+            self.assertEqual(report["clientTickHot"]["staleReason"], "game_state_changed_only")
+            self.assertFalse(report["actionReadiness"]["checks"]["clientTickHotFresh"])
+            self.assertTrue(report["actionReadiness"]["checks"]["livenessGameStateFresh"])
+            self.assertFalse(report["actionReadiness"]["checks"]["actionHotFresh"])
+            self.assertFalse(report["actionReadiness"]["checks"]["clientTickHotUsableForAction"])
+            self.assertEqual(report["capabilities"]["clientTickHot"]["sourceEvent"], "GameStateChanged")
 
     def test_dialogue_choice_readiness_passes_when_expected_option_exists(self):
         with tempfile.TemporaryDirectory() as tmp:

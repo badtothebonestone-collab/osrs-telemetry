@@ -39,6 +39,8 @@ public class PluginSnapshotEndpoint implements Closeable
 	static final String PRESET_RESPONSE_SCHEMA = "telemetry_preset_response.v1";
 	static final int MAX_REQUEST_BODY_BYTES = 16 * 1024;
 	static final int MAX_TILE_PROJECTION_REQUESTS = 16;
+	static final long CACHE_FRESHNESS_THRESHOLD_MILLIS = 5_000L;
+	static final String STALE_REASON_ALL_PACKETS = "plugin_all_packets_stale";
 	private static final String CONTENT_TYPE_JSON = "application/json; charset=utf-8";
 	private static final List<String> SUPPORTED_NEEDS = Arrays.asList(
 			"baseline",
@@ -342,17 +344,27 @@ public class PluginSnapshotEndpoint implements Closeable
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
 		Map<String, Object> cacheHealth = cacheHealth();
+		CacheFreshness cacheFreshness = cacheFreshness(cacheHealth);
+		List<String> warnings = endpointWarnings();
+		warnings.addAll(cacheFreshness.healthWarnings);
 		payload.put("schema", HEALTH_SCHEMA);
 		payload.put("enabled", true);
-		payload.put("status", liveCache == null ? "FAIL" : "PASS");
+		payload.put("status", liveCache == null ? "FAIL" : (cacheFreshness.healthWarn ? "WARN" : "PASS"));
 		payload.put("latestTick", liveCache == null ? -1L : liveCache.getLatestTick());
 		payload.put("latestSequence", liveCache == null ? -1L : liveCache.getLatestSequence());
 		payload.put("cachedPacketTypes", liveCache == null ? List.of() : liveCache.packetTypes());
 		payload.put("cacheAgeMillisByType", cacheHealth.get("liveCacheAgeMillisByType"));
+		payload.put("cacheWallClockFresh", cacheFreshness.anyFreshPacket);
+		payload.put("allCachedPacketsStale", cacheFreshness.allPacketsStale);
+		payload.put("cacheFreshnessThresholdMillis", CACHE_FRESHNESS_THRESHOLD_MILLIS);
+		payload.put("maxCacheAgeMillis", cacheFreshness.maxCacheAgeMillis);
+		payload.put("freshPacketTypes", cacheFreshness.freshPacketTypes);
+		payload.put("stalePacketTypes", cacheFreshness.stalePacketTypes);
+		payload.put("staleReasons", cacheFreshness.staleReasons);
 		payload.put("cacheHealth", cacheHealth);
 		payload.put("endpointHost", host);
 		payload.put("endpointPort", boundPort == 0 ? port : boundPort);
-		payload.put("warnings", endpointWarnings());
+		payload.put("warnings", warnings);
 		return payload;
 	}
 
@@ -419,11 +431,14 @@ public class PluginSnapshotEndpoint implements Closeable
 		List<String> hotNeeds = requestedHotNeeds(request);
 		List<String> worldModelNeeds = requestedWorldModelNeeds(request);
 		Map<String, Object> clientTickHot = clientTickHotSnapshot(request, false);
+		Map<String, Object> cacheHealth = cacheHealth();
+		CacheFreshness cacheFreshness = cacheFreshness(cacheHealth);
 		List<Map<String, Object>> tileProjectionRequests = tileProjectionRequests(request);
 		Map<String, Object> response = new LinkedHashMap<>();
 		Map<String, JsonElement> payloads = new LinkedHashMap<>();
 		Map<String, Object> freshness = new LinkedHashMap<>();
 		Map<String, Long> ageTicksByNeed = new LinkedHashMap<>();
+		Map<String, Long> ageMillisByNeed = new LinkedHashMap<>();
 		List<String> missingCapabilities = new ArrayList<>();
 		List<String> warnings = new ArrayList<>();
 		Map<String, Object> responseSizing = new LinkedHashMap<>();
@@ -476,6 +491,16 @@ public class PluginSnapshotEndpoint implements Closeable
 					stale = true;
 					warnings.add(need + " cache age exceeded maxAgeTicks");
 				}
+				Long ageMillis = cacheFreshness.ageMillisByType.get(packetType);
+				if (ageMillis != null)
+				{
+					ageMillisByNeed.put(need, ageMillis);
+					if (ageMillis > CACHE_FRESHNESS_THRESHOLD_MILLIS)
+					{
+						stale = true;
+						warnings.add(need + " cache age exceeded maxAgeMillis");
+					}
+				}
 
 				JsonElement payload = parsePayload(cached.payloadJson);
 				payload = compactPayloadForResponse(
@@ -488,6 +513,19 @@ public class PluginSnapshotEndpoint implements Closeable
 						warnings,
 						responseSizing);
 				payloads.put(need, payload);
+			}
+		}
+		if (liveCache != null)
+		{
+			if (!cacheFreshness.hasPacketTypes)
+			{
+				stale = true;
+				warnings.add("plugin live cache has no payloads");
+			}
+			else if (cacheFreshness.allPacketsStale)
+			{
+				stale = true;
+				warnings.add(STALE_REASON_ALL_PACKETS);
 			}
 		}
 		if (hotNeeds.contains("interaction_hot"))
@@ -524,6 +562,12 @@ public class PluginSnapshotEndpoint implements Closeable
 		freshness.put("maxAgeTicks", maxAgeTicks);
 		freshness.put("fresh", !stale);
 		freshness.put("ageTicksByNeed", ageTicksByNeed);
+		freshness.put("ageMillisByNeed", ageMillisByNeed);
+		freshness.put("cacheWallClockFresh", cacheFreshness.anyFreshPacket);
+		freshness.put("allCachedPacketsStale", cacheFreshness.allPacketsStale);
+		freshness.put("cacheFreshnessThresholdMillis", CACHE_FRESHNESS_THRESHOLD_MILLIS);
+		freshness.put("maxCacheAgeMillis", cacheFreshness.maxCacheAgeMillis);
+		freshness.put("staleReasons", cacheFreshness.staleReasons);
 
 		String status = "PASS";
 		if (liveCache == null || payloads.isEmpty())
@@ -563,7 +607,7 @@ public class PluginSnapshotEndpoint implements Closeable
 		response.put("warnings", warnings);
 		response.put("serviceTimingMillis", elapsedMillis(startNanos));
 		response.put("responseSizing", responseSizing);
-		response.put("cacheHealth", cacheHealth());
+		response.put("cacheHealth", cacheHealth);
 		return response;
 	}
 
@@ -1644,9 +1688,143 @@ public class PluginSnapshotEndpoint implements Closeable
 		}
 	}
 
+	private CacheFreshness cacheFreshness(Map<String, Object> cacheHealth)
+	{
+		Map<String, Long> ageMillisByType = longMap(cacheHealth == null ? null : cacheHealth.get("liveCacheAgeMillisByType"));
+		List<String> packetTypes = stringList(cacheHealth == null ? null : cacheHealth.get("liveCachePayloadTypes"));
+		List<String> freshPacketTypes = new ArrayList<>();
+		List<String> stalePacketTypes = new ArrayList<>();
+		List<String> staleReasons = new ArrayList<>();
+		List<String> healthWarnings = new ArrayList<>();
+		long maxCacheAgeMillis = -1L;
+
+		for (String packetType : packetTypes)
+		{
+			Long ageMillis = ageMillisByType.get(packetType);
+			if (ageMillis == null || ageMillis < 0L)
+			{
+				stalePacketTypes.add(packetType);
+				continue;
+			}
+			maxCacheAgeMillis = Math.max(maxCacheAgeMillis, ageMillis);
+			if (ageMillis <= CACHE_FRESHNESS_THRESHOLD_MILLIS)
+			{
+				freshPacketTypes.add(packetType);
+			}
+			else
+			{
+				stalePacketTypes.add(packetType);
+			}
+		}
+
+		boolean hasPacketTypes = !packetTypes.isEmpty();
+		boolean anyFreshPacket = !freshPacketTypes.isEmpty();
+		boolean allPacketsStale = hasPacketTypes && !anyFreshPacket;
+		boolean healthWarn = !hasPacketTypes || allPacketsStale;
+		if (!hasPacketTypes)
+		{
+			staleReasons.add("plugin_cache_empty");
+			healthWarnings.add("plugin live cache has no payloads");
+		}
+		else if (allPacketsStale)
+		{
+			staleReasons.add(STALE_REASON_ALL_PACKETS);
+			healthWarnings.add(STALE_REASON_ALL_PACKETS);
+		}
+		else if (!stalePacketTypes.isEmpty())
+		{
+			staleReasons.add("plugin_some_packets_stale");
+		}
+
+		return new CacheFreshness(
+				ageMillisByType,
+				freshPacketTypes,
+				stalePacketTypes,
+				staleReasons,
+				healthWarnings,
+				maxCacheAgeMillis,
+				hasPacketTypes,
+				anyFreshPacket,
+				allPacketsStale,
+				healthWarn);
+	}
+
+	private Map<String, Long> longMap(Object value)
+	{
+		Map<String, Long> result = new LinkedHashMap<>();
+		if (!(value instanceof Map))
+		{
+			return result;
+		}
+		for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet())
+		{
+			if (entry.getKey() == null || !(entry.getValue() instanceof Number))
+			{
+				continue;
+			}
+			result.put(String.valueOf(entry.getKey()), ((Number) entry.getValue()).longValue());
+		}
+		return result;
+	}
+
+	private List<String> stringList(Object value)
+	{
+		List<String> result = new ArrayList<>();
+		if (!(value instanceof List))
+		{
+			return result;
+		}
+		for (Object item : (List<?>) value)
+		{
+			if (item != null)
+			{
+				result.add(String.valueOf(item));
+			}
+		}
+		return result;
+	}
+
 	private Map<String, Object> cacheHealth()
 	{
 		return liveCache == null ? Map.of() : liveCache.health();
+	}
+
+	private static final class CacheFreshness
+	{
+		private final Map<String, Long> ageMillisByType;
+		private final List<String> freshPacketTypes;
+		private final List<String> stalePacketTypes;
+		private final List<String> staleReasons;
+		private final List<String> healthWarnings;
+		private final long maxCacheAgeMillis;
+		private final boolean hasPacketTypes;
+		private final boolean anyFreshPacket;
+		private final boolean allPacketsStale;
+		private final boolean healthWarn;
+
+		private CacheFreshness(
+				Map<String, Long> ageMillisByType,
+				List<String> freshPacketTypes,
+				List<String> stalePacketTypes,
+				List<String> staleReasons,
+				List<String> healthWarnings,
+				long maxCacheAgeMillis,
+				boolean hasPacketTypes,
+				boolean anyFreshPacket,
+				boolean allPacketsStale,
+				boolean healthWarn)
+		{
+			this.ageMillisByType = ageMillisByType;
+			this.freshPacketTypes = freshPacketTypes;
+			this.stalePacketTypes = stalePacketTypes;
+			this.staleReasons = staleReasons;
+			this.healthWarnings = healthWarnings;
+			this.maxCacheAgeMillis = maxCacheAgeMillis;
+			this.hasPacketTypes = hasPacketTypes;
+			this.anyFreshPacket = anyFreshPacket;
+			this.allPacketsStale = allPacketsStale;
+			this.healthWarn = healthWarn;
+		}
 	}
 
 	private List<String> endpointWarnings()

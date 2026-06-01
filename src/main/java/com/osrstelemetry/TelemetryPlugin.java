@@ -563,6 +563,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("gameState", String.valueOf(event.getGameState()));
 
 		logEvent("GameStateChanged", payload);
+		recordGameStateHotSample(event.getGameState());
 
 		if (event.getGameState() == GameState.LOADING
 				|| event.getGameState() == GameState.LOGIN_SCREEN
@@ -571,6 +572,13 @@ public class TelemetryPlugin extends Plugin
 			clearSceneIndex("gameState:" + event.getGameState());
 			worldModelCache.clear("gameState:" + event.getGameState());
 		}
+	}
+
+	private void recordGameStateHotSample(GameState gameState)
+	{
+		Map<String, Object> payload = clientTickPayload("GameStateChanged");
+		payload.put("gameState", gameState == null ? null : String.valueOf(gameState));
+		clientTickHotState.recordClientTick(payload);
 	}
 
 	@Subscribe

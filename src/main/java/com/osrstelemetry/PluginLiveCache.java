@@ -29,6 +29,11 @@ public class PluginLiveCache
 
 	public boolean update(String packetType, long tick, String timestampUtc, Object payload)
 	{
+		return updateAt(packetType, tick, timestampUtc, payload, Instant.now());
+	}
+
+	boolean updateAt(String packetType, long tick, String timestampUtc, Object payload, Instant cachedAt)
+	{
 		if (packetType == null || packetType.isBlank() || timestampUtc == null || gson == null)
 		{
 			return false;
@@ -37,7 +42,7 @@ public class PluginLiveCache
 		try
 		{
 			long nextSequence = sequence.incrementAndGet();
-			String now = Instant.now().toString();
+			String now = (cachedAt == null ? Instant.now() : cachedAt).toString();
 			String payloadJson = gson.toJson(payload);
 			CachedPayload cachedPayload = new CachedPayload(
 					packetType,

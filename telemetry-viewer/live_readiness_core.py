@@ -228,6 +228,8 @@ def _hot_recovery_action(stale_reason: str | None) -> str:
         return "run ensure_loaded_scene once to refocus/recover, then restart daemon if client ticks do not advance"
     if stale_reason == "daemon_snapshot_not_refreshing":
         return "restart/rebind the daemon to the current plugin session"
+    if stale_reason == "game_state_changed_only":
+        return "wait for fresh ClientTick/PostMenuSort hot-state evidence after the game-state transition"
     return "run ensure_loaded_scene once or wait for fresh client tick/menu samples"
 
 
@@ -264,28 +266,46 @@ def _client_tick_hot_state(status: dict[str, Any]) -> dict[str, Any]:
     daemon_tick_age = _int_or_none(status.get("daemonLatestTickAgeMillis") or status.get("latestTickAgeMillis"))
     game_state = _game_state_from_hot(status, hot, hover)
     is_logged_in = _is_logged_in_game_state(game_state)
+    source_event = _text(hot.get("sourceEvent") or hot.get("sampleSource"))
+    source_key = source_event.lower()
+    game_state_changed_only = source_key == "gamestatechanged"
     explicit_available = status.get("clientTickHotAvailable")
     explicit_fresh = status.get("clientTickHotFresh")
     available = bool((bool(hot) and bool(hover)) or explicit_available is True or explicit_fresh is True)
+    liveness_game_state_fresh = bool(
+        bool(hot)
+        and age_millis is not None
+        and age_millis <= CLIENT_TICK_HOT_MAX_AGE_MILLIS
+        and game_state
+    )
     fresh_by_age = bool(
         available
         and (
-            explicit_fresh is True
+            (explicit_fresh is True and not game_state_changed_only)
             or (age_millis is not None and age_millis <= CLIENT_TICK_HOT_MAX_AGE_MILLIS)
         )
     )
+    action_hot_fresh = bool(fresh_by_age and not game_state_changed_only)
     stale_reason = _hot_stale_reason(
         status,
         available=available,
-        fresh_by_age=fresh_by_age,
+        fresh_by_age=action_hot_fresh,
         game_state=game_state,
         is_logged_in=is_logged_in,
     )
-    fresh = bool(explicit_fresh is True or (fresh_by_age and stale_reason is None))
+    if game_state_changed_only and is_logged_in is True:
+        stale_reason = "game_state_changed_only"
+    fresh = bool(action_hot_fresh and stale_reason is None)
     return {
         "available": available,
         "fresh": fresh,
         "clientTickHotFresh": fresh,
+        "livenessGameStateFresh": liveness_game_state_fresh,
+        "actionHotFresh": action_hot_fresh,
+        "clientTickHotUsableForAction": bool(not game_state_changed_only and available),
+        "clientTickHotSource": source_event or None,
+        "sourceEvent": source_event or None,
+        "sampleSource": source_event or None,
         "staleReason": stale_reason,
         "clientTickHotStaleReason": stale_reason,
         "recovery": _hot_recovery_action(stale_reason) if stale_reason else None,
@@ -1458,6 +1478,10 @@ def build_readiness_report(
                 "clientTickHotRequired": client_tick_hot_required,
                 "clientTickHotAvailable": client_tick_hot["available"] if client_tick_hot_required else None,
                 "clientTickHotFresh": client_tick_hot["fresh"] if client_tick_hot_required else None,
+                "livenessGameStateFresh": client_tick_hot.get("livenessGameStateFresh") if client_tick_hot_required else None,
+                "actionHotFresh": client_tick_hot.get("actionHotFresh") if client_tick_hot_required else None,
+                "clientTickHotUsableForAction": client_tick_hot.get("clientTickHotUsableForAction") if client_tick_hot_required else None,
+                "clientTickHotSource": client_tick_hot.get("clientTickHotSource") if client_tick_hot_required else None,
                 "clientTickHotAgeMillis": client_tick_hot.get("ageMillis"),
                 "clientTickHotMaxAgeMillis": client_tick_hot.get("maxAgeMillis") if client_tick_hot_required else None,
                 "clientTickHotStaleReason": client_tick_hot.get("staleReason"),
@@ -1561,6 +1585,11 @@ def build_readiness_report(
                 "required": client_tick_hot_required,
                 "available": client_tick_hot["available"],
                 "fresh": client_tick_hot["fresh"],
+                "livenessGameStateFresh": client_tick_hot.get("livenessGameStateFresh"),
+                "actionHotFresh": client_tick_hot.get("actionHotFresh"),
+                "usableForAction": client_tick_hot.get("clientTickHotUsableForAction"),
+                "sourceEvent": client_tick_hot.get("sourceEvent"),
+                "sampleSource": client_tick_hot.get("sampleSource"),
                 "ageMillis": client_tick_hot.get("ageMillis"),
                 "maxAgeMillis": client_tick_hot.get("maxAgeMillis"),
                 "clientTick": client_tick_hot.get("clientTick"),

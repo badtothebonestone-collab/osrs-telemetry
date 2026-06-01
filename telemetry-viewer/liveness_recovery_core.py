@@ -86,6 +86,9 @@ def _client_tick_age_from_hot(hot: dict[str, Any]) -> int | None:
 def _client_tick_fresh_from_hot(hot: dict[str, Any], *, max_age_ms: int = CLIENT_TICK_HOT_MAX_AGE_MS) -> tuple[bool, int | None]:
     if not hot:
         return False, None
+    source = str(hot.get("sourceEvent") or hot.get("sampleSource") or "").strip().lower()
+    if source == "gamestatechanged":
+        return False, _client_tick_age_from_hot(hot)
     age = _client_tick_age_from_hot(hot)
     if age is None:
         return False, None

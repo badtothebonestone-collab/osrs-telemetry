@@ -9,6 +9,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -590,6 +591,52 @@ public class PluginSnapshotEndpointTest
 
 		assertEquals("WARN", response.get("status"));
 		assertTrue(((List<?>) response.get("warnings")).contains("baseline cache age exceeded maxAgeTicks"));
+	}
+
+	@Test
+	public void staleWallClockCacheProducesWarnEvenWhenTickAgeLooksFresh()
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		Instant oldCacheTime = Instant.now().minusSeconds(20);
+		cache.updateAt("live_baseline_packet.v1", 10L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"), oldCacheTime);
+		cache.updateAt("live_inventory_packet.v1", 10L, "2026-05-11T00:00:01Z", Map.of("freeSlots", 1), oldCacheTime);
+		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
+		JsonObject request = new JsonObject();
+		JsonArray needs = new JsonArray();
+		needs.add("baseline");
+		needs.add("inventory");
+		request.add("needs", needs);
+		request.addProperty("maxAgeTicks", 5);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		@SuppressWarnings("unchecked")
+		Map<String, Object> freshness = (Map<String, Object>) response.get("freshness");
+
+		assertEquals("WARN", response.get("status"));
+		assertEquals(Boolean.FALSE, freshness.get("fresh"));
+		assertEquals(Boolean.TRUE, freshness.get("allCachedPacketsStale"));
+		assertTrue(((Number) freshness.get("maxCacheAgeMillis")).longValue() > PluginSnapshotEndpoint.CACHE_FRESHNESS_THRESHOLD_MILLIS);
+		assertTrue(((List<?>) freshness.get("staleReasons")).contains(PluginSnapshotEndpoint.STALE_REASON_ALL_PACKETS));
+		assertTrue(((List<?>) response.get("warnings")).contains("baseline cache age exceeded maxAgeMillis"));
+		assertTrue(((List<?>) response.get("warnings")).contains("inventory cache age exceeded maxAgeMillis"));
+		assertTrue(((List<?>) response.get("warnings")).contains(PluginSnapshotEndpoint.STALE_REASON_ALL_PACKETS));
+	}
+
+	@Test
+	public void healthDowngradesWhenAllCachedPacketsAreWallClockStale()
+	{
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		Instant oldCacheTime = Instant.now().minusSeconds(20);
+		cache.updateAt("live_baseline_packet.v1", 10L, "2026-05-11T00:00:00Z", Map.of("gameState", "LOGGED_IN"), oldCacheTime);
+		PluginSnapshotEndpoint endpoint = endpoint(cache, 50, 1024 * 1024);
+
+		Map<String, Object> response = endpoint.healthPayload();
+
+		assertEquals("WARN", response.get("status"));
+		assertEquals(Boolean.FALSE, response.get("cacheWallClockFresh"));
+		assertEquals(Boolean.TRUE, response.get("allCachedPacketsStale"));
+		assertTrue(((List<?>) response.get("staleReasons")).contains(PluginSnapshotEndpoint.STALE_REASON_ALL_PACKETS));
+		assertTrue(((List<?>) response.get("warnings")).contains(PluginSnapshotEndpoint.STALE_REASON_ALL_PACKETS));
 	}
 
 	@Test

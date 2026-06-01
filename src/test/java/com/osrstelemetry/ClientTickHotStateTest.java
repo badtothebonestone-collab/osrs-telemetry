@@ -52,4 +52,30 @@ public class ClientTickHotStateTest
 		assertEquals("Chop down", ((Map<?, ?>) clickedTail.get(1)).get("option"));
 		assertEquals(1L, ((Map<?, ?>) snapshot.get("latency")).get("droppedPostMenuSortSamples"));
 	}
+
+	@Test
+	public void newerGameStateSampleReplacesStaleLoggedInHotState()
+	{
+		ClientTickHotState state = new ClientTickHotState(4);
+		state.recordClientTick(Map.of(
+				"sampleSource", "ClientTick",
+				"sourceEvent", "ClientTick",
+				"clientTick", 10L,
+				"wallTimeMillis", 1000L,
+				"gameState", "LOGGED_IN"));
+		state.recordClientTick(Map.of(
+				"sampleSource", "GameStateChanged",
+				"sourceEvent", "GameStateChanged",
+				"clientTick", 10L,
+				"wallTimeMillis", 2000L,
+				"gameState", "LOGIN_SCREEN"));
+
+		Map<String, Object> snapshot = state.snapshot(1, 0, 0, true, 5);
+		List<?> clientTail = (List<?>) snapshot.get("clientTickTail");
+
+		assertEquals("LOGIN_SCREEN", snapshot.get("gameState"));
+		assertEquals("GameStateChanged", snapshot.get("sampleSource"));
+		assertEquals("GameStateChanged", snapshot.get("sourceEvent"));
+		assertEquals("GameStateChanged", ((Map<?, ?>) clientTail.get(0)).get("sampleSource"));
+	}
 }
