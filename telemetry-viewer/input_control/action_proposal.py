@@ -75,7 +75,7 @@ class ActionProposal:
     def executable(self) -> bool:
         if self.proposed_action in {"none", "wait_for_context"}:
             return False
-        if self.actionability in {"advisory_only", "stale", "blocked"}:
+        if self.actionability in {"advisory_only", "stale", "blocked"} or str(self.actionability or "").startswith("blocked_"):
             return False
         if (
             self.target_kind == "path_tile"
@@ -155,6 +155,41 @@ def _lower(value: Any) -> str:
 def _contains_any(haystack: Any, needles: list[Any] | tuple[Any, ...] | set[Any]) -> bool:
     text = _lower(haystack)
     return bool(text and any(_lower(needle) and _lower(needle) in text for needle in needles))
+
+
+def _resource_live_actions(target: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("actions", "actionNames", "menuActions"):
+        for item in _list(target.get(key)):
+            if item is not None:
+                values.append(str(item))
+    return values
+
+
+def _has_explicit_live_actions(target: dict[str, Any]) -> bool:
+    return any(isinstance(target.get(key), list) for key in ("actions", "actionNames", "menuActions"))
+
+
+def _resource_live_action_status(target: dict[str, Any]) -> dict[str, Any]:
+    target = _dict(target)
+    actions = _resource_live_actions(target)
+    matching = [action for action in actions if "chop" in _lower(action)]
+    name = _lower(_target_name(target) or target.get("objectName"))
+    explicit = _has_explicit_live_actions(target)
+    blocked = bool(explicit and not matching)
+    reasons: list[str] = []
+    if blocked:
+        if "stump" in name:
+            reasons.append("resource_stump_no_live_action")
+        reasons.append("no_matching_live_resource_action")
+    return {
+        "liveActionsExplicit": explicit,
+        "liveActions": actions,
+        "matchingLiveResourceActions": matching,
+        "hasMatchingLiveResourceAction": bool(matching),
+        "blockedByLiveAction": blocked,
+        "rejectionReasons": reasons,
+    }
 
 
 def _int(value: Any, default: int = 0) -> int:
@@ -565,7 +600,7 @@ def _resource_target_from_context(
     )
     if selected is None:
         selected = preferred_woodcutting_resource_candidate(
-            resource_candidates,
+            [candidate for candidate in resource_candidates if _resource_live_action_status(candidate).get("blockedByLiveAction") is not True],
             woodcutting_level=woodcutting_level,
             suppressed_keys=suppressed,
         )
@@ -588,6 +623,13 @@ def _resource_target_from_context(
         target_keys = _target_suppression_keys(target)
         if target_keys and target_keys.intersection(suppressed):
             return {}
+        action_status = _resource_live_action_status(target)
+        target = dict(target)
+        target["resourceLiveActionStatus"] = action_status
+        if action_status.get("blockedByLiveAction") is True:
+            target["actionability"] = "blocked_no_matching_action"
+            target["resourceSelectionRejectionReason"] = ",".join(action_status.get("rejectionReasons") or ["no_matching_live_resource_action"])
+            return target
         required = woodcutting_required_level(target)
         if required is not None:
             if woodcutting_level is None and required > 1:
@@ -1030,7 +1072,8 @@ def _resource_candidate_view_metrics(
         projection.get("classification") in {"no_safe_aimpoint", "no_visible_interactable_geometry", "raw_aimpoint_outside_interactable_region"}
         and projection.get("projectionAvailable") is True
     )
-    executable = bool(level.get("levelRequirementMet") and safe_ok and not edge_clipped and not offscreen)
+    action_status = _resource_live_action_status(candidate)
+    executable = bool(level.get("levelRequirementMet") and safe_ok and not edge_clipped and not offscreen and not action_status.get("blockedByLiveAction"))
     ambiguity = _dict(candidate.get("resourceTargetAmbiguity"))
     ambiguity_status = str(ambiguity.get("ambiguityStatus") or "clear")
     ambiguous = bool(ambiguity_status and ambiguity_status not in {"clear", "unknown"})
@@ -1052,6 +1095,7 @@ def _resource_candidate_view_metrics(
         "safeAimPoint": safe,
         "projectionStatus": projection,
         "levelStatus": level,
+        "resourceLiveActionStatus": action_status,
         "resourceTargetAmbiguity": ambiguity or None,
         "ambiguousResourceTarget": ambiguous,
         "overlapPenaltyFromNonExecutableTarget": overlap_penalty,
@@ -1098,9 +1142,12 @@ def _preferred_resource_candidate_for_view(
             worksite=worksite,
             woodcutting_level=woodcutting_level,
         )
+        if _dict(metrics.get("resourceLiveActionStatus")).get("blockedByLiveAction") is True:
+            continue
         distance = _number(candidate.get("distanceTiles", candidate.get("targetDistanceChebyshev")), 1_000_000.0)
         quality = _number(candidate.get("qualityScore", candidate.get("score")), 0.0)
         key = (
+            0 if metrics.get("executable") else 1,
             1 if metrics.get("ambiguousResourceTarget") else 0,
             1 if metrics.get("overlapPenaltyFromNonExecutableTarget") else 0,
             0 if metrics.get("safeAimpoint") else 1,
@@ -1126,6 +1173,7 @@ def _preferred_resource_candidate_for_view(
         "centralSafeAimpoint": metrics.get("centralSafeAimpoint"),
         "edgeClipped": metrics.get("edgeClipped"),
     }
+    selected["resourceLiveActionStatus"] = metrics.get("resourceLiveActionStatus")
     return selected
 
 
@@ -1405,6 +1453,10 @@ def _proposal(
         if target.get("resourceSelectionReason"):
             proposal.target_explanation["resourceSelectionReason"] = target.get("resourceSelectionReason")
             proposal.target_explanation["reacquiredFromResourceTarget"] = target.get("reacquiredFromResourceTarget")
+        if isinstance(target.get("resourceLiveActionStatus"), dict):
+            proposal.target_explanation["resourceLiveActionStatus"] = dict(target["resourceLiveActionStatus"])
+        if target.get("resourceSelectionRejectionReason"):
+            proposal.target_explanation["resourceSelectionRejectionReason"] = target.get("resourceSelectionRejectionReason")
     if resolution and resolution.get("status") == "FAIL":
         proposal.status = "FAIL"
         proposal.missing_capabilities.extend(str(item) for item in resolution.get("missingCapabilities") or [])
@@ -2605,6 +2657,32 @@ def _resource_selection_proposal(
             status=status,
             brain=brain,
         )
+    action_status = _resource_live_action_status(target)
+    if action_status.get("blockedByLiveAction") is True:
+        target = dict(target)
+        target["resourceLiveActionStatus"] = action_status
+        target["actionability"] = "blocked_no_matching_action"
+        target["resourceSelectionRejectionReason"] = ",".join(action_status.get("rejectionReasons") or ["no_matching_live_resource_action"])
+        proposal = _proposal(
+            "select_resource_target",
+            target_kind="resource",
+            target=target,
+            reason="resource_target_missing_live_action",
+            confidence=0.25,
+            required_context=["target", "inventory", "resource_action"],
+            warnings=["resource target lacks a live matching action; refusing to click"],
+            missing=["resource_action"],
+            source_tick=source_tick,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
+            status=status,
+            brain=brain,
+            suppress_click_point=True,
+        )
+        if isinstance(proposal.target_explanation, dict):
+            proposal.target_explanation["resourceLiveActionStatus"] = action_status
+            proposal.target_explanation["resourceSelectionRejectionReason"] = target["resourceSelectionRejectionReason"]
+        return proposal
     target, safe_aimpoint = _resource_target_with_safe_aimpoint(
         target,
         source_canvas_size=source_canvas_size,

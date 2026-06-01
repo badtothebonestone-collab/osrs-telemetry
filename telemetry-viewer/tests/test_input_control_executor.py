@@ -31,6 +31,7 @@ from input_control.executor import (
     _proposal_has_actionable_safe_target,
     _proposal_reacquire_budget_type,
     _record_loop_status,
+    _record_target_hover_failure,
     _record_target_no_progress_failure,
     _route_transition_retry_required_observation,
     _goal_reached_with_only_recoverable_failures,
@@ -5839,6 +5840,50 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertIn(("mouse_up", "left"), backend.calls)
         self.assertEqual(payload["actionResults"][-1]["proposal"]["targetTile"]["worldX"], 3197)
         self.assertEqual(payload["actionResults"][1]["actionTrace"]["targetSuppression"]["suppressed"], True)
+
+    def test_walk_here_resource_hover_suppresses_immediately(self):
+        proposal = ActionProposal(
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Tree",
+            target_tile={"worldX": 3217, "worldY": 3231, "plane": 0},
+            suggested_click_point={"x": 220, "y": 170},
+            target_explanation={
+                "targetKey": "tree-3217-3231",
+                "name": "Tree",
+                "worldLocation": {"worldX": 3217, "worldY": 3231, "plane": 0},
+            },
+            actionability="needs_hover_confirmation",
+        )
+        result = ExecutionResult(
+            status="WARN",
+            proposed_action="select_resource_target",
+            dry_run=False,
+            proposal=proposal.to_dict(),
+            hover_confirmation={
+                "confirmed": False,
+                "reason": "top_option_rejected",
+                "latestHoverMenu": {"topOption": "Walk here", "topTarget": "", "type": "WALK"},
+            },
+            action_trace={},
+        )
+        summary = _new_loop_summary()
+
+        event = _record_target_hover_failure(
+            options=Namespace(target_hover_failure_limit=2, target_suppression_ms=2500),
+            cache={},
+            summary=summary,
+            result=result,
+            now_ms=1000,
+        )
+
+        self.assertIsNotNone(event)
+        self.assertTrue(event["suppressed"])
+        self.assertEqual(event["failureCount"], 1)
+        self.assertEqual(event["failureLimit"], 1)
+        self.assertEqual(event["reason"], "walk_here_hover_for_resource")
+        self.assertEqual(summary["targetsSuppressed"], 1)
+        self.assertEqual(summary["suppressedTargets"][0]["reason"], "walk_here_hover_for_resource")
 
     def test_all_candidates_suppressed_waits_without_clicking(self):
         backend = FakeBackend()

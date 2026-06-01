@@ -3300,7 +3300,11 @@ def _proposal_actionability(proposal: ActionProposal) -> str | None:
 def _proposal_is_stale_or_static(proposal: ActionProposal) -> bool:
     actionability = _proposal_actionability(proposal)
     source = _proposal_action_target_source(proposal)
-    return actionability in {"advisory_only", "stale", "blocked"} or source in {"static_route_prior", "route_context_goal"}
+    return (
+        actionability in {"advisory_only", "stale", "blocked"}
+        or str(actionability or "").startswith("blocked_")
+        or source in {"static_route_prior", "route_context_goal"}
+    )
 
 
 def _proposal_fresh_executable_source(proposal: ActionProposal) -> str | None:
@@ -3633,6 +3637,8 @@ def _record_target_hover_failure(
         return None
     budget_type = _proposal_payload_reacquire_budget_type(proposal)
     limit = max(1, int(getattr(options, "target_hover_failure_limit", 0) or 1))
+    if category == "walk_here_hover" and budget_type == "resource":
+        limit = 1
     window_ms = max(1, int(getattr(options, "target_suppression_ms", 0) or 1))
     record = cache.setdefault(
         target_key,
@@ -3668,7 +3674,7 @@ def _record_target_hover_failure(
         record["volatileHoverFailures"] = int(record.get("volatileHoverFailures") or 0) + 1
     elif category == "unsafe_geometry":
         record["unsafeGeometryFailures"] = int(record.get("unsafeGeometryFailures") or 0) + 1
-    record["lastFailureReason"] = category
+    record["lastFailureReason"] = "walk_here_hover_for_resource" if category == "walk_here_hover" and budget_type == "resource" else category
     record["lastFailureTime"] = now_ms
     suppressed = int(record.get("hoverConfirmFailures") or 0) >= limit
     if suppressed:
@@ -3682,7 +3688,7 @@ def _record_target_hover_failure(
                     "targetKey": target_key,
                     "targetName": record.get("targetName"),
                     "worldLocation": record.get("worldLocation"),
-                    "reason": category,
+                    "reason": record.get("lastFailureReason"),
                     "failureCount": record.get("hoverConfirmFailures"),
                     "suppressionUntil": record.get("suppressionUntil"),
                     "reacquireBudgetType": budget_type,
@@ -3690,7 +3696,7 @@ def _record_target_hover_failure(
             )
     event = {
         "targetKey": target_key,
-        "reason": category,
+        "reason": record.get("lastFailureReason"),
         "failureCount": record.get("hoverConfirmFailures"),
         "failureLimit": limit,
         "suppressed": bool(suppressed),
@@ -7387,7 +7393,7 @@ def execute_action(
         seed=getattr(navigation_options, "seed", None),
     )
     blocked_actionability = str(proposal.actionability or "")
-    if blocked_actionability in {"advisory_only", "stale", "blocked"}:
+    if blocked_actionability in {"advisory_only", "stale", "blocked"} or blocked_actionability.startswith("blocked_"):
         backend_name = getattr(backend, "name", backend.__class__.__name__)
         reason_map = {
             "advisory_only": "static_target_not_executable",

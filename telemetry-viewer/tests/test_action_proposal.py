@@ -2568,6 +2568,76 @@ class ActionProposalTest(unittest.TestCase):
         self.assertIn(proposal.target_explanation["resourceViewClassification"], {"good_resource_view", "usable_resource_view"})
         self.assertFalse(proposal.target_explanation["resourceCameraRecoveryRecommended"])
 
+    def test_no_action_stump_is_not_selected_over_visible_chop_tree(self):
+        stump = {
+            "targetName": "Tree stump",
+            "classId": "tree",
+            "id": 1342,
+            "worldX": 3217,
+            "worldY": 3231,
+            "plane": 0,
+            "actions": [],
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(220, 170),
+            "clickboxBounds": {"x": 210, "y": 160, "width": 20, "height": 20},
+            "qualityScore": 100,
+        }
+        tree = {
+            "targetName": "Tree",
+            "classId": "tree",
+            "id": 1278,
+            "worldX": 3212,
+            "worldY": 3232,
+            "plane": 0,
+            "actions": ["Chop down"],
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(300, 190),
+            "clickboxBounds": {"x": 280, "y": 160, "width": 40, "height": 60},
+            "qualityScore": 5,
+        }
+        status = status_for(active_target=stump, overlay={"selectedMarker": stump, "markers": [stump, tree]})
+        status["brain"]["profileCandidates"] = [stump, tree]
+        status["profileCandidates"] = [stump, tree]
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.target_name, "Tree")
+        self.assertEqual(proposal.target_tile, {"worldX": 3212, "worldY": 3232, "plane": 0})
+        self.assertEqual(proposal.target_explanation["resourceSelectionReason"], "preferred_skill_eligible_resource_candidate")
+        action_status = proposal.target_explanation["resourceLiveActionStatus"]
+        self.assertTrue(action_status["hasMatchingLiveResourceAction"])
+        self.assertEqual(action_status["matchingLiveResourceActions"], ["Chop down"])
+
+    def test_only_no_action_stump_is_blocked_without_camera_recovery(self):
+        stump = {
+            "targetName": "Tree stump",
+            "classId": "tree",
+            "id": 1342,
+            "worldX": 3217,
+            "worldY": 3231,
+            "plane": 0,
+            "actions": [],
+            "onScreen": True,
+            "geometryAvailable": True,
+            "aimPoint": aim(220, 170),
+            "clickboxBounds": {"x": 210, "y": 160, "width": 20, "height": 20},
+            "qualityScore": 100,
+        }
+
+        proposal = build_action_proposal(status_for(active_target=stump, overlay={"selectedMarker": stump, "markers": [stump]}))
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertEqual(proposal.status, "WARN")
+        self.assertFalse(proposal.executable)
+        self.assertEqual(proposal.reason, "resource_target_missing_live_action")
+        self.assertEqual(proposal.actionability, "blocked_no_matching_action")
+        self.assertIn("resource_action", proposal.missing_capabilities)
+        self.assertIn("resource_stump_no_live_action", proposal.target_explanation["resourceSelectionRejectionReason"])
+
     def test_safe_selected_resource_remains_clickable_in_poor_single_candidate_view(self):
         selected = {
             "targetName": "Tree",

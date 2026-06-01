@@ -1201,12 +1201,12 @@ def build_readiness_report(
             )
             missing.append("route.liveProjection")
             specific_target_blocker = True
-        elif proposal_actionability == "blocked":
+        elif proposal_actionability == "blocked" or str(proposal_actionability or "").startswith("blocked_"):
             blockers.append(
                 _blocker(
                     "action_target_blocked",
-                    "navigation target is currently blocked",
-                    action="wait or reacquire a different live waypoint",
+                    "action target is currently blocked",
+                    action="wait or reacquire a different live target",
                     proposalReason=proposal_payload.get("reason"),
                     actionTargetSource=proposal_action_target_source or None,
                     actionability=proposal_actionability,

@@ -280,6 +280,41 @@ def test_resource_query_demotes_oak_when_insufficient_level_and_prefers_tree():
     assert result["data"]["oakRejectedInsufficientLevelCount"] == 1
 
 
+def test_resource_query_keeps_no_action_stump_non_executable_even_with_static_enrichment():
+    payloads = synthetic_payloads()
+    payloads["resource_object_census"]["objects"].append(
+        {
+            "objectKey": "stump-1",
+            "name": "Tree stump",
+            "id": 1342,
+            "actions": [],
+            "worldX": 3201,
+            "worldY": 3200,
+            "plane": 0,
+            "resourceCandidate": True,
+            "resourceType": "basic_tree",
+            "requiredSkill": "WOODCUTTING",
+            "requiredLevel": 1,
+            "levelRequirementMet": True,
+            "projection": {"visible": True, "geometryAvailable": True, "actionableByCanvas": True, "edgeDistancePx": 90},
+        }
+    )
+    fabric = knowledge_fabric.KnowledgeFabric.from_status(
+        {"schema": "context_status.v1", "latestTick": 42, "worldModelPayloads": payloads}
+    )
+
+    result = fabric.query_resource_candidates()
+    objects = result["data"]["objects"]
+    stump = next(item for item in objects if item["name"] == "Tree stump")
+
+    assert objects[0]["name"] == "Tree"
+    assert stump["executable"] is False
+    assert stump["actionability"] == "blocked_no_matching_action"
+    assert "resource_stump_no_live_action" in stump["rejectionReason"]
+    assert "external_knowledge_advisory_only" in stump["rejectionReason"]
+    assert stump["externalKnowledge"]["externalKnowledgeAvailable"] is True
+
+
 def test_service_query_finds_bank_booth_banker_or_deposit_box():
     fabric = make_fabric()
 

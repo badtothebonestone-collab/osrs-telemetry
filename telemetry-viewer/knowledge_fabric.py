@@ -256,6 +256,32 @@ def _actions(obj: dict[str, Any]) -> list[str]:
     return [str(item) for item in _list(values) if item is not None]
 
 
+def _has_explicit_live_actions(obj: dict[str, Any]) -> bool:
+    return any(isinstance(obj.get(key), list) for key in ("actions", "actionNames", "menuActions"))
+
+
+def _resource_live_action_status(obj: dict[str, Any]) -> dict[str, Any]:
+    actions = _actions(obj)
+    normalized = [_norm(action) for action in actions]
+    matching = [action for action, norm in zip(actions, normalized) if "chop" in norm]
+    name = _norm(obj.get("name") or obj.get("targetName") or obj.get("objectName"))
+    explicit = _has_explicit_live_actions(obj)
+    blocked = bool(explicit and not matching)
+    reasons = []
+    if blocked:
+        if "stump" in name:
+            reasons.append("resource_stump_no_live_action")
+        reasons.extend(["no_matching_live_resource_action", "external_knowledge_advisory_only"])
+    return {
+        "liveActionsExplicit": explicit,
+        "liveActions": actions,
+        "matchingLiveResourceActions": matching,
+        "hasMatchingLiveResourceAction": bool(matching),
+        "blockedByLiveAction": blocked,
+        "rejectionReasons": reasons,
+    }
+
+
 def _action_text(obj: dict[str, Any]) -> str:
     return " ".join(_actions(obj)).lower()
 
@@ -1689,9 +1715,16 @@ class KnowledgeFabric:
             compact["externalKnowledge"] = external_knowledge.enrich_name(str(compact.get("name") or ""))
             compact["distanceToQuery"] = distance
             compact["worksiteDistanceTiles"] = worksite_distance
+            action_status = _resource_live_action_status(obj)
+            compact["liveResourceActionStatus"] = action_status
             level_status = world_model_core.target_level_status(obj)
             compact.update({k: v for k, v in level_status.items() if v is not None})
-            if compact.get("visibleButNotExecutable") is True:
+            if action_status.get("blockedByLiveAction") is True:
+                compact["executable"] = False
+                compact["actionability"] = "blocked_no_matching_action"
+                compact["candidateRole"] = "rejected"
+                compact["rejectionReason"] = ",".join(action_status.get("rejectionReasons") or ["no_matching_live_resource_action"])
+            elif compact.get("visibleButNotExecutable") is True:
                 compact["executable"] = False
                 compact["rejectionReason"] = compact.get("targetTemporarilyLockedReason") or "insufficient_level"
                 if "oak" in _norm(compact.get("name")):
@@ -1704,6 +1737,10 @@ class KnowledgeFabric:
                 score += 50.0
             if "tree" in _norm(compact.get("name")) and "oak" not in _norm(compact.get("name")):
                 score += 12.0
+            if action_status.get("hasMatchingLiveResourceAction") is True:
+                score += 18.0
+            if action_status.get("blockedByLiveAction") is True:
+                score -= 120.0
             if worksite_distance is not None:
                 score -= worksite_distance
             edge = _float(_projection(obj).get("edgeDistancePx"))
