@@ -2994,6 +2994,167 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(backend.calls, [])
         self.assertEqual(result.readiness["actionReadiness"]["status"], "FAIL")
 
+    def test_execute_next_action_auto_recovers_stale_liveness_once(self):
+        backend = FakeBackend()
+        stale_status = status_payload_for_loop(tick=1)
+        stale_status["inputSourceActive"] = "plugin-snapshot"
+        stale_status["clientTickHot"] = {
+            "schema": "client_tick_hot.v1",
+            "gameState": "LOGGED_IN",
+            "latency": {"ageMillis": 5000, "postMenuSortAgeMillis": 5000},
+        }
+        stale_status["worldModelSummary"] = {
+            "schema": "world_model_summary.v1",
+            "metadata": {"gameState": "LOGGED_IN"},
+            "objects": {"total": 0},
+        }
+        fresh_status = status_payload_for_loop(tick=2)
+        fresh_status["inputSourceActive"] = "plugin-snapshot"
+        fresh_status["clientTickHot"] = {
+            "schema": "client_tick_hot.v1",
+            "gameState": "LOGGED_IN",
+            "latency": {"ageMillis": 25, "postMenuSortAgeMillis": 25},
+        }
+        fresh_status["worldModelSummary"] = {
+            "schema": "world_model_summary.v1",
+            "metadata": {"gameState": "LOGGED_IN"},
+            "objects": {"total": 12},
+        }
+        statuses = [stale_status, fresh_status]
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            execute=True,
+            verify_after_action=False,
+            wait_for_ready=0,
+            poll_interval_ms=1,
+            focus_runelite=False,
+            window_title_filter="RuneLite",
+            require_live_readiness=False,
+            auto_recover_loaded_scene=True,
+            snapshot_url="http://snapshot",
+            arduino_port="COM6",
+            liveness_max_total_seconds=120,
+            liveness_max_attempts_per_state=2,
+            allow_jagex_launcher_automation=False,
+        )
+        recovery = {"schema": "liveness_recovery_result.v1", "status": "recovered_loaded_scene", "loadedSceneVerified": True}
+
+        with patch("liveness_recovery_core.ensure_loaded_scene", return_value=recovery) as ensure:
+            result = execute_next_action(
+                "http://daemon",
+                options,
+                fetch_json_func=lambda *_args, **_kwargs: statuses.pop(0),
+                backend=backend,
+            )
+
+        ensure.assert_called_once()
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual([call[0] for call in backend.calls], ["move", "click_at"])
+        self.assertEqual(result.readiness["livenessRecoveryLastResult"], recovery)
+
+    def test_execute_next_action_auto_recovers_when_daemon_status_initially_down(self):
+        backend = FakeBackend()
+        fresh_status = status_payload_for_loop(tick=2)
+        fresh_status["inputSourceActive"] = "plugin-snapshot"
+        fresh_status["clientTickHot"] = {
+            "schema": "client_tick_hot.v1",
+            "gameState": "LOGGED_IN",
+            "latency": {"ageMillis": 25, "postMenuSortAgeMillis": 25},
+        }
+        fresh_status["worldModelSummary"] = {
+            "schema": "world_model_summary.v1",
+            "metadata": {"gameState": "LOGGED_IN"},
+            "objects": {"total": 12},
+        }
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            execute=True,
+            verify_after_action=False,
+            wait_for_ready=0,
+            poll_interval_ms=1,
+            focus_runelite=False,
+            window_title_filter="RuneLite",
+            require_live_readiness=False,
+            auto_recover_loaded_scene=True,
+            snapshot_url="http://snapshot",
+            arduino_port="COM6",
+            liveness_max_total_seconds=120,
+            liveness_max_attempts_per_state=2,
+            allow_jagex_launcher_automation=False,
+        )
+        recovery = {"schema": "liveness_recovery_result.v1", "status": "recovered_loaded_scene", "loadedSceneVerified": True}
+        calls = {"count": 0}
+
+        def fetch_status(*_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise OSError("daemon down")
+            return fresh_status
+
+        with patch("liveness_recovery_core.ensure_loaded_scene", return_value=recovery) as ensure:
+            result = execute_next_action(
+                "http://daemon",
+                options,
+                fetch_json_func=fetch_status,
+                backend=backend,
+            )
+
+        ensure.assert_called_once()
+        self.assertEqual(calls["count"], 2)
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual([call[0] for call in backend.calls], ["move", "click_at"])
+        self.assertEqual(result.readiness["livenessRecoveryLastResult"], recovery)
+
+    def test_execute_next_action_blocks_when_auto_recovery_fails(self):
+        backend = FakeBackend()
+        stale_status = status_payload_for_loop(tick=1)
+        stale_status["inputSourceActive"] = "plugin-snapshot"
+        stale_status["clientTickHot"] = {
+            "schema": "client_tick_hot.v1",
+            "gameState": "LOGIN_SCREEN",
+            "latency": {"ageMillis": 5000, "postMenuSortAgeMillis": 5000},
+        }
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            execute=True,
+            verify_after_action=False,
+            wait_for_ready=0,
+            poll_interval_ms=1,
+            focus_runelite=False,
+            window_title_filter="RuneLite",
+            require_live_readiness=False,
+            auto_recover_loaded_scene=True,
+            snapshot_url="http://snapshot",
+            arduino_port="COM6",
+            liveness_max_total_seconds=120,
+            liveness_max_attempts_per_state=2,
+            allow_jagex_launcher_automation=False,
+        )
+        recovery = {
+            "schema": "liveness_recovery_result.v1",
+            "status": "manual_login_required",
+            "blocker": "manual_login_required",
+        }
+
+        with patch("liveness_recovery_core.ensure_loaded_scene", return_value=recovery):
+            result = execute_next_action(
+                "http://daemon",
+                options,
+                fetch_json_func=lambda *_args, **_kwargs: stale_status,
+                backend=backend,
+            )
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.proposed_action, "none")
+        self.assertEqual(backend.calls, [])
+        self.assertEqual(result.readiness["livenessRecoveryLastResult"], recovery)
+
     def test_execute_next_action_dry_run_verify_after_action_does_not_wait_for_result(self):
         backend = FakeBackend()
         options = Namespace(

@@ -2090,9 +2090,33 @@ class KnowledgeFabric:
             state = "plugin_endpoint_down" if not world_fresh else "loading"
         else:
             state = "unknown"
+        try:
+            import liveness_recovery_core
+
+            recovery_hint = liveness_recovery_core.liveness_hint_from_daemon_status(
+                {
+                    **self.daemon_status,
+                    "worldModelSummary": self.world_model_payloads.get("world_model_summary"),
+                }
+            )
+        except Exception:  # noqa: BLE001
+            recovery_hint = {
+                "livenessRecoveryAvailable": False,
+                "livenessRecoveryRecommended": not loaded_scene_verified,
+                "livenessState": state,
+                "knownRecoverableState": state in {"login_screen", "stale_logged_in_no_scene", "plugin_endpoint_down", "loading"},
+                "manualLoginRequired": state == "login_screen",
+                "unknownScreen": state == "unknown",
+                "loadedSceneProof": {
+                    "loadedSceneVerified": loaded_scene_verified,
+                    "gameState": game_state,
+                    "clientTickHotFresh": client_tick_fresh,
+                    "worldModelObjectTotal": object_count,
+                },
+            }
         return {
             "schema": "runelite_bootstrap_state.v1",
-            "state": state,
+            "state": recovery_hint.get("livenessState") or state,
             "loadedSceneVerified": loaded_scene_verified,
             "loginScreenDetected": state == "login_screen",
             "credentialRequired": False,
@@ -2100,15 +2124,21 @@ class KnowledgeFabric:
             "savedAccountPlayNowDetected": False,
             "clickHereToPlayDetected": False,
             "staleLoggedInNoScene": stale_logged_in_no_scene,
-            "bootstrapRecommended": not loaded_scene_verified,
+            "bootstrapRecommended": bool(recovery_hint.get("livenessRecoveryRecommended")),
             "bootstrapSafeActionAvailable": False,
-            "recommendedCommand": "python telemetry-viewer\\run_runelite_bootstrap.py --backend arduino --arduino-port COM6 --recover-loaded-scene --verify-loaded-scene --no-jagex-launcher --capture-debug-screenshots --execute --start-daemon",
+            "livenessRecoveryRecommended": bool(recovery_hint.get("livenessRecoveryRecommended")),
+            "livenessRecoveryAvailable": bool(recovery_hint.get("livenessRecoveryAvailable")),
+            "knownRecoverableState": bool(recovery_hint.get("knownRecoverableState")),
+            "manualLoginRequired": bool(recovery_hint.get("manualLoginRequired")),
+            "unknownScreen": bool(recovery_hint.get("unknownScreen")),
+            "recommendedCommand": "python telemetry-viewer\\context_service.py --ensure-loaded-scene --arduino-port COM6",
             "evidence": {
                 "gameState": game_state,
                 "latestTick": latest_tick,
                 "clientTickFresh": client_tick_fresh,
                 "worldModelAvailable": world_fresh,
                 "objectCount": object_count,
+                "loadedSceneProof": recovery_hint.get("loadedSceneProof"),
             },
         }
 
@@ -2160,7 +2190,7 @@ class KnowledgeFabric:
             return (
                 "login/liveness",
                 f"RuneLite bootstrap state is {bootstrap_state.get('state')}; loaded scene is not verified.",
-                "Run the RuneLite bootstrap FSM to recover a loaded scene, then rebind the daemon.",
+                "Run ensure_loaded_scene to recover a loaded scene and rebind the daemon.",
                 False,
                 False,
             )
@@ -2168,7 +2198,7 @@ class KnowledgeFabric:
             return (
                 "login/liveness",
                 f"RuneLite is {game_state}; live scene is not ready.",
-                "Recover/login RuneLite, then wait for fresh 8893/8890 packets.",
+                "Run ensure_loaded_scene unless a manual login/account prompt is present.",
                 False,
                 False,
             )
@@ -2189,7 +2219,7 @@ class KnowledgeFabric:
             return (
                 "plugin/daemon freshness",
                 "The plugin snapshot or client-tick hot interaction stream is not fresh enough for live action.",
-                "Wait for fresh 8893/8890 status or rebind/restart the daemon if the timeout persists.",
+                "Run ensure_loaded_scene once, then recheck 8893/8890 freshness.",
                 False,
                 False,
             )
@@ -2422,6 +2452,14 @@ class KnowledgeFabric:
             "readiness": readiness,
             "bootstrapState": bootstrap_state,
             "loadedSceneVerified": bootstrap_state.get("loadedSceneVerified"),
+            "livenessRecoveryRecommended": bootstrap_state.get("livenessRecoveryRecommended"),
+            "livenessRecoveryAvailable": bootstrap_state.get("livenessRecoveryAvailable"),
+            "livenessRecoveryLastResult": self.daemon_status.get("livenessRecoveryLastResult"),
+            "livenessState": bootstrap_state.get("state"),
+            "loadedSceneProof": _dict(bootstrap_state.get("evidence")).get("loadedSceneProof"),
+            "knownRecoverableState": bootstrap_state.get("knownRecoverableState"),
+            "manualLoginRequired": bootstrap_state.get("manualLoginRequired"),
+            "unknownScreen": bootstrap_state.get("unknownScreen"),
             "worldModelSummary": self.query_world_summary(),
             "knowledgeFabricStatus": self.status(),
             "currentBlocker": self.explain_current_blocker(),

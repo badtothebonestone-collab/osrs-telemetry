@@ -178,16 +178,16 @@ def _hot_stale_reason(
 
 def _hot_recovery_action(stale_reason: str | None) -> str:
     if stale_reason in {"login_screen", "game_not_logged_in", "auto_logged_out_or_inactive"}:
-        return "run bootstrap/login helper, then restart/rebind daemon"
+        return "run ensure_loaded_scene/bootstrap recovery, then restart/rebind daemon if needed"
     if stale_reason == "plugin_endpoint_not_reachable":
-        return "restore RuneLite PluginSnapshotEndpoint, then restart/rebind daemon"
+        return "run ensure_loaded_scene to recover RuneLite/PluginSnapshotEndpoint, then restart/rebind daemon if needed"
     if stale_reason == "plugin_snapshot_no_packets":
-        return "wait for fresh plugin snapshot/client tick data after login or restart RuneLite/daemon"
+        return "run ensure_loaded_scene once, or wait for fresh plugin snapshot/client tick data after login"
     if stale_reason == "plugin_hot_state_not_advancing":
-        return "refocus RuneLite or restart the plugin/daemon if client ticks do not advance"
+        return "run ensure_loaded_scene once to refocus/recover, then restart daemon if client ticks do not advance"
     if stale_reason == "daemon_snapshot_not_refreshing":
         return "restart/rebind the daemon to the current plugin session"
-    return "wait for fresh client tick/menu samples or refocus/restart RuneLite"
+    return "run ensure_loaded_scene once or wait for fresh client tick/menu samples"
 
 
 def _intent_for_action(action: str | None, target_kind: str | None = None) -> str:
@@ -739,6 +739,22 @@ def build_readiness_report(
         required_capabilities.append("client_tick_hot")
     else:
         optional_capabilities.append("client_tick_hot")
+    try:
+        import liveness_recovery_core
+
+        liveness_recovery = liveness_recovery_core.liveness_hint_from_daemon_status(status)
+    except Exception as error:  # noqa: BLE001
+        liveness_recovery = {
+            "schema": "liveness_recovery_hint.v1",
+            "livenessRecoveryAvailable": False,
+            "livenessRecoveryRecommended": False,
+            "livenessState": "unknown",
+            "loadedSceneProof": {},
+            "knownRecoverableState": False,
+            "manualLoginRequired": False,
+            "unknownScreen": False,
+            "error": f"{type(error).__name__}: {error}",
+        }
     if resource_target_required:
         required_capabilities.extend(
             [
@@ -1239,6 +1255,14 @@ def build_readiness_report(
             "stale": freshness.get("stale"),
         },
         "actionNeed": action_need,
+        "livenessRecoveryRecommended": bool(liveness_recovery.get("livenessRecoveryRecommended")),
+        "livenessRecoveryAvailable": bool(liveness_recovery.get("livenessRecoveryAvailable")),
+        "livenessRecoveryLastResult": status.get("livenessRecoveryLastResult"),
+        "livenessState": liveness_recovery.get("livenessState"),
+        "loadedSceneProof": liveness_recovery.get("loadedSceneProof"),
+        "knownRecoverableState": bool(liveness_recovery.get("knownRecoverableState")),
+        "manualLoginRequired": bool(liveness_recovery.get("manualLoginRequired")),
+        "unknownScreen": bool(liveness_recovery.get("unknownScreen")),
         "overlayHealth": overlay_health,
         "actionSafetyEvidence": action_safety_evidence,
         "actionReadiness": {
@@ -1262,6 +1286,8 @@ def build_readiness_report(
                 "clientTickHotAgeMillis": client_tick_hot.get("ageMillis"),
                 "clientTickHotMaxAgeMillis": client_tick_hot.get("maxAgeMillis") if client_tick_hot_required else None,
                 "clientTickHotStaleReason": client_tick_hot.get("staleReason"),
+                "livenessRecoveryRecommended": bool(liveness_recovery.get("livenessRecoveryRecommended")),
+                "livenessState": liveness_recovery.get("livenessState"),
                 "gameState": client_tick_hot.get("gameState"),
                 "isLoggedIn": client_tick_hot.get("isLoggedIn"),
                 "resourceTargetRequired": resource_target_required,
@@ -1297,6 +1323,9 @@ def build_readiness_report(
                 "staleFileSessionContext": stale_file_session_context,
                 "daemonSessionFresh": daemon_session_fresh,
                 "pluginSnapshotFresh": plugin_snapshot_fresh,
+                "livenessRecoveryRecommended": bool(liveness_recovery.get("livenessRecoveryRecommended")),
+                "livenessState": liveness_recovery.get("livenessState"),
+                "loadedSceneVerified": _dict(liveness_recovery.get("loadedSceneProof")).get("loadedSceneVerified"),
                 "overlayHealth": overlay_health,
                 "actionNeed": action_need,
             },

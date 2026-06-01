@@ -154,6 +154,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--template-dir", default=str(BOOTSTRAP_TEMPLATE_DIR))
     parser.add_argument("--start-daemon", action="store_true")
     parser.add_argument("--run-live-qa", action="store_true")
+    parser.add_argument("--ensure-loaded-scene", action="store_true", help="Run the compact reusable liveness recovery controller and exit.")
     parser.add_argument("--recover-loaded-scene", action="store_true", help="Recover through safe already-authenticated RuneLite screens until a loaded scene is available.")
     parser.add_argument("--verify-loaded-scene", action="store_true", help="Require loaded-scene proof, not just LOGGED_IN.")
     parser.add_argument("--no-jagex-launcher", action="store_true", help="Explicitly keep Jagex Launcher automation disabled.")
@@ -2285,6 +2286,21 @@ def cleanup_startup_backend(backend: Any) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if getattr(args, "ensure_loaded_scene", False):
+        import liveness_recovery_core
+
+        payload = liveness_recovery_core.ensure_loaded_scene(
+            daemon_url=args.daemon_url,
+            snapshot_url=args.snapshot_url,
+            backend=args.startup_backend,
+            arduino_port=args.arduino_port,
+            max_total_ms=int(max(1.0, float(args.timeout_seconds)) * 1000.0),
+            max_attempts_per_state=max(1, int(args.max_startup_clicks or 1)),
+            allow_jagex_launcher=bool(args.allow_jagex_launcher_automation),
+            allow_credentials=False,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=False) if args.json else liveness_recovery_core.format_compact_result(payload), end="")
+        return 0 if payload.get("status") in {"loaded_scene_ready", "recovered_loaded_scene"} else 1
     backend = build_startup_backend(args)
     startup_input = arm_startup_backend(args, backend)
     if startup_input.get("status") == "FAIL":

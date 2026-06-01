@@ -132,6 +132,17 @@ This document defines the intended shape of the live Python sidecar stack. It is
      automation is blocked unless `--allow-jagex-launcher-automation` is
      supplied, and credential/MFA/account prompts stop as manual-login-required
      states.
+   - `liveness_recovery_core.ensure_loaded_scene()` is the reusable fast
+     liveness preflight. It classifies known states from 8893 snapshot evidence,
+     bootstrap window/button evidence, and 8890 daemon status; recovers only
+     known already-authenticated surfaces through
+     `HumanInputController -> ArduinoHIDBackend`; verifies loaded-scene proof;
+     and starts/rebinds the daemon when the scene is loaded but 8890 is stale.
+     It does not type credentials, click unknown screens, or create
+     live_packets/NDJSON/JSONL output. CLI entry points are
+     `context_service.py --ensure-loaded-scene`,
+     `run_runelite_bootstrap.py --ensure-loaded-scene`, and
+     `execute_next_action.py --auto-recover-loaded-scene`.
    - VMware may see the Leonardo sketch and bootloader as different USB
      devices. Normal live validation should not reset or re-upload firmware;
      use STOP_ALL/IDENTIFY/CAPS/STATUS. If host prompts repeat, run
@@ -640,6 +651,8 @@ Current core modules:
 - `live_session_core.py`: session/path and daemon session rules.
 - `live_file_core.py`: live file/cache paths and safe loading.
 - `candidate_core.py`: candidate identity, source matching, freshness, woodcutting classification summary, and candidate explanation.
+- `liveness_recovery_core.py`: fast loaded-scene classifier/recovery API and
+  daemon rebind helper for known RuneLite disconnect/login/play surfaces.
 - `live_readiness_core.py`: reusable readiness contract and action gate.
 - `action_proposal_core.py`: compatibility import surface for proposal/explanation users.
 - `client_tick_core.py`: `client_tick_hot.v1` parsing, generic action-intent matching, hover confirmation, and clicked-menu classification.

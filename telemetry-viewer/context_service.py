@@ -1910,6 +1910,23 @@ def pipeline_health_cli(args) -> int:
     return print_json_response(pipeline_health_payload(args))
 
 
+def ensure_loaded_scene_cli(args) -> int:
+    import liveness_recovery_core
+
+    payload = liveness_recovery_core.ensure_loaded_scene(
+        daemon_url=args.daemon_url,
+        snapshot_url=args.snapshot_url,
+        backend="arduino",
+        arduino_port=args.arduino_port,
+        max_total_ms=int(max(1.0, float(args.liveness_max_total_seconds or 120.0)) * 1000.0),
+        max_attempts_per_state=max(1, int(args.liveness_max_attempts_per_state or 2)),
+        allow_jagex_launcher=bool(args.allow_jagex_launcher_automation),
+        allow_credentials=False,
+    )
+    print(json.dumps(payload, separators=(",", ":"), sort_keys=False))
+    return 0 if payload.get("status") in {"loaded_scene_ready", "recovered_loaded_scene"} else 1
+
+
 def query_oneshot(args) -> int:
     state = ContextState(args)
     context = state.load_context(force=True)
@@ -1975,6 +1992,7 @@ def parse_args():
     parser.add_argument("--query-coverage-matrix", action="store_true", help="Print query_coverage_matrix.v1 and exit.")
     parser.add_argument("--coverage-report", action="store_true", help="Print coverage_report.v1 and exit.")
     parser.add_argument("--pipeline-health", action="store_true", help="Print pipeline_health.v1 and exit.")
+    parser.add_argument("--ensure-loaded-scene", action="store_true", help="Recover known RuneLite liveness states, verify loaded scene, and rebind daemon.")
     parser.add_argument("--probe-task", help="Run read-only task probe for a task description and exit.")
     parser.add_argument("--probe-task-capture", action="store_true", help="Capture a script_authoring_context bundle during --probe-task.")
     parser.add_argument("--external-knowledge-status", action="store_true", help="Print external_knowledge_status.v1 and exit.")
@@ -1992,6 +2010,10 @@ def parse_args():
     parser.add_argument("--reason", help="Reason label for captured bundle commands.")
     parser.add_argument("--daemon-url", default="http://127.0.0.1:8890", help="Live daemon URL for live Knowledge Fabric CLI commands.")
     parser.add_argument("--snapshot-url", default="http://127.0.0.1:8893/snapshot", help="Plugin snapshot URL for live Knowledge Fabric CLI commands.")
+    parser.add_argument("--arduino-port", default="COM6", help="Arduino serial bridge port used by --ensure-loaded-scene.")
+    parser.add_argument("--allow-jagex-launcher-automation", action="store_true", help="Allow Jagex Launcher automation for --ensure-loaded-scene; credentials are still never typed.")
+    parser.add_argument("--liveness-max-total-seconds", type=float, default=120.0, help="Maximum total seconds for --ensure-loaded-scene.")
+    parser.add_argument("--liveness-max-attempts-per-state", type=int, default=2, help="Maximum attempts per known liveness state for --ensure-loaded-scene.")
     parser.add_argument("--context-json", help="Use a saved context/status JSON file for Knowledge Fabric CLI commands.")
     parser.add_argument("--live-timeout", type=float, default=1.0, help="HTTP timeout for live Knowledge Fabric CLI commands.")
     parser.add_argument("--world-max-objects", type=int, default=160, help="Max world objects requested by live Knowledge Fabric CLI commands.")
@@ -2023,6 +2045,8 @@ def main() -> int:
         return coverage_report_cli(args)
     if args.pipeline_health:
         return pipeline_health_cli(args)
+    if args.ensure_loaded_scene:
+        return ensure_loaded_scene_cli(args)
     if args.probe_task:
         return probe_task_cli(args)
     if args.external_knowledge_status:

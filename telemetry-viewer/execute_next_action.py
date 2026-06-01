@@ -32,6 +32,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--daemon-url", default="http://127.0.0.1:8890")
     parser.add_argument("--snapshot-url", default="http://127.0.0.1:8893")
     parser.add_argument("--backend", choices=["arduino", "pyautogui", "pydirectinput"], default=None)
+    parser.add_argument("--auto-recover-loaded-scene", action="store_true", help="Run ensure_loaded_scene once before failing stale liveness/client-tick checks.")
+    parser.add_argument("--liveness-max-total-seconds", type=float, default=120.0, help="Maximum seconds for --auto-recover-loaded-scene.")
+    parser.add_argument("--liveness-max-attempts-per-state", type=int, default=2, help="Maximum attempts per known liveness state during auto recovery.")
+    parser.add_argument("--allow-jagex-launcher-automation", action="store_true", help="Allow Jagex Launcher automation during liveness recovery; credentials are still never typed.")
     parser.add_argument("--allow-software-input", action="store_true", help="Unsafe/debug override: allow software mouse/keyboard output for live execution.")
     parser.add_argument("--unsafe-allow-pyautogui-live", dest="unsafe_allow_pyautogui_live", action="store_true", help="Alias for --allow-software-input.")
     parser.add_argument("--arduino-port", help="Arduino serial bridge port, for example COM5.")
@@ -2388,6 +2392,27 @@ def main(argv: list[str] | None = None) -> int:
         payload = run_arduino_pointer_calibration_test(args, backend)
         print(json.dumps(payload, indent=2, sort_keys=False) if args.json else format_arduino_pointer_calibration(payload), end="")
         return 0 if payload.get("status") != "FAIL" else 1
+    if args.auto_recover_loaded_scene and (args.execute or args.hover_only or args.loop or args.max_actions > 1):
+        import liveness_recovery_core
+
+        recovery_payload = liveness_recovery_core.ensure_loaded_scene(
+            daemon_url=args.daemon_url,
+            snapshot_url=args.snapshot_url,
+            backend="arduino",
+            arduino_port=args.arduino_port,
+            max_total_ms=int(max(1.0, float(args.liveness_max_total_seconds or 120.0)) * 1000.0),
+            max_attempts_per_state=max(1, int(args.liveness_max_attempts_per_state or 2)),
+            allow_jagex_launcher=bool(args.allow_jagex_launcher_automation),
+            allow_credentials=False,
+        )
+        if recovery_payload.get("status") not in {"loaded_scene_ready", "recovered_loaded_scene"}:
+            print(
+                json.dumps(recovery_payload, indent=2, sort_keys=False)
+                if args.json
+                else liveness_recovery_core.format_compact_result(recovery_payload),
+                end="",
+            )
+            return 1
     if (
         args.backend == "arduino"
         and (args.execute or args.hover_only)

@@ -3964,11 +3964,86 @@ def _blocked_by_readiness_result(
     return result
 
 
+def _blocked_by_liveness_recovery_result(options: Any, backend: Any, recovery: dict[str, Any]) -> ExecutionResult:
+    reason = str(recovery.get("blocker") or recovery.get("status") or "liveness_recovery_failed")
+    result = ExecutionResult(
+        status="FAIL",
+        proposed_action="none",
+        dry_run=not bool(getattr(options, "execute", False)),
+        backend_name=str(getattr(options, "backend", getattr(backend, "name", "unknown"))),
+        movement_profile=str(getattr(options, "movement_profile", "linear_debug")),
+        warnings=[f"liveness recovery did not produce a loaded scene: {reason}"],
+        missing_capabilities=["loaded_scene"],
+        verification_status="FAIL",
+        readiness={
+            "schema": "live_readiness.v2",
+            "status": "FAIL",
+            "livenessRecoveryLastResult": recovery,
+            "livenessRecoveryRecommended": True,
+            "actionReadiness": {
+                "status": "FAIL",
+                "executionAllowed": False,
+                "intent": "unknown",
+                "blockers": [{"code": reason, "message": "loaded scene recovery failed before action execution"}],
+                "warnings": [],
+            },
+        },
+    )
+    lifecycle = ActionLifecycleState(current_state="blocked", reason=reason, warnings=result.warnings)
+    _apply_lifecycle(result, lifecycle)
+    return result
+
+
 def _readiness_gate_required(options: Any, proposal: ActionProposal) -> bool:
     if getattr(options, "require_live_readiness", None) is False:
         return False
     has_readiness_option = hasattr(options, "wait_for_ready") or hasattr(options, "require_live_readiness")
     return has_readiness_option and (bool(getattr(options, "execute", False)) or bool(getattr(options, "hover_only", False))) and proposal.executable
+
+
+def _maybe_auto_recover_loaded_scene(
+    daemon_url: str,
+    options: Any,
+    *,
+    status: dict[str, Any],
+    fetch_json_func=fetch_json,
+    timeout: float = 3.0,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if not bool(getattr(options, "auto_recover_loaded_scene", False)):
+        return status, None
+    try:
+        import liveness_recovery_core
+
+        hint = liveness_recovery_core.liveness_hint_from_daemon_status(status)
+    except Exception:  # noqa: BLE001
+        return status, None
+    if not hint.get("livenessRecoveryRecommended"):
+        return status, None
+    recovery = liveness_recovery_core.ensure_loaded_scene(
+        daemon_url=daemon_url,
+        snapshot_url=str(getattr(options, "snapshot_url", "http://127.0.0.1:8893")),
+        backend="arduino",
+        arduino_port=getattr(options, "arduino_port", None),
+        max_total_ms=int(max(1.0, float(getattr(options, "liveness_max_total_seconds", 120.0) or 120.0)) * 1000.0),
+        max_attempts_per_state=max(1, int(getattr(options, "liveness_max_attempts_per_state", 2) or 2)),
+        allow_jagex_launcher=bool(getattr(options, "allow_jagex_launcher_automation", False)),
+        allow_credentials=False,
+    )
+    if recovery.get("status") in {"loaded_scene_ready", "recovered_loaded_scene"}:
+        try:
+            refreshed = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
+        except Exception as error:  # noqa: BLE001
+            failed = dict(recovery)
+            failed["status"] = "daemon_rebind_failed"
+            failed["blocker"] = f"daemon status unavailable after liveness recovery: {type(error).__name__}: {error}"
+            failed["warnings"] = [
+                *list(failed.get("warnings") or []),
+                str(failed["blocker"]),
+            ]
+            return status, failed
+        refreshed["livenessRecoveryLastResult"] = recovery
+        return refreshed, recovery
+    return status, recovery
 
 
 def _wait_until_ready(
@@ -8206,15 +8281,46 @@ def execute_next_action(
     try:
         status = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
     except Exception as error:  # noqa: BLE001
-        return ExecutionResult(
-            status="FAIL",
-            proposed_action="none",
-            dry_run=not bool(getattr(options, "execute", False)),
-            backend_name=str(getattr(options, "backend", "unknown")),
-            movement_profile=str(getattr(options, "movement_profile", "linear_debug")),
-            warnings=[f"daemon status unavailable: {type(error).__name__}: {error}"],
-            missing_capabilities=["daemon.status"],
+        if bool(getattr(options, "auto_recover_loaded_scene", False)):
+            status, recovery = _maybe_auto_recover_loaded_scene(
+                daemon_url,
+                options,
+                status={},
+                fetch_json_func=fetch_json_func,
+                timeout=timeout,
+            )
+            if recovery is not None and recovery.get("status") in {"loaded_scene_ready", "recovered_loaded_scene"}:
+                pass
+            elif recovery is not None:
+                return _blocked_by_liveness_recovery_result(options, backend, recovery)
+            else:
+                recovery = {
+                    "schema": "liveness_recovery_result.v1",
+                    "status": "daemon_rebind_failed",
+                    "blocker": f"daemon status unavailable before auto recovery: {type(error).__name__}: {error}",
+                }
+                return _blocked_by_liveness_recovery_result(options, backend, recovery)
+        else:
+            return ExecutionResult(
+                status="FAIL",
+                proposed_action="none",
+                dry_run=not bool(getattr(options, "execute", False)),
+                backend_name=str(getattr(options, "backend", "unknown")),
+                movement_profile=str(getattr(options, "movement_profile", "linear_debug")),
+                warnings=[f"daemon status unavailable: {type(error).__name__}: {error}"],
+                missing_capabilities=["daemon.status"],
+            )
+    else:
+        recovery = None
+        status, recovery = _maybe_auto_recover_loaded_scene(
+            daemon_url,
+            options,
+            status=status,
+            fetch_json_func=fetch_json_func,
+            timeout=timeout,
         )
+    if recovery is not None and recovery.get("status") not in {"loaded_scene_ready", "recovered_loaded_scene"}:
+        return _blocked_by_liveness_recovery_result(options, backend, recovery)
     if is_waiting_for_result(status):
         source_tick = status.get("latestTick") if isinstance(status.get("latestTick"), int) else None
         waiting_proposal = ActionProposal(
@@ -8291,6 +8397,11 @@ def execute_next_action(
     finally:
         _finish_live_input_session(backend, live_input_status, options=options)
     result.readiness = readiness
+    if recovery is not None:
+        if result.readiness is None:
+            result.readiness = {}
+        result.readiness["livenessRecoveryLastResult"] = recovery
+        result.readiness["livenessRecoveryRecommended"] = False
     _attach_readiness_trace(result, readiness)
     _attach_live_input_status(result, live_input_status, options=options, backend=backend)
     _enforce_no_direct_backend_bypass(result, options)
@@ -8391,6 +8502,38 @@ def execute_action_loop(
     timeout = float(getattr(options, "timeout", 3.0))
     dry_run = not bool(getattr(options, "execute", False))
     backend = backend or backend_from_options(options)
+    recovery: dict[str, Any] | None = None
+    if bool(getattr(options, "auto_recover_loaded_scene", False)):
+        try:
+            pre_status = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
+            _updated_status, recovery = _maybe_auto_recover_loaded_scene(
+                daemon_url,
+                options,
+                status=pre_status,
+                fetch_json_func=fetch_json_func,
+                timeout=timeout,
+            )
+        except Exception as error:  # noqa: BLE001
+            recovery = {
+                "schema": "liveness_recovery_result.v1",
+                "status": "daemon_rebind_failed",
+                "blocker": f"daemon status unavailable before auto recovery: {type(error).__name__}: {error}",
+            }
+        if recovery is not None and recovery.get("status") not in {"loaded_scene_ready", "recovered_loaded_scene"}:
+            summary = _new_loop_summary()
+            summary["livenessRecoveryLastResult"] = recovery
+            return LoopExecutionResult(
+                status="FAIL",
+                dry_run=dry_run,
+                action_results=[],
+                lifecycle_state=ActionLifecycleState(current_state="blocked", reason=str(recovery.get("blocker") or recovery.get("status") or "liveness_recovery_failed")).to_dict(),
+                loop_summary=summary,
+                reason=str(recovery.get("blocker") or recovery.get("status") or "liveness_recovery_failed"),
+                warnings=["liveness recovery did not produce a loaded scene"],
+                missing_capabilities=["loaded_scene"],
+                max_actions=max_actions,
+                max_runtime_seconds=max_runtime_seconds,
+            )
     live_input_status: dict[str, Any] | None = None
     try:
         live_input_status = _start_live_input_session(options, backend)
@@ -8435,6 +8578,8 @@ def execute_action_loop(
     loop_summary["pacingProfile"] = str(getattr(options, "pacing_profile", "instant_debug") or "instant_debug")
     loop_summary["inputProfile"] = _input_profile_from_options(options)
     loop_summary["liveInput"] = dict(live_input_status) if isinstance(live_input_status, dict) else None
+    if recovery is not None:
+        loop_summary["livenessRecoveryLastResult"] = recovery
     loop_summary["finalReconcileMillis"] = _final_reconcile_ms(options)
     suppression_cache: dict[str, dict[str, Any]] = {}
     last_reacquire_scope_key: tuple[Any, ...] | None = None

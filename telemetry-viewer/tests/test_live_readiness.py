@@ -194,6 +194,29 @@ class LiveReadinessTest(unittest.TestCase):
         self.assertEqual(report["status"], "FAIL")
         self.assertEqual(report["blockers"][0]["code"], "daemon_status_unavailable")
 
+    def test_stale_client_tick_recommends_loaded_scene_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target()
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [marker]})
+            status = enable_plugin_snapshot(status_for(session, marker), post_menu_age_ms=5000)
+            status["worldModelSummary"] = {
+                "schema": "world_model_summary.v1",
+                "metadata": {"gameState": "LOGGED_IN"},
+                "objects": {"total": 0},
+            }
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertTrue(report["livenessRecoveryAvailable"])
+            self.assertTrue(report["livenessRecoveryRecommended"])
+            self.assertEqual(report["livenessState"], "stale_logged_in_no_scene")
+            self.assertEqual(report["loadedSceneProof"]["loadedSceneVerified"], False)
+            self.assertTrue(report["knownRecoverableState"])
+            self.assertTrue(report["actionReadiness"]["checks"]["livenessRecoveryRecommended"])
+
     def test_missing_debug_overlay_blocks_resource_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "sessions"

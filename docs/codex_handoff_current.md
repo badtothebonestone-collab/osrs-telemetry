@@ -135,6 +135,21 @@ or Jagex Launcher prompt is reached without that explicit flag, the bootstrap
 stops at `manual_login_required`/`blocked_user_login_required` and asks the
 user to log in manually inside the VM.
 
+Fast loaded-scene recovery is centralized in
+`telemetry-viewer\liveness_recovery_core.py` as `ensure_loaded_scene()`. It
+classifies 8893/8890/window evidence, recovers only known safe RuneLite states
+such as disconnected OK, saved-account Play Now, and Click here to play through
+`HumanInputController -> ArduinoHIDBackend`, verifies loaded-scene proof, and
+starts/rebinds daemon 8890 when needed. It stops on manual-login and unknown
+screens, and does not type credentials or create live_packets/NDJSON/JSONL
+runtime output. Entry points:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --arduino-port COM6
+python telemetry-viewer\run_runelite_bootstrap.py --ensure-loaded-scene --backend arduino --arduino-port COM6 --execute
+python telemetry-viewer\execute_next_action.py --auto-recover-loaded-scene --arduino-port COM6 ...
+```
+
 Daily daemon command:
 
 ```powershell
