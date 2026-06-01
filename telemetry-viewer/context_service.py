@@ -1,5 +1,6 @@
 import argparse
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -1727,6 +1728,125 @@ def print_json_response(payload: dict[str, Any]) -> int:
     return 0 if payload.get("status") != "FAIL" else 1
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _git_output(args: list[str], *, max_lines: int = 24) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=_repo_root(),
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception as error:  # noqa: BLE001
+        return [f"unavailable: {type(error).__name__}"]
+    output = (result.stdout or result.stderr or "").strip()
+    if not output:
+        return []
+    return output.splitlines()[:max_lines]
+
+
+def _one_line(value: Any, *, max_chars: int = 220) -> str:
+    if value is None or value == "":
+        return "unknown"
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    sensitive_terms = ("password", "passwd", "token", "secret", "api_key", "apikey", "authorization", "credential")
+    lowered = text.lower()
+    if any(term in lowered for term in sensitive_terms):
+        return "[REDACTED]"
+    if len(text) > max_chars:
+        return text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
+def _bullet_lines(items: list[str], *, empty: str = "none", max_items: int = 12) -> list[str]:
+    safe_items = [_one_line(item, max_chars=260) for item in items[:max_items] if str(item).strip()]
+    if not safe_items:
+        return [f"- {empty}"]
+    lines = [f"- {item}" for item in safe_items]
+    if len(items) > max_items:
+        lines.append(f"- ... {len(items) - max_items} more omitted")
+    return lines
+
+
+def _world_location_text(location: Any) -> str:
+    if not isinstance(location, dict):
+        return "unknown"
+    world = location.get("worldLocation") if isinstance(location.get("worldLocation"), dict) else location
+    x = world.get("worldX")
+    y = world.get("worldY")
+    plane = world.get("plane", location.get("plane", 0))
+    if x is None or y is None:
+        return "unknown"
+    return f"{x},{y},{plane}"
+
+
+def _format_chatgpt_handoff(args, fabric: knowledge_fabric.KnowledgeFabric) -> str:
+    handoff = fabric.handoff_summary()
+    handoff_data = handoff.get("data") if isinstance(handoff.get("data"), dict) else {}
+    blocker = fabric.explain_current_blocker()
+    blocker_data = blocker.get("data") if isinstance(blocker.get("data"), dict) else {}
+    debug = fabric.query_current_debug_context(profile=getattr(args, "profile", "woodcutting"), limit=min(3, int(args.max_candidates or 3)))
+    debug_data = debug.get("data") if isinstance(debug.get("data"), dict) else {}
+    live_status = debug_data.get("liveStatus") if isinstance(debug_data.get("liveStatus"), dict) else {}
+    phase = live_status.get("phase") if isinstance(live_status.get("phase"), dict) else {}
+    readiness = debug_data.get("readiness") if isinstance(debug_data.get("readiness"), dict) else {}
+    action_readiness = readiness.get("actionReadiness") if isinstance(readiness.get("actionReadiness"), dict) else {}
+
+    branch = _git_output(["branch", "--show-current"], max_lines=1)
+    commit = _git_output(["log", "--oneline", "-1"], max_lines=1)
+    status_lines = _git_output(["status", "--short"], max_lines=20)
+    changed_files = status_lines or ["working tree clean"]
+
+    current_blocker = blocker_data.get("primaryBlockerSummary") or (handoff_data.get("currentBlocker") or {}).get("summary")
+    recommended_next = blocker_data.get("recommendedNextStep") or (handoff_data.get("currentBlocker") or {}).get("recommendedNextStep")
+    question = getattr(args, "handoff_question", None) or "Given this bounded evidence, what is the safest next debugging or implementation step?"
+    tests_run = getattr(args, "handoff_tests_run", None) or "Not inferred by helper; include recent focused test results before sending if they matter."
+
+    lines = [
+        "PASTE_TO_CHATGPT:",
+        "Context:",
+        f"- Repo: {_repo_root()}",
+        f"- Branch: {_one_line(branch[0] if branch else 'unknown')}",
+        f"- Commit: {_one_line(commit[0] if commit else 'unknown')}",
+        f"- Source: {_one_line(fabric.source)}",
+        f"- Session: {_one_line((fabric.freshness() or {}).get('sessionPath'))}",
+        f"- Phase/intent: {_one_line(phase.get('phase'))} / {_one_line(phase.get('currentIntent') or phase.get('activeIntent') or blocker_data.get('currentIntent'))}",
+        f"- Location: {_world_location_text(live_status.get('location'))}",
+        f"- Inventory: {_one_line(live_status.get('inventory'))}",
+        "What I tried:",
+        "- Local tools first: Knowledge Fabric handoff summary, current-debug-context, and current-blocker.",
+        "- No secrets, massive logs, screenshots, live sessions, or full JSON dumps are included.",
+        "Evidence:",
+        f"- current-debug-context status: {_one_line(debug.get('status'))}",
+        f"- current-blocker status: {_one_line(blocker.get('status'))}",
+        f"- blocker category: {_one_line(blocker_data.get('primaryBlockerCategory'))}",
+        f"- safeToRunBoundedLiveAction: {_one_line(blocker_data.get('safeToRunBoundedLiveAction'))}",
+        f"- action execution allowed: {_one_line(action_readiness.get('executionAllowed'))}",
+        f"- routeContextApplicable: {_one_line(readiness.get('routeContextApplicable') if readiness else blocker_data.get('routeContextApplicable'))}",
+        f"- staleRouteContextSuppressed: {_one_line(readiness.get('staleRouteContextSuppressed') if readiness else blocker_data.get('staleRouteContextSuppressed'))}",
+        "Files changed:",
+        *_bullet_lines(changed_files, empty="working tree clean"),
+        "Tests run:",
+        f"- {_one_line(tests_run, max_chars=500)}",
+        "Current blocker:",
+        f"- {_one_line(current_blocker, max_chars=500)}",
+        "Specific question:",
+        f"- {_one_line(question, max_chars=500)}",
+        "Options I\u2019m considering:",
+        f"- Run the recommended local query: {_one_line(handoff_data.get('recommendedNextDiagnosticQuery'))}",
+        f"- Follow the blocker recommendation: {_one_line(recommended_next)}",
+        "- Pause if this requires user preference, credentials, or a safety/input decision.",
+        "My recommended next step:",
+        f"- {_one_line(recommended_next or handoff_data.get('recommendedNextCodingTarget'), max_chars=500)}",
+    ]
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _arg_was_supplied(option: str, argv: list[str] | None = None) -> bool:
     values = sys.argv[1:] if argv is None else argv
     return any(value == option or value.startswith(option + "=") for value in values)
@@ -1950,8 +2070,14 @@ def diff_debug_context_cli(args) -> int:
     return print_json_response(knowledge_fabric.diff_debug_context(args.diff_debug_context[0], args.diff_debug_context[1]))
 
 
-def handoff_summary_cli(args) -> int:
+def handoff_summary_json_cli(args) -> int:
     return print_json_response(fabric_for_cli(args).handoff_summary())
+
+
+def handoff_summary_cli(args) -> int:
+    fabric = fabric_for_cli(args)
+    print(_format_chatgpt_handoff(args, fabric), end="")
+    return 0
 
 
 def data_quality_report_cli(args) -> int:
@@ -2169,7 +2295,10 @@ def parse_args():
     parser.add_argument("--capture-replay-scenario", action="store_true", help="Capture replay_scenario.v1 bundle and exit.")
     parser.add_argument("--replay-scenario", help="Replay a replay_scenario.v1 file offline and exit.")
     parser.add_argument("--diff-debug-context", nargs=2, metavar=("BUNDLE_A", "BUNDLE_B"), help="Diff two debug context/replay/script-authoring bundles and exit.")
-    parser.add_argument("--handoff-summary", action="store_true", help="Print compact current handoff summary and exit.")
+    parser.add_argument("--handoff-summary", action="store_true", help="Print a redacted PASTE_TO_CHATGPT consultation handoff block and exit.")
+    parser.add_argument("--handoff-summary-json", action="store_true", help="Print machine-readable knowledge_fabric_handoff_summary.v1 JSON and exit.")
+    parser.add_argument("--handoff-question", help="Specific question to include in the --handoff-summary PASTE_TO_CHATGPT block.")
+    parser.add_argument("--handoff-tests-run", help="Short test result summary to include in the --handoff-summary PASTE_TO_CHATGPT block.")
     parser.add_argument("--data-quality-report", action="store_true", help="Print data_quality_report.v1 and exit.")
     parser.add_argument("--data-source-inventory", action="store_true", help="Print data_source_inventory.v1 and exit.")
     parser.add_argument("--query-coverage-matrix", action="store_true", help="Print query_coverage_matrix.v1 and exit.")
@@ -2218,6 +2347,8 @@ def main() -> int:
         return replay_scenario_cli(args)
     if args.diff_debug_context:
         return diff_debug_context_cli(args)
+    if args.handoff_summary_json:
+        return handoff_summary_json_cli(args)
     if args.handoff_summary:
         return handoff_summary_cli(args)
     if args.data_quality_report:

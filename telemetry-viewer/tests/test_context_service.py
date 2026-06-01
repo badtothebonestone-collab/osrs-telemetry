@@ -784,6 +784,63 @@ class ContextServiceTest(unittest.TestCase):
                 self.assertEqual(payload["schema"], "context_response.v1")
                 self.assertIn(expected_key, payload)
 
+    def test_handoff_summary_cli_outputs_chatgpt_paste_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--session",
+                    str(session),
+                    "--handoff-summary",
+                    "--handoff-question",
+                    "Which local query should I run next?",
+                    "--handoff-tests-run",
+                    "test_context_service.py PASS",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = result.stdout
+        self.assertIn("PASTE_TO_CHATGPT:", text)
+        self.assertIn("Context:", text)
+        self.assertIn("What I tried:", text)
+        self.assertIn("Evidence:", text)
+        self.assertIn("Files changed:", text)
+        self.assertIn("Tests run:", text)
+        self.assertIn("Current blocker:", text)
+        self.assertIn("Specific question:", text)
+        self.assertIn("Options I\u2019m considering:", text)
+        self.assertIn("My recommended next step:", text)
+        self.assertIn("Which local query should I run next?", text)
+        self.assertIn("test_context_service.py PASS", text)
+        self.assertNotIn("password=", text.lower())
+        self.assertNotIn("token=", text.lower())
+
+    def test_handoff_summary_json_cli_remains_structured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--session",
+                    str(session),
+                    "--handoff-summary-json",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            payload = json.loads(result.stdout)
+
+        self.assertIn(result.returncode, {0, 1})
+        self.assertEqual(payload["schema"], "knowledge_fabric_handoff_summary.v1")
+
     def test_context_response_includes_navigation_readiness_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp))

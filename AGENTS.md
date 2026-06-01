@@ -294,6 +294,31 @@ Current known-good behavior to preserve unless the user explicitly asks to chang
 * Do not paste multi-week chat history into new tasks unless specifically needed.
 * Use concise current diagnostics instead of old conversation context.
 
+## ChatGPT Consultation
+
+* Use local tools first: `current_debug_context`, `current-blocker`,
+  Knowledge Fabric, MCP/direct queries, replay scenarios, visual debug bundles,
+  tests, docs/source search, and the external OSRS knowledge cache.
+* Consult ChatGPT only when local tools disagree, a real blocker remains, an
+  architecture or safety/input decision is ambiguous, a long-running goal is
+  blocked, user preference is needed, or two plausible fixes need a tie-breaker.
+* Do not consult ChatGPT for routine tests, simple syntax fixes, ordinary Git
+  commit/push, normal liveness recovery, every small action, or anything the
+  local query layer clearly answers.
+* Prefer Chrome Use in the already-open ChatGPT conversation. If Chrome Use is
+  unavailable or unreliable, use Computer Use only against the already-open
+  ChatGPT conversation. If both fail, print `PASTE_TO_CHATGPT` for manual paste.
+* Never paste secrets, credentials, tokens, auth files, private data, huge logs,
+  full JSON dumps, screenshots, live sessions, live_packets, NDJSON, or JSONL.
+* Generate a bounded manual handoff with:
+
+```powershell
+python telemetry-viewer\context_service.py --handoff-summary
+```
+
+* After ChatGPT answers, summarize the received answer in execution notes and
+  verify it against local repo/query/test evidence before acting.
+
 ## Response / Summary Expectations
 
 When finishing a task, summarize:

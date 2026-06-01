@@ -364,6 +364,25 @@ RuneLite plugin
   blocker-specific query: resource candidates, route objects, service objects,
   path frontier, or view quality. Only inspect raw files/logs after these
   query surfaces are insufficient or point at a code path.
+- ChatGPT consultation is a bounded escalation path, not the default workflow.
+  Use local tools first: `current_debug_context`, `current-blocker` /
+  `explain_current_blocker`, `pipeline_health`, Knowledge Fabric, MCP/direct
+  query tools, replay scenarios, visual debug bundles, tests, docs/source
+  search, and external OSRS knowledge cache. Consult ChatGPT only when those
+  sources disagree, a real blocker remains, an architecture or safety/input
+  decision is ambiguous, a long-running goal is blocked, user preference is
+  needed, or two plausible fixes need a tie-breaker. Prefer Chrome Use in the
+  already-open ChatGPT conversation. Use Computer Use only as fallback against
+  the already-open ChatGPT window, never while RuneLite live input/gameplay is
+  running. If both UI paths fail, print a manual `PASTE_TO_CHATGPT` block.
+  Do not paste secrets, credentials, tokens, auth files, private data, huge
+  logs, full JSON dumps, screenshots, live sessions, live_packets, NDJSON, or
+  JSONL. Generate the bounded block with
+  `python telemetry-viewer\context_service.py --handoff-summary`; machine JSON
+  remains available with `--query handoff-summary` or `--handoff-summary-json`.
+  After ChatGPT answers, summarize the answer in execution notes and verify it
+  against local repo/query/test evidence before acting. Full workflow:
+  `docs\chatgpt_consultation_workflow.md`.
 - `telemetry-viewer\mcp_server.py` is an optional local stdio MCP adapter for
   Codex/AI inspection. It exposes read-only tools such as
   `get_current_debug_context`, `get_knowledge_fabric_status`,
@@ -518,6 +537,7 @@ python telemetry-viewer\context_service.py --capture-script-authoring-context --
 python telemetry-viewer\context_service.py --capture-replay-scenario --profile woodcutting --reason route_wall_hugging
 python telemetry-viewer\context_service.py --data-quality-report
 python telemetry-viewer\context_service.py --handoff-summary
+python telemetry-viewer\context_service.py --query handoff-summary
 python telemetry-viewer\context_service.py --context-json live_logs\current_debug_context_daemon_context_latest.json --data-quality-report
 python telemetry-viewer\context_service.py --replay-scenario <scenario.json>
 python telemetry-viewer\context_service.py --diff-debug-context <bundleA> <bundleB>
@@ -527,6 +547,9 @@ python telemetry-viewer\context_service.py --diff-debug-context <bundleA> <bundl
 path when no explicit `--session` or `--latest-session` is supplied. They do
 not execute input and are intended for Codex handoff, script authoring, and
 offline replay of candidate/proposal/readiness/blocker decisions.
+`--handoff-summary` prints the redacted `PASTE_TO_CHATGPT` block for manual or
+UI-assisted ChatGPT consultation. `--query handoff-summary` keeps the compact
+machine-readable Knowledge Fabric handoff JSON.
 
 Daily gauntlet:
 
