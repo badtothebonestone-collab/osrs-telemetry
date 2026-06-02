@@ -108,6 +108,33 @@ def make_fabric() -> knowledge_fabric.KnowledgeFabric:
     )
 
 
+def runtime_snapshot(variables: dict) -> dict:
+    default_input = {
+        "phaseCounts": {
+            "live_action_phase": {
+                "injectedEventsDelta": 0,
+                "lowerIlInjectedEventsDelta": 0,
+                "directBackendBypassCountDelta": 0,
+                "hardBlocker": False,
+            }
+        },
+        "current": {"directBackendBypassCount": 0},
+    }
+    wrapped = {
+        name: {"observed": True, "value": value, "source": "test"}
+        for name, value in variables.items()
+    }
+    wrapped.setdefault("inputIntegrity", {"observed": True, "value": default_input, "source": "test"})
+    return {
+        "schema": "task_runtime_evidence.v1",
+        "data": {
+            "runtimeVariables": wrapped,
+            "readinessSummary": {"manualLoginRequired": False},
+            "liveValidationPossibleNow": True,
+        },
+    }
+
+
 class TaskScriptApiTest(unittest.TestCase):
     def test_spec_lists_required_primitives_and_no_raw_input_contract(self):
         spec = task_script_api.script_api_spec()
@@ -134,6 +161,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("inventory", spec["runtimeEvidenceVariables"])
         self.assertIn("resourceCount", spec["runtimeEvidenceVariables"])
         self.assertIn("menuOptionClicked", spec["runtimeEvidenceVariables"])
+        self.assertEqual(spec["runtimeEvidenceComparisonSchema"], "task_runtime_evidence_comparison.v1")
 
     def test_woodcut_bank_example_validates_and_compiles_to_existing_actions(self):
         script = load_example()
@@ -209,6 +237,56 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("routeProgress", data["coveredVariables"])
         self.assertIn("get_action_input_visibility", data["snapshotProtocol"]["before"])
 
+    def test_runtime_evidence_comparison_proves_deposit_progress(self):
+        before = runtime_snapshot(
+            {
+                "inventory": {"freeSlots": 0, "resourceItems": ["Logs"] * 16},
+                "resourceCount": 16,
+                "bankOpen": True,
+                "menuOptionClicked": {"option": "Bank", "target": "Bank booth"},
+                "phaseIntent": {"phase": "banking", "bankingComplete": False},
+            }
+        )
+        after = runtime_snapshot(
+            {
+                "inventory": {"freeSlots": 28, "resourceItems": []},
+                "resourceCount": 0,
+                "bankOpen": True,
+                "menuOptionClicked": {"option": "Deposit inventory", "target": ""},
+                "phaseIntent": {"phase": "banking", "bankingComplete": True},
+            }
+        )
+
+        comparison = task_script_api.compare_task_runtime_evidence_snapshots(
+            before,
+            after,
+            script=load_example(),
+            primitive="deposit",
+        )
+        data = comparison["data"]
+
+        self.assertEqual(comparison["schema"], "task_runtime_evidence_comparison.v1")
+        self.assertEqual(comparison["status"], "PASS")
+        self.assertIn("resourceCount", data["expectedVariablesChanged"])
+        self.assertIn("inventory", data["expectedVariablesChanged"])
+        self.assertIn("phaseIntent", data["expectedVariablesChanged"])
+        self.assertEqual(data["inputIntegrityHardBlockers"], [])
+
+    def test_runtime_evidence_comparison_blocks_live_input_integrity_delta(self):
+        before = runtime_snapshot({"resourceCount": 16})
+        after = runtime_snapshot({"resourceCount": 17})
+        after["data"]["runtimeVariables"]["inputIntegrity"]["value"]["phaseCounts"]["live_action_phase"] = {
+            "injectedEventsDelta": 1,
+            "lowerIlInjectedEventsDelta": 0,
+            "directBackendBypassCountDelta": 0,
+            "hardBlocker": True,
+        }
+
+        comparison = task_script_api.compare_task_runtime_evidence_snapshots(before, after, primitive="collect")
+
+        self.assertEqual(comparison["status"], "FAIL")
+        self.assertIn("live_action_input_integrity_hard_blocker", comparison["blockers"])
+
     def test_knowledge_fabric_direct_methods_expose_script_api(self):
         fabric = make_fabric()
 
@@ -216,6 +294,11 @@ class TaskScriptApiTest(unittest.TestCase):
         plan = fabric.compile_task_script(load_example())
         evidence_plan = fabric.task_script_evidence_plan(load_example())
         runtime = fabric.query_task_script_runtime_evidence(load_example())
+        comparison = fabric.compare_task_script_runtime_evidence(
+            runtime_snapshot({"resourceCount": 1}),
+            runtime_snapshot({"resourceCount": 2}),
+            primitive="collect",
+        )
         template = fabric.suggest_task_template("woodcutting and bank logs", profile="woodcutting")
         scene_probe = fabric.probe_task_from_scene("woodcutting and bank logs", profile="woodcutting", limit=5)
 
@@ -223,6 +306,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(plan["schema"], "task_script_plan.v1")
         self.assertEqual(evidence_plan["schema"], "task_script_evidence_plan.v1")
         self.assertEqual(runtime["schema"], "task_runtime_evidence.v1")
+        self.assertEqual(comparison["schema"], "task_runtime_evidence_comparison.v1")
         self.assertTrue(runtime["data"]["runtimeVariables"]["inventory"]["observed"])
         self.assertEqual(runtime["data"]["runtimeVariables"]["resourceCount"]["value"], 16)
         self.assertEqual(runtime["data"]["runtimeVariables"]["bankOpen"]["value"], False)
@@ -249,6 +333,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("explain_script_plan", tool_names)
         self.assertIn("get_task_script_evidence_plan", tool_names)
         self.assertIn("get_task_script_runtime_evidence", tool_names)
+        self.assertIn("compare_task_script_runtime_evidence", tool_names)
         self.assertIn("suggest_task_template", tool_names)
         self.assertIn("probe_task_from_scene", tool_names)
         self.assertTrue(forbidden_raw_names.isdisjoint(tool_names))
@@ -263,6 +348,16 @@ class TaskScriptApiTest(unittest.TestCase):
             compile_payload = json.loads(mcp_server.call_tool("compile_task_script", {"script": load_example()})["content"][0]["text"])
             evidence_payload = json.loads(mcp_server.call_tool("get_task_script_evidence_plan", {"script": load_example()})["content"][0]["text"])
             runtime_payload = json.loads(mcp_server.call_tool("get_task_script_runtime_evidence", {"script": load_example()})["content"][0]["text"])
+            comparison_payload = json.loads(
+                mcp_server.call_tool(
+                    "compare_task_script_runtime_evidence",
+                    {
+                        "before": runtime_snapshot({"resourceCount": 1}),
+                        "after": runtime_snapshot({"resourceCount": 2}),
+                        "primitive": "collect",
+                    },
+                )["content"][0]["text"]
+            )
             probe_payload = json.loads(
                 mcp_server.call_tool("probe_task_from_scene", {"taskDescription": "woodcutting and bank logs", "limit": 3})["content"][0]["text"]
             )
@@ -271,6 +366,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(compile_payload["schema"], "task_script_plan.v1")
         self.assertEqual(evidence_payload["schema"], "task_script_evidence_plan.v1")
         self.assertEqual(runtime_payload["schema"], "task_runtime_evidence.v1")
+        self.assertEqual(comparison_payload["schema"], "task_runtime_evidence_comparison.v1")
         self.assertEqual(probe_payload["schema"], "task_scene_probe.v1")
 
 

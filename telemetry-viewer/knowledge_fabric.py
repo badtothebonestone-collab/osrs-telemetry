@@ -1522,6 +1522,7 @@ class KnowledgeFabric:
                 "explain_script_plan",
                 "task_script_evidence_plan",
                 "query_task_script_runtime_evidence",
+                "compare_task_script_runtime_evidence",
                 "suggest_task_template",
                 "probe_task_from_scene",
                 "handoff_summary",
@@ -1818,6 +1819,7 @@ class KnowledgeFabric:
             ("What existing engine actions will this script use?", "compile_task_script/explain_script_plan", "compile_task_script/explain_script_plan", "task script JSON + task policy", task_script_api.TASK_SCRIPT_PLAN_SCHEMA, "high", "unknown primitive or missing evidence", "test_task_script_api.py"),
             ("Which live variables must prove this script changed state?", "task_script_evidence_plan", "get_task_script_evidence_plan", "task script JSON", task_script_api.TASK_SCRIPT_EVIDENCE_PLAN_SCHEMA, "high", "script does not cover required lifecycle variables", "test_task_script_api.py"),
             ("What are the current live values for script evidence variables?", "query_task_script_runtime_evidence", "get_task_script_runtime_evidence", "daemon/readiness/client_tick/action visibility", task_script_api.TASK_RUNTIME_EVIDENCE_SCHEMA, "high if loaded scene fresh", "manual login or stale liveness", "test_task_script_api.py"),
+            ("Did before/after runtime evidence prove a script step changed state?", "compare_task_script_runtime_evidence", "compare_task_script_runtime_evidence", "two task_runtime_evidence snapshots", task_script_api.TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA, "high with fresh before/after snapshots", "missing after evidence or input-integrity hard blocker", "test_task_script_api.py"),
             ("Can the current scene inform a script template?", "probe_task_from_scene", "probe_task_from_scene", "loaded scene + static library + external cache", "task_scene_probe.v1", "medium", "stale loaded scene", "test_task_script_api.py"),
         ]
         data = {
@@ -3812,6 +3814,16 @@ class KnowledgeFabric:
             warnings=warnings,
             status="WARN" if warnings or action_readiness.get("executionAllowed") is not True else "PASS",
         )
+
+    def compare_task_script_runtime_evidence(
+        self,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        *,
+        script: dict[str, Any] | str | Path | None = None,
+        primitive: str | None = None,
+    ) -> dict[str, Any]:
+        return task_script_api.compare_task_runtime_evidence_snapshots(before, after, script=script, primitive=primitive)
 
     def suggest_task_template(self, task_description: str | None = None, *, profile: str | None = None) -> dict[str, Any]:
         return task_script_api.suggest_task_template(task_description, profile=profile)

@@ -44,6 +44,7 @@ Tools:
 - `explain_script_plan`
 - `get_task_script_evidence_plan`
 - `get_task_script_runtime_evidence`
+- `compare_task_script_runtime_evidence`
 - `suggest_task_template`
 - `probe_task_from_scene`
 
@@ -61,6 +62,7 @@ Direct Python surface:
 - `KnowledgeFabric.explain_script_plan(script)`
 - `KnowledgeFabric.task_script_evidence_plan(script)`
 - `KnowledgeFabric.query_task_script_runtime_evidence(script)`
+- `KnowledgeFabric.compare_task_script_runtime_evidence(before, after, script=..., primitive=...)`
 - `KnowledgeFabric.suggest_task_template(task_description, profile=...)`
 - `KnowledgeFabric.probe_task_from_scene(task_description, profile=..., limit=...)`
 
@@ -77,7 +79,7 @@ Scripts compile with a `runtimeEvidencePlan` that names the live variables each 
 - `routeProgress`
 - `phaseIntent`
 
-Use `get_task_script_runtime_evidence` before and after one bounded live step to compare those variables. A script step is not proven by an external fact, a static route prior, or a proposed action alone; it needs fresh live RuneLite / 8893 / WorldModel / 8890 evidence. For live input steps, the comparison should also include action-input visibility and input-integrity phase counts.
+Use `get_task_script_runtime_evidence` before and after one bounded live step, then call `compare_task_script_runtime_evidence` with the primitive name to compare those variables. A script step is not proven by an external fact, a static route prior, or a proposed action alone; it needs fresh live RuneLite / 8893 / WorldModel / 8890 evidence. For live input steps, the comparison also checks action-input visibility and input-integrity phase counts. A nonzero live-action injected/lower-IL delta or direct backend bypass is reported as a hard blocker.
 
 ## Example
 

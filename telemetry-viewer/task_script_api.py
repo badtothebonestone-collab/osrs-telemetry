@@ -17,6 +17,7 @@ TASK_SCRIPT_EXPLANATION_SCHEMA = "task_script_explanation.v1"
 TASK_TEMPLATE_SUGGESTION_SCHEMA = "task_template_suggestion.v1"
 TASK_SCRIPT_EVIDENCE_PLAN_SCHEMA = "task_script_evidence_plan.v1"
 TASK_RUNTIME_EVIDENCE_SCHEMA = "task_runtime_evidence.v1"
+TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA = "task_runtime_evidence_comparison.v1"
 
 CANONICAL_PIPELINE = [
     "action proposal",
@@ -322,6 +323,19 @@ def _error(path: str, code: str, message: str) -> dict[str, str]:
 
 def _warning(path: str, code: str, message: str) -> dict[str, str]:
     return {"path": path, "code": code, "message": message}
+
+
+def _json_signature(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _nested_get(value: Any, path: list[str]) -> Any:
+    current = value
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
 
 
 def _primitive_name(step: dict[str, Any]) -> str:
@@ -720,6 +734,144 @@ def build_task_script_evidence_plan(script: dict[str, Any] | str | Path) -> dict
     }
 
 
+def _runtime_data(payload: dict[str, Any] | None) -> dict[str, Any]:
+    payload = _dict(payload)
+    if payload.get("schema") == TASK_RUNTIME_EVIDENCE_SCHEMA:
+        return _dict(payload.get("data"))
+    if "runtimeVariables" in payload:
+        return payload
+    return _dict(payload.get("data"))
+
+
+def _runtime_variables(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return _dict(_runtime_data(payload).get("runtimeVariables"))
+
+
+def _observed_variable(wrapper: Any) -> bool:
+    wrapper = _dict(wrapper)
+    if isinstance(wrapper.get("observed"), bool):
+        return bool(wrapper.get("observed"))
+    return wrapper.get("value") is not None
+
+
+def _variable_value(wrapper: Any) -> Any:
+    return _dict(wrapper).get("value")
+
+
+def _comparison_variable_names(before: dict[str, Any], after: dict[str, Any], primitive: str | None, script: dict[str, Any] | str | Path | None) -> list[str]:
+    names: list[str] = []
+    if script is not None:
+        plan = build_task_script_evidence_plan(script)
+        names.extend(str(item) for item in _list(_dict(plan.get("data")).get("coveredVariables")) if str(item or "").strip())
+    primitive_name = _norm(primitive)
+    if primitive_name in PRIMITIVE_RUNTIME_EXPECTATIONS:
+        names.extend(str(item.get("variable")) for item in PRIMITIVE_RUNTIME_EXPECTATIONS[primitive_name] if item.get("variable"))
+    names.extend(str(name) for name in before.keys())
+    names.extend(str(name) for name in after.keys())
+    return list(dict.fromkeys(name for name in names if name))
+
+
+def _input_integrity_hard_blockers(after_variables: dict[str, Any]) -> list[str]:
+    value = _variable_value(after_variables.get("inputIntegrity"))
+    phase = _dict(_dict(value).get("phaseCounts"))
+    live_phase = _dict(phase.get("live_action_phase"))
+    blockers: list[str] = []
+    if live_phase.get("hardBlocker") is True:
+        blockers.append("live_action_input_integrity_hard_blocker")
+    for key in ("injectedEventsDelta", "lowerIlInjectedEventsDelta", "directBackendBypassCountDelta"):
+        delta = live_phase.get(key)
+        if isinstance(delta, (int, float)) and delta > 0:
+            blockers.append(f"{key}_nonzero")
+    current = _dict(_dict(value).get("current"))
+    direct = current.get("directBackendBypassCount")
+    if isinstance(direct, (int, float)) and direct > 0:
+        blockers.append("directBackendBypassCount_nonzero")
+    return list(dict.fromkeys(blockers))
+
+
+def compare_task_runtime_evidence_snapshots(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    script: dict[str, Any] | str | Path | None = None,
+    primitive: str | None = None,
+) -> dict[str, Any]:
+    before_variables = _runtime_variables(before)
+    after_variables = _runtime_variables(after)
+    variable_names = _comparison_variable_names(before_variables, after_variables, primitive, script)
+    primitive_name = _norm(primitive)
+    expected_variables = []
+    if primitive_name in PRIMITIVE_RUNTIME_EXPECTATIONS:
+        expected_variables = list(dict.fromkeys(str(item.get("variable")) for item in PRIMITIVE_RUNTIME_EXPECTATIONS[primitive_name] if item.get("variable")))
+    comparisons = []
+    changed_variables = []
+    missing_after = []
+    for name in variable_names:
+        before_wrapper = _dict(before_variables.get(name))
+        after_wrapper = _dict(after_variables.get(name))
+        before_observed = _observed_variable(before_wrapper)
+        after_observed = _observed_variable(after_wrapper)
+        before_value = _variable_value(before_wrapper)
+        after_value = _variable_value(after_wrapper)
+        changed = _json_signature(before_value) != _json_signature(after_value)
+        if changed:
+            changed_variables.append(name)
+        if name in expected_variables and not after_observed:
+            missing_after.append(name)
+        comparisons.append(
+            {
+                "variable": name,
+                "beforeObserved": before_observed,
+                "afterObserved": after_observed,
+                "changed": changed,
+                "beforeValue": before_value,
+                "afterValue": after_value,
+                "source": after_wrapper.get("source") or before_wrapper.get("source"),
+                "expectedForPrimitive": name in expected_variables,
+            }
+        )
+    expected_changed = [name for name in expected_variables if name in changed_variables]
+    unexpected_unchanged = [name for name in expected_variables if name not in changed_variables]
+    after_data = _runtime_data(after)
+    readiness_summary = _dict(after_data.get("readinessSummary"))
+    manual_login = readiness_summary.get("manualLoginRequired") is True
+    hard_blockers = _input_integrity_hard_blockers(after_variables)
+    warnings = []
+    if manual_login:
+        warnings.append("manual_login_required")
+    warnings.extend(f"expected_variable_missing_after:{name}" for name in missing_after)
+    if primitive_name and expected_variables and not expected_changed:
+        warnings.append("no_expected_variable_changed")
+    if not primitive_name and not changed_variables:
+        warnings.append("no_runtime_variable_changed")
+    blockers = list(hard_blockers)
+    status = "FAIL" if blockers else "WARN" if warnings else "PASS"
+    return {
+        "schema": TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA,
+        "status": status,
+        "generatedAtUtc": utc_now(),
+        "primitive": primitive_name or None,
+        "data": {
+            "variableComparisons": comparisons,
+            "changedVariables": changed_variables,
+            "unchangedVariables": [name for name in variable_names if name not in changed_variables],
+            "expectedVariables": expected_variables,
+            "expectedVariablesChanged": expected_changed,
+            "expectedVariablesUnchanged": unexpected_unchanged,
+            "missingExpectedVariablesAfter": missing_after,
+            "inputIntegrityHardBlockers": hard_blockers,
+            "manualLoginRequired": manual_login,
+            "liveValidationPossibleAfter": after_data.get("liveValidationPossibleNow"),
+            "comparisonRule": "PASS requires after-snapshot evidence for expected variables and no live-action input-integrity hard blockers; external facts never prove live change",
+            "noLiveInput": True,
+        },
+        "warnings": warnings,
+        "blockers": blockers,
+        "externalKnowledgePolicy": EXTERNAL_KNOWLEDGE_POLICY,
+        "noLiveInput": True,
+    }
+
+
 def woodcut_bank_template() -> dict[str, Any]:
     return {
         "schema": TASK_SCRIPT_SCHEMA,
@@ -854,6 +1006,7 @@ def script_api_spec() -> dict[str, Any]:
         "boundedOperatorRequests": BOUNDED_OPERATOR_REQUESTS,
         "runtimeEvidenceVariables": RUNTIME_EVIDENCE_VARIABLES,
         "primitiveRuntimeExpectations": PRIMITIVE_RUNTIME_EXPECTATIONS,
+        "runtimeEvidenceComparisonSchema": TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA,
         "forbiddenRawInputPrimitives": sorted(RAW_INPUT_PRIMITIVES),
         "forbiddenRawInputFields": sorted(RAW_INPUT_FIELDS),
         "phaseAwareInputIntegrityPolicy": PHASE_AWARE_INPUT_POLICY,

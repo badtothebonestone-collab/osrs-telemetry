@@ -40,7 +40,7 @@ This document defines the intended shape of the live Python sidecar stack. It is
    - Current canonical code: `task_script_api.py`; example: `examples/woodcut_bank_task_script.json`.
    - Allowed primitives are `collect`, `interact`, `walk_to`, `bank`, `deposit`, `close_bank`, `return_to_resource`, `wait_for_evidence`, `recover_loaded_scene`, and `repeat_until`.
    - MCP/direct surfaces expose spec/validation/compile/explain/template/scene-probe queries. They do not expose raw arbitrary mouse/key/click tools.
-   - Evidence-plan/runtime-evidence queries name and read the live variables required to prove lifecycle transitions: inventory, resource count, bank-open state, hover/click proof, location, route progress, and phase/intent.
+   - Evidence-plan/runtime-evidence queries name, read, and compare the live variables required to prove lifecycle transitions: inventory, resource count, bank-open state, hover/click proof, location, route progress, and phase/intent.
    - The compiled live path remains action proposal -> readiness -> hover/menu proof -> HumanInputController -> ArduinoHIDBackend -> input integrity -> lifecycle verification.
 
 5. Executor

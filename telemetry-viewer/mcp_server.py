@@ -269,6 +269,19 @@ def tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {"script": {"type": ["object", "string"]}, "daemonUrl": string, "snapshotUrl": string}},
         },
         {
+            "name": "compare_task_script_runtime_evidence",
+            "description": "Compare before/after task runtime evidence snapshots and report which live variables changed, plus input-integrity blockers. Read-only; no live input.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "before": {"type": "object"},
+                    "after": {"type": "object"},
+                    "script": {"type": ["object", "string"]},
+                    "primitive": string,
+                },
+            },
+        },
+        {
             "name": "suggest_task_template",
             "description": "Suggest a high-level task script template such as woodcut_bank. Read-only; external facts remain advisory.",
             "inputSchema": {"type": "object", "properties": {"taskDescription": string, "profile": string}},
@@ -528,6 +541,13 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> dict[str, A
             payload = task_script_api.build_task_script_evidence_plan(args.get("script") or task_script_api.woodcut_bank_template())
         elif name == "get_task_script_runtime_evidence":
             payload = _fabric(args).query_task_script_runtime_evidence(args.get("script") or task_script_api.woodcut_bank_template())
+        elif name == "compare_task_script_runtime_evidence":
+            payload = task_script_api.compare_task_runtime_evidence_snapshots(
+                _dict(args.get("before")),
+                _dict(args.get("after")),
+                script=args.get("script"),
+                primitive=args.get("primitive"),
+            )
         elif name == "suggest_task_template":
             payload = task_script_api.suggest_task_template(args.get("taskDescription"), profile=args.get("profile"))
         elif name == "probe_task_from_scene":

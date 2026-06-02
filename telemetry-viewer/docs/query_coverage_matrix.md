@@ -44,6 +44,7 @@ MCP resource/tool:
 | What existing engine actions will this script use? | Knowledge Fabric task script API | `compile_task_script` / `explain_script_plan` | task script JSON, task policy | `task_script_plan.v1` | high | unknown primitive or missing evidence |
 | Which variables must prove the script changed state? | Knowledge Fabric task script API | `get_task_script_evidence_plan` / `osrs://script-api/woodcut-bank-evidence-plan` | task script JSON | `task_script_evidence_plan.v1` | high | missing lifecycle variable coverage |
 | What are the current values for script evidence variables? | Knowledge Fabric runtime evidence | `get_task_script_runtime_evidence` / `osrs://script-api/runtime-evidence` | daemon, readiness, client tick, action visibility | `task_runtime_evidence.v1` | high when loaded scene is fresh | manual login or stale liveness |
+| Did before/after evidence prove a step changed state? | Knowledge Fabric task script API | `compare_task_script_runtime_evidence` | two runtime evidence snapshots | `task_runtime_evidence_comparison.v1` | high with fresh before/after snapshots | missing after evidence or live input hard blocker |
 | Can the current scene inform a script template? | Knowledge Fabric scene probe | `probe_task_from_scene` | loaded scene, static library, external cache | `task_scene_probe.v1` | medium | stale/missing loaded scene |
 
 ## Rules
