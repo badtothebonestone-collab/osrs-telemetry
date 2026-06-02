@@ -230,11 +230,12 @@ def resolve_screen_click_point(
     source_matches_canvas = abs(canvas_width - source_width) < 0.5 and abs(canvas_height - source_height) < 0.5
     # On Windows high-DPI VMs, Java/AWT can report window/canvas locations in
     # logical coordinates while HID and DPI-aware cursor APIs move in physical
-    # pixels. Component size can still be expanded relative to the source canvas,
-    # so client window bounds are the stronger signal that the final screen point
-    # must be promoted into physical cursor space.
+    # pixels. If the canvas has already been expanded from the source canvas,
+    # though, the reported canvas dimensions are already in the cursor space we
+    # should click in. Applying display scale again double-scales the target.
     logical_screen_scale_applied = bool(
         client_bounds
+        and source_matches_canvas
         and (abs(display_scale_x - 1.0) > 0.01 or abs(display_scale_y - 1.0) > 0.01)
     )
     legacy_delta_scale_applied = bool(not logical_screen_scale_applied and source_matches_canvas and (abs(display_scale_x - 1.0) > 0.01 or abs(display_scale_y - 1.0) > 0.01))
