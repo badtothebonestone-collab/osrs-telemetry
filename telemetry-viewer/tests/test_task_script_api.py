@@ -162,6 +162,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("resourceCount", spec["runtimeEvidenceVariables"])
         self.assertIn("menuOptionClicked", spec["runtimeEvidenceVariables"])
         self.assertEqual(spec["runtimeEvidenceComparisonSchema"], "task_runtime_evidence_comparison.v1")
+        self.assertEqual(spec["failureClassificationSchema"], "task_failure_classification.v1")
 
     def test_woodcut_bank_example_validates_and_compiles_to_existing_actions(self):
         script = load_example()
@@ -287,6 +288,64 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(comparison["status"], "FAIL")
         self.assertIn("live_action_input_integrity_hard_blocker", comparison["blockers"])
 
+    def test_failure_classifier_labels_operator_phase_noise_as_non_blocking(self):
+        evidence = runtime_snapshot({"resourceCount": 1})
+        phase = evidence["data"]["runtimeVariables"]["inputIntegrity"]["value"]["phaseCounts"]
+        phase["operator_phase"] = {
+            "operatorInjectedEvents": 4,
+            "operatorLowerIlInjectedEvents": 0,
+            "blocking": False,
+            "classification": "operatorInjectedEvents",
+        }
+
+        classification = task_script_api.classify_task_failure({"runtimeEvidence": evidence})
+
+        self.assertEqual(classification["schema"], "task_failure_classification.v1")
+        self.assertEqual(classification["status"], "PASS")
+        self.assertEqual(classification["primaryClassification"], "operator-phase injected-input noise")
+        self.assertTrue(classification["inputIntegrityAssessment"]["operatorNoiseOnly"])
+        self.assertFalse(classification["inputIntegrityAssessment"]["liveActionHardBlocker"])
+
+    def test_failure_classifier_prioritizes_manual_login_over_operator_noise(self):
+        runtime = runtime_snapshot({"resourceCount": 1})
+        runtime["data"]["readinessSummary"]["manualLoginRequired"] = True
+        runtime["data"]["readinessSummary"]["livenessState"] = "login_screen"
+        phase = runtime["data"]["runtimeVariables"]["inputIntegrity"]["value"]["phaseCounts"]
+        phase["operator_phase"] = {"operatorInjectedEvents": 280, "operatorLowerIlInjectedEvents": 0, "blocking": False}
+
+        classification = task_script_api.classify_task_failure({"runtimeEvidence": runtime})
+
+        self.assertEqual(classification["status"], "WARN")
+        self.assertEqual(classification["primaryClassification"], "game-state/user-login blocker")
+        self.assertIn("operator-phase injected-input noise", classification["secondaryClassifications"])
+        self.assertIn("manual_login_required", classification["blockers"])
+
+    def test_failure_classifier_hard_blocks_live_input_integrity_delta(self):
+        before = runtime_snapshot({"resourceCount": 1})
+        after = runtime_snapshot({"resourceCount": 2})
+        after["data"]["runtimeVariables"]["inputIntegrity"]["value"]["phaseCounts"]["live_action_phase"] = {
+            "injectedEventsDelta": 1,
+            "lowerIlInjectedEventsDelta": 0,
+            "directBackendBypassCountDelta": 0,
+            "hardBlocker": True,
+        }
+        comparison = task_script_api.compare_task_runtime_evidence_snapshots(before, after, primitive="collect")
+
+        classification = task_script_api.classify_task_failure({"comparison": comparison})
+
+        self.assertEqual(classification["status"], "FAIL")
+        self.assertEqual(classification["primaryClassification"], "code/data truth bug")
+        self.assertIn("failure_classification_hard_blocker", classification["blockers"])
+
+    def test_failure_classifier_distinguishes_coordinate_arduino_and_menu_mismatch(self):
+        coordinate = task_script_api.classify_task_failure({"actionTrace": {"actionTraceSchema": "action_trace.v2", "clickFailureBucket": "coordinate_transform_error"}})
+        arduino = task_script_api.classify_task_failure({"actionTrace": {"actionTraceSchema": "action_trace.v2", "clickFailureBucket": "arduino_movement_error"}})
+        hover = task_script_api.classify_task_failure({"actionTrace": {"actionTraceSchema": "action_trace.v2", "finalClassification": "hover_mismatch_skipped"}})
+
+        self.assertEqual(coordinate["primaryClassification"], "coordinate_transform_error")
+        self.assertEqual(arduino["primaryClassification"], "arduino_movement_error")
+        self.assertEqual(hover["primaryClassification"], "target/hover/menu mismatch")
+
     def test_knowledge_fabric_direct_methods_expose_script_api(self):
         fabric = make_fabric()
 
@@ -299,6 +358,7 @@ class TaskScriptApiTest(unittest.TestCase):
             runtime_snapshot({"resourceCount": 2}),
             primitive="collect",
         )
+        classification = fabric.classify_task_failure({"runtimeEvidence": runtime})
         template = fabric.suggest_task_template("woodcutting and bank logs", profile="woodcutting")
         scene_probe = fabric.probe_task_from_scene("woodcutting and bank logs", profile="woodcutting", limit=5)
 
@@ -307,6 +367,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(evidence_plan["schema"], "task_script_evidence_plan.v1")
         self.assertEqual(runtime["schema"], "task_runtime_evidence.v1")
         self.assertEqual(comparison["schema"], "task_runtime_evidence_comparison.v1")
+        self.assertEqual(classification["schema"], "task_failure_classification.v1")
         self.assertTrue(runtime["data"]["runtimeVariables"]["inventory"]["observed"])
         self.assertEqual(runtime["data"]["runtimeVariables"]["resourceCount"]["value"], 16)
         self.assertEqual(runtime["data"]["runtimeVariables"]["bankOpen"]["value"], False)
@@ -334,6 +395,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("get_task_script_evidence_plan", tool_names)
         self.assertIn("get_task_script_runtime_evidence", tool_names)
         self.assertIn("compare_task_script_runtime_evidence", tool_names)
+        self.assertIn("classify_task_failure", tool_names)
         self.assertIn("suggest_task_template", tool_names)
         self.assertIn("probe_task_from_scene", tool_names)
         self.assertTrue(forbidden_raw_names.isdisjoint(tool_names))
@@ -341,6 +403,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("osrs://script-api/woodcut-bank-example", resource_uris)
         self.assertIn("osrs://script-api/woodcut-bank-evidence-plan", resource_uris)
         self.assertIn("osrs://script-api/runtime-evidence", resource_uris)
+        self.assertIn("osrs://script-api/failure-classification", resource_uris)
 
         fabric = make_fabric()
         with patch.object(mcp_server, "_fabric", return_value=fabric):
@@ -358,6 +421,9 @@ class TaskScriptApiTest(unittest.TestCase):
                     },
                 )["content"][0]["text"]
             )
+            classification_payload = json.loads(
+                mcp_server.call_tool("classify_task_failure", {"evidence": {"runtimeEvidence": runtime_payload}})["content"][0]["text"]
+            )
             probe_payload = json.loads(
                 mcp_server.call_tool("probe_task_from_scene", {"taskDescription": "woodcutting and bank logs", "limit": 3})["content"][0]["text"]
             )
@@ -367,6 +433,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(evidence_payload["schema"], "task_script_evidence_plan.v1")
         self.assertEqual(runtime_payload["schema"], "task_runtime_evidence.v1")
         self.assertEqual(comparison_payload["schema"], "task_runtime_evidence_comparison.v1")
+        self.assertEqual(classification_payload["schema"], "task_failure_classification.v1")
         self.assertEqual(probe_payload["schema"], "task_scene_probe.v1")
 
 

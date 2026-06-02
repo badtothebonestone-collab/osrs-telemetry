@@ -282,6 +282,26 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "classify_task_failure",
+            "description": "Classify current or supplied evidence into the before-patching failure taxonomy. Read-only; labels operator injected events separately from live-action hard blockers.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "evidence": {"type": "object"},
+                    "currentBlocker": {"type": "object"},
+                    "debugContext": {"type": "object"},
+                    "runtimeEvidence": {"type": "object"},
+                    "comparison": {"type": "object"},
+                    "actionInputVisibility": {"type": "object"},
+                    "actionTrace": {"type": "object"},
+                    "externalKnowledge": {"type": "object"},
+                    "errorText": string,
+                    "daemonUrl": string,
+                    "snapshotUrl": string,
+                },
+            },
+        },
+        {
             "name": "suggest_task_template",
             "description": "Suggest a high-level task script template such as woodcut_bank. Read-only; external facts remain advisory.",
             "inputSchema": {"type": "object", "properties": {"taskDescription": string, "profile": string}},
@@ -395,6 +415,7 @@ def resource_definitions() -> list[dict[str, Any]]:
         {"uri": "osrs://script-api/woodcut-bank-example", "name": "woodcut_bank task script example", "mimeType": "application/json"},
         {"uri": "osrs://script-api/woodcut-bank-evidence-plan", "name": "woodcut_bank runtime evidence plan", "mimeType": "application/json"},
         {"uri": "osrs://script-api/runtime-evidence", "name": "Current task runtime evidence", "mimeType": "application/json"},
+        {"uri": "osrs://script-api/failure-classification", "name": "Current task failure classification", "mimeType": "application/json"},
         {"uri": "osrs://external/items", "name": "External item lookup cache", "mimeType": "application/json"},
         {"uri": "osrs://external/item-map", "name": "External item ID/name map", "mimeType": "application/json"},
         {"uri": "osrs://external/wiki-cache", "name": "External wiki cache status", "mimeType": "application/json"},
@@ -548,6 +569,18 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> dict[str, A
                 script=args.get("script"),
                 primitive=args.get("primitive"),
             )
+        elif name == "classify_task_failure":
+            payload = _fabric(args).classify_task_failure(
+                _dict(args.get("evidence")) or None,
+                current_blocker=_dict(args.get("currentBlocker")) or None,
+                debug_context=_dict(args.get("debugContext")) or None,
+                runtime_evidence=_dict(args.get("runtimeEvidence")) or None,
+                comparison=_dict(args.get("comparison")) or None,
+                action_input_visibility=_dict(args.get("actionInputVisibility")) or None,
+                action_trace=_dict(args.get("actionTrace")) or None,
+                external_knowledge=_dict(args.get("externalKnowledge")) or None,
+                error_text=args.get("errorText"),
+            )
         elif name == "suggest_task_template":
             payload = task_script_api.suggest_task_template(args.get("taskDescription"), profile=args.get("profile"))
         elif name == "probe_task_from_scene":
@@ -694,6 +727,8 @@ def read_resource(uri: str, arguments: dict[str, Any] | None = None) -> dict[str
         payload = task_script_api.build_task_script_evidence_plan(task_script_api.woodcut_bank_template())
     elif uri == "osrs://script-api/runtime-evidence":
         payload = fabric.query_task_script_runtime_evidence() if fabric else {}
+    elif uri == "osrs://script-api/failure-classification":
+        payload = fabric.classify_task_failure() if fabric else {}
     elif uri == "osrs://external/items":
         root = external_knowledge_cache.ensure_cache()
         payload = external_knowledge_cache.read_json(root / "item_name_map.json", {"schema": "external_item_name_map.v1", "itemsByName": {}})

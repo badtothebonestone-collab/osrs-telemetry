@@ -1523,6 +1523,7 @@ class KnowledgeFabric:
                 "task_script_evidence_plan",
                 "query_task_script_runtime_evidence",
                 "compare_task_script_runtime_evidence",
+                "classify_task_failure",
                 "suggest_task_template",
                 "probe_task_from_scene",
                 "handoff_summary",
@@ -1726,6 +1727,20 @@ class KnowledgeFabric:
                     "sampleQuery": "get_task_script_runtime_evidence",
                 },
                 {
+                    "sourceName": "task_failure_classification.v1",
+                    "sourceType": "read_only_failure_diagnosis",
+                    "producer": "task_script_api.py over Knowledge Fabric evidence",
+                    "consumer": "Codex before-patching failure classification",
+                    "schema": task_script_api.TASK_FAILURE_CLASSIFICATION_SCHEMA,
+                    "freshnessField": "source evidence freshness",
+                    "capFields": ["evidence sections supplied"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "classify_task_failure",
+                },
+                {
                     "sourceName": "session_memory",
                     "sourceType": "session_memory",
                     "producer": "Knowledge Fabric/session observation writers",
@@ -1820,6 +1835,7 @@ class KnowledgeFabric:
             ("Which live variables must prove this script changed state?", "task_script_evidence_plan", "get_task_script_evidence_plan", "task script JSON", task_script_api.TASK_SCRIPT_EVIDENCE_PLAN_SCHEMA, "high", "script does not cover required lifecycle variables", "test_task_script_api.py"),
             ("What are the current live values for script evidence variables?", "query_task_script_runtime_evidence", "get_task_script_runtime_evidence", "daemon/readiness/client_tick/action visibility", task_script_api.TASK_RUNTIME_EVIDENCE_SCHEMA, "high if loaded scene fresh", "manual login or stale liveness", "test_task_script_api.py"),
             ("Did before/after runtime evidence prove a script step changed state?", "compare_task_script_runtime_evidence", "compare_task_script_runtime_evidence", "two task_runtime_evidence snapshots", task_script_api.TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA, "high with fresh before/after snapshots", "missing after evidence or input-integrity hard blocker", "test_task_script_api.py"),
+            ("How should a failed script/live attempt be classified before patching?", "classify_task_failure", "classify_task_failure/osrs://script-api/failure-classification", "current or supplied blocker/runtime/action evidence", task_script_api.TASK_FAILURE_CLASSIFICATION_SCHEMA, "medium-high with fresh evidence", "needs current evidence bundle", "test_task_script_api.py"),
             ("Can the current scene inform a script template?", "probe_task_from_scene", "probe_task_from_scene", "loaded scene + static library + external cache", "task_scene_probe.v1", "medium", "stale loaded scene", "test_task_script_api.py"),
         ]
         data = {
@@ -3824,6 +3840,51 @@ class KnowledgeFabric:
         primitive: str | None = None,
     ) -> dict[str, Any]:
         return task_script_api.compare_task_runtime_evidence_snapshots(before, after, script=script, primitive=primitive)
+
+    def classify_task_failure(
+        self,
+        evidence: dict[str, Any] | None = None,
+        *,
+        current_blocker: dict[str, Any] | None = None,
+        debug_context: dict[str, Any] | None = None,
+        runtime_evidence: dict[str, Any] | None = None,
+        comparison: dict[str, Any] | None = None,
+        action_input_visibility: dict[str, Any] | None = None,
+        action_trace: dict[str, Any] | None = None,
+        external_knowledge: dict[str, Any] | None = None,
+        error_text: str | None = None,
+    ) -> dict[str, Any]:
+        if evidence is None and not any(
+            item is not None
+            for item in (
+                current_blocker,
+                debug_context,
+                runtime_evidence,
+                comparison,
+                action_input_visibility,
+                action_trace,
+                external_knowledge,
+                error_text,
+            )
+        ):
+            evidence = {
+                "currentBlocker": self.explain_current_blocker(),
+                "debugContext": self.query_current_debug_context(),
+                "runtimeEvidence": self.query_task_script_runtime_evidence(),
+                "actionInputVisibility": self.query_action_input_visibility(),
+                "externalKnowledge": _external_summary_compact(),
+            }
+        return task_script_api.classify_task_failure(
+            evidence,
+            current_blocker=current_blocker,
+            debug_context=debug_context,
+            runtime_evidence=runtime_evidence,
+            comparison=comparison,
+            action_input_visibility=action_input_visibility,
+            action_trace=action_trace,
+            external_knowledge=external_knowledge,
+            error_text=error_text,
+        )
 
     def suggest_task_template(self, task_description: str | None = None, *, profile: str | None = None) -> dict[str, Any]:
         return task_script_api.suggest_task_template(task_description, profile=profile)

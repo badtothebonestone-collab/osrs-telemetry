@@ -18,6 +18,7 @@ TASK_TEMPLATE_SUGGESTION_SCHEMA = "task_template_suggestion.v1"
 TASK_SCRIPT_EVIDENCE_PLAN_SCHEMA = "task_script_evidence_plan.v1"
 TASK_RUNTIME_EVIDENCE_SCHEMA = "task_runtime_evidence.v1"
 TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA = "task_runtime_evidence_comparison.v1"
+TASK_FAILURE_CLASSIFICATION_SCHEMA = "task_failure_classification.v1"
 
 CANONICAL_PIPELINE = [
     "action proposal",
@@ -336,6 +337,14 @@ def _nested_get(value: Any, path: list[str]) -> Any:
             return None
         current = current.get(key)
     return current
+
+
+def _first_nested(value: Any, paths: list[list[str]]) -> Any:
+    for path in paths:
+        found = _nested_get(value, path)
+        if found is not None:
+            return found
+    return None
 
 
 def _primitive_name(step: dict[str, Any]) -> str:
@@ -872,6 +881,418 @@ def compare_task_runtime_evidence_snapshots(
     }
 
 
+def _evidence_bundle(
+    evidence: dict[str, Any] | None,
+    *,
+    current_blocker: dict[str, Any] | None = None,
+    debug_context: dict[str, Any] | None = None,
+    runtime_evidence: dict[str, Any] | None = None,
+    comparison: dict[str, Any] | None = None,
+    action_input_visibility: dict[str, Any] | None = None,
+    action_trace: dict[str, Any] | None = None,
+    external_knowledge: dict[str, Any] | None = None,
+    error_text: str | None = None,
+) -> dict[str, Any]:
+    bundle = deepcopy(_dict(evidence))
+    schema = bundle.get("schema")
+    if schema == TASK_RUNTIME_EVIDENCE_SCHEMA:
+        bundle = {"runtimeEvidence": bundle}
+    elif schema == TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA:
+        bundle = {"comparison": bundle}
+    elif schema == "knowledge_fabric_current_blocker_explanation.v1":
+        bundle = {"currentBlocker": bundle}
+    elif schema == "knowledge_fabric_current_debug_context.v1":
+        bundle = {"debugContext": bundle}
+    elif schema == "action_input_visibility_context.v1":
+        bundle = {"actionInputVisibility": bundle}
+    elif schema == "action_trace.v2" or bundle.get("actionTraceSchema") == "action_trace.v2":
+        bundle = {"actionTrace": bundle}
+    overrides = {
+        "currentBlocker": current_blocker,
+        "debugContext": debug_context,
+        "runtimeEvidence": runtime_evidence,
+        "comparison": comparison,
+        "actionInputVisibility": action_input_visibility,
+        "actionTrace": action_trace,
+        "externalKnowledge": external_knowledge,
+        "errorText": error_text,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            bundle[key] = value
+    return bundle
+
+
+def _bundle_text(bundle: dict[str, Any]) -> str:
+    return json.dumps(bundle, default=str, sort_keys=True).lower()
+
+
+def _input_integrity_value(bundle: dict[str, Any]) -> dict[str, Any]:
+    candidates = [
+        _first_nested(bundle, [["actionInputVisibility", "data", "input_integrity_status"], ["actionInputVisibility", "input_integrity_status"]]),
+        _first_nested(bundle, [["runtimeEvidence", "data", "runtimeVariables", "inputIntegrity", "value"]]),
+        _first_nested(bundle, [["currentBlocker", "data", "evidence", "inputIntegrity"]]),
+        _first_nested(bundle, [["debugContext", "data", "inputIntegrity"], ["debugContext", "data", "readiness", "inputIntegrity"]]),
+        _first_nested(bundle, [["actionTrace", "inputIntegrityPhaseReport"]]),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            if candidate.get("schema") == "input_integrity_phase_report.v1":
+                return {"phaseCounts": candidate}
+            return candidate
+    return {}
+
+
+def _num(value: Any) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _input_integrity_assessment(bundle: dict[str, Any]) -> dict[str, Any]:
+    value = _input_integrity_value(bundle)
+    phase = _dict(value.get("phaseCounts"))
+    operator = _dict(phase.get("operator_phase"))
+    live = _dict(phase.get("live_action_phase"))
+    current = _dict(value.get("current")) or value
+    operator_injected = _num(operator.get("operatorInjectedEvents"))
+    operator_lower = _num(operator.get("operatorLowerIlInjectedEvents"))
+    live_injected = _num(live.get("injectedEventsDelta"))
+    live_lower = _num(live.get("lowerIlInjectedEventsDelta"))
+    live_direct_delta = _num(live.get("directBackendBypassCountDelta"))
+    direct_current = _num(current.get("directBackendBypassCount"))
+    live_hard = bool(live.get("hardBlocker") is True or live_injected > 0 or live_lower > 0 or live_direct_delta > 0 or direct_current > 0)
+    phase_present = bool(phase)
+    current_injected = _num(current.get("injectedEvents"))
+    current_lower = _num(current.get("lowerIlInjectedEvents"))
+    operator_noise = bool((operator_injected > 0 or operator_lower > 0 or (not phase_present and (current_injected > 0 or current_lower > 0))) and not live_hard)
+    blockers = []
+    if live.get("hardBlocker") is True:
+        blockers.append("live_action_input_integrity_hard_blocker")
+    if live_injected > 0:
+        blockers.append("live_action_injected_delta_nonzero")
+    if live_lower > 0:
+        blockers.append("live_action_lower_il_delta_nonzero")
+    if live_direct_delta > 0:
+        blockers.append("live_action_direct_backend_bypass_delta_nonzero")
+    if direct_current > 0:
+        blockers.append("directBackendBypassCount_nonzero")
+    return {
+        "phaseEvidencePresent": phase_present,
+        "operatorInjectedEvents": int(operator_injected),
+        "operatorLowerIlInjectedEvents": int(operator_lower),
+        "currentInjectedEvents": int(current_injected),
+        "currentLowerIlInjectedEvents": int(current_lower),
+        "liveActionInjectedEventsDelta": int(live_injected),
+        "liveActionLowerIlInjectedEventsDelta": int(live_lower),
+        "liveActionDirectBackendBypassCountDelta": int(live_direct_delta),
+        "directBackendBypassCount": int(direct_current) if direct_current else 0,
+        "operatorNoiseOnly": operator_noise,
+        "liveActionHardBlocker": live_hard,
+        "hardBlockers": blockers,
+    }
+
+
+def _classification_candidate(
+    classification: str,
+    *,
+    confidence: str,
+    summary: str,
+    evidence_path: str,
+    evidence_value: Any,
+    recommended_next_query: str,
+    recommended_next_step: str,
+    hard_blocker: bool = False,
+) -> dict[str, Any]:
+    return {
+        "classification": classification,
+        "confidence": confidence,
+        "summary": summary,
+        "evidence": {"path": evidence_path, "value": evidence_value},
+        "recommendedNextQuery": recommended_next_query,
+        "recommendedNextStep": recommended_next_step,
+        "hardBlocker": hard_blocker,
+    }
+
+
+def _candidate_priority(candidate: dict[str, Any]) -> int:
+    if candidate.get("hardBlocker"):
+        return 100
+    priorities = {
+        "game-state/user-login blocker": 90,
+        "stale liveness/plugin bug": 82,
+        "runtime file/disk issue": 78,
+        "coordinate_transform_error": 74,
+        "arduino_movement_error": 73,
+        "target_aimpoint_error": 72,
+        "target/hover/menu mismatch": 71,
+        "external knowledge/cache miss": 60,
+        "code/data truth bug": 50,
+        "operator-phase injected-input noise": 10,
+    }
+    return priorities.get(str(candidate.get("classification")), 0)
+
+
+def classify_task_failure(
+    evidence: dict[str, Any] | None = None,
+    *,
+    current_blocker: dict[str, Any] | None = None,
+    debug_context: dict[str, Any] | None = None,
+    runtime_evidence: dict[str, Any] | None = None,
+    comparison: dict[str, Any] | None = None,
+    action_input_visibility: dict[str, Any] | None = None,
+    action_trace: dict[str, Any] | None = None,
+    external_knowledge: dict[str, Any] | None = None,
+    error_text: str | None = None,
+) -> dict[str, Any]:
+    bundle = _evidence_bundle(
+        evidence,
+        current_blocker=current_blocker,
+        debug_context=debug_context,
+        runtime_evidence=runtime_evidence,
+        comparison=comparison,
+        action_input_visibility=action_input_visibility,
+        action_trace=action_trace,
+        external_knowledge=external_knowledge,
+        error_text=error_text,
+    )
+    text = _bundle_text(bundle)
+    input_assessment = _input_integrity_assessment(bundle)
+    candidates: list[dict[str, Any]] = []
+
+    if input_assessment["liveActionHardBlocker"]:
+        candidates.append(
+            _classification_candidate(
+                "code/data truth bug",
+                confidence="high",
+                summary="The live action window contains injected/lower-IL input or direct backend bypass evidence; live motor control is no longer proven Arduino-only.",
+                evidence_path="inputIntegrity.live_action_phase",
+                evidence_value=input_assessment,
+                recommended_next_query="get_action_input_visibility",
+                recommended_next_step="STOP_ALL, DISARM, STATUS, then inspect the live-action input-integrity baseline and executor backend path before any further live action.",
+                hard_blocker=True,
+            )
+        )
+    elif input_assessment["operatorNoiseOnly"]:
+        candidates.append(
+            _classification_candidate(
+                "operator-phase injected-input noise",
+                confidence="high" if input_assessment["phaseEvidencePresent"] else "medium",
+                summary="Injected/lower-IL events are present outside the live action delta window and should be treated as operator/debug noise, not script failure.",
+                evidence_path="inputIntegrity.operator_phase",
+                evidence_value=input_assessment,
+                recommended_next_query="get_action_input_visibility",
+                recommended_next_step="Before live action, run the pre-live STOP_ALL/DISARM/STATUS and input-integrity reset or rebaseline.",
+            )
+        )
+
+    manual_login = any(
+        item is True
+        for item in [
+            _first_nested(bundle, [["runtimeEvidence", "data", "readinessSummary", "manualLoginRequired"]]),
+            _first_nested(bundle, [["debugContext", "data", "readiness", "manualLoginRequired"], ["debugContext", "data", "manualLoginRequired"]]),
+            _first_nested(bundle, [["currentBlocker", "data", "evidence", "bootstrapState", "manualLoginRequired"]]),
+        ]
+    ) or any(token in text for token in ("manual_login_required", "credentialrequired", "credential_required", "login_screen"))
+    if manual_login:
+        candidates.append(
+            _classification_candidate(
+                "game-state/user-login blocker",
+                confidence="high",
+                summary="Live evidence indicates a login or credential-required state; do not run gameplay actions.",
+                evidence_path="readiness.manualLoginRequired/livenessState",
+                evidence_value={
+                    "runtimeEvidence": _first_nested(bundle, [["runtimeEvidence", "data", "readinessSummary"]]),
+                    "debugContext": _first_nested(bundle, [["debugContext", "data", "readiness"]]),
+                    "currentBlocker": _first_nested(bundle, [["currentBlocker", "data", "primaryBlockerCategory"]]),
+                },
+                recommended_next_query="get_current_debug_context",
+                recommended_next_step="Request manual login/credential handling, then re-query loaded-scene readiness before any live action.",
+            )
+        )
+
+    liveness_state = _first_nested(bundle, [["debugContext", "data", "livenessState"], ["runtimeEvidence", "data", "readinessSummary", "livenessState"]])
+    loaded_scene = _first_nested(bundle, [["debugContext", "data", "loadedSceneVerified"], ["debugContext", "data", "readiness", "loadedSceneProof", "loadedSceneVerified"]])
+    blocker_category = _first_nested(bundle, [["currentBlocker", "data", "primaryBlockerCategory"]])
+    if (
+        loaded_scene is False
+        or _first_nested(bundle, [["debugContext", "data", "livenessRecoveryRecommended"]]) is True
+        or blocker_category in {"login/liveness", "plugin/daemon freshness"}
+        or any(token in text for token in ("loaded scene is not verified", "world model unavailable", "plugin_snapshot_no_packets", "daemon_session_missing", "daemon_latest_tick_missing", "client_tick_stale"))
+    ):
+        candidates.append(
+            _classification_candidate(
+                "stale liveness/plugin bug",
+                confidence="high" if not manual_login else "medium",
+                summary="Loaded-scene, daemon, plugin, or client-tick evidence is stale or missing.",
+                evidence_path="liveness/daemon/readiness",
+                evidence_value={"livenessState": liveness_state, "loadedSceneVerified": loaded_scene, "primaryBlockerCategory": blocker_category},
+                recommended_next_query="get_current_debug_context",
+                recommended_next_step="Use ensure_loaded_scene/request_liveness_recovery when the screen is known-safe; do not rediscover login/disconnect flows manually.",
+            )
+        )
+
+    if any(token in text for token in ("no telemetry session selected", "could not read", "filenotfound", "permission denied", "oserror", "missing file", "path does not exist", "disk")):
+        candidates.append(
+            _classification_candidate(
+                "runtime file/disk issue",
+                confidence="medium",
+                summary="The evidence points to a missing/unreadable runtime file, session, or disk-backed artifact.",
+                evidence_path="runtime/file",
+                evidence_value=bundle.get("errorText") or _first_nested(bundle, [["currentBlocker", "warnings"], ["debugContext", "warnings"]]),
+                recommended_next_query="get_pipeline_health",
+                recommended_next_step="Inspect session/path binding and disk-backed debug artifacts before changing gameplay logic.",
+            )
+        )
+
+    trace = _dict(bundle.get("actionTrace"))
+    trace_classification = _norm(
+        trace.get("clickFailureBucket")
+        or trace.get("finalClassification")
+        or _first_nested(bundle, [["actionInputVisibility", "data", "clickFailureBucket"]])
+    )
+    if "coordinate_transform_error" in text or trace_classification == "coordinate_transform_error":
+        candidates.append(
+            _classification_candidate(
+                "coordinate_transform_error",
+                confidence="high",
+                summary="The requested physical/screen point appears wrong; inspect coordinate conversion before blaming Arduino movement.",
+                evidence_path="actionTrace.clickFailureBucket/coordinateTrace",
+                evidence_value=trace.get("clickFailureBucket") or trace_classification,
+                recommended_next_query="get_action_input_visibility",
+                recommended_next_step="Fix coordinate conversion, display scale, or canvas-to-screen projection if the requested physical point is wrong.",
+            )
+        )
+    if "arduino_movement_error" in text or trace_classification == "arduino_movement_error" or any(token in text for token in ("move_chunk_no_effect", "serial_timeout", "rawinput_seen_cursor_no_move", "positionerrorpx")):
+        candidates.append(
+            _classification_candidate(
+                "arduino_movement_error",
+                confidence="high" if "arduino_movement_error" in text else "medium",
+                summary="The requested physical point appears plausible, but cursor movement/firmware evidence is suspect.",
+                evidence_path="actionTrace.humanInput/mouseMove",
+                evidence_value=trace.get("humanInput") or trace.get("mouseMove") or trace_classification,
+                recommended_next_query="get_action_input_visibility",
+                recommended_next_step="Inspect Arduino calibration, closed-loop movement trace, firmware acknowledgements, and cursor landing error.",
+            )
+        )
+    safe_aimpoint = _first_nested(bundle, [["actionInputVisibility", "data", "plannedTarget", "safeAimPoint"], ["actionTrace", "selectedTarget", "safeAimPoint"]])
+    safe_aimpoint_status = _norm(_dict(safe_aimpoint).get("status"))
+    safe_aimpoint_failed = bool(
+        safe_aimpoint_status in {"fail", "blocked", "unsafe"}
+        or _dict(safe_aimpoint).get("actionable") is False
+        or _dict(safe_aimpoint).get("validButUnsafe") is True
+    )
+    if "target_aimpoint_error" in text or safe_aimpoint_failed or any(token in text for token in ("target_outside_allowed_region", "aimpoint invalid", "insideinteractableregion\": false", "uiblocked\": true")):
+        candidates.append(
+            _classification_candidate(
+                "target_aimpoint_error",
+                confidence="medium",
+                summary="Target selection may be valid, but the chosen aimpoint is unsafe, blocked, or not inside the interactable region.",
+                evidence_path="plannedTarget.safeAimPoint",
+                evidence_value=safe_aimpoint,
+                recommended_next_query="get_action_input_visibility",
+                recommended_next_step="Inspect safe aimpoint sampling, clickable hull, UI blocking, and target candidate geometry.",
+            )
+        )
+    if any(token in text for token in ("hover_mismatch", "menu_mismatch", "clicked_direct_menu_mismatch", "menu_flip_mismatch", "menuoptionclicked mismatch")):
+        candidates.append(
+            _classification_candidate(
+                "target/hover/menu mismatch",
+                confidence="high",
+                summary="Cursor/hover/menu proof does not match the intended target or accepted MenuOptionClicked action.",
+                evidence_path="hover/menu/MenuOptionClicked",
+                evidence_value={
+                    "hover": _first_nested(bundle, [["actionInputVisibility", "data", "hoverConfirmationEvidence"]]),
+                    "menuOptionClicked": _first_nested(bundle, [["actionInputVisibility", "data", "menuOptionClickedEvidence"], ["runtimeEvidence", "data", "runtimeVariables", "menuOptionClicked", "value"]]),
+                    "traceClassification": trace_classification,
+                },
+                recommended_next_query="get_latest_action_trace",
+                recommended_next_step="Inspect target, hover confirmation, menu action, and clicked option evidence; fix candidate or aimpoint logic if cursor landed correctly.",
+            )
+        )
+
+    comparison_payload = _dict(bundle.get("comparison"))
+    comparison_warnings = [str(item) for item in _list(comparison_payload.get("warnings"))]
+    comparison_blockers = [str(item) for item in _list(comparison_payload.get("blockers"))]
+    if any(token in " ".join(comparison_blockers) for token in ("live_action", "injected", "lower", "directBackendBypassCount")):
+        candidates.append(
+            _classification_candidate(
+                "code/data truth bug",
+                confidence="high",
+                summary="The before/after comparison reports a live-action input-integrity hard blocker.",
+                evidence_path="comparison.blockers",
+                evidence_value=comparison_blockers,
+                recommended_next_query="compare_task_script_runtime_evidence",
+                recommended_next_step="STOP_ALL, DISARM, STATUS, then inspect input integrity baselines and executor backend evidence before any further live action.",
+                hard_blocker=True,
+            )
+        )
+    if any(token in " ".join(comparison_warnings + comparison_blockers) for token in ("no_expected_variable_changed", "no_runtime_variable_changed", "expected_variable_missing_after")):
+        candidates.append(
+            _classification_candidate(
+                "code/data truth bug",
+                confidence="medium",
+                summary="Before/after live evidence did not prove the expected lifecycle variable changed.",
+                evidence_path="comparison.warnings/blockers",
+                evidence_value={"warnings": comparison_warnings, "blockers": comparison_blockers},
+                recommended_next_query="compare_task_script_runtime_evidence",
+                recommended_next_step="Inspect whether the primitive expectation, analyzer field, or lifecycle truth source is wrong before patching behavior.",
+            )
+        )
+    external_misses = _first_nested(bundle, [["debugContext", "data", "dataQualityReport", "data", "externalCacheMisses"], ["externalKnowledge", "externalCacheMisses"]])
+    if _list(external_misses) or any(token in text for token in ("external knowledge/cache miss", "cache_miss", "external cache miss", "wiki cache miss")):
+        candidates.append(
+            _classification_candidate(
+                "external knowledge/cache miss",
+                confidence="medium",
+                summary="Advisory external OSRS knowledge is missing or stale; live gameplay truth is not affected.",
+                evidence_path="externalKnowledge",
+                evidence_value=external_misses or bundle.get("externalKnowledge"),
+                recommended_next_query="external_knowledge_status",
+                recommended_next_step="Use cache-first lookup or explicit refresh for authoring enrichment only; do not override fresh RuneLite evidence.",
+            )
+        )
+
+    deduped: list[dict[str, Any]] = []
+    seen = set()
+    for candidate in candidates:
+        key = (candidate.get("classification"), candidate.get("summary"))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(candidate)
+    deduped.sort(key=_candidate_priority, reverse=True)
+    primary = deduped[0] if deduped else None
+    blockers = list(input_assessment["hardBlockers"])
+    if any(candidate.get("hardBlocker") for candidate in deduped):
+        blockers.append("failure_classification_hard_blocker")
+    if primary and primary.get("classification") == "game-state/user-login blocker":
+        blockers.append("manual_login_required")
+    status = "FAIL" if any(candidate.get("hardBlocker") for candidate in deduped) else "PASS" if primary is None or primary.get("classification") == "operator-phase injected-input noise" else "WARN"
+    return {
+        "schema": TASK_FAILURE_CLASSIFICATION_SCHEMA,
+        "status": status,
+        "generatedAtUtc": utc_now(),
+        "primaryClassification": primary.get("classification") if primary else None,
+        "primarySummary": primary.get("summary") if primary else "No failure signal found in supplied evidence.",
+        "confidence": primary.get("confidence") if primary else "low",
+        "classificationCandidates": deduped,
+        "secondaryClassifications": [candidate.get("classification") for candidate in deduped[1:]],
+        "inputIntegrityAssessment": input_assessment,
+        "blockers": list(dict.fromkeys(blockers)),
+        "recommendedNextQuery": primary.get("recommendedNextQuery") if primary else "get_current_debug_context",
+        "recommendedNextStep": primary.get("recommendedNextStep") if primary else "Gather current debug context, action input visibility, and runtime evidence before patching.",
+        "failureClassificationPolicy": FAILURE_CLASSIFICATIONS,
+        "phaseAwareInputIntegrityPolicy": PHASE_AWARE_INPUT_POLICY,
+        "externalKnowledgePolicy": EXTERNAL_KNOWLEDGE_POLICY,
+        "noLiveInput": True,
+    }
+
+
 def woodcut_bank_template() -> dict[str, Any]:
     return {
         "schema": TASK_SCRIPT_SCHEMA,
@@ -1007,6 +1428,7 @@ def script_api_spec() -> dict[str, Any]:
         "runtimeEvidenceVariables": RUNTIME_EVIDENCE_VARIABLES,
         "primitiveRuntimeExpectations": PRIMITIVE_RUNTIME_EXPECTATIONS,
         "runtimeEvidenceComparisonSchema": TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA,
+        "failureClassificationSchema": TASK_FAILURE_CLASSIFICATION_SCHEMA,
         "forbiddenRawInputPrimitives": sorted(RAW_INPUT_PRIMITIVES),
         "forbiddenRawInputFields": sorted(RAW_INPUT_FIELDS),
         "phaseAwareInputIntegrityPolicy": PHASE_AWARE_INPUT_POLICY,

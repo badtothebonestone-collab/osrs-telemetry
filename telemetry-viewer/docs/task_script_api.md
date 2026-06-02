@@ -45,6 +45,7 @@ Tools:
 - `get_task_script_evidence_plan`
 - `get_task_script_runtime_evidence`
 - `compare_task_script_runtime_evidence`
+- `classify_task_failure`
 - `suggest_task_template`
 - `probe_task_from_scene`
 
@@ -54,6 +55,7 @@ Resources:
 - `osrs://script-api/woodcut-bank-example`
 - `osrs://script-api/woodcut-bank-evidence-plan`
 - `osrs://script-api/runtime-evidence`
+- `osrs://script-api/failure-classification`
 
 Direct Python surface:
 
@@ -63,6 +65,7 @@ Direct Python surface:
 - `KnowledgeFabric.task_script_evidence_plan(script)`
 - `KnowledgeFabric.query_task_script_runtime_evidence(script)`
 - `KnowledgeFabric.compare_task_script_runtime_evidence(before, after, script=..., primitive=...)`
+- `KnowledgeFabric.classify_task_failure(evidence=...)`
 - `KnowledgeFabric.suggest_task_template(task_description, profile=...)`
 - `KnowledgeFabric.probe_task_from_scene(task_description, profile=..., limit=...)`
 
@@ -80,6 +83,8 @@ Scripts compile with a `runtimeEvidencePlan` that names the live variables each 
 - `phaseIntent`
 
 Use `get_task_script_runtime_evidence` before and after one bounded live step, then call `compare_task_script_runtime_evidence` with the primitive name to compare those variables. A script step is not proven by an external fact, a static route prior, or a proposed action alone; it needs fresh live RuneLite / 8893 / WorldModel / 8890 evidence. For live input steps, the comparison also checks action-input visibility and input-integrity phase counts. A nonzero live-action injected/lower-IL delta or direct backend bypass is reported as a hard blocker.
+
+Use `classify_task_failure` before patching. With no supplied evidence it classifies the current Knowledge Fabric/debug/runtime bundle; with explicit evidence it accepts current blocker, debug context, runtime evidence, before/after comparison, action-input visibility, action trace, external knowledge, or error text. It is read-only and never executes input.
 
 ## Example
 
@@ -105,3 +110,5 @@ When a script or live attempt fails, classify before patching:
 - `runtime file/disk issue`
 
 Coordinate issues are not automatically Arduino issues. If the requested physical point is wrong, fix coordinate conversion. If the point is correct but the cursor lands wrong, inspect Arduino calibration. If the cursor lands right but hover/menu is wrong, inspect target/aimpoint/candidate logic. If liveness is stale, use loaded-scene recovery rather than rediscovering known login/disconnect flows manually.
+
+`classify_task_failure` reports operator-phase injected events as `operator-phase injected-input noise` when the live-action delta window is clean. A live-action injected/lower-IL delta or direct backend bypass is a hard blocker and should trigger STOP_ALL/DISARM/STATUS before any further live action.
