@@ -462,6 +462,37 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("operator-phase injected-input noise", classification["secondaryClassifications"])
         self.assertIn("manual_login_required", classification["blockers"])
 
+    def test_failure_classifier_does_not_treat_policy_text_as_manual_login(self):
+        runtime = runtime_snapshot({"resourceCount": 16})
+        runtime["data"]["readinessSummary"] = {
+            "manualLoginRequired": False,
+            "livenessState": "loaded_scene",
+            "loadedSceneProof": {"loadedSceneVerified": True, "gameState": "LOGGED_IN"},
+        }
+        visibility = action_visibility_snapshot(execution_allowed=True, planned_action="interact_service_route_object")
+        visibility["data"]["failureClassificationHints"] = ["manual_login_required"]
+        visibility["data"]["livenessRecovery"] = {"manualLoginRequiredIsBlocker": True}
+
+        classification = task_script_api.classify_task_failure(
+            {
+                "runtimeEvidence": runtime,
+                "actionInputVisibility": visibility,
+                "debugContext": {
+                    "data": {
+                        "readiness": {
+                            "manualLoginRequired": False,
+                            "livenessState": "loaded_scene",
+                            "loadedSceneProof": {"loadedSceneVerified": True, "gameState": "LOGGED_IN"},
+                        },
+                        "failureClassificationPolicy": ["manual_login_required"],
+                    }
+                },
+            }
+        )
+
+        self.assertNotEqual(classification["primaryClassification"], "game-state/user-login blocker")
+        self.assertNotIn("manual_login_required", classification["blockers"])
+
     def test_failure_classifier_hard_blocks_live_input_integrity_delta(self):
         before = runtime_snapshot({"resourceCount": 1})
         after = runtime_snapshot({"resourceCount": 2})

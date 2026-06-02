@@ -1088,30 +1088,6 @@ def _route_transition_left_click_is_dialogue_opener(
     return _entry_matches_route_transition_dialogue_opener(raw_top, proposal)
 
 
-def _route_transition_should_prefer_dialogue_opener(
-    proposal: ActionProposal,
-    confirmation: dict[str, Any] | None,
-) -> bool:
-    if not _route_transition_left_click_is_dialogue_opener(proposal, confirmation):
-        return False
-    resolution = proposal.click_point_resolution if isinstance(proposal.click_point_resolution, dict) else {}
-    if resolution.get("displayScaleApplied") is True:
-        return True
-    geometry = proposal.input_geometry if isinstance(proposal.input_geometry, dict) else {}
-    display_scale = resolution.get("displayScale") if isinstance(resolution.get("displayScale"), dict) else geometry.get("displayScale")
-    if isinstance(display_scale, dict):
-        def number(value: Any) -> float | None:
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return None
-
-        scale_x = number(display_scale.get("x"))
-        scale_y = number(display_scale.get("y"))
-        return bool((scale_x is not None and abs(scale_x - 1.0) > 0.01) or (scale_y is not None and abs(scale_y - 1.0) > 0.01))
-    return False
-
-
 def _menu_row_canvas_point(sample: dict[str, Any], row_index: int) -> dict[str, int] | None:
     bounds = sample.get("menuBounds") if isinstance(sample, dict) else None
     entries = sample.get("entries") if isinstance(sample, dict) else None
@@ -1199,6 +1175,35 @@ def _is_observed_menu_open_sample(sample: dict[str, Any], *, minimum_wall_time_m
     return source == "MenuOpened"
 
 
+def _menu_open_poll_client_tick_tail(hover_options: HoverConfirmationOptions) -> int:
+    return max(5, max(0, int(hover_options.client_tick_tail or 0)))
+
+
+def _observed_menu_open_sample_from_snapshot(
+    snapshot: dict[str, Any] | None,
+    *,
+    minimum_wall_time_millis: int | None = None,
+) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    latest = _hover_menu_sample(snapshot)
+    if isinstance(latest, dict):
+        candidates.append(latest)
+    candidates.extend(client_tick_core.post_menu_sort_tail_samples(snapshot, include_latest=False))
+
+    best: dict[str, Any] | None = None
+    best_key: tuple[int, int, int] | None = None
+    for index, sample in enumerate(candidates):
+        if not _is_observed_menu_open_sample(sample, minimum_wall_time_millis=minimum_wall_time_millis):
+            continue
+        wall_time = _int_or_none(sample.get("wallTimeMillis"))
+        client_tick = _int_or_none(sample.get("clientTick"))
+        key = (wall_time if wall_time is not None else -1, client_tick if client_tick is not None else -1, index)
+        if best_key is None or key >= best_key:
+            best = sample
+            best_key = key
+    return best
+
+
 def _poll_menu_open_sample(
     hover_options: HoverConfirmationOptions,
     *,
@@ -1211,17 +1216,22 @@ def _poll_menu_open_sample(
     timeout_seconds = max(0.25, hover_options.timeout_ms / 1000.0)
     poll_seconds = max(0.001, hover_options.poll_ms / 1000.0)
     latest: dict[str, Any] | None = None
+    effective_client_tick_tail = _menu_open_poll_client_tick_tail(hover_options)
     while True:
         try:
             snapshot = snapshot_fetch_func(
                 hover_options.snapshot_url,
                 timeout=hover_options.request_timeout_seconds,
-                client_tick_tail=hover_options.client_tick_tail,
+                client_tick_tail=effective_client_tick_tail,
                 menu_entry_limit=max(8, hover_options.menu_entry_limit),
             )
             latest = _hover_menu_sample(snapshot)
-            if isinstance(latest, dict) and _is_observed_menu_open_sample(latest, minimum_wall_time_millis=minimum_wall_time_millis):
-                return latest
+            open_sample = _observed_menu_open_sample_from_snapshot(
+                snapshot,
+                minimum_wall_time_millis=minimum_wall_time_millis,
+            )
+            if isinstance(open_sample, dict):
+                return open_sample
         except Exception:  # noqa: BLE001
             pass
         if float(monotonic_func()) - started >= timeout_seconds:
@@ -1250,6 +1260,8 @@ def _execute_route_transition_direct_menu_selection(
         "expectedEntry": dict(direct_entry),
         "source": "route_transition_direct_expected_option",
         "status": "started",
+        "clientTickTailRequested": _menu_open_poll_client_tick_tail(hover_options),
+        "menuEntryLimitRequested": max(8, hover_options.menu_entry_limit),
     }
     result.commands.append(
         {
@@ -4939,6 +4951,7 @@ def _classify_click_failure_bucket(result: ExecutionResult, lifecycle: ActionLif
             "screen_click_point_outside_movement_safety_region",
             "resolved screen click point outside",
             "target_outside_allowed_region",
+            "cursor_start_outside_allowed_region",
         )
     )
     arduino_like = any(
@@ -9290,20 +9303,7 @@ def execute_action(
                     _attach_human_input_trace(result, input_controller)
                     return result
             direct_menu_entry = _route_transition_direct_menu_entry(proposal, pre_click_confirmation)
-            prefer_dialogue_opener = False
-            if direct_menu_entry is not None and prefer_dialogue_opener:
-                result.commands.append(
-                    {
-                        "type": "route_transition_dialogue_opener_preferred",
-                        "reason": "left_click_dialogue_opener_top_option",
-                        "directEntryAvailable": dict(direct_menu_entry),
-                    }
-                )
-                if isinstance(result.hover_confirmation, dict):
-                    result.hover_confirmation["rightClickMenuSelectionFallback"] = "left_click_dialogue_opener"
-                if isinstance(result.action_trace, dict):
-                    result.action_trace["rightClickMenuSelectionFallback"] = "left_click_dialogue_opener"
-            if direct_menu_entry is not None and not prefer_dialogue_opener:
+            if direct_menu_entry is not None:
                 if isinstance(result.action_trace, dict):
                     result.action_trace["routeTransitionDirectMenuCandidate"] = dict(direct_menu_entry)
                 before_click = pre_click_confirmation.get("lastMenuOptionClickedBefore") if isinstance(pre_click_confirmation.get("lastMenuOptionClickedBefore"), dict) else None
@@ -9347,7 +9347,7 @@ def execute_action(
                         _set_trace_final(result, "clicked_direct_menu_mismatch")
                         _attach_human_input_trace(result, input_controller)
                         return result
-                    if _route_transition_left_click_is_dialogue_opener(proposal, pre_click_confirmation):
+                    if direct_menu_entry.get("syntheticEntry") is True and _route_transition_left_click_is_dialogue_opener(proposal, pre_click_confirmation):
                         result.commands.append(
                             {
                                 "type": "route_transition_dialogue_opener_fallback",

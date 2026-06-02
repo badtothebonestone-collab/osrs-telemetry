@@ -1020,6 +1020,90 @@ def _input_integrity_assessment(bundle: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+LOGIN_STATE_TOKENS = {"login_screen", "manual_login_required", "credential_required", "credentialrequired", "blocked_user_login_required"}
+
+
+def _login_token_in_structured_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        return _norm(value) in LOGIN_STATE_TOKENS
+    if isinstance(value, list):
+        return any(_login_token_in_structured_value(item) for item in value)
+    if isinstance(value, dict):
+        signal_keys = {
+            "blocker",
+            "blockedReason",
+            "blockReason",
+            "category",
+            "code",
+            "gameState",
+            "livenessState",
+            "primaryBlockerCategory",
+            "reason",
+            "state",
+            "status",
+        }
+        return any(
+            _login_token_in_structured_value(value.get(key))
+            for key in signal_keys
+            if key in value
+        )
+    return False
+
+
+def _manual_login_signal(bundle: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    bool_paths = [
+        ["runtimeEvidence", "data", "readinessSummary", "manualLoginRequired"],
+        ["runtimeEvidence", "data", "runtimeVariables", "loadedScene", "value", "manualLoginRequired"],
+        ["debugContext", "data", "readiness", "manualLoginRequired"],
+        ["debugContext", "data", "manualLoginRequired"],
+        ["actionInputVisibility", "data", "readiness", "manualLoginRequired"],
+        ["actionInputVisibility", "data", "readinessActionEvidence", "manualLoginRequired"],
+        ["currentBlocker", "data", "evidence", "bootstrapState", "manualLoginRequired"],
+    ]
+    state_paths = [
+        ["runtimeEvidence", "data", "readinessSummary", "livenessState"],
+        ["runtimeEvidence", "data", "readinessSummary", "loadedSceneProof", "gameState"],
+        ["debugContext", "data", "readiness", "livenessState"],
+        ["debugContext", "data", "readiness", "loadedSceneProof", "gameState"],
+        ["debugContext", "data", "livenessState"],
+        ["debugContext", "data", "gameState"],
+        ["actionInputVisibility", "data", "readiness", "livenessState"],
+        ["actionInputVisibility", "data", "readiness", "loadedSceneProof", "gameState"],
+        ["actionInputVisibility", "data", "readinessActionEvidence", "livenessState"],
+        ["currentBlocker", "data", "evidence", "bootstrapState", "state"],
+        ["currentBlocker", "data", "evidence", "bootstrapState", "gameState"],
+    ]
+    blocker_paths = [
+        ["runtimeEvidence", "blockers"],
+        ["debugContext", "blockers"],
+        ["debugContext", "data", "blockers"],
+        ["actionInputVisibility", "blockers"],
+        ["actionInputVisibility", "data", "inputBlockEvidence"],
+        ["actionInputVisibility", "data", "actionReadiness", "blockers"],
+        ["currentBlocker", "blockers"],
+        ["currentBlocker", "data", "primaryBlockerCategory"],
+        ["currentBlocker", "data", "blocker"],
+        ["currentBlocker", "data", "status"],
+        ["errorText"],
+    ]
+    evidence: dict[str, Any] = {"boolSignals": [], "stateSignals": [], "blockerSignals": []}
+    for path in bool_paths:
+        value = _nested_get(bundle, path)
+        if value is True:
+            evidence["boolSignals"].append({"path": ".".join(path), "value": value})
+    for path in state_paths:
+        value = _nested_get(bundle, path)
+        if _login_token_in_structured_value(value):
+            evidence["stateSignals"].append({"path": ".".join(path), "value": value})
+    for path in blocker_paths:
+        value = _nested_get(bundle, path)
+        if _login_token_in_structured_value(value):
+            evidence["blockerSignals"].append({"path": ".".join(path), "value": value})
+    return any(evidence.values()), evidence
+
+
 def _classification_candidate(
     classification: str,
     *,
@@ -1113,14 +1197,7 @@ def classify_task_failure(
             )
         )
 
-    manual_login = any(
-        item is True
-        for item in [
-            _first_nested(bundle, [["runtimeEvidence", "data", "readinessSummary", "manualLoginRequired"]]),
-            _first_nested(bundle, [["debugContext", "data", "readiness", "manualLoginRequired"], ["debugContext", "data", "manualLoginRequired"]]),
-            _first_nested(bundle, [["currentBlocker", "data", "evidence", "bootstrapState", "manualLoginRequired"]]),
-        ]
-    ) or any(token in text for token in ("manual_login_required", "credentialrequired", "credential_required", "login_screen"))
+    manual_login, manual_login_evidence = _manual_login_signal(bundle)
     if manual_login:
         candidates.append(
             _classification_candidate(
@@ -1132,6 +1209,7 @@ def classify_task_failure(
                     "runtimeEvidence": _first_nested(bundle, [["runtimeEvidence", "data", "readinessSummary"]]),
                     "debugContext": _first_nested(bundle, [["debugContext", "data", "readiness"]]),
                     "currentBlocker": _first_nested(bundle, [["currentBlocker", "data", "primaryBlockerCategory"]]),
+                    "structuredSignals": manual_login_evidence,
                 },
                 recommended_next_query="get_current_debug_context",
                 recommended_next_step="Request manual login/credential handling, then re-query loaded-scene readiness before any live action.",
@@ -1178,12 +1256,12 @@ def classify_task_failure(
         or trace.get("finalClassification")
         or _first_nested(bundle, [["actionInputVisibility", "data", "clickFailureBucket"]])
     )
-    if "coordinate_transform_error" in text or trace_classification == "coordinate_transform_error":
+    if "coordinate_transform_error" in text or trace_classification == "coordinate_transform_error" or "cursor_start_outside_allowed_region" in text:
         candidates.append(
             _classification_candidate(
                 "coordinate_transform_error",
                 confidence="high",
-                summary="The requested physical/screen point appears wrong; inspect coordinate conversion before blaming Arduino movement.",
+                summary="The requested physical/screen point or allowed-region state appears wrong; inspect coordinate conversion and cursor staging before blaming Arduino movement.",
                 evidence_path="actionTrace.clickFailureBucket/coordinateTrace",
                 evidence_value=trace.get("clickFailureBucket") or trace_classification,
                 recommended_next_query="get_action_input_visibility",

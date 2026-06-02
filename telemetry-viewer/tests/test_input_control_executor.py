@@ -2324,6 +2324,37 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(result.observed_result["clickFailureBucket"], "coordinate_transform_error")
         self.assertEqual(result.action_trace["clickFailureBucket"], "coordinate_transform_error")
 
+    def test_cursor_start_outside_allowed_region_is_coordinate_bucket(self):
+        result = ExecutionResult(
+            status="FAIL",
+            proposed_action="interact_service_route_object",
+            dry_run=False,
+            warnings=["hover movement failed: ArduinoHIDError: cursor_start_outside_allowed_region"],
+            missing_capabilities=["hover_movement"],
+            action_trace={
+                "mouseMove": {
+                    "movementAbortedReason": "cursor_start_outside_allowed_region",
+                    "cursorPositionBefore": {"x": 1713, "y": 862},
+                    "allowedRegion": {"x": 9, "y": 41, "width": 1282, "height": 906},
+                }
+            },
+        )
+        lifecycle = ActionLifecycleState(
+            current_state="blocked",
+            result_outcome="blocked",
+            reason="hover movement failed: cursor_start_outside_allowed_region",
+            observed_result={
+                "observedResult": "no_click_safety_block",
+                "resultOutcome": "blocked",
+                "resultComplete": True,
+            },
+        )
+
+        _apply_lifecycle(result, lifecycle)
+
+        self.assertEqual(result.observed_result["clickFailureBucket"], "coordinate_transform_error")
+        self.assertEqual(result.action_trace["clickFailureBucket"], "coordinate_transform_error")
+
     def test_navigation_projection_rejects_edge_primary_and_uses_safe_alternate(self):
         backend = FakeBackend()
         proposal = ActionProposal(
@@ -5280,6 +5311,129 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertIn(("mouse_down", "left"), backend.calls)
         self.assertIn(("mouse_up", "left"), backend.calls)
 
+    def test_route_transition_direct_menu_uses_tick_tail_on_scaled_runelite(self):
+        backend = FakeBackend()
+        hover_sample = {
+            "clientTick": 20,
+            "wallTimeMillis": 500,
+            "mouseCanvasX": 193,
+            "mouseCanvasY": 184,
+            "menuOpen": False,
+            "topOption": "Climb",
+            "topTarget": "<col=ffff>Staircase",
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "topIdentifier": 16672,
+            "entries": [
+                {"option": "Climb", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 16672},
+                {"option": "Climb-up", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_SECOND_OPTION", "identifier": 16672},
+                {"option": "Climb-down", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_THIRD_OPTION", "identifier": 16672},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+                {"option": "Examine", "target": "<col=ffff>Staircase", "type": "EXAMINE_OBJECT", "identifier": 16672},
+            ],
+        }
+        menu_opened_sample = {
+            **hover_sample,
+            "clientTick": 21,
+            "wallTimeMillis": 2100,
+            "sourceEvent": "MenuOpened",
+            "sampleSource": "MenuOpened",
+            "menuOpen": False,
+            "entryCount": 6,
+            "menuBounds": {"x": 124, "y": 148, "width": 150, "height": 112},
+        }
+        clicked_sample = {
+            "clientTick": 22,
+            "wallTimeMillis": 2200,
+            "option": "Climb-up",
+            "target": "<col=ffff>Staircase",
+            "type": "GAME_OBJECT_SECOND_OPTION",
+            "identifier": 16672,
+        }
+        tail_requests = []
+
+        def snapshot_fetch(_url, **kwargs):
+            tail_requests.append(kwargs.get("client_tick_tail", 0))
+            right_up = ("mouse_up", "right") in backend.calls
+            left_up = ("mouse_up", "left") in backend.calls
+            if left_up:
+                return {
+                    "clientTickHot": {
+                        "hoverMenu": menu_opened_sample,
+                        "postMenuSort": menu_opened_sample,
+                        "lastMenuOptionClicked": clicked_sample,
+                    }
+                }
+            if right_up:
+                return {
+                    "clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample},
+                    "payloads": {
+                        "client_tick_tail": {
+                            "postMenuSortTail": [
+                                hover_sample,
+                                menu_opened_sample,
+                            ]
+                        }
+                    },
+                }
+            return {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample}}
+
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Staircase",
+            suggested_click_point={"x": 195, "y": 185},
+            click_point_space="canvas",
+            resolved_screen_click_point={"x": 333, "y": 387},
+            input_geometry={
+                "inputGeometryAvailable": True,
+                "canvasScreenOrigin": {"x": 20, "y": 68},
+                "canvasSize": {"width": 1229, "height": 868},
+                "sourceCanvasSize": {"width": 765, "height": 503},
+                "displayScale": {"x": 1.75, "y": 1.75},
+            },
+            click_point_resolution={
+                "status": "PASS",
+                "displayScaleApplied": False,
+                "displayScale": {"x": 1.75, "y": 1.75},
+                "displayScaleReason": "source_canvas_expanded_to_physical_canvas_no_display_rescale",
+            },
+            target_explanation={
+                "name": "Staircase",
+                "objectId": 16672,
+                "expectedOptions": ["Climb-up", "Climb up"],
+                "expectedTargets": ["Staircase"],
+                "dialogueOpenerOptions": ["Climb"],
+                "dialogueExpectedPromptContains": ["Climb up or down"],
+            },
+        )
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile=MouseMovementProfile(name="instant_test", min_duration_ms=1, max_duration_ms=1, waypoint_count=2),
+            hover_options=HoverConfirmationOptions(enabled=True, timeout_ms=200, poll_ms=1, tolerance_px=3, menu_entry_limit=5),
+            dry_run=False,
+            snapshot_fetch_func=snapshot_fetch,
+            sleep_func=lambda _seconds: None,
+            monotonic_func=IncrementingClock(start=0.0, step=0.05),
+            wall_time_millis_func=lambda: 1000,
+            input_controller=HumanInputController(backend, profile="instant_debug", sleep_func=lambda _seconds: None, monotonic_func=IncrementingClock()),
+        )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertTrue(result.executed)
+        self.assertEqual(result.hover_confirmation["clickClassification"], "clicked_expected_action")
+        selection = result.hover_confirmation["rightClickMenuSelection"]
+        self.assertEqual(selection["menuOpenSample"]["sourceEvent"], "MenuOpened")
+        self.assertEqual(selection["selectedEntry"]["option"], "Climb-up")
+        self.assertEqual(selection["clientTickTailRequested"], 5)
+        self.assertGreaterEqual(max(tail_requests), 5)
+        self.assertNotIn("rightClickMenuSelectionFallback", result.hover_confirmation)
+        self.assertIn(("mouse_down", "right"), backend.calls)
+        self.assertIn(("mouse_up", "right"), backend.calls)
+        self.assertIn(("mouse_down", "left"), backend.calls)
+        self.assertIn(("mouse_up", "left"), backend.calls)
+
     def test_route_transition_falls_back_to_generic_opener_when_right_click_menu_fails(self):
         backend = FakeBackend()
         hover_sample = {
@@ -5352,14 +5506,15 @@ class InputControlExecutorTest(unittest.TestCase):
             input_controller=HumanInputController(backend, profile="instant_debug", sleep_func=lambda _seconds: None, monotonic_func=IncrementingClock()),
         )
 
-        self.assertEqual(result.status, "PASS")
-        self.assertTrue(result.executed)
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.executed)
         self.assertEqual(result.hover_confirmation["rightClickMenuSelection"]["reason"], "menu_open_not_observed")
-        self.assertEqual(result.hover_confirmation["rightClickMenuSelectionFallback"], "left_click_dialogue_opener")
-        self.assertEqual(result.hover_confirmation["clickClassification"], "clicked_expected_action")
+        self.assertNotIn("rightClickMenuSelectionFallback", result.hover_confirmation)
+        self.assertNotIn("clickClassification", result.hover_confirmation)
+        self.assertEqual(result.action_trace["finalClassification"], "right_click_menu_select_failed")
         self.assertIn(("mouse_down", "right"), backend.calls)
-        self.assertIn(("mouse_down", "left"), backend.calls)
-        self.assertIn(("mouse_up", "left"), backend.calls)
+        self.assertNotIn(("mouse_down", "left"), backend.calls)
+        self.assertNotIn(("mouse_up", "left"), backend.calls)
 
     def test_route_transition_uses_structured_alternate_aimpoint_after_cancel_hover(self):
         backend = FakeBackend()
