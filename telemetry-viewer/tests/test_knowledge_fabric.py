@@ -344,6 +344,54 @@ def test_path_frontier_query_returns_capped_structured_result():
     assert result["capHit"] is True
 
 
+def test_path_frontier_diagnoses_stale_missing_player_location_reason():
+    payloads = synthetic_payloads()
+    payloads["pathing_frontier"] = {
+        "schema": "pathing_frontier.v1",
+        "frontier": {"status": "WARN", "reason": "player_location_unavailable", "candidates": []},
+    }
+    fabric = knowledge_fabric.KnowledgeFabric.from_status(
+        {
+            "schema": "context_status.v1",
+            "latestTick": 44,
+            "worldModelPayloads": payloads,
+            "playerLocation": {"worldX": 3206, "worldY": 3229, "plane": 1},
+            "playerLocationSource": "plugin_snapshot_baseline_player",
+            "brain": {
+                "serviceRouteContext": {
+                    "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                    "currentNodeId": "lumbridge_first_floor_stairs",
+                    "currentStepIndex": 4,
+                },
+                "pathingContext": {
+                    "pathingNeeded": True,
+                    "nextWaypointTile": {"worldX": 3206, "worldY": 3228, "plane": 1},
+                    "pathTargetTile": {"worldX": 3205, "worldY": 3228, "plane": 1},
+                    "destinationTile": {"worldX": 3204, "worldY": 3229, "plane": 1},
+                    "predictedPathTiles": [
+                        {"worldX": 3206, "worldY": 3228, "plane": 1},
+                        {"worldX": 3205, "worldY": 3228, "plane": 1},
+                    ],
+                },
+            },
+        }
+    )
+
+    result = fabric.query_path_frontier()
+    data = result["data"]
+    diagnosis = data["frontierDiagnosis"]
+
+    assert result["status"] == "WARN"
+    assert "frontier_player_location_unavailable_but_daemon_location_present" in result["warnings"]
+    assert data["playerLocation"]["worldLocation"] == {"worldX": 3206, "worldY": 3229, "plane": 1}
+    assert diagnosis["staleFrontierPlayerLocation"] is True
+    assert diagnosis["playerLocationAvailable"] is True
+    assert diagnosis["routeContextHasPredictedPath"] is True
+    assert diagnosis["routeContextCanGuideDiagnosis"] is True
+    assert diagnosis["frontierUsableForNavigation"] is False
+    assert diagnosis["noGlobalPathfindingAdded"] is True
+
+
 def test_current_debug_context_includes_expected_sections():
     fabric = make_fabric()
 
@@ -1468,6 +1516,9 @@ class KnowledgeFabricTest(unittest.TestCase):
 
     def test_path_frontier_query_returns_capped_structured_result(self):
         test_path_frontier_query_returns_capped_structured_result()
+
+    def test_path_frontier_diagnoses_stale_missing_player_location_reason(self):
+        test_path_frontier_diagnoses_stale_missing_player_location_reason()
 
     def test_current_debug_context_includes_expected_sections(self):
         test_current_debug_context_includes_expected_sections()

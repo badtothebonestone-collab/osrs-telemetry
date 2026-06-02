@@ -2264,7 +2264,7 @@ class KnowledgeFabric:
             ("What resource targets exist?", "query_resource_candidates", "query_resource_candidates", "resource_object_census + static/external requirements", "knowledge_fabric_resource_candidates.v1", "high if world model fresh", "projection caps", "test_knowledge_fabric.py"),
             ("What service objects exist?", "query_service_candidates", "query_service_candidates", "service_object_census + service_routes", "knowledge_fabric_service_candidates.v1", "high if loaded scene contains service", "static anchors advisory", "test_knowledge_fabric.py"),
             ("What route objects exist?", "query_route_objects", "query_route_objects", "route_object_census", "knowledge_fabric_route_objects.v1", "high if loaded scene fresh", "off-scene objects unavailable", "test_knowledge_fabric.py"),
-            ("What pathing frontier exists?", "query_path_frontier", "query_path_frontier", "collision/pathing frontier", "knowledge_fabric_path_frontier.v1", "medium-high", "collision unavailable", "test_knowledge_fabric.py"),
+            ("What pathing frontier exists?", "query_path_frontier", "query_path_frontier", "collision/pathing frontier plus daemon player-location and route-context reconciliation", "knowledge_fabric_path_frontier.v1", "medium-high", "stale frontier may disagree with fresher daemon location", "test_knowledge_fabric.py"),
             ("What camera/view problem exists?", "query_view_quality", "query_view_quality", "view_quality_inputs/projection audit", "knowledge_fabric_view_quality.v1", "medium", "occlusion is heuristic", "test_knowledge_fabric.py"),
             ("What did the navigation decision trace say?", "query_navigation_decision_trace", "query_navigation_decision_trace/osrs://debug/navigation-decision-trace", "latest action_trace navigationDecisionTrace or supplied records", NAVIGATION_DECISION_TRACE_SUMMARY_SCHEMA, "high if trace present", "trace disabled or no latest action trace", "test_knowledge_fabric.py"),
             ("What widgets/dialogue/bank UI are open?", "list_seen_widgets", "list_seen_widgets", "daemon widget/bank/dialogue state", "knowledge_fabric_seen_widgets.v1", "medium", "widget sections may be compact", "test_knowledge_fabric.py"),
@@ -2539,12 +2539,26 @@ class KnowledgeFabric:
         if candidates:
             frontier["frontier"] = capped_candidates
         route_context = _compact_route_context(self.daemon_status)
+        player_location = _compact_location(self.daemon_status)
         latest_bundle = self._latest_visual_bundle_summary()
         wall_reasons = []
         if route_context.get("wallLoopDetected") or route_context.get("wallHuggingDetected"):
             wall_reasons.append("daemon_status_wall_hugging")
         if "wall_hugging" in _norm(latest_bundle.get("reason")) or "wall_hugging" in _norm(latest_bundle.get("classification")):
             wall_reasons.append("latest_debug_bundle_wall_hugging")
+        nested_frontier = _dict(frontier.get("frontier"))
+        nested_reason = nested_frontier.get("reason")
+        nested_status = nested_frontier.get("status") or frontier.get("status")
+        frontier_candidates = _list(nested_frontier.get("candidates")) if nested_frontier else capped_candidates
+        stale_frontier_player_location = bool(
+            str(nested_reason or "").lower() == "player_location_unavailable"
+            and player_location.get("worldLocation")
+        )
+        frontier_warning_reasons = []
+        if stale_frontier_player_location:
+            frontier_warning_reasons.append("frontier_player_location_unavailable_but_daemon_location_present")
+        if nested_status and str(nested_status).upper() not in {"PASS", "OK"}:
+            frontier_warning_reasons.append(f"frontier_status_{str(nested_status).lower()}")
         status_pathing = {
             "currentRouteNode": route_context.get("currentNodeId"),
             "currentRouteEdge": route_context.get("nextEdgeType"),
@@ -2559,6 +2573,25 @@ class KnowledgeFabric:
             "goal": goal or route_context.get("destinationTile") or {},
             "constraints": constraints or {},
             "frontier": frontier,
+            "playerLocation": player_location,
+            "frontierDiagnosis": {
+                "schema": "path_frontier_diagnosis.v1",
+                "frontierStatus": nested_status,
+                "frontierReason": nested_reason,
+                "frontierCandidateCount": len(frontier_candidates),
+                "playerLocationAvailable": bool(player_location.get("worldLocation")),
+                "playerLocationSource": player_location.get("source"),
+                "staleFrontierPlayerLocation": stale_frontier_player_location,
+                "routeContextHasPredictedPath": bool(route_context.get("predictedPathTiles")),
+                "routeContextCanGuideDiagnosis": bool(
+                    route_context.get("nextWaypointTile")
+                    or route_context.get("pathTargetTile")
+                    or route_context.get("destinationTile")
+                ),
+                "frontierUsableForNavigation": bool(frontier_candidates and not frontier_warning_reasons),
+                "diagnosticOnly": True,
+                "noGlobalPathfindingAdded": True,
+            },
             "routeContext": route_context,
             "statusPathing": status_pathing,
             "wallHuggingRisk": {
@@ -2584,8 +2617,8 @@ class KnowledgeFabric:
             freshness=self.freshness(),
             cap_hit=cap_hit or bool(frontier.get("capHit") or frontier.get("truncated")),
             truncated=cap_hit,
-            status="PASS" if frontier else "WARN",
-            warnings=[] if frontier else ["pathing frontier unavailable"],
+            status="PASS" if frontier and not frontier_warning_reasons else "WARN",
+            warnings=frontier_warning_reasons if frontier else ["pathing frontier unavailable"],
         )
 
     def query_view_quality(self, intent: str = "unknown", goal: dict[str, Any] | None = None) -> dict[str, Any]:
