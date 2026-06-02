@@ -4,6 +4,7 @@ import argparse
 import collections
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -58,6 +59,11 @@ class DevCycleConfig:
     startup_wait_seconds: float = 60.0
     max_wait_seconds: float = 300.0
     watch_poll_seconds: float = 5.0
+    auto_login_enabled: bool | None = None
+    auto_login_command: str | list[str] | None = None
+    auto_login_working_directory: str | None = None
+    auto_login_timeout_seconds: float = 120.0
+    auto_login_max_attempts: int = 1
 
     @classmethod
     def from_mapping(cls, payload: dict[str, Any]) -> "DevCycleConfig":
@@ -96,6 +102,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--watch", action="store_true", help="Keep polling readiness until safe or until --max-wait-seconds expires.")
     parser.add_argument("--max-wait-seconds", type=float, help="Maximum seconds to watch readiness before reporting a timeout blocker.")
     parser.add_argument("--poll-seconds", type=float, help="Readiness polling interval used by --watch.")
+    auto_login = parser.add_mutually_exclusive_group()
+    auto_login.add_argument("--use-auto-login", action="store_true", help="Use the existing loaded-scene/login recovery command while watching readiness.")
+    auto_login.add_argument("--no-auto-login", action="store_true", help="Disable auto-login/readiness recovery while watching readiness.")
+    parser.add_argument("--auto-login-command", help="Existing local recovery command to invoke. Do not include secrets.")
+    parser.add_argument("--auto-login-timeout-seconds", type=float, help="Timeout for each auto-login/recovery attempt.")
+    parser.add_argument("--auto-login-max-attempts", type=int, help="Maximum auto-login/recovery attempts during one watch run.")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     if not args.run:
@@ -142,6 +154,16 @@ def apply_cli_overrides(config: DevCycleConfig, args: argparse.Namespace) -> Dev
         config.max_wait_seconds = args.max_wait_seconds
     if args.poll_seconds is not None:
         config.watch_poll_seconds = args.poll_seconds
+    if args.use_auto_login:
+        config.auto_login_enabled = True
+    if args.no_auto_login:
+        config.auto_login_enabled = False
+    if args.auto_login_command:
+        config.auto_login_command = args.auto_login_command
+    if args.auto_login_timeout_seconds is not None:
+        config.auto_login_timeout_seconds = args.auto_login_timeout_seconds
+    if args.auto_login_max_attempts is not None:
+        config.auto_login_max_attempts = args.auto_login_max_attempts
     return config
 
 
@@ -382,6 +404,192 @@ def run_ensure_loaded_scene(config: DevCycleConfig, deps: RuntimeDeps) -> tuple[
     return parse_json_output(result), result
 
 
+SENSITIVE_COMMAND_KEYS = {
+    "--password",
+    "--passwd",
+    "--secret",
+    "--token",
+    "--auth-token",
+    "--credential",
+    "--credentials",
+    "--api-key",
+}
+SENSITIVE_TEXT_MARKERS = ("password", "passwd", "secret", "token", "credential", "api_key", "api-key")
+
+
+def format_command_template(value: str, config: DevCycleConfig) -> str:
+    return value.format(
+        python=sys.executable,
+        viewer_dir=str(VIEWER_DIR),
+        project_root=str(PROJECT_ROOT),
+        daemon_url=config.daemon_url,
+        snapshot_url=config.snapshot_url,
+        arduino_port=config.arduino_port or "",
+        timeout_seconds=max(1.0, float(config.auto_login_timeout_seconds)),
+    )
+
+
+def split_config_command(value: str | list[str] | None, config: DevCycleConfig) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [format_command_template(str(item), config) for item in value if str(item).strip()]
+    text = format_command_template(str(value).strip(), config)
+    if not text:
+        return []
+    return shlex.split(text, posix=os.name != "nt")
+
+
+def default_auto_login_command(config: DevCycleConfig) -> list[str] | None:
+    script = VIEWER_DIR / "context_service.py"
+    if not script.exists():
+        return None
+    command = [
+        sys.executable,
+        str(script),
+        "--ensure-loaded-scene",
+        "--daemon-url",
+        config.daemon_url,
+        "--snapshot-url",
+        config.snapshot_url,
+        "--liveness-max-total-seconds",
+        str(max(1.0, float(config.auto_login_timeout_seconds))),
+        "--liveness-max-attempts-per-state",
+        "2",
+    ]
+    if config.arduino_port:
+        command.extend(["--arduino-port", config.arduino_port])
+    return command
+
+
+def discover_auto_login_command(config: DevCycleConfig) -> tuple[list[str] | None, str, str | None]:
+    if config.auto_login_command is not None:
+        command = split_config_command(config.auto_login_command, config)
+        if not command:
+            return None, "configured", "auto_login_command is configured but empty"
+        return command, "configured", None
+    command = default_auto_login_command(config)
+    if command:
+        return command, "discovered_context_service_ensure_loaded_scene", None
+    return None, "missing", f"{VIEWER_DIR / 'context_service.py'} was not found"
+
+
+def auto_login_enabled_for_mode(config: DevCycleConfig, args: argparse.Namespace) -> bool:
+    if config.auto_login_enabled is False:
+        return False
+    if config.auto_login_enabled is True:
+        return True
+    return bool(getattr(args, "watch", False))
+
+
+def redact_command(command: list[str] | None) -> list[str] | None:
+    if command is None:
+        return None
+    redacted: list[str] = []
+    redact_next = False
+    for item in command:
+        text = str(item)
+        lower = text.lower()
+        key = lower.split("=", 1)[0]
+        if redact_next:
+            redacted.append("<redacted>")
+            redact_next = False
+            continue
+        if key in SENSITIVE_COMMAND_KEYS:
+            if "=" in text:
+                redacted.append(text.split("=", 1)[0] + "=<redacted>")
+            else:
+                redacted.append(text)
+                redact_next = True
+            continue
+        if any(marker in lower for marker in SENSITIVE_TEXT_MARKERS) and "=" in text:
+            redacted.append(text.split("=", 1)[0] + "=<redacted>")
+            continue
+        redacted.append(text)
+    return redacted
+
+
+def redact_text(text: str) -> str:
+    lines: list[str] = []
+    for line in (text or "").splitlines():
+        lower = line.lower()
+        if any(marker in lower for marker in SENSITIVE_TEXT_MARKERS):
+            lines.append("<redacted sensitive line>")
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def redacted_tail_lines(text: str, count: int) -> list[str]:
+    return tail_lines(redact_text(text), count)
+
+
+def auto_login_working_directory(config: DevCycleConfig) -> Path:
+    if not config.auto_login_working_directory:
+        return PROJECT_ROOT
+    path = Path(format_command_template(str(config.auto_login_working_directory), config))
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def readiness_needs_auto_login(readiness: dict[str, Any], blocker: dict[str, Any] | None = None) -> bool:
+    if readiness.get("unknownScreen") is True:
+        return False
+    loaded = readiness.get("loadedSceneProof") if isinstance(readiness.get("loadedSceneProof"), dict) else {}
+    game_state = str(loaded.get("gameState") or readiness.get("gameState") or "").upper()
+    liveness_state = str(readiness.get("livenessState") or "").lower()
+    category = str((blocker or {}).get("category") or "").lower()
+    if readiness.get("manualLoginRequired") is True:
+        return True
+    if game_state == "LOGIN_SCREEN" or liveness_state == "login_screen":
+        return True
+    if category in {"manual_login_required", "login_screen"}:
+        return True
+    if readiness.get("livenessRecoveryRecommended") is True and not readiness.get("unknownScreen"):
+        return True
+    blockers = readiness.get("blockers") if isinstance(readiness.get("blockers"), list) else []
+    return any("login" in str(item).lower() for item in blockers)
+
+
+def auto_login_successful(payload: dict[str, Any], result: CommandResult) -> bool:
+    if result.returncode != 0:
+        return False
+    status = str(payload.get("status") or "").lower()
+    if payload.get("loadedSceneVerified") is True:
+        return True
+    return status in {"pass", "ok", "loaded_scene_ready", "recovered_loaded_scene"}
+
+
+def run_auto_login_recovery(config: DevCycleConfig, deps: RuntimeDeps, command: list[str]) -> tuple[dict[str, Any], CommandResult]:
+    timeout = max(1.0, float(config.auto_login_timeout_seconds))
+    result = deps.run_command(command, timeout=timeout, cwd=auto_login_working_directory(config))
+    return parse_json_output(result), result
+
+
+def append_auto_login_attempt(
+    payload: dict[str, Any],
+    *,
+    elapsed_seconds: float,
+    command: list[str],
+    result_payload: dict[str, Any],
+    result: CommandResult,
+) -> dict[str, Any]:
+    attempt = {
+        "elapsedSeconds": round(elapsed_seconds, 3),
+        "command": redact_command(command),
+        "returnCode": result.returncode,
+        "status": result_payload.get("status"),
+        "loadedSceneVerified": result_payload.get("loadedSceneVerified"),
+        "blocker": result_payload.get("blocker"),
+        "stdoutTail": redacted_tail_lines(result.stdout, 12),
+        "stderrTail": redacted_tail_lines(result.stderr, 12),
+    }
+    auto = payload.get("autoLogin") if isinstance(payload.get("autoLogin"), dict) else {}
+    attempts = auto.setdefault("attempts", [])
+    if isinstance(attempts, list):
+        attempts.append(attempt)
+    return attempt
+
+
 def build_execute_command(config: DevCycleConfig, trace_path: Path) -> list[str]:
     command = [
         sys.executable,
@@ -590,6 +798,9 @@ def run_dev_cycle(args: argparse.Namespace, *, deps: RuntimeDeps | None = None) 
     config = apply_cli_overrides(config, args)
     trace_path = trace_path_from_config(config)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
+    auto_login_enabled = auto_login_enabled_for_mode(config, args)
+    auto_login_command, auto_login_source, auto_login_missing = discover_auto_login_command(config)
+    auto_login_invoke_allowed = bool(auto_login_enabled and mode == "run" and getattr(args, "watch", False))
 
     payload: dict[str, Any] = {
         "schema": SCHEMA,
@@ -609,6 +820,17 @@ def run_dev_cycle(args: argparse.Namespace, *, deps: RuntimeDeps | None = None) 
         "ready": False,
         "blocker": None,
         "warnings": [],
+        "autoLogin": {
+            "enabled": auto_login_enabled,
+            "invokeAllowed": auto_login_invoke_allowed,
+            "available": bool(auto_login_command),
+            "source": auto_login_source,
+            "missingReason": auto_login_missing,
+            "command": redact_command(auto_login_command),
+            "timeoutSeconds": max(1.0, float(config.auto_login_timeout_seconds)),
+            "maxAttempts": max(0, int(config.auto_login_max_attempts)),
+            "attempts": [],
+        },
     }
 
     window = deps.detect_window(config.window_title_filter)
@@ -665,17 +887,23 @@ def run_dev_cycle(args: argparse.Namespace, *, deps: RuntimeDeps | None = None) 
             payload,
             readiness,
             readiness_command,
+            auto_login_command=auto_login_command,
         )
         payload["readiness"] = compact_readiness(readiness, readiness_command)
         payload["ready"] = watch_ready
         if not watch_ready:
             payload["status"] = "BLOCKED"
-            last_blocker = readiness_blocker(readiness)
-            payload["blocker"] = {
-                "category": "watch_timeout",
-                "reason": f"readiness did not become safe before {max(0.0, float(config.max_wait_seconds))} seconds",
-                "lastBlocker": last_blocker,
-            }
+            watch = payload.get("watch") if isinstance(payload.get("watch"), dict) else {}
+            terminal = watch.get("terminalBlocker") if isinstance(watch.get("terminalBlocker"), dict) else None
+            if terminal:
+                payload["blocker"] = terminal
+            else:
+                last_blocker = readiness_blocker(readiness)
+                payload["blocker"] = {
+                    "category": "watch_timeout",
+                    "reason": f"readiness did not become safe before {max(0.0, float(config.max_wait_seconds))} seconds",
+                    "lastBlocker": last_blocker,
+                }
             return finalize_payload(payload, trace_path)
 
     if mode == "dry-run":
@@ -730,20 +958,83 @@ def watch_until_ready(
     payload: dict[str, Any],
     readiness: dict[str, Any],
     readiness_command: CommandResult,
+    *,
+    auto_login_command: list[str] | None,
 ) -> tuple[dict[str, Any], CommandResult, bool]:
     started = deps.monotonic()
     max_wait = max(0.0, float(config.max_wait_seconds))
     poll_seconds = max(0.1, float(config.watch_poll_seconds))
     current_readiness = readiness
     current_command = readiness_command
+    auto = payload.get("autoLogin") if isinstance(payload.get("autoLogin"), dict) else {}
+    auto_enabled = bool(auto.get("enabled"))
+    auto_invoke_allowed = bool(auto.get("invokeAllowed"))
+    auto_attempts = 0
+    auto_max_attempts = max(0, int(auto.get("maxAttempts") if auto.get("maxAttempts") is not None else config.auto_login_max_attempts))
 
     while True:
         ready = readiness_allows_execution(current_readiness)
         elapsed = max(0.0, deps.monotonic() - started)
         blocker = None if ready else readiness_blocker(current_readiness)
-        append_watch_event(payload, elapsed_seconds=elapsed, ready=ready, blocker=blocker, readiness=current_readiness, emit=not bool(getattr(args, "json", False)))
+        event = append_watch_event(payload, elapsed_seconds=elapsed, ready=ready, blocker=blocker, readiness=current_readiness, emit=not bool(getattr(args, "json", False)))
         if ready:
             return current_readiness, current_command, True
+        auto_eligible = readiness_needs_auto_login(current_readiness, blocker)
+        event["autoLoginEligible"] = auto_eligible
+        if auto_eligible and auto_enabled:
+            if not auto_invoke_allowed:
+                event["autoLoginWouldAttempt"] = True
+            elif not auto_login_command:
+                terminal = {
+                    "category": "auto_login_missing",
+                    "reason": str(auto.get("missingReason") or "no existing auto-login/readiness-recovery command was found"),
+                }
+                event["autoLoginBlocked"] = terminal
+                watch = payload.get("watch") if isinstance(payload.get("watch"), dict) else {}
+                watch["terminalBlocker"] = terminal
+                return current_readiness, current_command, False
+            elif auto_attempts >= auto_max_attempts:
+                terminal = {
+                    "category": "auto_login_max_attempts_reached",
+                    "reason": f"auto-login/readiness recovery reached max attempts ({auto_max_attempts}) before readiness became safe",
+                    "lastBlocker": blocker,
+                }
+                event["autoLoginBlocked"] = terminal
+                watch = payload.get("watch") if isinstance(payload.get("watch"), dict) else {}
+                watch["terminalBlocker"] = terminal
+                return current_readiness, current_command, False
+            else:
+                auto_attempts += 1
+                auto["attemptCount"] = auto_attempts
+                recovery_payload, recovery_result = run_auto_login_recovery(config, deps, auto_login_command)
+                attempt = append_auto_login_attempt(
+                    payload,
+                    elapsed_seconds=elapsed,
+                    command=auto_login_command,
+                    result_payload=recovery_payload,
+                    result=recovery_result,
+                )
+                event["autoLoginAttempt"] = {
+                    "number": auto_attempts,
+                    "returnCode": attempt.get("returnCode"),
+                    "status": attempt.get("status"),
+                    "loadedSceneVerified": attempt.get("loadedSceneVerified"),
+                    "blocker": attempt.get("blocker"),
+                }
+                if not auto_login_successful(recovery_payload, recovery_result):
+                    terminal = {
+                        "category": "auto_login_failed",
+                        "reason": "existing auto-login/readiness-recovery command did not recover a loaded scene",
+                        "returnCode": recovery_result.returncode,
+                        "status": recovery_payload.get("status"),
+                        "scriptBlocker": recovery_payload.get("blocker"),
+                    }
+                    event["autoLoginBlocked"] = terminal
+                    watch = payload.get("watch") if isinstance(payload.get("watch"), dict) else {}
+                    watch["terminalBlocker"] = terminal
+                    return current_readiness, current_command, False
+                current_readiness, current_command = run_readiness(config, deps)
+                continue
         if elapsed >= max_wait:
             watch = payload.get("watch") if isinstance(payload.get("watch"), dict) else {}
             watch["timedOut"] = True
@@ -760,7 +1051,7 @@ def append_watch_event(
     blocker: dict[str, Any] | None,
     readiness: dict[str, Any],
     emit: bool,
-) -> None:
+) -> dict[str, Any]:
     loaded = readiness.get("loadedSceneProof") if isinstance(readiness.get("loadedSceneProof"), dict) else {}
     event = {
         "elapsedSeconds": round(elapsed_seconds, 3),
@@ -784,6 +1075,7 @@ def append_watch_event(
             )
         else:
             print(f"[watch] {event['elapsedSeconds']}s ready: action execution allowed", file=sys.stderr, flush=True)
+    return event
 
 
 def check_services(config: DevCycleConfig, deps: RuntimeDeps) -> dict[str, Any]:
@@ -887,6 +1179,17 @@ def format_summary(payload: dict[str, Any]) -> str:
                 f"liveness={event.get('livenessState')} "
                 f"blocker={event_blocker.get('category') or 'none'}"
             )
+    auto = payload.get("autoLogin") if isinstance(payload.get("autoLogin"), dict) else {}
+    if auto:
+        attempts = auto.get("attempts") if isinstance(auto.get("attempts"), list) else []
+        lines.append(
+            "Auto-login recovery: "
+            f"enabled={bool(auto.get('enabled'))} "
+            f"invokeAllowed={bool(auto.get('invokeAllowed'))} "
+            f"available={bool(auto.get('available'))} "
+            f"source={auto.get('source') or 'unknown'} "
+            f"attempts={len(attempts)}/{auto.get('maxAttempts')}"
+        )
     runelite = payload.get("runelite") if isinstance(payload.get("runelite"), dict) else {}
     lines.append(f"RuneLite: running={'yes' if runelite.get('running') else 'no'} window={runelite.get('windowTitle') or 'none'} processes={runelite.get('processCount', 0)}")
     services = payload.get("services") if isinstance(payload.get("services"), dict) else {}

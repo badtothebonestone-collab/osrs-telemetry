@@ -12,9 +12,20 @@ from tools import run_traced_dev_cycle as dev_cycle
 
 
 class FakeDeps:
-    def __init__(self, *, readiness: dict | list[dict], trace_records: list[dict] | None = None):
+    def __init__(
+        self,
+        *,
+        readiness: dict | list[dict],
+        trace_records: list[dict] | None = None,
+        auto_login_results: dict | list[dict] | None = None,
+    ):
         self.readiness_sequence = list(readiness) if isinstance(readiness, list) else [readiness]
+        if auto_login_results is None:
+            self.auto_login_sequence = [{"status": "recovered_loaded_scene", "loadedSceneVerified": True}]
+        else:
+            self.auto_login_sequence = list(auto_login_results) if isinstance(auto_login_results, list) else [auto_login_results]
         self.readiness_calls = 0
+        self.auto_login_calls = 0
         self.trace_records = trace_records or []
         self.commands: list[list[str]] = []
         self.launches: list[object] = []
@@ -40,6 +51,14 @@ class FakeDeps:
                 ),
                 "",
             )
+        if ("context_service.py" in joined and "--ensure-loaded-scene" in command) or "recover.py" in joined:
+            index = min(self.auto_login_calls, len(self.auto_login_sequence) - 1)
+            self.auto_login_calls += 1
+            payload = dict(self.auto_login_sequence[index])
+            returncode = int(payload.pop("_returncode", 0))
+            stderr = str(payload.pop("_stderr", ""))
+            stdout = str(payload.pop("_stdout", json.dumps(payload)))
+            return dev_cycle.CommandResult(command, returncode, stdout, stderr)
         if "diagnose_live_readiness.py" in joined:
             index = min(self.readiness_calls, len(self.readiness_sequence) - 1)
             self.readiness_calls += 1
@@ -109,6 +128,37 @@ def write_config(path: Path, trace_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def blocked_login_readiness() -> dict:
+    return {
+        "status": "FAIL",
+        "ready": False,
+        "manualLoginRequired": True,
+        "unknownScreen": False,
+        "livenessState": "login_screen",
+        "loadedSceneProof": {"loadedSceneVerified": False, "gameState": "LOGIN_SCREEN"},
+        "daemon": {"latestTick": None, "sessionPath": "session-a"},
+        "actionReadiness": {"executionAllowed": False},
+        "actionExecution": {"allowed": False},
+        "blockers": [],
+        "livenessRecoveryRecommended": True,
+    }
+
+
+def ready_readiness(*, tick: int = 43) -> dict:
+    return {
+        "status": "PASS",
+        "ready": True,
+        "manualLoginRequired": False,
+        "unknownScreen": False,
+        "livenessState": "loaded_scene",
+        "loadedSceneProof": {"loadedSceneVerified": True, "gameState": "LOGGED_IN"},
+        "daemon": {"latestTick": tick, "sessionPath": "session-a"},
+        "actionReadiness": {"executionAllowed": True},
+        "actionExecution": {"allowed": True},
+        "blockers": [],
+    }
 
 
 class RunTracedDevCycleTest(unittest.TestCase):
@@ -290,6 +340,143 @@ class RunTracedDevCycleTest(unittest.TestCase):
         self.assertEqual(payload["trace"]["newDecisionCount"], 1)
         self.assertEqual(payload["trace"]["decisionCounts"], {"advance": 1})
 
+    def test_watch_run_invokes_auto_login_for_manual_login_then_resumes_polling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "dev_cycle.local.json"
+            trace_path = Path(tmp) / "navigation_decisions.jsonl"
+            write_config(config_path, trace_path)
+            fake = FakeDeps(readiness=[blocked_login_readiness(), ready_readiness()])
+
+            payload = dev_cycle.run_dev_cycle(dev_cycle.parse_args(["--run", "--watch", "--config", str(config_path)]), deps=fake.as_deps())
+
+        joined_commands = [" ".join(command) for command in fake.commands]
+        auto_index = next(index for index, command in enumerate(joined_commands) if "context_service.py" in command and "--ensure-loaded-scene" in command)
+        readiness_indexes = [index for index, command in enumerate(joined_commands) if "diagnose_live_readiness.py" in command]
+        execute_index = next(index for index, command in enumerate(joined_commands) if "execute_next_action.py" in command)
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(fake.auto_login_calls, 1)
+        self.assertGreater(auto_index, readiness_indexes[0])
+        self.assertGreater(readiness_indexes[-1], auto_index)
+        self.assertGreater(execute_index, readiness_indexes[-1])
+        self.assertEqual(payload["autoLogin"]["attempts"][0]["status"], "recovered_loaded_scene")
+
+    def test_watch_run_auto_login_success_allows_executor_when_readiness_becomes_safe(self):
+        trace_record = {
+            "schema": "navigation_decision_trace.v1",
+            "decision": "wait",
+            "reason": "player_still_moving_to_clicked_waypoint",
+            "observed": {"observedResult": "service_navigation_clicked_waiting", "nextActionAllowed": False},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "dev_cycle.local.json"
+            trace_path = Path(tmp) / "navigation_decisions.jsonl"
+            write_config(config_path, trace_path)
+            fake = FakeDeps(readiness=[blocked_login_readiness(), ready_readiness()], trace_records=[trace_record])
+
+            payload = dev_cycle.run_dev_cycle(dev_cycle.parse_args(["--run", "--watch", "--config", str(config_path)]), deps=fake.as_deps())
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertTrue(any("execute_next_action.py" in " ".join(command) for command in fake.commands))
+        self.assertEqual(payload["trace"]["newDecisionCount"], 1)
+        self.assertEqual(payload["trace"]["decisionCounts"], {"wait": 1})
+
+    def test_watch_run_auto_login_failure_reports_blocker_without_executor(self):
+        failed_recovery = {
+            "status": "manual_login_required",
+            "loadedSceneVerified": False,
+            "blocker": "manual_login_required",
+            "_returncode": 2,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "dev_cycle.local.json"
+            trace_path = Path(tmp) / "navigation_decisions.jsonl"
+            write_config(config_path, trace_path)
+            fake = FakeDeps(readiness=[blocked_login_readiness()], auto_login_results=failed_recovery)
+
+            payload = dev_cycle.run_dev_cycle(dev_cycle.parse_args(["--run", "--watch", "--config", str(config_path)]), deps=fake.as_deps())
+
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertEqual(payload["blocker"]["category"], "auto_login_failed")
+        self.assertEqual(payload["blocker"]["scriptBlocker"], "manual_login_required")
+        self.assertEqual(fake.auto_login_calls, 1)
+        self.assertFalse(any("execute_next_action.py" in " ".join(command) for command in fake.commands))
+
+    def test_watch_run_auto_login_missing_reports_discovery_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "dev_cycle.local.json"
+            trace_path = Path(tmp) / "navigation_decisions.jsonl"
+            write_config(config_path, trace_path)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["auto_login_command"] = []
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            fake = FakeDeps(readiness=[blocked_login_readiness()])
+
+            payload = dev_cycle.run_dev_cycle(dev_cycle.parse_args(["--run", "--watch", "--config", str(config_path)]), deps=fake.as_deps())
+
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertEqual(payload["blocker"]["category"], "auto_login_missing")
+        self.assertIn("configured but empty", payload["blocker"]["reason"])
+        self.assertEqual(fake.auto_login_calls, 0)
+        self.assertFalse(any("execute_next_action.py" in " ".join(command) for command in fake.commands))
+
+    def test_watch_run_auto_login_max_attempts_reached_exits_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "dev_cycle.local.json"
+            trace_path = Path(tmp) / "navigation_decisions.jsonl"
+            write_config(config_path, trace_path)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["auto_login_max_attempts"] = 1
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            fake = FakeDeps(readiness=[blocked_login_readiness(), blocked_login_readiness()])
+
+            payload = dev_cycle.run_dev_cycle(dev_cycle.parse_args(["--run", "--watch", "--config", str(config_path)]), deps=fake.as_deps())
+
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertEqual(payload["blocker"]["category"], "auto_login_max_attempts_reached")
+        self.assertEqual(fake.auto_login_calls, 1)
+        self.assertFalse(any("execute_next_action.py" in " ".join(command) for command in fake.commands))
+
+    def test_watch_dry_run_reports_auto_login_without_invoking_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "dev_cycle.local.json"
+            trace_path = Path(tmp) / "navigation_decisions.jsonl"
+            write_config(config_path, trace_path)
+            fake = FakeDeps(readiness=[blocked_login_readiness(), ready_readiness()])
+
+            payload = dev_cycle.run_dev_cycle(dev_cycle.parse_args(["--dry-run", "--watch", "--use-auto-login", "--config", str(config_path)]), deps=fake.as_deps())
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertTrue(payload["autoLogin"]["enabled"])
+        self.assertFalse(payload["autoLogin"]["invokeAllowed"])
+        self.assertEqual(fake.auto_login_calls, 0)
+        self.assertTrue(payload["watch"]["events"][0]["autoLoginWouldAttempt"])
+        self.assertFalse(any("execute_next_action.py" in " ".join(command) for command in fake.commands))
+
+    def test_auto_login_logs_redact_secret_like_command_and_output(self):
+        recovery = {
+            "status": "manual_login_required",
+            "loadedSceneVerified": False,
+            "blocker": "manual_login_required",
+            "_returncode": 2,
+            "_stdout": "password=fake-secret-value\nstatus=manual_login_required",
+            "_stderr": "token=fake-secret-value",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "dev_cycle.local.json"
+            trace_path = Path(tmp) / "navigation_decisions.jsonl"
+            write_config(config_path, trace_path)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["auto_login_command"] = ["python", "recover.py", "--password", "fake-secret-value"]
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            fake = FakeDeps(readiness=[blocked_login_readiness()], auto_login_results=recovery)
+
+            payload = dev_cycle.run_dev_cycle(dev_cycle.parse_args(["--run", "--watch", "--config", str(config_path)]), deps=fake.as_deps())
+
+        rendered = json.dumps(payload)
+        self.assertNotIn("fake-secret-value", rendered)
+        self.assertIn("<redacted>", rendered)
+        self.assertIn("<redacted sensitive line>", rendered)
+
     def test_watch_timeout_reports_last_blocker_without_executor(self):
         blocked = {
             "status": "FAIL",
@@ -310,7 +497,7 @@ class RunTracedDevCycleTest(unittest.TestCase):
             fake = FakeDeps(readiness=[blocked])
 
             payload = dev_cycle.run_dev_cycle(
-                dev_cycle.parse_args(["--run", "--watch", "--max-wait-seconds", "2", "--poll-seconds", "1", "--config", str(config_path)]),
+                dev_cycle.parse_args(["--run", "--watch", "--no-auto-login", "--max-wait-seconds", "2", "--poll-seconds", "1", "--config", str(config_path)]),
                 deps=fake.as_deps(),
             )
 
