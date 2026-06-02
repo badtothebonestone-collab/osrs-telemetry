@@ -1,0 +1,13 @@
+{
+  "daemon_url": "http://127.0.0.1:8890",
+  "snapshot_url": "http://127.0.0.1:8893",
+  "backend": "arduino",
+  "arduino_port": "COM6",
+  "runelite_launch_command": ".\\gradlew.bat run",
+  "trace_output_path": "interaction_geometry/live/navigation_decisions.jsonl",
+  "max_actions": 1,
+  "max_runtime_seconds": 30,
+  "wait_for_ready_seconds": 10,
+  "max_wait_seconds": 300,
+  "watch_poll_seconds": 5
+}

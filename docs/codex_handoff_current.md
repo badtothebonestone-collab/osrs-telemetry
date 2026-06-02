@@ -1,5 +1,11 @@
 ﻿# Current Codex Handoff
 
+# Historical Reference Only
+
+Historical reference only. Do not treat as current implementation guidance.
+
+---
+
 Repo:
 Current VM repo path for the live dev guest:
 `C:\Users\badto\osrs-telemetry`

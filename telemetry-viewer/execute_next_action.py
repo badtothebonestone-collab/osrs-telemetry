@@ -126,6 +126,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--client-hot-output", default="interaction_geometry/live/client_tick_hot.jsonl")
     parser.add_argument("--client-hot-window-ms", type=int, default=5000)
     parser.add_argument("--client-hot-max-samples", type=int, default=128)
+    parser.add_argument("--nav-trace", action="store_true", help="Write compact navigation decision traces as bounded JSONL debug output.")
+    parser.add_argument("--nav-trace-output", default="interaction_geometry/live/navigation_decisions.jsonl")
+    parser.add_argument("--nav-trace-console", action="store_true", help="Print one concise console line per navigation decision.")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--timeout", type=float, default=3.0)
@@ -362,6 +365,7 @@ def format_human(payload: dict[str, Any]) -> str:
             f"  Skips: unsafe geometry={summary.get('skippedUnsafeGeometry', 0)} hover mismatch={summary.get('skippedHoverMismatch', 0)} stale client tick={summary.get('skippedStaleClientTick', 0)} suppressed targets={summary.get('targetsSuppressed', 0)} no-progress suppressions={summary.get('targetNoProgressSuppressions', 0)}",
             f"  Navigation: occluded waypoints={summary.get('waypointOccludedByObject', 0)} alternate attempts={summary.get('navigationAlternateAttempts', 0)} camera adjustments={summary.get('cameraAdjustments', 0)} edge rejects={summary.get('edgeRouteClicksRejected', 0)} edge camera={summary.get('cameraReacquireOnEdgeCount', 0)} volatile skips={summary.get('volatileHoverSkips', 0)} menu flips={summary.get('menuFlipMismatchCount', 0)}",
             f"  Route stability: motion waits={summary.get('navigationInProgressWaits', 0)} replan suppressed={summary.get('routeReplanSuppressedWhileMoving', 0)} oscillation={summary.get('routeOscillationDetections', 0)} backtracking={summary.get('routeBacktrackingDetections', 0)} barrier={summary.get('routeBarrierDetections', 0)}",
+            f"  Navigation trace: entries={summary.get('navigationTraceEntries', 0)} path={summary.get('navigationTraceOutputPath') or 'console-only'}" if summary.get("navigationTraceEntries") else None,
             f"  Route transitions: attempts={summary.get('routeTransitionAttempts', 0)} firstTry={summary.get('routeTransitionFirstTrySuccesses', 0)} pending={summary.get('routeTransitionPending', 0)} retryRequired={summary.get('routeTransitionRetryRequired', 0)} retrySuccess={summary.get('routeTransitionRetrySuccesses', 0)} reconciled={summary.get('routeTransitionReconciledSuccesses', 0)} trueTimeouts={summary.get('routeTransitionTrueTimeouts', 0)}",
             f"  Successful actions: {summary.get('successfulActions', 0)}",
             f"  Timeouts: {summary.get('timeouts', 0)} unresolved={summary.get('unresolvedTimeouts', 0)} trueUnresolved={summary.get('trueUnresolvedTimeouts', summary.get('unresolvedTimeouts', 0))} classifications={summary.get('timeoutClassifications', {})}",

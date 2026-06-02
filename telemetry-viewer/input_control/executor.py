@@ -1669,6 +1669,10 @@ def _new_loop_summary() -> dict[str, Any]:
         "routeOscillationDetections": 0,
         "routeBacktrackingDetections": 0,
         "routeBarrierDetections": 0,
+        "navigationTraceEntries": 0,
+        "navigationTraceOutputPath": None,
+        "lastNavigationTrace": None,
+        "navigationNoProgressWithoutBlockEvidence": 0,
         "edgeRouteClicksRejected": 0,
         "cameraReacquireOnEdgeCount": 0,
         "resourceProjectionRecoveryAttempts": 0,
@@ -1967,6 +1971,7 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
     route_oscillation_detections = 0
     route_backtracking_detections = 0
     route_barrier_detections = 0
+    navigation_no_progress_without_block_evidence = 0
     edge_route_clicks_rejected = 0
     camera_reacquire_on_edge_count = 0
     resource_projection_recovery_attempts = 0
@@ -2118,12 +2123,15 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
             route_oscillation_detections += 1
         if route_stability.get("backtrackingDetected") is True:
             route_backtracking_detections += 1
+        route_no_progress = observed.get("routeNoProgress") if isinstance(observed.get("routeNoProgress"), dict) else {}
+        route_no_progress_classification = str(route_no_progress.get("classification") or "")
+        if route_no_progress and route_no_progress.get("barrierEvidence") is not True:
+            navigation_no_progress_without_block_evidence += 1
         if (
             route_stability.get("barrierDetected") is True
-            or route_stability.get("noProgressDetected") is True
-            or observed.get("routeNoProgress")
+            or route_no_progress.get("barrierEvidence") is True
+            or route_no_progress_classification == "route_wrong_node_or_barrier"
             or "route_wrong_node_or_barrier" in signals
-            or "route_no_progress" in signals
         ):
             route_barrier_detections += 1
         if trace.get("finalClassification") == "menu_flip_mismatch":
@@ -2220,6 +2228,7 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
         "routeOscillationDetections": route_oscillation_detections,
         "routeBacktrackingDetections": route_backtracking_detections,
         "routeBarrierDetections": route_barrier_detections,
+        "navigationNoProgressWithoutBlockEvidence": navigation_no_progress_without_block_evidence,
         "edgeRouteClicksRejected": edge_route_clicks_rejected,
         "cameraReacquireOnEdgeCount": camera_reacquire_on_edge_count,
         "expectedMenuClicks": expected_menu_clicks,
@@ -2533,6 +2542,307 @@ def _status_movement_state(status: dict[str, Any] | None) -> str:
     if activity.get("isMoving") is True:
         return "moving"
     return "unknown"
+
+
+def _navigation_trace_enabled(options: Any | None) -> bool:
+    return bool(getattr(options, "nav_trace", False) or getattr(options, "nav_trace_console", False))
+
+
+def _status_session_path(status: dict[str, Any] | None) -> str | None:
+    status = status if isinstance(status, dict) else {}
+    candidates: list[Any] = [
+        status.get("sessionPath"),
+        status.get("activeSessionPath"),
+        status.get("daemonSessionPath"),
+    ]
+    readiness = status.get("readiness") if isinstance(status.get("readiness"), dict) else {}
+    session = readiness.get("session") if isinstance(readiness.get("session"), dict) else {}
+    candidates.extend(
+        [
+            session.get("daemonSessionPath"),
+            session.get("latestLiveSessionPath"),
+            session.get("latestSessionPath"),
+            session.get("activeSessionPath"),
+        ]
+    )
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _navigation_trace_output_path(options: Any | None, status: dict[str, Any] | None) -> Path:
+    raw = str(getattr(options, "nav_trace_output", "") or "interaction_geometry/live/navigation_decisions.jsonl")
+    output = Path(raw)
+    if output.is_absolute():
+        return output
+    session_path = _status_session_path(status)
+    if session_path:
+        return Path(session_path) / output
+    return output
+
+
+def _compact_world_tile(tile: dict[str, Any] | None) -> dict[str, int] | None:
+    if not isinstance(tile, dict):
+        return None
+    world_x = _int_or_none(tile.get("worldX") if tile.get("worldX") is not None else tile.get("x"))
+    world_y = _int_or_none(tile.get("worldY") if tile.get("worldY") is not None else tile.get("y"))
+    plane = _int_or_none(tile.get("plane"))
+    if world_x is None or world_y is None:
+        return None
+    return {"worldX": world_x, "worldY": world_y, "plane": 0 if plane is None else plane}
+
+
+def _navigation_metric_value(status: dict[str, Any] | None, name: str) -> float | None:
+    status = status if isinstance(status, dict) else {}
+    pathing = _status_context(status, "pathingContext")
+    service = _status_context(status, "serviceContext")
+    nav = _status_context(status, "navigationIntentContext")
+    aliases: dict[str, tuple[tuple[dict[str, Any], str], ...]] = {
+        "destinationDistance": ((pathing, "distanceToDestination"), (status, "distanceToDestination")),
+        "pathTargetDistance": ((pathing, "distanceToPathTarget"), (status, "distanceToPathTarget")),
+        "serviceDistance": ((service, "distanceToServiceTarget"), (pathing, "distanceToServiceTarget"), (status, "distanceToServiceTarget")),
+        "navigationIntentDistance": ((nav, "distanceTiles"), (status, "navigationIntentDistanceTiles")),
+        "finalApproachDistance": ((service, "distanceToFinalApproach"), (pathing, "distanceToFinalApproach"), (status, "serviceDistanceToFinalApproach")),
+    }
+    for source, key in aliases.get(name, ()):
+        value = source.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                continue
+    return None
+
+
+def _navigation_goal_tile(status: dict[str, Any] | None, proposal: ActionProposal | None = None) -> dict[str, int] | None:
+    status = status if isinstance(status, dict) else {}
+    pathing = _status_context(status, "pathingContext")
+    service_route = _status_context(status, "serviceRouteContext")
+    for value in (
+        pathing.get("destinationTile"),
+        pathing.get("pathTargetTile"),
+        service_route.get("destinationTile"),
+        service_route.get("pathTargetTile"),
+        proposal.target_tile if proposal is not None else None,
+        proposal.suggested_world_tile if proposal is not None else None,
+    ):
+        tile = _compact_world_tile(value if isinstance(value, dict) else None)
+        if tile is not None:
+            return tile
+    return None
+
+
+def _navigation_distance_to_goal(status: dict[str, Any] | None, proposal: ActionProposal | None = None) -> float | None:
+    for name in ("destinationDistance", "pathTargetDistance", "serviceDistance", "navigationIntentDistance"):
+        value = _navigation_metric_value(status, name)
+        if value is not None:
+            return value
+    player = _status_player_tile(status)
+    goal = _navigation_goal_tile(status, proposal)
+    distance = _tile_distance(player, goal)
+    return float(distance) if distance is not None else None
+
+
+def _navigation_route_trace(status: dict[str, Any] | None) -> dict[str, Any]:
+    status = status if isinstance(status, dict) else {}
+    route = _status_context(status, "serviceRouteContext")
+    pathing = _status_context(status, "pathingContext")
+    return {
+        "routeId": route.get("routeId") or status.get("serviceRouteId"),
+        "currentNodeId": route.get("currentNodeId") or status.get("serviceRouteCurrentNodeId"),
+        "currentStepIndex": route.get("currentStepIndex") if route.get("currentStepIndex") is not None else status.get("serviceRouteCurrentStepIndex"),
+        "currentStepId": route.get("currentStepId") or route.get("stepId"),
+        "currentStepKind": route.get("currentStepKind") or route.get("currentStepType") or route.get("nextEdgeType"),
+        "routeStepStatus": route.get("routeStepStatus") or status.get("serviceRouteStepStatus"),
+        "pathingNeeded": pathing.get("pathingNeeded"),
+        "localReachability": pathing.get("localReachability"),
+        "pathingReason": pathing.get("reason"),
+    }
+
+
+def _navigation_chosen_subgoal(proposal: ActionProposal | None) -> dict[str, Any] | None:
+    if proposal is None:
+        return None
+    return {
+        "proposedAction": proposal.proposed_action,
+        "targetKind": proposal.target_kind,
+        "targetName": proposal.target_name,
+        "targetTile": _compact_world_tile(proposal.target_tile),
+        "suggestedWorldTile": _compact_world_tile(proposal.suggested_world_tile),
+        "suggestedClickPoint": dict(proposal.suggested_click_point) if isinstance(proposal.suggested_click_point, dict) else None,
+        "actionTargetSource": proposal.action_target_source,
+        "actionability": proposal.actionability,
+        "executable": proposal.executable,
+    }
+
+
+def _navigation_pending_state(observed: dict[str, Any] | None, status: dict[str, Any] | None) -> dict[str, Any]:
+    observed = observed if isinstance(observed, dict) else {}
+    return {
+        "movementState": _status_movement_state(status),
+        "observedResult": observed.get("observedResult"),
+        "resultOutcome": observed.get("resultOutcome"),
+        "resultComplete": observed.get("resultComplete"),
+        "nextActionAllowed": observed.get("nextActionAllowed"),
+        "navigationInProgress": observed.get("navigationInProgress") if isinstance(observed.get("navigationInProgress"), dict) else None,
+    }
+
+
+def _navigation_trace_entry(
+    *,
+    decision: str,
+    reason: str,
+    status: dict[str, Any] | None = None,
+    previous_status: dict[str, Any] | None = None,
+    proposal: ActionProposal | None = None,
+    observed: dict[str, Any] | None = None,
+    recovery_mode: str | None = None,
+    action_id: str | None = None,
+) -> dict[str, Any]:
+    status = status if isinstance(status, dict) else {}
+    previous_status = previous_status if isinstance(previous_status, dict) else None
+    observed = observed if isinstance(observed, dict) else {}
+    current_distance = _navigation_distance_to_goal(status, proposal)
+    previous_distance = _navigation_distance_to_goal(previous_status, proposal) if previous_status is not None else None
+    distance_delta = None
+    if current_distance is not None and previous_distance is not None:
+        distance_delta = round(current_distance - previous_distance, 3)
+    distances = {
+        "distanceToGoal": current_distance,
+        "lastDistanceToGoal": previous_distance,
+        "currentDistanceToGoal": current_distance,
+        "distanceDelta": distance_delta,
+        "distanceImproving": bool(distance_delta is not None and distance_delta < 0),
+        "destinationDistance": _navigation_metric_value(status, "destinationDistance"),
+        "pathTargetDistance": _navigation_metric_value(status, "pathTargetDistance"),
+        "serviceDistance": _navigation_metric_value(status, "serviceDistance"),
+        "navigationIntentDistance": _navigation_metric_value(status, "navigationIntentDistance"),
+        "finalApproachDistance": _navigation_metric_value(status, "finalApproachDistance"),
+    }
+    clicked_waypoint = observed.get("clickedWaypointMovement") if isinstance(observed.get("clickedWaypointMovement"), dict) else None
+    if clicked_waypoint:
+        distances["clickedWaypointMovement"] = dict(clicked_waypoint)
+    entry = {
+        "schema": "navigation_decision_trace.v1",
+        "wallTimeMillis": _wall_time_millis(),
+        "tick": _status_tick(status) if _status_tick(status) is not None else (proposal.source_tick if proposal is not None else None),
+        "playerWorldPosition": _status_player_tile(status),
+        "destinationWorldPosition": _navigation_goal_tile(status, proposal),
+        "routeStep": _navigation_route_trace(status),
+        "distances": distances,
+        "pending": _navigation_pending_state(observed, status),
+        "chosenSubgoal": _navigation_chosen_subgoal(proposal),
+        "recoveryMode": recovery_mode,
+        "decision": str(decision or "unknown"),
+        "reason": str(reason or "unspecified_navigation_decision"),
+        "actionId": action_id,
+    }
+    return entry
+
+
+def _navigation_trace_console_line(entry: dict[str, Any]) -> str:
+    player = entry.get("playerWorldPosition") if isinstance(entry.get("playerWorldPosition"), dict) else {}
+    goal = entry.get("destinationWorldPosition") if isinstance(entry.get("destinationWorldPosition"), dict) else {}
+    distances = entry.get("distances") if isinstance(entry.get("distances"), dict) else {}
+    route = entry.get("routeStep") if isinstance(entry.get("routeStep"), dict) else {}
+    return (
+        "NAV "
+        f"tick={entry.get('tick')} "
+        f"decision={entry.get('decision')} "
+        f"reason={entry.get('reason')} "
+        f"pos={player.get('worldX')},{player.get('worldY')},{player.get('plane')} "
+        f"goal={goal.get('worldX')},{goal.get('worldY')},{goal.get('plane')} "
+        f"dist={distances.get('currentDistanceToGoal')} "
+        f"delta={distances.get('distanceDelta')} "
+        f"step={route.get('currentNodeId') or route.get('currentStepId') or route.get('routeStepStatus')}"
+    )
+
+
+def _record_navigation_trace(
+    *,
+    options: Any | None,
+    loop_summary: dict[str, Any] | None,
+    decision: str,
+    reason: str,
+    status: dict[str, Any] | None = None,
+    previous_status: dict[str, Any] | None = None,
+    proposal: ActionProposal | None = None,
+    observed: dict[str, Any] | None = None,
+    result: ExecutionResult | None = None,
+    recovery_mode: str | None = None,
+) -> dict[str, Any] | None:
+    if not _navigation_trace_enabled(options):
+        return None
+    action_id = result.action_id if isinstance(result, ExecutionResult) else None
+    entry = _navigation_trace_entry(
+        decision=decision,
+        reason=reason,
+        status=status,
+        previous_status=previous_status,
+        proposal=proposal,
+        observed=observed,
+        recovery_mode=recovery_mode,
+        action_id=action_id,
+    )
+    if isinstance(result, ExecutionResult) and isinstance(result.action_trace, dict):
+        result.action_trace.setdefault("navigationDecisionTrace", []).append(dict(entry))
+    if isinstance(loop_summary, dict):
+        loop_summary["navigationTraceEntries"] = int(loop_summary.get("navigationTraceEntries") or 0) + 1
+        loop_summary["lastNavigationTrace"] = dict(entry)
+    if bool(getattr(options, "nav_trace", False)):
+        output = _navigation_trace_output_path(options, status)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, separators=(",", ":"), sort_keys=False) + "\n")
+        if isinstance(loop_summary, dict):
+            loop_summary["navigationTraceOutputPath"] = str(output)
+    if bool(getattr(options, "nav_trace_console", False)):
+        print(_navigation_trace_console_line(entry), flush=True)
+    return entry
+
+
+def _navigation_decision_from_observed(observed: dict[str, Any] | None) -> tuple[str, str, str | None]:
+    observed = observed if isinstance(observed, dict) else {}
+    result = str(observed.get("observedResult") or "")
+    outcome = str(observed.get("resultOutcome") or "")
+    signals = {str(signal) for signal in observed.get("observedSignals") or []}
+    if isinstance(observed.get("navigationInProgress"), dict):
+        lock = observed.get("navigationInProgress") or {}
+        return "wait", str(lock.get("replanSuppressedReason") or result or "navigation_in_progress"), None
+    if signals.intersection({"route_node_changed", "route_step_changed", "route_step_index_changed", "route_step_status_changed", "service_ready"}):
+        return "advance", result or "route_step_progress", None
+    if result in {"service_navigation_reached_node", "resource_return_reached_node", "bank_opened", "service_ready"}:
+        return "advance", result, None
+    if outcome in {"success", "progress", "depleted"}:
+        return "wait", result or outcome, None
+    route_no_progress = observed.get("routeNoProgress") if isinstance(observed.get("routeNoProgress"), dict) else {}
+    if route_no_progress:
+        if route_no_progress.get("barrierEvidence") is True:
+            return "recover", str(route_no_progress.get("classification") or "route_no_progress"), str(route_no_progress.get("classification") or "route_no_progress")
+        return "wait", str(route_no_progress.get("classification") or "navigation_no_progress_no_block_evidence"), None
+    if outcome == "no_change_timeout":
+        return "wait", result or "navigation_timeout_no_progress", None
+    if outcome in {"skipped", "menu_mismatch"}:
+        return "fail", result or outcome, None
+    return "wait", result or outcome or "navigation_observation", None
+
+
+def _status_has_navigation_context(status: dict[str, Any] | None) -> bool:
+    status = status if isinstance(status, dict) else {}
+    pathing = _status_context(status, "pathingContext")
+    route = _status_context(status, "serviceRouteContext")
+    phase, intent = _status_phase_intent(status)
+    return bool(
+        pathing
+        or route
+        or str(intent or "").lower() in {"needs_service", "return_to_resource", "return_to_resource_area", "navigation"}
+        or str(phase or "").lower() in {"inventory_full", "service_route", "return_to_resource"}
+    )
 
 
 def _status_route_object_actionable(status: dict[str, Any] | None) -> bool:
@@ -3464,13 +3774,71 @@ def _navigation_progress_observed(result: ExecutionResult | None) -> bool:
     signals = {str(signal) for signal in observed.get("observedSignals") or []}
     progress_signals = {
         "player_tile_changed",
+        "player_position_changed",
         "destination_distance_decreased",
         "path_target_distance_decreased",
         "service_distance_decreased",
         "final_approach_distance_decreased",
         "resource_destination_distance_decreased",
+        "clicked_waypoint_distance_decreased",
+        "route_node_changed",
+        "route_step_changed",
+        "route_step_index_changed",
+        "route_step_status_changed",
+        "service_ready",
     }
     return bool(signals.intersection(progress_signals))
+
+
+def _navigation_block_evidence(
+    *,
+    status: dict[str, Any] | None = None,
+    observed: dict[str, Any] | None = None,
+    result: ExecutionResult | None = None,
+) -> list[str]:
+    evidence: list[str] = []
+    status = status if isinstance(status, dict) else {}
+    observed = observed if isinstance(observed, dict) else {}
+    pathing = _status_context(status, "pathingContext")
+    route = _status_context(status, "serviceRouteContext")
+    for source_name, source in (("pathing", pathing), ("route", route), ("status", status)):
+        if not isinstance(source, dict):
+            continue
+        for key in ("localReachability", "frontierStatus", "routeStepStatus", "approachQuality"):
+            value = str(source.get(key) or "").strip().lower()
+            if value in {
+                "blocked",
+                "path_blocked",
+                "destination_blocked",
+                "player_tile_blocked",
+                "suspect_outside_wall",
+                "invalid_no_side_access",
+                "invalid_no_line_of_sight",
+            }:
+                evidence.append(f"{source_name}.{key}={value}")
+        for key in ("wallLoopDetected", "wallHuggingDetected", "wallLoop", "blockedPathDetected", "pathBlocked"):
+            if source.get(key) is True:
+                evidence.append(f"{source_name}.{key}=true")
+        reason = str(source.get("reason") or source.get("pathingReason") or "").strip().lower()
+        if any(token in reason for token in ("blocked", "collision", "barrier", "wall_hug", "outside_wall")):
+            evidence.append(f"{source_name}.reason={reason}")
+        rejected = source.get("rejectedApproachTileReasons")
+        if isinstance(rejected, dict) and rejected:
+            evidence.append(f"{source_name}.rejectedApproachTileReasons")
+    signals = {str(signal) for signal in observed.get("observedSignals") or []}
+    for signal in sorted(signals):
+        if signal in {"route_blocked", "route_wrong_node_or_barrier", "wall_loop_detected", "wall_hugging_detected"}:
+            evidence.append(f"observedSignal={signal}")
+    route_no_progress = observed.get("routeNoProgress") if isinstance(observed.get("routeNoProgress"), dict) else {}
+    if route_no_progress.get("barrierEvidence") is True:
+        evidence.append("observed.routeNoProgress.barrierEvidence=true")
+    if isinstance(result, ExecutionResult) and isinstance(result.action_trace, dict):
+        stability = result.action_trace.get("routeStability") if isinstance(result.action_trace.get("routeStability"), dict) else {}
+        if stability.get("barrierDetected") is True:
+            evidence.append("trace.routeStability.barrierDetected=true")
+        for item in stability.get("blockEvidence") or []:
+            evidence.append(f"trace.routeStability.{item}")
+    return list(dict.fromkeys(evidence))
 
 
 def _route_stability_issue(
@@ -3478,6 +3846,7 @@ def _route_stability_issue(
     recent_waypoints: list[tuple[int, int, int]],
     *,
     last_result: ExecutionResult | None = None,
+    current_status: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if proposal.proposed_action not in NAVIGATION_ACTIONS or proposal.target_kind != "path_tile":
         return None
@@ -3499,9 +3868,44 @@ def _route_stability_issue(
     if recent_waypoints and key == recent_waypoints[-1]:
         if _navigation_progress_observed(last_result):
             return None
+        current_player_tile = _status_player_tile(current_status)
+        distance_to_repeated_waypoint = _tile_distance(current_player_tile, proposal.target_tile)
+        if distance_to_repeated_waypoint is not None and distance_to_repeated_waypoint <= 1:
+            return {
+                "classification": "route_waypoint_arrived_advance_required",
+                "advanceRecommended": True,
+                "repeatClickSuppressed": True,
+                "barrierDetected": False,
+                "noProgressDetected": False,
+                "recoverySuppressed": True,
+                "reason": "player is already inside the waypoint radius; route step should advance instead of clicking again",
+                "distanceToWaypoint": distance_to_repeated_waypoint,
+                "proposedWaypointTile": {"worldX": key[0], "worldY": key[1], "plane": key[2]},
+                "playerWorldPosition": dict(current_player_tile) if isinstance(current_player_tile, dict) else None,
+                "recentClickedWaypointTiles": [
+                    {"worldX": item[0], "worldY": item[1], "plane": item[2]}
+                    for item in recent_waypoints[-4:]
+                ],
+            }
+        block_evidence = _navigation_block_evidence(status=current_status, result=last_result)
+        if not block_evidence:
+            return {
+                "classification": "route_repeat_suppressed_no_block_evidence",
+                "repeatClickSuppressed": True,
+                "barrierDetected": False,
+                "noProgressDetected": True,
+                "recoverySuppressed": True,
+                "reason": "proposed waypoint repeats the previous route click without obstacle evidence; wait or reacquire instead of wall-hug recovery",
+                "proposedWaypointTile": {"worldX": key[0], "worldY": key[1], "plane": key[2]},
+                "recentClickedWaypointTiles": [
+                    {"worldX": item[0], "worldY": item[1], "plane": item[2]}
+                    for item in recent_waypoints[-4:]
+                ],
+            }
         return {
             "classification": "route_wall_hugging_detected",
             "barrierDetected": True,
+            "blockEvidence": block_evidence,
             "reason": "proposed waypoint repeats the previous route click",
             "proposedWaypointTile": {"worldX": key[0], "worldY": key[1], "plane": key[2]},
             "recentClickedWaypointTiles": [
@@ -3562,7 +3966,12 @@ def _blocked_by_route_stability_result(
     return result
 
 
-def _mark_navigation_no_progress(result: ExecutionResult, proposal: ActionProposal) -> bool:
+def _mark_navigation_no_progress(
+    result: ExecutionResult,
+    proposal: ActionProposal,
+    *,
+    status: dict[str, Any] | None = None,
+) -> bool:
     if result.proposed_action not in NAVIGATION_ACTIONS:
         return False
     observed = result.observed_result if isinstance(result.observed_result, dict) else {}
@@ -3575,17 +3984,25 @@ def _mark_navigation_no_progress(result: ExecutionResult, proposal: ActionPropos
         "resource_return_stuck",
     } and outcome != "no_change_timeout":
         return False
+    block_evidence = _navigation_block_evidence(status=status, observed=observed, result=result)
+    classification = "route_wrong_node_or_barrier" if block_evidence else "navigation_no_progress_no_block_evidence"
     signals = [str(signal) for signal in observed.get("observedSignals") or []]
-    for signal in ("route_no_progress", "route_wrong_node_or_barrier"):
+    for signal in (["route_no_progress", "route_wrong_node_or_barrier"] if block_evidence else ["route_no_progress"]):
         if signal not in signals:
             signals.append(signal)
     observed["observedSignals"] = signals
     observed["routeNoProgress"] = {
-        "classification": "route_wrong_node_or_barrier",
+        "classification": classification,
         "clickedWaypointTile": dict(proposal.target_tile) if isinstance(proposal.target_tile, dict) else None,
         "reason": observed_name or outcome or "navigation_no_progress",
+        "barrierEvidence": bool(block_evidence),
+        "blockEvidence": list(block_evidence),
     }
-    warning = "route navigation produced no movement/distance progress; suppressing further local replans around this waypoint"
+    warning = (
+        "route navigation produced no movement/distance progress with obstacle evidence; suppressing further local replans around this waypoint"
+        if block_evidence
+        else "route navigation produced no movement/distance progress, but no obstacle evidence was present; waiting/reacquiring instead of wall-hug recovery"
+    )
     warnings = list(observed.get("warnings") or [])
     if warning not in warnings:
         warnings.append(warning)
@@ -3597,11 +4014,12 @@ def _mark_navigation_no_progress(result: ExecutionResult, proposal: ActionPropos
     route_stability = trace.setdefault("routeStability", {})
     route_stability.update(
         {
-            "classification": "route_wrong_node_or_barrier",
-            "barrierDetected": True,
+            "classification": classification,
+            "barrierDetected": bool(block_evidence),
             "noProgressDetected": True,
             "clickedWaypointTile": dict(proposal.target_tile) if isinstance(proposal.target_tile, dict) else None,
             "observedResult": observed_name or outcome,
+            "blockEvidence": list(block_evidence),
         }
     )
     result.action_trace = trace
@@ -8899,7 +9317,24 @@ def execute_next_action(
             warnings=["already waiting for previous action result"],
             expected_result=lifecycle.expected_result,
         )
+        result.action_trace = _new_action_trace(waiting_proposal)
         _apply_lifecycle(result, lifecycle, cooldown_remaining_ms=_cooldown_ms(options))
+        if _status_has_navigation_context(status):
+            _record_navigation_trace(
+                options=options,
+                loop_summary=None,
+                decision="wait",
+                reason="client_processing_previous_action",
+                status=status,
+                proposal=waiting_proposal,
+                observed={
+                    "observedResult": "already_waiting_for_result",
+                    "resultOutcome": "still_waiting",
+                    "resultComplete": False,
+                    "nextActionAllowed": False,
+                },
+                result=result,
+            )
         return result
     proposal = build_action_proposal(_status_with_navigation_option_overrides(status, options))
     readiness: dict[str, Any] | None = None
@@ -8927,6 +9362,21 @@ def execute_next_action(
     result: ExecutionResult
     try:
         input_controller = _input_controller_from_options(backend, options, sleep_func=sleep_func, monotonic_func=monotonic_func)
+        if proposal.proposed_action in NAVIGATION_ACTIONS or proposal.target_kind == "path_tile":
+            _record_navigation_trace(
+                options=options,
+                loop_summary=None,
+                decision="click",
+                reason=proposal.reason or "navigation_waypoint_executable",
+                status=status,
+                proposal=proposal,
+                observed={
+                    "observedResult": "navigation_click_selected",
+                    "resultOutcome": "pending",
+                    "resultComplete": False,
+                    "nextActionAllowed": False,
+                },
+            )
         result = execute_action(
             proposal,
             backend=backend,
@@ -9018,6 +9468,20 @@ def execute_next_action(
                     lifecycle.next_action_allowed = False
                 _apply_lifecycle(result, lifecycle, cooldown_remaining_ms=_cooldown_ms(options))
                 _update_result_classification_from_observed(result)
+            if result.proposed_action in NAVIGATION_ACTIONS:
+                decision, trace_reason, recovery_mode = _navigation_decision_from_observed(result.observed_result)
+                _record_navigation_trace(
+                    options=options,
+                    loop_summary=None,
+                    decision=decision,
+                    reason=trace_reason,
+                    status=result.verification if isinstance(result.verification, dict) else status,
+                    previous_status=status,
+                    proposal=proposal,
+                    observed=result.observed_result,
+                    result=result,
+                    recovery_mode=recovery_mode,
+                )
         except Exception as error:  # noqa: BLE001
             result.warnings.append(f"verification failed: {type(error).__name__}: {error}")
             if result.status == "PASS":
@@ -9187,6 +9651,18 @@ def execute_action_loop(
             )
             if locked is not None:
                 observed = locked
+                lock = locked.get("navigationInProgress") if isinstance(locked.get("navigationInProgress"), dict) else {}
+                _record_navigation_trace(
+                    options=options,
+                    loop_summary=loop_summary,
+                    decision="wait",
+                    reason=str(lock.get("replanSuppressedReason") or "navigation_in_progress"),
+                    status=latest_status,
+                    previous_status=wait_before_status,
+                    proposal=lock_proposal,
+                    observed=locked,
+                    result=results[-1] if results else None,
+                )
             if (lifecycle.last_action or "") == "resource_view_recovery" and _loop_resource_progress_seen(loop_summary):
                 observed = _resource_progress_during_view_recovery_observation(observed, loop_summary)
             _sync_lifecycle_observation(lifecycle, observed)
@@ -9243,6 +9719,20 @@ def execute_action_loop(
                 if results:
                     _apply_lifecycle(results[-1], lifecycle, cooldown_remaining_ms=0)
                     _update_result_classification_from_observed(results[-1])
+                    if (lifecycle.last_action or "") in NAVIGATION_ACTIONS:
+                        decision, trace_reason, recovery_mode = _navigation_decision_from_observed(observed)
+                        _record_navigation_trace(
+                            options=options,
+                            loop_summary=loop_summary,
+                            decision=decision,
+                            reason=trace_reason,
+                            status=latest_status,
+                            previous_status=wait_before_status,
+                            proposal=lock_proposal,
+                            observed=observed,
+                            result=results[-1],
+                            recovery_mode=recovery_mode,
+                        )
                 _refresh_loop_summary(loop_summary, results)
                 if observed.get("delayedProgressReconciliation") is True and status_value == "WARN":
                     status_value = "PASS"
@@ -9322,9 +9812,23 @@ def execute_action_loop(
                     lifecycle.reason = "action_timeout"
                 if results:
                     if lock_proposal is not None:
-                        _mark_navigation_no_progress(results[-1], lock_proposal)
+                        route_no_progress_marked = _mark_navigation_no_progress(results[-1], lock_proposal, status=latest_status)
                         lifecycle.observed_result = results[-1].observed_result
                         lifecycle.observed_signals = list(_observed_from_result(results[-1]).get("observedSignals") or [])
+                        if route_no_progress_marked:
+                            decision, trace_reason, recovery_mode = _navigation_decision_from_observed(_observed_from_result(results[-1]))
+                            _record_navigation_trace(
+                                options=options,
+                                loop_summary=loop_summary,
+                                decision=decision,
+                                reason=trace_reason,
+                                status=latest_status,
+                                previous_status=wait_before_status,
+                                proposal=lock_proposal,
+                                observed=_observed_from_result(results[-1]),
+                                result=results[-1],
+                                recovery_mode=recovery_mode,
+                            )
                     if resource_target_reacquired:
                         continued = dict(observed)
                         continued["resourceNoProgressContinued"] = True
@@ -9485,6 +9989,20 @@ def execute_action_loop(
             )
             status_value = "WARN" if status_value == "PASS" else status_value
             reason = "already_waiting_for_result"
+            if _status_has_navigation_context(before_status):
+                _record_navigation_trace(
+                    options=options,
+                    loop_summary=loop_summary,
+                    decision="wait",
+                    reason="client_processing_previous_action",
+                    status=before_status,
+                    observed={
+                        "observedResult": "already_waiting_for_result",
+                        "resultOutcome": "still_waiting",
+                        "resultComplete": False,
+                        "nextActionAllowed": False,
+                    },
+                )
             sleep_func(_poll_interval_seconds(options))
             continue
         current_reacquire_scope_key = _status_reacquire_scope_key(before_status)
@@ -9631,6 +10149,21 @@ def execute_action_loop(
             lifecycle = lifecycle_state_for_proposal(proposal, max_attempts=max_actions)
             status_value = "WARN" if status_value == "PASS" else status_value
             reason = proposal.reason
+            if proposal.proposed_action in NAVIGATION_ACTIONS or proposal.target_kind == "path_tile" or _status_has_navigation_context(before_status):
+                _record_navigation_trace(
+                    options=options,
+                    loop_summary=loop_summary,
+                    decision="wait" if proposal.proposed_action in {"none", "wait_for_context"} else "fail",
+                    reason=proposal.reason or "navigation_context_unavailable",
+                    status=before_status,
+                    proposal=proposal,
+                    observed={
+                        "observedResult": proposal.reason or "navigation_context_unavailable",
+                        "resultOutcome": "still_waiting" if proposal.proposed_action in {"none", "wait_for_context"} else "skipped",
+                        "resultComplete": proposal.proposed_action not in {"none", "wait_for_context"},
+                        "nextActionAllowed": False,
+                    },
+                )
             if proposal.proposed_action == "select_resource_target" and "safe_aimpoint" in proposal.missing_capabilities:
                 _record_reacquire_wait(options, loop_summary, sleep_func, reason="no_safe_target")
             else:
@@ -9670,11 +10203,23 @@ def execute_action_loop(
             proposal,
             recent_navigation_waypoints,
             last_result=results[-1] if results else None,
+            current_status=before_status,
         )
         if route_stability_issue is not None:
             action_result = _blocked_by_route_stability_result(proposal, route_stability_issue, options=options)
             action_result.readiness = readiness
             _attach_readiness_trace(action_result, readiness)
+            _record_navigation_trace(
+                options=options,
+                loop_summary=loop_summary,
+                decision="advance" if route_stability_issue.get("advanceRecommended") is True else "fail",
+                reason=str(route_stability_issue.get("reason") or route_stability_issue.get("classification") or "route_stability_blocked"),
+                status=before_status,
+                proposal=proposal,
+                observed=action_result.observed_result,
+                result=action_result,
+                recovery_mode=str(route_stability_issue.get("classification")) if route_stability_issue.get("barrierDetected") is True else None,
+            )
             results.append(action_result)
             _refresh_loop_summary(loop_summary, results)
             route_stability_classification = str(route_stability_issue.get("classification") or "route_stability_blocked")
@@ -9714,6 +10259,21 @@ def execute_action_loop(
                 proposal=proposal,
                 readiness=readiness,
                 classification="service_view_recovery_started",
+            )
+        if proposal.proposed_action in NAVIGATION_ACTIONS or proposal.target_kind == "path_tile":
+            _record_navigation_trace(
+                options=options,
+                loop_summary=loop_summary,
+                decision="click",
+                reason=proposal.reason or "navigation_waypoint_executable",
+                status=before_status,
+                proposal=proposal,
+                observed={
+                    "observedResult": "navigation_click_selected",
+                    "resultOutcome": "pending",
+                    "resultComplete": False,
+                    "nextActionAllowed": False,
+                },
             )
         action_result = execute_action(
             proposal,
@@ -9982,10 +10542,24 @@ def execute_action_loop(
                         _set_trace_final(action_result, _trace_classification_from_observed(action_classification))
                     if isinstance(action_result.action_trace, dict):
                         action_result.action_trace["gameTickVerificationTimeline"].extend(timeline)
-                route_no_progress = _mark_navigation_no_progress(action_result, proposal)
+                route_no_progress = _mark_navigation_no_progress(action_result, proposal, status=after_status)
                 if route_no_progress:
                     lifecycle.observed_result = action_result.observed_result
                     lifecycle.observed_signals = list(_observed_from_result(action_result).get("observedSignals") or [])
+                if action_result.proposed_action in NAVIGATION_ACTIONS:
+                    decision, trace_reason, recovery_mode = _navigation_decision_from_observed(_observed_from_result(action_result))
+                    _record_navigation_trace(
+                        options=options,
+                        loop_summary=loop_summary,
+                        decision=decision,
+                        reason=trace_reason,
+                        status=after_status,
+                        previous_status=before_status,
+                        proposal=proposal,
+                        observed=_observed_from_result(action_result),
+                        result=action_result,
+                        recovery_mode=recovery_mode,
+                    )
                 _apply_lifecycle(action_result, lifecycle, cooldown_remaining_ms=_cooldown_ms(options))
                 _update_result_classification_from_observed(action_result)
                 no_progress_suppression = _record_target_no_progress_failure(

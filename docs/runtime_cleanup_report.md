@@ -1,3 +1,9 @@
+# Historical Reference Only
+
+Historical reference only. Do not treat as current implementation guidance.
+
+---
+
 # Runtime Cleanup Report
 
 Current cleanup state:

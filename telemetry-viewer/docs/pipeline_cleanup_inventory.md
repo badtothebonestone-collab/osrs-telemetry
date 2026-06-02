@@ -1,3 +1,9 @@
+# Historical Reference Only
+
+Historical reference only. Do not treat as current implementation guidance.
+
+---
+
 # Pipeline Cleanup Inventory
 
 This inventory classifies the current major data paths after the pipeline cleanup pass. Unknown or historical tools are not deleted blindly; they stay documented until references and tests prove they are safe to remove.

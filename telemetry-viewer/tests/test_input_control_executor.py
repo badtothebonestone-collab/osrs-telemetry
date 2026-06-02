@@ -35,12 +35,14 @@ from input_control.executor import (
     _record_loop_status,
     _record_target_hover_failure,
     _record_target_no_progress_failure,
+    _record_navigation_trace,
     _route_transition_retry_required_observation,
     _goal_reached_with_only_recoverable_failures,
     _target_key_from_proposal,
     _verify_action_after_execution,
     _mark_navigation_no_progress,
     _navigation_motion_lock_observation,
+    _navigation_decision_from_observed,
     _navigation_alternate_tile_requests,
     _navigation_hover_failure_reason,
     _try_navigation_alternate_hover,
@@ -1296,7 +1298,176 @@ class InputControlExecutorTest(unittest.TestCase):
 
         self.assertIsNone(issue)
 
-    def test_navigation_no_progress_marks_route_barrier(self):
+    def test_route_stability_repeat_without_block_evidence_does_not_enter_wall_hug_recovery(self):
+        proposal = ActionProposal(
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_tile={"worldX": 3231, "worldY": 3218, "plane": 0},
+        )
+        last_result = ExecutionResult(
+            status="FAIL",
+            proposed_action="navigate_to_service",
+            dry_run=False,
+            executed=True,
+            observed_result={
+                "observedResult": "service_navigation_no_progress",
+                "resultOutcome": "no_change_timeout",
+                "observedSignals": ["route_no_progress"],
+            },
+        )
+        status = navigation_status_payload(tick=5, x=3231, y=3220, service_distance=10, path_distance=2)
+        status["brain"]["pathingContext"]["localReachability"] = "reachable"
+
+        issue = _route_stability_issue(
+            proposal,
+            [(3231, 3218, 0)],
+            last_result=last_result,
+            current_status=status,
+        )
+
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["classification"], "route_repeat_suppressed_no_block_evidence")
+        self.assertFalse(issue["barrierDetected"])
+        self.assertTrue(issue["recoverySuppressed"])
+
+    def test_route_stability_reached_waypoint_advances_instead_of_clicking_again(self):
+        proposal = ActionProposal(
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_tile={"worldX": 3231, "worldY": 3218, "plane": 0},
+        )
+        status = navigation_status_payload(tick=5, x=3231, y=3218, service_distance=8, path_distance=0)
+
+        issue = _route_stability_issue(
+            proposal,
+            [(3231, 3218, 0)],
+            last_result=ExecutionResult(
+                status="WARN",
+                proposed_action="navigate_to_service",
+                dry_run=False,
+                executed=True,
+                observed_result={"observedResult": "service_navigation_no_progress", "resultOutcome": "no_change_timeout"},
+            ),
+            current_status=status,
+        )
+
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["classification"], "route_waypoint_arrived_advance_required")
+        self.assertTrue(issue["advanceRecommended"])
+        self.assertFalse(issue["barrierDetected"])
+
+    def test_route_stability_repeat_with_block_evidence_can_enter_wall_hug_recovery(self):
+        proposal = ActionProposal(
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_tile={"worldX": 3231, "worldY": 3218, "plane": 0},
+        )
+        status = navigation_status_payload(tick=5, x=3231, y=3220, service_distance=10, path_distance=2)
+        status["brain"]["pathingContext"]["localReachability"] = "blocked"
+
+        issue = _route_stability_issue(
+            proposal,
+            [(3231, 3218, 0)],
+            last_result=ExecutionResult(
+                status="FAIL",
+                proposed_action="navigate_to_service",
+                dry_run=False,
+                executed=True,
+                observed_result={"observedResult": "service_navigation_no_progress", "resultOutcome": "no_change_timeout"},
+            ),
+            current_status=status,
+        )
+
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["classification"], "route_wall_hugging_detected")
+        self.assertTrue(issue["barrierDetected"])
+        self.assertIn("pathing.localReachability=blocked", issue["blockEvidence"])
+
+    def test_navigation_trace_writes_compact_jsonl_with_reason_and_distance_delta(self):
+        proposal = ActionProposal(
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_tile={"worldX": 3206, "worldY": 3242, "plane": 0},
+            reason="service_route_waypoint",
+            source_tick=12,
+            action_target_source="live_projected_waypoint",
+        )
+        previous = navigation_status_payload(tick=12, x=3200, y=3248, service_distance=12, path_distance=6)
+        current = navigation_status_payload(tick=13, x=3201, y=3247, service_distance=10, path_distance=5, movement_state="moving")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "nav.jsonl"
+            result = ExecutionResult(status="PASS", proposed_action="navigate_to_service", dry_run=False, action_trace={})
+            entry = _record_navigation_trace(
+                options=Namespace(nav_trace=True, nav_trace_console=False, nav_trace_output=str(output)),
+                loop_summary={},
+                decision="wait",
+                reason="player_still_moving_to_clicked_waypoint",
+                status=current,
+                previous_status=previous,
+                proposal=proposal,
+                observed={
+                    "observedResult": "service_navigation_clicked_waiting",
+                    "resultOutcome": "still_waiting",
+                    "resultComplete": False,
+                    "nextActionAllowed": False,
+                },
+                result=result,
+            )
+            lines = output.read_text(encoding="utf-8").strip().splitlines()
+
+        self.assertEqual(len(lines), 1)
+        payload = json.loads(lines[0])
+        self.assertEqual(entry["decision"], "wait")
+        self.assertEqual(payload["schema"], "navigation_decision_trace.v1")
+        self.assertEqual(payload["decision"], "wait")
+        self.assertEqual(payload["reason"], "player_still_moving_to_clicked_waypoint")
+        self.assertEqual(payload["playerWorldPosition"], {"worldX": 3201, "worldY": 3247, "plane": 0})
+        self.assertEqual(payload["chosenSubgoal"]["targetTile"], {"worldX": 3206, "worldY": 3242, "plane": 0})
+        self.assertLess(payload["distances"]["distanceDelta"], 0)
+        self.assertTrue(payload["distances"]["distanceImproving"])
+        self.assertEqual(result.action_trace["navigationDecisionTrace"][0]["decision"], "wait")
+
+    def test_navigation_decision_trace_classifies_waypoint_reached_as_advance(self):
+        decision, reason, recovery = _navigation_decision_from_observed(
+            {
+                "observedResult": "service_navigation_reached_node",
+                "resultOutcome": "progress",
+                "observedSignals": ["route_step_index_changed"],
+            }
+        )
+
+        self.assertEqual(decision, "advance")
+        self.assertEqual(reason, "service_navigation_reached_node")
+        self.assertIsNone(recovery)
+
+    def test_navigation_decision_trace_classifies_stale_state_as_wait_no_click(self):
+        proposal = ActionProposal(
+            proposed_action="wait_for_context",
+            target_kind="none",
+            reason="daemon_latest_tick_missing",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = _record_navigation_trace(
+                options=Namespace(nav_trace=True, nav_trace_console=False, nav_trace_output=str(Path(tmp) / "nav.jsonl")),
+                loop_summary={},
+                decision="wait",
+                reason=proposal.reason,
+                status=navigation_status_payload(tick=0, x=3200, y=3248, service_distance=12, path_distance=6),
+                proposal=proposal,
+                observed={
+                    "observedResult": proposal.reason,
+                    "resultOutcome": "still_waiting",
+                    "resultComplete": False,
+                    "nextActionAllowed": False,
+                },
+            )
+
+        self.assertEqual(entry["decision"], "wait")
+        self.assertEqual(entry["reason"], "daemon_latest_tick_missing")
+        self.assertFalse(entry["chosenSubgoal"]["executable"])
+
+    def test_navigation_no_progress_without_block_evidence_does_not_mark_route_barrier(self):
         proposal = ActionProposal(
             proposed_action="navigate_to_service",
             target_kind="path_tile",
@@ -1317,8 +1488,40 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertTrue(_mark_navigation_no_progress(result, proposal))
         observed = result.observed_result
         route_stability = result.action_trace["routeStability"]
+        self.assertNotIn("route_wrong_node_or_barrier", observed["observedSignals"])
+        self.assertEqual(observed["routeNoProgress"]["classification"], "navigation_no_progress_no_block_evidence")
+        self.assertFalse(observed["routeNoProgress"]["barrierEvidence"])
+        self.assertFalse(route_stability["barrierDetected"])
+        counts = _loop_counts([result])
+        self.assertEqual(counts["routeBarrierDetections"], 0)
+        self.assertEqual(counts["navigationNoProgressWithoutBlockEvidence"], 1)
+
+    def test_navigation_no_progress_with_block_evidence_marks_route_barrier(self):
+        proposal = ActionProposal(
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_tile={"worldX": 3203, "worldY": 3238, "plane": 0},
+        )
+        result = ExecutionResult(
+            status="FAIL",
+            proposed_action="navigate_to_service",
+            dry_run=False,
+            observed_result={
+                "observedResult": "service_navigation_no_progress",
+                "resultOutcome": "no_change_timeout",
+                "observedSignals": [],
+            },
+            action_trace={},
+        )
+        status = navigation_status_payload(tick=5, x=3203, y=3238, service_distance=12, path_distance=6)
+        status["brain"]["pathingContext"]["localReachability"] = "blocked"
+
+        self.assertTrue(_mark_navigation_no_progress(result, proposal, status=status))
+        observed = result.observed_result
+        route_stability = result.action_trace["routeStability"]
         self.assertIn("route_wrong_node_or_barrier", observed["observedSignals"])
         self.assertEqual(observed["routeNoProgress"]["classification"], "route_wrong_node_or_barrier")
+        self.assertTrue(observed["routeNoProgress"]["barrierEvidence"])
         self.assertTrue(route_stability["barrierDetected"])
         self.assertEqual(_loop_counts([result])["routeBarrierDetections"], 1)
 
@@ -3791,6 +3994,20 @@ class InputControlExecutorTest(unittest.TestCase):
         args = execute_cli.parse_args(["--execute", "--wait-for-ready", "30"])
 
         self.assertEqual(args.wait_for_ready, 30)
+
+    def test_cli_parses_navigation_trace_options(self):
+        args = execute_cli.parse_args(
+            [
+                "--nav-trace",
+                "--nav-trace-output",
+                "interaction_geometry/live/custom_navigation_trace.jsonl",
+                "--nav-trace-console",
+            ]
+        )
+
+        self.assertTrue(args.nav_trace)
+        self.assertEqual(args.nav_trace_output, "interaction_geometry/live/custom_navigation_trace.jsonl")
+        self.assertTrue(args.nav_trace_console)
 
     def test_cli_parses_reconcile_and_pacing_options(self):
         args = execute_cli.parse_args(

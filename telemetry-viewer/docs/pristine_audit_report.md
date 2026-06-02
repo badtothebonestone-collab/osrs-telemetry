@@ -1,3 +1,9 @@
+# Historical Reference Only
+
+Historical reference only. Do not treat as current implementation guidance.
+
+---
+
 # Pristine System Audit Report
 
 Generated: 2026-05-27T08:22:01-05:00

@@ -20,6 +20,7 @@ exports/
 latest/
 live_logs/
 telemetry-viewer/logs/
+telemetry-viewer/config/*.local.json
 .osrs-telemetry/
 external_knowledge_cache/
 live_packets/
