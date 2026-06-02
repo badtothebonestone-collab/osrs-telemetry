@@ -411,11 +411,56 @@ def test_current_debug_context_includes_expected_sections():
         "serviceObjects",
         "pathingFrontier",
         "viewQuality",
+        "input_integrity_status",
+        "inputIntegrityPhaseReport",
+        "phaseAwareInputIntegrity",
         "sessionMemorySummary",
         "staticProfileSummary",
     ):
         assert key in data
     assert "get_current_debug_context" in data["queryFirstWorkflow"]
+
+
+def test_current_debug_context_exposes_phase_aware_input_integrity():
+    fabric = knowledge_fabric.KnowledgeFabric(
+        world_model_payloads=synthetic_payloads(),
+        daemon_status={
+            "schema": "context_status.v1",
+            "latestTick": 77,
+            "clientTickHot": {"gameState": "LOGIN_SCREEN"},
+            "inputIntegrityStatus": {
+                "status": "FAIL",
+                "monitorPass": False,
+                "blockers": ["injected_input_detected"],
+                "injectionFlags": {
+                    "mouseInjectedCount": 5,
+                    "keyboardInjectedCount": 0,
+                    "mouseLowerIlInjectedCount": 0,
+                    "keyboardLowerIlInjectedCount": 0,
+                },
+                "backend": {"directBackendBypassCount": 0, "liveInputBackend": "arduino"},
+            },
+        },
+    )
+
+    result = fabric.query_current_debug_context(limit=3)
+    data = result["data"]
+    input_status = data["input_integrity_status"]
+    phase = input_status["phaseCounts"]
+    assessment = data["phaseAwareInputIntegrity"]
+
+    assert data["inputIntegrity"]["blockers"] == ["injected_input_detected"]
+    assert phase["operator_phase"]["operatorInjectedEvents"] == 5
+    assert phase["operator_phase"]["blocking"] is False
+    assert phase["live_action_phase"]["injectedEventsDelta"] == 0
+    assert phase["live_action_phase"]["lowerIlInjectedEventsDelta"] == 0
+    assert phase["live_action_phase"]["directBackendBypassCountDelta"] == 0
+    assert phase["live_action_phase"]["hardBlocker"] is False
+    assert assessment["operatorInjectedEventsAreBlocking"] is False
+    assert assessment["liveActionHardBlocker"] is False
+    assert assessment["directBackendBypassCount"] == 0
+    assert input_status["rawMonitorBlockersArePhaseQualified"] is True
+    assert input_status["noLiveInput"] is True
 
 
 def test_current_debug_context_reads_nested_context_status_shape():
@@ -1522,6 +1567,9 @@ class KnowledgeFabricTest(unittest.TestCase):
 
     def test_current_debug_context_includes_expected_sections(self):
         test_current_debug_context_includes_expected_sections()
+
+    def test_current_debug_context_exposes_phase_aware_input_integrity(self):
+        test_current_debug_context_exposes_phase_aware_input_integrity()
 
     def test_current_debug_context_reads_nested_context_status_shape(self):
         test_current_debug_context_reads_nested_context_status_shape()

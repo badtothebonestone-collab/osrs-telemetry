@@ -29,7 +29,7 @@ MCP resource/tool:
 
 | Question | Direct Query | MCP | Source Data | Expected Schema | Confidence | Common Gap |
 | --- | --- | --- | --- | --- | --- | --- |
-| What is happening now? | `--query current-debug-context` | `get_current_debug_context` | daemon, world model, readiness | `knowledge_fabric_current_debug_context.v1` | high when fresh | idle/stale scene |
+| What is happening now? | `--query current-debug-context` | `get_current_debug_context` | daemon, world model, readiness, phase-aware input integrity | `knowledge_fabric_current_debug_context.v1` | high when fresh | idle/stale scene |
 | What is blocking progress? | `--query current-blocker` | `explain_current_blocker` | readiness, traces, route/view data | `knowledge_fabric_current_blocker_explanation.v1` | medium-high | missing route/frontier evidence |
 | What resource targets exist? | `query_resource_candidates` | `query_resource_candidates` | resource census, projection, external requirements | `knowledge_fabric_resource_candidates.v1` | high in loaded scene | projection cap/stale client tick |
 | What service objects exist? | `query_service_candidates` | `query_service_candidates` | service census, static routes | `knowledge_fabric_service_candidates.v1` | high if service is loaded | static anchors are advisory |

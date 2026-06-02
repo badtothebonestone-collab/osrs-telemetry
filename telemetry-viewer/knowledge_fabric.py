@@ -559,6 +559,34 @@ def _readiness_block_evidence(
     }
 
 
+def _phase_aware_input_integrity_status(current_input_integrity: dict[str, Any]) -> dict[str, Any]:
+    phase_counts = _trace_input_phase_summary({"inputIntegrityStatusBefore": current_input_integrity})
+    live_phase = _dict(phase_counts.get("live_action_phase"))
+    operator_phase = _dict(phase_counts.get("operator_phase"))
+    direct_bypass_count = _dict(current_input_integrity).get("directBackendBypassCount")
+    return {
+        "current": current_input_integrity,
+        "phaseCounts": phase_counts,
+        "phaseAwareAssessment": {
+            "operatorInjectedEventsAreBlocking": False,
+            "operatorInjectedEvents": operator_phase.get("operatorInjectedEvents"),
+            "operatorLowerIlInjectedEvents": operator_phase.get("operatorLowerIlInjectedEvents"),
+            "liveActionHardBlocker": bool(live_phase.get("hardBlocker")),
+            "liveActionInjectedEventsDelta": live_phase.get("injectedEventsDelta"),
+            "liveActionLowerIlInjectedEventsDelta": live_phase.get("lowerIlInjectedEventsDelta"),
+            "liveActionDirectBackendBypassCountDelta": live_phase.get("directBackendBypassCountDelta"),
+            "directBackendBypassCount": direct_bypass_count,
+            "policy": "phase_aware_live_window_only",
+            "noLiveInput": True,
+        },
+        "directBackendBypassCount": direct_bypass_count,
+        "rawMonitorStatus": _dict(current_input_integrity).get("status"),
+        "rawMonitorBlockers": _list(_dict(current_input_integrity).get("blockers")),
+        "rawMonitorBlockersArePhaseQualified": True,
+        "noLiveInput": True,
+    }
+
+
 def _derive_arduino_calibration_status(
     readiness: dict[str, Any],
     current_input_integrity: dict[str, Any],
@@ -2258,7 +2286,7 @@ class KnowledgeFabric:
     def query_coverage_matrix(self) -> dict[str, Any]:
         started = time.perf_counter()
         rows = [
-            ("What is the player doing?", "get_current_debug_context", "get_current_debug_context", "daemon status/activity/client_tick_hot", "knowledge_fabric_current_debug_context.v1", "high if daemon fresh", "loaded-scene stale", "test_knowledge_fabric.py"),
+            ("What is the player doing?", "get_current_debug_context", "get_current_debug_context", "daemon status/activity/client_tick_hot/phase-aware input integrity", "knowledge_fabric_current_debug_context.v1", "high if daemon fresh", "loaded-scene stale", "test_knowledge_fabric.py"),
             ("Where is the player?", "get_current_debug_context", "osrs://debug/current-context", "plugin baseline/player location", "location summary", "high if source is plugin_snapshot_baseline_player", "proxy fallback confidence lower", "test_context_service.py"),
             ("What is blocking progress?", "explain_current_blocker", "explain_current_blocker", "readiness, trace, world model, pathing", "knowledge_fabric_current_blocker_explanation.v1", "medium-high", "unknown if evidence absent", "test_knowledge_fabric.py"),
             ("What resource targets exist?", "query_resource_candidates", "query_resource_candidates", "resource_object_census + static/external requirements", "knowledge_fabric_resource_candidates.v1", "high if world model fresh", "projection caps", "test_knowledge_fabric.py"),
@@ -3032,15 +3060,7 @@ class KnowledgeFabric:
             planned_screen_point=planned_screen_point,
             coordinate_trace=coordinate_trace,
         )
-        input_integrity_status = visibility.get("input_integrity_status") or {
-            "current": current_input_integrity,
-            "phaseCounts": _trace_input_phase_summary({"inputIntegrityStatusBefore": current_input_integrity}),
-            "phaseAwareAssessment": {
-                "operatorInjectedEventsAreBlocking": False,
-                "liveActionHardBlocker": bool(_dict(input_block_evidence.get("liveActionPhase")).get("hardBlocker")),
-                "policy": "phase_aware_live_window_only",
-            },
-        }
+        input_integrity_status = visibility.get("input_integrity_status") or _phase_aware_input_integrity_status(current_input_integrity)
         data = {
             "latestActionTrace": visibility or latest_trace,
             "latestActionTraceSummary": latest_trace,
@@ -3604,6 +3624,8 @@ class KnowledgeFabric:
         bootstrap_state = self._bootstrap_liveness_summary()
         route_context_applicability = _route_context_applicability(self.daemon_status, readiness=readiness, proposal=proposal)
         source_metadata = _source_metadata(self.daemon_status, fallback_source=self.source)
+        input_integrity = self._input_integrity_summary()
+        input_integrity_status = _phase_aware_input_integrity_status(input_integrity)
         data = {
             "liveStatus": {
                 "schema": self.daemon_status.get("schema"),
@@ -3647,7 +3669,10 @@ class KnowledgeFabric:
             "viewQuality": self.query_view_quality(intent=str(current_intent or "unknown")),
             "navigationDecisionTrace": self.query_navigation_decision_trace(limit=min(cap, 15)),
             "overlayHealth": readiness.get("overlayHealth"),
-            "inputIntegrity": self._input_integrity_summary(),
+            "inputIntegrity": input_integrity,
+            "input_integrity_status": input_integrity_status,
+            "inputIntegrityPhaseReport": input_integrity_status.get("phaseCounts"),
+            "phaseAwareInputIntegrity": input_integrity_status.get("phaseAwareAssessment"),
             "actionInputVisibility": self.query_action_input_visibility(),
             "latestActionTraceSummary": self._latest_action_trace_summary(),
             "latestVisualBundleSummary": self.query_debug_evidence(limit=3),
