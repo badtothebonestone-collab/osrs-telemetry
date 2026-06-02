@@ -1932,6 +1932,14 @@ def _status_from_payloads(payloads: list[dict[str, Any]]) -> str:
     return status
 
 
+def _named_query_prefers_live_daemon(args, needs: list[str]) -> bool:
+    if getattr(args, "daemon_url_explicit", False):
+        return True
+    if getattr(args, "session", None) or getattr(args, "latest_session", False):
+        return False
+    return any(str(need).startswith("knowledge_") for need in needs)
+
+
 def build_live_named_query_response(args, query_name: str, needs: list[str]) -> tuple[dict[str, Any] | None, str | None]:
     daemon_url = str(getattr(args, "daemon_url", None) or DEFAULT_DAEMON_URL)
     snapshot_url = str(getattr(args, "snapshot_url", None) or DEFAULT_SNAPSHOT_URL)
@@ -2085,7 +2093,7 @@ def build_file_named_query_response(
 
 
 def build_named_query_response(args, query_name: str, needs: list[str]) -> dict[str, Any]:
-    if getattr(args, "daemon_url_explicit", False):
+    if _named_query_prefers_live_daemon(args, needs):
         live_response, daemon_query_error = build_live_named_query_response(args, query_name, needs)
         if live_response is not None:
             return live_response

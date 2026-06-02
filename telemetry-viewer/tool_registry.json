@@ -476,7 +476,7 @@
     {
       "name": "context_service.py",
       "category": "daily",
-      "purpose": "Read-only context API and direct query adapter over daemon/session/Knowledge Fabric evidence, including current debug context, blockers, navigation decision trace summaries, and task-script readiness snapshots.",
+      "purpose": "Read-only context API and direct query adapter over daemon/session/Knowledge Fabric evidence, including current debug context, blockers, navigation decision trace summaries, and task-script readiness snapshots. No-session named Knowledge Fabric queries use the live daemon first; session-scoped queries stay file-bound unless --daemon-url is supplied.",
       "dailyRequired": false,
       "normalCommand": "python telemetry-viewer\\context_service.py --query current-debug-context",
       "alternateCommand": "python telemetry-viewer\\context_service.py --query task-script-run-readiness",

@@ -803,6 +803,35 @@ class ContextServiceTest(unittest.TestCase):
             self.assertEqual(list(Path(tmp).rglob("*.ndjson")), [])
             self.assertEqual(list(Path(tmp).rglob("*.jsonl")), [])
 
+    def test_named_query_without_session_prefers_live_daemon_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live_session = Path(tmp) / "live-session"
+            args = self.live_query_args(session=None, query="task-script-run-readiness")
+            args.daemon_url_explicit = False
+            with mock.patch.object(service.knowledge_fabric, "fabric_from_live", return_value=self.live_fabric(live_session)) as live_mock:
+                payload = service.build_named_query_response(args, "task-script-run-readiness", ["knowledge_task_run_readiness"])
+
+            self.assertEqual(payload["status"], payload["knowledgeTaskRunReadiness"]["status"])
+            self.assertEqual(payload["contextSource"], "live_daemon")
+            self.assertEqual(payload["sourceUsed"], "live_daemon")
+            self.assertFalse(payload["fileSessionFallbackUsed"])
+            self.assertEqual(payload["latestTick"], 42)
+            live_mock.assert_called_once()
+
+    def test_named_query_with_session_uses_file_context_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp))
+            args = self.live_query_args(session=session, query="task-script-run-readiness")
+            args.daemon_url_explicit = False
+            with mock.patch.object(service.knowledge_fabric, "fabric_from_live") as live_mock:
+                payload = service.build_named_query_response(args, "task-script-run-readiness", ["knowledge_task_run_readiness"])
+
+            self.assertEqual(payload["contextSource"], "file_session")
+            self.assertEqual(payload["sourceUsed"], "file_session")
+            self.assertFalse(payload["fileSessionFallbackUsed"])
+            self.assertIn("knowledgeTaskRunReadiness", payload)
+            live_mock.assert_not_called()
+
     def test_daemon_url_query_fallback_is_labeled_when_daemon_status_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp))

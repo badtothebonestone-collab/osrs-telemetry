@@ -83,6 +83,8 @@ Named context queries:
 - `python telemetry-viewer\context_service.py --query task-script-run-readiness`
 - `python telemetry-viewer\context_service.py --query run-readiness`
 
+When no `--session` or `--latest-session` is supplied, these named Knowledge Fabric queries use the live daemon/snapshot path first. Session-scoped calls stay bound to the requested files unless `--daemon-url` is supplied explicitly.
+
 ## Runtime Evidence
 
 Scripts compile with a `runtimeEvidencePlan` that names the live variables each primitive must prove. The current required woodcut-bank lifecycle variables are:
