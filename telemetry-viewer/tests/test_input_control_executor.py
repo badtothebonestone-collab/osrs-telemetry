@@ -1322,6 +1322,83 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertTrue(route_stability["barrierDetected"])
         self.assertEqual(_loop_counts([result])["routeBarrierDetections"], 1)
 
+    def test_navigation_no_progress_continues_until_bounded_limit(self):
+        backend = FakeBackend()
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            input_profile="steady",
+            execute=True,
+            verify_after_action=True,
+            after_action_wait_ms=0,
+            hover_confirm_target=False,
+            wait_for_ready=0,
+            cooldown_ms=0,
+            result_timeout_ms=20,
+            action_timeout_ms=20,
+            poll_interval_ms=10,
+            max_actions=2,
+            max_total_actions=2,
+            max_runtime_seconds=2,
+            final_reconcile_ms=0,
+            final_reconcile_game_ticks=0,
+            stop_on_warn=False,
+            stop_on_fail=False,
+            stop_after_inventory_changes=None,
+            stop_when_inventory_full=False,
+            max_successful_actions=None,
+            max_timeouts=None,
+            max_consecutive_no_progress=3,
+            max_consecutive_timeouts=3,
+            seed=None,
+            require_live_readiness=False,
+        )
+        def nav_status(*, tick, x, y, service_distance, path_distance, waypoint_y):
+            status = navigation_status_payload(
+                tick=tick,
+                x=x,
+                y=y,
+                service_distance=service_distance,
+                path_distance=path_distance,
+            )
+            waypoint = {"worldX": 3233, "worldY": waypoint_y, "plane": 0}
+            pathing = status["brain"]["pathingContext"]
+            pathing["nextWaypointTile"] = waypoint
+            pathing["pathTargetTile"] = waypoint
+            pathing["predictedPathTiles"] = [waypoint]
+            return status
+
+        statuses = [
+            nav_status(tick=1, x=3233, y=3227, service_distance=19, path_distance=19, waypoint_y=3226),
+            nav_status(tick=2, x=3233, y=3227, service_distance=19, path_distance=19, waypoint_y=3226),
+            nav_status(tick=3, x=3233, y=3227, service_distance=19, path_distance=19, waypoint_y=3225),
+            nav_status(tick=4, x=3233, y=3226, service_distance=18, path_distance=18, waypoint_y=3225),
+        ]
+
+        def fetch_status(*_args, **_kwargs):
+            if statuses:
+                return statuses.pop(0)
+            return navigation_status_payload(tick=5, x=3233, y=3226, service_distance=18, path_distance=18)
+
+        result = execute_action_loop(
+            "http://daemon",
+            options,
+            fetch_json_func=fetch_status,
+            backend=backend,
+            sleep_func=lambda _seconds: None,
+            monotonic_func=IncrementingClock(start=0.0, step=0.1),
+        )
+
+        payload = result.to_dict()
+        self.assertNotEqual(payload["reason"], "route_wrong_node_or_barrier")
+        self.assertEqual(payload["reason"], "max_actions_reached")
+        self.assertEqual(payload["actionResultCount"], 2)
+        self.assertEqual(payload["loopSummary"]["timeouts"], 1)
+        self.assertEqual(payload["loopSummary"]["navigationInProgressWaits"], 1)
+        self.assertEqual(payload["actionResults"][0]["observedResult"]["observedResult"], "service_navigation_stuck")
+        self.assertEqual(payload["actionResults"][1]["observedResult"]["observedResult"], "service_navigation_clicked_waiting")
+
     def test_loop_counts_classifies_unresolved_and_reconciled_timeouts(self):
         unresolved = ExecutionResult(
             status="FAIL",

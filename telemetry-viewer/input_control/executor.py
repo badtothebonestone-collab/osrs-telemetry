@@ -9406,6 +9406,26 @@ def execute_action_loop(
                             input_controller=input_controller,
                     )
                     continue
+                if (lifecycle.last_action or "") in NAVIGATION_ACTIONS:
+                    stop_reason = _loop_stop_reason(options, loop_summary)
+                    if stop_reason:
+                        status_value = "FAIL"
+                        reason = stop_reason
+                        if results:
+                            _capture_debug_bundle(
+                                debug_bundles,
+                                loop_summary,
+                                "failure",
+                                daemon_status=latest_status,
+                                proposal=results[-1].proposal,
+                                result=results[-1],
+                                readiness=results[-1].readiness,
+                                classification=reason,
+                            )
+                        break
+                    status_value = "WARN" if status_value == "PASS" else status_value
+                    sleep_func(_poll_interval_seconds(options))
+                    continue
                 status_value = "FAIL"
                 reason = (
                     "route_wrong_node_or_barrier"
@@ -10092,9 +10112,14 @@ def execute_action_loop(
                         readiness=readiness,
                         classification="route_wrong_node_or_barrier",
                     )
-                    status_value = "FAIL"
-                    reason = "route_wrong_node_or_barrier"
-                    break
+                    stop_reason = _loop_stop_reason(options, loop_summary)
+                    if stop_reason:
+                        status_value = "FAIL"
+                        reason = stop_reason
+                        break
+                    status_value = "WARN" if status_value == "PASS" else status_value
+                    sleep_func(_poll_interval_seconds(options))
+                    continue
                 observed_signals = {str(item) for item in (lifecycle.observed_signals or [])}
                 if "service_ready" in observed_signals:
                     _capture_debug_bundle(
