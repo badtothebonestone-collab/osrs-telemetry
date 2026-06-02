@@ -30,6 +30,8 @@ from input_control.executor import (
     _no_click_safety_skip_observed,
     _proposal_has_actionable_safe_target,
     _proposal_reacquire_budget_type,
+    _resource_progress_during_view_recovery_observation,
+    _clear_suppression_on_progress_if_needed,
     _record_loop_status,
     _record_target_hover_failure,
     _record_target_no_progress_failure,
@@ -955,6 +957,38 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(summary["resourceProgressSuccesses"], 1)
         self.assertEqual(summary["resourceProjectionRecoveryFailures"], 0)
         self.assertEqual(summary["cameraAdjustments"], 1)
+
+    def test_resource_view_recovery_progress_clears_suppressed_targets(self):
+        summary = _new_loop_summary()
+        summary.update(
+            {
+                "inventoryFreeSlotsStart": 3,
+                "inventoryFreeSlotsEnd": 2,
+                "resourceCountStart": 13,
+                "resourceCountEnd": 14,
+                "progressStart": 6,
+                "progressEnd": 7,
+            }
+        )
+        cache = {"1278:3225:3232:0:tree": {"suppressionUntil": 999999}}
+        observed = _resource_progress_during_view_recovery_observation(
+            {
+                "observedResult": "resource_projection_recovery_waiting",
+                "resultOutcome": "still_waiting",
+            },
+            summary,
+        )
+
+        _clear_suppression_on_progress_if_needed(
+            Namespace(clear_suppression_on_progress=True),
+            cache,
+            summary,
+            observed,
+        )
+
+        self.assertEqual(cache, {})
+        self.assertEqual(summary["suppressionClearsOnProgress"], 1)
+        self.assertIn("resource_progress_increased", observed["observedSignals"])
 
     def test_resource_recovery_loop_captures_bounded_debug_bundles(self):
         backend = FakeBackend()

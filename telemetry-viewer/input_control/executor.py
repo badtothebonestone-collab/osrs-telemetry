@@ -9999,6 +9999,7 @@ def execute_action_loop(
                     lifecycle.result_outcome = "progress"
                     lifecycle.next_action_allowed = True
                     _set_trace_final(action_result, "resource_progress_during_view_recovery")
+                    _clear_suppression_on_progress_if_needed(options, suppression_cache, loop_summary, observed)
                     _apply_lifecycle(action_result, lifecycle, cooldown_remaining_ms=0)
                     _refresh_loop_summary(loop_summary, results)
                     status_value = "WARN" if status_value == "PASS" else status_value
@@ -10058,6 +10059,7 @@ def execute_action_loop(
                         lifecycle.result_outcome = "progress"
                         lifecycle.next_action_allowed = True
                         _set_trace_final(action_result, "resource_progress_during_view_recovery")
+                        _clear_suppression_on_progress_if_needed(options, suppression_cache, loop_summary, observed)
                         _apply_lifecycle(action_result, lifecycle, cooldown_remaining_ms=0)
                         _refresh_loop_summary(loop_summary, results)
                         status_value = "WARN" if status_value == "PASS" else status_value
