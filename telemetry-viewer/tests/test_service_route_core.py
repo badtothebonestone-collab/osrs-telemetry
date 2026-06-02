@@ -373,6 +373,24 @@ class ServiceRouteCoreTest(unittest.TestCase):
         self.assertEqual(context["selectedApproachNode"]["nodeId"], "lumbridge_castle_entrance_or_courtyard")
         self.assertEqual(context["currentNodeId"], "lumbridge_castle_entrance_or_courtyard")
 
+    def test_goal_directed_north_of_south_approach_does_not_backtrack(self):
+        for world_y in (3228, 3230):
+            with self.subTest(world_y=world_y):
+                context = service_route_core.build_service_route_context(
+                    profile="woodcut_bank",
+                    service_type="bank",
+                    player_context=player(world_x=3217, world_y=world_y, plane=0),
+                    service_context={"serviceNeeded": True, "serviceTypeNeeded": "bank", "candidateCount": 0},
+                    target_context={"serviceCandidateInputs": [], "loadedServiceScene": [], "broadCandidates": []},
+                    source_tick=83,
+                )
+
+                self.assertEqual(context["routeMode"], "goal_directed_fallback")
+                self.assertEqual(context["selectedApproachNode"]["nodeId"], "lumbridge_castle_entrance_or_courtyard")
+                self.assertEqual(context["currentNodeId"], "lumbridge_castle_entrance_or_courtyard")
+                self.assertEqual(context["currentNavigationTarget"]["worldX"], 3205)
+                self.assertEqual(context["currentNavigationTarget"]["worldY"], 3232)
+
     def test_goal_directed_castle_entry_opens_near_route_door_obstacle(self):
         context = service_route_core.build_service_route_context(
             profile="woodcut_bank",

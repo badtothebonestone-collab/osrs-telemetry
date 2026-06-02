@@ -1648,6 +1648,16 @@ def _goal_directed_post_approach_unlocked(player_tile: dict[str, Any] | None) ->
     return world_x <= 3215 and 3221 <= world_y <= 3234
 
 
+def _goal_directed_south_approach_passed_by_castle_band(player_tile: dict[str, Any] | None) -> bool:
+    if not isinstance(player_tile, dict):
+        return False
+    world_x = _int(player_tile.get("worldX"))
+    world_y = _int(player_tile.get("worldY"))
+    if world_x is None or world_y is None:
+        return False
+    return 3216 <= world_x <= 3221 and 3224 <= world_y <= 3234
+
+
 def _goal_directed_lateral_distance_sq(
     *,
     player_tile: dict[str, Any] | None,
@@ -1684,7 +1694,10 @@ def _goal_directed_approach_passed(
     node_location: dict[str, Any] | None,
     goal_location: dict[str, Any] | None,
     arrival_radius: int,
+    node_id: str | None = None,
 ) -> bool:
+    if node_id == "lumbridge_castle_south_entrance_approach" and _goal_directed_south_approach_passed_by_castle_band(player_tile):
+        return True
     distance = _tile_distance(player_tile, node_location)
     if distance is not None and distance <= max(0, arrival_radius):
         return True
@@ -1721,6 +1734,7 @@ def _selected_goal_directed_approach(route: dict[str, Any], player_tile: dict[st
             node_location=node_location,
             goal_location=goal_location,
             arrival_radius=radius,
+            node_id=node_id,
         ):
             arrived.append((_index, step, node, preference))
         else:
