@@ -42,6 +42,7 @@ This document defines the intended shape of the live Python sidecar stack. It is
    - MCP/direct surfaces expose spec/validation/compile/explain/template/scene-probe queries. They do not expose raw arbitrary mouse/key/click tools.
    - Evidence-plan/runtime-evidence queries name, read, and compare the live variables required to prove lifecycle transitions: inventory, resource count, bank-open state, hover/click proof, location, route progress, and phase/intent.
    - Failure-classification queries classify current or supplied evidence before patching, including phase-aware operator-injected noise versus live-action input-integrity hard blockers.
+   - Step-readiness queries assess whether a compiled primitive may request its bounded operator path now, using action readiness, runtime evidence, failure classification, navigation trace summaries, and input-integrity phase evidence. They do not execute the request.
    - The compiled live path remains action proposal -> readiness -> hover/menu proof -> HumanInputController -> ArduinoHIDBackend -> input integrity -> lifecycle verification.
 
 5. Executor

@@ -45,6 +45,7 @@ MCP resource/tool:
 | task_script_api | script authoring contract | `task_script_api.py` | validators, compiler, MCP/direct tools | `task_script_api_spec.v1` | static code version | validation limits | no | no | no |
 | task_script_runtime_evidence | read-only runtime evidence | Knowledge Fabric | lifecycle proof comparison | `task_runtime_evidence.v1` | source evidence freshness | evidence variable catalog | no | no | no |
 | task_failure_classification | read-only failure diagnosis | `task_script_api.py` | Codex before-patching classification | `task_failure_classification.v1` | source evidence freshness | supplied evidence sections | no | no | no |
+| task_step_readiness | read-only script step gate | Knowledge Fabric and `task_script_api.py` | Codex before bounded script/operator requests | `task_step_readiness.v1` | runtime/readiness/action evidence freshness | compiled step count | no | no | no |
 | session_memory | session memory | Knowledge Fabric | advisory anchors | `session_memory.v1` | session/tick | ring buffers | no | bounded | no |
 | static libraries | static | repo JSON | profiles/routes/targets | `static_knowledge_library.v1` | version hash | query limit | no | no | no |
 | external OSRS knowledge cache | advisory external | explicit refresh/manual seed | task probe, ID/name resolver | `external_knowledge_sources.v1` | source refresh/cache age | cache/query caps | no | capped | explicit only |

@@ -135,6 +135,53 @@ def runtime_snapshot(variables: dict) -> dict:
     }
 
 
+def action_visibility_snapshot(*, execution_allowed: bool = True, planned_action: str = "deposit_inventory") -> dict:
+    return {
+        "schema": "action_input_visibility_context.v1",
+        "status": "PASS" if execution_allowed else "WARN",
+        "data": {
+            "plannedAction": planned_action,
+            "plannedTarget": {"name": "Bank booth", "actionTargetSource": "live_service_candidate"},
+            "plannedScreenPoint": {"x": 1000, "y": 700},
+            "hoverConfirmationEvidence": {"acceptedHoverSample": {"topOption": "Bank", "topTarget": "Bank booth"}},
+            "menuOptionClickedEvidence": {"option": "Bank", "target": "Bank booth"},
+            "actionReadiness": {
+                "status": "PASS" if execution_allowed else "FAIL",
+                "executionAllowed": execution_allowed,
+                "blockers": [] if execution_allowed else [{"code": "manual_login_required"}],
+                "warnings": [],
+            },
+            "readiness": {"manualLoginRequired": False, "loadedSceneProof": {"loadedSceneVerified": True}},
+        },
+    }
+
+
+def clean_failure_classification() -> dict:
+    return {
+        "schema": "task_failure_classification.v1",
+        "status": "PASS",
+        "primaryClassification": None,
+        "blockers": [],
+        "inputIntegrityAssessment": {
+            "liveActionHardBlocker": False,
+            "directBackendBypassCount": 0,
+            "operatorNoiseOnly": False,
+        },
+    }
+
+
+def navigation_trace_snapshot(*, suspicious: bool = False) -> dict:
+    return {
+        "schema": "navigation_decision_trace_summary.v1",
+        "status": "WARN" if suspicious else "PASS",
+        "data": {
+            "tracePresent": True,
+            "firstSuspiciousDecision": {"issue": "stale_state_allowed_click"} if suspicious else None,
+            "latestDecision": {"decision": "wait", "reason": "navigation_in_progress"},
+        },
+    }
+
+
 class TaskScriptApiTest(unittest.TestCase):
     def test_spec_lists_required_primitives_and_no_raw_input_contract(self):
         spec = task_script_api.script_api_spec()
@@ -163,6 +210,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("menuOptionClicked", spec["runtimeEvidenceVariables"])
         self.assertEqual(spec["runtimeEvidenceComparisonSchema"], "task_runtime_evidence_comparison.v1")
         self.assertEqual(spec["failureClassificationSchema"], "task_failure_classification.v1")
+        self.assertEqual(spec["stepReadinessSchema"], "task_step_readiness.v1")
 
     def test_woodcut_bank_example_validates_and_compiles_to_existing_actions(self):
         script = load_example()
@@ -346,6 +394,48 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(arduino["primaryClassification"], "arduino_movement_error")
         self.assertEqual(hover["primaryClassification"], "target/hover/menu mismatch")
 
+    def test_step_readiness_allows_ready_deposit_through_bounded_request(self):
+        readiness = task_script_api.assess_task_step_readiness(
+            load_example(),
+            primitive="deposit",
+            runtime_evidence=runtime_snapshot({"inventory": {"freeSlots": 0}, "resourceCount": 28, "bankOpen": True}),
+            action_input_visibility=action_visibility_snapshot(execution_allowed=True, planned_action="deposit_inventory"),
+            failure_classification=clean_failure_classification(),
+            navigation_decision_trace=navigation_trace_snapshot(),
+        )
+        data = readiness["data"]
+
+        self.assertEqual(readiness["schema"], "task_step_readiness.v1")
+        self.assertEqual(readiness["status"], "PASS")
+        self.assertTrue(data["requestAllowedNow"])
+        self.assertEqual(data["primitive"], "deposit")
+        self.assertEqual(data["boundedOperatorRequest"], "request_bounded_live_step")
+        self.assertTrue(data["liveCapablePrimitive"])
+        self.assertFalse(data["rawInputBypassToolsExposed"])
+        self.assertIn("HumanInputController", data["canonicalPipeline"])
+
+    def test_step_readiness_blocks_manual_login_and_failed_action_readiness(self):
+        runtime = runtime_snapshot({"bankOpen": False})
+        runtime["data"]["readinessSummary"]["manualLoginRequired"] = True
+        runtime["data"]["readinessSummary"]["livenessState"] = "login_screen"
+        visibility = action_visibility_snapshot(execution_allowed=False, planned_action="open_service")
+        visibility["data"]["readiness"]["manualLoginRequired"] = True
+        failure = task_script_api.classify_task_failure({"runtimeEvidence": runtime, "actionInputVisibility": visibility})
+
+        readiness = task_script_api.assess_task_step_readiness(
+            load_example(),
+            primitive="bank",
+            runtime_evidence=runtime,
+            action_input_visibility=visibility,
+            failure_classification=failure,
+            navigation_decision_trace=navigation_trace_snapshot(),
+        )
+
+        self.assertEqual(readiness["status"], "WARN")
+        self.assertFalse(readiness["data"]["requestAllowedNow"])
+        self.assertIn("manual_login_required", readiness["blockers"])
+        self.assertIn("action_readiness_not_pass", readiness["blockers"])
+
     def test_knowledge_fabric_direct_methods_expose_script_api(self):
         fabric = make_fabric()
 
@@ -359,6 +449,14 @@ class TaskScriptApiTest(unittest.TestCase):
             primitive="collect",
         )
         classification = fabric.classify_task_failure({"runtimeEvidence": runtime})
+        step_readiness = fabric.assess_task_script_step(
+            load_example(),
+            primitive="deposit",
+            runtime_evidence=runtime_snapshot({"bankOpen": True, "resourceCount": 12}),
+            action_input_visibility=action_visibility_snapshot(),
+            failure_classification=clean_failure_classification(),
+            navigation_decision_trace=navigation_trace_snapshot(),
+        )
         template = fabric.suggest_task_template("woodcutting and bank logs", profile="woodcutting")
         scene_probe = fabric.probe_task_from_scene("woodcutting and bank logs", profile="woodcutting", limit=5)
 
@@ -368,6 +466,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(runtime["schema"], "task_runtime_evidence.v1")
         self.assertEqual(comparison["schema"], "task_runtime_evidence_comparison.v1")
         self.assertEqual(classification["schema"], "task_failure_classification.v1")
+        self.assertEqual(step_readiness["schema"], "task_step_readiness.v1")
         self.assertTrue(runtime["data"]["runtimeVariables"]["inventory"]["observed"])
         self.assertEqual(runtime["data"]["runtimeVariables"]["resourceCount"]["value"], 16)
         self.assertEqual(runtime["data"]["runtimeVariables"]["bankOpen"]["value"], False)
@@ -396,6 +495,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("get_task_script_runtime_evidence", tool_names)
         self.assertIn("compare_task_script_runtime_evidence", tool_names)
         self.assertIn("classify_task_failure", tool_names)
+        self.assertIn("assess_task_script_step", tool_names)
         self.assertIn("suggest_task_template", tool_names)
         self.assertIn("probe_task_from_scene", tool_names)
         self.assertTrue(forbidden_raw_names.isdisjoint(tool_names))
@@ -404,6 +504,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("osrs://script-api/woodcut-bank-evidence-plan", resource_uris)
         self.assertIn("osrs://script-api/runtime-evidence", resource_uris)
         self.assertIn("osrs://script-api/failure-classification", resource_uris)
+        self.assertIn("osrs://script-api/step-readiness", resource_uris)
 
         fabric = make_fabric()
         with patch.object(mcp_server, "_fabric", return_value=fabric):
@@ -424,6 +525,19 @@ class TaskScriptApiTest(unittest.TestCase):
             classification_payload = json.loads(
                 mcp_server.call_tool("classify_task_failure", {"evidence": {"runtimeEvidence": runtime_payload}})["content"][0]["text"]
             )
+            step_readiness_payload = json.loads(
+                mcp_server.call_tool(
+                    "assess_task_script_step",
+                    {
+                        "script": load_example(),
+                        "primitive": "deposit",
+                        "runtimeEvidence": runtime_snapshot({"bankOpen": True, "resourceCount": 12}),
+                        "actionInputVisibility": action_visibility_snapshot(),
+                        "failureClassification": clean_failure_classification(),
+                        "navigationDecisionTrace": navigation_trace_snapshot(),
+                    },
+                )["content"][0]["text"]
+            )
             probe_payload = json.loads(
                 mcp_server.call_tool("probe_task_from_scene", {"taskDescription": "woodcutting and bank logs", "limit": 3})["content"][0]["text"]
             )
@@ -434,6 +548,7 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(runtime_payload["schema"], "task_runtime_evidence.v1")
         self.assertEqual(comparison_payload["schema"], "task_runtime_evidence_comparison.v1")
         self.assertEqual(classification_payload["schema"], "task_failure_classification.v1")
+        self.assertEqual(step_readiness_payload["schema"], "task_step_readiness.v1")
         self.assertEqual(probe_payload["schema"], "task_scene_probe.v1")
 
 

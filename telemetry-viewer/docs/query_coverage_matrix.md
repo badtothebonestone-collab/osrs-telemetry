@@ -47,6 +47,7 @@ MCP resource/tool:
 | What are the current values for script evidence variables? | Knowledge Fabric runtime evidence | `get_task_script_runtime_evidence` / `osrs://script-api/runtime-evidence` | daemon, readiness, client tick, action visibility | `task_runtime_evidence.v1` | high when loaded scene is fresh | manual login or stale liveness |
 | Did before/after evidence prove a step changed state? | Knowledge Fabric task script API | `compare_task_script_runtime_evidence` | two runtime evidence snapshots | `task_runtime_evidence_comparison.v1` | high with fresh before/after snapshots | missing after evidence or live input hard blocker |
 | How should a failed script/live attempt be classified before patching? | Knowledge Fabric task script API | `classify_task_failure` / `osrs://script-api/failure-classification` | current or supplied blocker/runtime/action evidence | `task_failure_classification.v1` | medium-high with fresh evidence | missing evidence bundle |
+| Is the next high-level script step ready to request? | Knowledge Fabric task script API | `assess_task_script_step` / `osrs://script-api/step-readiness` | compiled script plus runtime/readiness/action-input/navigation evidence | `task_step_readiness.v1` | medium-high with fresh evidence | manual login, readiness, input integrity, or suspicious navigation trace |
 | Can the current scene inform a script template? | Knowledge Fabric scene probe | `probe_task_from_scene` | loaded scene, static library, external cache | `task_scene_probe.v1` | medium | stale/missing loaded scene |
 
 ## Rules
@@ -55,6 +56,7 @@ MCP resource/tool:
 - Static route priors remain advisory until the live world model, projection, and hover/menu evidence verify an executable target.
 - MCP is read-only and does not expose click/input execution.
 - High-level task script tools compile into existing action proposal/readiness paths; they do not add raw mouse/key tools.
+- Script step readiness must be assessed before bounded requests; it may name `request_bounded_live_step`, `request_watcher_step`, or `request_liveness_recovery`, but it does not execute them.
 - Script lifecycle success requires before/after live evidence for inventory, resource count, bank-open state, hover/click proof, location, route progress, and phase/intent.
 - Failure classification must use the phase-aware input report: operator-phase injected events are not script failure, while live-action injected/lower-IL or direct-backend-bypass deltas are hard blockers.
 - Route/pathing patches should use `query_navigation_decision_trace` to inspect decision, reason, distance, route step, and suspicious-decision evidence before changing behavior.
