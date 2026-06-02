@@ -75,6 +75,14 @@ Direct Python surface:
 - `KnowledgeFabric.suggest_task_template(task_description, profile=...)`
 - `KnowledgeFabric.probe_task_from_scene(task_description, profile=..., limit=...)`
 
+Named context queries:
+
+- `python telemetry-viewer\context_service.py --query task-script-runtime-evidence`
+- `python telemetry-viewer\context_service.py --query task-failure-classification`
+- `python telemetry-viewer\context_service.py --query task-script-step-readiness`
+- `python telemetry-viewer\context_service.py --query task-script-run-readiness`
+- `python telemetry-viewer\context_service.py --query run-readiness`
+
 ## Runtime Evidence
 
 Scripts compile with a `runtimeEvidencePlan` that names the live variables each primitive must prove. The current required woodcut-bank lifecycle variables are:

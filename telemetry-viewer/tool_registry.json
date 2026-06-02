@@ -476,12 +476,12 @@
     {
       "name": "context_service.py",
       "category": "daily",
-      "purpose": "Read-only context API and direct query adapter over daemon/session/Knowledge Fabric evidence, including current debug context, blockers, and navigation decision trace summaries.",
+      "purpose": "Read-only context API and direct query adapter over daemon/session/Knowledge Fabric evidence, including current debug context, blockers, navigation decision trace summaries, and task-script readiness snapshots.",
       "dailyRequired": false,
       "normalCommand": "python telemetry-viewer\\context_service.py --query current-debug-context",
-      "alternateCommand": "python telemetry-viewer\\context_service.py --query navigation-decision-trace",
+      "alternateCommand": "python telemetry-viewer\\context_service.py --query task-script-run-readiness",
       "input": "live_core_daemon/status, optional session debug evidence, Knowledge Fabric indexes",
-      "output": "context_response.v1 and Knowledge Fabric query payloads",
+      "output": "context_response.v1 and Knowledge Fabric query payloads including task_runtime_evidence.v1, task_failure_classification.v1, task_step_readiness.v1, and task_run_readiness.v1",
       "status": "daily",
       "safeToHideInUi": true
     },

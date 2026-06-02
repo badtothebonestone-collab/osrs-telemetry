@@ -811,6 +811,11 @@ class ContextServiceTest(unittest.TestCase):
                 ("query-coverage-matrix", "knowledgeQueryCoverageMatrix"),
                 ("navigation-decision-trace", "knowledgeNavigationDecisionTrace"),
                 ("coverage-report", "knowledgeCoverageReport"),
+                ("task-script-runtime-evidence", "knowledgeTaskScriptRuntimeEvidence"),
+                ("task-failure-classification", "knowledgeTaskFailureClassification"),
+                ("task-script-step-readiness", "knowledgeTaskStepReadiness"),
+                ("task-script-run-readiness", "knowledgeTaskRunReadiness"),
+                ("run-readiness", "knowledgeTaskRunReadiness"),
                 ("external-knowledge-status", "externalKnowledgeStatus"),
                 ("handoff-summary", "knowledgeHandoffSummary"),
             ):
@@ -833,6 +838,44 @@ class ContextServiceTest(unittest.TestCase):
                 self.assertIn(result.returncode, {0, 1})
                 self.assertEqual(payload["schema"], "context_response.v1")
                 self.assertIn(expected_key, payload)
+
+    def test_live_daemon_task_script_named_queries_use_live_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live_session = Path(tmp) / "live-session"
+            for query_name, needs, expected_key, expected_schema in (
+                (
+                    "task-script-runtime-evidence",
+                    ["knowledge_task_script_runtime_evidence"],
+                    "knowledgeTaskScriptRuntimeEvidence",
+                    "task_runtime_evidence.v1",
+                ),
+                (
+                    "task-failure-classification",
+                    ["knowledge_task_failure_classification"],
+                    "knowledgeTaskFailureClassification",
+                    "task_failure_classification.v1",
+                ),
+                (
+                    "task-script-step-readiness",
+                    ["knowledge_task_step_readiness"],
+                    "knowledgeTaskStepReadiness",
+                    "task_step_readiness.v1",
+                ),
+                (
+                    "task-script-run-readiness",
+                    ["knowledge_task_run_readiness"],
+                    "knowledgeTaskRunReadiness",
+                    "task_run_readiness.v1",
+                ),
+            ):
+                args = self.live_query_args(query=query_name)
+                with mock.patch.object(service.knowledge_fabric, "fabric_from_live", return_value=self.live_fabric(live_session)):
+                    payload = service.build_named_query_response(args, query_name, needs)
+
+                self.assertEqual(payload["contextSource"], "live_daemon")
+                self.assertFalse(payload["fileSessionFallbackUsed"])
+                self.assertIn(expected_key, payload)
+                self.assertEqual(payload[expected_key]["schema"], expected_schema)
 
     def test_handoff_summary_cli_outputs_chatgpt_paste_block(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -93,6 +93,10 @@ SUPPORTED_NEEDS = [
     "knowledge_query_coverage_matrix",
     "knowledge_coverage_report",
     "knowledge_task_probe",
+    "knowledge_task_script_runtime_evidence",
+    "knowledge_task_failure_classification",
+    "knowledge_task_step_readiness",
+    "knowledge_task_run_readiness",
     "external_knowledge_status",
     "knowledge_handoff_summary",
     "best:<classId>",
@@ -110,6 +114,12 @@ NAMED_QUERY_NEEDS = {
     "query-coverage-matrix": ["knowledge_query_coverage_matrix"],
     "navigation-decision-trace": ["knowledge_navigation_decision_trace"],
     "coverage-report": ["knowledge_coverage_report"],
+    "task-script-runtime-evidence": ["knowledge_task_script_runtime_evidence"],
+    "task-failure-classification": ["knowledge_task_failure_classification"],
+    "task-script-step-readiness": ["knowledge_task_step_readiness"],
+    "step-readiness": ["knowledge_task_step_readiness"],
+    "task-script-run-readiness": ["knowledge_task_run_readiness"],
+    "run-readiness": ["knowledge_task_run_readiness"],
     "external-knowledge-status": ["external_knowledge_status"],
     "handoff-summary": ["knowledge_handoff_summary"],
 }
@@ -1141,6 +1151,10 @@ def build_context_response(
         "knowledge_query_coverage_matrix",
         "knowledge_coverage_report",
         "knowledge_task_probe",
+        "knowledge_task_script_runtime_evidence",
+        "knowledge_task_failure_classification",
+        "knowledge_task_step_readiness",
+        "knowledge_task_run_readiness",
         "external_knowledge_status",
         "knowledge_handoff_summary",
     }
@@ -1185,6 +1199,14 @@ def build_context_response(
             response["knowledgeCoverageReport"] = fabric.coverage_report(intent=str(scoped_context.get("currentIntent") or ""), limit=max_candidates)
         if "knowledge_task_probe" in needs:
             response["knowledgeTaskProbe"] = fabric.probe_task(str(request.get("taskDescription") or request.get("task") or "woodcutting"), limit=max_candidates)
+        if "knowledge_task_script_runtime_evidence" in needs:
+            response["knowledgeTaskScriptRuntimeEvidence"] = fabric.query_task_script_runtime_evidence()
+        if "knowledge_task_failure_classification" in needs:
+            response["knowledgeTaskFailureClassification"] = fabric.classify_task_failure()
+        if "knowledge_task_step_readiness" in needs:
+            response["knowledgeTaskStepReadiness"] = fabric.assess_task_script_step()
+        if "knowledge_task_run_readiness" in needs:
+            response["knowledgeTaskRunReadiness"] = fabric.assess_task_script_run()
         if "external_knowledge_status" in needs:
             response["externalKnowledgeStatus"] = external_knowledge.knowledge_status()
         if "knowledge_handoff_summary" in needs:
@@ -1986,6 +2008,22 @@ def build_live_named_query_response(args, query_name: str, needs: list[str]) -> 
         payload = fabric.coverage_report(limit=max_candidates)
         response["knowledgeCoverageReport"] = payload
         payloads.append(payload)
+    if "knowledge_task_script_runtime_evidence" in needs:
+        payload = fabric.query_task_script_runtime_evidence()
+        response["knowledgeTaskScriptRuntimeEvidence"] = payload
+        payloads.append(payload)
+    if "knowledge_task_failure_classification" in needs:
+        payload = fabric.classify_task_failure()
+        response["knowledgeTaskFailureClassification"] = payload
+        payloads.append(payload)
+    if "knowledge_task_step_readiness" in needs:
+        payload = fabric.assess_task_script_step()
+        response["knowledgeTaskStepReadiness"] = payload
+        payloads.append(payload)
+    if "knowledge_task_run_readiness" in needs:
+        payload = fabric.assess_task_script_run()
+        response["knowledgeTaskRunReadiness"] = payload
+        payloads.append(payload)
     if "external_knowledge_status" in needs:
         payload = external_knowledge.knowledge_status()
         response["externalKnowledgeStatus"] = payload
@@ -2305,7 +2343,7 @@ def parse_args():
     parser.add_argument("--auth-token", help="Require X-Context-Token header for requests.")
     parser.add_argument("--no-auth-token", action="store_true", help="Explicitly run without an auth token.")
     parser.add_argument("--oneshot-request", help="Process one context_request.v1 JSON string and exit.")
-    parser.add_argument("--query", help="Run a named compact query such as current-debug-context, current-blocker, navigation-decision-trace, or knowledge-fabric-status and exit.")
+    parser.add_argument("--query", help="Run a named compact query such as current-debug-context, current-blocker, navigation-decision-trace, task-script-run-readiness, or knowledge-fabric-status and exit.")
     parser.add_argument("--capture-script-authoring-context", action="store_true", help="Capture script_authoring_context.v1 bundle and exit.")
     parser.add_argument("--capture-replay-scenario", action="store_true", help="Capture replay_scenario.v1 bundle and exit.")
     parser.add_argument("--replay-scenario", help="Replay a replay_scenario.v1 file offline and exit.")
