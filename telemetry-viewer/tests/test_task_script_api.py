@@ -369,6 +369,51 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("inventory", data["expectedVariablesChanged"])
         self.assertIn("phaseIntent", data["expectedVariablesChanged"])
         self.assertEqual(data["inputIntegrityHardBlockers"], [])
+        self.assertIn("resourceCount", data["expectedVariablesChangedAndProofEligible"])
+
+    def test_runtime_evidence_comparison_warns_when_changed_variables_are_advisory_only(self):
+        before = runtime_snapshot(
+            {
+                "inventory": {"freeSlots": 0, "resourceItems": ["Logs"] * 16},
+                "resourceCount": 16,
+                "bankOpen": True,
+                "phaseIntent": {"phase": "banking", "bankingComplete": False},
+            }
+        )
+        after = runtime_snapshot(
+            {
+                "inventory": {"freeSlots": 28, "resourceItems": []},
+                "resourceCount": 0,
+                "bankOpen": True,
+                "phaseIntent": {"phase": "banking", "bankingComplete": True},
+            }
+        )
+        after["data"]["liveValidationPossibleNow"] = False
+        after["data"]["runtimeEvidenceIntegrity"] = {
+            "schema": "task_runtime_evidence_integrity.v1",
+            "status": "WARN",
+            "liveValidationPossibleNow": False,
+            "proofBlockers": ["loaded_scene_not_verified"],
+            "variableIntegrity": {
+                "inventory": {"proofEligibleNow": False, "advisoryOnly": True},
+                "resourceCount": {"proofEligibleNow": False, "advisoryOnly": True},
+                "phaseIntent": {"proofEligibleNow": False, "advisoryOnly": True},
+            },
+        }
+
+        comparison = task_script_api.compare_task_runtime_evidence_snapshots(
+            before,
+            after,
+            script=load_example(),
+            primitive="deposit",
+        )
+        data = comparison["data"]
+
+        self.assertEqual(comparison["status"], "WARN")
+        self.assertIn("resourceCount", data["expectedVariablesChanged"])
+        self.assertIn("resourceCount", data["expectedVariablesProofBlockedAfter"])
+        self.assertNotIn("resourceCount", data["expectedVariablesChangedAndProofEligible"])
+        self.assertIn("expected_variable_not_proof_eligible_after:resourceCount", comparison["warnings"])
 
     def test_runtime_evidence_comparison_blocks_live_input_integrity_delta(self):
         before = runtime_snapshot({"resourceCount": 16})
@@ -651,6 +696,11 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(runtime["data"]["runtimeVariables"]["resourceCount"]["value"], 16)
         self.assertEqual(runtime["data"]["runtimeVariables"]["bankOpen"]["value"], False)
         self.assertTrue(runtime["data"]["runtimeVariables"]["menuOptionClicked"]["observed"])
+        integrity = runtime["data"]["runtimeEvidenceIntegrity"]
+        self.assertEqual(integrity["schema"], "task_runtime_evidence_integrity.v1")
+        self.assertIn("menuOptionClicked", runtime["data"]["advisoryVariablesNow"])
+        self.assertFalse(integrity["variableIntegrity"]["menuOptionClicked"]["proofEligibleNow"])
+        self.assertIn("inputIntegrity", runtime["data"]["proofEligibleVariablesNow"])
         input_integrity = runtime["data"]["runtimeVariables"]["inputIntegrity"]["value"]
         self.assertEqual(input_integrity["phaseCounts"]["operator_phase"]["operatorInjectedEvents"], 3)
         self.assertFalse(input_integrity["phaseCounts"]["operator_phase"]["blocking"])

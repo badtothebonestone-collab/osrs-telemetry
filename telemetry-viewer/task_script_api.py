@@ -853,15 +853,25 @@ def compare_task_runtime_evidence_snapshots(
     after_data = _runtime_data(after)
     readiness_summary = _dict(after_data.get("readinessSummary"))
     manual_login = readiness_summary.get("manualLoginRequired") is True
+    runtime_integrity = _dict(after_data.get("runtimeEvidenceIntegrity"))
+    variable_integrity = _dict(runtime_integrity.get("variableIntegrity"))
+    proof_blocked_after = [
+        name
+        for name in expected_variables
+        if _dict(after_variables.get(name)).get("observed") is True
+        and _dict(variable_integrity.get(name)).get("proofEligibleNow") is False
+    ]
     hard_blockers = _input_integrity_hard_blockers(after_variables)
     warnings = []
     if manual_login:
         warnings.append("manual_login_required")
     warnings.extend(f"expected_variable_missing_after:{name}" for name in missing_after)
+    warnings.extend(f"expected_variable_not_proof_eligible_after:{name}" for name in proof_blocked_after)
     if primitive_name and expected_variables and not expected_changed:
         warnings.append("no_expected_variable_changed")
     if not primitive_name and not changed_variables:
         warnings.append("no_runtime_variable_changed")
+    expected_changed_proof_eligible = [name for name in expected_changed if name not in proof_blocked_after]
     blockers = list(hard_blockers)
     status = "FAIL" if blockers else "WARN" if warnings else "PASS"
     return {
@@ -875,8 +885,11 @@ def compare_task_runtime_evidence_snapshots(
             "unchangedVariables": [name for name in variable_names if name not in changed_variables],
             "expectedVariables": expected_variables,
             "expectedVariablesChanged": expected_changed,
+            "expectedVariablesChangedAndProofEligible": expected_changed_proof_eligible,
             "expectedVariablesUnchanged": unexpected_unchanged,
             "missingExpectedVariablesAfter": missing_after,
+            "expectedVariablesProofBlockedAfter": proof_blocked_after,
+            "runtimeEvidenceIntegrityAfter": runtime_integrity or None,
             "inputIntegrityHardBlockers": hard_blockers,
             "manualLoginRequired": manual_login,
             "liveValidationPossibleAfter": after_data.get("liveValidationPossibleNow"),

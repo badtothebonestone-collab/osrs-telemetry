@@ -2307,8 +2307,8 @@ class KnowledgeFabric:
             ("Is this high-level task script valid?", "validate_task_script", "validate_task_script", "task script JSON", task_script_api.TASK_SCRIPT_VALIDATION_SCHEMA, "high", "raw input fields or unbounded loops", "test_task_script_api.py"),
             ("What existing engine actions will this script use?", "compile_task_script/explain_script_plan", "compile_task_script/explain_script_plan", "task script JSON + task policy", task_script_api.TASK_SCRIPT_PLAN_SCHEMA, "high", "unknown primitive or missing evidence", "test_task_script_api.py"),
             ("Which live variables must prove this script changed state?", "task_script_evidence_plan", "get_task_script_evidence_plan", "task script JSON", task_script_api.TASK_SCRIPT_EVIDENCE_PLAN_SCHEMA, "high", "script does not cover required lifecycle variables", "test_task_script_api.py"),
-            ("What are the current live values for script evidence variables?", "query_task_script_runtime_evidence", "get_task_script_runtime_evidence", "daemon/readiness/client_tick/action visibility", task_script_api.TASK_RUNTIME_EVIDENCE_SCHEMA, "high if loaded scene fresh", "manual login or stale liveness", "test_task_script_api.py"),
-            ("Did before/after runtime evidence prove a script step changed state?", "compare_task_script_runtime_evidence", "compare_task_script_runtime_evidence", "two task_runtime_evidence snapshots", task_script_api.TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA, "high with fresh before/after snapshots", "missing after evidence or input-integrity hard blocker", "test_task_script_api.py"),
+            ("What are the current live values for script evidence variables?", "query_task_script_runtime_evidence", "get_task_script_runtime_evidence", "daemon/readiness/client_tick/action visibility/proof eligibility", task_script_api.TASK_RUNTIME_EVIDENCE_SCHEMA, "high if loaded scene fresh", "manual login, stale liveness, or advisory-only variables", "test_task_script_api.py"),
+            ("Did before/after runtime evidence prove a script step changed state?", "compare_task_script_runtime_evidence", "compare_task_script_runtime_evidence", "two task_runtime_evidence snapshots plus proof eligibility", task_script_api.TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA, "high with fresh before/after snapshots", "missing after evidence, advisory-only changes, or input-integrity hard blocker", "test_task_script_api.py"),
             ("How should a failed script/live attempt be classified before patching?", "classify_task_failure", "classify_task_failure/osrs://script-api/failure-classification", "current or supplied blocker/runtime/action evidence", task_script_api.TASK_FAILURE_CLASSIFICATION_SCHEMA, "medium-high with fresh evidence", "needs current evidence bundle", "test_task_script_api.py"),
             ("Is the next high-level script step ready to request?", "assess_task_script_step", "assess_task_script_step/osrs://script-api/step-readiness", "compiled task script + runtime/readiness/action-input/navigation evidence, route context, and path-frontier diagnosis", task_script_api.TASK_STEP_READINESS_SCHEMA, "medium-high with fresh evidence", "manual login, action readiness, input integrity, missing trace, or suspicious navigation trace", "test_task_script_api.py"),
             ("What high-level script primitive should be considered next?", "assess_task_script_run", "assess_task_script_run/osrs://script-api/run-readiness", "compiled task script + runtime/readiness/action-input/navigation evidence, route context, and path-frontier diagnosis", task_script_api.TASK_RUN_READINESS_SCHEMA, "medium-high with fresh evidence", "manual login, stale liveness, readiness, input integrity, missing trace, or suspicious navigation trace", "test_task_script_api.py"),
@@ -4379,6 +4379,73 @@ class KnowledgeFabric:
         }
         return variables
 
+    def _task_runtime_evidence_integrity(
+        self,
+        variables: dict[str, Any],
+        *,
+        readiness: dict[str, Any],
+        live_validation_possible: bool,
+    ) -> dict[str, Any]:
+        loaded_scene = _dict(readiness.get("loadedSceneProof"))
+        manual_login = readiness.get("manualLoginRequired") is True
+        loaded_scene_verified = loaded_scene.get("loadedSceneVerified") is True
+        action_readiness = _dict(readiness.get("actionReadiness"))
+        proof_blockers: list[str] = []
+        if manual_login:
+            proof_blockers.append("manual_login_required")
+        if not loaded_scene_verified:
+            proof_blockers.append("loaded_scene_not_verified")
+        if action_readiness.get("executionAllowed") is False:
+            proof_blockers.append("action_readiness_blocked")
+        lifecycle_variables = {
+            "inventory",
+            "resourceCount",
+            "bankOpen",
+            "menuOptionClicked",
+            "hoverTarget",
+            "location",
+            "routeProgress",
+            "phaseIntent",
+        }
+        variable_integrity: dict[str, Any] = {}
+        advisory_variables: list[str] = []
+        proof_eligible_variables: list[str] = []
+        for name, wrapper in variables.items():
+            observed = _dict(wrapper).get("observed") is True
+            advisory_only = bool(name in lifecycle_variables and proof_blockers)
+            proof_eligible = bool(observed and not advisory_only)
+            if advisory_only:
+                advisory_variables.append(name)
+            if proof_eligible:
+                proof_eligible_variables.append(name)
+            variable_integrity[name] = {
+                "observed": observed,
+                "advisoryOnly": advisory_only,
+                "proofEligibleNow": proof_eligible,
+                "proofBlockers": list(proof_blockers) if advisory_only else [],
+                "source": _dict(wrapper).get("source"),
+                "rule": (
+                    "Value is context-only until loaded scene and action readiness are fresh."
+                    if advisory_only
+                    else "Value may participate in proof if compared against a fresh before/after snapshot."
+                ),
+            }
+        status = "WARN" if proof_blockers or advisory_variables else "PASS"
+        return {
+            "schema": "task_runtime_evidence_integrity.v1",
+            "status": status,
+            "loadedSceneVerified": loaded_scene_verified,
+            "manualLoginRequired": manual_login,
+            "livenessState": readiness.get("livenessState"),
+            "liveValidationPossibleNow": live_validation_possible,
+            "proofBlockers": list(dict.fromkeys(proof_blockers)),
+            "advisoryVariables": advisory_variables,
+            "proofEligibleVariables": proof_eligible_variables,
+            "variableIntegrity": variable_integrity,
+            "rule": "Runtime values remain visible, but lifecycle variables cannot prove live progress while liveness/readiness is blocked.",
+            "noLiveInput": True,
+        }
+
     def query_task_script_runtime_evidence(self, script: dict[str, Any] | str | Path | None = None) -> dict[str, Any]:
         started = time.perf_counter()
         script_payload = script if script is not None else task_script_api.woodcut_bank_template()
@@ -4393,11 +4460,20 @@ class KnowledgeFabric:
         action_readiness = _dict(readiness.get("actionReadiness"))
         blockers = _list(action_readiness.get("blockers"))
         manual_login = bool(readiness.get("manualLoginRequired") is True)
+        live_validation_possible = bool(action_readiness.get("executionAllowed") is True and not manual_login)
+        evidence_integrity = self._task_runtime_evidence_integrity(
+            variables,
+            readiness=readiness,
+            live_validation_possible=live_validation_possible,
+        )
         data = {
             "scriptEvidencePlan": _dict(evidence_plan.get("data")),
             "runtimeVariables": variables,
             "coveredVariablesObservedNow": observed,
             "coveredVariablesMissingNow": missing_observations,
+            "runtimeEvidenceIntegrity": evidence_integrity,
+            "proofEligibleVariablesNow": evidence_integrity.get("proofEligibleVariables"),
+            "advisoryVariablesNow": evidence_integrity.get("advisoryVariables"),
             "readinessSummary": {
                 "status": readiness.get("status"),
                 "ready": readiness.get("ready"),
@@ -4420,12 +4496,14 @@ class KnowledgeFabric:
                 "blockedReason": visibility_data.get("blockedReason"),
             },
             "snapshotProtocol": _dict(_dict(evidence_plan.get("data")).get("snapshotProtocol")),
-            "liveValidationPossibleNow": bool(action_readiness.get("executionAllowed") is True and not manual_login),
+            "liveValidationPossibleNow": live_validation_possible,
             "noLiveInput": True,
         }
         warnings = []
         if manual_login:
             warnings.append("manual_login_required")
+        if evidence_integrity.get("status") == "WARN":
+            warnings.append("runtime_evidence_advisory_until_loaded_scene_verified")
         warnings.extend(f"missing_runtime_variable:{name}" for name in missing_observations)
         return _query_response(
             task_script_api.TASK_RUNTIME_EVIDENCE_SCHEMA,
