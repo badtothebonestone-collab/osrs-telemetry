@@ -536,6 +536,47 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("manual_login_required", readiness["blockers"])
         self.assertIn("action_readiness_not_pass", readiness["blockers"])
 
+    def test_step_readiness_blocks_when_expected_variables_are_advisory_only(self):
+        runtime = runtime_snapshot(
+            {
+                "inventory": {"freeSlots": 0},
+                "resourceCount": 12,
+                "bankOpen": True,
+                "menuOptionClicked": {"option": "Bank", "target": "Bank booth"},
+                "phaseIntent": {"phase": "banking"},
+            }
+        )
+        runtime["data"]["runtimeEvidenceIntegrity"] = {
+            "schema": "task_runtime_evidence_integrity.v1",
+            "status": "WARN",
+            "proofBlockers": ["loaded_scene_not_verified"],
+            "variableIntegrity": {
+                "bankOpen": {"proofEligibleNow": False, "advisoryOnly": True},
+                "menuOptionClicked": {"proofEligibleNow": False, "advisoryOnly": True},
+                "inventory": {"proofEligibleNow": False, "advisoryOnly": True},
+                "resourceCount": {"proofEligibleNow": False, "advisoryOnly": True},
+                "phaseIntent": {"proofEligibleNow": False, "advisoryOnly": True},
+            },
+        }
+
+        readiness = task_script_api.assess_task_step_readiness(
+            load_example(),
+            primitive="deposit",
+            runtime_evidence=runtime,
+            action_input_visibility=action_visibility_snapshot(execution_allowed=True, planned_action="deposit_inventory"),
+            failure_classification=clean_failure_classification(),
+            navigation_decision_trace=navigation_trace_snapshot(),
+        )
+        data = readiness["data"]
+
+        self.assertEqual(readiness["status"], "WARN")
+        self.assertFalse(data["requestAllowedNow"])
+        self.assertIn("expected_runtime_variable_not_proof_eligible", readiness["blockers"])
+        self.assertIn("resourceCount", data["proofBlockedExpectedRuntimeVariablesNow"])
+        self.assertIn("resourceCount", data["advisoryExpectedRuntimeVariablesNow"])
+        self.assertFalse(data["expectedRuntimeVariableProof"]["variableIntegrity"]["resourceCount"]["proofEligibleNow"])
+        self.assertIn("expected_runtime_variable_not_proof_eligible:resourceCount", readiness["warnings"])
+
     def test_run_readiness_infers_deposit_and_delegates_step_gate(self):
         readiness = task_script_api.assess_task_run_readiness(
             load_example(),

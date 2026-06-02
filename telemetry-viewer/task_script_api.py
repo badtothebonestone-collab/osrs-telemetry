@@ -1393,6 +1393,49 @@ def _step_expected_variables(step: dict[str, Any]) -> list[str]:
     return [str(item) for item in _list(runtime.get("variables")) if str(item or "").strip()]
 
 
+def _expected_runtime_variable_proof(
+    runtime_data: dict[str, Any],
+    expected_variables: list[str],
+) -> dict[str, Any]:
+    integrity = _dict(runtime_data.get("runtimeEvidenceIntegrity"))
+    variable_integrity = _dict(integrity.get("variableIntegrity"))
+    proof_eligible: list[str] = []
+    advisory: list[str] = []
+    proof_blocked: list[str] = []
+    unknown: list[str] = []
+    selected_integrity: dict[str, Any] = {}
+    for name in expected_variables:
+        item = _dict(variable_integrity.get(name))
+        if item:
+            selected_integrity[name] = item
+        proof_value = item.get("proofEligibleNow")
+        advisory_value = item.get("advisoryOnly") is True
+        if proof_value is True:
+            proof_eligible.append(name)
+        elif proof_value is False:
+            proof_blocked.append(name)
+            if advisory_value:
+                advisory.append(name)
+        else:
+            unknown.append(name)
+    status = "WARN" if proof_blocked else "UNKNOWN" if expected_variables and not variable_integrity else "PASS"
+    return {
+        "schema": "expected_runtime_variable_proof.v1",
+        "status": status,
+        "runtimeEvidenceIntegritySchema": integrity.get("schema"),
+        "runtimeEvidenceIntegrityStatus": integrity.get("status"),
+        "expectedRuntimeVariables": expected_variables,
+        "proofEligibleExpectedRuntimeVariables": proof_eligible,
+        "advisoryExpectedRuntimeVariables": advisory,
+        "proofBlockedExpectedRuntimeVariables": proof_blocked,
+        "unknownProofExpectedRuntimeVariables": unknown,
+        "proofBlockers": integrity.get("proofBlockers"),
+        "variableIntegrity": selected_integrity,
+        "rule": "A bounded request should not be made when expected proof variables are explicitly advisory-only.",
+        "noLiveInput": True,
+    }
+
+
 def _runtime_variable_value(runtime_variables: dict[str, Any], name: str) -> Any:
     return _variable_value(runtime_variables.get(name))
 
@@ -1656,6 +1699,12 @@ def assess_task_step_readiness(
     live_input_hard_blocker = bool(input_assessment.get("liveActionHardBlocker") is True or failure.get("status") == "FAIL")
     direct_bypass = input_assessment.get("directBackendBypassCount")
     expected_variables = _step_expected_variables(selected_step)
+    expected_variable_proof = _expected_runtime_variable_proof(runtime_data, expected_variables)
+    proof_blocked_expected = [
+        str(item)
+        for item in _list(expected_variable_proof.get("proofBlockedExpectedRuntimeVariables"))
+        if str(item or "").strip()
+    ]
     missing_now = [str(item) for item in _list(runtime_data.get("coveredVariablesMissingNow"))]
     missing_expected = [name for name in expected_variables if name in missing_now]
     nav_suspicious = _dict(nav_data.get("firstSuspiciousDecision"))
@@ -1669,6 +1718,8 @@ def assess_task_step_readiness(
         blockers.append("directBackendBypassCount_nonzero")
     if live_capable and not execution_allowed:
         blockers.append("action_readiness_not_pass")
+    if proof_blocked_expected:
+        blockers.append("expected_runtime_variable_not_proof_eligible")
     if primitive_name == "recover_loaded_scene" and manual_login:
         blockers.append("manual_login_blocks_liveness_recovery")
     if primitive_name == "recover_loaded_scene" and loaded_scene is True:
@@ -1676,6 +1727,7 @@ def assess_task_step_readiness(
     if primitive_name in {"walk_to", "return_to_resource"} and nav_suspicious:
         blockers.append("suspicious_navigation_decision_trace")
     warnings.extend(f"missing_runtime_variable:{name}" for name in missing_expected)
+    warnings.extend(f"expected_runtime_variable_not_proof_eligible:{name}" for name in proof_blocked_expected)
     warnings.extend(str(item) for item in readiness_warnings)
     request_allowed = bool(not blockers)
     if live_capable:
@@ -1705,6 +1757,11 @@ def assess_task_step_readiness(
             "watcherOrRecoveryPrimitive": watcher_or_recovery,
             "expectedRuntimeVariables": expected_variables,
             "missingExpectedRuntimeVariablesNow": missing_expected,
+            "runtimeEvidenceIntegrity": runtime_data.get("runtimeEvidenceIntegrity"),
+            "expectedRuntimeVariableProof": expected_variable_proof,
+            "proofEligibleExpectedRuntimeVariablesNow": expected_variable_proof.get("proofEligibleExpectedRuntimeVariables"),
+            "advisoryExpectedRuntimeVariablesNow": expected_variable_proof.get("advisoryExpectedRuntimeVariables"),
+            "proofBlockedExpectedRuntimeVariablesNow": proof_blocked_expected,
             "readinessRule": readiness_rule,
             "actionReadiness": readiness,
             "actionReadinessStatus": readiness_status,
