@@ -1658,6 +1658,10 @@ def _goal_directed_south_approach_passed_by_castle_band(player_tile: dict[str, A
     return 3216 <= world_x <= 3221 and 3224 <= world_y <= 3234
 
 
+def _goal_directed_castle_progress_band(player_tile: dict[str, Any] | None) -> bool:
+    return _goal_directed_south_approach_passed_by_castle_band(player_tile) or _goal_directed_post_approach_unlocked(player_tile)
+
+
 def _goal_directed_lateral_distance_sq(
     *,
     player_tile: dict[str, Any] | None,
@@ -1822,6 +1826,8 @@ def _should_use_goal_directed_fallback(
         return False
     if completed_steps:
         return False
+    if route_source_status == "nearby_known_source" and _goal_directed_castle_progress_band(player_tile):
+        return True
     if route_source_status in {"known_source", "nearby_known_source"}:
         return False
     return bool(_approach_step_candidates(route, player_plane))

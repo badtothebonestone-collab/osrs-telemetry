@@ -391,6 +391,28 @@ class ServiceRouteCoreTest(unittest.TestCase):
                 self.assertEqual(context["currentNavigationTarget"]["worldX"], 3205)
                 self.assertEqual(context["currentNavigationTarget"]["worldY"], 3232)
 
+    def test_castle_progress_band_does_not_reset_to_west_approach(self):
+        expected_nodes = {
+            (3214, 3232): ("lumbridge_castle_entrance_or_courtyard", 3205, 3232),
+            (3208, 3230): ("lumbridge_first_stairs_search_area", 3205, 3229),
+        }
+        for (world_x, world_y), (expected_node, expected_x, expected_y) in expected_nodes.items():
+            with self.subTest(world_x=world_x, world_y=world_y):
+                context = service_route_core.build_service_route_context(
+                    profile="woodcut_bank",
+                    service_type="bank",
+                    player_context=player(world_x=world_x, world_y=world_y, plane=0),
+                    service_context={"serviceNeeded": True, "serviceTypeNeeded": "bank", "candidateCount": 0},
+                    target_context={"serviceCandidateInputs": [], "loadedServiceScene": [], "broadCandidates": []},
+                    source_tick=84,
+                )
+
+                self.assertEqual(context["routeMode"], "goal_directed_fallback")
+                self.assertEqual(context["selectedApproachNode"]["nodeId"], expected_node)
+                self.assertEqual(context["currentNodeId"], expected_node)
+                self.assertEqual(context["currentNavigationTarget"]["worldX"], expected_x)
+                self.assertEqual(context["currentNavigationTarget"]["worldY"], expected_y)
+
     def test_goal_directed_castle_entry_opens_near_route_door_obstacle(self):
         context = service_route_core.build_service_route_context(
             profile="woodcut_bank",
