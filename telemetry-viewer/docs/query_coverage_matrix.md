@@ -59,6 +59,7 @@ MCP resource/tool:
 - High-level task script tools compile into existing action proposal/readiness paths; they do not add raw mouse/key tools.
 - Script step readiness must be assessed before bounded requests; it may name `request_bounded_live_step`, `request_watcher_step`, or `request_liveness_recovery`, but it does not execute them.
 - Script run readiness may infer the next primitive from lifecycle evidence, but it still delegates actual permission to the step-readiness gate.
+- Script run readiness reports lifecycle evidence integrity; route, phase, planned-action, and inventory context are advisory-only while loaded scene proof is missing or unverified, or manual login is required.
 - Script lifecycle success requires before/after live evidence for inventory, resource count, bank-open state, hover/click proof, location, route progress, and phase/intent.
 - Failure classification must use the phase-aware input report: operator-phase injected events are not script failure, while live-action injected/lower-IL or direct-backend-bypass deltas are hard blockers.
 - Route/pathing patches should use `query_navigation_decision_trace` to inspect decision, reason, distance, route step, and suspicious-decision evidence before changing behavior.

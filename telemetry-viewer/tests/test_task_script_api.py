@@ -455,7 +455,12 @@ class TaskScriptApiTest(unittest.TestCase):
         readiness = task_script_api.assess_task_run_readiness(
             load_example(),
             runtime_evidence=runtime_snapshot(
-                {"inventory": {"freeSlots": 0}, "resourceCount": 12, "bankOpen": True}
+                {
+                    "inventory": {"freeSlots": 0},
+                    "resourceCount": 12,
+                    "bankOpen": True,
+                    "loadedScene": {"loadedSceneVerified": True},
+                }
             ),
             action_input_visibility=action_visibility_snapshot(
                 execution_allowed=True,
@@ -480,9 +485,44 @@ class TaskScriptApiTest(unittest.TestCase):
             data["actionInputVisibilityEvidence"]["arduinoCalibrationStatus"]["source"],
             "test",
         )
+        self.assertEqual(data["currentLifecycle"]["evidenceIntegrity"]["status"], "PASS")
+        self.assertTrue(data["currentLifecycle"]["evidenceIntegrity"]["liveTruthUsableForGameplay"])
+
+    def test_run_readiness_treats_missing_loaded_scene_proof_as_recovery_only(self):
+        visibility = action_visibility_snapshot(execution_allowed=True, planned_action="deposit_inventory")
+        visibility["data"]["readiness"].pop("loadedSceneProof")
+
+        readiness = task_script_api.assess_task_run_readiness(
+            load_example(),
+            runtime_evidence=runtime_snapshot(
+                {"inventory": {"freeSlots": 0}, "resourceCount": 12, "bankOpen": True}
+            ),
+            action_input_visibility=visibility,
+            failure_classification=clean_failure_classification(),
+            navigation_decision_trace=navigation_trace_snapshot(),
+        )
+        data = readiness["data"]
+        integrity = data["currentLifecycle"]["evidenceIntegrity"]
+
+        self.assertEqual(readiness["status"], "WARN")
+        self.assertEqual(data["inferredNextPrimitive"]["primitive"], "recover_loaded_scene")
+        self.assertEqual(data["boundedOperatorRequest"], "request_liveness_recovery")
+        self.assertTrue(data["requestAllowedNow"])
+        self.assertFalse(data["nextStepReadiness"]["data"]["liveCapablePrimitive"])
+        self.assertFalse(integrity["liveTruthUsableForGameplay"])
+        self.assertTrue(integrity["advisoryOnlyUntilLoadedSceneVerified"])
+        self.assertIn("inventory", integrity["advisoryLifecycleFields"])
+        self.assertIn("loaded_scene_proof_missing_or_unverified", readiness["warnings"])
 
     def test_run_readiness_recommends_recover_loaded_scene_but_blocks_manual_login(self):
-        runtime = runtime_snapshot({"bankOpen": False, "loadedScene": {"loadedSceneVerified": False}})
+        runtime = runtime_snapshot(
+            {
+                "bankOpen": False,
+                "loadedScene": {"loadedSceneVerified": False},
+                "routeProgress": {"routeId": "test_route", "currentStepIndex": 4},
+                "phaseIntent": {"phase": "inventory_full", "activeIntent": "needs_service"},
+            }
+        )
         runtime["data"]["readinessSummary"]["manualLoginRequired"] = True
         runtime["data"]["readinessSummary"]["livenessState"] = "login_screen"
         runtime["data"]["readinessSummary"]["loadedSceneProof"] = {"loadedSceneVerified": False}
@@ -504,6 +544,16 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(readiness["data"]["inferredNextPrimitive"]["primitive"], "recover_loaded_scene")
         self.assertFalse(readiness["data"]["requestAllowedNow"])
         self.assertIn("manual_login_required", readiness["blockers"])
+        integrity = readiness["data"]["currentLifecycle"]["evidenceIntegrity"]
+        self.assertEqual(integrity["schema"], "task_lifecycle_evidence_integrity.v1")
+        self.assertEqual(integrity["status"], "WARN")
+        self.assertFalse(integrity["liveTruthUsableForGameplay"])
+        self.assertTrue(integrity["advisoryOnlyUntilLoadedSceneVerified"])
+        self.assertIn("routeProgress", integrity["advisoryLifecycleFields"])
+        self.assertIn("phaseIntent", integrity["advisoryLifecycleFields"])
+        self.assertIn("route_progress_present_while_liveness_unverified", readiness["warnings"])
+        self.assertIn("phase_intent_present_while_liveness_unverified", readiness["warnings"])
+        self.assertIn("planned_action_present_while_liveness_unverified", readiness["warnings"])
 
     def test_knowledge_fabric_direct_methods_expose_script_api(self):
         fabric = make_fabric()

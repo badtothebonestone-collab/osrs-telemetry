@@ -1378,6 +1378,7 @@ def _infer_next_task_primitive(runtime_evidence: dict[str, Any] | None, action_i
     variables = _runtime_variables(runtime_evidence)
     readiness_summary = _dict(runtime_data.get("readinessSummary"))
     visibility_data = _payload_data(action_input_visibility)
+    visibility_readiness = _dict(visibility_data.get("readiness"))
     failure = _dict(failure_classification)
     inventory = _dict(_runtime_variable_value(variables, "inventory"))
     phase_intent = _dict(_runtime_variable_value(variables, "phaseIntent"))
@@ -1389,12 +1390,14 @@ def _infer_next_task_primitive(runtime_evidence: dict[str, Any] | None, action_i
     inventory_full = _boolish(inventory.get("inventoryFull"))
     manual_login = bool(
         readiness_summary.get("manualLoginRequired") is True
+        or visibility_readiness.get("manualLoginRequired") is True
         or failure.get("primaryClassification") == "game-state/user-login blocker"
         or "manual_login_required" in _list(failure.get("blockers"))
     )
     loaded_scene_verified = _first_present(
         _dict(readiness_summary.get("loadedSceneProof")).get("loadedSceneVerified"),
         loaded_scene.get("loadedSceneVerified"),
+        _dict(visibility_readiness.get("loadedSceneProof")).get("loadedSceneVerified"),
     )
     planned_action = _norm(visibility_data.get("plannedAction") or readiness_summary.get("proposedAction") or phase_intent.get("proposedAction"))
     current_intent = _norm(readiness_summary.get("currentIntent") or phase_intent.get("currentIntent") or phase_intent.get("activeIntent"))
@@ -1402,7 +1405,7 @@ def _infer_next_task_primitive(runtime_evidence: dict[str, Any] | None, action_i
     reason = "fallback_collect_until_live_evidence_selects_another_phase"
     primitive = "collect"
     confidence = "low"
-    if manual_login or loaded_scene_verified is False:
+    if manual_login or loaded_scene_verified is not True:
         primitive = "recover_loaded_scene"
         reason = "manual_login_or_loaded_scene_not_verified"
         confidence = "high"
@@ -1442,6 +1445,96 @@ def _infer_next_task_primitive(runtime_evidence: dict[str, Any] | None, action_i
             "plannedAction": planned_action or None,
             "routeProgress": route_progress,
         },
+    }
+
+
+def _readiness_blocker_codes(*sections: Any) -> list[str]:
+    codes: list[str] = []
+    for section in sections:
+        for item in _list(section):
+            if isinstance(item, dict):
+                code = item.get("code") or item.get("staleReason") or item.get("message")
+                if code is not None:
+                    codes.append(str(code))
+            elif item is not None:
+                codes.append(str(item))
+    return codes
+
+
+def _lifecycle_evidence_integrity(runtime_data: dict[str, Any], variables: dict[str, Any], visibility_data: dict[str, Any], failure: dict[str, Any]) -> dict[str, Any]:
+    readiness_summary = _dict(runtime_data.get("readinessSummary"))
+    visibility_readiness = _dict(visibility_data.get("readiness"))
+    loaded_scene = _dict(_runtime_variable_value(variables, "loadedScene"))
+    loaded_scene_proof = _dict(readiness_summary.get("loadedSceneProof"))
+    visibility_loaded_scene_proof = _dict(visibility_readiness.get("loadedSceneProof"))
+    liveness_state = _norm(
+        readiness_summary.get("livenessState")
+        or loaded_scene.get("livenessState")
+        or loaded_scene_proof.get("gameState")
+        or visibility_readiness.get("livenessState")
+        or visibility_loaded_scene_proof.get("gameState")
+    )
+    loaded_scene_verified = _first_present(
+        loaded_scene_proof.get("loadedSceneVerified"),
+        loaded_scene.get("loadedSceneVerified"),
+        visibility_loaded_scene_proof.get("loadedSceneVerified"),
+        _dict(visibility_data.get("livenessRecoveryActions")).get("loadedSceneVerified"),
+    )
+    manual_login = bool(
+        readiness_summary.get("manualLoginRequired") is True
+        or visibility_readiness.get("manualLoginRequired") is True
+        or failure.get("primaryClassification") == "game-state/user-login blocker"
+        or "manual_login_required" in _list(failure.get("blockers"))
+    )
+    action_readiness = _dict(visibility_data.get("actionReadiness")) or _dict(_dict(visibility_data.get("readiness")).get("actionReadiness"))
+    blocker_codes = _readiness_blocker_codes(readiness_summary.get("blockers"), action_readiness.get("blockers"))
+    loaded_scene_unverified = loaded_scene_verified is not True
+    liveness_unverified = bool(
+        manual_login
+        or loaded_scene_unverified
+        or "login" in liveness_state
+        or liveness_state in {"unknown", "disconnected", "loading", "not_logged_in"}
+    )
+    advisory_fields: list[str] = []
+    for name in ("inventory", "resourceCount", "bankOpen", "routeProgress", "phaseIntent"):
+        wrapper = _dict(variables.get(name))
+        if wrapper.get("observed") is True or _runtime_variable_value(variables, name) is not None:
+            advisory_fields.append(name)
+    if visibility_data.get("plannedAction"):
+        advisory_fields.append("plannedAction")
+    if visibility_data.get("plannedTarget"):
+        advisory_fields.append("plannedTarget")
+
+    warnings: list[str] = []
+    if liveness_unverified:
+        warnings.append("lifecycle_liveness_not_verified")
+    if loaded_scene_unverified:
+        warnings.append("loaded_scene_proof_missing_or_unverified")
+    if manual_login:
+        warnings.append("manual_login_lifecycle_context_non_executable")
+    if liveness_unverified and "routeProgress" in advisory_fields:
+        warnings.append("route_progress_present_while_liveness_unverified")
+    if liveness_unverified and "phaseIntent" in advisory_fields:
+        warnings.append("phase_intent_present_while_liveness_unverified")
+    if liveness_unverified and "plannedAction" in advisory_fields:
+        warnings.append("planned_action_present_while_liveness_unverified")
+    if any("client_tick_hot_stale" in _norm(code) or "client_tick_hot" in _norm(code) for code in blocker_codes):
+        warnings.append("client_tick_hot_stale_for_lifecycle")
+
+    advisory_only = bool(liveness_unverified and advisory_fields)
+    return {
+        "schema": "task_lifecycle_evidence_integrity.v1",
+        "status": "WARN" if warnings else "PASS",
+        "loadedSceneVerified": loaded_scene_verified,
+        "manualLoginRequired": manual_login,
+        "livenessState": liveness_state or None,
+        "liveTruthUsableForGameplay": bool(not liveness_unverified),
+        "advisoryOnlyUntilLoadedSceneVerified": advisory_only,
+        "advisoryLifecycleFields": list(dict.fromkeys(advisory_fields)) if advisory_only else [],
+        "readinessBlockerCodes": list(dict.fromkeys(blocker_codes)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "rule": "When loaded scene proof is missing or unverified, or manual login is required, route/phase/planned-action context may explain stale intent but must not authorize gameplay.",
+        "noLiveInput": True,
     }
 
 
@@ -1662,8 +1755,9 @@ def assess_task_run_readiness(
     variables = _runtime_variables(runtime_evidence)
     visibility_data = _payload_data(action_input_visibility)
     readiness_summary = _dict(runtime_data.get("readinessSummary"))
+    lifecycle_integrity = _lifecycle_evidence_integrity(runtime_data, variables, visibility_data, failure)
     global_blockers = list(dict.fromkeys(_list(next_readiness.get("blockers")) + _list(failure.get("blockers"))))
-    global_warnings = list(dict.fromkeys(_list(next_readiness.get("warnings")) + _list(failure.get("warnings"))))
+    global_warnings = list(dict.fromkeys(_list(next_readiness.get("warnings")) + _list(failure.get("warnings")) + _list(lifecycle_integrity.get("warnings"))))
     request_allowed = bool(_dict(next_readiness.get("data")).get("requestAllowedNow") is True)
     status = (
         "FAIL"
@@ -1684,6 +1778,7 @@ def assess_task_run_readiness(
                 "inferenceReason": inference.get("reason"),
                 "inferenceConfidence": inference.get("confidence"),
                 "inferenceEvidence": inference.get("evidence"),
+                "evidenceIntegrity": lifecycle_integrity,
                 "readinessSummary": readiness_summary,
                 "inventory": _runtime_variable_value(variables, "inventory"),
                 "resourceCount": _runtime_variable_value(variables, "resourceCount"),
