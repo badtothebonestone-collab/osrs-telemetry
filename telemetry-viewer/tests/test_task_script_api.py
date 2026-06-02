@@ -190,14 +190,42 @@ def clean_failure_classification() -> dict:
     }
 
 
-def navigation_trace_snapshot(*, suspicious: bool = False) -> dict:
+def navigation_trace_snapshot(*, suspicious: bool = False, trace_present: bool = True) -> dict:
     return {
         "schema": "navigation_decision_trace_summary.v1",
-        "status": "WARN" if suspicious else "PASS",
+        "status": "WARN" if suspicious or not trace_present else "PASS",
+        "warnings": ["navigation_decision_trace_missing"] if not trace_present else [],
         "data": {
-            "tracePresent": True,
+            "source": "test_navigation_trace",
+            "tracePresent": trace_present,
+            "latestActionTraceCount": 1 if trace_present else 0,
+            "decisionCount": 1 if trace_present else 0,
             "firstSuspiciousDecision": {"issue": "stale_state_allowed_click"} if suspicious else None,
-            "latestDecision": {"decision": "wait", "reason": "navigation_in_progress"},
+            "latestDecision": {"decision": "wait", "reason": "navigation_in_progress"} if trace_present else None,
+            "routeContext": {
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "currentNodeId": "lumbridge_first_floor_stairs",
+                "currentStepIndex": 4,
+                "predictedPathTiles": [
+                    {"worldX": 3206, "worldY": 3228, "plane": 1},
+                    {"worldX": 3205, "worldY": 3228, "plane": 1},
+                ],
+            },
+            "pathingFrontier": {
+                "frontierDiagnosis": {
+                    "schema": "path_frontier_diagnosis.v1",
+                    "frontierStatus": "WARN" if not trace_present else "PASS",
+                    "frontierReason": "player_location_unavailable" if not trace_present else None,
+                    "staleFrontierPlayerLocation": not trace_present,
+                    "routeContextCanGuideDiagnosis": True,
+                    "noGlobalPathfindingAdded": True,
+                },
+                "playerLocation": {
+                    "worldLocation": {"worldX": 3206, "worldY": 3229, "plane": 1},
+                    "source": "plugin_snapshot_baseline_player",
+                },
+            },
+            "diagnosisRules": ["stale_state_allowed_click"],
         },
     }
 
@@ -434,6 +462,12 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertTrue(data["liveCapablePrimitive"])
         self.assertFalse(data["rawInputBypassToolsExposed"])
         self.assertIn("HumanInputController", data["canonicalPipeline"])
+        self.assertEqual(
+            data["navigationDecisionTrace"]["routeContext"]["routeId"],
+            "lumbridge_west_trees_to_lumbridge_castle_bank",
+        )
+        self.assertEqual(data["navigationDecisionTrace"]["pathingFrontierStatus"], "PASS")
+        self.assertTrue(data["navigationDecisionTrace"]["routeContextCanGuideDiagnosis"])
 
     def test_step_readiness_blocks_manual_login_and_failed_action_readiness(self):
         runtime = runtime_snapshot({"bankOpen": False})
@@ -493,6 +527,11 @@ class TaskScriptApiTest(unittest.TestCase):
         )
         self.assertFalse(data["actionInputVisibilityEvidence"]["inputBlockEvidence"]["blocked"])
         self.assertEqual(data["actionInputVisibilityEvidence"]["actionReadiness"]["status"], "PASS")
+        self.assertEqual(
+            data["navigationDecisionTrace"]["routeContext"]["routeId"],
+            "lumbridge_west_trees_to_lumbridge_castle_bank",
+        )
+        self.assertEqual(data["navigationDecisionTrace"]["pathingPlayerLocation"]["worldLocation"]["worldX"], 3206)
         self.assertEqual(data["currentLifecycle"]["evidenceIntegrity"]["status"], "PASS")
         self.assertTrue(data["currentLifecycle"]["evidenceIntegrity"]["liveTruthUsableForGameplay"])
 
@@ -544,7 +583,7 @@ class TaskScriptApiTest(unittest.TestCase):
             runtime_evidence=runtime,
             action_input_visibility=visibility,
             failure_classification=failure,
-            navigation_decision_trace=navigation_trace_snapshot(),
+            navigation_decision_trace=navigation_trace_snapshot(trace_present=False),
         )
 
         self.assertEqual(readiness["schema"], "task_run_readiness.v1")
@@ -562,6 +601,12 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("route_progress_present_while_liveness_unverified", readiness["warnings"])
         self.assertIn("phase_intent_present_while_liveness_unverified", readiness["warnings"])
         self.assertIn("planned_action_present_while_liveness_unverified", readiness["warnings"])
+        nav = readiness["data"]["navigationDecisionTrace"]
+        self.assertFalse(nav["tracePresent"])
+        self.assertEqual(nav["traceMissingReason"], "latest_action_trace_missing")
+        self.assertTrue(nav["pathingFrontierDiagnosis"]["staleFrontierPlayerLocation"])
+        self.assertTrue(nav["pathingFrontierDiagnosis"]["noGlobalPathfindingAdded"])
+        self.assertEqual(nav["pathingPlayerLocation"]["worldLocation"]["plane"], 1)
 
     def test_knowledge_fabric_direct_methods_expose_script_api(self):
         fabric = make_fabric()

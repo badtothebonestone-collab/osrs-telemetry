@@ -1339,6 +1339,42 @@ def _payload_data(payload: dict[str, Any] | None) -> dict[str, Any]:
     return _dict(payload.get("data")) if isinstance(payload.get("data"), dict) else payload
 
 
+def _navigation_trace_evidence(navigation_decision_trace: dict[str, Any] | None) -> dict[str, Any]:
+    payload = _dict(navigation_decision_trace)
+    data = _payload_data(navigation_decision_trace)
+    pathing = _dict(data.get("pathingFrontier"))
+    frontier_diagnosis = _dict(pathing.get("frontierDiagnosis"))
+    trace_present = data.get("tracePresent")
+    latest_action_trace_count = data.get("latestActionTraceCount")
+    trace_missing_reason = None
+    if trace_present is False:
+        trace_missing_reason = (
+            "latest_action_trace_missing"
+            if latest_action_trace_count == 0
+            else "navigation_decision_trace_records_missing"
+        )
+    return {
+        "schema": payload.get("schema"),
+        "status": payload.get("status"),
+        "source": _first_present(data.get("source"), payload.get("source")),
+        "warnings": _list(payload.get("warnings")),
+        "tracePresent": trace_present,
+        "traceMissingReason": trace_missing_reason,
+        "latestActionTraceCount": latest_action_trace_count,
+        "decisionCount": data.get("decisionCount"),
+        "firstSuspiciousDecision": data.get("firstSuspiciousDecision"),
+        "latestDecision": data.get("latestDecision"),
+        "routeContext": data.get("routeContext"),
+        "pathingFrontierStatus": frontier_diagnosis.get("frontierStatus"),
+        "pathingFrontierReason": frontier_diagnosis.get("frontierReason"),
+        "pathingFrontierDiagnosis": frontier_diagnosis,
+        "pathingPlayerLocation": pathing.get("playerLocation"),
+        "routeContextCanGuideDiagnosis": frontier_diagnosis.get("routeContextCanGuideDiagnosis"),
+        "diagnosisRules": data.get("diagnosisRules"),
+        "noLiveInput": True,
+    }
+
+
 def _step_expected_variables(step: dict[str, Any]) -> list[str]:
     runtime = _dict(step.get("runtimeEvidence"))
     return [str(item) for item in _list(runtime.get("variables")) if str(item or "").strip()]
@@ -1584,6 +1620,7 @@ def assess_task_step_readiness(
         }
     )
     nav_data = _payload_data(navigation_decision_trace)
+    navigation_evidence = _navigation_trace_evidence(navigation_decision_trace)
     readiness = _dict(visibility_data.get("actionReadiness")) or _dict(_dict(visibility_data.get("readiness")).get("actionReadiness"))
     readiness_status = readiness.get("status")
     execution_allowed = readiness.get("executionAllowed") is True
@@ -1672,13 +1709,7 @@ def assess_task_step_readiness(
                 "primaryClassification": failure.get("primaryClassification"),
                 "blockers": failure.get("blockers"),
             },
-            "navigationDecisionTrace": {
-                "schema": navigation_decision_trace.get("schema") if isinstance(navigation_decision_trace, dict) else None,
-                "status": navigation_decision_trace.get("status") if isinstance(navigation_decision_trace, dict) else None,
-                "tracePresent": nav_data.get("tracePresent"),
-                "firstSuspiciousDecision": nav_data.get("firstSuspiciousDecision"),
-                "latestDecision": nav_data.get("latestDecision"),
-            },
+            "navigationDecisionTrace": navigation_evidence,
             "canonicalPipeline": CANONICAL_PIPELINE if live_capable else [],
             "preLivePhaseChecklist": [
                 "STOP_ALL",
@@ -1754,6 +1785,7 @@ def assess_task_run_readiness(
     runtime_data = _runtime_data(runtime_evidence)
     variables = _runtime_variables(runtime_evidence)
     visibility_data = _payload_data(action_input_visibility)
+    navigation_evidence = _navigation_trace_evidence(navigation_decision_trace)
     readiness_summary = _dict(runtime_data.get("readinessSummary"))
     lifecycle_integrity = _lifecycle_evidence_integrity(runtime_data, variables, visibility_data, failure)
     global_blockers = list(dict.fromkeys(_list(next_readiness.get("blockers")) + _list(failure.get("blockers"))))
@@ -1827,12 +1859,7 @@ def assess_task_run_readiness(
                 "primaryClassification": failure.get("primaryClassification"),
                 "blockers": failure.get("blockers"),
             },
-            "navigationDecisionTrace": {
-                "schema": navigation_decision_trace.get("schema") if isinstance(navigation_decision_trace, dict) else None,
-                "status": navigation_decision_trace.get("status") if isinstance(navigation_decision_trace, dict) else None,
-                "tracePresent": _payload_data(navigation_decision_trace).get("tracePresent"),
-                "firstSuspiciousDecision": _payload_data(navigation_decision_trace).get("firstSuspiciousDecision"),
-            },
+            "navigationDecisionTrace": navigation_evidence,
             "lifecycleRule": "The inferred next primitive is advisory; bounded live action still requires task_step_readiness.requestAllowedNow and fresh live evidence.",
             "noLiveInput": True,
         },
