@@ -62,6 +62,17 @@ class InputGeometryTest(unittest.TestCase):
         self.assertEqual(resolution["coordinateSpace"], "physical_pyautogui")
         self.assertEqual(resolution["screenPointBeforeScaling"], {"x": 1400, "y": 2300})
         self.assertEqual(resolution["screenPointAfterScaling"], {"x": 1400, "y": 2300})
+        self.assertTrue(resolution["displayScaleApplied"])
+        self.assertEqual(resolution["displayScaleReason"], "source_canvas_matches_current_canvas_display_scale_applied_to_delta")
+
+    def test_screen_direct_point_is_already_physical(self):
+        resolution = resolve_screen_click_point({"x": 438, "y": 537}, click_point_space="screen")
+
+        self.assertEqual(resolution["status"], "PASS")
+        self.assertEqual(resolution["screenClickPoint"], {"x": 438, "y": 537})
+        self.assertFalse(resolution["displayScaleApplied"])
+        self.assertEqual(resolution["displayScaleReason"], "screen_direct_already_physical")
+        self.assertEqual(resolution["coordinateResolver"], "input_geometry.resolve_screen_click_point")
 
     def test_dynamic_geometry_scales_when_source_canvas_differs(self):
         geometry = normalize_input_geometry(geometry_payload(displayScaleX=1.0, displayScaleY=1.0))
@@ -152,7 +163,10 @@ class InputGeometryTest(unittest.TestCase):
         self.assertEqual(resolution["status"], "PASS")
         self.assertEqual(resolution["screenClickPoint"], {"x": 886, "y": 819})
         self.assertTrue(resolution["displayScaleApplied"])
+        self.assertEqual(resolution["displayScaleReason"], "client_window_bounds_logical_scaled_to_physical")
         self.assertEqual(resolution["coordinateSpace"], "scaled_logical_to_physical")
+        self.assertEqual(resolution["scaleX"], 1.75)
+        self.assertEqual(resolution["scaleY"], 1.75)
         self.assertEqual(resolution["screenPointBeforeScaling"], {"x": 506, "y": 468})
         self.assertEqual(resolution["screenPointAfterScaling"], {"x": 886, "y": 819})
         self.assertEqual(resolution["windowBoundsSource"], "clientWindowBounds")
@@ -185,6 +199,7 @@ class InputGeometryTest(unittest.TestCase):
         self.assertEqual(resolution["status"], "PASS")
         self.assertEqual(resolution["screenClickPoint"], {"x": 443, "y": 394})
         self.assertFalse(resolution["displayScaleApplied"])
+        self.assertEqual(resolution["displayScaleReason"], "source_canvas_expanded_to_physical_canvas_no_display_rescale")
         self.assertEqual(resolution["coordinateSpace"], "physical_pyautogui")
         self.assertEqual(resolution["screenPointBeforeScaling"], {"x": 443, "y": 394})
         self.assertEqual(resolution["screenPointAfterScaling"], {"x": 443, "y": 394})
@@ -217,6 +232,7 @@ class InputGeometryTest(unittest.TestCase):
         self.assertEqual(resolution["screenPointBeforeScaling"], {"x": 720, "y": 437})
         self.assertEqual(resolution["screenClickPoint"], {"x": 720, "y": 437})
         self.assertFalse(resolution["displayScaleApplied"])
+        self.assertEqual(resolution["displayScaleReason"], "source_canvas_expanded_to_physical_canvas_no_display_rescale")
         self.assertEqual(resolution["coordinateSpace"], "physical_pyautogui")
 
     def test_dynamic_geometry_does_not_scale_current_vm_service_waypoint_outside_safe_window(self):
@@ -246,7 +262,9 @@ class InputGeometryTest(unittest.TestCase):
         self.assertEqual(resolution["status"], "PASS")
         self.assertEqual(resolution["screenPointBeforeScaling"], {"x": 438, "y": 537})
         self.assertEqual(resolution["screenClickPoint"], {"x": 438, "y": 537})
+        self.assertNotEqual(resolution["screenClickPoint"], {"x": 766, "y": 940})
         self.assertFalse(resolution["displayScaleApplied"])
+        self.assertEqual(resolution["displayScaleReason"], "source_canvas_expanded_to_physical_canvas_no_display_rescale")
         self.assertEqual(resolution["coordinateSpace"], "physical_pyautogui")
 
     def test_canvas_point_outside_dynamic_canvas_fails(self):
@@ -261,6 +279,7 @@ class InputGeometryTest(unittest.TestCase):
 
         self.assertEqual(resolution["status"], "FAIL")
         self.assertIn("screen_click_point", resolution["missingCapabilities"])
+        self.assertEqual(resolution["clickFailureBucket"], "coordinate_transform_error")
 
     def test_missing_geometry_requests_backend_fallback(self):
         resolution = resolve_screen_click_point(

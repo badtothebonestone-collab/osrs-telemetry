@@ -5,6 +5,13 @@ from typing import Any
 
 SCHEMA = "input_geometry.v1"
 DEFAULT_FALLBACK_CANVAS_SIZE = {"width": 765, "height": 503}
+CLICK_FAILURE_BUCKETS = {
+    "coordinate_transform_error",
+    "arduino_movement_error",
+    "target_aimpoint_error",
+    "game_state_stale",
+}
+COORDINATE_RESOLVER = "input_geometry.resolve_screen_click_point"
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -179,7 +186,11 @@ def resolve_screen_click_point(
         return {
             "status": "FAIL",
             "method": "missing_click_point",
+            "coordinateResolver": COORDINATE_RESOLVER,
+            "clickFailureBucket": "target_aimpoint_error",
             "screenClickPoint": None,
+            "displayScaleApplied": False,
+            "displayScaleReason": "click_point_missing",
             "warnings": ["no click point available"],
             "missingCapabilities": ["click_point"],
         }
@@ -190,6 +201,7 @@ def resolve_screen_click_point(
         return {
             "status": "PASS",
             "method": "screen_direct",
+            "coordinateResolver": COORDINATE_RESOLVER,
             "screenClickPoint": screen_point,
             "coordinateSpace": "physical_pyautogui",
             "scaleX": 1.0,
@@ -198,6 +210,8 @@ def resolve_screen_click_point(
             "screenPointAfterScaling": dict(screen_point),
             "windowBoundsSource": "screen_direct",
             "canvasBoundsSource": "none",
+            "displayScaleApplied": False,
+            "displayScaleReason": "screen_direct_already_physical",
             "warnings": [],
             "missingCapabilities": [],
         }
@@ -208,8 +222,11 @@ def resolve_screen_click_point(
         return {
             "status": "WARN",
             "method": "backend_fallback_required",
+            "coordinateResolver": COORDINATE_RESOLVER,
             "screenClickPoint": None,
             "inputGeometryAvailable": False,
+            "displayScaleApplied": False,
+            "displayScaleReason": "dynamic_input_geometry_unavailable",
             "warnings": warnings,
             "missingCapabilities": [],
         }
@@ -243,6 +260,16 @@ def resolve_screen_click_point(
         scale_x *= display_scale_x
         scale_y *= display_scale_y
     display_scale_applied = logical_screen_scale_applied or legacy_delta_scale_applied
+    if logical_screen_scale_applied:
+        display_scale_reason = "client_window_bounds_logical_scaled_to_physical"
+    elif legacy_delta_scale_applied:
+        display_scale_reason = "source_canvas_matches_current_canvas_display_scale_applied_to_delta"
+    elif source_matches_canvas:
+        display_scale_reason = "canvas_coordinates_already_physical"
+    elif abs(display_scale_x - 1.0) > 0.01 or abs(display_scale_y - 1.0) > 0.01:
+        display_scale_reason = "source_canvas_expanded_to_physical_canvas_no_display_rescale"
+    else:
+        display_scale_reason = "display_scale_identity"
     logical_x = float(origin.get("x") or 0) + x * scale_x
     logical_y = float(origin.get("y") or 0) + y * scale_y
     screen_point_before_scaling = {"x": int(round(logical_x)), "y": int(round(logical_y))}
@@ -269,9 +296,10 @@ def resolve_screen_click_point(
         warnings.append("resolved screen click point outside canvas bounds")
         if "screen_click_point" not in missing:
             missing.append("screen_click_point")
-    return {
+    result = {
         "status": "FAIL" if missing else "PASS",
         "method": "dynamic_input_geometry",
+        "coordinateResolver": COORDINATE_RESOLVER,
         "screenClickPoint": screen_point,
         "inputGeometryAvailable": True,
         "canvasScreenOrigin": geometry.get("canvasScreenOrigin"),
@@ -287,6 +315,10 @@ def resolve_screen_click_point(
         "windowBoundsSource": "clientWindowBounds" if client_bounds else "canvasScreenOrigin",
         "canvasBoundsSource": "canvasSize/sourceCanvasSize",
         "displayScaleApplied": display_scale_applied,
+        "displayScaleReason": display_scale_reason,
         "warnings": warnings,
         "missingCapabilities": missing,
     }
+    if missing:
+        result["clickFailureBucket"] = "coordinate_transform_error"
+    return result

@@ -12,6 +12,7 @@ sys.path.insert(0, str(VIEWER_DIR))
 from argparse import Namespace
 
 import execute_next_action as execute_cli
+from input_control.action_lifecycle import ActionLifecycleState
 from input_control.action_proposal import ActionProposal
 from input_control.backend_pyautogui import scale_canvas_point_to_screen
 from input_control.camera_control import camera_input_spec, fitts_hold_duration_ms, hold_camera_input, smooth_drag_segments
@@ -20,6 +21,7 @@ from input_control.mouse_movement import MouseMovementProfile
 from input_control.executor import (
     ExecutionResult,
     HoverConfirmationOptions,
+    _apply_lifecycle,
     _apply_reconciled_observation,
     _maybe_reset_reacquire_budget_on_scope_change,
     _confirm_hover_menu,
@@ -2279,10 +2281,48 @@ class InputControlExecutorTest(unittest.TestCase):
 
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.click_point_resolution["coordinateMethod"], "dynamic_input_geometry")
+        self.assertEqual(result.click_point_resolution["coordinateResolver"], "input_geometry.resolve_screen_click_point")
+        self.assertFalse(result.click_point_resolution["displayScaleApplied"])
+        self.assertEqual(result.click_point_resolution["displayScaleReason"], "display_scale_identity")
         self.assertEqual(result.action_trace["intendedPoint"]["coordinateSpace"], "physical_pyautogui")
         self.assertEqual(result.action_trace["intendedPoint"]["windowBoundsSource"], "canvasScreenOrigin")
+        self.assertFalse(result.action_trace["intendedPoint"]["displayScaleApplied"])
+        self.assertEqual(result.action_trace["intendedPoint"]["displayScaleReason"], "display_scale_identity")
+        self.assertEqual(result.action_trace["intendedPoint"]["coordinateResolver"], "input_geometry.resolve_screen_click_point")
         self.assertEqual(result.commands[0]["clickPoint"]["x"], 4555)
         self.assertEqual(result.commands[0]["clickPoint"]["y"], 500)
+
+    def test_coordinate_transform_failure_bucket_attaches_to_failed_click_result(self):
+        result = ExecutionResult(
+            status="FAIL",
+            proposed_action="navigate_to_service",
+            dry_run=False,
+            click_point_resolution={
+                "status": "FAIL",
+                "method": "dynamic_input_geometry",
+                "coordinateResolver": "input_geometry.resolve_screen_click_point",
+                "clickFailureBucket": "coordinate_transform_error",
+                "warnings": ["resolved screen click point outside canvas bounds"],
+                "missingCapabilities": ["screen_click_point"],
+            },
+            missing_capabilities=["screen_click_point"],
+            action_trace={},
+        )
+        lifecycle = ActionLifecycleState(
+            current_state="blocked",
+            result_outcome="blocked",
+            reason="screen_click_point_outside_movement_safety_region",
+            observed_result={
+                "observedResult": "no_click_safety_block",
+                "resultOutcome": "blocked",
+                "resultComplete": True,
+            },
+        )
+
+        _apply_lifecycle(result, lifecycle)
+
+        self.assertEqual(result.observed_result["clickFailureBucket"], "coordinate_transform_error")
+        self.assertEqual(result.action_trace["clickFailureBucket"], "coordinate_transform_error")
 
     def test_navigation_projection_rejects_edge_primary_and_uses_safe_alternate(self):
         backend = FakeBackend()

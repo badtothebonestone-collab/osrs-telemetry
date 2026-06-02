@@ -22,7 +22,7 @@ from .action_lifecycle import (
     verify_expected_result,
 )
 from .action_proposal import ActionProposal, build_action_proposal
-from .input_geometry import resolve_screen_click_point
+from .input_geometry import CLICK_FAILURE_BUCKETS, resolve_screen_click_point
 from .backend_pyautogui import PyAutoGuiBackend
 from .backend_pydirectinput import PyDirectInputBackend
 from .backend_arduino_hid import DEFAULT_COMMAND_TIMEOUT_MS, ArduinoHIDBackend, check_arduino_monitor_status
@@ -2690,6 +2690,10 @@ def _navigation_route_trace(status: dict[str, Any] | None) -> dict[str, Any]:
 def _navigation_chosen_subgoal(proposal: ActionProposal | None) -> dict[str, Any] | None:
     if proposal is None:
         return None
+    resolution = proposal.click_point_resolution if isinstance(proposal.click_point_resolution, dict) else {}
+    resolved_screen = proposal.resolved_screen_click_point
+    if not isinstance(resolved_screen, dict):
+        resolved_screen = resolution.get("screenClickPoint") if isinstance(resolution.get("screenClickPoint"), dict) else None
     return {
         "proposedAction": proposal.proposed_action,
         "targetKind": proposal.target_kind,
@@ -2697,6 +2701,21 @@ def _navigation_chosen_subgoal(proposal: ActionProposal | None) -> dict[str, Any
         "targetTile": _compact_world_tile(proposal.target_tile),
         "suggestedWorldTile": _compact_world_tile(proposal.suggested_world_tile),
         "suggestedClickPoint": dict(proposal.suggested_click_point) if isinstance(proposal.suggested_click_point, dict) else None,
+        "resolvedScreenClickPoint": dict(resolved_screen) if isinstance(resolved_screen, dict) else None,
+        "coordinate": {
+            key: resolution.get(key)
+            for key in (
+                "coordinateResolver",
+                "coordinateMethod",
+                "coordinateSpace",
+                "displayScaleApplied",
+                "displayScaleReason",
+                "screenPointBeforeScaling",
+                "screenPointAfterScaling",
+                "clickFailureBucket",
+            )
+            if resolution.get(key) is not None
+        } if resolution else None,
         "actionTargetSource": proposal.action_target_source,
         "actionability": proposal.actionability,
         "executable": proposal.executable,
@@ -4782,6 +4801,122 @@ def _apply_lifecycle(
     )
     result.next_allowed_at = lifecycle.cooldown_until_utc
     result.cooldown_remaining_ms = max(0, int(cooldown_remaining_ms))
+    bucket = _classify_click_failure_bucket(result, lifecycle)
+    if bucket:
+        if isinstance(result.observed_result, dict):
+            result.observed_result["clickFailureBucket"] = bucket
+        if isinstance(result.action_trace, dict):
+            result.action_trace["clickFailureBucket"] = bucket
+
+
+def _jsonish_text(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, default=str).lower()
+    except Exception:  # noqa: BLE001
+        return str(value).lower()
+
+
+def _resolution_failure_bucket(resolution: dict[str, Any] | None) -> str | None:
+    resolution = resolution if isinstance(resolution, dict) else {}
+    bucket = str(resolution.get("clickFailureBucket") or "")
+    if bucket in CLICK_FAILURE_BUCKETS:
+        return bucket
+    if str(resolution.get("status") or "").upper() == "FAIL":
+        return "coordinate_transform_error"
+    text = _jsonish_text([resolution.get("warnings"), resolution.get("missingCapabilities"), resolution.get("method")])
+    if any(
+        token in text
+        for token in (
+            "canvas coordinate conversion failed",
+            "coordinate validation failed",
+            "resolved screen click point outside",
+            "screen_click_point_outside_movement_safety_region",
+        )
+    ):
+        return "coordinate_transform_error"
+    return None
+
+
+def _classify_click_failure_bucket(result: ExecutionResult, lifecycle: ActionLifecycleState) -> str | None:
+    coordinate_bucket = _resolution_failure_bucket(result.click_point_resolution)
+    if coordinate_bucket:
+        return coordinate_bucket
+    observed = lifecycle.observed_result if isinstance(lifecycle.observed_result, dict) else result.observed_result
+    trace = result.action_trace if isinstance(result.action_trace, dict) else {}
+    hover = result.hover_confirmation if isinstance(result.hover_confirmation, dict) else {}
+    final_classification = str(trace.get("finalClassification") or "").lower()
+    observed_result = str((observed or {}).get("observedResult") if isinstance(observed, dict) else "").lower()
+    result_outcome = str(
+        ((observed or {}).get("resultOutcome") if isinstance(observed, dict) else None)
+        or lifecycle.result_outcome
+        or ""
+    ).lower()
+    text = _jsonish_text(
+        {
+            "status": result.status,
+            "warnings": result.warnings,
+            "missingCapabilities": result.missing_capabilities,
+            "lifecycleReason": lifecycle.reason,
+            "lifecycleWarnings": lifecycle.warnings,
+            "observed": observed,
+            "hover": hover,
+            "finalClassification": final_classification,
+            "mouseMove": trace.get("mouseMove"),
+            "clientTick": trace.get("clientTick"),
+        }
+    )
+    stale_like = any(token in text for token in ("stale", "freshness", "not_fresh", "stale_static_route_target"))
+    coordinate_like = any(
+        token in text
+        for token in (
+            "screen_click_point_outside_movement_safety_region",
+            "resolved screen click point outside",
+            "target_outside_allowed_region",
+        )
+    )
+    arduino_like = any(
+        token in text
+        for token in (
+            "hover movement failed",
+            "movement_feedback_mismatch",
+            "move_chunk_feedback_mismatch",
+            "cursor_left_allowed_region",
+            "move_chunk_no_rawinput_no_cursor",
+            "move_chunk_rawinput_seen_cursor_no_move",
+        )
+    )
+    aimpoint_like = any(
+        token in text
+        for token in (
+            "hover_position_mismatch",
+            "hover_confirm_timeout",
+            "hover_mismatch_skipped",
+            "menu_flip_mismatch",
+            "clicked_direct_menu_mismatch",
+            "hover_confirmed_but_clicked_walk_here",
+            "clicked_menu_did_not_match",
+            "clicked_cancel",
+        )
+    )
+    failure_like = (
+        str(result.status or "").upper() == "FAIL"
+        or result_outcome in {"blocked", "menu_mismatch", "no_change_timeout", "skipped", "interrupted"}
+        or observed_result in {"no_click_safety_block", "no_click_safety_skip"}
+        or bool(stale_like or coordinate_like or arduino_like or aimpoint_like or final_classification)
+    )
+    if not failure_like:
+        return None
+    if coordinate_like:
+        return "coordinate_transform_error"
+    if stale_like:
+        return "game_state_stale"
+    if arduino_like:
+        return "arduino_movement_error"
+    if aimpoint_like:
+        return "target_aimpoint_error"
+    if result.status == "FAIL" and any(item in {"screen_click_point", "click_point", "canvas_hover_point"} for item in result.missing_capabilities):
+        return "coordinate_transform_error"
+    return None
 
 
 def _sync_lifecycle_observation(lifecycle: ActionLifecycleState, observed: dict[str, Any]) -> None:
@@ -5550,6 +5685,7 @@ def _apply_path_tile_projection(
             "status": "PASS",
             "method": "plugin_tile_projection",
             "coordinateMethod": resolution.get("method"),
+            "coordinateResolver": resolution.get("coordinateResolver"),
             "screenClickPoint": resolution.get("screenClickPoint"),
             "coordinateSpace": resolution.get("coordinateSpace"),
             "scaleX": resolution.get("scaleX"),
@@ -5560,6 +5696,7 @@ def _apply_path_tile_projection(
             "canvasBoundsSource": resolution.get("canvasBoundsSource"),
             "displayScale": resolution.get("displayScale"),
             "displayScaleApplied": resolution.get("displayScaleApplied"),
+            "displayScaleReason": resolution.get("displayScaleReason"),
             "warnings": [],
             "missingCapabilities": [],
             "tileProjection": dict(projection),
@@ -5579,7 +5716,10 @@ def _apply_path_tile_projection(
                 "status": "PASS",
                 "method": "plugin_tile_projection",
                 "coordinateMethod": "backend_fallback_window_geometry",
+                "coordinateResolver": "backend.canvas_to_screen_point",
                 "screenClickPoint": backend.canvas_to_screen_point(point),
+                "displayScaleApplied": False,
+                "displayScaleReason": "dynamic_input_geometry_unavailable_backend_fallback",
                 "warnings": ["dynamic input geometry unavailable; used backend fallback window geometry"],
                 "missingCapabilities": [],
                 "tileProjection": dict(projection),
@@ -5941,6 +6081,22 @@ def _screen_click_point(proposal: ActionProposal, backend: Any) -> tuple[dict[st
         return {"x": int(round(float(point["x"]))), "y": int(round(float(point["y"])))}, [], proposal.click_point_resolution
     point = dict(proposal.suggested_click_point)
     if proposal.click_point_space == "canvas":
+        resolution = resolve_screen_click_point(
+            point,
+            click_point_space="canvas",
+            input_geometry=proposal.input_geometry,
+            source_canvas_size=(proposal.input_geometry or {}).get("sourceCanvasSize") if isinstance(proposal.input_geometry, dict) else None,
+        )
+        if isinstance(resolution, dict):
+            screen_point = resolution.get("screenClickPoint")
+            if resolution.get("status") == "PASS" and isinstance(screen_point, dict):
+                return {
+                    "x": int(round(float(screen_point["x"]))),
+                    "y": int(round(float(screen_point["y"]))),
+                }, [], resolution
+            if resolution.get("status") == "FAIL":
+                warnings = [str(item) for item in resolution.get("warnings") or []]
+                return None, warnings or ["resolved click point failed validation"], resolution
         converter = getattr(backend, "canvas_to_screen_point", None)
         if callable(converter):
             try:
@@ -5949,6 +6105,7 @@ def _screen_click_point(proposal: ActionProposal, backend: Any) -> tuple[dict[st
                     resolution = {
                         "status": "PASS",
                         "method": "backend_fallback_window_geometry",
+                        "coordinateResolver": "backend.canvas_to_screen_point",
                         "screenClickPoint": {"x": int(round(float(converted["x"]))), "y": int(round(float(converted["y"])))},
                         "coordinateSpace": "physical_pyautogui",
                         "scaleX": 1.0,
@@ -5957,6 +6114,8 @@ def _screen_click_point(proposal: ActionProposal, backend: Any) -> tuple[dict[st
                         "screenPointAfterScaling": {"x": int(round(float(converted["x"]))), "y": int(round(float(converted["y"])))},
                         "windowBoundsSource": "backend.canvas_to_screen_point",
                         "canvasBoundsSource": "backend.canvas_client_geometry",
+                        "displayScaleApplied": False,
+                        "displayScaleReason": "dynamic_input_geometry_unavailable_backend_fallback",
                         "warnings": ["dynamic input geometry unavailable; used backend fallback window geometry"],
                         "missingCapabilities": [],
                     }
@@ -5967,6 +6126,7 @@ def _screen_click_point(proposal: ActionProposal, backend: Any) -> tuple[dict[st
     resolution = {
         "status": "PASS",
         "method": "screen_direct",
+        "coordinateResolver": "executor.screen_direct",
         "screenClickPoint": {"x": int(point["x"]), "y": int(point["y"])},
         "coordinateSpace": "physical_pyautogui",
         "scaleX": 1.0,
@@ -5975,6 +6135,8 @@ def _screen_click_point(proposal: ActionProposal, backend: Any) -> tuple[dict[st
         "screenPointAfterScaling": {"x": int(point["x"]), "y": int(point["y"])},
         "windowBoundsSource": "screen_direct",
         "canvasBoundsSource": "none",
+        "displayScaleApplied": False,
+        "displayScaleReason": "screen_direct_already_physical",
         "warnings": [],
         "missingCapabilities": [],
     }
@@ -7696,7 +7858,10 @@ def _coordinate_trace_fields(click_resolution: dict[str, Any] | None) -> dict[st
         "canvasBoundsSource",
         "displayScale",
         "displayScaleApplied",
+        "displayScaleReason",
         "coordinateMethod",
+        "coordinateResolver",
+        "clickFailureBucket",
     ):
         if resolution.get(key) is not None:
             fields[key] = resolution.get(key)
