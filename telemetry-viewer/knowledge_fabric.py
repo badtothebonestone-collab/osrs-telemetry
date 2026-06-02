@@ -37,6 +37,7 @@ QUERY_COVERAGE_SCHEMA = "query_coverage_matrix.v1"
 COVERAGE_REPORT_SCHEMA = "coverage_report.v1"
 TASK_PROBE_SCHEMA = "task_probe_report.v1"
 ACTION_INPUT_VISIBILITY_SCHEMA = "action_input_visibility_context.v1"
+NAVIGATION_DECISION_TRACE_SUMMARY_SCHEMA = "navigation_decision_trace_summary.v1"
 
 VIEWER_DIR = Path(__file__).resolve().parent
 TARGET_PROFILES_PATH = VIEWER_DIR / "target_profiles.json"
@@ -182,6 +183,154 @@ def _trace_input_phase_summary(trace: dict[str, Any]) -> dict[str, Any]:
             "injectedEventsAfter": after_counts["injectedEvents"],
             "lowerIlInjectedEventsAfter": after_counts["lowerIlInjectedEvents"],
         },
+    }
+
+
+def _navigation_trace_records_from_trace(trace: dict[str, Any]) -> list[dict[str, Any]]:
+    trace = _trace_payload(trace)
+    records = []
+    for item in _list(trace.get("navigationDecisionTrace")):
+        if isinstance(item, dict) and item.get("schema") == "navigation_decision_trace.v1":
+            records.append(dict(item))
+    return records
+
+
+def _navigation_trace_records_from_debug(debug_evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for trace in _list(debug_evidence.get("latestActionTraces")):
+        if not isinstance(trace, dict):
+            continue
+        for item in _list(trace.get("navigationDecisionTrace")):
+            if isinstance(item, dict):
+                copied = dict(item)
+                copied.setdefault("_sourcePath", trace.get("path"))
+                records.append(copied)
+    return records
+
+
+def _navigation_trace_compact_row(record: dict[str, Any]) -> dict[str, Any]:
+    observed = _dict(record.get("observed"))
+    pending = _dict(record.get("pending"))
+    distances = _dict(record.get("distances"))
+    subgoal = _dict(record.get("chosenSubgoal"))
+    route = _dict(record.get("routeStep"))
+    return {
+        "line": record.get("_line"),
+        "sourcePath": record.get("_sourcePath"),
+        "tick": record.get("tick"),
+        "decision": record.get("decision"),
+        "reason": record.get("reason"),
+        "playerWorldPosition": record.get("playerWorldPosition"),
+        "destinationWorldPosition": record.get("destinationWorldPosition"),
+        "targetTile": subgoal.get("targetTile"),
+        "targetName": subgoal.get("targetName"),
+        "proposedAction": subgoal.get("proposedAction"),
+        "actionTargetSource": subgoal.get("actionTargetSource"),
+        "actionability": subgoal.get("actionability"),
+        "executable": subgoal.get("executable"),
+        "routeId": route.get("routeId"),
+        "routeNode": route.get("currentNodeId"),
+        "routeStepIndex": route.get("currentStepIndex"),
+        "routeStepStatus": route.get("routeStepStatus"),
+        "distanceToGoal": distances.get("currentDistanceToGoal") or distances.get("distanceToGoal"),
+        "distanceDelta": distances.get("distanceDelta"),
+        "distanceImproving": distances.get("distanceImproving"),
+        "movementState": pending.get("movementState"),
+        "observedResult": observed.get("observedResult") or pending.get("observedResult"),
+        "nextActionAllowed": observed.get("nextActionAllowed") if observed.get("nextActionAllowed") is not None else pending.get("nextActionAllowed"),
+        "recoveryMode": record.get("recoveryMode"),
+    }
+
+
+def _navigation_trace_block_evidence_present(record: dict[str, Any]) -> bool:
+    text = json.dumps(record, sort_keys=True, default=str).lower()
+    return any(token in text for token in ("blockevidence", "barrierdetected", "localreachability=blocked", "wallhuggingdetected", "wallhuggingdetected"))
+
+
+def _navigation_trace_repeated_short_click(record: dict[str, Any], previous: dict[str, Any]) -> bool:
+    if str(record.get("decision") or "") != "click" or str(previous.get("decision") or "") != "click":
+        return False
+    current_goal = _dict(record.get("chosenSubgoal"))
+    previous_goal = _dict(previous.get("chosenSubgoal"))
+    if current_goal.get("targetTile") != previous_goal.get("targetTile"):
+        return False
+    delta = _dict(record.get("distances")).get("distanceDelta")
+    try:
+        return abs(float(delta)) < 1.0
+    except (TypeError, ValueError):
+        return True
+
+
+def _navigation_trace_suspicious_summary(record: dict[str, Any], previous: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    reason = str(record.get("reason") or "").strip()
+    decision = str(record.get("decision") or "").strip()
+    observed = _dict(record.get("observed"))
+    pending = _dict(record.get("pending"))
+    distances = _dict(record.get("distances"))
+    subgoal = _dict(record.get("chosenSubgoal"))
+    issue: str | None = None
+    if not reason:
+        issue = "missing_reason_string"
+    elif decision in {"click", "recover"} and subgoal.get("executable") is False:
+        issue = "click_or_recover_for_non_executable_subgoal"
+    elif decision in {"click", "recover"} and (observed.get("nextActionAllowed") is False or pending.get("nextActionAllowed") is False):
+        issue = "click_or_recover_while_previous_result_pending"
+    elif decision in {"click", "recover"} and distances.get("distanceImproving") is True:
+        issue = "click_or_recover_while_distance_improving"
+    elif decision in {"click", "recover"} and any(token in reason.lower() for token in ("stale", "daemon_latest_tick_missing", "input_geometry_unavailable")):
+        issue = "stale_state_allowed_click"
+    elif decision in {"click", "recover"} and "wall" in reason.lower() and not _navigation_trace_block_evidence_present(record):
+        issue = "blocked_recovery_without_block_evidence"
+    elif previous and _navigation_trace_repeated_short_click(record, previous):
+        issue = "repeated_short_click"
+    if issue is None:
+        return None
+    return {
+        "issue": issue,
+        "line": record.get("_line"),
+        "sourcePath": record.get("_sourcePath"),
+        "decision": decision or None,
+        "reason": reason or None,
+        "observedResult": observed.get("observedResult") or pending.get("observedResult"),
+        "targetTile": subgoal.get("targetTile"),
+        "routeStep": _dict(record.get("routeStep")),
+    }
+
+
+def _navigation_trace_first_suspicious_index(records: list[dict[str, Any]]) -> int | None:
+    for index, record in enumerate(records):
+        previous = records[index - 1] if index > 0 else None
+        if _navigation_trace_suspicious_summary(record, previous):
+            return index
+    return None
+
+
+def _navigation_trace_summary(records: list[dict[str, Any]], *, limit: int = DEFAULT_QUERY_LIMIT) -> dict[str, Any]:
+    normalized = [dict(record) for record in records if isinstance(record, dict)]
+    for index, record in enumerate(normalized):
+        record.setdefault("_line", index + 1)
+    decisions = Counter(str(record.get("decision") or "missing") for record in normalized)
+    reasons = Counter(str(record.get("reason") or "missing") for record in normalized)
+    suspicious_index = _navigation_trace_first_suspicious_index(normalized)
+    suspicious = None
+    context_rows: list[dict[str, Any]] = []
+    if suspicious_index is not None:
+        suspicious = _navigation_trace_suspicious_summary(normalized[suspicious_index], normalized[suspicious_index - 1] if suspicious_index > 0 else None)
+        half_window = max(1, min(5, int(limit // 2) if limit else 5))
+        start = max(0, suspicious_index - half_window)
+        end = min(len(normalized), suspicious_index + half_window + 1)
+        context_rows = [_navigation_trace_compact_row(record) for record in normalized[start:end]]
+    else:
+        context_rows = [_navigation_trace_compact_row(record) for record in normalized[-limit:]] if limit else []
+    latest = normalized[-1] if normalized else {}
+    return {
+        "decisionCount": len(normalized),
+        "decisionCounts": dict(sorted(decisions.items())),
+        "reasonCounts": dict(sorted(reasons.items())),
+        "firstSuspiciousDecision": suspicious,
+        "contextRows": context_rows,
+        "latestDecision": _navigation_trace_compact_row(latest) if latest else None,
+        "allDecisionsHaveReasons": all(bool(str(record.get("reason") or "").strip()) for record in normalized) if normalized else False,
     }
 
 
@@ -1293,6 +1442,7 @@ def _debug_evidence_index(session_path: Path | None, limit: int = 10) -> dict[st
             trace = _read_json(path)
             trace_payload = _trace_payload(trace)
             visibility = _action_trace_visibility(trace_payload, path=str(path))
+            navigation_trace = _navigation_trace_records_from_trace(trace_payload)
             trace_paths.append({
                 "path": str(path),
                 "classification": trace_payload.get("finalClassification"),
@@ -1307,6 +1457,9 @@ def _debug_evidence_index(session_path: Path | None, limit: int = 10) -> dict[st
                 "hoverConfirmationEvidence": visibility.get("hoverConfirmationEvidence"),
                 "menuOptionClickedEvidence": visibility.get("menuOptionClickedEvidence"),
                 "blockedReason": visibility.get("blockedReason"),
+                "navigationDecisionTrace": navigation_trace,
+                "navigationDecisionTraceCount": len(navigation_trace),
+                "lastNavigationDecisionTrace": dict(navigation_trace[-1]) if navigation_trace else None,
                 "visibility": visibility,
             })
     failure_reasons = Counter(
@@ -1484,6 +1637,7 @@ class KnowledgeFabric:
                 "query_route_objects",
                 "query_path_frontier",
                 "query_view_quality",
+                "query_navigation_decision_trace",
                 "query_worksite_context",
                 "query_session_memory",
                 "query_debug_evidence",
@@ -1657,6 +1811,20 @@ class KnowledgeFabric:
                     "sampleQuery": "get_action_input_visibility",
                 },
                 {
+                    "sourceName": "navigation_decision_trace.v1",
+                    "sourceType": "bounded_debug_latest_state",
+                    "producer": "executor action_trace.v2 navigationDecisionTrace entries",
+                    "consumer": "Codex route/pathing regression diagnosis",
+                    "schema": NAVIGATION_DECISION_TRACE_SUMMARY_SCHEMA,
+                    "freshnessField": "latest action trace/session freshness",
+                    "capFields": ["trace context row limit"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": True,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "query_navigation_decision_trace",
+                },
+                {
                     "sourceName": "visual_debug_bundle",
                     "sourceType": "explicit_debug_bundle",
                     "producer": "executor/visual_debug_bundle.py",
@@ -1821,6 +1989,7 @@ class KnowledgeFabric:
             ("What route objects exist?", "query_route_objects", "query_route_objects", "route_object_census", "knowledge_fabric_route_objects.v1", "high if loaded scene fresh", "off-scene objects unavailable", "test_knowledge_fabric.py"),
             ("What pathing frontier exists?", "query_path_frontier", "query_path_frontier", "collision/pathing frontier", "knowledge_fabric_path_frontier.v1", "medium-high", "collision unavailable", "test_knowledge_fabric.py"),
             ("What camera/view problem exists?", "query_view_quality", "query_view_quality", "view_quality_inputs/projection audit", "knowledge_fabric_view_quality.v1", "medium", "occlusion is heuristic", "test_knowledge_fabric.py"),
+            ("What did the navigation decision trace say?", "query_navigation_decision_trace", "query_navigation_decision_trace/osrs://debug/navigation-decision-trace", "latest action_trace navigationDecisionTrace or supplied records", NAVIGATION_DECISION_TRACE_SUMMARY_SCHEMA, "high if trace present", "trace disabled or no latest action trace", "test_knowledge_fabric.py"),
             ("What widgets/dialogue/bank UI are open?", "list_seen_widgets", "list_seen_widgets", "daemon widget/bank/dialogue state", "knowledge_fabric_seen_widgets.v1", "medium", "widget sections may be compact", "test_knowledge_fabric.py"),
             ("What target is executable?", "get_current_debug_context", "get_current_debug_context", "action proposal/readiness/hover", "actionReadiness/actionProposal", "high only after hover evidence", "must not rely on static/external only", "readiness tests"),
             ("What action was actually clicked?", "get_latest_action_trace", "get_latest_action_trace", "action trace/MenuOptionClicked", "knowledge_fabric_latest_action_trace.v1", "high if trace present", "no click trace if skipped", "test_knowledge_fabric.py"),
@@ -2450,6 +2619,59 @@ class KnowledgeFabric:
             truncated=cap_hit,
         )
 
+    def query_navigation_decision_trace(
+        self,
+        *,
+        records: list[dict[str, Any]] | None = None,
+        action_trace: dict[str, Any] | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        cap = _safe_limit(limit)
+        source = "latest_action_trace_index"
+        if records is not None:
+            trace_records = [dict(item) for item in records if isinstance(item, dict)]
+            source = "supplied_records"
+        elif action_trace is not None:
+            trace_records = _navigation_trace_records_from_trace(action_trace)
+            source = "supplied_action_trace"
+        else:
+            trace_records = _navigation_trace_records_from_debug(self.debug_evidence)
+        summary = _navigation_trace_summary(trace_records, limit=cap)
+        data = {
+            **summary,
+            "tracePresent": bool(trace_records),
+            "source": source,
+            "sessionPath": self.debug_evidence.get("sessionPath"),
+            "latestActionTraceCount": len(_list(self.debug_evidence.get("latestActionTraces"))),
+            "routeContext": _compact_route_context(self.daemon_status),
+            "pathingFrontier": self.query_path_frontier(limit=5).get("data"),
+            "diagnosisRules": [
+                "missing_reason_string",
+                "click_or_recover_for_non_executable_subgoal",
+                "click_or_recover_while_previous_result_pending",
+                "click_or_recover_while_distance_improving",
+                "stale_state_allowed_click",
+                "blocked_recovery_without_block_evidence",
+                "repeated_short_click",
+            ],
+            "noLiveInput": True,
+        }
+        warnings = []
+        if not trace_records:
+            warnings.append("navigation_decision_trace_missing")
+        if summary.get("firstSuspiciousDecision"):
+            warnings.append("suspicious_navigation_decision_detected")
+        return _query_response(
+            NAVIGATION_DECISION_TRACE_SUMMARY_SCHEMA,
+            data,
+            started=started,
+            source=source,
+            freshness=self.freshness(),
+            warnings=warnings,
+            status="WARN" if warnings else "PASS",
+        )
+
     def _latest_visual_bundle_summary(self) -> dict[str, Any]:
         bundles = [item for item in _list(self.debug_evidence.get("visualBundles")) if isinstance(item, dict)]
         return dict(bundles[0]) if bundles else {}
@@ -2506,6 +2728,7 @@ class KnowledgeFabric:
                 "lastResult": status.get("livenessRecoveryLastResult"),
             },
             "boundedWatcherDecisions": status.get("boundedWatcherDecisions") or status.get("watcherDecisions"),
+            "navigationDecisionTrace": self.query_navigation_decision_trace(limit=10),
             "target_view_state": visibility.get("target_view_state") or _dict(_dict(proposal.get("targetExplanation")).get("targetViewState")),
             "target_view_state_source": "latest_action_trace" if visibility.get("target_view_state") else "current_action_proposal",
             "serviceResourceRouteCandidateState": {
@@ -3066,6 +3289,7 @@ class KnowledgeFabric:
             "serviceObjects": self.query_service_candidates(limit=min(cap, 15)),
             "pathingFrontier": self.query_path_frontier(limit=min(cap, 15)),
             "viewQuality": self.query_view_quality(intent=str(current_intent or "unknown")),
+            "navigationDecisionTrace": self.query_navigation_decision_trace(limit=min(cap, 15)),
             "overlayHealth": readiness.get("overlayHealth"),
             "inputIntegrity": self._input_integrity_summary(),
             "actionInputVisibility": self.query_action_input_visibility(),
@@ -3096,6 +3320,7 @@ class KnowledgeFabric:
                 "explain_current_blocker",
                 "query_resource_candidates/query_route_objects/query_service_candidates",
                 "query_path_frontier for route issues",
+                "query_navigation_decision_trace for route decision reasons",
                 "query_view_quality for camera/visibility issues",
                 "get_latest_action_trace and get_latest_visual_bundle for evidence",
             ],

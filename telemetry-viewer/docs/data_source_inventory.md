@@ -38,6 +38,7 @@ MCP resource/tool:
 | 8890 daemon/context | live context | Python daemon | Codex, MCP, executor context | `context_status.v1` | daemon/plugin freshness | response caps | yes | no | no |
 | overlay_debug_state | latest-state debug | daemon overlay writer | RuneLite overlay, bundles | `telemetry_overlay_debug_state.v1` | write age | marker limits | no | overwritten | no |
 | input_integrity_status | latest-state safety | input monitor | readiness, summaries | `input_integrity_status.v1` | generated time | none | yes for live action | overwritten | no |
+| navigation_decision_trace | latest action-trace route decision evidence | executor action trace | route/pathing regression diagnosis | `navigation_decision_trace_summary.v1` | latest action trace/session freshness | context row limit | no | no | no |
 | visual_debug_bundle | explicit debug | executor/bundle support | Codex evidence | bundle summaries | created time | screenshot/bundle caps | no | bounded by flags | no |
 | replay_scenario | explicit replay | Knowledge Fabric | offline replay | `replay_scenario.v1` | created time | query limit | no | explicit only | no |
 | script_authoring_context | explicit authoring | Knowledge Fabric | future scripts | `script_authoring_context.v1` | created time | query limit | no | explicit only | no |

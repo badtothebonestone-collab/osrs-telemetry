@@ -84,6 +84,7 @@ SUPPORTED_NEEDS = [
     "knowledge_service_candidates",
     "knowledge_route_objects",
     "knowledge_path_frontier",
+    "knowledge_navigation_decision_trace",
     "knowledge_view_quality",
     "knowledge_session_memory",
     "knowledge_debug_evidence",
@@ -107,6 +108,7 @@ NAMED_QUERY_NEEDS = {
     "data-quality-report": ["knowledge_data_quality_report"],
     "data-source-inventory": ["knowledge_data_source_inventory"],
     "query-coverage-matrix": ["knowledge_query_coverage_matrix"],
+    "navigation-decision-trace": ["knowledge_navigation_decision_trace"],
     "coverage-report": ["knowledge_coverage_report"],
     "external-knowledge-status": ["external_knowledge_status"],
     "handoff-summary": ["knowledge_handoff_summary"],
@@ -1130,6 +1132,7 @@ def build_context_response(
         "knowledge_service_candidates",
         "knowledge_route_objects",
         "knowledge_path_frontier",
+        "knowledge_navigation_decision_trace",
         "knowledge_view_quality",
         "knowledge_session_memory",
         "knowledge_debug_evidence",
@@ -1164,6 +1167,8 @@ def build_context_response(
             response["knowledgeRouteObjects"] = fabric.query_route_objects(limit=max_candidates)
         if "knowledge_path_frontier" in needs:
             response["knowledgePathFrontier"] = fabric.query_path_frontier(limit=max_candidates)
+        if "knowledge_navigation_decision_trace" in needs:
+            response["knowledgeNavigationDecisionTrace"] = fabric.query_navigation_decision_trace(limit=max_candidates)
         if "knowledge_view_quality" in needs:
             response["knowledgeViewQuality"] = fabric.query_view_quality(intent=str(scoped_context.get("currentIntent") or "unknown"))
         if "knowledge_session_memory" in needs:
@@ -2300,7 +2305,7 @@ def parse_args():
     parser.add_argument("--auth-token", help="Require X-Context-Token header for requests.")
     parser.add_argument("--no-auth-token", action="store_true", help="Explicitly run without an auth token.")
     parser.add_argument("--oneshot-request", help="Process one context_request.v1 JSON string and exit.")
-    parser.add_argument("--query", help="Run a named compact query such as current-debug-context, current-blocker, or knowledge-fabric-status and exit.")
+    parser.add_argument("--query", help="Run a named compact query such as current-debug-context, current-blocker, navigation-decision-trace, or knowledge-fabric-status and exit.")
     parser.add_argument("--capture-script-authoring-context", action="store_true", help="Capture script_authoring_context.v1 bundle and exit.")
     parser.add_argument("--capture-replay-scenario", action="store_true", help="Capture replay_scenario.v1 bundle and exit.")
     parser.add_argument("--replay-scenario", help="Replay a replay_scenario.v1 file offline and exit.")

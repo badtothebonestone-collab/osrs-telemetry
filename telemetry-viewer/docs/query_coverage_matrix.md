@@ -35,6 +35,7 @@ MCP resource/tool:
 | What service objects exist? | `query_service_candidates` | `query_service_candidates` | service census, static routes | `knowledge_fabric_service_candidates.v1` | high if service is loaded | static anchors are advisory |
 | What route objects exist? | `query_route_objects` | `query_route_objects` | route census | `knowledge_fabric_route_objects.v1` | high in loaded scene | route object off-scene |
 | What collision/pathing frontier exists? | `query_path_frontier` | `query_path_frontier` | collision/frontier query | `knowledge_fabric_path_frontier.v1` | medium-high | collision unavailable |
+| What did the navigation decision trace say? | `--query navigation-decision-trace` / `query_navigation_decision_trace` | `query_navigation_decision_trace` / `osrs://debug/navigation-decision-trace` | latest action-trace navigationDecisionTrace or supplied records | `navigation_decision_trace_summary.v1` | high when trace present | trace disabled or no latest action trace |
 | What camera/view issue exists? | `query_view_quality` | `query_view_quality` | projection audit/view inputs | `knowledge_fabric_view_quality.v1` | medium | occlusion is heuristic |
 | What widgets/UI are open? | `list_seen_widgets` | `list_seen_widgets` | daemon widget/dialogue/bank state | `knowledge_fabric_seen_widgets.v1` | medium | compact widget state |
 | What item/object/NPC ID is this? | external lookup flags | `external_lookup_*` | external cache/static library | `external_*_lookup.v1` | advisory | cache miss |
@@ -56,4 +57,5 @@ MCP resource/tool:
 - High-level task script tools compile into existing action proposal/readiness paths; they do not add raw mouse/key tools.
 - Script lifecycle success requires before/after live evidence for inventory, resource count, bank-open state, hover/click proof, location, route progress, and phase/intent.
 - Failure classification must use the phase-aware input report: operator-phase injected events are not script failure, while live-action injected/lower-IL or direct-backend-bypass deltas are hard blockers.
+- Route/pathing patches should use `query_navigation_decision_trace` to inspect decision, reason, distance, route step, and suspicious-decision evidence before changing behavior.
 - No query path should create `live_packets`, NDJSON, or JSONL live archives.

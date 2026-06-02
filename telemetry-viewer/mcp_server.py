@@ -98,6 +98,20 @@ def tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {"intent": string, "goal": location_schema, "daemonUrl": string, "snapshotUrl": string}},
         },
         {
+            "name": "query_navigation_decision_trace",
+            "description": "Summarize navigation_decision_trace.v1 records from the latest action trace or supplied records/actionTrace. Read-only; no trace writer or live input.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "records": {"type": "array", "items": {"type": "object"}},
+                    "actionTrace": {"type": "object"},
+                    "limit": integer,
+                    "daemonUrl": string,
+                    "snapshotUrl": string,
+                },
+            },
+        },
+        {
             "name": "explain_current_blocker",
             "description": "Explain the current live blocker from daemon/fabric status.",
             "inputSchema": {"type": "object", "properties": {"daemonUrl": string, "snapshotUrl": string}},
@@ -394,6 +408,7 @@ def resource_definitions() -> list[dict[str, Any]]:
         {"uri": "osrs://debug/current-context", "name": "Current debug context", "mimeType": "application/json"},
         {"uri": "osrs://debug/blocker", "name": "Current blocker explanation", "mimeType": "application/json"},
         {"uri": "osrs://debug/action-input-visibility", "name": "Action/input visibility context", "mimeType": "application/json"},
+        {"uri": "osrs://debug/navigation-decision-trace", "name": "Navigation decision trace summary", "mimeType": "application/json"},
         {"uri": "osrs://debug/latest-script-authoring-context", "name": "Latest script authoring context bundle", "mimeType": "application/json"},
         {"uri": "osrs://debug/latest-replay-scenario", "name": "Latest replay scenario", "mimeType": "application/json"},
         {"uri": "osrs://debug/data-quality-report", "name": "Data quality report", "mimeType": "application/json"},
@@ -463,6 +478,12 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> dict[str, A
             payload = _fabric(args).query_path_frontier(goal=_dict(args.get("goal")) or None, limit=args.get("limit"))
         elif name == "query_view_quality":
             payload = _fabric(args).query_view_quality(intent=str(args.get("intent") or "unknown"), goal=_dict(args.get("goal")) or None)
+        elif name == "query_navigation_decision_trace":
+            payload = _fabric(args).query_navigation_decision_trace(
+                records=args.get("records") if isinstance(args.get("records"), list) else None,
+                action_trace=_dict(args.get("actionTrace")) or None,
+                limit=args.get("limit"),
+            )
         elif name == "explain_current_blocker":
             payload = _fabric(args).explain_current_blocker()
         elif name == "get_latest_action_trace":
@@ -652,6 +673,8 @@ def read_resource(uri: str, arguments: dict[str, Any] | None = None) -> dict[str
         payload = fabric.explain_current_blocker() if fabric else {}
     elif uri == "osrs://debug/action-input-visibility":
         payload = fabric.query_action_input_visibility() if fabric else {}
+    elif uri == "osrs://debug/navigation-decision-trace":
+        payload = fabric.query_navigation_decision_trace() if fabric else {}
     elif uri == "osrs://debug/latest-script-authoring-context":
         payload = knowledge_fabric.latest_artifact(fabric.session_path if fabric else None, "script_authoring_context")
     elif uri == "osrs://debug/latest-replay-scenario":

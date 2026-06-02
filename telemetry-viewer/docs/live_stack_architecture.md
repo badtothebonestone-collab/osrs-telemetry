@@ -304,6 +304,7 @@ This document defines the intended shape of the live Python sidecar stack. It is
      `scaled_logical_to_physical` records the full-point AWT logical to
      pyautogui physical pixel conversion.
    - Service-route navigation adds `routeStability`, `navigationInProgress`, clicked waypoint tile, player tile after the click, movement state, and any replan-suppression reason. A movement click is not considered permission to immediately click the next waypoint while pathing still reports movement.
+   - Navigation decisions can include compact `navigation_decision_trace.v1` entries in `action_trace.v2.navigationDecisionTrace`, with decision, reason, player/goal tiles, route step, distances, pending state, chosen subgoal, and recovery mode.
    - Resource actions add `resourceProgressClassification` when useful:
      `resource_click_confirmed_waiting`, `resource_animation_started_pending`,
      `resource_delayed_inventory_success`, `resource_target_depleted_success`,
@@ -589,7 +590,7 @@ This document defines the intended shape of the live Python sidecar stack. It is
      include `get_current_debug_context`, `get_knowledge_fabric_status`,
      `query_resource_candidates`,
      `query_service_candidates`, `query_route_objects`, `query_path_frontier`,
-     `query_view_quality`, `explain_current_blocker`,
+     `query_navigation_decision_trace`, `query_view_quality`, `explain_current_blocker`,
      `search_session_memory`, and `search_static_library`.
    - Query-first debugging starts with `get_current_debug_context`. That
      aggregate includes live status, readiness/action readiness, world model

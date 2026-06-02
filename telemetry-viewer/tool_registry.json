@@ -475,13 +475,14 @@
     },
     {
       "name": "context_service.py",
-      "category": "legacy_file_pipeline",
-      "purpose": "Legacy context API over rolling live files.",
+      "category": "daily",
+      "purpose": "Read-only context API and direct query adapter over daemon/session/Knowledge Fabric evidence, including current debug context, blockers, and navigation decision trace summaries.",
       "dailyRequired": false,
-      "normalCommand": "python telemetry-viewer\\context_service.py --latest-session --port 8890",
-      "input": "interaction_geometry\\live rolling files",
-      "output": "localhost context_response.v1 API",
-      "status": "legacy",
+      "normalCommand": "python telemetry-viewer\\context_service.py --query current-debug-context",
+      "alternateCommand": "python telemetry-viewer\\context_service.py --query navigation-decision-trace",
+      "input": "live_core_daemon/status, optional session debug evidence, Knowledge Fabric indexes",
+      "output": "context_response.v1 and Knowledge Fabric query payloads",
+      "status": "daily",
       "safeToHideInUi": true
     },
     {

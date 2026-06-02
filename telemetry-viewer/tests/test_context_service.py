@@ -809,6 +809,7 @@ class ContextServiceTest(unittest.TestCase):
                 ("data-quality-report", "knowledgeDataQualityReport"),
                 ("data-source-inventory", "knowledgeDataSourceInventory"),
                 ("query-coverage-matrix", "knowledgeQueryCoverageMatrix"),
+                ("navigation-decision-trace", "knowledgeNavigationDecisionTrace"),
                 ("coverage-report", "knowledgeCoverageReport"),
                 ("external-knowledge-status", "externalKnowledgeStatus"),
                 ("handoff-summary", "knowledgeHandoffSummary"),

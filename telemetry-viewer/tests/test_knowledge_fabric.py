@@ -1079,6 +1079,7 @@ def test_mcp_server_lists_tools_resources_and_searches_static_library():
     assert any(resource["uri"] == "osrs://library/routes" for resource in resources)
     assert any(resource["uri"] == "osrs://live/current-debug-context" for resource in resources)
     assert any(resource["uri"] == "osrs://debug/action-input-visibility" for resource in resources)
+    assert any(resource["uri"] == "osrs://debug/navigation-decision-trace" for resource in resources)
     assert any(resource["uri"] == "osrs://debug/data-quality-report" for resource in resources)
     assert any(resource["uri"] == "osrs://library/data-sources" for resource in resources)
     assert any(resource["uri"] == "osrs://external/source-status" for resource in resources)
@@ -1115,18 +1116,114 @@ def test_mcp_new_tools_return_structured_compact_json():
         coverage_result = mcp_server.call_tool("get_coverage_report", {"intent": "route_to_service", "limit": 3})
         probe_result = mcp_server.call_tool("probe_task", {"taskDescription": "woodcutting and bank logs", "limit": 3})
         visibility_result = mcp_server.call_tool("get_action_input_visibility", {})
+        navigation_result = mcp_server.call_tool(
+            "query_navigation_decision_trace",
+            {
+                "records": [
+                    {
+                        "schema": "navigation_decision_trace.v1",
+                        "decision": "wait",
+                        "reason": "navigation_in_progress",
+                    }
+                ]
+            },
+        )
     quality = json.loads(quality_result["content"][0]["text"])
     handoff = json.loads(handoff_result["content"][0]["text"])
     coverage = json.loads(coverage_result["content"][0]["text"])
     probe = json.loads(probe_result["content"][0]["text"])
     visibility = json.loads(visibility_result["content"][0]["text"])
+    navigation = json.loads(navigation_result["content"][0]["text"])
 
     assert quality["schema"] == "data_quality_report.v1"
     assert handoff["schema"] == "knowledge_fabric_handoff_summary.v1"
     assert coverage["schema"] == "coverage_report.v1"
     assert probe["schema"] == "task_probe_report.v1"
     assert visibility["schema"] == "action_input_visibility_context.v1"
+    assert navigation["schema"] == "navigation_decision_trace_summary.v1"
+    assert navigation["data"]["decisionCounts"] == {"wait": 1}
     assert handoff["data"]["currentBlocker"]["category"] == "route/pathing"
+
+
+def test_navigation_decision_trace_summary_exposes_suspicious_route_decision():
+    with tempfile.TemporaryDirectory() as tmp:
+        session = Path(tmp) / "session"
+        live_dir = session / "interaction_geometry" / "live"
+        live_dir.mkdir(parents=True)
+        trace = {
+            "actionTraceSchema": "action_trace.v2",
+            "proposedAction": "navigate_to_service",
+            "finalClassification": "navigation_no_progress",
+            "navigationDecisionTrace": [
+                {
+                    "schema": "navigation_decision_trace.v1",
+                    "tick": 100,
+                    "decision": "wait",
+                    "reason": "navigation_in_progress",
+                    "routeStep": {
+                        "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                        "currentNodeId": "courtyard",
+                        "currentStepIndex": 3,
+                        "routeStepStatus": "moving_to_staircase",
+                    },
+                    "distances": {"currentDistanceToGoal": 8, "distanceDelta": -2, "distanceImproving": True},
+                    "pending": {"nextActionAllowed": False, "observedResult": "movement_pending"},
+                    "chosenSubgoal": {"targetName": "Staircase", "targetTile": {"worldX": 3204, "worldY": 3229, "plane": 1}, "executable": True},
+                },
+                {
+                    "schema": "navigation_decision_trace.v1",
+                    "tick": 101,
+                    "decision": "click",
+                    "reason": "daemon_latest_tick_missing",
+                    "routeStep": {
+                        "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                        "currentNodeId": "courtyard",
+                        "currentStepIndex": 3,
+                        "routeStepStatus": "stale_state",
+                    },
+                    "distances": {"currentDistanceToGoal": 8, "distanceDelta": 0, "distanceImproving": False},
+                    "pending": {"nextActionAllowed": True, "observedResult": "stale_status"},
+                    "chosenSubgoal": {"targetName": "Staircase", "targetTile": {"worldX": 3204, "worldY": 3229, "plane": 1}, "executable": True},
+                },
+            ],
+        }
+        (live_dir / "last_action_trace.json").write_text(json.dumps(trace), encoding="utf-8")
+        fabric = knowledge_fabric.KnowledgeFabric.from_status(
+            {
+                "schema": "context_status.v1",
+                "sessionPath": str(session),
+                "latestTick": 101,
+                "worldModelPayloads": synthetic_payloads(),
+                "brain": {
+                    "serviceRouteContext": {
+                        "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                        "currentNodeId": "courtyard",
+                        "currentStepIndex": 3,
+                    }
+                },
+            }
+        )
+
+        summary = fabric.query_navigation_decision_trace(limit=5)
+        current = fabric.query_current_debug_context(limit=3)
+        visibility = fabric.query_action_input_visibility()
+        with patch.object(mcp_server, "_fabric", return_value=fabric):
+            mcp_payload = json.loads(mcp_server.call_tool("query_navigation_decision_trace", {"limit": 5})["content"][0]["text"])
+            resource_payload = json.loads(mcp_server.read_resource("osrs://debug/navigation-decision-trace")["contents"][0]["text"])
+
+    data = summary["data"]
+    assert summary["schema"] == "navigation_decision_trace_summary.v1"
+    assert summary["status"] == "WARN"
+    assert data["tracePresent"] is True
+    assert data["decisionCounts"] == {"click": 1, "wait": 1}
+    assert data["firstSuspiciousDecision"]["issue"] == "stale_state_allowed_click"
+    assert data["contextRows"][1]["reason"] == "daemon_latest_tick_missing"
+    assert data["latestDecision"]["decision"] == "click"
+    assert data["noLiveInput"] is True
+    assert current["data"]["navigationDecisionTrace"]["schema"] == "navigation_decision_trace_summary.v1"
+    assert visibility["data"]["navigationDecisionTrace"]["schema"] == "navigation_decision_trace_summary.v1"
+    assert mcp_payload["data"]["firstSuspiciousDecision"]["issue"] == "stale_state_allowed_click"
+    assert resource_payload["data"]["decisionCounts"] == {"click": 1, "wait": 1}
 
 
 def test_action_input_visibility_exposes_trace_input_and_phase_evidence():
@@ -1250,6 +1347,7 @@ def test_mcp_jsonrpc_lists_tools():
     assert any(tool["name"] == "explain_current_blocker" for tool in response["result"]["tools"])
     assert any(tool["name"] == "get_current_debug_context" for tool in response["result"]["tools"])
     assert any(tool["name"] == "get_action_input_visibility" for tool in response["result"]["tools"])
+    assert any(tool["name"] == "query_navigation_decision_trace" for tool in response["result"]["tools"])
 
 
 def test_performance_caps_report_cap_hit_and_truncated():
