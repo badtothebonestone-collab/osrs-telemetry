@@ -35,6 +35,13 @@ This document defines the intended shape of the live Python sidecar stack. It is
    - Current canonical code: `input_control/action_proposal.py`; compatibility import: `action_proposal_core.py`.
    - Shared target explanation comes from `candidate_core.explain_candidate`.
 
+4a. High-level task script API
+   - Authoring layer only: validates and compiles `task_script.v1` primitives into existing profile/action proposal intents.
+   - Current canonical code: `task_script_api.py`; example: `examples/woodcut_bank_task_script.json`.
+   - Allowed primitives are `collect`, `interact`, `walk_to`, `bank`, `deposit`, `close_bank`, `return_to_resource`, `wait_for_evidence`, `recover_loaded_scene`, and `repeat_until`.
+   - MCP/direct surfaces expose spec/validation/compile/explain/template/scene-probe queries. They do not expose raw arbitrary mouse/key/click tools.
+   - The compiled live path remains action proposal -> readiness -> hover/menu proof -> HumanInputController -> ArduinoHIDBackend -> input integrity -> lifecycle verification.
+
 5. Executor
    - Optional input execution only after readiness passes.
    - Current canonical code: `input_control/executor.py`, `input_control/action_lifecycle.py`, input geometry, and backends.

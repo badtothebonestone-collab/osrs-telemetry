@@ -39,10 +39,15 @@ MCP resource/tool:
 | What widgets/UI are open? | `list_seen_widgets` | `list_seen_widgets` | daemon widget/dialogue/bank state | `knowledge_fabric_seen_widgets.v1` | medium | compact widget state |
 | What item/object/NPC ID is this? | external lookup flags | `external_lookup_*` | external cache/static library | `external_*_lookup.v1` | advisory | cache miss |
 | What should a future script include? | `--probe-task` | `probe_task` | scene, static library, external cache | `task_probe_report.v1` | medium | loaded scene missing |
+| What high-level primitives can a script use? | Knowledge Fabric task script API | `get_task_script_api_spec` / `osrs://script-api/spec` | task script API spec | `task_script_api_spec.v1` | high | none |
+| Is this task script valid? | Knowledge Fabric task script API | `validate_task_script` | task script JSON | `task_script_validation.v1` | high | raw-input fields or unbounded loops |
+| What existing engine actions will this script use? | Knowledge Fabric task script API | `compile_task_script` / `explain_script_plan` | task script JSON, task policy | `task_script_plan.v1` | high | unknown primitive or missing evidence |
+| Can the current scene inform a script template? | Knowledge Fabric scene probe | `probe_task_from_scene` | loaded scene, static library, external cache | `task_scene_probe.v1` | medium | stale/missing loaded scene |
 
 ## Rules
 
 - External knowledge labels and explains; it does not execute.
 - Static route priors remain advisory until the live world model, projection, and hover/menu evidence verify an executable target.
 - MCP is read-only and does not expose click/input execution.
+- High-level task script tools compile into existing action proposal/readiness paths; they do not add raw mouse/key tools.
 - No query path should create `live_packets`, NDJSON, or JSONL live archives.

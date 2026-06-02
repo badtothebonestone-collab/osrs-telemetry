@@ -216,6 +216,17 @@
       "safeToHideInUi": true
     },
     {
+      "name": "task_script_api.py",
+      "category": "daily",
+      "purpose": "High-level task script primitive contract, validation, compile, explanation, templates, and scene-probe helpers over the existing engine.",
+      "dailyRequired": false,
+      "normalCommand": "MCP tools: get_task_script_api_spec, validate_task_script, compile_task_script, explain_script_plan, suggest_task_template, probe_task_from_scene",
+      "input": "task_script.v1 JSON, static task policies, loaded-scene Knowledge Fabric data for probes",
+      "output": "task_script_api_spec.v1, task_script_validation.v1, task_script_plan.v1, task_script_explanation.v1, task_scene_probe.v1",
+      "status": "daily",
+      "safeToHideInUi": true
+    },
+    {
       "name": "capability_registry.json",
       "category": "daily",
       "purpose": "Read-only capability metadata exposed by context APIs.",

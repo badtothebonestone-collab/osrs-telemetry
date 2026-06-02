@@ -27,6 +27,7 @@ Use this index to avoid following stale plans as current instructions.
 | `telemetry-viewer/docs/current_pipeline_manifest.md` | Current pipeline manifest. |
 | `telemetry-viewer/docs/query_coverage_matrix.md` | Query coverage matrix. |
 | `telemetry-viewer/docs/data_source_inventory.md` | Current data source inventory. |
+| `telemetry-viewer/docs/task_script_api.md` | High-level task script API and primitive contract. |
 
 ## Reference Docs
 

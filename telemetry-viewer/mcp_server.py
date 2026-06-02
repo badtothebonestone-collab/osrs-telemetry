@@ -10,6 +10,7 @@ import context_service
 import external_knowledge
 import external_knowledge_cache
 import knowledge_fabric
+import task_script_api
 
 
 SERVER_NAME = "osrs-telemetry-knowledge-fabric"
@@ -104,6 +105,11 @@ def tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "get_latest_action_trace",
             "description": "Return latest action-trace entries indexed from the active session.",
+            "inputSchema": {"type": "object", "properties": {"daemonUrl": string, "snapshotUrl": string}},
+        },
+        {
+            "name": "get_action_input_visibility",
+            "description": "Return Codex-visible planned action, target, coordinate conversion, hover/click proof, HumanInputController, Arduino/input-integrity phase evidence, and readiness context. Read-only; no raw input tools are exposed.",
             "inputSchema": {"type": "object", "properties": {"daemonUrl": string, "snapshotUrl": string}},
         },
         {
@@ -233,6 +239,36 @@ def tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {"taskDescription": string, "profile": string, "limit": integer, "captureBundle": {"type": "boolean"}, "daemonUrl": string, "snapshotUrl": string}},
         },
         {
+            "name": "get_task_script_api_spec",
+            "description": "Return the high-level task script API contract, allowed primitives, safety policies, and woodcut_bank example.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "validate_task_script",
+            "description": "Validate a high-level task script without live input or raw click/key exposure.",
+            "inputSchema": {"type": "object", "properties": {"script": {"type": ["object", "string"]}}},
+        },
+        {
+            "name": "compile_task_script",
+            "description": "Compile a high-level task script into existing profile/action proposal intents. Read-only; no live input.",
+            "inputSchema": {"type": "object", "properties": {"script": {"type": ["object", "string"]}}},
+        },
+        {
+            "name": "explain_script_plan",
+            "description": "Explain the compiled task script plan, evidence gates, canonical input pipeline, and failure classifications.",
+            "inputSchema": {"type": "object", "properties": {"script": {"type": ["object", "string"]}}},
+        },
+        {
+            "name": "suggest_task_template",
+            "description": "Suggest a high-level task script template such as woodcut_bank. Read-only; external facts remain advisory.",
+            "inputSchema": {"type": "object", "properties": {"taskDescription": string, "profile": string}},
+        },
+        {
+            "name": "probe_task_from_scene",
+            "description": "Probe the loaded scene and suggest a high-level task template. Read-only; live truth remains RuneLite/8893/WorldModel/8890.",
+            "inputSchema": {"type": "object", "properties": {"taskDescription": string, "profile": string, "limit": integer, "daemonUrl": string, "snapshotUrl": string}},
+        },
+        {
             "name": "list_seen_widgets",
             "description": "List compact widget/dialogue/bank UI evidence observed in daemon status.",
             "inputSchema": {"type": "object", "properties": {"limit": integer, "daemonUrl": string, "snapshotUrl": string}},
@@ -314,6 +350,7 @@ def resource_definitions() -> list[dict[str, Any]]:
         {"uri": "osrs://live/current-blocker", "name": "Current blocker explanation", "mimeType": "application/json"},
         {"uri": "osrs://debug/current-context", "name": "Current debug context", "mimeType": "application/json"},
         {"uri": "osrs://debug/blocker", "name": "Current blocker explanation", "mimeType": "application/json"},
+        {"uri": "osrs://debug/action-input-visibility", "name": "Action/input visibility context", "mimeType": "application/json"},
         {"uri": "osrs://debug/latest-script-authoring-context", "name": "Latest script authoring context bundle", "mimeType": "application/json"},
         {"uri": "osrs://debug/latest-replay-scenario", "name": "Latest replay scenario", "mimeType": "application/json"},
         {"uri": "osrs://debug/data-quality-report", "name": "Data quality report", "mimeType": "application/json"},
@@ -331,6 +368,8 @@ def resource_definitions() -> list[dict[str, Any]]:
         {"uri": "osrs://library/actions", "name": "Known target actions", "mimeType": "application/json"},
         {"uri": "osrs://library/data-sources", "name": "Data source inventory", "mimeType": "application/json"},
         {"uri": "osrs://library/query-coverage", "name": "Query coverage matrix", "mimeType": "application/json"},
+        {"uri": "osrs://script-api/spec", "name": "High-level task script API spec", "mimeType": "application/json"},
+        {"uri": "osrs://script-api/woodcut-bank-example", "name": "woodcut_bank task script example", "mimeType": "application/json"},
         {"uri": "osrs://external/items", "name": "External item lookup cache", "mimeType": "application/json"},
         {"uri": "osrs://external/item-map", "name": "External item ID/name map", "mimeType": "application/json"},
         {"uri": "osrs://external/wiki-cache", "name": "External wiki cache status", "mimeType": "application/json"},
@@ -387,6 +426,8 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> dict[str, A
                 "data": fabric.debug_evidence.get("latestActionTraces", []),
                 "source": "debug_evidence_index",
             }
+        elif name == "get_action_input_visibility":
+            payload = _fabric(args).query_action_input_visibility()
         elif name == "get_latest_visual_bundle":
             payload = _fabric(args).query_debug_evidence(reason=args.get("reason"), limit=args.get("limit"))
         elif name == "search_session_memory":
@@ -463,6 +504,22 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> dict[str, A
                 limit=args.get("limit"),
                 capture_bundle=bool(args.get("captureBundle", False)),
             )
+        elif name == "get_task_script_api_spec":
+            payload = task_script_api.script_api_spec()
+        elif name == "validate_task_script":
+            payload = task_script_api.validate_task_script(args.get("script") or {})
+        elif name == "compile_task_script":
+            payload = task_script_api.compile_task_script(args.get("script") or {})
+        elif name == "explain_script_plan":
+            payload = task_script_api.explain_script_plan(args.get("script") or {})
+        elif name == "suggest_task_template":
+            payload = task_script_api.suggest_task_template(args.get("taskDescription"), profile=args.get("profile"))
+        elif name == "probe_task_from_scene":
+            payload = _fabric(args).probe_task_from_scene(
+                str(args.get("taskDescription") or ""),
+                profile=str(args.get("profile") or "woodcutting"),
+                limit=args.get("limit"),
+            )
         elif name == "list_seen_widgets":
             payload = _fabric(args).list_seen_widgets(limit=args.get("limit"))
         elif name == "list_seen_inventory_items":
@@ -524,6 +581,8 @@ def read_resource(uri: str, arguments: dict[str, Any] | None = None) -> dict[str
         payload = fabric.query_current_debug_context() if fabric else {}
     elif uri == "osrs://debug/blocker":
         payload = fabric.explain_current_blocker() if fabric else {}
+    elif uri == "osrs://debug/action-input-visibility":
+        payload = fabric.query_action_input_visibility() if fabric else {}
     elif uri == "osrs://debug/latest-script-authoring-context":
         payload = knowledge_fabric.latest_artifact(fabric.session_path if fabric else None, "script_authoring_context")
     elif uri == "osrs://debug/latest-replay-scenario":
@@ -591,6 +650,10 @@ def read_resource(uri: str, arguments: dict[str, Any] | None = None) -> dict[str
         payload = fabric.data_source_inventory() if fabric else {}
     elif uri == "osrs://library/query-coverage":
         payload = fabric.query_coverage_matrix() if fabric else {}
+    elif uri == "osrs://script-api/spec":
+        payload = task_script_api.script_api_spec()
+    elif uri == "osrs://script-api/woodcut-bank-example":
+        payload = task_script_api.woodcut_bank_template()
     elif uri == "osrs://external/items":
         root = external_knowledge_cache.ensure_cache()
         payload = external_knowledge_cache.read_json(root / "item_name_map.json", {"schema": "external_item_name_map.v1", "itemsByName": {}})

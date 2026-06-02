@@ -455,12 +455,74 @@ def _input_integrity_fail_on_bypass(options: Any | None) -> bool:
     return bool(getattr(options, "input_integrity_fail_on_bypass", True))
 
 
+def _input_integrity_counts(status: dict[str, Any] | None) -> dict[str, int]:
+    status = status if isinstance(status, dict) else {}
+    flags = status.get("injectionFlags") if isinstance(status.get("injectionFlags"), dict) else {}
+    mouse_injected = int(flags.get("mouseInjectedCount") or 0)
+    keyboard_injected = int(flags.get("keyboardInjectedCount") or 0)
+    mouse_lower = int(flags.get("mouseLowerIlInjectedCount") or 0)
+    keyboard_lower = int(flags.get("keyboardLowerIlInjectedCount") or 0)
+    return {
+        "mouseInjectedCount": mouse_injected,
+        "keyboardInjectedCount": keyboard_injected,
+        "mouseLowerIlInjectedCount": mouse_lower,
+        "keyboardLowerIlInjectedCount": keyboard_lower,
+        "injectedEvents": int(status.get("injectedEvents") or mouse_injected + keyboard_injected),
+        "lowerIlInjectedEvents": int(status.get("lowerIlInjectedEvents") or mouse_lower + keyboard_lower),
+    }
+
+
+def _input_integrity_phase_report(status: dict[str, Any]) -> dict[str, Any]:
+    before = status.get("inputIntegrityStatusBefore") if isinstance(status.get("inputIntegrityStatusBefore"), dict) else status.get("inputIntegrityStatus")
+    after = status.get("inputIntegrityStatusAfter") if isinstance(status.get("inputIntegrityStatusAfter"), dict) else {}
+    before_counts = _input_integrity_counts(before if isinstance(before, dict) else {})
+    after_counts = _input_integrity_counts(after if isinstance(after, dict) else {})
+    delta = status.get("inputIntegrityDelta") if isinstance(status.get("inputIntegrityDelta"), dict) else {}
+    injected_delta = int(delta.get("mouseInjectedCountDelta") or 0) + int(delta.get("keyboardInjectedCountDelta") or 0)
+    lower_delta = int(delta.get("lowerIlInjectedCountDelta") or 0)
+    direct_delta = int(delta.get("directBackendBypassCountDelta") or 0)
+    hard_blocker = bool(injected_delta > 0 or lower_delta > 0 or direct_delta > 0)
+    return {
+        "schema": "input_integrity_phase_report.v1",
+        "policy": "phase_aware_live_window_only",
+        "operator_phase": {
+            "operatorInjectedEvents": before_counts["injectedEvents"],
+            "operatorLowerIlInjectedEvents": before_counts["lowerIlInjectedEvents"],
+            "blocking": False,
+            "classification": "operatorInjectedEvents" if before_counts["injectedEvents"] or before_counts["lowerIlInjectedEvents"] else "none",
+        },
+        "pre_live_phase": {
+            "baselineEstablished": isinstance(before, dict) and bool(before),
+            "monitorPassAtBaseline": before.get("monitorPass") if isinstance(before, dict) else None,
+            "injectedEventsAtBaseline": before_counts["injectedEvents"],
+            "lowerIlInjectedEventsAtBaseline": before_counts["lowerIlInjectedEvents"],
+            "blocking": False,
+            "rule": "pre-live injected totals are baseline counts; only live deltas block",
+        },
+        "live_action_phase": {
+            "injectedEventsDelta": injected_delta,
+            "lowerIlInjectedEventsDelta": lower_delta,
+            "directBackendBypassCountDelta": direct_delta,
+            "hardBlocker": hard_blocker,
+            "blockingReason": "live_input_integrity_delta" if hard_blocker else None,
+        },
+        "post_live_phase": {
+            "monitorPassAfter": after.get("monitorPass") if isinstance(after, dict) else None,
+            "injectedEventsAfter": after_counts["injectedEvents"],
+            "lowerIlInjectedEventsAfter": after_counts["lowerIlInjectedEvents"],
+            "stopAllSent": bool(status.get("stopAllSent")),
+            "disarmed": bool(status.get("arduinoDisarmed")),
+        },
+    }
+
+
 def _read_input_integrity_status(
     options: Any | None,
     backend: Any,
     *,
     direct_backend_bypass_count: int = 0,
     require_armed: bool = False,
+    fail_on_injected: bool | None = None,
 ) -> dict[str, Any]:
     return check_arduino_monitor_status(
         require_monitor=bool(getattr(options, "arduino_require_monitor", False)),
@@ -472,7 +534,7 @@ def _read_input_integrity_status(
         arduino_armed=bool(getattr(backend, "armed", False)),
         software_input_allowed=_software_input_allowed(options),
         direct_backend_bypass_count=direct_backend_bypass_count,
-        fail_on_injected=_input_integrity_fail_on_injected(options),
+        fail_on_injected=_input_integrity_fail_on_injected(options) if fail_on_injected is None else bool(fail_on_injected),
         fail_on_bypass=_input_integrity_fail_on_bypass(options),
         require_armed=require_armed,
         max_event_age_ms=int(getattr(options, "arduino_monitor_max_age_ms", 3000) or 3000),
@@ -508,9 +570,10 @@ def _live_input_status(options: Any | None, backend: Any) -> dict[str, Any]:
         status["blockReason"] = "arduino_backend_required"
         return status
     if _is_arduino_backend(backend) and bool(getattr(options, "arduino_require_monitor", False)):
-        monitor = _read_input_integrity_status(options, backend, direct_backend_bypass_count=0, require_armed=False)
+        monitor = _read_input_integrity_status(options, backend, direct_backend_bypass_count=0, require_armed=False, fail_on_injected=False)
         status["monitor"] = monitor
         status["inputIntegrityStatus"] = monitor.get("inputIntegrityStatus") if isinstance(monitor.get("inputIntegrityStatus"), dict) else dict(monitor)
+        status["inputIntegrityPhasePolicy"] = "operator_or_pre_live_injected_counts_do_not_block; live_action_delta_blocks"
         if not bool(monitor.get("monitorPass")):
             status["status"] = "FAIL"
             status["blockReason"] = monitor.get("monitorBlockReason") or "arduino_monitor_failed"
@@ -532,11 +595,12 @@ def _start_live_input_session(options: Any | None, backend: Any) -> dict[str, An
             status["arduinoSessionTokenHash"] = arduino_status.get("sessionTokenHash") if isinstance(arduino_status, dict) else None
             _write_input_backend_status(options, backend, armed=True, direct_backend_bypass_count=0)
             if bool(getattr(options, "arduino_require_monitor", False)):
-                integrity_before = _read_input_integrity_status(options, backend, direct_backend_bypass_count=0, require_armed=True)
+                integrity_before = _read_input_integrity_status(options, backend, direct_backend_bypass_count=0, require_armed=True, fail_on_injected=False)
                 status["monitor"] = integrity_before
                 status["inputIntegrityStatusBefore"] = (
                     integrity_before.get("inputIntegrityStatus") if isinstance(integrity_before.get("inputIntegrityStatus"), dict) else dict(integrity_before)
                 )
+                status["inputIntegrityPhasePolicy"] = "pre_live_baseline_established; live_action_delta_blocks"
                 if not bool(integrity_before.get("monitorPass")):
                     status["status"] = "FAIL"
                     status["blockReason"] = integrity_before.get("monitorBlockReason") or "input_integrity_failed"
@@ -615,7 +679,7 @@ def _attach_live_input_status(
     direct_count = _direct_backend_bypass_count(result)
     if backend is not None and _is_arduino_backend(backend) and bool(getattr(options, "arduino_require_monitor", False)):
         try:
-            after_monitor = _read_input_integrity_status(options, backend, direct_backend_bypass_count=direct_count, require_armed=False)
+            after_monitor = _read_input_integrity_status(options, backend, direct_backend_bypass_count=direct_count, require_armed=False, fail_on_injected=False)
             status["inputIntegrityStatusAfter"] = (
                 after_monitor.get("inputIntegrityStatus") if isinstance(after_monitor.get("inputIntegrityStatus"), dict) else dict(after_monitor)
             )
@@ -626,6 +690,8 @@ def _attach_live_input_status(
                 status["inputIntegrityDelta"] = input_integrity_delta(before, after)
         except Exception as error:  # noqa: BLE001
             status["inputIntegrityReadAfterError"] = f"{type(error).__name__}: {error}"
+    phase_report = _input_integrity_phase_report(status)
+    status["inputIntegrityPhaseReport"] = phase_report
     if isinstance(result.action_trace, dict):
         result.action_trace["liveInput"] = dict(status)
         before_status = status.get("inputIntegrityStatusBefore") or status.get("inputIntegrityStatus")
@@ -644,6 +710,7 @@ def _attach_live_input_status(
                     "directBackendBypassCountDelta": delta.get("directBackendBypassCountDelta", 0),
                 }
             )
+        result.action_trace["inputIntegrityPhaseReport"] = phase_report
         monitor = status.get("monitorAfter") if isinstance(status.get("monitorAfter"), dict) else status.get("monitor")
         if isinstance(monitor, dict):
             result.action_trace["monitorPass"] = monitor.get("monitorPass")

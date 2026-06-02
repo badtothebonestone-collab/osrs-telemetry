@@ -10,6 +10,7 @@ VIEWER_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(VIEWER_DIR))
 
 import execute_next_action as execute_cli
+from input_control.executor import ExecutionResult, _attach_live_input_status, _start_live_input_session
 from input_control.input_integrity import (
     build_input_integrity_status,
     build_vmware_autoconnect_recommendation,
@@ -253,6 +254,79 @@ class SelfTestBackend:
 
 
 class InputIntegritySelfTestTest(unittest.TestCase):
+    def test_pre_live_operator_injected_counts_do_not_block_arming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "status.json"
+            status_path.write_text(
+                json.dumps(
+                    raw_status(
+                        arduinoDetected={"comPortMatched": True},
+                        injectionFlags={"mouseInjectedCount": 3, "keyboardLowerIlInjectedCount": 1},
+                    )
+                ),
+                encoding="utf-8",
+            )
+            backend = SelfTestBackend()
+            args = Namespace(
+                execute=True,
+                hover_only=False,
+                camera_self_test=False,
+                arduino_require_monitor=True,
+                arduino_monitor_status_path=str(status_path),
+                arduino_vid="VID_2341",
+                arduino_pid="PID_8036",
+                arduino_port="COM9",
+                arduino_monitor_max_age_ms=10**15,
+                arduino_session_token="session",
+                input_integrity_fail_on_injected=True,
+                input_integrity_fail_on_bypass=True,
+            )
+
+            status = _start_live_input_session(args, backend)
+
+        self.assertEqual(status["status"], "PASS")
+        self.assertTrue(status["arduinoArmed"])
+        self.assertEqual(status["inputIntegrityStatusBefore"]["injectedEvents"], 3)
+        self.assertEqual(status["inputIntegrityStatusBefore"]["lowerIlInjectedEvents"], 1)
+
+    def test_live_action_injected_delta_remains_hard_blocker(self):
+        before = build_input_integrity_status(
+            raw_status(injectionFlags={"mouseInjectedCount": 3, "keyboardLowerIlInjectedCount": 1}),
+            fail_on_injected=False,
+            now_ms=1010,
+        )
+        after = build_input_integrity_status(
+            raw_status(injectionFlags={"mouseInjectedCount": 4, "keyboardLowerIlInjectedCount": 1}),
+            fail_on_injected=False,
+            now_ms=1020,
+        )
+        status = {
+            "schema": "live_input_policy.v1",
+            "liveInputBackend": "arduino",
+            "liveInputBackendRequired": True,
+            "softwareInputAllowed": False,
+            "inputIntegrityStatusBefore": before,
+            "inputIntegrityStatusAfter": after,
+            "inputIntegrityDelta": input_integrity_delta(before, after),
+        }
+        result = ExecutionResult(
+            status="PASS",
+            proposed_action="select_resource_target",
+            dry_run=False,
+            action_trace={"actionTraceSchema": "action_trace.v2", "humanInput": {"directBackendBypassCount": 0}},
+        )
+        args = Namespace(execute=True, hover_only=False, camera_self_test=False, input_integrity_fail_on_injected=True)
+
+        _attach_live_input_status(result, status, options=args)
+
+        phase = result.action_trace["inputIntegrityPhaseReport"]
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("live_input.injected_input", result.missing_capabilities)
+        self.assertEqual(phase["operator_phase"]["operatorInjectedEvents"], 3)
+        self.assertFalse(phase["operator_phase"]["blocking"])
+        self.assertEqual(phase["live_action_phase"]["injectedEventsDelta"], 1)
+        self.assertTrue(phase["live_action_phase"]["hardBlocker"])
+
     def test_self_test_disarms_arduino_even_on_exception(self):
         with tempfile.TemporaryDirectory() as tmp:
             status_path = Path(tmp) / "status.json"

@@ -832,9 +832,11 @@ def test_data_source_inventory_and_query_coverage_include_expected_sources():
     source_names = [item["sourceName"] for item in inventory["data"]["sources"]]
     assert "8893 PluginSnapshotEndpoint" in source_names
     assert "external OSRS knowledge cache" in source_names
+    assert "action_input_visibility_context" in source_names
     assert inventory["data"]["livePacketArchiveRemoved"] is True
     assert coverage["schema"] == "query_coverage_matrix.v1"
     assert any("item/object/NPC ID" in row["question"] for row in coverage["data"]["rows"])
+    assert any("planned click/input" in row["question"] for row in coverage["data"]["rows"])
 
 
 def test_external_source_registry_cache_and_lookup_behaviour():
@@ -1064,6 +1066,7 @@ def test_mcp_server_lists_tools_resources_and_searches_static_library():
 
     assert any(tool["name"] == "query_resource_candidates" for tool in tools)
     assert any(tool["name"] == "get_current_debug_context" for tool in tools)
+    assert any(tool["name"] == "get_action_input_visibility" for tool in tools)
     assert any(tool["name"] == "capture_script_authoring_context" for tool in tools)
     assert any(tool["name"] == "get_data_quality_report" for tool in tools)
     assert any(tool["name"] == "get_data_source_inventory" for tool in tools)
@@ -1071,8 +1074,11 @@ def test_mcp_server_lists_tools_resources_and_searches_static_library():
     assert any(tool["name"] == "external_lookup_item_id" for tool in tools)
     assert any(tool["name"] == "get_handoff_summary" for tool in tools)
     assert not any(tool["name"].startswith(("execute_", "click_", "input_")) for tool in tools)
+    forbidden_raw_names = {"mouseDown", "mouseUp", "keyDown", "keyUp", "click", "raw_click", "raw_mouse_down"}
+    assert forbidden_raw_names.isdisjoint({tool["name"] for tool in tools})
     assert any(resource["uri"] == "osrs://library/routes" for resource in resources)
     assert any(resource["uri"] == "osrs://live/current-debug-context" for resource in resources)
+    assert any(resource["uri"] == "osrs://debug/action-input-visibility" for resource in resources)
     assert any(resource["uri"] == "osrs://debug/data-quality-report" for resource in resources)
     assert any(resource["uri"] == "osrs://library/data-sources" for resource in resources)
     assert any(resource["uri"] == "osrs://external/source-status" for resource in resources)
@@ -1108,16 +1114,133 @@ def test_mcp_new_tools_return_structured_compact_json():
         handoff_result = mcp_server.call_tool("get_handoff_summary", {})
         coverage_result = mcp_server.call_tool("get_coverage_report", {"intent": "route_to_service", "limit": 3})
         probe_result = mcp_server.call_tool("probe_task", {"taskDescription": "woodcutting and bank logs", "limit": 3})
+        visibility_result = mcp_server.call_tool("get_action_input_visibility", {})
     quality = json.loads(quality_result["content"][0]["text"])
     handoff = json.loads(handoff_result["content"][0]["text"])
     coverage = json.loads(coverage_result["content"][0]["text"])
     probe = json.loads(probe_result["content"][0]["text"])
+    visibility = json.loads(visibility_result["content"][0]["text"])
 
     assert quality["schema"] == "data_quality_report.v1"
     assert handoff["schema"] == "knowledge_fabric_handoff_summary.v1"
     assert coverage["schema"] == "coverage_report.v1"
     assert probe["schema"] == "task_probe_report.v1"
+    assert visibility["schema"] == "action_input_visibility_context.v1"
     assert handoff["data"]["currentBlocker"]["category"] == "route/pathing"
+
+
+def test_action_input_visibility_exposes_trace_input_and_phase_evidence():
+    with tempfile.TemporaryDirectory() as tmp:
+        session = Path(tmp) / "session"
+        live_dir = session / "interaction_geometry" / "live"
+        live_dir.mkdir(parents=True)
+        trace = {
+            "actionTraceSchema": "action_trace.v2",
+            "selectedTarget": {
+                "name": "Tree",
+                "classId": "tree",
+                "targetType": "sceneObject",
+                "worldX": 3213,
+                "worldY": 3238,
+                "plane": 0,
+                "actionTargetSource": "live_resource_candidate",
+                "actionability": "needs_hover_confirmation",
+                "targetViewState": {"viewQualityClassification": "target_actionable"},
+                "hoverConfirmedTopExpected": True,
+            },
+            "proposedAction": "select_resource_target",
+            "actionIntentType": "resource_object_action",
+            "intendedPoint": {
+                "canvas": {"x": 123, "y": 234},
+                "screen": {"x": 1123, "y": 734},
+                "coordinateSpace": "canvas",
+                "displayScaleApplied": True,
+                "displayScaleReason": "snapshot_display_scale",
+                "clickPointResolution": {
+                    "screenPointAfterScaling": {"x": 1123, "y": 734},
+                    "movementSafetyPreflight": {"status": "PASS", "source": "pointer_calibration_record", "allowedWindow": "runelite"},
+                },
+            },
+            "mouseMove": {
+                "startScreenPoint": {"x": 900, "y": 700},
+                "plannedEndScreenPoint": {"x": 1123, "y": 734},
+                "endScreenPoint": {"x": 1122, "y": 735},
+            },
+            "clientTick": {
+                "acceptedHoverSample": {"topOption": "Chop down", "topTarget": "Tree"},
+                "rejectedHoverSamples": [],
+                "hoverConfirmationSamples": [{"topOption": "Chop down", "topTarget": "Tree"}],
+                "lastMenuOptionClickedAfter": {"option": "Chop down", "target": "Tree", "sourceEvent": "MenuOptionClicked"},
+                "clickedMenuClassification": "clicked_expected_action",
+            },
+            "humanInput": {
+                "profile": "steady",
+                "movementGenerator": "minimum_jerk",
+                "liveInputBackend": "arduino",
+                "directBackendBypassCount": 0,
+            },
+            "inputIntegrityStatusBefore": {
+                "monitorPass": True,
+                "injectionFlags": {
+                    "mouseInjectedCount": 2,
+                    "keyboardInjectedCount": 0,
+                    "mouseLowerIlInjectedCount": 0,
+                    "keyboardLowerIlInjectedCount": 0,
+                },
+                "backend": {"directBackendBypassCount": 0},
+            },
+            "inputIntegrityStatusAfter": {
+                "monitorPass": True,
+                "injectionFlags": {
+                    "mouseInjectedCount": 2,
+                    "keyboardInjectedCount": 0,
+                    "mouseLowerIlInjectedCount": 0,
+                    "keyboardLowerIlInjectedCount": 0,
+                },
+                "backend": {"directBackendBypassCount": 0},
+            },
+            "mouseInjectedCountDelta": 0,
+            "keyboardInjectedCountDelta": 0,
+            "lowerIlInjectedCountDelta": 0,
+            "directBackendBypassCountDelta": 0,
+            "actionReadiness": {"status": "PASS", "executionAllowed": True, "blockers": [], "warnings": []},
+            "finalClassification": "clicked_expected_action",
+        }
+        (live_dir / "last_action_trace.json").write_text(json.dumps(trace), encoding="utf-8")
+        fabric = knowledge_fabric.KnowledgeFabric.from_status(
+            {
+                "schema": "context_status.v1",
+                "sessionPath": str(session),
+                "latestTick": 42,
+                "worldModelPayloads": synthetic_payloads(),
+                "clientTickHot": {"lastMenuOptionClicked": {"option": "Chop down", "target": "Tree"}},
+            }
+        )
+
+        result = fabric.query_action_input_visibility()
+        current = fabric.query_current_debug_context(limit=3)
+        with patch.object(mcp_server, "_fabric", return_value=fabric):
+            mcp_payload = json.loads(mcp_server.call_tool("get_action_input_visibility", {})["content"][0]["text"])
+
+    data = result["data"]
+    phase = data["input_integrity_status"]["phaseCounts"]
+    assert result["schema"] == "action_input_visibility_context.v1"
+    assert data["plannedAction"] == "select_resource_target"
+    assert data["plannedTarget"]["name"] == "Tree"
+    assert data["plannedScreenPoint"] == {"x": 1123, "y": 734}
+    assert data["displayScaleApplied"] is True
+    assert data["arduinoCalibrationStatus"]["movementSafetyStatus"] == "PASS"
+    assert data["humanInputController"]["liveInputBackend"] == "arduino"
+    assert data["cursorMovementTrace"]["lastMovementProof"]["endScreenPoint"] == {"x": 1122, "y": 735}
+    assert data["hoverConfirmationEvidence"]["acceptedHoverSample"]["topOption"] == "Chop down"
+    assert data["menuOptionClickedEvidence"]["sourceEvent"] == "MenuOptionClicked"
+    assert phase["operator_phase"]["operatorInjectedEvents"] == 2
+    assert phase["operator_phase"]["blocking"] is False
+    assert phase["live_action_phase"]["hardBlocker"] is False
+    assert data["directBackendBypassCount"] == 0
+    assert data["rawInputBypassToolsExposed"] is False
+    assert current["data"]["actionInputVisibility"]["schema"] == "action_input_visibility_context.v1"
+    assert mcp_payload["data"]["plannedTarget"]["name"] == "Tree"
 
 
 def test_mcp_jsonrpc_lists_tools():
@@ -1126,6 +1249,7 @@ def test_mcp_jsonrpc_lists_tools():
     assert response["id"] == 1
     assert any(tool["name"] == "explain_current_blocker" for tool in response["result"]["tools"])
     assert any(tool["name"] == "get_current_debug_context" for tool in response["result"]["tools"])
+    assert any(tool["name"] == "get_action_input_visibility" for tool in response["result"]["tools"])
 
 
 def test_performance_caps_report_cap_hit_and_truncated():
@@ -1253,6 +1377,9 @@ class KnowledgeFabricTest(unittest.TestCase):
 
     def test_mcp_new_tools_return_structured_compact_json(self):
         test_mcp_new_tools_return_structured_compact_json()
+
+    def test_action_input_visibility_exposes_trace_input_and_phase_evidence(self):
+        test_action_input_visibility_exposes_trace_input_and_phase_evidence()
 
     def test_performance_caps_report_cap_hit_and_truncated(self):
         test_performance_caps_report_cap_hit_and_truncated()

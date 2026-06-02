@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import external_knowledge
+import task_script_api
 import target_view_core
 import world_model_client
 import world_model_core
@@ -35,6 +36,7 @@ DATA_SOURCE_INVENTORY_SCHEMA = "data_source_inventory.v1"
 QUERY_COVERAGE_SCHEMA = "query_coverage_matrix.v1"
 COVERAGE_REPORT_SCHEMA = "coverage_report.v1"
 TASK_PROBE_SCHEMA = "task_probe_report.v1"
+ACTION_INPUT_VISIBILITY_SCHEMA = "action_input_visibility_context.v1"
 
 VIEWER_DIR = Path(__file__).resolve().parent
 TARGET_PROFILES_PATH = VIEWER_DIR / "target_profiles.json"
@@ -113,6 +115,166 @@ def _read_json(path: Path) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _trace_payload(value: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(value.get("actionTrace"), dict):
+        return _dict(value.get("actionTrace"))
+    results = _list(value.get("actionResults"))
+    for item in reversed(results):
+        if isinstance(item, dict) and isinstance(item.get("actionTrace"), dict):
+            return dict(item["actionTrace"])
+    return value if isinstance(value, dict) else {}
+
+
+def _input_count_summary(status: dict[str, Any] | None) -> dict[str, int]:
+    status = status if isinstance(status, dict) else {}
+    flags = _dict(status.get("injectionFlags"))
+    mouse_injected = _int(flags.get("mouseInjectedCount")) or 0
+    keyboard_injected = _int(flags.get("keyboardInjectedCount")) or 0
+    mouse_lower = _int(flags.get("mouseLowerIlInjectedCount")) or 0
+    keyboard_lower = _int(flags.get("keyboardLowerIlInjectedCount")) or 0
+    return {
+        "mouseInjectedCount": mouse_injected,
+        "keyboardInjectedCount": keyboard_injected,
+        "mouseLowerIlInjectedCount": mouse_lower,
+        "keyboardLowerIlInjectedCount": keyboard_lower,
+        "injectedEvents": _int(status.get("injectedEvents")) or mouse_injected + keyboard_injected,
+        "lowerIlInjectedEvents": _int(status.get("lowerIlInjectedEvents")) or mouse_lower + keyboard_lower,
+    }
+
+
+def _trace_input_phase_summary(trace: dict[str, Any]) -> dict[str, Any]:
+    report = _dict(trace.get("inputIntegrityPhaseReport"))
+    if report:
+        return report
+    before = _dict(trace.get("inputIntegrityStatusBefore"))
+    after = _dict(trace.get("inputIntegrityStatusAfter"))
+    before_counts = _input_count_summary(before)
+    after_counts = _input_count_summary(after)
+    injected_delta = (_int(trace.get("mouseInjectedCountDelta")) or 0) + (_int(trace.get("keyboardInjectedCountDelta")) or 0)
+    lower_delta = _int(trace.get("lowerIlInjectedCountDelta")) or 0
+    direct_delta = _int(trace.get("directBackendBypassCountDelta")) or 0
+    return {
+        "schema": "input_integrity_phase_report.v1",
+        "policy": "phase_aware_live_window_only",
+        "operator_phase": {
+            "operatorInjectedEvents": before_counts["injectedEvents"],
+            "operatorLowerIlInjectedEvents": before_counts["lowerIlInjectedEvents"],
+            "blocking": False,
+            "classification": "operatorInjectedEvents" if before_counts["injectedEvents"] or before_counts["lowerIlInjectedEvents"] else "none",
+        },
+        "pre_live_phase": {
+            "baselineEstablished": bool(before),
+            "monitorPassAtBaseline": before.get("monitorPass"),
+            "injectedEventsAtBaseline": before_counts["injectedEvents"],
+            "lowerIlInjectedEventsAtBaseline": before_counts["lowerIlInjectedEvents"],
+            "blocking": False,
+        },
+        "live_action_phase": {
+            "injectedEventsDelta": injected_delta,
+            "lowerIlInjectedEventsDelta": lower_delta,
+            "directBackendBypassCountDelta": direct_delta,
+            "hardBlocker": bool(injected_delta > 0 or lower_delta > 0 or direct_delta > 0),
+        },
+        "post_live_phase": {
+            "monitorPassAfter": after.get("monitorPass"),
+            "injectedEventsAfter": after_counts["injectedEvents"],
+            "lowerIlInjectedEventsAfter": after_counts["lowerIlInjectedEvents"],
+        },
+    }
+
+
+def _action_trace_visibility(trace: dict[str, Any], *, path: str | None = None) -> dict[str, Any]:
+    trace = _trace_payload(trace)
+    selected = _dict(trace.get("selectedTarget"))
+    intended = _dict(trace.get("intendedPoint"))
+    client_tick = _dict(trace.get("clientTick"))
+    live_input = _dict(trace.get("liveInput"))
+    human_input = _dict(trace.get("humanInput"))
+    mouse_move = _dict(trace.get("mouseMove"))
+    readiness = _dict(trace.get("actionReadiness"))
+    point_resolution = _dict(intended.get("clickPointResolution") or trace.get("clickPointResolution"))
+    movement_safety = _dict(trace.get("movementSafetyPreflight") or point_resolution.get("movementSafetyPreflight"))
+    planned_screen_point = intended.get("screen") or point_resolution.get("screenPointAfterScaling") or mouse_move.get("plannedEndScreenPoint")
+    hover_sample = client_tick.get("acceptedHoverSample") or client_tick.get("latestRejectedHoverSample")
+    clicked = client_tick.get("lastMenuOptionClickedAfter")
+    return {
+        "path": path,
+        "classification": trace.get("finalClassification"),
+        "plannedAction": trace.get("proposedAction"),
+        "plannedTarget": {
+            "name": selected.get("targetName") or selected.get("name") or trace.get("targetName"),
+            "classId": selected.get("classId") or trace.get("classId"),
+            "type": selected.get("targetType") or selected.get("targetKind") or trace.get("targetKind"),
+            "worldLocation": selected.get("worldLocation")
+            or {
+                "worldX": selected.get("worldX"),
+                "worldY": selected.get("worldY"),
+                "plane": selected.get("plane"),
+            },
+            "actionTargetSource": selected.get("actionTargetSource") or trace.get("actionTargetSource"),
+            "actionability": selected.get("actionability") or trace.get("actionability"),
+        },
+        "plannedScreenPoint": planned_screen_point,
+        "coordinateConversionTrace": intended or point_resolution,
+        "displayScaleApplied": _first_present(intended.get("displayScaleApplied"), point_resolution.get("displayScaleApplied")),
+        "displayScaleReason": _first_present(intended.get("displayScaleReason"), point_resolution.get("displayScaleReason")),
+        "arduinoCalibrationStatus": {
+            "movementSafetyStatus": movement_safety.get("status"),
+            "source": movement_safety.get("source"),
+            "allowedWindow": movement_safety.get("allowedWindow"),
+            "blockers": _list(movement_safety.get("blockers")),
+            "warnings": _list(movement_safety.get("warnings")),
+        },
+        "humanInputController": {
+            "profile": human_input.get("profile"),
+            "movementGenerator": human_input.get("movementGenerator"),
+            "liveInputBackend": human_input.get("liveInputBackend") or trace.get("liveInputBackend"),
+            "movementProfile": human_input.get("profile"),
+            "movementMetrics": human_input,
+        },
+        "cursorMovementTrace": {
+            "mouseMove": mouse_move,
+            "movementPlan": trace.get("movementPlan"),
+            "lastMovementProof": {
+                "startScreenPoint": mouse_move.get("startScreenPoint"),
+                "plannedEndScreenPoint": mouse_move.get("plannedEndScreenPoint"),
+                "endScreenPoint": mouse_move.get("endScreenPoint") or mouse_move.get("actualEndScreenPoint"),
+            },
+        },
+        "hoverConfirmationEvidence": {
+            "acceptedHoverSample": hover_sample,
+            "rejectedHoverSamples": _list(client_tick.get("rejectedHoverSamples")),
+            "hoverConfirmationSamples": _list(client_tick.get("hoverConfirmationSamples")),
+            "hoverConfirmedTopExpected": selected.get("hoverConfirmedTopExpected"),
+        },
+        "menuOptionClickedEvidence": clicked,
+        "input_integrity_status": {
+            "before": trace.get("inputIntegrityStatusBefore"),
+            "after": trace.get("inputIntegrityStatusAfter"),
+            "delta": live_input.get("inputIntegrityDelta") or {
+                "mouseInjectedCountDelta": trace.get("mouseInjectedCountDelta"),
+                "keyboardInjectedCountDelta": trace.get("keyboardInjectedCountDelta"),
+                "lowerIlInjectedCountDelta": trace.get("lowerIlInjectedCountDelta"),
+                "directBackendBypassCountDelta": trace.get("directBackendBypassCountDelta"),
+            },
+            "phaseCounts": _trace_input_phase_summary(trace),
+        },
+        "directBackendBypassCount": human_input.get("directBackendBypassCount"),
+        "lastClickProof": {
+            "clickTimestampWallMillis": trace.get("clickTimestampWallMillis"),
+            "clickedMenuClassification": client_tick.get("clickedMenuClassification"),
+            "lastMenuOptionClickedAfter": clicked,
+        },
+        "blockedReason": live_input.get("blockReason")
+        or readiness.get("blockReason")
+        or trace.get("clickFailureBucket")
+        or trace.get("finalClassification"),
+        "target_view_state": trace.get("targetViewState") or selected.get("targetViewState"),
+        "actionReadiness": readiness,
+        "liveInput": live_input,
+    }
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -1129,11 +1291,23 @@ def _debug_evidence_index(session_path: Path | None, limit: int = 10) -> dict[st
         path = live_dir / name
         if path.exists():
             trace = _read_json(path)
+            trace_payload = _trace_payload(trace)
+            visibility = _action_trace_visibility(trace_payload, path=str(path))
             trace_paths.append({
                 "path": str(path),
-                "classification": trace.get("finalClassification"),
-                "proposedAction": trace.get("proposedAction"),
-                "actionIntentType": trace.get("actionIntentType"),
+                "classification": trace_payload.get("finalClassification"),
+                "proposedAction": trace_payload.get("proposedAction"),
+                "actionIntentType": trace_payload.get("actionIntentType"),
+                "plannedTarget": visibility.get("plannedTarget"),
+                "plannedScreenPoint": visibility.get("plannedScreenPoint"),
+                "displayScaleApplied": visibility.get("displayScaleApplied"),
+                "displayScaleReason": visibility.get("displayScaleReason"),
+                "directBackendBypassCount": visibility.get("directBackendBypassCount"),
+                "inputIntegrityPhaseCounts": _dict(visibility.get("input_integrity_status")).get("phaseCounts"),
+                "hoverConfirmationEvidence": visibility.get("hoverConfirmationEvidence"),
+                "menuOptionClickedEvidence": visibility.get("menuOptionClickedEvidence"),
+                "blockedReason": visibility.get("blockedReason"),
+                "visibility": visibility,
             })
     failure_reasons = Counter(
         str(item.get("reason") or item.get("classification") or "unknown")
@@ -1342,6 +1516,12 @@ class KnowledgeFabric:
                 "external_lookup_area",
                 "external_get_skill_requirement",
                 "probe_task",
+                "task_script_api_spec",
+                "validate_task_script",
+                "compile_task_script",
+                "explain_script_plan",
+                "suggest_task_template",
+                "probe_task_from_scene",
                 "handoff_summary",
             ],
             "staleSources": stale_sources,
@@ -1459,6 +1639,20 @@ class KnowledgeFabric:
                     "sampleQuery": "get_current_debug_context -> inputIntegrity",
                 },
                 {
+                    "sourceName": "action_input_visibility_context",
+                    "sourceType": "bounded_debug_latest_state",
+                    "producer": "Knowledge Fabric over action_trace.v2 and daemon status",
+                    "consumer": "Codex MCP/direct visibility into planned action, target, coordinates, hover/click proof, and input integrity by phase",
+                    "schema": ACTION_INPUT_VISIBILITY_SCHEMA,
+                    "freshnessField": "latest action trace/session freshness",
+                    "capFields": ["candidate limits", "debug evidence limits"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": True,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "get_action_input_visibility",
+                },
+                {
                     "sourceName": "visual_debug_bundle",
                     "sourceType": "explicit_debug_bundle",
                     "producer": "executor/visual_debug_bundle.py",
@@ -1499,6 +1693,20 @@ class KnowledgeFabric:
                     "canGrowOnDisk": True,
                     "requiresInternet": False,
                     "sampleQuery": "python telemetry-viewer\\context_service.py --capture-script-authoring-context --profile woodcutting",
+                },
+                {
+                    "sourceName": "task_script_api.v1",
+                    "sourceType": "script_authoring_contract",
+                    "producer": "task_script_api.py",
+                    "consumer": "Knowledge Fabric, MCP/direct script validators, future task scripts",
+                    "schema": task_script_api.TASK_SCRIPT_SPEC_SCHEMA,
+                    "freshnessField": "static code version",
+                    "capFields": ["repeat_until.maxIterations", "validation errors"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "get_task_script_api_spec",
                 },
                 {
                     "sourceName": "session_memory",
@@ -1564,7 +1772,7 @@ class KnowledgeFabric:
                 "worldAndCandidates": "WorldModelCache + Knowledge Fabric queries",
                 "currentBlocker": "explain_current_blocker",
                 "historicalScenario": "replay_scenario.v1",
-                "scriptWriting": "script_authoring_context.v1",
+                "scriptWriting": "task_script_api.v1 + script_authoring_context.v1",
                 "debugEvidence": "visual_debug_bundle",
             },
         }
@@ -1584,10 +1792,15 @@ class KnowledgeFabric:
             ("What widgets/dialogue/bank UI are open?", "list_seen_widgets", "list_seen_widgets", "daemon widget/bank/dialogue state", "knowledge_fabric_seen_widgets.v1", "medium", "widget sections may be compact", "test_knowledge_fabric.py"),
             ("What target is executable?", "get_current_debug_context", "get_current_debug_context", "action proposal/readiness/hover", "actionReadiness/actionProposal", "high only after hover evidence", "must not rely on static/external only", "readiness tests"),
             ("What action was actually clicked?", "get_latest_action_trace", "get_latest_action_trace", "action trace/MenuOptionClicked", "knowledge_fabric_latest_action_trace.v1", "high if trace present", "no click trace if skipped", "test_knowledge_fabric.py"),
+            ("What did Codex know about the planned click/input?", "get_action_input_visibility", "get_action_input_visibility", "action trace, coordinate conversion, HumanInputController, input integrity phase report", ACTION_INPUT_VISIBILITY_SCHEMA, "high if action trace present", "no movement proof if action skipped before motor control", "test_knowledge_fabric.py"),
             ("What data is stale/capped/missing?", "data-quality-report", "get_data_quality_report", "world model + query perf + disk/external status", "data_quality_report.v1", "high", "requires current context", "test_knowledge_fabric.py"),
             ("What item/object/NPC ID is this?", "external lookup commands", "external_lookup_item_id/external_lookup_object", "external cache/static library", "external_*_lookup.v1", "advisory", "cache miss until refresh", "test_knowledge_fabric.py"),
             ("What wiki/static fact explains this?", "external-search-wiki/external lookup", "external_search_wiki", "external cache/API explicit refresh", "external_wiki_search.v1", "advisory", "internet disabled unless explicit", "test_knowledge_fabric.py"),
             ("What should a future script profile include?", "probe-task/export_task_context_bundle", "probe_task", "scene + static + external cache", "task_probe_report.v1", "medium", "needs loaded scene for best suggestions", "test_knowledge_fabric.py"),
+            ("What high-level primitives can a script use?", "task_script_api_spec", "get_task_script_api_spec/osrs://script-api/spec", "task_script_api.py", task_script_api.TASK_SCRIPT_SPEC_SCHEMA, "high", "none", "test_task_script_api.py"),
+            ("Is this high-level task script valid?", "validate_task_script", "validate_task_script", "task script JSON", task_script_api.TASK_SCRIPT_VALIDATION_SCHEMA, "high", "raw input fields or unbounded loops", "test_task_script_api.py"),
+            ("What existing engine actions will this script use?", "compile_task_script/explain_script_plan", "compile_task_script/explain_script_plan", "task script JSON + task policy", task_script_api.TASK_SCRIPT_PLAN_SCHEMA, "high", "unknown primitive or missing evidence", "test_task_script_api.py"),
+            ("Can the current scene inform a script template?", "probe_task_from_scene", "probe_task_from_scene", "loaded scene + static library + external cache", "task_scene_probe.v1", "medium", "stale loaded scene", "test_task_script_api.py"),
         ]
         data = {
             "rows": [
@@ -2209,6 +2422,89 @@ class KnowledgeFabric:
         traces = [item for item in _list(self.debug_evidence.get("latestActionTraces")) if isinstance(item, dict)]
         return dict(traces[0]) if traces else {}
 
+    def query_action_input_visibility(self) -> dict[str, Any]:
+        started = time.perf_counter()
+        readiness = self._readiness_report()
+        proposal = self._action_proposal()
+        latest_trace = self._latest_action_trace_summary()
+        latest_bundle = self._latest_visual_bundle_summary()
+        status = self.daemon_status
+        hot = _dict(status.get("clientTickHot"))
+        route_context = _compact_route_context(status)
+        visibility = _dict(latest_trace.get("visibility"))
+        bootstrap = self._bootstrap_liveness_summary()
+        data = {
+            "latestActionTrace": visibility or latest_trace,
+            "latestActionTraceSummary": latest_trace,
+            "latestDebugBundle": latest_bundle,
+            "readiness": readiness,
+            "actionReadiness": readiness.get("actionReadiness") if isinstance(readiness.get("actionReadiness"), dict) else {},
+            "plannedAction": visibility.get("plannedAction") or proposal.get("proposedAction"),
+            "plannedTarget": visibility.get("plannedTarget") or _dict(proposal.get("targetExplanation")),
+            "plannedScreenPoint": visibility.get("plannedScreenPoint"),
+            "coordinateConversionTrace": visibility.get("coordinateConversionTrace"),
+            "displayScaleApplied": visibility.get("displayScaleApplied"),
+            "displayScaleReason": visibility.get("displayScaleReason"),
+            "arduinoCalibrationStatus": visibility.get("arduinoCalibrationStatus"),
+            "humanInputController": visibility.get("humanInputController"),
+            "cursorMovementTrace": visibility.get("cursorMovementTrace"),
+            "hoverConfirmationEvidence": visibility.get("hoverConfirmationEvidence") or {
+                "hoverMenu": hot.get("hoverMenu") or hot.get("postMenuSort"),
+            },
+            "menuOptionClickedEvidence": visibility.get("menuOptionClickedEvidence") or hot.get("lastMenuOptionClicked"),
+            "input_integrity_status": visibility.get("input_integrity_status") or {
+                "current": self._input_integrity_summary(),
+                "phaseCounts": _trace_input_phase_summary({}),
+            },
+            "directBackendBypassCount": _first_present(
+                visibility.get("directBackendBypassCount"),
+                _dict(self._input_integrity_summary()).get("directBackendBypassCount"),
+            ),
+            "lastClickProof": visibility.get("lastClickProof"),
+            "lastMovementProof": _dict(visibility.get("cursorMovementTrace")).get("lastMovementProof"),
+            "blockedReason": visibility.get("blockedReason") or _dict(readiness.get("actionReadiness")).get("blockReason"),
+            "livenessRecoveryActions": {
+                "recommended": bool(bootstrap.get("livenessRecoveryRecommended")),
+                "available": bool(bootstrap.get("livenessRecoveryAvailable")),
+                "lastResult": status.get("livenessRecoveryLastResult"),
+            },
+            "boundedWatcherDecisions": status.get("boundedWatcherDecisions") or status.get("watcherDecisions"),
+            "target_view_state": visibility.get("target_view_state") or _dict(_dict(proposal.get("targetExplanation")).get("targetViewState")),
+            "target_view_state_source": "latest_action_trace" if visibility.get("target_view_state") else "current_action_proposal",
+            "serviceResourceRouteCandidateState": {
+                "resourceCandidates": self.query_resource_candidates(limit=5).get("data"),
+                "serviceCandidates": self.query_service_candidates(limit=5).get("data"),
+                "routeObjects": self.query_route_objects(limit=5).get("data"),
+                "routeContext": route_context,
+            },
+            "readinessActionEvidence": readiness,
+            "canonicalPipeline": [
+                "action proposal",
+                "readiness",
+                "hover/menu proof",
+                "HumanInputController",
+                "ArduinoHIDBackend",
+                "input integrity",
+                "lifecycle verification",
+            ],
+            "rawInputBypassToolsExposed": False,
+            "externalKnowledgePolicy": {
+                "advisoryOnly": True,
+                "liveTruth": "RuneLite / 8893 / WorldModel / 8890",
+                "hotExecutorExternalCallsAllowed": False,
+                "cacheFirst": True,
+                "source": _external_summary_compact(),
+            },
+        }
+        return _query_response(
+            ACTION_INPUT_VISIBILITY_SCHEMA,
+            data,
+            started=started,
+            source="knowledge_fabric_debug_evidence",
+            freshness=self.freshness(),
+            status="PASS" if data.get("plannedAction") or latest_trace else "WARN",
+        )
+
     def _status_with_world_model_context(self) -> dict[str, Any]:
         status = dict(self.daemon_status)
         if self.world_model_payloads and not status.get("worldModelPayloads"):
@@ -2735,6 +3031,7 @@ class KnowledgeFabric:
             "viewQuality": self.query_view_quality(intent=str(current_intent or "unknown")),
             "overlayHealth": readiness.get("overlayHealth"),
             "inputIntegrity": self._input_integrity_summary(),
+            "actionInputVisibility": self.query_action_input_visibility(),
             "latestActionTraceSummary": self._latest_action_trace_summary(),
             "latestVisualBundleSummary": self.query_debug_evidence(limit=3),
             "sessionMemorySummary": {
@@ -3365,6 +3662,50 @@ class KnowledgeFabric:
             "noLiveInput": True,
         }
         return _query_response(TASK_PROBE_SCHEMA, data, started=started, source="knowledge_fabric+external_cache", freshness=self.freshness())
+
+    def task_script_api_spec(self) -> dict[str, Any]:
+        return task_script_api.script_api_spec()
+
+    def validate_task_script(self, script: dict[str, Any] | str | Path) -> dict[str, Any]:
+        return task_script_api.validate_task_script(script)
+
+    def compile_task_script(self, script: dict[str, Any] | str | Path) -> dict[str, Any]:
+        return task_script_api.compile_task_script(script)
+
+    def explain_script_plan(self, script: dict[str, Any] | str | Path) -> dict[str, Any]:
+        return task_script_api.explain_script_plan(script)
+
+    def suggest_task_template(self, task_description: str | None = None, *, profile: str | None = None) -> dict[str, Any]:
+        return task_script_api.suggest_task_template(task_description, profile=profile)
+
+    def probe_task_from_scene(
+        self,
+        task_description: str,
+        *,
+        profile: str = "woodcutting",
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        probe = self.probe_task(task_description, profile=profile, limit=limit)
+        template = self.suggest_task_template(task_description, profile=profile)
+        data = {
+            "taskDescription": task_description,
+            "profile": profile,
+            "taskProbe": probe.get("data"),
+            "suggestedTemplate": _dict(template.get("data")).get("template"),
+            "templateValidation": _dict(template.get("data")).get("validation"),
+            "externalKnowledgePolicy": task_script_api.EXTERNAL_KNOWLEDGE_POLICY,
+            "liveTruth": "RuneLite / 8893 / WorldModel / 8890",
+            "noLiveInput": True,
+        }
+        return _query_response(
+            "task_scene_probe.v1",
+            data,
+            started=started,
+            source="knowledge_fabric+task_script_api+external_cache",
+            freshness=self.freshness(),
+            status="PASS" if probe.get("status") != "FAIL" and template.get("status") != "FAIL" else "WARN",
+        )
 
     def data_quality_report(self, *, limit: int | None = None) -> dict[str, Any]:
         started = time.perf_counter()
