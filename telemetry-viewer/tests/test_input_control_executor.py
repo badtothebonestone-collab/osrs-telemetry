@@ -866,6 +866,96 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(summary["resourceProjectionRecoveryFailures"], 1)
         self.assertEqual(summary["cameraAdjustments"], 1)
 
+    def test_resource_view_recovery_wait_is_recoverable_when_resource_progress_lands(self):
+        backend = FakeBackend()
+        target = {
+            "targetName": "Tree",
+            "name": "Tree",
+            "classId": "tree",
+            "targetType": "sceneObject",
+            "id": 1278,
+            "objectId": 1278,
+            "worldX": 3212,
+            "worldY": 3232,
+            "plane": 0,
+            "onScreen": True,
+            "geometryAvailable": True,
+            "bounds": {"x": 2147483647, "y": 2147483647, "w": 1, "h": 1},
+            "safeAimPoint": {
+                "status": "FAIL",
+                "actionable": False,
+                "rawAimPoint": {"x": 2147483648, "y": 2147483648},
+                "rejectionReason": "projection_sentinel",
+            },
+        }
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            input_profile="steady",
+            execute=True,
+            verify_after_action=True,
+            after_action_wait_ms=0,
+            hover_confirm_target=False,
+            hover_confirm_timeout_ms=0,
+            hover_poll_ms=10,
+            hover_position_tolerance=3,
+            click_hold_ms=0,
+            wait_for_ready=0,
+            cooldown_ms=0,
+            result_timeout_ms=20,
+            action_timeout_ms=20,
+            poll_interval_ms=10,
+            max_actions=10,
+            max_total_actions=10,
+            max_runtime_seconds=2,
+            stop_on_warn=False,
+            stop_on_fail=False,
+            stop_after_inventory_changes=1,
+            stop_when_inventory_full=False,
+            max_successful_actions=None,
+            max_timeouts=None,
+            max_consecutive_timeouts=None,
+            seed=None,
+            client_tick_debug=False,
+            client_tick_tail=0,
+            menu_entry_limit=5,
+            require_clicked_menu_match=False,
+            require_live_readiness=False,
+            camera_method="keyboard_arrows",
+        )
+        statuses = [
+            status_payload_with_candidates_for_loop(active_target=target, candidates=[target], free_slots=4, held_count=12, progress_count=5, tick=10),
+            status_payload_with_candidates_for_loop(active_target=target, candidates=[target], free_slots=3, held_count=13, progress_count=6, tick=11),
+        ]
+        for status in statuses:
+            status["selectedHighlighterTarget"] = target
+            status["selectedTarget"] = target
+
+        result = execute_action_loop(
+            "http://daemon",
+            options,
+            fetch_json_func=lambda *_args, **_kwargs: statuses.pop(0),
+            backend=backend,
+            snapshot_fetch_func=lambda *_args, **_kwargs: {},
+            sleep_func=lambda _seconds: None,
+            monotonic_func=IncrementingClock(start=0.0, step=0.05),
+        )
+
+        payload = result.to_dict()
+        observed = payload["actionResults"][0]["observedResult"]
+        summary = payload["loopSummary"]
+        self.assertEqual(payload["status"], "WARN")
+        self.assertEqual(payload["reason"], "inventory_change_limit_reached")
+        self.assertEqual(observed["observedResult"], "resource_progress_during_view_recovery")
+        self.assertEqual(observed["previousObservedResult"], "resource_projection_recovery_waiting")
+        self.assertTrue(observed["resourceProgressDuringViewRecovery"])
+        self.assertEqual(observed["resourceProgressDelta"]["resourceCountDelta"], 1)
+        self.assertEqual(summary["inventoryChanges"], 1)
+        self.assertEqual(summary["resourceProgressSuccesses"], 1)
+        self.assertEqual(summary["resourceProjectionRecoveryFailures"], 0)
+        self.assertEqual(summary["cameraAdjustments"], 1)
+
     def test_resource_recovery_loop_captures_bounded_debug_bundles(self):
         backend = FakeBackend()
         target = {

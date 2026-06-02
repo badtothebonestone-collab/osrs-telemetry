@@ -1814,6 +1814,65 @@ def _record_loop_status(summary: dict[str, Any], status: dict[str, Any] | None) 
     summary["finalActiveIntent"] = intent or summary.get("finalActiveIntent")
 
 
+def _loop_resource_progress_delta(summary: dict[str, Any]) -> dict[str, int | None]:
+    free_start = _int_or_none(summary.get("inventoryFreeSlotsStart"))
+    free_end = _int_or_none(summary.get("inventoryFreeSlotsEnd"))
+    resource_start = _int_or_none(summary.get("resourceCountStart"))
+    resource_end = _int_or_none(summary.get("resourceCountEnd"))
+    progress_start = _int_or_none(summary.get("progressStart"))
+    progress_end = _int_or_none(summary.get("progressEnd"))
+    return {
+        "inventoryFreeSlotsStart": free_start,
+        "inventoryFreeSlotsEnd": free_end,
+        "inventoryFreeSlotDelta": None if free_start is None or free_end is None else free_end - free_start,
+        "resourceCountStart": resource_start,
+        "resourceCountEnd": resource_end,
+        "resourceCountDelta": None if resource_start is None or resource_end is None else resource_end - resource_start,
+        "progressStart": progress_start,
+        "progressEnd": progress_end,
+        "progressDelta": None if progress_start is None or progress_end is None else progress_end - progress_start,
+    }
+
+
+def _loop_resource_progress_seen(summary: dict[str, Any]) -> bool:
+    delta = _loop_resource_progress_delta(summary)
+    free_delta = delta.get("inventoryFreeSlotDelta")
+    resource_delta = delta.get("resourceCountDelta")
+    progress_delta = delta.get("progressDelta")
+    return (
+        (isinstance(free_delta, int) and free_delta < 0)
+        or (isinstance(resource_delta, int) and resource_delta > 0)
+        or (isinstance(progress_delta, int) and progress_delta > 0)
+    )
+
+
+def _resource_progress_during_view_recovery_observation(
+    observed: dict[str, Any],
+    loop_summary: dict[str, Any],
+) -> dict[str, Any]:
+    progress = dict(observed)
+    progress["previousObservedResult"] = observed.get("observedResult")
+    progress["previousResultOutcome"] = observed.get("resultOutcome")
+    progress["observedResult"] = "resource_progress_during_view_recovery"
+    progress["resultOutcome"] = "progress"
+    progress["resultComplete"] = True
+    progress["nextActionAllowed"] = True
+    progress["verificationStatus"] = "WARN"
+    progress["resourceProgressClassification"] = "resource_progress_during_view_recovery"
+    progress["resourceProjectionRecoveryClassification"] = "resource_progress_during_view_recovery"
+    progress["resourceProgressDuringViewRecovery"] = True
+    progress["resourceProgressDelta"] = _loop_resource_progress_delta(loop_summary)
+    signals = list(progress.get("observedSignals") or [])
+    for signal in ("inventory_changed", "inventory_free_slots_changed", "held_resource_count_increased", "resource_progress_increased"):
+        if signal not in signals:
+            signals.append(signal)
+    progress["observedSignals"] = signals
+    progress["warnings"] = list(progress.get("warnings") or []) + [
+        "resource view recovery did not improve projection, but resource inventory progressed during the recovery window"
+    ]
+    return progress
+
+
 def _observed_from_result(result: ExecutionResult) -> dict[str, Any]:
     if isinstance(result.observed_result, dict):
         return result.observed_result
@@ -9128,6 +9187,8 @@ def execute_action_loop(
             )
             if locked is not None:
                 observed = locked
+            if (lifecycle.last_action or "") == "resource_view_recovery" and _loop_resource_progress_seen(loop_summary):
+                observed = _resource_progress_during_view_recovery_observation(observed, loop_summary)
             _sync_lifecycle_observation(lifecycle, observed)
             previous_wait_observed: dict[str, Any] = {}
             if results:
@@ -9169,6 +9230,10 @@ def execute_action_loop(
                     )
                 latest_result.observed_result = observed
                 latest_result.verification_status = str(observed.get("verificationStatus") or "UNKNOWN")
+                if observed.get("resourceProgressDuringViewRecovery") is True:
+                    latest_result.status = "WARN"
+                    latest_result.verification_status = "WARN"
+                    _set_trace_final(latest_result, "resource_progress_during_view_recovery")
                 _apply_lifecycle(latest_result, lifecycle, cooldown_remaining_ms=_cooldown_ms(options))
             _refresh_loop_summary(loop_summary, results)
             if observed.get("resultComplete") and observed.get("resultOutcome") in {"success", "progress", "depleted"}:
@@ -9918,6 +9983,25 @@ def execute_action_loop(
                 wait_before_status = before_status
                 wait_started = now
                 _refresh_loop_summary(loop_summary, results)
+                if action_result.proposed_action == "resource_view_recovery" and _loop_resource_progress_seen(loop_summary):
+                    observed = _resource_progress_during_view_recovery_observation(
+                        _observed_from_result(action_result),
+                        loop_summary,
+                    )
+                    action_result.status = "WARN"
+                    action_result.verification_status = "WARN"
+                    action_result.observed_result = observed
+                    lifecycle.current_state = "verified"
+                    lifecycle.reason = "resource_progress_during_view_recovery"
+                    lifecycle.observed_result = observed
+                    lifecycle.observed_signals = list(observed.get("observedSignals") or [])
+                    lifecycle.result_complete = True
+                    lifecycle.result_outcome = "progress"
+                    lifecycle.next_action_allowed = True
+                    _set_trace_final(action_result, "resource_progress_during_view_recovery")
+                    _apply_lifecycle(action_result, lifecycle, cooldown_remaining_ms=0)
+                    _refresh_loop_summary(loop_summary, results)
+                    status_value = "WARN" if status_value == "PASS" else status_value
                 if action_result.proposed_action == "resource_view_recovery":
                     observed = _observed_from_result(action_result)
                     proposal_payload = action_result.proposal if isinstance(action_result.proposal, dict) else proposal.to_dict()
@@ -9958,6 +10042,30 @@ def execute_action_loop(
                         ),
                     )
                 if action_result.proposed_action == "resource_view_recovery" and lifecycle.current_state == "timed_out":
+                    if _loop_resource_progress_seen(loop_summary):
+                        observed = _resource_progress_during_view_recovery_observation(
+                            _observed_from_result(action_result),
+                            loop_summary,
+                        )
+                        action_result.status = "WARN"
+                        action_result.verification_status = "WARN"
+                        action_result.observed_result = observed
+                        lifecycle.current_state = "verified"
+                        lifecycle.reason = "resource_progress_during_view_recovery"
+                        lifecycle.observed_result = observed
+                        lifecycle.observed_signals = list(observed.get("observedSignals") or [])
+                        lifecycle.result_complete = True
+                        lifecycle.result_outcome = "progress"
+                        lifecycle.next_action_allowed = True
+                        _set_trace_final(action_result, "resource_progress_during_view_recovery")
+                        _apply_lifecycle(action_result, lifecycle, cooldown_remaining_ms=0)
+                        _refresh_loop_summary(loop_summary, results)
+                        status_value = "WARN" if status_value == "PASS" else status_value
+                        stop_reason = _loop_stop_reason(options, loop_summary)
+                        if stop_reason:
+                            reason = stop_reason
+                            break
+                        continue
                     _capture_debug_bundle(
                         debug_bundles,
                         loop_summary,
