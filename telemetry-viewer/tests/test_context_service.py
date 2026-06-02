@@ -672,6 +672,30 @@ class ContextServiceTest(unittest.TestCase):
             source="live_8890_8893",
         )
 
+    def live_loading_fabric_without_tick(self, session: Path) -> service.knowledge_fabric.KnowledgeFabric:
+        return service.knowledge_fabric.KnowledgeFabric(
+            world_model_payloads={},
+            daemon_status={
+                "schema": "context_status.v1",
+                "status": "ok",
+                "sessionPath": str(session),
+                "latestTick": None,
+                "inputSourceActive": "plugin-snapshot",
+                "noFileDaily": True,
+                "compactPacketFilesRequired": False,
+                "compactPacketFilesWriting": False,
+                "candidateCount": 0,
+                "clientTickHot": {
+                    "schema": "client_tick_hot.v1",
+                    "gameState": "LOGIN_SCREEN",
+                    "sourceEvent": "GameStateChanged",
+                    "sampleSource": "GameStateChanged",
+                    "latency": {"ageMillis": 125},
+                },
+            },
+            source="live_8890_8893",
+        )
+
     def test_current_debug_context_with_explicit_daemon_url_uses_live_daemon_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             live_session = Path(tmp) / "live-session"
@@ -701,6 +725,31 @@ class ContextServiceTest(unittest.TestCase):
             self.assertTrue(kwargs["include_projection"])
             self.assertTrue(kwargs["include_collision"])
             self.assertEqual(kwargs["max_objects"], 77)
+
+    def test_daemon_url_queries_use_live_daemon_truth_when_reachable_without_latest_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live_session = Path(tmp) / "loading-session"
+            for query_name, needs, expected_key in (
+                ("current-debug-context", ["knowledge_current_debug_context"], "knowledgeCurrentDebugContext"),
+                ("current-blocker", ["knowledge_current_blocker"], "knowledgeCurrentBlocker"),
+            ):
+                args = self.live_query_args(query=query_name)
+                with mock.patch.object(
+                    service.knowledge_fabric,
+                    "fabric_from_live",
+                    return_value=self.live_loading_fabric_without_tick(live_session),
+                ):
+                    payload = service.build_named_query_response(args, query_name, needs)
+
+                self.assertEqual(payload["contextSource"], "live_daemon")
+                self.assertEqual(payload["sourceUsed"], "live_daemon")
+                self.assertFalse(payload["fileSessionFallbackUsed"])
+                self.assertNotIn("fileSessionFallbackReason", payload)
+                self.assertNotIn("daemonQueryError", payload)
+                self.assertIsNone(payload["latestTick"])
+                self.assertIn("daemon /status did not include latestTick", payload["warnings"])
+                self.assertIn("daemon.latestTick", payload["missingCapabilities"])
+                self.assertIn(expected_key, payload)
 
     def test_current_blocker_with_explicit_daemon_url_uses_live_daemon_source(self):
         with tempfile.TemporaryDirectory() as tmp:

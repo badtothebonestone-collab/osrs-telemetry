@@ -1858,11 +1858,20 @@ def _daemon_query_error(fabric: knowledge_fabric.KnowledgeFabric) -> str | None:
         return "daemon /status returned an empty payload"
     if status.get("schema") == "http_fetch_error.v1" or status.get("status") == "FAIL":
         return str(status.get("error") or status.get("message") or "daemon /status request failed")
-    if not status.get("sessionPath"):
-        return "daemon /status did not include sessionPath"
-    if status.get("latestTick") is None:
-        return "daemon /status did not include latestTick"
     return None
+
+
+def _live_daemon_status_gaps(fabric: knowledge_fabric.KnowledgeFabric) -> tuple[list[str], list[str]]:
+    status = fabric.daemon_status if isinstance(fabric.daemon_status, dict) else {}
+    warnings: list[str] = []
+    missing: list[str] = []
+    if not status.get("sessionPath"):
+        warnings.append("daemon /status did not include sessionPath")
+        missing.append("daemon.sessionPath")
+    if status.get("latestTick") is None:
+        warnings.append("daemon /status did not include latestTick")
+        missing.append("daemon.latestTick")
+    return warnings, missing
 
 
 def _add_live_query_metadata(
@@ -1916,6 +1925,7 @@ def build_live_named_query_response(args, query_name: str, needs: list[str]) -> 
     daemon_error = _daemon_query_error(fabric)
     if daemon_error:
         return None, daemon_error
+    status_warnings, status_missing = _live_daemon_status_gaps(fabric)
 
     payloads: list[dict[str, Any]] = []
     response: dict[str, Any] = {
@@ -1925,8 +1935,8 @@ def build_live_named_query_response(args, query_name: str, needs: list[str]) -> 
         "latestTick": fabric.daemon_status.get("latestTick"),
         "status": "PASS",
         "freshness": fabric.freshness(),
-        "warnings": [],
-        "missingCapabilities": [],
+        "warnings": list(status_warnings),
+        "missingCapabilities": list(status_missing),
         "sourceFilesSummary": {
             "allRequiredPresent": True,
             "missingFiles": [],
@@ -1982,8 +1992,8 @@ def build_live_named_query_response(args, query_name: str, needs: list[str]) -> 
 
     response["status"] = _status_from_payloads(payloads)
     response["confidence"] = 0.7 if response["status"] == "PASS" else 0.4 if response["status"] == "WARN" else 0.0
-    warnings: list[str] = []
-    missing: list[str] = []
+    warnings: list[str] = list(response["warnings"])
+    missing: list[str] = list(response["missingCapabilities"])
     for payload in payloads:
         warnings.extend(str(item) for item in (payload.get("warnings") or []) if item)
         missing.extend(str(item) for item in (payload.get("missingCapabilities") or []) if item)
