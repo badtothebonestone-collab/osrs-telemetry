@@ -1406,8 +1406,22 @@ def test_action_input_visibility_derives_proposal_point_without_live_input():
     assert trace["inputPointSpace"] == "canvas"
     assert trace["targetKey"] == "route-step-4"
     assert trace["noLiveInput"] is True
+    assert data["blockedReason"] == "manual_login_required"
+    assert data["inputBlockEvidence"]["blocked"] is True
+    assert data["inputBlockEvidence"]["blockedReason"] == "manual_login_required"
+    assert data["inputBlockEvidence"]["operatorInjectedEventsBlocking"] is False
+    assert data["arduinoCalibrationStatus"]["movementSafetyStatus"] == "NOT_EVALUATED"
+    assert data["arduinoCalibrationStatus"]["movementSafetyEvaluated"] is False
+    assert data["arduinoCalibrationStatus"]["inputGeometryAvailable"] is True
+    assert data["arduinoCalibrationStatus"]["operatorInjectedEvents"] == 4
+    assert data["humanInputController"]["controllerInstantiated"] is False
+    assert data["humanInputController"]["requiredLivePipeline"] == "HumanInputController -> ArduinoHIDBackend"
+    assert data["humanInputController"]["liveInputBackend"] == "arduino"
+    assert data["cursorMovementTrace"]["movementExecuted"] is False
+    assert data["cursorMovementTrace"]["plannedEndScreenPoint"] == {"x": 1200, "y": 2160}
     assert data["input_integrity_status"]["phaseCounts"]["operator_phase"]["operatorInjectedEvents"] == 4
     assert data["input_integrity_status"]["phaseCounts"]["live_action_phase"]["hardBlocker"] is False
+    assert data["input_integrity_status"]["phaseAwareAssessment"]["liveActionHardBlocker"] is False
     assert data["directBackendBypassCount"] == 0
     assert data["rawInputBypassToolsExposed"] is False
 

@@ -152,6 +152,12 @@ def action_visibility_snapshot(*, execution_allowed: bool = True, planned_action
             "hoverConfirmationEvidence": {"acceptedHoverSample": {"topOption": "Bank", "topTarget": "Bank booth"}},
             "menuOptionClickedEvidence": {"option": "Bank", "target": "Bank booth"},
             "lastClickProof": {"menuOptionClicked": True},
+            "inputBlockEvidence": {
+                "blocked": not execution_allowed,
+                "blockedReason": None if execution_allowed else "manual_login_required",
+                "phaseAwareLiveInputHardBlocker": False,
+                "operatorInjectedEventsBlocking": False,
+            },
             "latestActionTraceSummary": {"actionTraceSchema": "action_trace.v2", "finalClassification": "pass"},
             "latestDebugBundle": {"bundleDir": "test-bundle"},
             "livenessRecoveryActions": {"recommended": False, "available": True},
@@ -485,6 +491,8 @@ class TaskScriptApiTest(unittest.TestCase):
             data["actionInputVisibilityEvidence"]["arduinoCalibrationStatus"]["source"],
             "test",
         )
+        self.assertFalse(data["actionInputVisibilityEvidence"]["inputBlockEvidence"]["blocked"])
+        self.assertEqual(data["actionInputVisibilityEvidence"]["actionReadiness"]["status"], "PASS")
         self.assertEqual(data["currentLifecycle"]["evidenceIntegrity"]["status"], "PASS")
         self.assertTrue(data["currentLifecycle"]["evidenceIntegrity"]["liveTruthUsableForGameplay"])
 

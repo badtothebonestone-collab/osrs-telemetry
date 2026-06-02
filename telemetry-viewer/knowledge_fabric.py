@@ -504,6 +504,175 @@ def _derive_planned_point_visibility(
     }
 
 
+def _readiness_block_reason(readiness: dict[str, Any]) -> str | None:
+    action_readiness = _dict(readiness.get("actionReadiness"))
+    action_execution = _dict(readiness.get("actionExecution"))
+    for value in (
+        action_readiness.get("blockReason"),
+        action_execution.get("refusalReason"),
+        readiness.get("blockReason"),
+        readiness.get("refusalReason"),
+    ):
+        if value:
+            return str(value)
+    blockers = _list(action_readiness.get("blockers")) or _list(readiness.get("blockers"))
+    for blocker in blockers:
+        if isinstance(blocker, dict):
+            value = blocker.get("code") or blocker.get("reason") or blocker.get("message")
+            if value:
+                return str(value)
+        elif blocker:
+            return str(blocker)
+    return None
+
+
+def _readiness_block_evidence(
+    readiness: dict[str, Any],
+    current_input_integrity: dict[str, Any],
+) -> dict[str, Any]:
+    action_readiness = _dict(readiness.get("actionReadiness"))
+    phase_counts = _trace_input_phase_summary({"inputIntegrityStatusBefore": current_input_integrity})
+    live_phase = _dict(phase_counts.get("live_action_phase"))
+    operator_phase = _dict(phase_counts.get("operator_phase"))
+    reason = _readiness_block_reason(readiness)
+    execution_allowed = action_readiness.get("executionAllowed")
+    readiness_blockers = _list(action_readiness.get("blockers")) or _list(readiness.get("blockers"))
+    raw_monitor_blockers = _list(current_input_integrity.get("blockers"))
+    return {
+        "schema": "action_input_block_evidence.v1",
+        "source": "readiness+phase_aware_input_integrity",
+        "blocked": bool(execution_allowed is False or reason or live_phase.get("hardBlocker")),
+        "blockedReason": reason,
+        "executionAllowed": execution_allowed,
+        "readinessStatus": action_readiness.get("status") or readiness.get("status"),
+        "readinessBlockers": readiness_blockers,
+        "phaseAwareLiveInputHardBlocker": bool(live_phase.get("hardBlocker")),
+        "liveActionPhase": live_phase,
+        "operatorInjectedEvents": operator_phase.get("operatorInjectedEvents"),
+        "operatorInjectedEventsBlocking": False,
+        "rawMonitorStatus": current_input_integrity.get("status"),
+        "rawMonitorBlockers": raw_monitor_blockers,
+        "rawMonitorBlockersArePhaseQualified": True,
+        "whyInputWasBlocked": reason
+        or ("live_action_input_integrity_hard_blocker" if live_phase.get("hardBlocker") else None),
+        "noLiveInput": True,
+    }
+
+
+def _derive_arduino_calibration_status(
+    readiness: dict[str, Any],
+    current_input_integrity: dict[str, Any],
+    *,
+    planned_screen_point: dict[str, Any] | None,
+    coordinate_trace: dict[str, Any] | None,
+) -> dict[str, Any]:
+    input_geometry = _dict(readiness.get("inputGeometry"))
+    phase_counts = _trace_input_phase_summary({"inputIntegrityStatusBefore": current_input_integrity})
+    live_phase = _dict(phase_counts.get("live_action_phase"))
+    warnings = list(dict.fromkeys(
+        _list(current_input_integrity.get("warnings"))
+        + _list(input_geometry.get("warnings"))
+        + ["movement_safety_not_evaluated_without_live_action_trace"]
+    ))
+    blockers = []
+    if input_geometry.get("inputGeometryAvailable") is False:
+        blockers.append("input_geometry_unavailable")
+    if current_input_integrity.get("expectedVidPidMatched") is False:
+        blockers.append("arduino_vid_pid_mismatch")
+    if live_phase.get("hardBlocker"):
+        blockers.append("live_action_input_integrity_hard_blocker")
+    return {
+        "schema": "arduino_calibration_visibility.v1",
+        "status": "WARN" if warnings or blockers else "UNKNOWN",
+        "source": "readiness_input_geometry+input_integrity_status",
+        "movementSafetyStatus": "NOT_EVALUATED",
+        "movementSafetyEvaluated": False,
+        "movementSafetyReason": "no_live_action_trace",
+        "plannedScreenPoint": planned_screen_point,
+        "coordinateResolutionStatus": _dict(coordinate_trace).get("status"),
+        "inputGeometryStatus": input_geometry.get("status"),
+        "inputGeometryAvailable": input_geometry.get("inputGeometryAvailable"),
+        "canvasScreenOrigin": input_geometry.get("canvasScreenOrigin"),
+        "canvasSize": input_geometry.get("canvasSize"),
+        "sourceCanvasSize": input_geometry.get("sourceCanvasSize"),
+        "clientWindowBounds": input_geometry.get("clientWindowBounds"),
+        "displayScale": input_geometry.get("displayScale"),
+        "isClientFocused": input_geometry.get("isClientFocused"),
+        "inputIntegrityMonitorPass": current_input_integrity.get("monitorPass"),
+        "inputIntegrityStatus": current_input_integrity.get("status"),
+        "expectedVidPidMatched": current_input_integrity.get("expectedVidPidMatched"),
+        "lastArduinoEventAgeMs": current_input_integrity.get("lastArduinoEventAgeMs"),
+        "liveActionHardBlocker": bool(live_phase.get("hardBlocker")),
+        "operatorInjectedEvents": _dict(phase_counts.get("operator_phase")).get("operatorInjectedEvents"),
+        "directBackendBypassCount": current_input_integrity.get("directBackendBypassCount"),
+        "rawMonitorBlockers": _list(current_input_integrity.get("blockers")),
+        "phaseAwareBlockers": blockers,
+        "warnings": warnings,
+        "noLiveInput": True,
+    }
+
+
+def _derive_human_input_controller_visibility(
+    readiness: dict[str, Any],
+    current_input_integrity: dict[str, Any],
+) -> dict[str, Any]:
+    action_readiness = _dict(readiness.get("actionReadiness"))
+    try:
+        from input_control.human_input_controller import resolve_input_profile
+
+        default_profile = resolve_input_profile("instant_debug")
+        default_profile_payload = {
+            "profile": default_profile.name,
+            "movementGenerator": default_profile.movement_generator,
+            "minMoveMs": default_profile.min_move_ms,
+            "maxMoveMs": default_profile.max_move_ms,
+            "preClickSettleMs": list(default_profile.pre_click_settle_ms),
+            "clickHoldMs": list(default_profile.click_hold_ms),
+            "postClickSettleMs": list(default_profile.post_click_settle_ms),
+        }
+    except Exception as error:  # noqa: BLE001
+        default_profile_payload = {
+            "profile": "instant_debug",
+            "movementGenerator": None,
+            "error": f"{type(error).__name__}: {error}",
+        }
+    return {
+        "schema": "human_input_controller_visibility.v1",
+        "source": "executor_defaults+readiness+input_integrity_status",
+        "controllerInstantiated": False,
+        "metricsAvailable": False,
+        "reason": "no_live_action_trace",
+        "requiredLivePipeline": "HumanInputController -> ArduinoHIDBackend",
+        "liveInputBackend": current_input_integrity.get("liveInputBackend") or "arduino",
+        "liveInputBackendRequired": True,
+        "softwareInputAllowed": False,
+        "actionExecutionAllowed": action_readiness.get("executionAllowed"),
+        "movementProfile": "not_instantiated_until_bounded_live_step",
+        "movementGenerator": "not_instantiated_until_bounded_live_step",
+        "executorDefaultProfile": default_profile_payload,
+        "directBackendBypassCount": current_input_integrity.get("directBackendBypassCount"),
+        "noLiveInput": True,
+    }
+
+
+def _derive_cursor_movement_trace(
+    *,
+    planned_screen_point: dict[str, Any] | None,
+    coordinate_trace: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "schema": "cursor_movement_trace_visibility.v1",
+        "source": "current_action_proposal",
+        "movementPlanned": planned_screen_point is not None,
+        "movementExecuted": False,
+        "reason": "no_live_action_trace",
+        "plannedEndScreenPoint": planned_screen_point,
+        "coordinateResolutionStatus": _dict(coordinate_trace).get("status"),
+        "lastMovementProof": None,
+        "noLiveInput": True,
+    }
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
@@ -1880,7 +2049,7 @@ class KnowledgeFabric:
                     "sourceName": "action_input_visibility_context",
                     "sourceType": "bounded_debug_latest_state",
                     "producer": "Knowledge Fabric over action_trace.v2, current action proposal, readiness input geometry, and daemon status",
-                    "consumer": "Codex MCP/direct visibility into planned action, target, coordinates, hover/click proof, and input integrity by phase; derived proposal points are read-only",
+                    "consumer": "Codex MCP/direct visibility into planned action, target, coordinates, hover/click proof, input block evidence, and input integrity by phase; derived proposal fields are read-only",
                     "schema": ACTION_INPUT_VISIBILITY_SCHEMA,
                     "freshnessField": "latest action trace/session freshness",
                     "capFields": ["candidate limits", "debug evidence limits"],
@@ -2101,7 +2270,7 @@ class KnowledgeFabric:
             ("What widgets/dialogue/bank UI are open?", "list_seen_widgets", "list_seen_widgets", "daemon widget/bank/dialogue state", "knowledge_fabric_seen_widgets.v1", "medium", "widget sections may be compact", "test_knowledge_fabric.py"),
             ("What target is executable?", "get_current_debug_context", "get_current_debug_context", "action proposal/readiness/hover", "actionReadiness/actionProposal", "high only after hover evidence", "must not rely on static/external only", "readiness tests"),
             ("What action was actually clicked?", "get_latest_action_trace", "get_latest_action_trace", "action trace/MenuOptionClicked", "knowledge_fabric_latest_action_trace.v1", "high if trace present", "no click trace if skipped", "test_knowledge_fabric.py"),
-            ("What did Codex know about the planned click/input?", "get_action_input_visibility", "get_action_input_visibility/osrs://debug/action-input-visibility", "latest action trace or current action proposal plus readiness input geometry, coordinate conversion, HumanInputController, input integrity phase report", ACTION_INPUT_VISIBILITY_SCHEMA, "high for planned point when proposal and input geometry are present", "derived proposal points have no movement/hover proof until live action trace exists", "test_knowledge_fabric.py"),
+            ("What did Codex know about the planned click/input?", "get_action_input_visibility", "get_action_input_visibility/osrs://debug/action-input-visibility", "latest action trace or current action proposal plus readiness input geometry, coordinate conversion, HumanInputController, input integrity phase report, input block evidence", ACTION_INPUT_VISIBILITY_SCHEMA, "high for planned point and blocker reason when proposal/readiness/input geometry are present", "derived proposal fields have no executed movement/hover proof until live action trace exists", "test_knowledge_fabric.py"),
             ("What data is stale/capped/missing?", "data-quality-report", "get_data_quality_report", "world model + query perf + disk/external status", "data_quality_report.v1", "high", "requires current context", "test_knowledge_fabric.py"),
             ("What item/object/NPC ID is this?", "external lookup commands", "external_lookup_item_id/external_lookup_object", "external cache/static library", "external_*_lookup.v1", "advisory", "cache miss until refresh", "test_knowledge_fabric.py"),
             ("What wiki/static fact explains this?", "external-search-wiki/external lookup", "external_search_wiki", "external cache/API explicit refresh", "external_wiki_search.v1", "advisory", "internet disabled unless explicit", "test_knowledge_fabric.py"),
@@ -2813,6 +2982,32 @@ class KnowledgeFabric:
             )
             else {}
         )
+        planned_screen_point = _first_present(visibility.get("plannedScreenPoint"), derived_point.get("plannedScreenPoint"))
+        coordinate_trace = _first_present(visibility.get("coordinateConversionTrace"), derived_point.get("coordinateConversionTrace"))
+        input_block_evidence = _readiness_block_evidence(readiness, current_input_integrity)
+        arduino_calibration_status = visibility.get("arduinoCalibrationStatus") or _derive_arduino_calibration_status(
+            readiness,
+            current_input_integrity,
+            planned_screen_point=planned_screen_point,
+            coordinate_trace=coordinate_trace,
+        )
+        human_input_controller = visibility.get("humanInputController") or _derive_human_input_controller_visibility(
+            readiness,
+            current_input_integrity,
+        )
+        cursor_movement_trace = visibility.get("cursorMovementTrace") or _derive_cursor_movement_trace(
+            planned_screen_point=planned_screen_point,
+            coordinate_trace=coordinate_trace,
+        )
+        input_integrity_status = visibility.get("input_integrity_status") or {
+            "current": current_input_integrity,
+            "phaseCounts": _trace_input_phase_summary({"inputIntegrityStatusBefore": current_input_integrity}),
+            "phaseAwareAssessment": {
+                "operatorInjectedEventsAreBlocking": False,
+                "liveActionHardBlocker": bool(_dict(input_block_evidence.get("liveActionPhase")).get("hardBlocker")),
+                "policy": "phase_aware_live_window_only",
+            },
+        }
         data = {
             "latestActionTrace": visibility or latest_trace,
             "latestActionTraceSummary": latest_trace,
@@ -2821,28 +3016,26 @@ class KnowledgeFabric:
             "actionReadiness": readiness.get("actionReadiness") if isinstance(readiness.get("actionReadiness"), dict) else {},
             "plannedAction": visibility.get("plannedAction") or proposal.get("proposedAction"),
             "plannedTarget": planned_target,
-            "plannedScreenPoint": _first_present(visibility.get("plannedScreenPoint"), derived_point.get("plannedScreenPoint")),
-            "coordinateConversionTrace": _first_present(visibility.get("coordinateConversionTrace"), derived_point.get("coordinateConversionTrace")),
+            "plannedScreenPoint": planned_screen_point,
+            "coordinateConversionTrace": coordinate_trace,
             "displayScaleApplied": _first_present(visibility.get("displayScaleApplied"), derived_point.get("displayScaleApplied")),
             "displayScaleReason": _first_present(visibility.get("displayScaleReason"), derived_point.get("displayScaleReason")),
-            "arduinoCalibrationStatus": visibility.get("arduinoCalibrationStatus"),
-            "humanInputController": visibility.get("humanInputController"),
-            "cursorMovementTrace": visibility.get("cursorMovementTrace"),
+            "arduinoCalibrationStatus": arduino_calibration_status,
+            "humanInputController": human_input_controller,
+            "cursorMovementTrace": cursor_movement_trace,
             "hoverConfirmationEvidence": visibility.get("hoverConfirmationEvidence") or {
                 "hoverMenu": hot.get("hoverMenu") or hot.get("postMenuSort"),
             },
             "menuOptionClickedEvidence": visibility.get("menuOptionClickedEvidence") or hot.get("lastMenuOptionClicked"),
-            "input_integrity_status": visibility.get("input_integrity_status") or {
-                "current": current_input_integrity,
-                "phaseCounts": _trace_input_phase_summary({"inputIntegrityStatusBefore": current_input_integrity}),
-            },
+            "input_integrity_status": input_integrity_status,
             "directBackendBypassCount": _first_present(
                 visibility.get("directBackendBypassCount"),
                 _dict(current_input_integrity).get("directBackendBypassCount"),
             ),
             "lastClickProof": visibility.get("lastClickProof"),
-            "lastMovementProof": _dict(visibility.get("cursorMovementTrace")).get("lastMovementProof"),
-            "blockedReason": visibility.get("blockedReason") or _dict(readiness.get("actionReadiness")).get("blockReason"),
+            "lastMovementProof": _dict(cursor_movement_trace).get("lastMovementProof"),
+            "blockedReason": visibility.get("blockedReason") or input_block_evidence.get("blockedReason"),
+            "inputBlockEvidence": input_block_evidence,
             "livenessRecoveryActions": {
                 "recommended": bool(bootstrap.get("livenessRecoveryRecommended")),
                 "available": bool(bootstrap.get("livenessRecoveryAvailable")),
@@ -2950,7 +3143,13 @@ class KnowledgeFabric:
                 backend.get("directBackendBypassCount"),
                 self.daemon_status.get("directBackendBypassCount"),
             ),
+            "liveInputBackend": backend.get("liveInputBackend"),
+            "liveInputBackendRequired": backend.get("liveInputBackendRequired"),
+            "arduinoBackendSelected": backend.get("arduinoBackendSelected"),
+            "arduinoArmed": backend.get("arduinoArmed"),
             "lastArduinoEventAgeMs": monitor.get("lastArduinoEventAgeMs"),
+            "arduinoDetected": monitor.get("arduinoDetected"),
+            "arduinoActivity": monitor.get("arduinoActivity"),
             "warnings": _list(monitor.get("warnings")),
             "blockers": _list(monitor.get("blockers")),
         }
