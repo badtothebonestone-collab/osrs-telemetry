@@ -3558,6 +3558,8 @@ def _hover_failure_category(result: ExecutionResult) -> str | None:
         lifecycle = result.lifecycle_state if isinstance(result.lifecycle_state, dict) else {}
         reason = str(lifecycle.get("reason") or "")
         if reason in FATAL_NO_CLICK_BLOCK_REASONS:
+            if _resource_target_movement_safety_reacquirable(result, reason):
+                return "unsafe_geometry"
             return None
         if missing.intersection({"click_point", "screen_click_point", "canvas_hover_point", "safe_aimpoint"}) or reason in {
             "click_point_unavailable",
@@ -3584,6 +3586,14 @@ def _hover_failure_category(result: ExecutionResult) -> str | None:
     return "hover_mismatch"
 
 
+def _resource_target_movement_safety_reacquirable(result: ExecutionResult, reason: str | None = None) -> bool:
+    if result.executed or result.proposed_action != "select_resource_target":
+        return False
+    lifecycle = result.lifecycle_state if isinstance(result.lifecycle_state, dict) else {}
+    resolved_reason = str(reason or lifecycle.get("reason") or "")
+    return resolved_reason == "screen_click_point_outside_movement_safety_region"
+
+
 def _no_click_safety_skip_observed(result: ExecutionResult) -> dict[str, Any] | None:
     if result.executed:
         return None
@@ -3591,6 +3601,16 @@ def _no_click_safety_skip_observed(result: ExecutionResult) -> dict[str, Any] | 
     lifecycle = result.lifecycle_state if isinstance(result.lifecycle_state, dict) else {}
     reason = str(lifecycle.get("reason") or "")
     if reason in FATAL_NO_CLICK_BLOCK_REASONS:
+        if _resource_target_movement_safety_reacquirable(result, reason):
+            return {
+                "observedResult": "no_click_safety_skip",
+                "resultOutcome": "skipped",
+                "resultComplete": True,
+                "nextActionAllowed": True,
+                "verificationStatus": "SKIPPED",
+                "skipReason": "unsafe_geometry",
+                "safetyReason": reason,
+            }
         return {
             "observedResult": "no_click_safety_block",
             "resultOutcome": "blocked",

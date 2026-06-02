@@ -361,6 +361,47 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertFalse(observed["nextActionAllowed"])
         self.assertEqual(observed["verificationStatus"], "FAIL")
 
+    def test_resource_movement_safety_edge_is_suppressible_unsafe_geometry(self):
+        result = ExecutionResult(
+            status="FAIL",
+            dry_run=False,
+            proposed_action="select_resource_target",
+            executed=False,
+            missing_capabilities=["screen_click_point"],
+            proposal={
+                "proposedAction": "select_resource_target",
+                "targetKind": "resource",
+                "targetName": "Tree",
+                "targetExplanation": {
+                    "name": "Tree",
+                    "targetKey": "tree-edge",
+                    "worldLocation": {"worldX": 3225, "worldY": 3245, "plane": 0},
+                },
+            },
+            lifecycle_state={"reason": "screen_click_point_outside_movement_safety_region"},
+        )
+
+        self.assertEqual(_hover_failure_category(result), "unsafe_geometry")
+        observed = _no_click_safety_skip_observed(result)
+        self.assertEqual(observed["observedResult"], "no_click_safety_skip")
+        self.assertEqual(observed["resultOutcome"], "skipped")
+        self.assertTrue(observed["nextActionAllowed"])
+        self.assertEqual(observed["skipReason"], "unsafe_geometry")
+
+        summary = {}
+        event = _record_target_hover_failure(
+            options=Namespace(target_hover_failure_limit=1, target_suppression_ms=2500),
+            cache={},
+            summary=summary,
+            result=result,
+            now_ms=1000,
+        )
+
+        self.assertIsNotNone(event)
+        self.assertTrue(event["suppressed"])
+        self.assertEqual(event["reason"], "unsafe_geometry")
+        self.assertEqual(summary["targetsSuppressed"], 1)
+
     def test_live_movement_safety_blocks_off_region_screen_point_before_move(self):
         backend = MovementSafetyBackend({"x": 100, "y": 100, "width": 500, "height": 500})
         proposal = ActionProposal(
