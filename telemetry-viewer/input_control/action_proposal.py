@@ -2467,6 +2467,7 @@ def _selected_route_waypoint(
     lookahead = max(1, _int(pathing.get("routeWaypointLookaheadTiles"), 12))
     max_horizon = max(1, _int(pathing.get("routeWaypointMaxHorizonTiles"), 25))
     min_progress = max(1, _int(pathing.get("minRouteProgressTiles"), 3))
+    close_destination_precision = max(1, _int(pathing.get("routeWaypointCloseDestinationPrecisionTiles"), 8))
     tiles = _path_tiles(pathing)
     suppressed_keys = {str(value) for value in _list(pathing.get("suppressedNavigationTargetKeys")) + _list(pathing.get("suppressedActionTargetKeys")) if value is not None}
     unsuppressed_tiles = [
@@ -2518,7 +2519,7 @@ def _selected_route_waypoint(
                 "suppressedTargetKeys": sorted(suppressed_keys),
             }
     direct_distance = _int(pathing.get("distanceToDestination"), None)
-    if direct_distance is not None and direct_distance <= lookahead and len(tiles) > lookahead:
+    if direct_distance is not None and direct_distance <= close_destination_precision and len(tiles) > lookahead:
         destination_tile = _normalise_tile(pathing.get("destinationTile") or pathing.get("pathTargetTile"))
         next_distance = _tile_distance(next_tile, destination_tile)
         detour_threshold = max(lookahead, max(1, direct_distance) * 4)
@@ -2539,6 +2540,7 @@ def _selected_route_waypoint(
                 "lookaheadTiles": lookahead,
                 "maxHorizonTiles": max_horizon,
                 "minRouteProgressTiles": min_progress,
+                "closeDestinationPrecisionTiles": close_destination_precision,
                 "directDistanceToDestination": direct_distance,
                 "nextWaypointTile": dict(next_tile) if next_tile else None,
                 "nextWaypointDistanceToDestination": next_distance,
@@ -2554,6 +2556,7 @@ def _selected_route_waypoint(
             "lookaheadTiles": lookahead,
             "maxHorizonTiles": max_horizon,
             "minRouteProgressTiles": min_progress,
+            "closeDestinationPrecisionTiles": close_destination_precision,
             "directDistanceToDestination": direct_distance,
             "selectedTile": dict(next_tile) if next_tile else None,
             "suppressedTargetKeys": sorted(suppressed_keys) if suppressed_keys else [],
@@ -2571,6 +2574,8 @@ def _selected_route_waypoint(
         "lookaheadTiles": lookahead,
         "maxHorizonTiles": max_horizon,
         "minRouteProgressTiles": min_progress,
+        "closeDestinationPrecisionTiles": close_destination_precision,
+        "directDistanceToDestination": direct_distance,
         "selectedTile": dict(selected),
         "nextWaypointTile": dict(next_tile) if next_tile else None,
         "candidateTilesAfterSuppression": len(tiles) if suppressed_keys else None,

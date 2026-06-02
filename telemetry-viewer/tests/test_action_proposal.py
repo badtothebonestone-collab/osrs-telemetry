@@ -1490,6 +1490,43 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_explanation["routeWaypointSelection"]["mode"], "adaptive")
         self.assertEqual(proposal.target_explanation["routeWaypointSelection"]["waypointDistanceTiles"], 12)
 
+    def test_adaptive_service_route_does_not_treat_lookahead_distance_as_close_destination(self):
+        predicted = [
+            {"worldX": 3233, "worldY": 3226 - step, "plane": 0}
+            for step in range(0, 7)
+        ] + [
+            {"worldX": 3232 - step, "worldY": 3219, "plane": 0}
+            for step in range(0, 12)
+        ]
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False},
+                pathing={
+                    "pathingNeeded": True,
+                    "nextWaypointTile": predicted[0],
+                    "predictedPathTiles": predicted,
+                    "destinationTile": predicted[-1],
+                    "distanceToDestination": 12,
+                    "routeWaypointDistanceMode": "adaptive",
+                    "routeWaypointLookaheadTiles": 12,
+                    "routeWaypointMaxHorizonTiles": 25,
+                    "minRouteProgressTiles": 3,
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_tile, predicted[11])
+        selection = proposal.target_explanation["routeWaypointSelection"]
+        self.assertEqual(selection["reason"], "long_visible_route_progress")
+        self.assertEqual(selection["directDistanceToDestination"], 12)
+        self.assertEqual(selection["waypointDistanceTiles"], 12)
+
     def test_adaptive_route_waypoint_keeps_short_step_near_transition_geometry(self):
         predicted = [{"worldX": 3200 + step, "worldY": 3230, "plane": 0} for step in range(1, 12)]
         proposal = build_action_proposal(
