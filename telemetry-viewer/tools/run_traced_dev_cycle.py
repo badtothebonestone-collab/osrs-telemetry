@@ -81,6 +81,7 @@ class RuntimeDeps:
     fetch_json: Callable[..., dict[str, Any]]
     detect_window: Callable[[str], dict[str, Any]]
     detect_processes: Callable[[], list[dict[str, Any]]]
+    check_input_readiness: Callable[[DevCycleConfig], dict[str, Any]]
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic
 
@@ -257,6 +258,7 @@ def default_deps() -> RuntimeDeps:
         fetch_json=fetch_json,
         detect_window=detect_runelite_window,
         detect_processes=detect_runelite_processes,
+        check_input_readiness=check_input_readiness,
     )
 
 
@@ -336,6 +338,51 @@ $items | ConvertTo-Json -Depth 3
     if isinstance(decoded, dict):
         return [decoded]
     return [item for item in decoded if isinstance(item, dict)] if isinstance(decoded, list) else []
+
+
+def check_input_readiness(config: DevCycleConfig) -> dict[str, Any]:
+    if config.backend != "arduino":
+        return {"schema": "traced_dev_cycle_input_readiness.v1", "status": "PASS", "backend": config.backend}
+    if not config.arduino_port:
+        return {
+            "schema": "traced_dev_cycle_input_readiness.v1",
+            "status": "FAIL",
+            "backend": "arduino",
+            "blocker": "arduino_port_unknown",
+            "reason": "Arduino backend is configured but no port was configured or discovered.",
+        }
+    try:
+        import execute_next_action as execute_cli
+
+        args = execute_cli.parse_args(["--backend", "arduino", "--arduino-port", config.arduino_port])
+        calibration = execute_cli._load_pointer_calibration_for_live_movement(args)
+    except Exception as error:  # noqa: BLE001
+        return {
+            "schema": "traced_dev_cycle_input_readiness.v1",
+            "status": "FAIL",
+            "backend": "arduino",
+            "arduinoPort": config.arduino_port,
+            "blocker": "arduino_pointer_calibration_check_failed",
+            "reason": f"{type(error).__name__}: {error}",
+        }
+    blockers = calibration.get("blockers") if isinstance(calibration.get("blockers"), list) else []
+    return {
+        "schema": "traced_dev_cycle_input_readiness.v1",
+        "status": "PASS" if calibration.get("status") == "PASS" else "FAIL",
+        "backend": "arduino",
+        "arduinoPort": config.arduino_port,
+        "blocker": None if calibration.get("status") == "PASS" else "arduino_pointer_calibration_required",
+        "reason": None if calibration.get("status") == "PASS" else "Arduino pointer calibration is required before RuneLite movement.",
+        "calibration": {
+            "status": calibration.get("status"),
+            "path": calibration.get("path"),
+            "blockers": blockers,
+            "writtenAtUtc": calibration.get("writtenAtUtc"),
+            "movementSuccessRate": calibration.get("movementSuccessRate"),
+            "maxPositionErrorPx": calibration.get("maxPositionErrorPx"),
+            "finalPositionErrorPx": calibration.get("finalPositionErrorPx"),
+        },
+    }
 
 
 def daemon_status_url(daemon_url: str) -> str:
@@ -655,6 +702,13 @@ def readiness_blocker(readiness: dict[str, Any]) -> dict[str, Any]:
     return {"category": "not_ready", "reason": str(readiness.get("status") or "readiness did not pass")}
 
 
+def input_readiness_blocker(input_readiness: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "category": str(input_readiness.get("blocker") or "input_backend_not_ready"),
+        "reason": str(input_readiness.get("reason") or "input backend readiness did not pass"),
+    }
+
+
 def trace_path_from_config(config: DevCycleConfig) -> Path:
     path = Path(str(config.trace_output_path))
     if not path.is_absolute():
@@ -908,9 +962,15 @@ def run_dev_cycle(args: argparse.Namespace, *, deps: RuntimeDeps | None = None) 
 
     if mode == "dry-run":
         payload["wouldRunCommand"] = build_execute_command(config, trace_path)
+        input_readiness = deps.check_input_readiness(config)
+        payload["inputReadiness"] = input_readiness
         if not payload["ready"]:
             payload["status"] = "BLOCKED"
             payload["blocker"] = readiness_blocker(readiness)
+        elif input_readiness.get("status") != "PASS":
+            payload["status"] = "BLOCKED"
+            payload["ready"] = False
+            payload["blocker"] = input_readiness_blocker(input_readiness)
         return finalize_payload(payload, trace_path)
 
     if (
@@ -933,6 +993,14 @@ def run_dev_cycle(args: argparse.Namespace, *, deps: RuntimeDeps | None = None) 
     if not payload["ready"]:
         payload["status"] = "BLOCKED"
         payload["blocker"] = readiness_blocker(readiness)
+        return finalize_payload(payload, trace_path)
+
+    input_readiness = deps.check_input_readiness(config)
+    payload["inputReadiness"] = input_readiness
+    if input_readiness.get("status") != "PASS":
+        payload["status"] = "BLOCKED"
+        payload["ready"] = False
+        payload["blocker"] = input_readiness_blocker(input_readiness)
         return finalize_payload(payload, trace_path)
 
     before_lines = count_lines(trace_path)
@@ -1207,6 +1275,14 @@ def format_summary(payload: dict[str, Any]) -> str:
             f"liveness={readiness.get('livenessState')} "
             f"manualLogin={readiness.get('manualLoginRequired')} "
             f"actionAllowed={readiness.get('actionAllowed')}"
+        )
+    input_readiness = payload.get("inputReadiness") if isinstance(payload.get("inputReadiness"), dict) else {}
+    if input_readiness:
+        lines.append(
+            "Input readiness: "
+            f"status={input_readiness.get('status')} "
+            f"backend={input_readiness.get('backend') or 'unknown'} "
+            f"blocker={input_readiness.get('blocker') or 'none'}"
         )
     trace = payload.get("trace") if isinstance(payload.get("trace"), dict) else {}
     lines.append(f"Trace: {payload.get('tracePath')}")

@@ -18,6 +18,7 @@ class FakeDeps:
         readiness: dict | list[dict],
         trace_records: list[dict] | None = None,
         auto_login_results: dict | list[dict] | None = None,
+        input_readiness: dict | None = None,
     ):
         self.readiness_sequence = list(readiness) if isinstance(readiness, list) else [readiness]
         if auto_login_results is None:
@@ -27,6 +28,7 @@ class FakeDeps:
         self.readiness_calls = 0
         self.auto_login_calls = 0
         self.trace_records = trace_records or []
+        self.input_readiness = input_readiness or {"schema": "traced_dev_cycle_input_readiness.v1", "status": "PASS", "backend": "arduino"}
         self.commands: list[list[str]] = []
         self.launches: list[object] = []
         self.sleep_calls: list[float] = []
@@ -89,6 +91,9 @@ class FakeDeps:
     def detect_processes(self):
         return []
 
+    def check_input_readiness(self, _config):
+        return dict(self.input_readiness)
+
     def sleep(self, _seconds):
         self.sleep_calls.append(float(_seconds))
         self.now += float(_seconds)
@@ -104,6 +109,7 @@ class FakeDeps:
             fetch_json=self.fetch_json,
             detect_window=self.detect_window,
             detect_processes=self.detect_processes,
+            check_input_readiness=self.check_input_readiness,
             sleep=self.sleep,
             monotonic=self.monotonic,
         )
@@ -379,6 +385,31 @@ class RunTracedDevCycleTest(unittest.TestCase):
         self.assertTrue(any("execute_next_action.py" in " ".join(command) for command in fake.commands))
         self.assertEqual(payload["trace"]["newDecisionCount"], 1)
         self.assertEqual(payload["trace"]["decisionCounts"], {"wait": 1})
+
+    def test_run_mode_blocks_before_executor_when_arduino_calibration_missing(self):
+        input_readiness = {
+            "schema": "traced_dev_cycle_input_readiness.v1",
+            "status": "FAIL",
+            "backend": "arduino",
+            "arduinoPort": "COM9",
+            "blocker": "arduino_pointer_calibration_required",
+            "reason": "Arduino pointer calibration is required before RuneLite movement.",
+            "calibration": {"status": "FAIL", "blockers": ["calibration_record_missing"]},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "dev_cycle.local.json"
+            trace_path = Path(tmp) / "navigation_decisions.jsonl"
+            write_config(config_path, trace_path)
+            fake = FakeDeps(readiness=ready_readiness(), input_readiness=input_readiness)
+
+            payload = dev_cycle.run_dev_cycle(dev_cycle.parse_args(["--run", "--config", str(config_path)]), deps=fake.as_deps())
+
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["blocker"]["category"], "arduino_pointer_calibration_required")
+        self.assertEqual(payload["inputReadiness"]["calibration"]["blockers"], ["calibration_record_missing"])
+        self.assertFalse(any("execute_next_action.py" in " ".join(command) for command in fake.commands))
+        self.assertEqual(payload["trace"]["newDecisionCount"], 0)
 
     def test_watch_run_auto_login_failure_reports_blocker_without_executor(self):
         failed_recovery = {
