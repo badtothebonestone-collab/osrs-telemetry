@@ -1885,6 +1885,28 @@ def _observed_from_result(result: ExecutionResult) -> dict[str, Any]:
     return observed if isinstance(observed, dict) else {}
 
 
+def _navigation_not_executed_observation(result: ExecutionResult) -> dict[str, Any] | None:
+    if result.proposed_action not in NAVIGATION_ACTIONS or result.executed:
+        return None
+    observed = dict(_observed_from_result(result))
+    lifecycle = result.lifecycle_state if isinstance(result.lifecycle_state, dict) else {}
+    reason = str(
+        observed.get("observedResult")
+        or lifecycle.get("reason")
+        or (result.warnings[-1] if result.warnings else "")
+        or "navigation_action_not_executed"
+    )
+    observed["observedResult"] = reason
+    observed.setdefault("resultOutcome", "blocked" if result.status == "FAIL" else "skipped")
+    observed.setdefault("resultComplete", True)
+    observed.setdefault("nextActionAllowed", True)
+    observed.setdefault("verificationStatus", result.verification_status or ("FAIL" if result.status == "FAIL" else "WARN"))
+    observed["navigationActionNotExecuted"] = True
+    result.observed_result = observed
+    result.verification_status = str(observed.get("verificationStatus") or result.verification_status or "UNKNOWN")
+    return observed
+
+
 def _result_has_click_command(result: ExecutionResult) -> bool:
     for command in result.commands:
         if not isinstance(command, dict):
@@ -2827,7 +2849,7 @@ def _navigation_decision_from_observed(observed: dict[str, Any] | None) -> tuple
         return "wait", str(route_no_progress.get("classification") or "navigation_no_progress_no_block_evidence"), None
     if outcome == "no_change_timeout":
         return "wait", result or "navigation_timeout_no_progress", None
-    if outcome in {"skipped", "menu_mismatch"}:
+    if outcome in {"skipped", "menu_mismatch", "blocked"}:
         return "fail", result or outcome, None
     return "wait", result or outcome or "navigation_observation", None
 
@@ -10364,6 +10386,34 @@ def execute_action_loop(
                 readiness=readiness,
                 classification=timeout_reason,
             )
+        navigation_not_executed = _navigation_not_executed_observation(action_result) if not dry_run else None
+        if navigation_not_executed is not None:
+            decision, trace_reason, recovery_mode = _navigation_decision_from_observed(navigation_not_executed)
+            _record_navigation_trace(
+                options=options,
+                loop_summary=loop_summary,
+                decision=decision,
+                reason=trace_reason,
+                status=before_status,
+                proposal=proposal,
+                observed=navigation_not_executed,
+                result=action_result,
+                recovery_mode=recovery_mode,
+            )
+            _capture_debug_bundle(
+                debug_bundles,
+                loop_summary,
+                "navigation_action_not_executed",
+                daemon_status=before_status,
+                proposal=proposal,
+                result=action_result,
+                readiness=readiness,
+                classification=trace_reason,
+            )
+            _refresh_loop_summary(loop_summary, results)
+            status_value = "FAIL" if action_result.status == "FAIL" else "WARN"
+            reason = str(navigation_not_executed.get("observedResult") or "navigation_action_not_executed")
+            break
         if action_result.status == "FAIL":
             _capture_debug_bundle(
                 debug_bundles,

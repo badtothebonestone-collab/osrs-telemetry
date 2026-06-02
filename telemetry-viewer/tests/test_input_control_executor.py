@@ -6072,6 +6072,79 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(payload["executedActionCount"], 0)
         self.assertEqual(payload["loopSummary"]["skippedHoverMismatch"], 2)
 
+    def test_navigation_no_click_failure_stops_repeated_waypoint_trace(self):
+        backend = FakeBackend()
+        with tempfile.TemporaryDirectory() as tmp:
+            trace_path = Path(tmp) / "navigation_decisions.jsonl"
+            options = Namespace(
+                timeout=0.01,
+                backend="pyautogui",
+                movement_profile="instant_test",
+                input_profile="steady",
+                execute=True,
+                verify_after_action=True,
+                after_action_wait_ms=0,
+                hover_confirm_target=True,
+                hover_confirm_timeout_ms=10,
+                hover_poll_ms=10,
+                hover_position_tolerance=3,
+                click_hold_ms=0,
+                wait_for_ready=0,
+                cooldown_ms=0,
+                result_timeout_ms=100,
+                action_timeout_ms=100,
+                poll_interval_ms=10,
+                max_actions=100,
+                max_total_actions=5,
+                max_runtime_seconds=10,
+                stop_on_warn=False,
+                stop_on_fail=False,
+                stop_after_inventory_changes=None,
+                stop_when_inventory_full=False,
+                max_successful_actions=None,
+                max_timeouts=None,
+                max_consecutive_timeouts=None,
+                max_consecutive_no_progress=None,
+                seed=None,
+                client_tick_debug=False,
+                client_tick_tail=0,
+                menu_entry_limit=5,
+                require_clicked_menu_match=False,
+                require_live_readiness=False,
+                nav_trace=True,
+                nav_trace_output=str(trace_path),
+                nav_trace_console=False,
+                nav_verify_game_ticks=3,
+                nav_progress_min_distance=1,
+                nav_replan_while_moving=False,
+                max_navigation_reacquire_rounds=0,
+                camera_reacquire_waypoint=False,
+                camera_reacquire_on_edge_projection=False,
+            )
+            status = navigation_status_payload(tick=20, x=3233, y=3227, service_distance=12, path_distance=12)
+
+            result = execute_action_loop(
+                "http://daemon",
+                options,
+                fetch_json_func=lambda *_args, **_kwargs: status,
+                backend=backend,
+                snapshot_fetch_func=lambda *_args, **_kwargs: {},
+                sleep_func=lambda _seconds: None,
+                monotonic_func=IncrementingClock(start=0.0, step=0.01),
+            )
+
+            payload = result.to_dict()
+            records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(payload["actionResultCount"], 1)
+        self.assertEqual(payload["executedActionCount"], 0)
+        self.assertEqual(payload["reason"], "hover_confirm_timeout")
+        self.assertEqual(sum(1 for record in records if record["decision"] == "click"), 1)
+        self.assertEqual(records[-1]["decision"], "fail")
+        self.assertEqual(records[-1]["pending"]["observedResult"], "hover_confirm_timeout")
+        self.assertEqual(records[-1]["pending"]["resultOutcome"], "blocked")
+        self.assertEqual(payload["loopSummary"]["actualClicks"], 0)
+
     def test_loop_counts_volatile_no_click_skip_without_timeout(self):
         result = ExecutionResult(
             status="WARN",
