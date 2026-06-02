@@ -2445,6 +2445,16 @@ def _path_tiles(pathing: dict[str, Any]) -> list[dict[str, Any]]:
     return tiles
 
 
+def _pathing_has_concrete_waypoint(pathing: dict[str, Any]) -> bool:
+    if _normalise_tile(pathing.get("nextWaypointTile")) is not None:
+        return True
+    if isinstance(pathing.get("nextWaypointTarget"), dict):
+        return True
+    if isinstance(pathing.get("nextWaypointAimPoint"), dict) or isinstance(pathing.get("pathClickPoint"), dict):
+        return True
+    return bool(_path_tiles(pathing))
+
+
 def _selected_route_waypoint(
     pathing: dict[str, Any],
     *,
@@ -3316,6 +3326,22 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 brain=brain,
             )
 
+        route_navigation_target = _dict(service_route.get("currentNavigationTarget"))
+        if _bool(pathing.get("pathingNeeded")) is True and (_pathing_has_concrete_waypoint(pathing) or route_navigation_target):
+            return _proposal(
+                "navigate_to_service",
+                target_kind="path_tile",
+                target=_path_target(pathing, route_navigation_target or _service_target(service, generic), "Service waypoint"),
+                reason="pathing_to_service",
+                confidence=0.74,
+                required_context=["pathing"],
+                source_tick=source_tick,
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
+                status=status,
+                brain=brain,
+            )
+
         service_recovery_target = _route_census_recovery_target(service_route)
         if service_recovery_target:
             service_recovery_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
@@ -3345,7 +3371,6 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 )
 
         if _bool(pathing.get("pathingNeeded")) is True:
-            route_navigation_target = _dict(service_route.get("currentNavigationTarget"))
             return _proposal(
                 "navigate_to_service",
                 target_kind="path_tile",

@@ -1035,6 +1035,84 @@ class ActionProposalTest(unittest.TestCase):
         self.assertTrue(exposure["shouldAttemptCameraExposure"])
         self.assertEqual(exposure["currentProjectionStatus"], "offscreen")
 
+    def test_offscreen_route_census_transition_with_waypoint_navigates_first(self):
+        route_census = {
+            "topRouteObjects": [
+                {
+                    "name": "Staircase",
+                    "routeObjectKind": "route_transition",
+                    "routeRelevanceStatus": "PASS",
+                    "matchedRouteStepIndex": 0,
+                    "rejectionReason": "offscreen",
+                    "source": "worldModelRouteObjectCensus",
+                    "projectionStatus": {
+                        "geometryAvailable": True,
+                        "onScreen": False,
+                        "visible": False,
+                        "actionableByCanvas": False,
+                        "aimPoint": {"canvasX": -332, "canvasY": -185, "source": "canvasLocation"},
+                        "classification": "offscreen",
+                    },
+                    "routeRelevance": {"relevanceStatus": "PASS"},
+                    "candidate": {
+                        "targetName": "Staircase",
+                        "classId": "route_transition",
+                        "targetType": "sceneObject",
+                        "id": 56230,
+                        "worldX": 3204,
+                        "worldY": 3229,
+                        "plane": 0,
+                        "actions": ["Climb-up", "Top-floor"],
+                        "source": "world_model_cache",
+                        "worldModelSource": True,
+                    },
+                }
+            ]
+        }
+        next_waypoint = {"worldX": 3233, "worldY": 3231, "plane": 0}
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 0},
+            service_route={
+                "schema": "service_route_context.v1",
+                "routeAvailable": True,
+                "routeStepStatus": "goal_directed_route_prior",
+                "actionReady": False,
+                "currentStepIndex": 8,
+                "currentStep": {"type": "navigate_world", "label": "Lumbridge Castle approach"},
+                "routeObjectCensus": route_census,
+            },
+            pathing={
+                "pathingNeeded": True,
+                "nextWaypointTile": next_waypoint,
+                "nextWaypointAimPoint": aim(255, 201),
+                "destinationTile": {"worldX": 3221, "worldY": 3218, "plane": 0},
+                "pathTargetTile": {"worldX": 3221, "worldY": 3218, "plane": 0},
+            },
+            camera_viewport={
+                "canvasWidth": 765,
+                "canvasHeight": 503,
+                "viewportXOffset": 0,
+                "viewportYOffset": 0,
+                "viewportWidth": 765,
+                "viewportHeight": 503,
+                "cameraYaw": 32,
+                "cameraPitch": 383,
+            },
+        )
+        status["playerLocation"] = {"worldX": 3233, "worldY": 3232, "plane": 0}
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.reason, "pathing_to_service")
+        self.assertEqual(proposal.target_kind, "path_tile")
+        self.assertEqual(proposal.target_tile, next_waypoint)
+        self.assertEqual(proposal.target_explanation["actionTargetSource"], "local_frontier_waypoint")
+
     def test_route_ready_bank_service_target_proposes_open_service(self):
         service_target = {
             "targetName": "Bank booth",
