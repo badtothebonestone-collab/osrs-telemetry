@@ -1992,6 +1992,10 @@ def build_live_named_query_response(args, query_name: str, needs: list[str]) -> 
         payload = fabric.explain_current_blocker()
         response["knowledgeCurrentBlocker"] = payload
         payloads.append(payload)
+    if "knowledge_navigation_decision_trace" in needs:
+        payload = fabric.query_navigation_decision_trace(limit=max_candidates)
+        response["knowledgeNavigationDecisionTrace"] = payload
+        payloads.append(payload)
     if "knowledge_data_quality_report" in needs:
         payload = fabric.data_quality_report(limit=max_candidates)
         response["knowledgeDataQualityReport"] = payload

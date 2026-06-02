@@ -770,6 +770,25 @@ class ContextServiceTest(unittest.TestCase):
             self.assertNotIn("daemon_session_missing", blocker_text)
             self.assertNotIn("No telemetry session selected", blocker_text)
 
+    def test_navigation_decision_trace_with_explicit_daemon_url_returns_trace_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live_session = Path(tmp) / "live-session"
+            args = self.live_query_args(query="navigation-decision-trace")
+            with mock.patch.object(service.knowledge_fabric, "fabric_from_live", return_value=self.live_fabric(live_session)):
+                payload = service.build_named_query_response(
+                    args,
+                    "navigation-decision-trace",
+                    ["knowledge_navigation_decision_trace"],
+                )
+
+            self.assertEqual(payload["contextSource"], "live_daemon")
+            self.assertFalse(payload["fileSessionFallbackUsed"])
+            self.assertIn("knowledgeNavigationDecisionTrace", payload)
+            trace = payload["knowledgeNavigationDecisionTrace"]
+            self.assertEqual(trace["schema"], "navigation_decision_trace_summary.v1")
+            self.assertIn("tracePresent", trace["data"])
+            self.assertEqual(payload["status"], trace["status"])
+
     def test_live_daemon_named_query_does_not_require_latest_session_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             live_session = Path(tmp) / "live-session"
