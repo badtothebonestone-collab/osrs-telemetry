@@ -25,6 +25,38 @@ def make_fabric() -> knowledge_fabric.KnowledgeFabric:
         {
             "schema": "context_status.v1",
             "latestTick": 42,
+            "gameState": "LOGGED_IN",
+            "playerLocation": {"worldX": 3202, "worldY": 3200, "plane": 0},
+            "clientTickHot": {
+                "gameState": "LOGGED_IN",
+                "latency": {"ageMillis": 25, "postMenuSortAgeMillis": 25},
+                "postMenuSort": {"topOption": "Chop down", "topTarget": "Tree"},
+                "lastMenuOptionClicked": {"option": "Chop down", "target": "Tree", "sourceEvent": "MenuOptionClicked"},
+            },
+            "inputIntegrityStatus": {
+                "status": "FAIL",
+                "monitorPass": False,
+                "injectedEvents": 3,
+                "lowerIlInjectedEvents": 0,
+                "backend": {"directBackendBypassCount": 0},
+            },
+            "brain": {
+                "genericTaskState": {"phase": "collecting", "cycleStage": "collect", "activeIntent": "select_target"},
+                "inventoryContext": {"freeSlots": 12, "occupiedSlots": 16, "inventoryFull": False},
+                "goalProgress": {"heldResourceCount": 16, "resourceGroup": "logs"},
+                "bankUiContext": {"bankOpen": False, "depositInventoryAvailable": False},
+                "serviceRouteContext": {
+                    "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                    "currentNodeId": "lumbridge_west_trees",
+                    "currentStepIndex": 0,
+                    "routeStepStatus": "at_resource_area",
+                },
+                "pathingContext": {
+                    "pathingNeeded": False,
+                    "nextWaypointTile": {"worldX": 3203, "worldY": 3201, "plane": 0},
+                    "pathLengthTiles": 1,
+                },
+            },
             "worldModelPayloads": {
                 "quality": {
                     "worldModelAvailable": True,
@@ -99,6 +131,9 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("HumanInputController", " ".join(spec["canonicalPipeline"]))
         self.assertTrue(spec["externalKnowledgePolicy"]["advisoryOnly"])
         self.assertFalse(spec["externalKnowledgePolicy"]["hotExecutorExternalCallsAllowed"])
+        self.assertIn("inventory", spec["runtimeEvidenceVariables"])
+        self.assertIn("resourceCount", spec["runtimeEvidenceVariables"])
+        self.assertIn("menuOptionClicked", spec["runtimeEvidenceVariables"])
 
     def test_woodcut_bank_example_validates_and_compiles_to_existing_actions(self):
         script = load_example()
@@ -113,6 +148,13 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(data["executorContract"]["directBackendBypassCountMustRemain"], 0)
         self.assertFalse(data["executorContract"]["rawArbitraryInputToolsAllowed"])
         self.assertEqual(data["taskPolicy"]["bankOperation"], "deposit_inventory")
+        evidence_plan = data["runtimeEvidencePlan"]
+        self.assertEqual(evidence_plan["schema"], "task_script_evidence_plan.v1")
+        self.assertEqual(evidence_plan["missingLifecycleVariables"], [])
+        self.assertIn("inventory", evidence_plan["coveredVariables"])
+        self.assertIn("bankOpen", evidence_plan["coveredVariables"])
+        self.assertIn("hoverTarget", evidence_plan["coveredVariables"])
+        self.assertIn("routeProgress", evidence_plan["coveredVariables"])
         self.assertIn("select_resource_target", data["actionProposalActions"])
         self.assertIn("open_service", data["actionProposalActions"])
         self.assertIn("deposit_inventory", data["actionProposalActions"])
@@ -152,17 +194,44 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertTrue(data["externalKnowledgePolicy"]["cacheFirst"])
         self.assertIn("coordinate_transform_error", data["failureClassificationPolicy"])
         self.assertIn("target/hover/menu mismatch", data["failureClassificationPolicy"])
+        self.assertIn("runtimeEvidencePlan", data)
+        self.assertIn("snapshotProtocol", data["runtimeEvidencePlan"])
+
+    def test_evidence_plan_names_live_variables_and_snapshot_protocol(self):
+        evidence = task_script_api.build_task_script_evidence_plan(load_example())
+        data = evidence["data"]
+
+        self.assertEqual(evidence["schema"], "task_script_evidence_plan.v1")
+        self.assertEqual(evidence["status"], "PASS")
+        self.assertEqual(data["missingLifecycleVariables"], [])
+        self.assertIn("menuOptionClicked", data["coveredVariables"])
+        self.assertIn("hoverTarget", data["coveredVariables"])
+        self.assertIn("routeProgress", data["coveredVariables"])
+        self.assertIn("get_action_input_visibility", data["snapshotProtocol"]["before"])
 
     def test_knowledge_fabric_direct_methods_expose_script_api(self):
         fabric = make_fabric()
 
         validation = fabric.validate_task_script(load_example())
         plan = fabric.compile_task_script(load_example())
+        evidence_plan = fabric.task_script_evidence_plan(load_example())
+        runtime = fabric.query_task_script_runtime_evidence(load_example())
         template = fabric.suggest_task_template("woodcutting and bank logs", profile="woodcutting")
         scene_probe = fabric.probe_task_from_scene("woodcutting and bank logs", profile="woodcutting", limit=5)
 
         self.assertEqual(validation["status"], "PASS")
         self.assertEqual(plan["schema"], "task_script_plan.v1")
+        self.assertEqual(evidence_plan["schema"], "task_script_evidence_plan.v1")
+        self.assertEqual(runtime["schema"], "task_runtime_evidence.v1")
+        self.assertTrue(runtime["data"]["runtimeVariables"]["inventory"]["observed"])
+        self.assertEqual(runtime["data"]["runtimeVariables"]["resourceCount"]["value"], 16)
+        self.assertEqual(runtime["data"]["runtimeVariables"]["bankOpen"]["value"], False)
+        self.assertTrue(runtime["data"]["runtimeVariables"]["menuOptionClicked"]["observed"])
+        input_integrity = runtime["data"]["runtimeVariables"]["inputIntegrity"]["value"]
+        self.assertEqual(input_integrity["phaseCounts"]["operator_phase"]["operatorInjectedEvents"], 3)
+        self.assertFalse(input_integrity["phaseCounts"]["operator_phase"]["blocking"])
+        self.assertFalse(input_integrity["phaseCounts"]["live_action_phase"]["hardBlocker"])
+        self.assertIn("phaseIntent", runtime["data"]["coveredVariablesObservedNow"])
         self.assertEqual(template["data"]["templateName"], "woodcut_bank")
         self.assertEqual(scene_probe["schema"], "task_scene_probe.v1")
         self.assertTrue(scene_probe["data"]["noLiveInput"])
@@ -178,22 +247,30 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertIn("validate_task_script", tool_names)
         self.assertIn("compile_task_script", tool_names)
         self.assertIn("explain_script_plan", tool_names)
+        self.assertIn("get_task_script_evidence_plan", tool_names)
+        self.assertIn("get_task_script_runtime_evidence", tool_names)
         self.assertIn("suggest_task_template", tool_names)
         self.assertIn("probe_task_from_scene", tool_names)
         self.assertTrue(forbidden_raw_names.isdisjoint(tool_names))
         self.assertIn("osrs://script-api/spec", resource_uris)
         self.assertIn("osrs://script-api/woodcut-bank-example", resource_uris)
+        self.assertIn("osrs://script-api/woodcut-bank-evidence-plan", resource_uris)
+        self.assertIn("osrs://script-api/runtime-evidence", resource_uris)
 
         fabric = make_fabric()
         with patch.object(mcp_server, "_fabric", return_value=fabric):
             spec_payload = json.loads(mcp_server.call_tool("get_task_script_api_spec", {})["content"][0]["text"])
             compile_payload = json.loads(mcp_server.call_tool("compile_task_script", {"script": load_example()})["content"][0]["text"])
+            evidence_payload = json.loads(mcp_server.call_tool("get_task_script_evidence_plan", {"script": load_example()})["content"][0]["text"])
+            runtime_payload = json.loads(mcp_server.call_tool("get_task_script_runtime_evidence", {"script": load_example()})["content"][0]["text"])
             probe_payload = json.loads(
                 mcp_server.call_tool("probe_task_from_scene", {"taskDescription": "woodcutting and bank logs", "limit": 3})["content"][0]["text"]
             )
 
         self.assertEqual(spec_payload["schema"], "task_script_api_spec.v1")
         self.assertEqual(compile_payload["schema"], "task_script_plan.v1")
+        self.assertEqual(evidence_payload["schema"], "task_script_evidence_plan.v1")
+        self.assertEqual(runtime_payload["schema"], "task_runtime_evidence.v1")
         self.assertEqual(probe_payload["schema"], "task_scene_probe.v1")
 
 

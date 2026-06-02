@@ -1520,6 +1520,8 @@ class KnowledgeFabric:
                 "validate_task_script",
                 "compile_task_script",
                 "explain_script_plan",
+                "task_script_evidence_plan",
+                "query_task_script_runtime_evidence",
                 "suggest_task_template",
                 "probe_task_from_scene",
                 "handoff_summary",
@@ -1709,6 +1711,20 @@ class KnowledgeFabric:
                     "sampleQuery": "get_task_script_api_spec",
                 },
                 {
+                    "sourceName": "task_script_runtime_evidence.v1",
+                    "sourceType": "read_only_runtime_evidence",
+                    "producer": "Knowledge Fabric over daemon/readiness/client_tick/action visibility",
+                    "consumer": "Codex script validation, replay/live lifecycle proof comparison",
+                    "schema": task_script_api.TASK_RUNTIME_EVIDENCE_SCHEMA,
+                    "freshnessField": "freshness.sourceTick/worldModelAgeMs/clientTickHot age",
+                    "capFields": ["script evidence variable catalog"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "get_task_script_runtime_evidence",
+                },
+                {
                     "sourceName": "session_memory",
                     "sourceType": "session_memory",
                     "producer": "Knowledge Fabric/session observation writers",
@@ -1800,6 +1816,8 @@ class KnowledgeFabric:
             ("What high-level primitives can a script use?", "task_script_api_spec", "get_task_script_api_spec/osrs://script-api/spec", "task_script_api.py", task_script_api.TASK_SCRIPT_SPEC_SCHEMA, "high", "none", "test_task_script_api.py"),
             ("Is this high-level task script valid?", "validate_task_script", "validate_task_script", "task script JSON", task_script_api.TASK_SCRIPT_VALIDATION_SCHEMA, "high", "raw input fields or unbounded loops", "test_task_script_api.py"),
             ("What existing engine actions will this script use?", "compile_task_script/explain_script_plan", "compile_task_script/explain_script_plan", "task script JSON + task policy", task_script_api.TASK_SCRIPT_PLAN_SCHEMA, "high", "unknown primitive or missing evidence", "test_task_script_api.py"),
+            ("Which live variables must prove this script changed state?", "task_script_evidence_plan", "get_task_script_evidence_plan", "task script JSON", task_script_api.TASK_SCRIPT_EVIDENCE_PLAN_SCHEMA, "high", "script does not cover required lifecycle variables", "test_task_script_api.py"),
+            ("What are the current live values for script evidence variables?", "query_task_script_runtime_evidence", "get_task_script_runtime_evidence", "daemon/readiness/client_tick/action visibility", task_script_api.TASK_RUNTIME_EVIDENCE_SCHEMA, "high if loaded scene fresh", "manual login or stale liveness", "test_task_script_api.py"),
             ("Can the current scene inform a script template?", "probe_task_from_scene", "probe_task_from_scene", "loaded scene + static library + external cache", "task_scene_probe.v1", "medium", "stale loaded scene", "test_task_script_api.py"),
         ]
         data = {
@@ -2433,6 +2451,7 @@ class KnowledgeFabric:
         route_context = _compact_route_context(status)
         visibility = _dict(latest_trace.get("visibility"))
         bootstrap = self._bootstrap_liveness_summary()
+        current_input_integrity = self._input_integrity_summary()
         data = {
             "latestActionTrace": visibility or latest_trace,
             "latestActionTraceSummary": latest_trace,
@@ -2453,12 +2472,12 @@ class KnowledgeFabric:
             },
             "menuOptionClickedEvidence": visibility.get("menuOptionClickedEvidence") or hot.get("lastMenuOptionClicked"),
             "input_integrity_status": visibility.get("input_integrity_status") or {
-                "current": self._input_integrity_summary(),
-                "phaseCounts": _trace_input_phase_summary({}),
+                "current": current_input_integrity,
+                "phaseCounts": _trace_input_phase_summary({"inputIntegrityStatusBefore": current_input_integrity}),
             },
             "directBackendBypassCount": _first_present(
                 visibility.get("directBackendBypassCount"),
-                _dict(self._input_integrity_summary()).get("directBackendBypassCount"),
+                _dict(current_input_integrity).get("directBackendBypassCount"),
             ),
             "lastClickProof": visibility.get("lastClickProof"),
             "lastMovementProof": _dict(visibility.get("cursorMovementTrace")).get("lastMovementProof"),
@@ -3674,6 +3693,125 @@ class KnowledgeFabric:
 
     def explain_script_plan(self, script: dict[str, Any] | str | Path) -> dict[str, Any]:
         return task_script_api.explain_script_plan(script)
+
+    def task_script_evidence_plan(self, script: dict[str, Any] | str | Path) -> dict[str, Any]:
+        return task_script_api.build_task_script_evidence_plan(script)
+
+    def _task_script_runtime_variables(self, *, visibility: dict[str, Any] | None = None, readiness: dict[str, Any] | None = None) -> dict[str, Any]:
+        status = _status_view(self.daemon_status)
+        brain = _dict(status.get("brain"))
+        generic = _dict(brain.get("genericTaskState") or status.get("genericTaskState"))
+        inventory = _compact_inventory(status)
+        route = _compact_route_context(status)
+        location = _compact_location(status)
+        phase = _compact_phase(status)
+        hot = _dict(status.get("clientTickHot"))
+        hover = _dict(hot.get("postMenuSort")) or _dict(hot.get("hoverMenu"))
+        last_click = _dict(hot.get("lastMenuOptionClicked"))
+        bank_ui = _dict(brain.get("bankUiContext") or status.get("bankUiContext") or status.get("bankUi"))
+        bank_open = _first_present(bank_ui.get("bankOpen"), bank_ui.get("bank_open"), status.get("bankOpen"), generic.get("bankOpen"))
+        visibility_data = _dict(visibility)
+        readiness_data = _dict(readiness)
+        action_need = _dict(readiness_data.get("actionNeed"))
+        loaded_scene = _dict(readiness_data.get("loadedSceneProof"))
+        input_integrity = visibility_data.get("input_integrity_status") or self._input_integrity_summary()
+
+        def observed(value: Any) -> bool:
+            if isinstance(value, dict):
+                return any(observed(item) for item in value.values())
+            if isinstance(value, list):
+                return bool(value)
+            return value is not None
+
+        menu_evidence = visibility_data.get("menuOptionClickedEvidence") or last_click
+        hover_evidence = visibility_data.get("hoverConfirmationEvidence") or {
+            "topOption": _first_present(hover.get("topOption"), hover.get("option"), hot.get("topOption")),
+            "topTarget": _first_present(hover.get("topTarget"), hover.get("target"), hot.get("topTarget")),
+            "source": hot.get("sourceEvent") or hot.get("sampleSource"),
+        }
+        phase_intent = {
+            **phase,
+            "proposedAction": _first_present(readiness_data.get("proposedAction"), visibility_data.get("plannedAction")),
+            "readinessStatus": readiness_data.get("status"),
+            "executionAllowed": _dict(readiness_data.get("actionReadiness")).get("executionAllowed"),
+            "needsService": action_need.get("needsService"),
+            "bankingComplete": action_need.get("bankingComplete"),
+        }
+        variables = {
+            "inventory": {"observed": observed(inventory), "value": inventory, "source": "compact_inventory"},
+            "resourceCount": {
+                "observed": inventory.get("resourceCount") is not None or action_need.get("resourceCount") is not None,
+                "value": _first_present(inventory.get("resourceCount"), action_need.get("resourceCount")),
+                "source": "inventorySummary/actionNeed",
+            },
+            "bankOpen": {"observed": bank_open is not None, "value": bank_open, "source": "bankUiContext/status"},
+            "menuOptionClicked": {"observed": observed(menu_evidence), "value": menu_evidence, "source": "clientTickHot/actionTrace"},
+            "hoverTarget": {"observed": observed(hover_evidence), "value": hover_evidence, "source": "PostMenuSort/actionTrace"},
+            "location": {"observed": observed(location.get("worldLocation")), "value": location, "source": "playerLocation"},
+            "routeProgress": {"observed": observed(route), "value": route, "source": "serviceRouteContext/pathingContext"},
+            "phaseIntent": {"observed": observed(phase_intent), "value": phase_intent, "source": "genericTaskState/readiness"},
+            "loadedScene": {"observed": observed(loaded_scene), "value": loaded_scene, "source": "readiness.loadedSceneProof"},
+            "inputIntegrity": {"observed": observed(input_integrity), "value": input_integrity, "source": "input_integrity/action_visibility"},
+        }
+        return variables
+
+    def query_task_script_runtime_evidence(self, script: dict[str, Any] | str | Path | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        script_payload = script if script is not None else task_script_api.woodcut_bank_template()
+        evidence_plan = task_script_api.build_task_script_evidence_plan(script_payload)
+        readiness = self._readiness_report()
+        visibility_response = self.query_action_input_visibility()
+        visibility_data = _dict(visibility_response.get("data"))
+        variables = self._task_script_runtime_variables(visibility=visibility_data, readiness=readiness)
+        covered = _list(_dict(evidence_plan.get("data")).get("coveredVariables"))
+        observed = [name for name in covered if _dict(variables.get(name)).get("observed") is True]
+        missing_observations = [name for name in covered if name not in observed]
+        action_readiness = _dict(readiness.get("actionReadiness"))
+        blockers = _list(action_readiness.get("blockers"))
+        manual_login = bool(readiness.get("manualLoginRequired") is True)
+        data = {
+            "scriptEvidencePlan": _dict(evidence_plan.get("data")),
+            "runtimeVariables": variables,
+            "coveredVariablesObservedNow": observed,
+            "coveredVariablesMissingNow": missing_observations,
+            "readinessSummary": {
+                "status": readiness.get("status"),
+                "ready": readiness.get("ready"),
+                "proposedAction": readiness.get("proposedAction"),
+                "currentIntent": readiness.get("currentIntent"),
+                "livenessState": readiness.get("livenessState"),
+                "manualLoginRequired": readiness.get("manualLoginRequired"),
+                "loadedSceneProof": readiness.get("loadedSceneProof"),
+                "blockers": blockers,
+            },
+            "actionInputVisibilitySummary": {
+                "schema": visibility_response.get("schema"),
+                "status": visibility_response.get("status"),
+                "plannedAction": visibility_data.get("plannedAction"),
+                "plannedTarget": visibility_data.get("plannedTarget"),
+                "hoverConfirmationEvidence": visibility_data.get("hoverConfirmationEvidence"),
+                "menuOptionClickedEvidence": visibility_data.get("menuOptionClickedEvidence"),
+                "input_integrity_status": visibility_data.get("input_integrity_status"),
+                "directBackendBypassCount": visibility_data.get("directBackendBypassCount"),
+                "blockedReason": visibility_data.get("blockedReason"),
+            },
+            "snapshotProtocol": _dict(_dict(evidence_plan.get("data")).get("snapshotProtocol")),
+            "liveValidationPossibleNow": bool(action_readiness.get("executionAllowed") is True and not manual_login),
+            "noLiveInput": True,
+        }
+        warnings = []
+        if manual_login:
+            warnings.append("manual_login_required")
+        warnings.extend(f"missing_runtime_variable:{name}" for name in missing_observations)
+        return _query_response(
+            task_script_api.TASK_RUNTIME_EVIDENCE_SCHEMA,
+            data,
+            started=started,
+            source="knowledge_fabric+readiness+action_input_visibility",
+            freshness=self.freshness(),
+            warnings=warnings,
+            status="WARN" if warnings or action_readiness.get("executionAllowed") is not True else "PASS",
+        )
 
     def suggest_task_template(self, task_description: str | None = None, *, profile: str | None = None) -> dict[str, Any]:
         return task_script_api.suggest_task_template(task_description, profile=profile)

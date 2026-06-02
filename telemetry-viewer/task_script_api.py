@@ -15,6 +15,8 @@ TASK_SCRIPT_VALIDATION_SCHEMA = "task_script_validation.v1"
 TASK_SCRIPT_PLAN_SCHEMA = "task_script_plan.v1"
 TASK_SCRIPT_EXPLANATION_SCHEMA = "task_script_explanation.v1"
 TASK_TEMPLATE_SUGGESTION_SCHEMA = "task_template_suggestion.v1"
+TASK_SCRIPT_EVIDENCE_PLAN_SCHEMA = "task_script_evidence_plan.v1"
+TASK_RUNTIME_EVIDENCE_SCHEMA = "task_runtime_evidence.v1"
 
 CANONICAL_PIPELINE = [
     "action proposal",
@@ -66,6 +68,113 @@ BOUNDED_OPERATOR_REQUESTS = {
     "wait_for_evidence": "request_watcher_step",
     "recover_loaded_scene": "request_liveness_recovery",
     "repeat_until": "request_watcher_step",
+}
+
+RUNTIME_EVIDENCE_VARIABLES: dict[str, dict[str, Any]] = {
+    "inventory": {
+        "description": "Inventory occupancy and item set.",
+        "liveSources": ["brain.inventoryContext", "actionNeed.inventoryFreeSlots", "list_seen_inventory_items"],
+        "proves": ["free slot changes", "held item changes", "full-inventory gates"],
+    },
+    "resourceCount": {
+        "description": "Held matching resource count for the active task.",
+        "liveSources": ["brain.goalProgress.heldResourceCount", "actionNeed.resourceCount", "inventorySummary.resourceCount"],
+        "proves": ["collection progress", "deposit completion"],
+    },
+    "bankOpen": {
+        "description": "Bank interface open/closed state.",
+        "liveSources": ["brain.bankUiContext.bankOpen", "status.bankOpen", "genericTaskState.bankOpen"],
+        "proves": ["service opened", "bank closed"],
+    },
+    "menuOptionClicked": {
+        "description": "Client-accepted click action after a live input.",
+        "liveSources": ["clientTickHot.lastMenuOptionClicked", "action_trace.clientTick.lastMenuOptionClickedAfter"],
+        "proves": ["the clicked menu action matched the intended action"],
+    },
+    "hoverTarget": {
+        "description": "PostMenuSort hover target/action before a click.",
+        "liveSources": ["clientTickHot.postMenuSort", "clientTickHot.hoverMenu", "action_input_visibility.hoverConfirmationEvidence"],
+        "proves": ["cursor was over the intended target/action before live click"],
+    },
+    "location": {
+        "description": "Player world tile/plane.",
+        "liveSources": ["playerLocation", "baseline.playerLocation", "WorldModel player state"],
+        "proves": ["navigation progress", "return-to-resource progress"],
+    },
+    "routeProgress": {
+        "description": "Service route/pathing node, step, and waypoint state.",
+        "liveSources": ["brain.serviceRouteContext", "brain.pathingContext", "status.serviceRouteStepStatus"],
+        "proves": ["route advance", "route transition", "waypoint progress"],
+    },
+    "phaseIntent": {
+        "description": "Current task phase, cycle stage, active intent, and proposed action.",
+        "liveSources": ["brain.genericTaskState", "readiness.actionNeed", "action_proposal"],
+        "proves": ["cycle stage transitions", "one-action-then-wait lifecycle"],
+    },
+    "loadedScene": {
+        "description": "Loaded-scene liveness proof.",
+        "liveSources": ["readiness.loadedSceneProof", "clientTickHot.gameState", "WorldModel object counts"],
+        "proves": ["safe baseline before live action"],
+    },
+    "inputIntegrity": {
+        "description": "Input integrity phase counts and backend bypass status.",
+        "liveSources": ["input_integrity_status", "action_input_visibility.input_integrity_status"],
+        "proves": ["operator events separated from live action deltas", "directBackendBypassCount remains 0"],
+    },
+}
+
+PRIMITIVE_RUNTIME_EXPECTATIONS: dict[str, list[dict[str, str]]] = {
+    "collect": [
+        {"variable": "hoverTarget", "expectedChange": "hover top option/target matches the resource action before click"},
+        {"variable": "menuOptionClicked", "expectedChange": "MenuOptionClicked records the expected collect action or resource progress follows"},
+        {"variable": "inventory", "expectedChange": "free slots decrease or matching resource item appears"},
+        {"variable": "resourceCount", "expectedChange": "held resource count increases"},
+        {"variable": "phaseIntent", "expectedChange": "phase remains collection or waits for result after one action"},
+    ],
+    "interact": [
+        {"variable": "hoverTarget", "expectedChange": "hover/menu evidence matches target and action"},
+        {"variable": "menuOptionClicked", "expectedChange": "accepted menu action matches requested interaction"},
+        {"variable": "phaseIntent", "expectedChange": "intent advances or waits for post-interaction proof"},
+    ],
+    "walk_to": [
+        {"variable": "location", "expectedChange": "player world tile moves toward the destination"},
+        {"variable": "routeProgress", "expectedChange": "route node/step/waypoint state advances"},
+        {"variable": "phaseIntent", "expectedChange": "navigation intent remains active until position proof arrives"},
+    ],
+    "bank": [
+        {"variable": "routeProgress", "expectedChange": "route reaches service target or service object is visible"},
+        {"variable": "hoverTarget", "expectedChange": "hover/menu evidence matches bank/service action"},
+        {"variable": "menuOptionClicked", "expectedChange": "accepted menu action opens the service"},
+        {"variable": "bankOpen", "expectedChange": "bankOpen becomes true"},
+        {"variable": "phaseIntent", "expectedChange": "phase moves from needs_service toward banking"},
+    ],
+    "deposit": [
+        {"variable": "bankOpen", "expectedChange": "bank is open before deposit and may stay open after deposit"},
+        {"variable": "menuOptionClicked", "expectedChange": "accepted menu action or UI command matches deposit inventory"},
+        {"variable": "inventory", "expectedChange": "resource slots clear"},
+        {"variable": "resourceCount", "expectedChange": "held resource count drops to zero"},
+        {"variable": "phaseIntent", "expectedChange": "bankingComplete becomes true or close_bank becomes needed"},
+    ],
+    "close_bank": [
+        {"variable": "bankOpen", "expectedChange": "bankOpen becomes false"},
+        {"variable": "phaseIntent", "expectedChange": "phase advances toward return_to_resource"},
+    ],
+    "return_to_resource": [
+        {"variable": "location", "expectedChange": "player world tile/plane moves toward resource area"},
+        {"variable": "routeProgress", "expectedChange": "return route/pathing advances"},
+        {"variable": "phaseIntent", "expectedChange": "active intent returns to resource collection"},
+    ],
+    "wait_for_evidence": [
+        {"variable": "phaseIntent", "expectedChange": "watched evidence is re-read without live input"},
+    ],
+    "recover_loaded_scene": [
+        {"variable": "loadedScene", "expectedChange": "loaded scene, client tick, and world model become fresh"},
+        {"variable": "inputIntegrity", "expectedChange": "pre-live baseline is reset or re-read before any live action"},
+    ],
+    "repeat_until": [
+        {"variable": "phaseIntent", "expectedChange": "loop condition is rechecked from fresh live state each iteration"},
+        {"variable": "inventory", "expectedChange": "loop condition can observe inventory_full or available slots"},
+    ],
 }
 
 PRIMITIVE_SPECS: dict[str, dict[str, Any]] = {
@@ -388,6 +497,23 @@ def _action_for_step(step: dict[str, Any], primitive: str) -> str:
     return str(PRIMITIVE_SPECS[primitive]["emitsActionProposal"])
 
 
+def _runtime_evidence_for_primitive(primitive: str) -> dict[str, Any]:
+    expectations = [dict(item) for item in PRIMITIVE_RUNTIME_EXPECTATIONS.get(primitive, [])]
+    variables = list(dict.fromkeys(str(item.get("variable")) for item in expectations if item.get("variable")))
+    return {
+        "variables": variables,
+        "expectedChanges": expectations,
+        "variableSources": {name: RUNTIME_EVIDENCE_VARIABLES.get(name, {}) for name in variables},
+        "readOnlyQueries": [
+            "get_current_debug_context",
+            "get_action_input_visibility",
+            "get_latest_action_trace",
+            "list_seen_inventory_items",
+        ],
+        "changeProofRule": "compare before/after snapshots from live RuneLite/8893/WorldModel/8890; external facts never prove live change",
+    }
+
+
 def _compile_step(step: dict[str, Any], path: str, index: int) -> dict[str, Any]:
     primitive = _primitive_name(step)
     spec = PRIMITIVE_SPECS[primitive]
@@ -410,6 +536,7 @@ def _compile_step(step: dict[str, Any], path: str, index: int) -> dict[str, Any]
         "liveTruthSources": ["RuneLite 8893", "WorldModel", "8890 daemon", "client_tick_hot"],
         "externalFactsMayEnrich": True,
         "externalFactsAdvisoryOnly": True,
+        "runtimeEvidence": _runtime_evidence_for_primitive(primitive),
     }
     if primitive == "recover_loaded_scene":
         compiled["livenessRecovery"] = {
@@ -431,6 +558,51 @@ def _flatten_plan_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         flattened.append(step)
         flattened.extend(_flatten_plan_steps(_list(step.get("steps"))))
     return flattened
+
+
+def _runtime_evidence_plan_from_steps(flattened_steps: list[dict[str, Any]]) -> dict[str, Any]:
+    step_evidence = []
+    variable_names: list[str] = []
+    for step in flattened_steps:
+        runtime = _dict(step.get("runtimeEvidence"))
+        variables = [str(item) for item in _list(runtime.get("variables")) if str(item or "").strip()]
+        variable_names.extend(variables)
+        step_evidence.append(
+            {
+                "sourcePath": step.get("sourcePath"),
+                "primitive": step.get("primitive"),
+                "actionProposalAction": step.get("actionProposalAction"),
+                "variables": variables,
+                "expectedChanges": _list(runtime.get("expectedChanges")),
+                "readOnlyQueries": _list(runtime.get("readOnlyQueries")),
+            }
+        )
+    covered = list(dict.fromkeys(variable_names))
+    important = [
+        "inventory",
+        "resourceCount",
+        "bankOpen",
+        "menuOptionClicked",
+        "hoverTarget",
+        "location",
+        "routeProgress",
+        "phaseIntent",
+    ]
+    missing = [name for name in important if name not in covered]
+    return {
+        "schema": TASK_SCRIPT_EVIDENCE_PLAN_SCHEMA,
+        "variableCatalog": RUNTIME_EVIDENCE_VARIABLES,
+        "requiredWoodcutBankLifecycleVariables": important,
+        "coveredVariables": covered,
+        "missingLifecycleVariables": missing,
+        "stepEvidence": step_evidence,
+        "snapshotProtocol": {
+            "before": "capture get_current_debug_context and get_action_input_visibility before a bounded live step",
+            "after": "capture the same queries after tick/state proof",
+            "compare": "assert expectedChanges using live variables only",
+        },
+        "noLiveInput": True,
+    }
 
 
 def compile_task_script(script: dict[str, Any] | str | Path) -> dict[str, Any]:
@@ -465,6 +637,7 @@ def compile_task_script(script: dict[str, Any] | str | Path) -> dict[str, Any]:
         "actionPlan": steps,
         "flattenedActionPlan": flattened,
         "actionProposalActions": action_intents,
+        "runtimeEvidencePlan": _runtime_evidence_plan_from_steps(flattened),
         "executorContract": {
             "usesExistingExecutorOnly": True,
             "liveInputBackend": "HumanInputController -> ArduinoHIDBackend",
@@ -494,6 +667,7 @@ def explain_script_plan(script: dict[str, Any] | str | Path) -> dict[str, Any]:
         "summary": "High-level task primitives compile into existing profile/action proposal intents; live motor control stays in the canonical Arduino-backed executor pipeline.",
         "validation": plan.get("validation"),
         "plan": plan.get("data") or {"actionPlan": []},
+        "runtimeEvidencePlan": _dict(plan.get("data")).get("runtimeEvidencePlan"),
         "primitiveReference": PRIMITIVE_SPECS,
         "canonicalPipeline": CANONICAL_PIPELINE,
         "phaseAwareInputIntegrityPolicy": PHASE_AWARE_INPUT_POLICY,
@@ -514,6 +688,34 @@ def explain_script_plan(script: dict[str, Any] | str | Path) -> dict[str, Any]:
         "status": plan.get("status", "WARN"),
         "generatedAtUtc": utc_now(),
         "data": data,
+        "noLiveInput": True,
+    }
+
+
+def build_task_script_evidence_plan(script: dict[str, Any] | str | Path) -> dict[str, Any]:
+    plan = compile_task_script(script)
+    if plan.get("status") != "PASS":
+        return {
+            "schema": TASK_SCRIPT_EVIDENCE_PLAN_SCHEMA,
+            "status": "FAIL",
+            "generatedAtUtc": utc_now(),
+            "validation": plan.get("validation"),
+            "data": {},
+            "noLiveInput": True,
+        }
+    plan_data = _dict(plan.get("data"))
+    evidence_plan = _dict(plan_data.get("runtimeEvidencePlan"))
+    return {
+        "schema": TASK_SCRIPT_EVIDENCE_PLAN_SCHEMA,
+        "status": "PASS",
+        "generatedAtUtc": utc_now(),
+        "validation": plan.get("validation"),
+        "data": {
+            **evidence_plan,
+            "script": plan_data.get("script"),
+            "taskPolicy": plan_data.get("taskPolicy"),
+            "actionProposalActions": plan_data.get("actionProposalActions"),
+        },
         "noLiveInput": True,
     }
 
@@ -650,6 +852,8 @@ def script_api_spec() -> dict[str, Any]:
         "primitives": PRIMITIVE_SPECS,
         "canonicalPipeline": CANONICAL_PIPELINE,
         "boundedOperatorRequests": BOUNDED_OPERATOR_REQUESTS,
+        "runtimeEvidenceVariables": RUNTIME_EVIDENCE_VARIABLES,
+        "primitiveRuntimeExpectations": PRIMITIVE_RUNTIME_EXPECTATIONS,
         "forbiddenRawInputPrimitives": sorted(RAW_INPUT_PRIMITIVES),
         "forbiddenRawInputFields": sorted(RAW_INPUT_FIELDS),
         "phaseAwareInputIntegrityPolicy": PHASE_AWARE_INPUT_POLICY,

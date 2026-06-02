@@ -42,6 +42,8 @@ MCP resource/tool:
 | What high-level primitives can a script use? | Knowledge Fabric task script API | `get_task_script_api_spec` / `osrs://script-api/spec` | task script API spec | `task_script_api_spec.v1` | high | none |
 | Is this task script valid? | Knowledge Fabric task script API | `validate_task_script` | task script JSON | `task_script_validation.v1` | high | raw-input fields or unbounded loops |
 | What existing engine actions will this script use? | Knowledge Fabric task script API | `compile_task_script` / `explain_script_plan` | task script JSON, task policy | `task_script_plan.v1` | high | unknown primitive or missing evidence |
+| Which variables must prove the script changed state? | Knowledge Fabric task script API | `get_task_script_evidence_plan` / `osrs://script-api/woodcut-bank-evidence-plan` | task script JSON | `task_script_evidence_plan.v1` | high | missing lifecycle variable coverage |
+| What are the current values for script evidence variables? | Knowledge Fabric runtime evidence | `get_task_script_runtime_evidence` / `osrs://script-api/runtime-evidence` | daemon, readiness, client tick, action visibility | `task_runtime_evidence.v1` | high when loaded scene is fresh | manual login or stale liveness |
 | Can the current scene inform a script template? | Knowledge Fabric scene probe | `probe_task_from_scene` | loaded scene, static library, external cache | `task_scene_probe.v1` | medium | stale/missing loaded scene |
 
 ## Rules
@@ -50,4 +52,5 @@ MCP resource/tool:
 - Static route priors remain advisory until the live world model, projection, and hover/menu evidence verify an executable target.
 - MCP is read-only and does not expose click/input execution.
 - High-level task script tools compile into existing action proposal/readiness paths; they do not add raw mouse/key tools.
+- Script lifecycle success requires before/after live evidence for inventory, resource count, bank-open state, hover/click proof, location, route progress, and phase/intent.
 - No query path should create `live_packets`, NDJSON, or JSONL live archives.

@@ -42,6 +42,8 @@ Tools:
 - `validate_task_script`
 - `compile_task_script`
 - `explain_script_plan`
+- `get_task_script_evidence_plan`
+- `get_task_script_runtime_evidence`
 - `suggest_task_template`
 - `probe_task_from_scene`
 
@@ -49,14 +51,33 @@ Resources:
 
 - `osrs://script-api/spec`
 - `osrs://script-api/woodcut-bank-example`
+- `osrs://script-api/woodcut-bank-evidence-plan`
+- `osrs://script-api/runtime-evidence`
 
 Direct Python surface:
 
 - `KnowledgeFabric.validate_task_script(script)`
 - `KnowledgeFabric.compile_task_script(script)`
 - `KnowledgeFabric.explain_script_plan(script)`
+- `KnowledgeFabric.task_script_evidence_plan(script)`
+- `KnowledgeFabric.query_task_script_runtime_evidence(script)`
 - `KnowledgeFabric.suggest_task_template(task_description, profile=...)`
 - `KnowledgeFabric.probe_task_from_scene(task_description, profile=..., limit=...)`
+
+## Runtime Evidence
+
+Scripts compile with a `runtimeEvidencePlan` that names the live variables each primitive must prove. The current required woodcut-bank lifecycle variables are:
+
+- `inventory`
+- `resourceCount`
+- `bankOpen`
+- `menuOptionClicked`
+- `hoverTarget`
+- `location`
+- `routeProgress`
+- `phaseIntent`
+
+Use `get_task_script_runtime_evidence` before and after one bounded live step to compare those variables. A script step is not proven by an external fact, a static route prior, or a proposed action alone; it needs fresh live RuneLite / 8893 / WorldModel / 8890 evidence. For live input steps, the comparison should also include action-input visibility and input-integrity phase counts.
 
 ## Example
 

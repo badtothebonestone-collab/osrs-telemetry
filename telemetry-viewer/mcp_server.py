@@ -259,6 +259,16 @@ def tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {"script": {"type": ["object", "string"]}}},
         },
         {
+            "name": "get_task_script_evidence_plan",
+            "description": "Return the read-only variable/change evidence plan a task script must prove during replay or bounded live validation.",
+            "inputSchema": {"type": "object", "properties": {"script": {"type": ["object", "string"]}}},
+        },
+        {
+            "name": "get_task_script_runtime_evidence",
+            "description": "Return current read-only runtime values for task evidence variables such as inventory, resourceCount, bankOpen, hover, click, location, route progress, and phase/intent.",
+            "inputSchema": {"type": "object", "properties": {"script": {"type": ["object", "string"]}, "daemonUrl": string, "snapshotUrl": string}},
+        },
+        {
             "name": "suggest_task_template",
             "description": "Suggest a high-level task script template such as woodcut_bank. Read-only; external facts remain advisory.",
             "inputSchema": {"type": "object", "properties": {"taskDescription": string, "profile": string}},
@@ -370,6 +380,8 @@ def resource_definitions() -> list[dict[str, Any]]:
         {"uri": "osrs://library/query-coverage", "name": "Query coverage matrix", "mimeType": "application/json"},
         {"uri": "osrs://script-api/spec", "name": "High-level task script API spec", "mimeType": "application/json"},
         {"uri": "osrs://script-api/woodcut-bank-example", "name": "woodcut_bank task script example", "mimeType": "application/json"},
+        {"uri": "osrs://script-api/woodcut-bank-evidence-plan", "name": "woodcut_bank runtime evidence plan", "mimeType": "application/json"},
+        {"uri": "osrs://script-api/runtime-evidence", "name": "Current task runtime evidence", "mimeType": "application/json"},
         {"uri": "osrs://external/items", "name": "External item lookup cache", "mimeType": "application/json"},
         {"uri": "osrs://external/item-map", "name": "External item ID/name map", "mimeType": "application/json"},
         {"uri": "osrs://external/wiki-cache", "name": "External wiki cache status", "mimeType": "application/json"},
@@ -512,6 +524,10 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> dict[str, A
             payload = task_script_api.compile_task_script(args.get("script") or {})
         elif name == "explain_script_plan":
             payload = task_script_api.explain_script_plan(args.get("script") or {})
+        elif name == "get_task_script_evidence_plan":
+            payload = task_script_api.build_task_script_evidence_plan(args.get("script") or task_script_api.woodcut_bank_template())
+        elif name == "get_task_script_runtime_evidence":
+            payload = _fabric(args).query_task_script_runtime_evidence(args.get("script") or task_script_api.woodcut_bank_template())
         elif name == "suggest_task_template":
             payload = task_script_api.suggest_task_template(args.get("taskDescription"), profile=args.get("profile"))
         elif name == "probe_task_from_scene":
@@ -565,7 +581,7 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> dict[str, A
 def read_resource(uri: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     args = _dict(arguments)
     fabric = None
-    if uri.startswith("osrs://live/") or uri.startswith("osrs://session/") or uri.startswith("osrs://debug/") or uri in {"osrs://library/data-sources", "osrs://library/query-coverage"}:
+    if uri.startswith("osrs://live/") or uri.startswith("osrs://session/") or uri.startswith("osrs://debug/") or uri in {"osrs://library/data-sources", "osrs://library/query-coverage", "osrs://script-api/runtime-evidence"}:
         fabric = _fabric(args)
     if uri == "osrs://live/status":
         payload = knowledge_fabric.fetch_json(str(args.get("daemonUrl") or DEFAULT_DAEMON_URL).rstrip("/") + "/status")
@@ -654,6 +670,10 @@ def read_resource(uri: str, arguments: dict[str, Any] | None = None) -> dict[str
         payload = task_script_api.script_api_spec()
     elif uri == "osrs://script-api/woodcut-bank-example":
         payload = task_script_api.woodcut_bank_template()
+    elif uri == "osrs://script-api/woodcut-bank-evidence-plan":
+        payload = task_script_api.build_task_script_evidence_plan(task_script_api.woodcut_bank_template())
+    elif uri == "osrs://script-api/runtime-evidence":
+        payload = fabric.query_task_script_runtime_evidence() if fabric else {}
     elif uri == "osrs://external/items":
         root = external_knowledge_cache.ensure_cache()
         payload = external_knowledge_cache.read_json(root / "item_name_map.json", {"schema": "external_item_name_map.v1", "itemsByName": {}})
