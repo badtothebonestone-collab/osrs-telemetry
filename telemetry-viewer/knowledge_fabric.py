@@ -1679,6 +1679,7 @@ class KnowledgeFabric:
                 "compare_task_script_runtime_evidence",
                 "classify_task_failure",
                 "assess_task_script_step",
+                "assess_task_script_run",
                 "suggest_task_template",
                 "probe_task_from_scene",
                 "handoff_summary",
@@ -1924,6 +1925,20 @@ class KnowledgeFabric:
                     "sampleQuery": "assess_task_script_step",
                 },
                 {
+                    "sourceName": "task_run_readiness.v1",
+                    "sourceType": "read_only_script_lifecycle_gate",
+                    "producer": "Knowledge Fabric + task_script_api.py",
+                    "consumer": "Codex before selecting/requesting the next high-level script primitive",
+                    "schema": task_script_api.TASK_RUN_READINESS_SCHEMA,
+                    "freshnessField": "runtime/readiness/action-input/navigation evidence freshness",
+                    "capFields": ["compiled step count", "inferred primitive", "evidence section caps"],
+                    "runtimeCritical": False,
+                    "explicitDebugOnly": False,
+                    "canGrowOnDisk": False,
+                    "requiresInternet": False,
+                    "sampleQuery": "assess_task_script_run",
+                },
+                {
                     "sourceName": "session_memory",
                     "sourceType": "session_memory",
                     "producer": "Knowledge Fabric/session observation writers",
@@ -2021,6 +2036,7 @@ class KnowledgeFabric:
             ("Did before/after runtime evidence prove a script step changed state?", "compare_task_script_runtime_evidence", "compare_task_script_runtime_evidence", "two task_runtime_evidence snapshots", task_script_api.TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA, "high with fresh before/after snapshots", "missing after evidence or input-integrity hard blocker", "test_task_script_api.py"),
             ("How should a failed script/live attempt be classified before patching?", "classify_task_failure", "classify_task_failure/osrs://script-api/failure-classification", "current or supplied blocker/runtime/action evidence", task_script_api.TASK_FAILURE_CLASSIFICATION_SCHEMA, "medium-high with fresh evidence", "needs current evidence bundle", "test_task_script_api.py"),
             ("Is the next high-level script step ready to request?", "assess_task_script_step", "assess_task_script_step/osrs://script-api/step-readiness", "compiled task script + runtime/readiness/action-input/navigation evidence", task_script_api.TASK_STEP_READINESS_SCHEMA, "medium-high with fresh evidence", "manual login, action readiness, input integrity, or suspicious navigation trace", "test_task_script_api.py"),
+            ("What high-level script primitive should be considered next?", "assess_task_script_run", "assess_task_script_run/osrs://script-api/run-readiness", "compiled task script + runtime/readiness/action-input/navigation evidence", task_script_api.TASK_RUN_READINESS_SCHEMA, "medium-high with fresh evidence", "manual login, stale liveness, readiness, input integrity, or suspicious navigation trace", "test_task_script_api.py"),
             ("Can the current scene inform a script template?", "probe_task_from_scene", "probe_task_from_scene", "loaded scene + static library + external cache", "task_scene_probe.v1", "medium", "stale loaded scene", "test_task_script_api.py"),
         ]
         data = {
@@ -4153,6 +4169,34 @@ class KnowledgeFabric:
             script_payload,
             step_index=step_index,
             primitive=primitive,
+            runtime_evidence=runtime,
+            action_input_visibility=visibility,
+            failure_classification=failure,
+            navigation_decision_trace=navigation,
+        )
+
+    def assess_task_script_run(
+        self,
+        script: dict[str, Any] | str | Path | None = None,
+        *,
+        runtime_evidence: dict[str, Any] | None = None,
+        action_input_visibility: dict[str, Any] | None = None,
+        failure_classification: dict[str, Any] | None = None,
+        navigation_decision_trace: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        script_payload = script if script is not None else task_script_api.woodcut_bank_template()
+        runtime = runtime_evidence if runtime_evidence is not None else self.query_task_script_runtime_evidence(script_payload)
+        visibility = action_input_visibility if action_input_visibility is not None else self.query_action_input_visibility()
+        navigation = navigation_decision_trace if navigation_decision_trace is not None else self.query_navigation_decision_trace()
+        failure = failure_classification if failure_classification is not None else self.classify_task_failure(
+            {
+                "runtimeEvidence": runtime,
+                "actionInputVisibility": visibility,
+                "navigationDecisionTrace": navigation,
+            }
+        )
+        return task_script_api.assess_task_run_readiness(
+            script_payload,
             runtime_evidence=runtime,
             action_input_visibility=visibility,
             failure_classification=failure,

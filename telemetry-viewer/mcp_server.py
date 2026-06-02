@@ -334,6 +334,22 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "assess_task_script_run",
+            "description": "Assess the current high-level task script lifecycle, infer the next primitive to consider, and delegate permission to the bounded step gate. Read-only; no live input.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "script": {"type": ["object", "string"]},
+                    "runtimeEvidence": {"type": "object"},
+                    "actionInputVisibility": {"type": "object"},
+                    "failureClassification": {"type": "object"},
+                    "navigationDecisionTrace": {"type": "object"},
+                    "daemonUrl": string,
+                    "snapshotUrl": string,
+                },
+            },
+        },
+        {
             "name": "suggest_task_template",
             "description": "Suggest a high-level task script template such as woodcut_bank. Read-only; external facts remain advisory.",
             "inputSchema": {"type": "object", "properties": {"taskDescription": string, "profile": string}},
@@ -450,6 +466,7 @@ def resource_definitions() -> list[dict[str, Any]]:
         {"uri": "osrs://script-api/runtime-evidence", "name": "Current task runtime evidence", "mimeType": "application/json"},
         {"uri": "osrs://script-api/failure-classification", "name": "Current task failure classification", "mimeType": "application/json"},
         {"uri": "osrs://script-api/step-readiness", "name": "Current task script step readiness", "mimeType": "application/json"},
+        {"uri": "osrs://script-api/run-readiness", "name": "Current task script run readiness", "mimeType": "application/json"},
         {"uri": "osrs://external/items", "name": "External item lookup cache", "mimeType": "application/json"},
         {"uri": "osrs://external/item-map", "name": "External item ID/name map", "mimeType": "application/json"},
         {"uri": "osrs://external/wiki-cache", "name": "External wiki cache status", "mimeType": "application/json"},
@@ -631,6 +648,14 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> dict[str, A
                 failure_classification=_dict(args.get("failureClassification")) or None,
                 navigation_decision_trace=_dict(args.get("navigationDecisionTrace")) or None,
             )
+        elif name == "assess_task_script_run":
+            payload = _fabric(args).assess_task_script_run(
+                args.get("script") or task_script_api.woodcut_bank_template(),
+                runtime_evidence=_dict(args.get("runtimeEvidence")) or None,
+                action_input_visibility=_dict(args.get("actionInputVisibility")) or None,
+                failure_classification=_dict(args.get("failureClassification")) or None,
+                navigation_decision_trace=_dict(args.get("navigationDecisionTrace")) or None,
+            )
         elif name == "suggest_task_template":
             payload = task_script_api.suggest_task_template(args.get("taskDescription"), profile=args.get("profile"))
         elif name == "probe_task_from_scene":
@@ -690,6 +715,7 @@ def read_resource(uri: str, arguments: dict[str, Any] | None = None) -> dict[str
         "osrs://script-api/runtime-evidence",
         "osrs://script-api/failure-classification",
         "osrs://script-api/step-readiness",
+        "osrs://script-api/run-readiness",
     }:
         fabric = _fabric(args)
     if uri == "osrs://live/status":
@@ -789,6 +815,8 @@ def read_resource(uri: str, arguments: dict[str, Any] | None = None) -> dict[str
         payload = fabric.classify_task_failure() if fabric else {}
     elif uri == "osrs://script-api/step-readiness":
         payload = fabric.assess_task_script_step() if fabric else {}
+    elif uri == "osrs://script-api/run-readiness":
+        payload = fabric.assess_task_script_run() if fabric else {}
     elif uri == "osrs://external/items":
         root = external_knowledge_cache.ensure_cache()
         payload = external_knowledge_cache.read_json(root / "item_name_map.json", {"schema": "external_item_name_map.v1", "itemsByName": {}})

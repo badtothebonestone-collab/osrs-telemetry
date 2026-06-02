@@ -47,6 +47,7 @@ Tools:
 - `compare_task_script_runtime_evidence`
 - `classify_task_failure`
 - `assess_task_script_step`
+- `assess_task_script_run`
 - `suggest_task_template`
 - `probe_task_from_scene`
 
@@ -58,6 +59,7 @@ Resources:
 - `osrs://script-api/runtime-evidence`
 - `osrs://script-api/failure-classification`
 - `osrs://script-api/step-readiness`
+- `osrs://script-api/run-readiness`
 
 Direct Python surface:
 
@@ -69,6 +71,7 @@ Direct Python surface:
 - `KnowledgeFabric.compare_task_script_runtime_evidence(before, after, script=..., primitive=...)`
 - `KnowledgeFabric.classify_task_failure(evidence=...)`
 - `KnowledgeFabric.assess_task_script_step(script, step_index=..., primitive=...)`
+- `KnowledgeFabric.assess_task_script_run(script)`
 - `KnowledgeFabric.suggest_task_template(task_description, profile=...)`
 - `KnowledgeFabric.probe_task_from_scene(task_description, profile=..., limit=...)`
 
@@ -90,6 +93,8 @@ Use `get_task_script_runtime_evidence` before and after one bounded live step, t
 Use `classify_task_failure` before patching. With no supplied evidence it classifies the current Knowledge Fabric/debug/runtime bundle; with explicit evidence it accepts current blocker, debug context, runtime evidence, before/after comparison, action-input visibility, action trace, external knowledge, or error text. It is read-only and never executes input.
 
 Use `assess_task_script_step` before requesting a bounded script/operator step. It compiles the script, selects a step by `stepIndex` or `primitive`, and combines runtime evidence, action readiness, input-integrity phase evidence, failure classification, and navigation decision trace summaries. It reports `requestAllowedNow`, the required bounded request name, blockers, expected runtime variables, and the canonical pre/post live checklists. It is read-only and never executes the request.
+
+Use `assess_task_script_run` when Codex needs the whole lifecycle view first. It compiles the script, reads runtime and action-input visibility evidence, infers the next primitive to consider, then nests the normal step-readiness result for that primitive. It exposes planned action/target/screen point, coordinate conversion, Arduino calibration, HumanInputController and cursor traces, hover/MenuOptionClicked proof, phase-aware input integrity, latest action/debug evidence, liveness recovery, watcher decisions, target view state, candidate state, and readiness evidence when those fields are present. It is read-only and never executes the request.
 
 ## Example
 

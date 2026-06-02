@@ -20,6 +20,7 @@ TASK_RUNTIME_EVIDENCE_SCHEMA = "task_runtime_evidence.v1"
 TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA = "task_runtime_evidence_comparison.v1"
 TASK_FAILURE_CLASSIFICATION_SCHEMA = "task_failure_classification.v1"
 TASK_STEP_READINESS_SCHEMA = "task_step_readiness.v1"
+TASK_RUN_READINESS_SCHEMA = "task_run_readiness.v1"
 
 CANONICAL_PIPELINE = [
     "action proposal",
@@ -1343,6 +1344,107 @@ def _step_expected_variables(step: dict[str, Any]) -> list[str]:
     return [str(item) for item in _list(runtime.get("variables")) if str(item or "").strip()]
 
 
+def _runtime_variable_value(runtime_variables: dict[str, Any], name: str) -> Any:
+    return _variable_value(runtime_variables.get(name))
+
+
+def _boolish(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in {"true", "yes", "1"}:
+            return True
+        if lower in {"false", "no", "0"}:
+            return False
+    return None
+
+
+def _numeric(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _infer_next_task_primitive(runtime_evidence: dict[str, Any] | None, action_input_visibility: dict[str, Any] | None, failure_classification: dict[str, Any] | None) -> dict[str, Any]:
+    runtime_data = _runtime_data(runtime_evidence)
+    variables = _runtime_variables(runtime_evidence)
+    readiness_summary = _dict(runtime_data.get("readinessSummary"))
+    visibility_data = _payload_data(action_input_visibility)
+    failure = _dict(failure_classification)
+    inventory = _dict(_runtime_variable_value(variables, "inventory"))
+    phase_intent = _dict(_runtime_variable_value(variables, "phaseIntent"))
+    route_progress = _dict(_runtime_variable_value(variables, "routeProgress"))
+    loaded_scene = _dict(_runtime_variable_value(variables, "loadedScene"))
+    resource_count = _numeric(_runtime_variable_value(variables, "resourceCount"))
+    bank_open = _boolish(_runtime_variable_value(variables, "bankOpen"))
+    free_slots = _numeric(inventory.get("freeSlots"))
+    inventory_full = _boolish(inventory.get("inventoryFull"))
+    manual_login = bool(
+        readiness_summary.get("manualLoginRequired") is True
+        or failure.get("primaryClassification") == "game-state/user-login blocker"
+        or "manual_login_required" in _list(failure.get("blockers"))
+    )
+    loaded_scene_verified = _first_present(
+        _dict(readiness_summary.get("loadedSceneProof")).get("loadedSceneVerified"),
+        loaded_scene.get("loadedSceneVerified"),
+    )
+    planned_action = _norm(visibility_data.get("plannedAction") or readiness_summary.get("proposedAction") or phase_intent.get("proposedAction"))
+    current_intent = _norm(readiness_summary.get("currentIntent") or phase_intent.get("currentIntent") or phase_intent.get("activeIntent"))
+    phase_text = _norm(phase_intent.get("phase") or phase_intent.get("cycleStage"))
+    reason = "fallback_collect_until_live_evidence_selects_another_phase"
+    primitive = "collect"
+    confidence = "low"
+    if manual_login or loaded_scene_verified is False:
+        primitive = "recover_loaded_scene"
+        reason = "manual_login_or_loaded_scene_not_verified"
+        confidence = "high"
+    elif bank_open is True and (resource_count is None or resource_count > 0):
+        primitive = "deposit"
+        reason = "bank_open_with_resources_or_unknown_resource_count"
+        confidence = "medium"
+    elif bank_open is True and resource_count == 0:
+        primitive = "close_bank"
+        reason = "bank_open_and_no_resources_observed"
+        confidence = "medium"
+    elif "return" in current_intent or "return" in phase_text or planned_action == "return_to_resource_area":
+        primitive = "return_to_resource"
+        reason = "return_intent_or_phase_observed"
+        confidence = "medium"
+    elif inventory_full is True or free_slots == 0 or "route_transition" in current_intent or "service" in planned_action or "bank" in planned_action:
+        primitive = "bank"
+        reason = "inventory_full_or_service_route_intent"
+        confidence = "medium"
+    elif resource_count == 0 and "resource" in planned_action:
+        primitive = "collect"
+        reason = "resource_action_planned_with_no_resources_observed"
+        confidence = "medium"
+    return {
+        "primitive": primitive,
+        "reason": reason,
+        "confidence": confidence,
+        "evidence": {
+            "manualLoginRequired": manual_login,
+            "loadedSceneVerified": loaded_scene_verified,
+            "bankOpen": bank_open,
+            "resourceCount": resource_count,
+            "inventoryFull": inventory_full,
+            "freeSlots": free_slots,
+            "currentIntent": current_intent or None,
+            "phase": phase_text or None,
+            "plannedAction": planned_action or None,
+            "routeProgress": route_progress,
+        },
+    }
+
+
 def assess_task_step_readiness(
     script: dict[str, Any] | str | Path,
     *,
@@ -1505,6 +1607,146 @@ def assess_task_step_readiness(
     }
 
 
+def assess_task_run_readiness(
+    script: dict[str, Any] | str | Path,
+    *,
+    runtime_evidence: dict[str, Any] | None = None,
+    action_input_visibility: dict[str, Any] | None = None,
+    failure_classification: dict[str, Any] | None = None,
+    navigation_decision_trace: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    plan = compile_task_script(script)
+    if plan.get("status") != "PASS":
+        return {
+            "schema": TASK_RUN_READINESS_SCHEMA,
+            "status": "FAIL",
+            "generatedAtUtc": utc_now(),
+            "validation": plan.get("validation"),
+            "errors": _list(_dict(plan.get("validation")).get("errors")),
+            "noLiveInput": True,
+        }
+    plan_data = _dict(plan.get("data"))
+    steps = [_dict(item) for item in _list(plan_data.get("flattenedActionPlan")) if isinstance(item, dict)]
+    failure = failure_classification or classify_task_failure(
+        {
+            "runtimeEvidence": runtime_evidence or {},
+            "actionInputVisibility": action_input_visibility or {},
+            "navigationDecisionTrace": navigation_decision_trace or {},
+        }
+    )
+    inference = _infer_next_task_primitive(runtime_evidence, action_input_visibility, failure)
+    next_primitive = str(inference.get("primitive") or "collect")
+    next_readiness = assess_task_step_readiness(
+        script,
+        primitive=next_primitive,
+        runtime_evidence=runtime_evidence,
+        action_input_visibility=action_input_visibility,
+        failure_classification=failure,
+        navigation_decision_trace=navigation_decision_trace,
+    )
+    step_summaries = [
+        {
+            "sourcePath": step.get("sourcePath"),
+            "stepIndex": step.get("stepIndex"),
+            "primitive": step.get("primitive"),
+            "actionProposalAction": step.get("actionProposalAction"),
+            "boundedOperatorRequest": step.get("boundedOperatorRequest"),
+            "target": step.get("target"),
+            "expectedRuntimeVariables": _step_expected_variables(step),
+            "liveCapablePrimitive": step.get("primitive") not in {"wait_for_evidence", "recover_loaded_scene", "repeat_until"},
+            "isInferredNextStep": _norm(step.get("primitive")) == _norm(next_primitive),
+        }
+        for step in steps
+    ]
+    runtime_data = _runtime_data(runtime_evidence)
+    variables = _runtime_variables(runtime_evidence)
+    visibility_data = _payload_data(action_input_visibility)
+    readiness_summary = _dict(runtime_data.get("readinessSummary"))
+    global_blockers = list(dict.fromkeys(_list(next_readiness.get("blockers")) + _list(failure.get("blockers"))))
+    global_warnings = list(dict.fromkeys(_list(next_readiness.get("warnings")) + _list(failure.get("warnings"))))
+    request_allowed = bool(_dict(next_readiness.get("data")).get("requestAllowedNow") is True)
+    status = (
+        "FAIL"
+        if next_readiness.get("status") == "FAIL" or failure.get("status") == "FAIL"
+        else "PASS" if request_allowed and not global_blockers and not global_warnings else "WARN"
+    )
+    return {
+        "schema": TASK_RUN_READINESS_SCHEMA,
+        "status": status,
+        "generatedAtUtc": utc_now(),
+        "data": {
+            "script": plan_data.get("script"),
+            "compiledStepCount": len(steps),
+            "stepSummaries": step_summaries,
+            "inferredNextPrimitive": inference,
+            "currentLifecycle": {
+                "inferredNextPrimitive": next_primitive,
+                "inferenceReason": inference.get("reason"),
+                "inferenceConfidence": inference.get("confidence"),
+                "inferenceEvidence": inference.get("evidence"),
+                "readinessSummary": readiness_summary,
+                "inventory": _runtime_variable_value(variables, "inventory"),
+                "resourceCount": _runtime_variable_value(variables, "resourceCount"),
+                "bankOpen": _runtime_variable_value(variables, "bankOpen"),
+                "routeProgress": _runtime_variable_value(variables, "routeProgress"),
+                "phaseIntent": _runtime_variable_value(variables, "phaseIntent"),
+            },
+            "nextStepReadiness": next_readiness,
+            "requestAllowedNow": request_allowed,
+            "boundedOperatorRequest": _dict(next_readiness.get("data")).get("boundedOperatorRequest"),
+            "canonicalPipeline": CANONICAL_PIPELINE,
+            "rawInputBypassToolsExposed": False,
+            "directBackendBypassCountMustRemain": 0,
+            "actionInputVisibilityEvidence": {
+                "schema": action_input_visibility.get("schema") if isinstance(action_input_visibility, dict) else None,
+                "status": action_input_visibility.get("status") if isinstance(action_input_visibility, dict) else None,
+                "plannedAction": visibility_data.get("plannedAction"),
+                "plannedTarget": visibility_data.get("plannedTarget"),
+                "plannedScreenPoint": visibility_data.get("plannedScreenPoint"),
+                "coordinateConversionTrace": visibility_data.get("coordinateConversionTrace"),
+                "displayScaleApplied": visibility_data.get("displayScaleApplied"),
+                "displayScaleReason": visibility_data.get("displayScaleReason"),
+                "arduinoCalibrationStatus": visibility_data.get("arduinoCalibrationStatus"),
+                "humanInputController": visibility_data.get("humanInputController"),
+                "cursorMovementTrace": visibility_data.get("cursorMovementTrace"),
+                "hoverConfirmationEvidence": visibility_data.get("hoverConfirmationEvidence"),
+                "menuOptionClickedEvidence": visibility_data.get("menuOptionClickedEvidence"),
+                "input_integrity_status": visibility_data.get("input_integrity_status"),
+                "directBackendBypassCount": visibility_data.get("directBackendBypassCount"),
+                "lastClickProof": visibility_data.get("lastClickProof"),
+                "lastMovementProof": visibility_data.get("lastMovementProof"),
+                "blockedReason": visibility_data.get("blockedReason"),
+                "latestActionTraceSummary": visibility_data.get("latestActionTraceSummary"),
+                "latestDebugBundle": visibility_data.get("latestDebugBundle"),
+                "livenessRecoveryActions": visibility_data.get("livenessRecoveryActions"),
+                "boundedWatcherDecisions": visibility_data.get("boundedWatcherDecisions"),
+                "target_view_state": visibility_data.get("target_view_state"),
+                "serviceResourceRouteCandidateState": visibility_data.get("serviceResourceRouteCandidateState"),
+                "readinessActionEvidence": visibility_data.get("readinessActionEvidence"),
+            },
+            "failureClassification": {
+                "schema": failure.get("schema"),
+                "status": failure.get("status"),
+                "primaryClassification": failure.get("primaryClassification"),
+                "blockers": failure.get("blockers"),
+            },
+            "navigationDecisionTrace": {
+                "schema": navigation_decision_trace.get("schema") if isinstance(navigation_decision_trace, dict) else None,
+                "status": navigation_decision_trace.get("status") if isinstance(navigation_decision_trace, dict) else None,
+                "tracePresent": _payload_data(navigation_decision_trace).get("tracePresent"),
+                "firstSuspiciousDecision": _payload_data(navigation_decision_trace).get("firstSuspiciousDecision"),
+            },
+            "lifecycleRule": "The inferred next primitive is advisory; bounded live action still requires task_step_readiness.requestAllowedNow and fresh live evidence.",
+            "noLiveInput": True,
+        },
+        "warnings": global_warnings,
+        "blockers": global_blockers,
+        "phaseAwareInputIntegrityPolicy": PHASE_AWARE_INPUT_POLICY,
+        "externalKnowledgePolicy": EXTERNAL_KNOWLEDGE_POLICY,
+        "noLiveInput": True,
+    }
+
+
 def woodcut_bank_template() -> dict[str, Any]:
     return {
         "schema": TASK_SCRIPT_SCHEMA,
@@ -1642,6 +1884,7 @@ def script_api_spec() -> dict[str, Any]:
         "runtimeEvidenceComparisonSchema": TASK_RUNTIME_EVIDENCE_COMPARISON_SCHEMA,
         "failureClassificationSchema": TASK_FAILURE_CLASSIFICATION_SCHEMA,
         "stepReadinessSchema": TASK_STEP_READINESS_SCHEMA,
+        "taskRunReadinessSchema": TASK_RUN_READINESS_SCHEMA,
         "forbiddenRawInputPrimitives": sorted(RAW_INPUT_PRIMITIVES),
         "forbiddenRawInputFields": sorted(RAW_INPUT_FIELDS),
         "phaseAwareInputIntegrityPolicy": PHASE_AWARE_INPUT_POLICY,
