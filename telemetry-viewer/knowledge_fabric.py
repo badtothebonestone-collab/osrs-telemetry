@@ -426,6 +426,84 @@ def _action_trace_visibility(trace: dict[str, Any], *, path: str | None = None) 
     }
 
 
+def _point_from_target(target: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    for key in ("screenAimPoint", "screenClickPoint", "screenPoint"):
+        point = _dict(target.get(key))
+        if point.get("x") is not None and point.get("y") is not None:
+            return {"x": point.get("x"), "y": point.get("y")}, "screen"
+    for key in ("canvasAimPoint", "aimPoint", "rawAimPoint"):
+        point = _dict(target.get(key))
+        if point.get("x") is not None and point.get("y") is not None:
+            return {"x": point.get("x"), "y": point.get("y")}, "canvas"
+    safe = _dict(target.get("safeAimPoint"))
+    accepted = _dict(safe.get("acceptedAimpoint") or safe.get("rawAimPoint"))
+    if accepted.get("x") is not None and accepted.get("y") is not None:
+        return {"x": accepted.get("x"), "y": accepted.get("y")}, "canvas"
+    if safe.get("canvasX") is not None and safe.get("canvasY") is not None:
+        return {"x": safe.get("canvasX"), "y": safe.get("canvasY")}, "canvas"
+    return None, None
+
+
+def _derive_planned_point_visibility(
+    target: dict[str, Any],
+    *,
+    readiness: dict[str, Any],
+    status: dict[str, Any],
+) -> dict[str, Any]:
+    point, coordinate_space = _point_from_target(target)
+    if point is None:
+        return {
+            "plannedScreenPoint": None,
+            "coordinateConversionTrace": {
+                "status": "WARN",
+                "method": "target_point_missing",
+                "source": "current_action_proposal",
+                "warnings": ["planned target has no screen/canvas aimpoint"],
+                "missingCapabilities": ["target.aimPoint"],
+                "noLiveInput": True,
+            },
+            "displayScaleApplied": None,
+            "displayScaleReason": "target_point_missing",
+        }
+    try:
+        from input_control.input_geometry import resolve_screen_click_point
+
+        input_geometry = _dict(readiness.get("inputGeometry") or status.get("inputGeometry"))
+        resolution = resolve_screen_click_point(
+            point,
+            click_point_space=coordinate_space or "canvas",
+            input_geometry=input_geometry,
+            source_canvas_size=_dict(target.get("sourceCanvasSize")),
+        )
+    except Exception as error:  # noqa: BLE001
+        return {
+            "plannedScreenPoint": None,
+            "coordinateConversionTrace": {
+                "status": "WARN",
+                "method": "coordinate_resolution_unavailable",
+                "source": "current_action_proposal",
+                "error": f"{type(error).__name__}: {error}",
+                "noLiveInput": True,
+            },
+            "displayScaleApplied": None,
+            "displayScaleReason": "coordinate_resolution_unavailable",
+        }
+    trace = dict(resolution)
+    trace["source"] = "current_action_proposal"
+    trace["targetName"] = target.get("name")
+    trace["targetKey"] = target.get("targetKey")
+    trace["targetSource"] = target.get("actionTargetSource") or target.get("targetSource")
+    trace["inputPoint"] = point
+    trace["inputPointSpace"] = coordinate_space
+    trace["noLiveInput"] = True
+    return {
+        "plannedScreenPoint": resolution.get("screenClickPoint"),
+        "coordinateConversionTrace": trace,
+        "displayScaleApplied": resolution.get("displayScaleApplied"),
+        "displayScaleReason": resolution.get("displayScaleReason"),
+    }
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
@@ -1801,8 +1879,8 @@ class KnowledgeFabric:
                 {
                     "sourceName": "action_input_visibility_context",
                     "sourceType": "bounded_debug_latest_state",
-                    "producer": "Knowledge Fabric over action_trace.v2 and daemon status",
-                    "consumer": "Codex MCP/direct visibility into planned action, target, coordinates, hover/click proof, and input integrity by phase",
+                    "producer": "Knowledge Fabric over action_trace.v2, current action proposal, readiness input geometry, and daemon status",
+                    "consumer": "Codex MCP/direct visibility into planned action, target, coordinates, hover/click proof, and input integrity by phase; derived proposal points are read-only",
                     "schema": ACTION_INPUT_VISIBILITY_SCHEMA,
                     "freshnessField": "latest action trace/session freshness",
                     "capFields": ["candidate limits", "debug evidence limits"],
@@ -2023,7 +2101,7 @@ class KnowledgeFabric:
             ("What widgets/dialogue/bank UI are open?", "list_seen_widgets", "list_seen_widgets", "daemon widget/bank/dialogue state", "knowledge_fabric_seen_widgets.v1", "medium", "widget sections may be compact", "test_knowledge_fabric.py"),
             ("What target is executable?", "get_current_debug_context", "get_current_debug_context", "action proposal/readiness/hover", "actionReadiness/actionProposal", "high only after hover evidence", "must not rely on static/external only", "readiness tests"),
             ("What action was actually clicked?", "get_latest_action_trace", "get_latest_action_trace", "action trace/MenuOptionClicked", "knowledge_fabric_latest_action_trace.v1", "high if trace present", "no click trace if skipped", "test_knowledge_fabric.py"),
-            ("What did Codex know about the planned click/input?", "get_action_input_visibility", "get_action_input_visibility", "action trace, coordinate conversion, HumanInputController, input integrity phase report", ACTION_INPUT_VISIBILITY_SCHEMA, "high if action trace present", "no movement proof if action skipped before motor control", "test_knowledge_fabric.py"),
+            ("What did Codex know about the planned click/input?", "get_action_input_visibility", "get_action_input_visibility/osrs://debug/action-input-visibility", "latest action trace or current action proposal plus readiness input geometry, coordinate conversion, HumanInputController, input integrity phase report", ACTION_INPUT_VISIBILITY_SCHEMA, "high for planned point when proposal and input geometry are present", "derived proposal points have no movement/hover proof until live action trace exists", "test_knowledge_fabric.py"),
             ("What data is stale/capped/missing?", "data-quality-report", "get_data_quality_report", "world model + query perf + disk/external status", "data_quality_report.v1", "high", "requires current context", "test_knowledge_fabric.py"),
             ("What item/object/NPC ID is this?", "external lookup commands", "external_lookup_item_id/external_lookup_object", "external cache/static library", "external_*_lookup.v1", "advisory", "cache miss until refresh", "test_knowledge_fabric.py"),
             ("What wiki/static fact explains this?", "external-search-wiki/external lookup", "external_search_wiki", "external cache/API explicit refresh", "external_wiki_search.v1", "advisory", "internet disabled unless explicit", "test_knowledge_fabric.py"),
@@ -2724,6 +2802,17 @@ class KnowledgeFabric:
         visibility = _dict(latest_trace.get("visibility"))
         bootstrap = self._bootstrap_liveness_summary()
         current_input_integrity = self._input_integrity_summary()
+        planned_target = visibility.get("plannedTarget") or _dict(proposal.get("targetExplanation"))
+        derived_point = (
+            _derive_planned_point_visibility(planned_target, readiness=readiness, status=status)
+            if planned_target
+            and (
+                visibility.get("plannedScreenPoint") is None
+                or visibility.get("coordinateConversionTrace") is None
+                or visibility.get("displayScaleApplied") is None
+            )
+            else {}
+        )
         data = {
             "latestActionTrace": visibility or latest_trace,
             "latestActionTraceSummary": latest_trace,
@@ -2731,11 +2820,11 @@ class KnowledgeFabric:
             "readiness": readiness,
             "actionReadiness": readiness.get("actionReadiness") if isinstance(readiness.get("actionReadiness"), dict) else {},
             "plannedAction": visibility.get("plannedAction") or proposal.get("proposedAction"),
-            "plannedTarget": visibility.get("plannedTarget") or _dict(proposal.get("targetExplanation")),
-            "plannedScreenPoint": visibility.get("plannedScreenPoint"),
-            "coordinateConversionTrace": visibility.get("coordinateConversionTrace"),
-            "displayScaleApplied": visibility.get("displayScaleApplied"),
-            "displayScaleReason": visibility.get("displayScaleReason"),
+            "plannedTarget": planned_target,
+            "plannedScreenPoint": _first_present(visibility.get("plannedScreenPoint"), derived_point.get("plannedScreenPoint")),
+            "coordinateConversionTrace": _first_present(visibility.get("coordinateConversionTrace"), derived_point.get("coordinateConversionTrace")),
+            "displayScaleApplied": _first_present(visibility.get("displayScaleApplied"), derived_point.get("displayScaleApplied")),
+            "displayScaleReason": _first_present(visibility.get("displayScaleReason"), derived_point.get("displayScaleReason")),
             "arduinoCalibrationStatus": visibility.get("arduinoCalibrationStatus"),
             "humanInputController": visibility.get("humanInputController"),
             "cursorMovementTrace": visibility.get("cursorMovementTrace"),
@@ -2857,7 +2946,10 @@ class KnowledgeFabric:
             "lowerIlInjectedEvents": monitor.get("lowerIlInjectedEvents")
             if monitor.get("lowerIlInjectedEvents") is not None
             else (_int(flags.get("mouseLowerIlInjectedCount")) or 0) + (_int(flags.get("keyboardLowerIlInjectedCount")) or 0),
-            "directBackendBypassCount": backend.get("directBackendBypassCount") or self.daemon_status.get("directBackendBypassCount"),
+            "directBackendBypassCount": _first_present(
+                backend.get("directBackendBypassCount"),
+                self.daemon_status.get("directBackendBypassCount"),
+            ),
             "lastArduinoEventAgeMs": monitor.get("lastArduinoEventAgeMs"),
             "warnings": _list(monitor.get("warnings")),
             "blockers": _list(monitor.get("blockers")),

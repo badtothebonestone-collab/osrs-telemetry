@@ -1340,6 +1340,78 @@ def test_action_input_visibility_exposes_trace_input_and_phase_evidence():
     assert mcp_payload["data"]["plannedTarget"]["name"] == "Tree"
 
 
+def test_action_input_visibility_derives_proposal_point_without_live_input():
+    fabric = knowledge_fabric.KnowledgeFabric(
+        world_model_payloads=synthetic_payloads(),
+        daemon_status={
+            "schema": "context_status.v1",
+            "latestTick": 77,
+            "clientTickHot": {"gameState": "LOGIN_SCREEN"},
+            "inputIntegrityStatus": {
+                "monitorPass": True,
+                "injectionFlags": {
+                    "mouseInjectedCount": 4,
+                    "keyboardInjectedCount": 0,
+                    "mouseLowerIlInjectedCount": 0,
+                    "keyboardLowerIlInjectedCount": 0,
+                },
+                "backend": {"directBackendBypassCount": 0},
+            },
+        },
+    )
+    proposal = {
+        "proposedAction": "interact_service_route_object",
+        "targetExplanation": {
+            "name": "Staircase",
+            "targetKey": "route-step-4",
+            "actionTargetSource": "live_route_object",
+            "canvasAimPoint": {"x": 100, "y": 80},
+        },
+    }
+    readiness = {
+        "schema": "live_readiness.v2",
+        "status": "FAIL",
+        "actionReadiness": {
+            "status": "FAIL",
+            "executionAllowed": False,
+            "blockReason": "manual_login_required",
+            "blockers": [{"code": "manual_login_required"}],
+        },
+        "inputGeometry": {
+            "inputGeometryAvailable": True,
+            "canvasScreenOrigin": {"x": 1000, "y": 2000},
+            "canvasSize": {"width": 1530, "height": 1006},
+            "sourceCanvasSize": {"width": 765, "height": 503},
+            "displayScale": {"x": 1.0, "y": 1.0},
+        },
+    }
+
+    with patch.object(fabric, "_action_proposal", return_value=proposal), patch.object(
+        fabric,
+        "_readiness_report",
+        return_value=readiness,
+    ):
+        result = fabric.query_action_input_visibility()
+
+    data = result["data"]
+    trace = data["coordinateConversionTrace"]
+    assert data["plannedAction"] == "interact_service_route_object"
+    assert data["plannedTarget"]["name"] == "Staircase"
+    assert data["plannedScreenPoint"] == {"x": 1200, "y": 2160}
+    assert data["displayScaleApplied"] is False
+    assert data["displayScaleReason"] == "display_scale_identity"
+    assert trace["source"] == "current_action_proposal"
+    assert trace["method"] == "dynamic_input_geometry"
+    assert trace["inputPoint"] == {"x": 100, "y": 80}
+    assert trace["inputPointSpace"] == "canvas"
+    assert trace["targetKey"] == "route-step-4"
+    assert trace["noLiveInput"] is True
+    assert data["input_integrity_status"]["phaseCounts"]["operator_phase"]["operatorInjectedEvents"] == 4
+    assert data["input_integrity_status"]["phaseCounts"]["live_action_phase"]["hardBlocker"] is False
+    assert data["directBackendBypassCount"] == 0
+    assert data["rawInputBypassToolsExposed"] is False
+
+
 def test_mcp_jsonrpc_lists_tools():
     response = mcp_server.handle_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
 
@@ -1478,6 +1550,9 @@ class KnowledgeFabricTest(unittest.TestCase):
 
     def test_action_input_visibility_exposes_trace_input_and_phase_evidence(self):
         test_action_input_visibility_exposes_trace_input_and_phase_evidence()
+
+    def test_action_input_visibility_derives_proposal_point_without_live_input(self):
+        test_action_input_visibility_derives_proposal_point_without_live_input()
 
     def test_performance_caps_report_cap_hit_and_truncated(self):
         test_performance_caps_report_cap_hit_and_truncated()
