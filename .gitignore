@@ -21,6 +21,7 @@ exports/
 *.duckdb
 *.parquet
 *.log
+logs/*.txt
 *.ndjson
 *.jsonl
 bot_runs/

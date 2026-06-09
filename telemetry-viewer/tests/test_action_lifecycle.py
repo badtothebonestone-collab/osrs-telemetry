@@ -689,6 +689,46 @@ class ActionLifecycleTest(unittest.TestCase):
         self.assertEqual(observed["verificationStatus"], "PASS")
         self.assertEqual(observed["observedResult"], "banking_complete")
 
+    def test_deposit_verification_uses_fresh_inventory_progress_when_bank_operation_count_stale(self):
+        before = deposit_status(held=28)
+        before["brain"]["inventoryContext"] = {"progress": {"currentHeldCount": 28, "currentHeldResourceCount": 28}}
+        after = deposit_status(held=28)
+        after["brain"]["inventoryContext"] = {"progress": {"currentHeldCount": 6, "currentHeldResourceCount": 6}}
+
+        observed = verify_expected_result(
+            "deposit_inventory",
+            before,
+            after,
+            elapsed_ms=1000,
+            timeout_ms=15000,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "PASS")
+        self.assertEqual(observed["observedResult"], "resource_count_decreased")
+        self.assertEqual(observed["resourceItemsHeldBefore"], 28)
+        self.assertEqual(observed["resourceItemsHeldAfter"], 6)
+        self.assertTrue(observed["nextActionAllowed"])
+
+    def test_deposit_verification_uses_free_slot_increase_when_resource_count_stale(self):
+        before = deposit_status(held=6)
+        before["brain"]["bankUiContext"]["inventorySummary"] = {"freeSlots": 22}
+        after = deposit_status(held=6)
+        after["brain"]["bankUiContext"]["inventorySummary"] = {"freeSlots": 28}
+
+        observed = verify_expected_result(
+            "deposit_inventory",
+            before,
+            after,
+            elapsed_ms=1000,
+            timeout_ms=15000,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "PASS")
+        self.assertEqual(observed["observedResult"], "inventory_free_slots_changed")
+        self.assertEqual(observed["inventoryFreeSlotsBefore"], 22)
+        self.assertEqual(observed["inventoryFreeSlotsAfter"], 28)
+        self.assertTrue(observed["nextActionAllowed"])
+
     def test_open_service_pathing_to_object_is_progress_not_dead_wait(self):
         before = navigation_status(tick=10, x=3206, y=3218, plane=2, service_distance=5, path_distance=4)
         after = navigation_status(

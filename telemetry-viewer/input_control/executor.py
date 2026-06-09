@@ -2764,6 +2764,7 @@ def _new_loop_summary() -> dict[str, Any]:
         "delayedProgressReconciliations": 0,
         "resourceTimeoutReconciledSuccesses": 0,
         "resourceTimeoutNoProgress": 0,
+        "serviceObjectTimeoutExtendedWaits": 0,
         "unresolvedTimeouts": 0,
         "trueUnresolvedTimeouts": 0,
         "resolvedByRetry": 0,
@@ -3047,6 +3048,7 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
     delayed_progress_reconciliations = 0
     resource_timeout_reconciled_successes = 0
     resource_timeout_no_progress = 0
+    service_object_timeout_extended_waits = 0
     unresolved_timeouts = 0
     route_transition_attempts = 0
     route_transition_first_try_successes = 0
@@ -3179,6 +3181,15 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
             timeout_recovered_by["delayed_progress_reconciliation"] = timeout_recovered_by.get("delayed_progress_reconciliation", 0) + 1
             if "delayed_progress_reconciliation" not in evidence_after_timeout:
                 evidence_after_timeout.append("delayed_progress_reconciliation")
+        service_object_wait_extended = bool(
+            observed.get("serviceObjectTimeoutExtendedWait") is True
+            or trace_for_counts.get("serviceObjectTimeoutExtendedWait") is True
+        )
+        if service_object_wait_extended:
+            service_object_timeout_extended_waits += 1
+            pending_but_safe += 1
+            if "service_object_timeout_extended_wait" not in evidence_after_timeout:
+                evidence_after_timeout.append("service_object_timeout_extended_wait")
         if resource_progress_classification == "resource_timeout_reconciled_success":
             resource_timeout_reconciled_successes += 1
             timeout_classifications[resource_progress_classification] = timeout_classifications.get(resource_progress_classification, 0) + 1
@@ -3343,6 +3354,7 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
         "delayedProgressReconciliations": delayed_progress_reconciliations,
         "resourceTimeoutReconciledSuccesses": resource_timeout_reconciled_successes,
         "resourceTimeoutNoProgress": resource_timeout_no_progress,
+        "serviceObjectTimeoutExtendedWaits": service_object_timeout_extended_waits,
         "unresolvedTimeouts": unresolved_timeouts,
         "trueUnresolvedTimeouts": unresolved_timeouts,
         "resolvedByRetry": resolved_by_retry,
@@ -5706,6 +5718,38 @@ def _resource_timeout_wait_extension_allowed(options: Any, summary: dict[str, An
     if timeout_limit is None:
         return False
     return int(summary.get("consecutiveTimeouts") or 0) < timeout_limit
+
+
+def _service_object_timeout_wait_extension_allowed(result: ExecutionResult | None) -> bool:
+    if result is None or result.proposed_action != "open_service" or not result.executed:
+        return False
+    hover = result.hover_confirmation if isinstance(result.hover_confirmation, dict) else {}
+    observed = _observed_from_result(result)
+    trace = result.action_trace if isinstance(result.action_trace, dict) else {}
+    classifications = {
+        str(hover.get("clickClassification") or ""),
+        str(observed.get("menuClickClassification") or ""),
+        str(observed.get("actionResultClassification") or ""),
+        str(trace.get("clickClassification") or ""),
+        str(trace.get("finalClassification") or ""),
+    }
+    return bool(classifications.intersection({"clicked_expected_action", "clicked_open_service"}))
+
+
+def _service_object_timeout_pending_observation(observed: dict[str, Any]) -> dict[str, Any]:
+    pending = dict(observed)
+    pending["serviceObjectTimeoutExtendedWait"] = True
+    pending["verificationStatus"] = "WARN"
+    pending["observedResult"] = "service_object_click_confirmed_waiting"
+    pending["resultOutcome"] = "still_waiting"
+    pending["resultComplete"] = False
+    pending["nextActionAllowed"] = False
+    pending["previousObservedResult"] = observed.get("observedResult")
+    pending["previousResultOutcome"] = observed.get("resultOutcome")
+    pending["warnings"] = list(pending.get("warnings") or []) + [
+        "service object click timed out while the expected Bank action was confirmed; continuing bounded observation"
+    ]
+    return pending
 
 
 def _status_from_lifecycle(lifecycle: ActionLifecycleState) -> str:
@@ -11470,6 +11514,11 @@ def execute_action_loop(
                 )
                 projection_recovery_failed = (lifecycle.last_action or "") == "resource_view_recovery"
                 service_view_recovery_failed = (lifecycle.last_action or "") == "service_view_recovery"
+                service_object_pending_after_timeout = bool(
+                    (lifecycle.last_action or "") == "open_service"
+                    and results
+                    and _service_object_timeout_wait_extension_allowed(results[-1])
+                )
                 lifecycle.current_state = "verified" if resource_target_reacquired else "timed_out"
                 if resource_target_reacquired:
                     lifecycle.reason = "resource_no_progress_target_reacquired"
@@ -11545,6 +11594,27 @@ def execute_action_loop(
                     if results:
                         results[-1].observed_result = pending
                         results[-1].verification_status = "WARN"
+                        _apply_lifecycle(results[-1], lifecycle, cooldown_remaining_ms=0)
+                    _refresh_loop_summary(loop_summary, results)
+                    status_value = "WARN" if status_value == "PASS" else status_value
+                    sleep_func(_poll_interval_seconds(options))
+                    continue
+                if service_object_pending_after_timeout:
+                    pending = _service_object_timeout_pending_observation(observed)
+                    lifecycle.current_state = "waiting_for_result"
+                    lifecycle.reason = "service_object_timeout_waiting_for_bank_ui"
+                    lifecycle.observed_result = pending
+                    lifecycle.observed_signals = list(pending.get("observedSignals") or [])
+                    lifecycle.result_complete = False
+                    lifecycle.result_outcome = "still_waiting"
+                    lifecycle.next_action_allowed = False
+                    if results:
+                        results[-1].observed_result = pending
+                        results[-1].verification_status = "WARN"
+                        if results[-1].status == "PASS":
+                            results[-1].status = "WARN"
+                        if isinstance(results[-1].action_trace, dict):
+                            results[-1].action_trace["serviceObjectTimeoutExtendedWait"] = True
                         _apply_lifecycle(results[-1], lifecycle, cooldown_remaining_ms=0)
                     _refresh_loop_summary(loop_summary, results)
                     status_value = "WARN" if status_value == "PASS" else status_value
@@ -11828,6 +11898,33 @@ def execute_action_loop(
                         classification=reason,
                     )
                     break
+                continue
+        if proposal.proposed_action == "wait_for_context" and not proposal.executable and _status_has_navigation_context(before_status):
+            max_rounds = max(0, _max_navigation_reacquire_rounds(options))
+            attempts = int(loop_summary.get("contextWaitReacquireAttempts") or 0)
+            loop_summary["contextWaitReacquireLimit"] = max_rounds
+            if attempts < max_rounds:
+                loop_summary["contextWaitReacquireAttempts"] = attempts + 1
+                loop_summary["reacquireAttempted"] = True
+                loop_summary["reacquireResult"] = "waiting_for_context"
+                loop_summary["reasonIfNoFreshTarget"] = proposal.reason or "wait_for_context"
+                _record_navigation_trace(
+                    options=options,
+                    loop_summary=loop_summary,
+                    decision="wait",
+                    reason=proposal.reason or "wait_for_context",
+                    status=before_status,
+                    proposal=proposal,
+                    observed={
+                        "observedResult": proposal.reason or "wait_for_context",
+                        "resultOutcome": "still_waiting",
+                        "resultComplete": False,
+                        "nextActionAllowed": False,
+                        "contextWaitReacquireAttempt": attempts + 1,
+                        "contextWaitReacquireLimit": max_rounds,
+                    },
+                )
+                _record_reacquire_wait(options, loop_summary, sleep_func, reason="wait_for_context")
                 continue
         if proposal.proposed_action in {"none", "wait_for_context"} or not proposal.executable:
             action_result = _blocked_by_no_executable_result(
@@ -12349,6 +12446,26 @@ def execute_action_loop(
                 if route_no_progress:
                     lifecycle.observed_result = action_result.observed_result
                     lifecycle.observed_signals = list(_observed_from_result(action_result).get("observedSignals") or [])
+                if (
+                    action_result.proposed_action == "open_service"
+                    and str(_observed_from_result(action_result).get("resultOutcome") or "") == "no_change_timeout"
+                    and _service_object_timeout_wait_extension_allowed(action_result)
+                ):
+                    pending = _service_object_timeout_pending_observation(_observed_from_result(action_result))
+                    action_result.observed_result = pending
+                    action_result.verification_status = "WARN"
+                    if action_result.status == "PASS":
+                        action_result.status = "WARN"
+                    if isinstance(action_result.action_trace, dict):
+                        action_result.action_trace["serviceObjectTimeoutExtendedWait"] = True
+                    lifecycle.current_state = "waiting_for_result"
+                    lifecycle.reason = "service_object_timeout_waiting_for_bank_ui"
+                    lifecycle.observed_result = pending
+                    lifecycle.observed_signals = list(pending.get("observedSignals") or [])
+                    lifecycle.result_complete = False
+                    lifecycle.result_outcome = "still_waiting"
+                    lifecycle.next_action_allowed = False
+                    _apply_lifecycle(action_result, lifecycle, cooldown_remaining_ms=0)
                 if action_result.proposed_action in NAVIGATION_ACTIONS:
                     decision, trace_reason, recovery_mode = _navigation_decision_from_observed(_observed_from_result(action_result))
                     _record_navigation_trace(

@@ -32,6 +32,7 @@ DEFAULT_FULL_LOOP_RECORDING = "20260607_171427_Wood_cutting_attacked"
 DEFAULT_DAEMON_URL = "http://127.0.0.1:8890"
 DEFAULT_SNAPSHOT_URL = "http://127.0.0.1:8893/snapshot"
 DEFAULT_READINESS_TIMEOUT_SECONDS = 0.75
+DEFAULT_STATUS_DIAGNOSTIC_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_TELEMETRY_AGE_MS = 5_000
 DEFAULT_ARDUINO_PORT = "COM6"
 DEFAULT_LIVENESS_RECOVERY_SECONDS = 180.0
@@ -388,6 +389,73 @@ def _object_total(payload: dict[str, Any]) -> int | None:
     return None
 
 
+def _tick_matches_payload_latest(payload: dict[str, Any], tick: Any, *, max_delta: int = 5) -> bool:
+    source_tick = _numeric_tick(tick)
+    if source_tick is None:
+        return False
+    brain = _dict(payload.get("brain"))
+    latest_tick = _numeric_tick(
+        _first_present(
+            payload.get("latestTick"),
+            payload.get("latestTickProcessed"),
+            brain.get("latestTick"),
+        )
+    )
+    if latest_tick is None:
+        return False
+    return abs(latest_tick - source_tick) <= max_delta
+
+
+def _payload_has_fresh_live_scene_context(payload: dict[str, Any]) -> bool:
+    payload = payload if isinstance(payload, dict) else {}
+    brain = _dict(payload.get("brain"))
+    for player in (
+        _dict(payload.get("player")),
+        _dict(payload.get("playerContext")),
+        _dict(brain.get("player")),
+        _dict(brain.get("playerContext")),
+        _dict(_dict(payload.get("baseline")).get("player")),
+    ):
+        if _first_present(
+            player.get("worldX"),
+            player.get("worldY"),
+            _dict(player.get("worldPoint")).get("worldX"),
+            _dict(player.get("worldPoint")).get("x"),
+            _dict(player.get("worldTile")).get("worldX"),
+            _dict(player.get("worldTile")).get("x"),
+        ) is not None:
+            return True
+    freshness = _dict(brain.get("freshnessDomains"))
+    inventory = _dict(brain.get("inventoryContext") or payload.get("inventoryContext"))
+    if inventory and str(freshness.get("inventoryFreshness") or "fresh").lower() != "stale":
+        if _first_present(inventory.get("freeSlots"), inventory.get("inventoryFull"), _dict(inventory.get("progress")).get("currentHeldCount")) is not None:
+            return True
+    for context_name in ("serviceRouteContext", "pathingContext", "resourceReturnContext"):
+        context = _dict(brain.get(context_name) or payload.get(context_name))
+        if not context:
+            continue
+        status = str(context.get("status") or "").upper()
+        if status in {"FAIL", "MISS"}:
+            continue
+        source_tick = _first_present(context.get("sourceTick"), context.get("latestTick"))
+        if source_tick is not None and not _tick_matches_payload_latest(payload, source_tick):
+            continue
+        if _first_present(
+            context.get("routeAvailable"),
+            context.get("actionReady"),
+            context.get("pathingNeeded"),
+            context.get("currentStep"),
+            context.get("currentNodeId"),
+            context.get("nextWaypointTile"),
+            context.get("visibleServiceTarget"),
+            context.get("visibleInteractionTarget"),
+            context.get("selectedServiceObject"),
+            context.get("resourceTargetAvailable"),
+        ) is not None:
+            return True
+    return False
+
+
 def _loaded_scene_blockers(
     *payloads: dict[str, Any],
     now: float | None = None,
@@ -405,12 +473,15 @@ def _loaded_scene_blockers(
     for payload in payloads:
         if not payload:
             continue
+        fresh_live_scene_context = _payload_has_fresh_live_scene_context(payload)
         hot = _dict(payload.get("clientTickHot"))
         hot_state = str(hot.get("gameState") or "").upper()
-        if hot_state in negative_states:
-            blockers.append(f"client_tick_hot_game_state_{hot_state.lower()}")
         hot_age = _epoch_ms_age_ms(hot.get("wallTimeMillis"), now=now)
-        if hot and hot_age is not None and hot_age > max_hot_age_ms:
+        hot_stale = hot_age is not None and hot_age > max_hot_age_ms
+        if hot_state in negative_states:
+            if not (fresh_live_scene_context and hot_stale):
+                blockers.append(f"client_tick_hot_game_state_{hot_state.lower()}")
+        if hot and hot_stale and not fresh_live_scene_context:
             blockers.append(f"client_tick_hot_stale_age_ms_{hot_age}")
         screen = str(_first_present(payload.get("screenClassification"), payload.get("visualClassification")) or "").lower()
         if "disconnected" in screen:
@@ -432,8 +503,12 @@ def _loaded_scene_blockers(
     return list(dict.fromkeys(blockers))
 
 
-def _game_client_loaded(*payloads: dict[str, Any]) -> bool:
-    if _loaded_scene_blockers(*payloads):
+def _game_client_loaded(
+    *payloads: dict[str, Any],
+    now: float | None = None,
+    max_hot_age_ms: int = DEFAULT_MAX_TELEMETRY_AGE_MS,
+) -> bool:
+    if _loaded_scene_blockers(*payloads, now=now, max_hot_age_ms=max_hot_age_ms):
         return False
     for payload in payloads:
         hot = _dict(payload.get("clientTickHot"))
@@ -445,6 +520,8 @@ def _game_client_loaded(*payloads: dict[str, Any]) -> bool:
             return True
         player = _dict(_first_present(payload.get("player"), _dict(payload.get("baseline")).get("player")))
         if _first_present(player.get("worldX"), player.get("worldY"), _dict(player.get("worldPoint")).get("worldX"), _dict(player.get("worldPoint")).get("x")) is not None:
+            return True
+        if _payload_has_fresh_live_scene_context(payload):
             return True
     return False
 
@@ -529,6 +606,26 @@ def check_live_readiness(
     snapshot_payload = _dict(snapshot_health_result.get("payload"))
     latest_session = latest_live_session_dir(sessions_root)
     disk_snapshot = _disk_live_snapshot(latest_session, now=now)
+    disk_status = _dict(disk_snapshot.get("status"))
+    disk_context = _dict(disk_snapshot.get("contextIndex"))
+    baseline = _dict(disk_snapshot.get("baseline"))
+    disk_activity = _dict(disk_snapshot.get("activity"))
+    preliminary_loaded_scene = _game_client_loaded(
+        status_payload,
+        snapshot_payload,
+        disk_status,
+        disk_context,
+        baseline,
+        disk_activity,
+        now=now,
+        max_hot_age_ms=max_telemetry_age_ms,
+    )
+    if not preliminary_loaded_scene and health_result.get("ok"):
+        diagnostic_timeout = max(float(timeout or 0.0), DEFAULT_STATUS_DIAGNOSTIC_TIMEOUT_SECONDS)
+        diagnostic_status_result = fetch(daemon_url + "/status", diagnostic_timeout)
+        status_result = diagnostic_status_result
+        if diagnostic_status_result.get("ok"):
+            status_payload = _dict(diagnostic_status_result.get("payload"))
     telemetry_age_ms = _extract_telemetry_age_ms(status_payload, snapshot_payload, disk_snapshot, now=now)
     freshness_override = _live_tick_freshness_override(
         status_payload,
@@ -570,8 +667,6 @@ def check_live_readiness(
     if not context_reachable:
         status = "FAIL"
 
-    disk_status = _dict(disk_snapshot.get("status"))
-    disk_context = _dict(disk_snapshot.get("contextIndex"))
     latest_tick = _first_present(
         status_payload.get("latestTick"),
         status_payload.get("latestTickProcessed"),
@@ -604,6 +699,8 @@ def check_live_readiness(
         disk_context,
         _dict(disk_snapshot.get("baseline")),
         _dict(disk_snapshot.get("activity")),
+        now=now,
+        max_hot_age_ms=max_telemetry_age_ms,
     )
     if loaded_scene_blockers:
         game_client_loaded = False
@@ -717,8 +814,10 @@ def run_input_geometry_check(
     latest_session = latest_live_session_dir(sessions_root)
     disk_snapshot = _disk_live_snapshot(latest_session, now=now)
     bounded_timeout = max(float(timeout or 0.0), 5.0)
+    status_timeout = max(bounded_timeout, DEFAULT_STATUS_DIAGNOSTIC_TIMEOUT_SECONDS)
     health_result = fetch(daemon_url + "/health", bounded_timeout)
-    status_result = fetch(daemon_url + "/status", bounded_timeout)
+    status_request_started = time.time() if now is None else now
+    status_result = fetch(daemon_url + "/status", status_timeout)
     snapshot_health_result = fetch(_health_url_from_snapshot(snapshot_url), bounded_timeout)
     status_payload = _dict(status_result.get("payload"))
     snapshot_payload = _dict(snapshot_health_result.get("payload"))
@@ -746,7 +845,16 @@ def run_input_geometry_check(
         max_hot_age_ms=max_telemetry_age_ms,
     )
     loaded_scene_verified = bool(
-        _game_client_loaded(status_payload, snapshot_payload, disk_status, disk_context, baseline, disk_activity)
+        _game_client_loaded(
+            status_payload,
+            snapshot_payload,
+            disk_status,
+            disk_context,
+            baseline,
+            disk_activity,
+            now=status_request_started,
+            max_hot_age_ms=max_telemetry_age_ms,
+        )
         and not loaded_scene_blockers
     )
     loaded_scene_proof = {
@@ -802,6 +910,7 @@ def run_input_geometry_check(
             "contextStatus": {key: value for key, value in status_result.items() if key != "payload"},
             "snapshotHealth": {key: value for key, value in snapshot_health_result.items() if key != "payload"},
         },
+        "statusDiagnosticTimeoutSeconds": status_timeout,
         "warnings": list(dict.fromkeys(warnings)),
         "errors": list(dict.fromkeys(errors)),
         "nextLiveCommand": (

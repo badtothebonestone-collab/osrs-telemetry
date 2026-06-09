@@ -1,6 +1,6 @@
 {
   "schema": "project_script_api_map.v1",
-  "updatedAtUtc": "2026-06-09T15:39:55.360466Z",
+  "updatedAtUtc": "2026-06-09T19:00:40.703668Z",
   "scriptApis": [
     {
       "function": "get_bank_state(source)",

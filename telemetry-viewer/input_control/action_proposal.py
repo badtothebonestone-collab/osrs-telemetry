@@ -2580,8 +2580,131 @@ def _service_view_recovery_proposal(
     return proposal
 
 
-def _deposit_inventory_target(bank_ui: dict[str, Any]) -> dict[str, Any]:
-    return {
+def _resource_deposit_display_name(bank_operation: dict[str, Any], item_id: Any = None) -> str:
+    display_name = _text(bank_operation.get("resourceDisplayName"))
+    item_id_int = _int(item_id, None)
+    if not display_name and item_id_int == 1511:
+        display_name = "Logs"
+    elif not display_name and item_id_int == 1521:
+        display_name = "Oak logs"
+    return display_name or "resources"
+
+
+def _resource_deposit_expected_targets(display_name: str) -> list[str]:
+    return list(
+        dict.fromkeys(
+            target
+            for target in (
+                display_name,
+                display_name.rstrip("s"),
+                "Logs" if "log" in display_name.lower() else None,
+                "Log" if "log" in display_name.lower() else None,
+            )
+            if target
+        )
+    )
+
+
+def _deposit_inventory_slot_target(bank_ui: dict[str, Any], bank_operation: dict[str, Any] | None = None) -> dict[str, Any]:
+    bank_operation = _dict(bank_operation)
+    for slot in _list(bank_ui.get("inventorySlots") or bank_ui.get("bankInventorySlots") or bank_ui.get("bankInventorySlotWidgets")):
+        if not isinstance(slot, dict):
+            continue
+        actions = [str(action) for action in _list(slot.get("actions")) if action]
+        if not any("deposit" in action.lower() for action in actions):
+            continue
+        bounds = dict(_dict(slot.get("bounds")))
+        if bounds:
+            bounds.setdefault("source", "bank_inventory_slot_widget_canvas")
+        aim = _dict(slot.get("aimPoint"))
+        aim_point = None
+        if aim:
+            aim_point = {
+                "canvasX": _first_present(aim.get("canvasX"), aim.get("x")),
+                "canvasY": _first_present(aim.get("canvasY"), aim.get("y")),
+                "source": "bank_inventory_slot_widget_canvas",
+            }
+        item_id = slot.get("itemId")
+        display_name = _resource_deposit_display_name(bank_operation, item_id)
+        return {
+            "targetName": display_name,
+            "targetType": "bankInventorySlot",
+            "classId": "bank_inventory_item",
+            "resourceItemSlot": slot.get("slot"),
+            "resourceItemId": item_id,
+            "resourceItemQuantity": slot.get("quantity"),
+            "bounds": bounds,
+            "aimPoint": aim_point,
+            "actions": actions,
+            "expectedOptions": ["Deposit-All", "Deposit"],
+            "expectedTargets": _resource_deposit_expected_targets(display_name),
+            "source": "bank_inventory_slot_widget",
+        }
+    return {}
+
+
+def _deposit_inventory_resource_slot_target(bank_operation: dict[str, Any]) -> dict[str, Any]:
+    widgets = _list(bank_operation.get("resourceItemWidgets") or bank_operation.get("resourceSlotWidgets"))
+    bounds_values = _list(bank_operation.get("resourceItemSlotBounds"))
+    for index, widget in enumerate(widgets):
+        if not isinstance(widget, dict):
+            continue
+        bounds = dict(_dict(widget.get("bounds")))
+        if not bounds and index < len(bounds_values) and isinstance(bounds_values[index], dict):
+            bounds = dict(bounds_values[index])
+        if bounds:
+            bounds.setdefault("source", "bank_operation_resource_slot_canvas")
+        aim = _dict(widget.get("aimPoint"))
+        aim_point = None
+        if aim:
+            aim_point = {
+                "canvasX": _first_present(aim.get("canvasX"), aim.get("x")),
+                "canvasY": _first_present(aim.get("canvasY"), aim.get("y")),
+                "source": "bank_operation_resource_slot_canvas",
+            }
+        if not bounds and not aim_point:
+            continue
+        display_name = _resource_deposit_display_name(bank_operation, widget.get("itemId"))
+        expected_targets = _resource_deposit_expected_targets(display_name)
+        actions = [str(action) for action in _list(widget.get("actions")) if action]
+        return {
+            "targetName": display_name,
+            "targetType": "bankInventorySlot",
+            "classId": "bank_inventory_item",
+            "resourceItemSlot": widget.get("slot"),
+            "resourceItemId": widget.get("itemId"),
+            "resourceItemQuantity": widget.get("quantity"),
+            "bounds": bounds,
+            "aimPoint": aim_point,
+            "actions": actions or ["Deposit"],
+            "expectedOptions": ["Deposit-All", "Deposit-1", "Deposit"],
+            "expectedTargets": expected_targets,
+            "source": "bank_operation_resource_slot_widget",
+        }
+    for index, bounds_value in enumerate(bounds_values):
+        bounds = dict(_dict(bounds_value))
+        if not bounds:
+            continue
+        bounds.setdefault("source", "bank_operation_resource_slot_canvas")
+        display_name = _resource_deposit_display_name(bank_operation)
+        return {
+            "targetName": display_name,
+            "targetType": "bankInventorySlot",
+            "classId": "bank_inventory_item",
+            "resourceItemSlot": (_list(bank_operation.get("resourceItemSlots")) or [None])[index]
+            if index < len(_list(bank_operation.get("resourceItemSlots")))
+            else None,
+            "bounds": bounds,
+            "actions": ["Deposit"],
+            "expectedOptions": ["Deposit-All", "Deposit-1", "Deposit"],
+            "expectedTargets": _resource_deposit_expected_targets(display_name),
+            "source": "bank_operation_resource_slot_widget",
+        }
+    return {}
+
+
+def _deposit_inventory_target(bank_ui: dict[str, Any], bank_operation: dict[str, Any] | None = None) -> dict[str, Any]:
+    target = {
         "targetName": "Deposit inventory",
         "bounds": _dict(
             bank_ui.get("depositInventoryButtonBounds")
@@ -2589,7 +2712,13 @@ def _deposit_inventory_target(bank_ui: dict[str, Any]) -> dict[str, Any]:
             or bank_ui.get("depositInventoryWidget")
         ),
         "aimPoint": _point_from_aim(bank_ui.get("depositInventoryButtonAimPoint")),
+        "actions": ["Deposit inventory"],
+        "expectedOptions": ["Deposit inventory", "Deposit-All", "Deposit"],
+        "source": "bank_deposit_inventory_button",
     }
+    if target["bounds"] or target["aimPoint"]:
+        return target
+    return _deposit_inventory_slot_target(bank_ui, bank_operation) or _deposit_inventory_resource_slot_target(_dict(bank_operation)) or target
 
 
 def _deposit_resource_target(bank_operation: dict[str, Any]) -> dict[str, Any]:
@@ -2640,7 +2769,14 @@ def _close_bank_target(close_bank: dict[str, Any], bank_ui: dict[str, Any]) -> d
         or bank_ui.get("closeButtonWidget")
         or bank_ui.get("bankCloseButtonWidget")
     )
-    return {"targetName": "Close bank", "bounds": _dict(bounds)}
+    target_source = "bank_close_button" if _dict(bounds) else "bank_close_keyboard"
+    return {
+        "targetName": "Close bank",
+        "bounds": _dict(bounds),
+        "source": target_source,
+        "actionTargetSource": target_source,
+        "actionability": "ready",
+    }
 
 
 def _banking_complete(bank_operation: dict[str, Any]) -> bool:
@@ -3651,7 +3787,7 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
             return _proposal(
                 "deposit_inventory",
                 target_kind="bank_ui",
-                target=_deposit_inventory_target(bank_ui),
+                target=_deposit_inventory_target(bank_ui, bank_operation),
                 reason="deposit_inventory_available",
                 confidence=0.9,
                 required_context=["bank_ui", "bank_operation"],

@@ -29,6 +29,7 @@ NAVIGATION_ACTIONS = {"navigate_to_service", "return_to_resource_area"}
 SERVICE_OBJECT_ACTIONS = {"open_service", "deposit_inventory", "deposit_resources", "close_bank"}
 ROUTE_TRANSITION_ACTIONS = {"interact_service_route_object"}
 INTERFACE_DIALOGUE_ACTIONS = {"interface_dialogue_choice"}
+BANK_UI_ACTIONS = {"deposit_inventory", "deposit_resources", "close_bank"}
 CLIENT_TICK_HOT_MAX_AGE_MILLIS = 1000
 NO_ACTIVE_TARGET_PHASES = {
     "goal_complete",
@@ -897,6 +898,7 @@ def build_readiness_report(
     resource_recovery_required = action in RESOURCE_RECOVERY_ACTIONS
     navigation_target_required = action in NAVIGATION_ACTIONS or proposal.target_kind == "path_tile"
     service_object_required = action in SERVICE_OBJECT_ACTIONS
+    bank_ui_action_required = action in BANK_UI_ACTIONS and proposal.target_kind == "bank_ui"
     route_transition_required = action in ROUTE_TRANSITION_ACTIONS
     interface_dialogue_required = action in INTERFACE_DIALOGUE_ACTIONS
     selected_resource_target_freshness_applicable = bool(resource_target_required or resource_recovery_required)
@@ -967,8 +969,10 @@ def build_readiness_report(
     if navigation_target_required:
         required_capabilities.extend(["route.waypoint", "navigation.intent"])
         optional_capabilities.extend(["overlay_debug_state.json", "highlighter.routeMarkers", "camera.controller"])
-    if service_object_required:
+    if service_object_required and not bank_ui_action_required:
         required_capabilities.extend(["service.target", "target.geometry", "target.aimPoint"])
+    if bank_ui_action_required:
+        required_capabilities.extend(["bank_ui", "bank_ui.action_target"])
     if route_transition_required:
         required_capabilities.extend(["route.transitionTarget", "target.geometry", "target.aimPoint"])
     if interface_dialogue_required:
@@ -1040,6 +1044,39 @@ def build_readiness_report(
         and bool(proposal_payload.get("suggestedClickPoint") or proposal_payload.get("resolvedScreenClickPoint"))
         and (client_tick_hot.get("fresh") or plugin_snapshot_route_transition)
     )
+    live_service_object_source = bool(
+        service_object_required
+        and getattr(proposal, "executable", False)
+        and proposal.target_kind in {"service", "service_route_object"}
+        and proposal_action_target_source
+        in {"live_route_object", "live_service_object", "live_service_target", "service_route_context", "plugin_snapshot_projection"}
+        and proposal_actionability in {"", "needs_hover_confirmation", "live_projected", "fresh", "ready"}
+        and bool(proposal_payload.get("suggestedClickPoint") or proposal_payload.get("resolvedScreenClickPoint"))
+        and (
+            _safe_aimpoint_status(proposal_target, selected_target) == "PASS"
+            or bool(proposal_payload.get("suggestedClickPoint"))
+        )
+        and client_tick_hot.get("isLoggedIn") is not False
+        and client_tick_hot.get("staleReason") not in {"login_screen", "game_not_logged_in", "auto_logged_out_or_inactive"}
+    )
+    live_bank_ui_action_source = bool(
+        bank_ui_action_required
+        and getattr(proposal, "executable", False)
+        and proposal_action_target_source
+        in {
+            "bank_deposit_inventory_button",
+            "bank_inventory_slot_widget",
+            "bank_resource_item_widget",
+            "bank_close_button",
+            "bank_close_keyboard",
+            "bank_operation_context",
+        }
+        and proposal_actionability in {"", "needs_hover_confirmation", "fresh", "ready"}
+        and bool(proposal_payload.get("keyAction") or proposal_payload.get("suggestedClickPoint") or proposal_payload.get("resolvedScreenClickPoint"))
+        and (client_tick_hot.get("fresh") or proposal_action_target_source == "bank_close_keyboard")
+        and client_tick_hot.get("isLoggedIn") is not False
+        and client_tick_hot.get("staleReason") not in {"login_screen", "game_not_logged_in", "auto_logged_out_or_inactive"}
+    )
     plugin_snapshot_required_for_action = bool(plugin_snapshot_required and not live_navigation_waypoint_source)
     if pending_plugin_snapshot_blockers:
         if plugin_snapshot_required_for_action:
@@ -1087,6 +1124,16 @@ def build_readiness_report(
                 f"client-tick hot interaction state is stale before route-transition hover confirmation: age={age_text}; reason={stale_reason}"
             )
             optional_capabilities.append("client_tick_hot.fresh")
+        elif live_service_object_source:
+            action_warnings.append(
+                f"client-tick hot interaction state is stale before service-object hover confirmation: age={age_text}; reason={stale_reason}"
+            )
+            optional_capabilities.append("client_tick_hot.fresh")
+        elif live_bank_ui_action_source:
+            action_warnings.append(
+                f"client-tick hot interaction state is stale before bank UI action: age={age_text}; reason={stale_reason}"
+            )
+            optional_capabilities.append("client_tick_hot.fresh")
         else:
             blockers.append(
                 _blocker(
@@ -1125,6 +1172,16 @@ def build_readiness_report(
                 "daemon session differs from newest live overlay/candidate session; using fresh plugin-snapshot route transition target"
             )
             optional_capabilities.append("session.match")
+        elif live_service_object_source:
+            action_warnings.append(
+                "daemon session differs from newest live overlay/candidate session; using fresh live service target with executor hover confirmation"
+            )
+            optional_capabilities.append("session.match")
+        elif live_bank_ui_action_source:
+            action_warnings.append(
+                "daemon session differs from newest live overlay/candidate session; using fresh live bank UI action target"
+            )
+            optional_capabilities.append("session.match")
         else:
             blockers.append(
                 _blocker(
@@ -1153,6 +1210,16 @@ def build_readiness_report(
         elif live_route_transition_source:
             action_warnings.append(
                 "latest file session differs from daemon action session; using fresh plugin-snapshot route transition target"
+            )
+            optional_capabilities.append("session.match")
+        elif live_service_object_source:
+            action_warnings.append(
+                "latest file session differs from daemon action session; using fresh live service target with executor hover confirmation"
+            )
+            optional_capabilities.append("session.match")
+        elif live_bank_ui_action_source:
+            action_warnings.append(
+                "latest file session differs from daemon action session; using fresh live bank UI action target"
             )
             optional_capabilities.append("session.match")
         else:
@@ -1448,12 +1515,16 @@ def build_readiness_report(
         allow_focus_repair=loaded_scene_verified_for_geometry,
         max_age_ms=5000,
     )
+    if live_route_transition_source and not _dict(status.get("inputGeometry")).get("inputGeometryAvailable"):
+        if "input.geometry" not in optional_capabilities:
+            optional_capabilities.append("input.geometry")
     if not input_geometry.get("inputGeometryAvailable"):
         if live_route_transition_source:
             action_warnings.append(
                 "dynamic input geometry unavailable; executor will validate the plugin-snapshot route transition point with backend window geometry fallback"
             )
-            optional_capabilities.append("input.geometry")
+            if "input.geometry" not in optional_capabilities:
+                optional_capabilities.append("input.geometry")
         else:
             blockers.append(
                 _blocker(

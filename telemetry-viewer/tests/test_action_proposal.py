@@ -2175,6 +2175,91 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_kind, "bank_ui")
         self.assertEqual(proposal.suggested_click_point, {"x": 310, "y": 405})
 
+    def test_bank_readable_deposit_inventory_uses_inventory_slot_when_button_bounds_missing(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="service_open",
+                active_intent="bank_operation_pending",
+                active_target=None,
+                bank_ui={
+                    "bankOpen": True,
+                    "bankReadable": True,
+                    "depositInventoryButtonVisible": True,
+                    "depositInventoryAvailable": True,
+                    "inventorySlots": [
+                        {
+                            "slot": 0,
+                            "itemId": 1511,
+                            "quantity": 1,
+                            "visible": True,
+                            "bounds": {"x": 563, "y": 213, "w": 36, "h": 32},
+                            "aimPoint": {"x": 581, "y": 229},
+                            "actions": [None, "Deposit-All", "Deposit-1", "Deposit-5"],
+                        }
+                    ],
+                },
+                bank_operation={
+                    "operationNeeded": True,
+                    "operationType": "deposit_inventory",
+                    "resourceItemsHeld": 28,
+                    "resourceDisplayName": "woodcutting logs",
+                    "depositInventoryAvailable": True,
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "deposit_inventory")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.suggested_click_point, {"x": 581, "y": 229})
+        self.assertEqual(proposal.click_point_space, "canvas")
+        self.assertEqual(proposal.action_target_source, "bank_inventory_slot_widget")
+        self.assertEqual(proposal.target_explanation["targetSource"], "bank_inventory_slot_widget")
+        self.assertIn("Deposit-All", proposal.target_explanation["actions"])
+        self.assertIn("Logs", proposal.target_explanation["expectedTargets"])
+
+    def test_bank_readable_deposit_inventory_uses_bank_operation_slot_bounds(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="service_open",
+                active_intent="bank_operation_pending",
+                active_target=None,
+                bank_ui={
+                    "bankOpen": True,
+                    "bankReadable": True,
+                    "depositInventoryButtonVisible": True,
+                    "depositInventoryAvailable": True,
+                },
+                bank_operation={
+                    "operationNeeded": True,
+                    "operationType": "deposit_inventory",
+                    "resourceItemsHeld": 28,
+                    "resourceDisplayName": "woodcutting logs",
+                    "nonResourceItemsHeld": 0,
+                    "depositInventoryAvailable": True,
+                    "resourceItemWidgets": [
+                        {
+                            "slot": 0,
+                            "itemId": 1511,
+                            "quantity": 1,
+                            "bounds": {"x": 563, "y": 213, "w": 36, "h": 32},
+                            "aimPoint": {"x": 581, "y": 229},
+                            "actions": [None, "Drop", "Examine"],
+                        }
+                    ],
+                    "resourceItemSlotBounds": [{"x": 563, "y": 213, "w": 36, "h": 32}],
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "deposit_inventory")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.suggested_click_point, {"x": 581, "y": 229})
+        self.assertEqual(proposal.click_point_space, "canvas")
+        self.assertEqual(proposal.action_target_source, "bank_operation_resource_slot_widget")
+        self.assertEqual(proposal.target_explanation["targetSource"], "bank_operation_resource_slot_widget")
+        self.assertIn("Deposit-All", proposal.target_explanation["expectedOptions"])
+        self.assertIn("Logs", proposal.target_explanation["expectedTargets"])
+
     def test_banking_complete_true_does_not_suppress_known_held_resources(self):
         proposal = build_action_proposal(
             status_for(
@@ -2268,6 +2353,8 @@ class ActionProposalTest(unittest.TestCase):
 
         self.assertEqual(proposal.proposed_action, "close_bank")
         self.assertEqual(proposal.key_action, {"type": "key_press", "key": "escape"})
+        self.assertEqual(proposal.action_target_source, "bank_close_keyboard")
+        self.assertEqual(proposal.actionability, "ready")
 
     def test_banking_complete_close_ready_ignores_stale_service_needed_signal(self):
         proposal = build_action_proposal(

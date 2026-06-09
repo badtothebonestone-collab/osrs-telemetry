@@ -297,6 +297,61 @@ class BotEvalRunnerTest(unittest.TestCase):
             self.assertTrue(readiness["taskStateReadable"])
             self.assertTrue(readiness["liveEvalCanStart"])
 
+    def test_readiness_uses_bounded_status_fallback_when_health_lacks_scene_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions_root = make_live_session(Path(tmp))
+            live_status = next(sessions_root.iterdir()) / "interaction_geometry" / "live" / "live_status.json"
+            payload = json.loads(live_status.read_text(encoding="utf-8"))
+            payload.update({"clientTickHot": {}, "worldModelObjectTotal": None})
+            write_json(live_status, payload)
+            baseline_path = next(sessions_root.iterdir()) / "interaction_geometry" / "live" / "live_baseline_state.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            baseline.pop("gameState", None)
+            baseline["player"] = {}
+            baseline["sceneCache"] = {}
+            write_json(baseline_path, baseline)
+            fetch = fake_fetcher(
+                {
+                    "http://127.0.0.1:8890/health": {
+                        "schema": "context_health.v1",
+                        "status": "ok",
+                        "latestTick": 500,
+                        "liveFreshness": {"latestTick": 500, "freshByTicks": True, "freshByMillis": True},
+                    },
+                    "http://127.0.0.1:8890/status": {
+                        "schema": "context_status.v1",
+                        "status": "ok",
+                        "latestTick": 500,
+                        "brain": {
+                            "latestTick": 500,
+                            "freshnessDomains": {"inventoryFreshness": "fresh"},
+                            "inventoryContext": {"freeSlots": 0, "inventoryFull": True},
+                            "serviceRouteContext": {
+                                "status": "PASS",
+                                "sourceTick": 500,
+                                "routeAvailable": True,
+                                "currentNodeId": "lumbridge_castle_bank",
+                            },
+                        },
+                    },
+                    "http://127.0.0.1:8893/health": {
+                        "schema": "snapshot_health.v1",
+                        "status": "PASS",
+                        "latestTick": 500,
+                        "cacheWallClockFresh": True,
+                    },
+                }
+            )
+
+            readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root, timeout=0.25)
+
+            status_call = next(call for call in fetch.calls if call[0].endswith("/status"))
+            self.assertGreaterEqual(status_call[1], bot_eval_runner.DEFAULT_STATUS_DIAGNOSTIC_TIMEOUT_SECONDS)
+            self.assertEqual(readiness["status"], "PASS")
+            self.assertTrue(readiness["gameClientLoaded"])
+            self.assertTrue(readiness["liveEvalCanStart"])
+            self.assertEqual(readiness["endpointChecks"]["daemonStatus"]["ok"], True)
+
     def test_input_geometry_check_reports_canvas_window_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             sessions_root = make_live_session(Path(tmp))
@@ -320,6 +375,133 @@ class BotEvalRunnerTest(unittest.TestCase):
             self.assertIsNotNone(geometry["clientRect"])
             self.assertTrue(geometry["screenToClientAvailable"])
             self.assertTrue(geometry["clientToScreenAvailable"])
+
+    def test_input_geometry_check_uses_status_diagnostic_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions_root = make_live_session(Path(tmp))
+            fetch = fake_fetcher(
+                {
+                    "http://127.0.0.1:8890/health": {"schema": "context_health.v1", "status": "ok", "sourceAgeMs": 100, "latestTick": 123},
+                    "http://127.0.0.1:8890/status": {"schema": "context_status.v1", "status": "ok", "latestTick": 123},
+                    "http://127.0.0.1:8893/health": {"schema": "snapshot_health.v1", "status": "PASS", "latestTick": 123},
+                }
+            )
+            with patch("input_control.input_geometry.find_runelite_window", return_value={"runeliteWindowMatched": False, "matchedWindow": None}):
+                summary = bot_eval_runner.run_input_geometry_check(fetcher=fetch, sessions_root=sessions_root, timeout=0.75)
+
+            status_call = next(call for call in fetch.calls if call[0].endswith("/status"))
+            self.assertGreaterEqual(status_call[1], bot_eval_runner.DEFAULT_STATUS_DIAGNOSTIC_TIMEOUT_SECONDS)
+            self.assertEqual(summary["statusDiagnosticTimeoutSeconds"], bot_eval_runner.DEFAULT_STATUS_DIAGNOSTIC_TIMEOUT_SECONDS)
+
+    def test_input_geometry_check_loaded_scene_uses_status_request_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions_root = make_live_session(Path(tmp))
+            request_started = 1_000.0
+            fetch = fake_fetcher(
+                {
+                    "http://127.0.0.1:8890/health": {"schema": "context_health.v1", "status": "ok", "sourceAgeMs": 100, "latestTick": 123},
+                    "http://127.0.0.1:8890/status": {
+                        "schema": "context_status.v1",
+                        "status": "ok",
+                        "latestTick": 123,
+                        "worldModelObjectTotal": 12,
+                        "clientTickHot": {
+                            "gameState": "LOGGED_IN",
+                            "wallTimeMillis": int((request_started - 0.5) * 1000),
+                        },
+                    },
+                    "http://127.0.0.1:8893/health": {"schema": "snapshot_health.v1", "status": "PASS", "latestTick": 123},
+                }
+            )
+            with patch("input_control.input_geometry.find_runelite_window", return_value={"runeliteWindowMatched": False, "matchedWindow": None}):
+                summary = bot_eval_runner.run_input_geometry_check(fetcher=fetch, sessions_root=sessions_root, now=request_started)
+
+            self.assertEqual(summary["status"], "PASS")
+            self.assertTrue(summary["loadedSceneProof"]["loadedSceneVerified"])
+
+    def test_loaded_scene_proof_accepts_fresh_live_context_over_stale_hot_tick(self):
+        now = 1_000.0
+        status = {
+            "schema": "context_status.v1",
+            "status": "ok",
+            "latestTick": 500,
+            "clientTickHot": {
+                "gameState": "LOGIN_SCREEN",
+                "wallTimeMillis": int((now - 30.0) * 1000),
+            },
+            "brain": {
+                "latestTick": 500,
+                "freshnessDomains": {"inventoryFreshness": "fresh"},
+                "inventoryContext": {"freeSlots": 0, "inventoryFull": True},
+                "serviceRouteContext": {
+                    "status": "PASS",
+                    "sourceTick": 500,
+                    "routeAvailable": True,
+                    "currentNodeId": "lumbridge_castle_bank",
+                },
+            },
+        }
+
+        blockers = bot_eval_runner._loaded_scene_blockers(status, now=now)
+
+        self.assertEqual(blockers, [])
+        self.assertTrue(bot_eval_runner._game_client_loaded(status, now=now))
+
+    def test_input_geometry_check_accepts_fresh_live_context_over_stale_hot_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = 1_000.0
+            sessions_root = Path(tmp) / "missing_sessions"
+            status_payload = {
+                "schema": "context_status.v1",
+                "status": "ok",
+                "latestTick": 500,
+                "clientTickHot": {
+                    "gameState": "LOGIN_SCREEN",
+                    "wallTimeMillis": int((now - 30.0) * 1000),
+                },
+                "inputGeometry": {
+                    "schema": "input_geometry.v1",
+                    "status": "PASS",
+                    "geometryAvailable": True,
+                    "canvasScreenOrigin": {"x": 100, "y": 200},
+                    "canvasSize": {"width": 800, "height": 600},
+                    "sourceCanvasSize": {"width": 800, "height": 600},
+                    "clientWindowBounds": {"x": 90, "y": 180, "width": 840, "height": 650},
+                    "isCanvasShowing": True,
+                    "isClientFocused": True,
+                    "sourceTick": 500,
+                },
+                "brain": {
+                    "latestTick": 500,
+                    "freshnessDomains": {"inventoryFreshness": "fresh"},
+                    "inventoryContext": {"freeSlots": 0, "inventoryFull": True},
+                    "serviceRouteContext": {
+                        "status": "PASS",
+                        "sourceTick": 500,
+                        "routeAvailable": True,
+                        "currentNodeId": "lumbridge_castle_bank",
+                    },
+                },
+            }
+            fetch = fake_fetcher(
+                {
+                    "http://127.0.0.1:8890/health": {"schema": "context_health.v1", "status": "ok", "sourceAgeMs": 100, "latestTick": 500},
+                    "http://127.0.0.1:8890/status": status_payload,
+                    "http://127.0.0.1:8893/health": {
+                        "schema": "snapshot_health.v1",
+                        "status": "PASS",
+                        "latestTick": 500,
+                        "cacheWallClockFresh": True,
+                    },
+                }
+            )
+            with patch("input_control.input_geometry.find_runelite_window", return_value={"runeliteWindowMatched": False, "matchedWindow": None}):
+                summary = bot_eval_runner.run_input_geometry_check(fetcher=fetch, sessions_root=sessions_root, now=now)
+
+            self.assertEqual(summary["status"], "PASS")
+            self.assertTrue(summary["loadedSceneProof"]["loadedSceneVerified"])
+            self.assertTrue(summary["inputGeometryPass"])
+            self.assertEqual(summary["loadedSceneProof"]["blockers"], [])
 
     def test_live_action_does_not_start_executor_when_geometry_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

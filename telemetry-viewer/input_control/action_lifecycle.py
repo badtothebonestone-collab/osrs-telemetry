@@ -245,6 +245,16 @@ def _inventory_free_slots(status: dict[str, Any]) -> int | None:
         value = _int(inventory.get(key))
         if value is not None:
             return value
+    bank_ui = _context(status, "bankUiContext")
+    inventory_summary = _dict(bank_ui.get("inventorySummary"))
+    for key in ("freeSlots", "inventoryFreeSlots"):
+        value = _int(inventory_summary.get(key))
+        if value is not None:
+            return value
+        value = _int(bank_ui.get(key))
+        if value is not None:
+            return value
+    for key in ("freeSlots", "inventoryFreeSlots"):
         value = _int(status.get(key))
         if value is not None:
             return value
@@ -696,8 +706,15 @@ def expected_result_for_action(action: str) -> dict[str, Any]:
 
 
 def _resource_items_held(status: dict[str, Any]) -> int | None:
-    value = context_value(status, "bankOperationContext", "resourceItemsHeld", "bankOperationResourceItemsHeld")
-    return _int(value)
+    counts: list[int] = []
+    for key in ("resourceItemsHeld", "resourceItemQuantity"):
+        value = _int(context_value(status, "bankOperationContext", key, f"bankOperation{key[:1].upper()}{key[1:]}"))
+        if value is not None:
+            counts.append(value)
+    progress_count = _held_resource_count(status)
+    if progress_count is not None:
+        counts.append(progress_count)
+    return min(counts) if counts else None
 
 
 def _bank_open(status: dict[str, Any]) -> bool | None:
@@ -1357,6 +1374,12 @@ def verify_expected_result(
     if action in {"deposit_inventory", "deposit_resources"}:
         before_held = _resource_items_held(before)
         after_held = _resource_items_held(after)
+        before_free = _inventory_free_slots(before)
+        after_free = _inventory_free_slots(after)
+        if before_free is not None:
+            observed["inventoryFreeSlotsBefore"] = before_free
+        if after_free is not None:
+            observed["inventoryFreeSlotsAfter"] = after_free
         if _banking_complete(after) is True or after_held == 0:
             _add_signal(observed, "banking_complete")
             observed["resourceItemsHeldBefore"] = before_held
@@ -1367,6 +1390,11 @@ def verify_expected_result(
             observed["resourceItemsHeldBefore"] = before_held
             observed["resourceItemsHeldAfter"] = after_held
             return _finish(observed, status="PASS", result="resource_count_decreased", outcome="progress", complete=True, next_allowed=True)
+        elif before_free is not None and after_free is not None and after_free > before_free:
+            _add_signal(observed, "inventory_free_slots_changed")
+            observed["resourceItemsHeldBefore"] = before_held
+            observed["resourceItemsHeldAfter"] = after_held
+            return _finish(observed, status="PASS", result="inventory_free_slots_changed", outcome="progress", complete=True, next_allowed=True)
         if timed_out:
             observed["warnings"].append("resource deposit result timed out")
             observed["resourceItemsHeldBefore"] = before_held

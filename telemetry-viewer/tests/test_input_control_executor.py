@@ -42,6 +42,8 @@ from input_control.executor import (
     _route_transition_retry_required_observation,
     _goal_reached_with_only_recoverable_failures,
     _fetch_status_or_action_context,
+    _service_object_timeout_pending_observation,
+    _service_object_timeout_wait_extension_allowed,
     human_click_profile_handoff,
     build_click_plan_from_handoff,
     compare_center_click_vs_profile_click,
@@ -4368,7 +4370,7 @@ class InputControlExecutorTest(unittest.TestCase):
             result_timeout_ms=1,
             action_timeout_ms=1,
             poll_interval_ms=10,
-            max_actions=1,
+            max_actions=2,
             max_total_actions=0,
             max_runtime_seconds=1,
             final_reconcile_ms=0,
@@ -4379,7 +4381,7 @@ class InputControlExecutorTest(unittest.TestCase):
             stop_on_fail=False,
             stop_after_inventory_changes=None,
             stop_when_inventory_full=False,
-            max_successful_actions=None,
+            max_successful_actions=1,
             max_timeouts=None,
             max_consecutive_timeouts=4,
             seed=None,
@@ -4443,6 +4445,107 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(payload["loopSummary"]["menuFlipMismatchCount"], 1)
         self.assertEqual(payload["loopSummary"]["targetMenuFlipSuppressions"], 1)
         self.assertEqual(payload["loopSummary"]["suppressedTargets"][0]["reason"], "menu_flip_mismatch")
+
+    def test_loop_retries_wait_for_context_when_service_route_context_is_present(self):
+        backend = FakeBackend()
+        options = Namespace(
+            timeout=0.01,
+            backend="pyautogui",
+            movement_profile="instant_test",
+            execute=True,
+            verify_after_action=False,
+            after_action_wait_ms=0,
+            hover_confirm_target=False,
+            wait_for_ready=0,
+            cooldown_ms=0,
+            result_timeout_ms=1,
+            action_timeout_ms=1,
+            poll_interval_ms=10,
+            max_actions=1,
+            max_total_actions=0,
+            max_runtime_seconds=1,
+            final_reconcile_ms=0,
+            final_reconcile_game_ticks=0,
+            stop_on_warn=False,
+            stop_on_fail=False,
+            stop_after_inventory_changes=None,
+            stop_when_inventory_full=False,
+            max_successful_actions=None,
+            max_timeouts=None,
+            max_consecutive_timeouts=4,
+            seed=None,
+            require_live_readiness=False,
+            max_navigation_reacquire_rounds=3,
+            max_candidate_reacquire_rounds=0,
+            suppressed_target_wait_ms=0,
+            nav_trace=False,
+            nav_trace_console=False,
+        )
+        waiting_proposal = ActionProposal(
+            status="WARN",
+            proposed_action="wait_for_context",
+            target_kind="service_route_object",
+            reason="route_object_not_on_expected_segment",
+            missing_capabilities=["service_route.route_to_bank"],
+        )
+        service_proposal = ActionProposal(
+            proposed_action="open_service",
+            target_kind="service",
+            target_name="Bank booth",
+            suggested_click_point={"x": 325, "y": 89},
+            click_point_space="canvas",
+            resolved_screen_click_point={"x": 1473, "y": 146},
+            click_point_resolution={"status": "PASS", "screenClickPoint": {"x": 1473, "y": 146}},
+            target_explanation={"name": "Bank booth", "objectId": 18491},
+            reason="service_target_actionable",
+            confidence=0.9,
+        )
+        service_result = ExecutionResult(
+            status="PASS",
+            proposed_action="open_service",
+            dry_run=False,
+            executed=True,
+            proposal=service_proposal.to_dict(),
+            commands=[{"type": "move_and_click", "clickPoint": {"x": 1473, "y": 146}}],
+            observed_result={
+                "observedResult": "bank_opened",
+                "resultOutcome": "success",
+                "resultComplete": True,
+                "nextActionAllowed": True,
+                "verificationStatus": "PASS",
+            },
+            action_trace={},
+        )
+        proposals = [waiting_proposal, service_proposal]
+
+        def fetch_status(*_args, **_kwargs):
+            return navigation_status_payload(tick=10, x=3205, y=3212, service_distance=0, path_distance=0)
+
+        with (
+            patch("input_control.executor.build_action_proposal", side_effect=lambda _status: proposals.pop(0)),
+            patch("input_control.executor.fetch_action_context", side_effect=TimeoutError("context warming")),
+            patch("input_control.executor.execute_action", return_value=service_result),
+        ):
+            result = execute_action_loop(
+                "http://daemon",
+                options,
+                fetch_json_func=fetch_status,
+                backend=backend,
+                snapshot_fetch_func=lambda *_args, **_kwargs: {},
+                sleep_func=lambda _seconds: None,
+                monotonic_func=IncrementingClock(start=0.0, step=0.05),
+            )
+
+        payload = result.to_dict()
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["reason"], "max_actions_reached")
+        self.assertEqual(payload["actionResultCount"], 1)
+        self.assertEqual(payload["actionResults"][0]["proposedAction"], "open_service")
+        summary = payload["loopSummary"]
+        self.assertEqual(summary["contextWaitReacquireAttempts"], 1)
+        self.assertEqual(summary["contextWaitReacquireLimit"], 3)
+        self.assertEqual(summary["reacquireResult"], "waiting_for_context")
+        self.assertEqual(summary["targetReacquireWaits"], 1)
 
     def test_navigation_volatile_menu_tail_blocks_click_before_mousedown(self):
         backend = FakeBackend()
@@ -7742,6 +7845,32 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(payload["loopSummary"]["finalReconcileGameTicks"], 3)
         self.assertEqual(payload["loopSummary"]["finalReconcileResult"], "inventory_changed")
         self.assertEqual(payload["loopSummary"]["inventoryChanges"], 1)
+
+    def test_confirmed_service_click_timeout_keeps_waiting_until_bank_opens(self):
+        result = ExecutionResult(
+            status="PASS",
+            proposed_action="open_service",
+            dry_run=False,
+            executed=True,
+            hover_confirmation={"clickClassification": "clicked_expected_action"},
+            observed_result={
+                "observedResult": "service_object_no_progress",
+                "resultOutcome": "no_change_timeout",
+                "warnings": ["bank UI did not open before timeout"],
+            },
+            action_trace={},
+        )
+
+        self.assertTrue(_service_object_timeout_wait_extension_allowed(result))
+        pending = _service_object_timeout_pending_observation(result.observed_result)
+        self.assertEqual(pending["observedResult"], "service_object_click_confirmed_waiting")
+        self.assertEqual(pending["resultOutcome"], "still_waiting")
+        self.assertFalse(pending["resultComplete"])
+        result.observed_result = pending
+        result.action_trace["serviceObjectTimeoutExtendedWait"] = True
+        counts = _loop_counts([result])
+        self.assertEqual(counts["serviceObjectTimeoutExtendedWaits"], 1)
+        self.assertEqual(counts["pendingButSafe"], 1)
 
     def test_resource_timeout_waiting_state_reconciles_when_inventory_lands_late(self):
         backend = FakeBackend()

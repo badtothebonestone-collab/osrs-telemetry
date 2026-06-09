@@ -619,6 +619,195 @@ class LiveReadinessTest(unittest.TestCase):
             self.assertEqual(report["actionNeed"]["resourceCount"], 7)
             self.assertTrue(report["actionReadiness"]["executionAllowed"])
 
+    def test_live_service_object_allows_session_mismatch_when_target_is_hover_guarded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            daemon_session = root / "daemon-session"
+            latest_session = root / "latest-session"
+            write_json(daemon_session / "manifest.json", {"sessionId": "daemon-session"})
+            write_json(latest_session / "manifest.json", {"sessionId": "latest-session"})
+            write_json(latest_session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
+            status = enable_plugin_snapshot(status_for(daemon_session), post_menu_age_ms=25)
+            service_target = {
+                "targetName": "Bank booth",
+                "name": "Bank booth",
+                "objectId": 18491,
+                "id": 18491,
+                "classId": "bank_related",
+                "targetType": "sceneObject",
+                "source": "live_route_object",
+                "worldX": 3208,
+                "worldY": 3221,
+                "plane": 2,
+                "bounds": {"x": 293, "y": 92, "width": 67, "height": 133},
+                "aimPoint": {"canvasX": 325, "canvasY": 89},
+                "safeAimPoint": {
+                    "status": "PASS",
+                    "canvasX": 325,
+                    "canvasY": 89,
+                    "distanceToViewportEdgePx": 85,
+                    "rawCenterInsideViewport": True,
+                },
+                "expectedOptions": ["Bank", "Use", "Deposit"],
+                "actions": ["Bank", "Use", "Deposit"],
+                "projectionStatus": {"actionableByCanvas": True, "visible": True, "visibleAreaRatio": 1.0},
+            }
+            brain = status["brain"]
+            brain["genericTaskState"] = {
+                "phase": "inventory_full",
+                "activeIntent": "needs_service",
+                "activeIntentTarget": None,
+                "blockingConditions": [],
+                "goalProgress": {"heldResourceCount": 28},
+            }
+            brain["inventoryContext"] = {"inventoryFull": True, "freeSlots": 0}
+            brain["serviceContext"] = {
+                "serviceNeeded": True,
+                "serviceRequired": True,
+                "serviceReady": False,
+                "serviceRouteContext": {
+                    "schema": "service_route_context.v1",
+                    "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                    "routeStepStatus": "service_target_actionable",
+                    "actionReady": True,
+                    "currentStepIndex": 5,
+                    "currentStep": {
+                        "type": "service_interact",
+                        "expectedOptions": ["Bank", "Use", "Deposit"],
+                        "expectedTargetContains": ["Bank", "Deposit", "Bank booth"],
+                    },
+                    "visibleServiceTarget": service_target,
+                    "selectedServiceObject": service_target,
+                },
+            }
+            brain["serviceRouteContext"] = brain["serviceContext"]["serviceRouteContext"]
+            brain["intentOverlayContext"] = {"selectedMarker": None}
+            status["serviceNeeded"] = True
+            status["serviceRouteActionReady"] = True
+            status["inventoryFreeSlots"] = 0
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            blocker_codes = [item["code"] for item in report["blockers"]]
+            self.assertEqual(report["proposedAction"], "open_service")
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertNotIn("daemon_latest_live_session_mismatch", blocker_codes)
+            self.assertNotIn("daemon_latest_session_mismatch", blocker_codes)
+            self.assertIn("session.match", report["optionalCapabilities"])
+            self.assertTrue(any("fresh live service target" in warning for warning in report["actionReadiness"]["warnings"]))
+
+            service_target["source"] = "live_service_object"
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+            blocker_codes = [item["code"] for item in report["blockers"]]
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertNotIn("daemon_latest_live_session_mismatch", blocker_codes)
+            self.assertNotIn("daemon_latest_session_mismatch", blocker_codes)
+
+    def test_live_bank_ui_action_allows_session_mismatch_when_widget_target_is_current(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            daemon_session = root / "daemon-session"
+            latest_session = root / "latest-session"
+            write_json(daemon_session / "manifest.json", {"sessionId": "daemon-session"})
+            write_json(latest_session / "manifest.json", {"sessionId": "latest-session"})
+            latest_overlay = latest_session / "interaction_geometry" / "live" / "overlay_debug_state.json"
+            write_json(latest_overlay, {"markers": []})
+            os.utime(latest_overlay, (time_value := 4102444800, time_value))
+            status = enable_plugin_snapshot(status_for(daemon_session), post_menu_age_ms=25)
+            brain = status["brain"]
+            brain["genericTaskState"] = {
+                "phase": "inventory_full",
+                "activeIntent": "needs_service",
+                "activeIntentTarget": None,
+                "blockingConditions": [],
+                "goalProgress": {"heldResourceCount": 28},
+            }
+            brain["inventoryContext"] = {"inventoryFull": True, "freeSlots": 0}
+            brain["serviceContext"] = {"serviceNeeded": True, "serviceRequired": True, "serviceReady": True}
+            brain["bankUiContext"] = {
+                "bankOpen": True,
+                "bankReadable": True,
+                "bankPinOpen": False,
+                "depositInventoryButtonVisible": True,
+                "inventorySlots": [
+                    {
+                        "slot": 0,
+                        "itemId": 1511,
+                        "quantity": 28,
+                        "bounds": {"x": 563, "y": 213, "width": 36, "height": 32},
+                        "aimPoint": {"x": 581, "y": 229},
+                        "actions": ["Deposit-All", "Deposit-1", "Examine"],
+                    }
+                ],
+            }
+            brain["bankOperationContext"] = {
+                "operationNeeded": True,
+                "bankingComplete": False,
+                "resourceItemsHeld": 28,
+                "nonResourceItemsHeld": 0,
+                "depositInventoryAvailable": True,
+            }
+            brain["intentOverlayContext"] = {"selectedMarker": None}
+            status["inventoryFreeSlots"] = 0
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            blocker_codes = [item["code"] for item in report["blockers"]]
+            self.assertEqual(report["proposedAction"], "deposit_inventory")
+            self.assertEqual(report["actionReadiness"]["status"], "WARN")
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertNotIn("daemon_latest_live_session_mismatch", blocker_codes)
+            self.assertNotIn("daemon_latest_session_mismatch", blocker_codes)
+            self.assertIn("session.match", report["optionalCapabilities"])
+            self.assertTrue(any("fresh live bank UI action target" in warning for warning in report["actionReadiness"]["warnings"]))
+
+    def test_close_bank_keyboard_allows_session_mismatch_and_stale_hot_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            daemon_session = root / "daemon-session"
+            latest_session = root / "latest-session"
+            write_json(daemon_session / "manifest.json", {"sessionId": "daemon-session"})
+            write_json(latest_session / "manifest.json", {"sessionId": "latest-session"})
+            latest_overlay = latest_session / "interaction_geometry" / "live" / "overlay_debug_state.json"
+            write_json(latest_overlay, {"markers": []})
+            os.utime(latest_overlay, (time_value := 4102444800, time_value))
+            status = enable_plugin_snapshot(status_for(daemon_session), post_menu_age_ms=60_000)
+            brain = status["brain"]
+            brain["freshnessDomains"] = {"targetCandidateFreshness": "stale"}
+            brain["genericTaskState"] = {
+                "phase": "waiting_for_world_view",
+                "activeIntent": "close_service_context",
+                "activeIntentTarget": None,
+                "blockingConditions": [],
+            }
+            brain["inventoryContext"] = {"inventoryFull": False, "freeSlots": 28}
+            brain["bankUiContext"] = {"bankOpen": True, "bankReadable": True, "bankPinOpen": False}
+            brain["bankOperationContext"] = {
+                "operationNeeded": False,
+                "bankingComplete": True,
+                "resourceItemsHeld": 0,
+            }
+            brain["closeBankContext"] = {
+                "closeBankNeeded": True,
+                "closeBankReady": True,
+                "keyboardClosePossible": True,
+            }
+            brain["intentOverlayContext"] = {"selectedMarker": None}
+            status["inventoryFreeSlots"] = 28
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            blocker_codes = [item["code"] for item in report["blockers"]]
+            self.assertEqual(report["proposedAction"], "close_bank")
+            self.assertEqual(report["actionReadiness"]["status"], "WARN")
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertNotIn("client_tick_hot_stale", blocker_codes)
+            self.assertNotIn("daemon_latest_live_session_mismatch", blocker_codes)
+            self.assertNotIn("daemon_latest_session_mismatch", blocker_codes)
+            self.assertIn("client_tick_hot.fresh", report["optionalCapabilities"])
+            self.assertIn("session.match", report["optionalCapabilities"])
+            self.assertTrue(any("bank UI action" in warning for warning in report["actionReadiness"]["warnings"]))
+
     def test_overlay_marker_source_is_required_when_target_source_is_overlay_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "sessions"
