@@ -1938,6 +1938,14 @@ def _route_target_validation_issue(target: dict[str, Any], route_context: dict[s
     route_relevance = _dict(target.get("routeRelevance"))
     reasons: list[str] = []
     plugin_only_route = route_id.startswith("plugin_snapshot")
+    target_validation = _dict(target.get("routeCandidateValidation"))
+    if (
+        str(target.get("interactionType") or "") == "floor_selection"
+        and target.get("floorSelectionOption")
+        and target_validation.get("status") == "PASS"
+        and target_validation.get("classification") == "floor_selection_interaction_match"
+    ):
+        return None
 
     if plugin_only_route:
         reasons.append("route_object_not_on_expected_segment")
@@ -3211,6 +3219,84 @@ def _guide_interaction_target(progress: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _route_target_id(target: dict[str, Any]) -> int | None:
+    for key in ("objectId", "targetId", "id", "rawId"):
+        value = _int(target.get(key), None)
+        if value is not None:
+            return value
+    return None
+
+
+def _target_world_tile(target: dict[str, Any]) -> dict[str, Any] | None:
+    return (
+        _normalise_tile(target.get("worldLocation"))
+        or _normalise_tile(target.get("world"))
+        or _normalise_tile(target)
+        or _normalise_tile(_dict(target.get("targetTile")))
+    )
+
+
+def _floor_selection_target_for_live_route_object(
+    route_name: str,
+    live_target: dict[str, Any],
+    *,
+    current_world: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if route_demonstration is None or not live_target:
+        return {}
+    live_world = _target_world_tile(live_target)
+    live_id = _route_target_id(live_target)
+    if live_id is None or not live_world:
+        return {}
+    current_plane = _int(_dict(current_world).get("plane"), live_world.get("plane"))
+    try:
+        guide = route_demonstration.load_route_guide(route_name)
+    except Exception:
+        return {}
+    for interaction in _list(guide.get("floorSelectionInteractions")):
+        interaction = _dict(interaction)
+        if str(interaction.get("interactionType") or "") != "floor_selection":
+            continue
+        if _int(interaction.get("objectId") or interaction.get("targetId"), None) != live_id:
+            continue
+        interaction_world = _normalise_tile(interaction.get("world"))
+        if interaction_world != live_world:
+            continue
+        allowed = [_int(value, None) for value in _list(interaction.get("allowedSourcePlanes"))]
+        source_plane = _int(interaction.get("sourcePlane"), None)
+        if source_plane is not None and source_plane not in allowed:
+            allowed.append(source_plane)
+        allowed = [value for value in allowed if value is not None]
+        if current_plane is not None and allowed and current_plane not in allowed:
+            continue
+        progress = {
+            "schema": "route_guide_progress.v1",
+            "status": "PASS",
+            "routeGuideName": guide.get("routeName") or route_name,
+            "currentWorld": current_world,
+            "nextGuideInteraction": interaction,
+            "nextFloorSelectionInteraction": interaction,
+            "guideProgressReason": "floor_selection_live_target_match",
+        }
+        guide_target = _guide_interaction_target(progress)
+        if not guide_target:
+            continue
+        upgraded = {**live_target, **guide_target}
+        for key in ("aimPoint", "safeAimPoint", "canvasAimPoint", "rawAimPoint", "geometry", "bounds", "clickboxBounds"):
+            if key in live_target and key not in upgraded:
+                upgraded[key] = live_target[key]
+        upgraded["source"] = "route_guide_floor_selection"
+        upgraded["actionTargetSource"] = "floor_selection_interaction"
+        upgraded["floorSelectionLiveTarget"] = {
+            "objectId": live_id,
+            "world": live_world,
+            "originalExpectedOptions": list(_list(live_target.get("expectedOptions")) or _list(live_target.get("actions"))),
+        }
+        upgraded["warnings"] = list(dict.fromkeys(_list(live_target.get("warnings")) + ["preferring proven Bottom floor direct transition over Climb-down"]))
+        return upgraded
+    return {}
+
+
 def _route_reentry_action_for_route(route_name: str | None) -> str:
     return "return_to_resource_area" if str(route_name or "") == "Bank_to_Woodcutting_area" else "navigate_to_service"
 
@@ -4149,6 +4235,14 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
     return_route_target = _service_route_interaction_target(return_route)
     if not return_route_target:
         return_route_target = _route_hover_interaction_target(status=status, brain=brain, route_context=return_route)
+    if return_route_target:
+        floor_selection_target = _floor_selection_target_for_live_route_object(
+            "Bank_to_Woodcutting_area",
+            return_route_target,
+            current_world=player_tile,
+        )
+        if floor_selection_target:
+            return_route_target = floor_selection_target
     if returning_to_resource_intent or not service_required:
         if (_bool(return_route.get("returnActionReady")) is True or _bool(return_route.get("actionReady")) is True) and return_route_target:
             route_issue = _route_target_validation_issue(return_route_target, return_route)

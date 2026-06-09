@@ -693,3 +693,162 @@ Remaining need:
 ```text
 Record or extract a short plane-1 Staircase recovery sample from 3206,3229,1. The useful proof is one of: same-plane waypoint, strict Climb-down target, or captured Bottom floor option from plane 1.
 ```
+
+## 21. Plane-1 Staircase Recovery Probe
+
+Probe goal:
+
+```text
+Collect fresh hover/right-click menu evidence for the plane-1 Staircase near 3206,3229,1 without running a full loop or sending a route-transition click.
+```
+
+Probe artifacts:
+
+```text
+recordings\20260609_171349_plane1_staircase_recovery_probe\plane1_staircase_recovery_probe.json
+recordings\20260609_171349_plane1_staircase_recovery_probe\plane1_staircase_recovery_probe.jsonl
+recordings\20260609_171349_plane1_staircase_recovery_probe\schema_gap_report.md
+recordings\20260609_171349_plane1_staircase_recovery_probe\screen_after_probe.png
+docs\recording_analysis_plane1_staircase_recovery_probe.md
+```
+
+Observed route candidate:
+
+```text
+reported player: 3206,3229,1
+reported target: Staircase object 16672 at 3204,3229,1
+attempted aim points: clickbox/projection-derived Staircase points only
+route transition click sent: no
+```
+
+Menu evidence result:
+
+```text
+fresh Bottom floor captured: no
+fresh Climb-down captured: no
+fresh Climb-up captured: no
+observed menu sample: Cancel only
+postMenuSortAgeMillis: about 5.18M ms
+snapshot freshness: plugin_all_packets_stale
+post-probe screen: RuneLite disconnected/login screen
+```
+
+Route guide decision:
+
+```text
+route guide updated: no
+reason: stale daemon/menu context and disconnected client are not safe plane-1 recovery evidence
+current blocker remains: route_guide_no_same_plane_reentry
+```
+
+Next exact focused command after reconnecting and returning to the plane-1 state:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+python telemetry-viewer\plane1_staircase_recovery_probe.py --json
+```
+
+## 22. Top-Floor Staircase Floor-Selection Fix
+
+Root cause:
+
+```text
+The live return route targeted the correct top-floor Staircase object 56231, but selected the top menu row Climb-down. The action ledger shows that Climb-down moved the player from plane 2 to plane 1, creating the later route_guide_no_same_plane_reentry blocker at 3206,3229,1.
+```
+
+Live menu evidence:
+
+```text
+source: bot_runs\20260609_135357_live_woodcutting_loop\bot_action_trace.jsonl
+target: Staircase object 56231
+world: 3205,3229,2
+top menu: Climb-down / Staircase
+captured lower row: Bottom-floor / Staircase
+clicked row in bad run: Climb-down
+observed bad postcondition: plane 2 -> 1
+```
+
+Fix:
+
+```text
+Added staircase_floor_selection_probe.py for focused top-floor menu evidence collection.
+Normalized Bottom-floor to Bottom floor in route-demonstration floor-selection parsing.
+Updated Bank_to_Woodcutting_area.route_guide.json with a strict live-trace-backed Bottom floor floor_selection_interaction.
+Updated action proposal to prefer the proven Bottom floor interaction over Climb-down only when object id, world, and plane match.
+Updated executor so missing Bottom floor fails closed as floor_selection_option_missing instead of falling back to a left-click Climb-down.
+```
+
+Plane-1 policy:
+
+```text
+Still blocked safely as route_guide_no_same_plane_reentry when already stranded on plane 1.
+likelyCause: expected Bottom floor direct transition was missed or not used
+recovery: return to top-floor state or capture plane-1 recovery evidence
+safeState: no route click sent
+```
+
+Focused rerun policy:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+python telemetry-viewer\staircase_floor_selection_probe.py --json
+```
+
+Only rerun the full live loop if the focused probe proves the current live top-floor Staircase still exposes Bottom floor.
+
+Focused probe result on 2026-06-09:
+
+```text
+geometry check after focusing RuneLite: PASS
+probe folder: recordings\20260609_181650_staircase_floor_selection_probe
+current world during probe: 3206,3229,1
+expected top-floor state: 3209,3220,2 near Staircase 56231 at 3205,3229,2
+observed Staircase: object 16672 at 3204,3229,1
+bottomFloorAvailable: false
+blockers: player_not_near_top_floor_route_state, expected_top_floor_staircase_missing
+full live loop rerun: no
+reason: the client is already on the unproven plane-1 state, so the top-floor Bottom floor probe cannot validate the intended route action and plane-1 recovery remains unproven.
+```
+
+Final report for this pass:
+
+```text
+git status before: existing dirty tree with prior plane-1 recovery docs/code plus knowledge/report edits
+git status after: source/docs/tests modified; focused probe artifact written under recordings and left uncommitted
+changed files: staircase_floor_selection_probe.py, route_demonstration.py, action_proposal.py, executor.py, Bank_to_Woodcutting_area.route_guide.json, focused tests, live/knowledge reports
+Bottom floor live-probed this pass: no, because current live player is already on plane 1
+Bottom floor source evidence used: bot_runs\20260609_135357_live_woodcutting_loop\bot_action_trace.jsonl
+route guide updated: yes, from strict live trace evidence for object 56231 at 3205,3229,2
+full loop rerun: no
+reason full loop was not rerun: focused probe did not prove current top-floor Bottom floor availability; current state is the unproven plane-1 blocker
+commit hash: not committed in this pass
+next recommended task: either return the character to the top-floor bank Staircase state and rerun staircase_floor_selection_probe.py --json, or capture a fresh plane-1 recovery fixture
+```
+
+Checks run:
+
+```powershell
+python -m py_compile telemetry-viewer\staircase_floor_selection_probe.py telemetry-viewer\route_demonstration.py telemetry-viewer\input_control\action_proposal.py telemetry-viewer\input_control\executor.py telemetry-viewer\candidate_core.py
+python telemetry-viewer\tests\test_route_demonstration.py
+python telemetry-viewer\tests\test_action_proposal.py
+python telemetry-viewer\tests\test_bot_eval_runner.py
+python telemetry-viewer\tests\test_input_control_executor.py -k floor_selection
+python telemetry-viewer\tests\test_project_knowledge.py
+python telemetry-viewer\telemetry_ui.py --check
+python telemetry-viewer\update_project_knowledge.py --check
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+python telemetry-viewer\staircase_floor_selection_probe.py --json
+```
+
+Check results:
+
+```text
+py_compile: PASS
+route_demonstration/action_proposal/bot_eval_runner tests: PASS
+input_control_executor focused floor_selection tests: PASS
+full input_control_executor.py: timed out before focused rerun
+project knowledge test/check and telemetry_ui --check: PASS
+initial input geometry check: FAIL input_geometry_focus_needed while Chrome was foreground
+after Computer activation of RuneLite: input geometry PASS
+staircase_floor_selection_probe.py --json: FAIL because current player is 3206,3229,1, not top-floor route state
+```

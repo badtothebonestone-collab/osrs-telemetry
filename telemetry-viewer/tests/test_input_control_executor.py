@@ -6439,6 +6439,166 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertIn(("mouse_down", "left"), backend.calls)
         self.assertIn(("mouse_up", "left"), backend.calls)
 
+    def test_floor_selection_selects_bottom_floor_row_when_top_is_climb_down(self):
+        backend = FakeBackend()
+        hover_sample = {
+            "clientTick": 20,
+            "wallTimeMillis": 500,
+            "mouseCanvasX": 173,
+            "mouseCanvasY": 98,
+            "menuOpen": False,
+            "topOption": "Climb-down",
+            "topTarget": "<col=ffff>Staircase",
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "topIdentifier": 56231,
+            "entries": [
+                {"option": "Climb-down", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 56231},
+                {"option": "Bottom-floor", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_SECOND_OPTION", "identifier": 56231},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+                {"option": "Examine", "target": "<col=ffff>Staircase", "type": "EXAMINE_OBJECT", "identifier": 56231},
+            ],
+        }
+        menu_open_sample = {
+            **hover_sample,
+            "clientTick": 21,
+            "wallTimeMillis": 2100,
+            "menuOpen": True,
+            "menuBounds": {"x": 90, "y": 90, "width": 170, "height": 97},
+        }
+        clicked_sample = {
+            "clientTick": 22,
+            "wallTimeMillis": 2200,
+            "option": "Bottom-floor",
+            "target": "<col=ffff>Staircase",
+            "type": "GAME_OBJECT_SECOND_OPTION",
+            "identifier": 56231,
+        }
+        def snapshot_fetch(_url, **_kwargs):
+            if ("mouse_up", "left") in backend.calls:
+                return {"clientTickHot": {"hoverMenu": menu_open_sample, "postMenuSort": menu_open_sample, "lastMenuOptionClicked": clicked_sample}}
+            if ("mouse_up", "right") in backend.calls:
+                return {"clientTickHot": {"hoverMenu": menu_open_sample, "postMenuSort": menu_open_sample}}
+            return {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample}}
+
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Staircase",
+            suggested_click_point={"x": 173, "y": 98},
+            click_point_space="canvas",
+            resolved_screen_click_point={"x": 1173, "y": 2098},
+            input_geometry={
+                "inputGeometryAvailable": True,
+                "canvasScreenOrigin": {"x": 1000, "y": 2000},
+                "canvasSize": {"width": 1834, "height": 1205},
+                "sourceCanvasSize": {"width": 765, "height": 503},
+                "displayScale": {"x": 1.0, "y": 1.0},
+            },
+            target_explanation={
+                "name": "Staircase",
+                "objectId": 56231,
+                "interactionType": "floor_selection",
+                "routeStepType": "floor_selection_interaction",
+                "floorSelectionOption": "Bottom floor",
+                "expectedOptions": ["Bottom floor"],
+                "expectedTargets": ["Staircase"],
+            },
+        )
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile=MouseMovementProfile(name="instant_test", min_duration_ms=1, max_duration_ms=1, waypoint_count=2),
+            hover_options=HoverConfirmationOptions(enabled=True, timeout_ms=200, poll_ms=1, tolerance_px=3, menu_entry_limit=5),
+            dry_run=False,
+            snapshot_fetch_func=snapshot_fetch,
+            sleep_func=lambda _seconds: None,
+            monotonic_func=IncrementingClock(start=0.0, step=0.05),
+            wall_time_millis_func=lambda: 1000,
+            input_controller=HumanInputController(backend, profile="instant_debug", sleep_func=lambda _seconds: None, monotonic_func=IncrementingClock()),
+        )
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.hover_confirmation["rightClickMenuSelection"]["selectedEntry"]["option"], "Bottom-floor")
+        self.assertEqual(result.hover_confirmation["clickClassification"], "clicked_expected_action")
+        self.assertIn(("mouse_down", "right"), backend.calls)
+        self.assertIn(("mouse_down", "left"), backend.calls)
+
+    def test_floor_selection_missing_bottom_floor_fails_closed_without_left_click(self):
+        backend = FakeBackend()
+        hover_sample = {
+            "clientTick": 20,
+            "wallTimeMillis": 500,
+            "mouseCanvasX": 173,
+            "mouseCanvasY": 98,
+            "menuOpen": False,
+            "topOption": "Climb-down",
+            "topTarget": "<col=ffff>Staircase",
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "topIdentifier": 56231,
+            "entries": [
+                {"option": "Climb-down", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 56231},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+                {"option": "Examine", "target": "<col=ffff>Staircase", "type": "EXAMINE_OBJECT", "identifier": 56231},
+            ],
+        }
+        menu_open_sample = {
+            **hover_sample,
+            "clientTick": 21,
+            "wallTimeMillis": 2100,
+            "menuOpen": True,
+            "menuBounds": {"x": 90, "y": 90, "width": 170, "height": 97},
+        }
+        def snapshot_fetch(_url, **_kwargs):
+            if ("mouse_up", "right") in backend.calls:
+                return {"clientTickHot": {"hoverMenu": menu_open_sample, "postMenuSort": menu_open_sample}}
+            return {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample}}
+
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Staircase",
+            suggested_click_point={"x": 173, "y": 98},
+            click_point_space="canvas",
+            resolved_screen_click_point={"x": 1173, "y": 2098},
+            input_geometry={
+                "inputGeometryAvailable": True,
+                "canvasScreenOrigin": {"x": 1000, "y": 2000},
+                "canvasSize": {"width": 1834, "height": 1205},
+                "sourceCanvasSize": {"width": 765, "height": 503},
+                "displayScale": {"x": 1.0, "y": 1.0},
+            },
+            target_explanation={
+                "name": "Staircase",
+                "objectId": 56231,
+                "interactionType": "floor_selection",
+                "routeStepType": "floor_selection_interaction",
+                "floorSelectionOption": "Bottom floor",
+                "expectedOptions": ["Bottom floor"],
+                "expectedTargets": ["Staircase"],
+            },
+        )
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile=MouseMovementProfile(name="instant_test", min_duration_ms=1, max_duration_ms=1, waypoint_count=2),
+            hover_options=HoverConfirmationOptions(enabled=True, timeout_ms=200, poll_ms=1, tolerance_px=3, menu_entry_limit=5),
+            dry_run=False,
+            snapshot_fetch_func=snapshot_fetch,
+            sleep_func=lambda _seconds: None,
+            monotonic_func=IncrementingClock(start=0.0, step=0.05),
+            wall_time_millis_func=lambda: 1000,
+            input_controller=HumanInputController(backend, profile="instant_debug", sleep_func=lambda _seconds: None, monotonic_func=IncrementingClock()),
+        )
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.observed_result["observedResult"], "floor_selection_option_missing")
+        self.assertEqual(result.lifecycle_state["reason"], "floor_selection_option_missing")
+        self.assertEqual(result.hover_confirmation["rightClickMenuSelection"]["reason"], "floor_selection_option_missing")
+        self.assertIn(("mouse_down", "right"), backend.calls)
+        self.assertNotIn(("mouse_down", "left"), backend.calls)
+
     def test_route_transition_direct_menu_uses_tick_tail_on_scaled_runelite(self):
         backend = FakeBackend()
         hover_sample = {

@@ -4,7 +4,11 @@ Date: 2026-06-09
 
 ## Summary
 
-The successful Bank-to-Woodcutting route recordings prove a direct multi-plane castle stair transition from plane 2 to plane 0. Two later recordings are labeled as using the `Bottom floor` option, but the inspected machine artifacts do not capture a `Bottom floor`, `Middle floor`, or `Top floor` menu row.
+The successful Bank-to-Woodcutting route recordings prove a direct multi-plane castle stair transition from plane 2 to plane 0. Two later recordings are labeled as using the `Bottom floor` option, but their inspected machine artifacts do not capture a `Bottom floor`, `Middle floor`, or `Top floor` menu row.
+
+The later live action trace `bot_runs\20260609_135357_live_woodcutting_loop\bot_action_trace.jsonl` does capture the missing top-floor menu evidence: the strict Staircase object `56231` at `3205,3229,2` exposed `Bottom-floor / Staircase` while `Climb-down / Staircase` was the top option. The bot clicked `Climb-down`, and the postcondition ledger confirms that landed on plane `1`. The route guide can therefore model `Bottom floor` as the safe direct plane `2 -> 0` floor-selection action for the top-floor state.
+
+The focused probe `recordings\20260609_181650_staircase_floor_selection_probe` could not re-check the top-floor menu because the current live player position was already `3206,3229,1`. It saw plane-1 Staircase object `16672`, not the expected top-floor object `56231`, so it did not update plane-1 recovery evidence and did not justify a full-loop rerun.
 
 The current live blocker at `3206,3229,1` is therefore still a missing same-plane recovery fixture. It is not safe to invent a plane-1 Staircase click or loosen the strict Staircase guard.
 
@@ -29,7 +33,7 @@ The current `route_guides\Bank_to_Woodcutting_area.route_guide.json` is extracte
 
 It now records:
 
-- `floorSelectionInteractions`: empty
+- `floorSelectionInteractions`: one live-trace-backed `Bottom floor / Staircase` interaction for object `56231` at `3205,3229,2`
 - `directPlaneSkips`: three plane-2 to plane-0 Staircase transitions
 - no plane-1 path points
 - no plane-1 route interactions
@@ -42,8 +46,8 @@ Canonical Bank-to-Woodcutting transition:
 | --- | --- |
 | Target | `Staircase` |
 | Object id | `56231` |
-| World | `3205,3208,2` |
-| Action | `Climb-down` |
+| World | recordings: `3205,3208,2`; live floor-selection trace: `3205,3229,2` |
+| Action | `Bottom floor` preferred when live menu row is present; old `Climb-down` live click landed on plane 1 |
 | Source plane | `2` |
 | Destination plane | `0` |
 | Skipped plane | `1` |
@@ -61,7 +65,7 @@ Latest stranded live state:
 
 ## Conclusion
 
-Existing evidence supports modeling a direct floor-skip transition, but it does not prove a safe plane-1 recovery action from `3206,3229,1`.
+Existing evidence now supports modeling a direct top-floor `Bottom floor` floor-selection transition. It still does not prove a safe plane-1 recovery action from `3206,3229,1`.
 
 The correct behavior remains:
 
@@ -70,6 +74,7 @@ The correct behavior remains:
 - do not click a name-only Staircase
 - stop safely with `route_guide_no_same_plane_reentry`
 - include `likelyReason`, `suggestedFixture`, and `safeState` in traces
+- from the top-floor state, prefer the strict live-proven `Bottom floor / Staircase` interaction over `Climb-down`
 
 ## Needed Fixture
 
@@ -79,4 +84,4 @@ Record one short recovery sample starting at or near `3206,3229,1` that proves o
 - a strict `Climb-down Staircase` route target with object id/world/plane evidence
 - a same-plane movement waypoint that safely re-enters the demonstrated route
 
-Until that fixture exists, no live rerun is safe from this blocker.
+Until that fixture exists, no live route click is safe from the plane-1 blocker. A top-floor rerun is safe only after current geometry/loaded-scene checks pass and the focused floor-selection probe confirms the same `Bottom floor / Staircase` row is present.

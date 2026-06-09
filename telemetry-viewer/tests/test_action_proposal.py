@@ -2532,6 +2532,69 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_explanation["allowedSourcePlanes"], [1, 2])
         self.assertIsNone(proposal.suggested_click_point)
 
+    def test_return_route_prefers_proven_bottom_floor_over_climb_down(self):
+        status = status_for(
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+            active_target={"targetName": "Tree", "classId": "tree", "targetType": "resource", "aimPoint": aim(500, 500)},
+            bank_ui={"bankOpen": False, "bankReadable": False},
+            bank_operation={"operationNeeded": False, "bankingComplete": True, "resourceItemsHeld": 0},
+            overlay={"selectedMarker": None},
+            return_route={
+                "returnActionReady": True,
+                "state": "return_transition_actionable",
+                "routeName": "Bank_to_Woodcutting_area",
+                "visibleInteractionTarget": {
+                    "targetName": "Staircase",
+                    "classId": "route_transition",
+                    "targetType": "sceneObject",
+                    "objectId": 56231,
+                    "worldLocation": {"worldX": 3205, "worldY": 3229, "plane": 2},
+                    "aimPoint": aim(173, 98),
+                    "expectedOptions": ["Climb-down"],
+                    "expectedTargets": ["Staircase"],
+                },
+                "currentStep": {
+                    "type": "interact_object",
+                    "label": "Climb-down Staircase",
+                    "expectedOptions": ["Climb-down"],
+                    "expectedTargetContains": ["Staircase"],
+                    "planeChange": -1,
+                },
+            },
+        )
+        status["playerWorldPosition"] = {"worldX": 3209, "worldY": 3220, "plane": 2}
+        guide = {
+            "schema": "route_demonstration_guide.v1",
+            "routeName": "Bank_to_Woodcutting_area",
+            "pathPoints": [],
+            "interactionSteps": [],
+            "floorSelectionInteractions": [
+                {
+                    "interactionType": "floor_selection",
+                    "action": "Bottom floor",
+                    "option": "Bottom floor",
+                    "targetName": "Staircase",
+                    "targetId": 56231,
+                    "world": {"worldX": 3205, "worldY": 3229, "plane": 2},
+                    "sourcePlane": 2,
+                    "destinationPlane": 0,
+                    "allowedSourcePlanes": [2],
+                    "expectedPlaneChange": -2,
+                }
+            ],
+        }
+
+        with patch.object(action_proposal_module.route_demonstration, "load_route_guide", return_value=guide):
+            proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "interact_service_route_object")
+        self.assertEqual(proposal.target_explanation["actionTargetSource"], "floor_selection_interaction")
+        self.assertEqual(proposal.target_explanation["floorSelectionOption"], "Bottom floor")
+        self.assertEqual(proposal.target_explanation["expectedOptions"], ["Bottom floor"])
+        self.assertEqual(proposal.target_explanation["expectedPlaneChange"], -2)
+        self.assertEqual(proposal.suggested_click_point, {"x": 173, "y": 98})
+
     def test_valid_return_destination_proposes_return_to_resource_area(self):
         proposal = build_action_proposal(
             status_for(

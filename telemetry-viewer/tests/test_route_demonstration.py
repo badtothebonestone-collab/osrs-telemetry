@@ -120,14 +120,14 @@ class RouteDemonstrationTest(unittest.TestCase):
                             "stepIndex": 1,
                             "stepId": "route_step_001",
                             "type": "menu_selection",
-                            "action": "Bottom floor",
+                            "action": "Bottom-floor",
                             "targetName": "Staircase",
                             "targetId": 56231,
                             "world": {"worldX": 3205, "worldY": 3208, "plane": 2},
                             "menuSelection": {
                                 "present": True,
                                 "selectedRowIndex": 2,
-                                "option": "Bottom floor",
+                                "option": "Bottom-floor",
                                 "target": "Staircase",
                             },
                             "postcondition": {
@@ -155,6 +155,96 @@ class RouteDemonstrationTest(unittest.TestCase):
             self.assertEqual(step["objectId"], 56231)
             self.assertEqual(guide["directPlaneSkips"][0]["skippedPlanes"], [1])
             self.assertTrue(guide["directPlaneSkips"][0]["evidence"]["floorSelectionOptionCaptured"])
+
+    def test_floor_selection_probe_accepts_strict_bottom_floor_menu_evidence(self):
+        probe = {
+            "currentWorld": {"worldX": 3209, "worldY": 3220, "plane": 2},
+            "currentPlane": 2,
+            "expectedRouteLeg": "Bank_to_Woodcutting_area",
+            "probeFolder": "recordings/top_floor_probe",
+            "staircaseObjectId": 56231,
+            "staircaseWorld": {"worldX": 3205, "worldY": 3229, "plane": 2},
+            "matchingMenuEntries": [
+                {
+                    "option": "Bottom-floor",
+                    "target": "<col=ffff>Staircase",
+                    "identifier": 56231,
+                    "param0": 45,
+                    "param1": 61,
+                }
+            ],
+            "evidenceFreshness": {"status": "PASS"},
+        }
+
+        interaction = route_demonstration.floor_selection_interaction_from_probe(probe)
+
+        self.assertEqual(interaction["interactionType"], "floor_selection")
+        self.assertEqual(interaction["option"], "Bottom floor")
+        self.assertEqual(interaction["objectId"], 56231)
+        self.assertEqual(interaction["world"], {"worldX": 3205, "worldY": 3229, "plane": 2})
+        self.assertEqual(interaction["sourcePlane"], 2)
+        self.assertEqual(interaction["destinationPlane"], 0)
+        self.assertEqual(interaction["expectedPlaneChange"], -2)
+        self.assertFalse(interaction["evidence"]["labelOnlyEvidenceAccepted"])
+
+    def test_floor_selection_probe_rejects_stale_label_or_wrong_identifier(self):
+        base = {
+            "currentWorld": {"worldX": 3209, "worldY": 3220, "plane": 2},
+            "currentPlane": 2,
+            "staircaseObjectId": 56231,
+            "staircaseWorld": {"worldX": 3205, "worldY": 3229, "plane": 2},
+        }
+        label_only = {**base, "recordingLabel": "Bottom floor", "matchingMenuEntries": []}
+        stale = {
+            **base,
+            "evidenceFreshness": {"status": "FAIL"},
+            "matchingMenuEntries": [{"option": "Bottom-floor", "target": "Staircase", "identifier": 56231}],
+        }
+        wrong_id = {**base, "matchingMenuEntries": [{"option": "Bottom-floor", "target": "Staircase", "identifier": 16672}]}
+
+        self.assertEqual(route_demonstration.floor_selection_interaction_from_probe(label_only), {})
+        self.assertEqual(route_demonstration.floor_selection_interaction_from_probe(stale), {})
+        self.assertEqual(route_demonstration.floor_selection_interaction_from_probe(wrong_id), {})
+
+    def test_progress_prefers_floor_selection_over_climb_down_on_top_floor(self):
+        guide = {
+            "schema": route_demonstration.SCHEMA,
+            "routeName": "Bank_to_Woodcutting_area",
+            "pathPoints": [],
+            "interactionSteps": [
+                {
+                    "interactionType": "route_object",
+                    "action": "Climb-down",
+                    "option": "Climb-down",
+                    "targetName": "Staircase",
+                    "targetId": 56231,
+                    "world": {"worldX": 3205, "worldY": 3229, "plane": 2},
+                    "sourcePlane": 2,
+                    "destinationPlane": 1,
+                    "expectedPlaneChange": -1,
+                }
+            ],
+            "floorSelectionInteractions": [
+                {
+                    "interactionType": "floor_selection",
+                    "action": "Bottom floor",
+                    "option": "Bottom floor",
+                    "targetName": "Staircase",
+                    "targetId": 56231,
+                    "world": {"worldX": 3205, "worldY": 3229, "plane": 2},
+                    "sourcePlane": 2,
+                    "destinationPlane": 0,
+                    "allowedSourcePlanes": [2],
+                    "expectedPlaneChange": -2,
+                }
+            ],
+        }
+
+        progress = route_demonstration.resolve_progress(guide, {"worldX": 3209, "worldY": 3220, "plane": 2})
+
+        self.assertEqual(progress["status"], "PASS")
+        self.assertEqual(progress["nextGuideInteraction"]["interactionType"], "floor_selection")
+        self.assertEqual(progress["nextGuideInteraction"]["option"], "Bottom floor")
 
     def test_plane1_floor_selection_reentry_requires_allowed_source_plane(self):
         guide = {
@@ -236,6 +326,59 @@ class RouteDemonstrationTest(unittest.TestCase):
         self.assertFalse(reentry["nearestSamePlaneGuidePoint"])
         self.assertEqual(reentry["suggestedFixture"], "record a short plane-1 Staircase recovery from 3206,3229,1")
         self.assertEqual(reentry["safeState"], "no click sent because route guide lacks same-plane proof")
+        self.assertIn("Bottom floor direct transition was missed", reentry["likelyReason"])
+
+    def test_plane1_recovery_probe_rejects_label_only_evidence(self):
+        probe = {
+            "nearPlane1RecoveryState": True,
+            "player": {"worldX": 3206, "worldY": 3229, "plane": 1},
+            "recordingLabel": "Bottom floor recovery",
+            "staircaseObjects": [
+                {"name": "Staircase", "objectId": 16672, "world": {"worldX": 3204, "worldY": 3229, "plane": 1}}
+            ],
+            "matchingMenuEntries": [],
+        }
+
+        self.assertEqual(route_demonstration.plane1_recovery_interaction_from_probe(probe), {})
+
+    def test_plane1_recovery_probe_accepts_captured_climb_down_menu_evidence(self):
+        probe = {
+            "nearPlane1RecoveryState": True,
+            "player": {"worldX": 3206, "worldY": 3229, "plane": 1},
+            "probeFolder": "recordings/probe",
+            "staircaseObjects": [
+                {"name": "Staircase", "objectId": 16672, "world": {"worldX": 3204, "worldY": 3229, "plane": 1}}
+            ],
+            "matchingMenuEntries": [
+                {"option": "Climb-down", "target": "Staircase", "identifier": 16672, "rowBounds": {"x": 1, "y": 2, "w": 3, "h": 4}}
+            ],
+        }
+
+        interaction = route_demonstration.plane1_recovery_interaction_from_probe(probe)
+
+        self.assertEqual(interaction["interactionType"], "plane1_recovery")
+        self.assertEqual(interaction["option"], "Climb-down")
+        self.assertEqual(interaction["objectId"], 16672)
+        self.assertEqual(interaction["world"], {"worldX": 3204, "worldY": 3229, "plane": 1})
+        self.assertEqual(interaction["allowedSourcePlanes"], [1])
+
+    def test_plane1_recovery_probe_rejects_stale_or_wrong_identifier_evidence(self):
+        base = {
+            "nearPlane1RecoveryState": True,
+            "player": {"worldX": 3206, "worldY": 3229, "plane": 1},
+            "staircaseObjects": [
+                {"name": "Staircase", "objectId": 16672, "world": {"worldX": 3204, "worldY": 3229, "plane": 1}}
+            ],
+        }
+        stale = {
+            **base,
+            "attempts": [{"hoverMenu": {"clientTickHot": {"postMenuSortAgeMillis": 9000}}}],
+            "matchingMenuEntries": [{"option": "Climb-down", "target": "Staircase", "identifier": 16672}],
+        }
+        wrong_id = {**base, "matchingMenuEntries": [{"option": "Climb-down", "target": "Staircase", "identifier": 56231}]}
+
+        self.assertEqual(route_demonstration.plane1_recovery_interaction_from_probe(stale), {})
+        self.assertEqual(route_demonstration.plane1_recovery_interaction_from_probe(wrong_id), {})
 
     def test_same_plane_reentry_finds_nearest_guide_step(self):
         guide = {

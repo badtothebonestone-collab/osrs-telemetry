@@ -1097,6 +1097,15 @@ def _route_transition_direct_expected_options(proposal: ActionProposal) -> list[
     return direct
 
 
+def _proposal_is_floor_selection(proposal: ActionProposal) -> bool:
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    return bool(
+        str(explanation.get("interactionType") or "") == "floor_selection"
+        or explanation.get("floorSelectionOption")
+        or str(explanation.get("routeStepType") or "") == "floor_selection_interaction"
+    )
+
+
 def _entry_matches_route_transition_direct_option(entry: dict[str, Any], proposal: ActionProposal) -> bool:
     option_key = _menu_text_key(entry.get("option"))
     if not option_key:
@@ -1182,6 +1191,14 @@ def _route_transition_direct_menu_entry(
     for entry in entries:
         if _entry_matches_route_transition_direct_option(entry, proposal):
             return entry
+    if _proposal_is_floor_selection(proposal) and expected_options:
+        return {
+            "option": expected_options[0],
+            "target": proposal.target_name or "",
+            "identifier": _proposal_target_id(proposal),
+            "syntheticEntry": True,
+            "reason": "floor_selection_expected_option_missing_in_hover",
+        }
     return synthetic_direct_entry
 
 
@@ -1504,8 +1521,12 @@ def _execute_route_transition_direct_menu_selection(
             break
     if selected_entry is None:
         event["status"] = "FAIL"
-        event["reason"] = "expected_menu_row_missing"
-        result.warnings.append("right-click menu selection failed: expected route option not present")
+        event["reason"] = "floor_selection_option_missing" if _proposal_is_floor_selection(proposal) else "expected_menu_row_missing"
+        result.warnings.append(
+            "right-click menu selection failed: expected floor-selection option not present"
+            if _proposal_is_floor_selection(proposal)
+            else "right-click menu selection failed: expected route option not present"
+        )
         result.hover_confirmation["rightClickMenuSelection"] = event
         return False
     row_index = int(selected_entry.get("entryIndex") or 0)
@@ -10624,9 +10645,31 @@ def execute_action(
                                         result.action_trace.setdefault("reacquisition", {})["waypointReacquiredAfterCamera"] = True
                                     _update_trace_from_hover(result, confirmation)
             if confirmation.get("confirmed") is not True:
+                floor_selection_direct_entry = _route_transition_direct_menu_entry(proposal, confirmation) if _proposal_is_floor_selection(proposal) else None
+                if floor_selection_direct_entry is not None:
+                    if isinstance(result.action_trace, dict):
+                        result.action_trace["floorSelectionLowerMenuCandidate"] = dict(floor_selection_direct_entry)
+                else:
+                    result.status = "FAIL"
+                    reason = _navigation_hover_failure_reason(proposal, confirmation)
+                    result.warnings.append(f"hover confirmation failed: {reason}; top menu={_hover_menu_label(confirmation)}")
+                    if "hover_menu" not in result.missing_capabilities:
+                        result.missing_capabilities.append("hover_menu")
+                    lifecycle = lifecycle_state_for_proposal(proposal)
+                    lifecycle.current_state = "blocked"
+                    lifecycle.reason = "hover_confirm_timeout"
+                    _apply_lifecycle(result, lifecycle)
+                    _set_trace_final(result, "hover_confirm_timeout")
+                    _attach_human_input_trace(result, input_controller)
+                    return result
+        if confirmation.get("confirmed") is not True:
+            floor_selection_direct_entry = _route_transition_direct_menu_entry(proposal, confirmation) if _proposal_is_floor_selection(proposal) else None
+            if floor_selection_direct_entry is not None:
+                if isinstance(result.action_trace, dict):
+                    result.action_trace["floorSelectionLowerMenuCandidate"] = dict(floor_selection_direct_entry)
+            else:
                 result.status = "FAIL"
-                reason = _navigation_hover_failure_reason(proposal, confirmation)
-                result.warnings.append(f"hover confirmation failed: {reason}; top menu={_hover_menu_label(confirmation)}")
+                result.warnings.append(f"hover confirmation failed: {confirmation.get('reason') or 'unknown'}")
                 if "hover_menu" not in result.missing_capabilities:
                     result.missing_capabilities.append("hover_menu")
                 lifecycle = lifecycle_state_for_proposal(proposal)
@@ -10636,18 +10679,6 @@ def execute_action(
                 _set_trace_final(result, "hover_confirm_timeout")
                 _attach_human_input_trace(result, input_controller)
                 return result
-        if confirmation.get("confirmed") is not True:
-            result.status = "FAIL"
-            result.warnings.append(f"hover confirmation failed: {confirmation.get('reason') or 'unknown'}")
-            if "hover_menu" not in result.missing_capabilities:
-                result.missing_capabilities.append("hover_menu")
-            lifecycle = lifecycle_state_for_proposal(proposal)
-            lifecycle.current_state = "blocked"
-            lifecycle.reason = "hover_confirm_timeout"
-            _apply_lifecycle(result, lifecycle)
-            _set_trace_final(result, "hover_confirm_timeout")
-            _attach_human_input_trace(result, input_controller)
-            return result
         if hover_options.hover_only:
             lifecycle = lifecycle_after_execution(proposal, executed=False, dry_run=True)
             lifecycle.reason = "hover_only_confirmed"
@@ -10682,36 +10713,64 @@ def execute_action(
             if isinstance(result.hover_confirmation, dict):
                 result.hover_confirmation["preClickConfirmation"] = pre_click_confirmation
             if pre_click_confirmation.get("confirmed") is not True:
-                navigation_walk_entry = _navigation_walk_here_menu_entry(proposal, pre_click_confirmation)
-                if navigation_walk_entry is not None:
+                floor_selection_direct_entry = (
+                    _route_transition_direct_menu_entry(proposal, pre_click_confirmation)
+                    if _proposal_is_floor_selection(proposal)
+                    else None
+                )
+                if floor_selection_direct_entry is not None:
                     if isinstance(result.action_trace, dict):
-                        result.action_trace["navigationWalkHereMenuCandidate"] = dict(navigation_walk_entry)
-                    before_click = pre_click_confirmation.get("lastMenuOptionClickedBefore") if isinstance(pre_click_confirmation.get("lastMenuOptionClickedBefore"), dict) else None
-                    if before_click is None:
-                        before_click = confirmation.get("lastMenuOptionClickedBefore") if isinstance(confirmation.get("lastMenuOptionClickedBefore"), dict) else None
-                    try:
-                        walk_selected = _execute_route_transition_direct_menu_selection(
-                            proposal,
-                            direct_entry=navigation_walk_entry,
-                            screen_point=screen_point,
-                            plan=plan,
-                            result=result,
-                            hover_options=hover_options,
-                            input_controller=input_controller,
-                            backend=backend,
-                            before_click=before_click,
-                            snapshot_fetch_func=snapshot_fetch_func,
-                            sleep_func=sleep_func,
-                            monotonic_func=monotonic_func,
-                            wall_time_millis_func=wall_time_millis_func,
-                            entry_matcher=_entry_matches_navigation_walk_here,
-                            event_source="navigation_walk_here_lower_menu_entry",
-                            open_reason="navigation_walk_here_lower_menu_entry",
-                            row_label="navigation walk here menu row",
+                        result.action_trace["floorSelectionPreClickLowerMenuCandidate"] = dict(floor_selection_direct_entry)
+                    _update_trace_from_hover(result, pre_click_confirmation)
+                else:
+                    navigation_walk_entry = _navigation_walk_here_menu_entry(proposal, pre_click_confirmation)
+                    if navigation_walk_entry is not None:
+                        if isinstance(result.action_trace, dict):
+                            result.action_trace["navigationWalkHereMenuCandidate"] = dict(navigation_walk_entry)
+                        before_click = (
+                            pre_click_confirmation.get("lastMenuOptionClickedBefore")
+                            if isinstance(pre_click_confirmation.get("lastMenuOptionClickedBefore"), dict)
+                            else None
                         )
-                    except Exception as error:  # noqa: BLE001
+                        if before_click is None:
+                            before_click = confirmation.get("lastMenuOptionClickedBefore") if isinstance(confirmation.get("lastMenuOptionClickedBefore"), dict) else None
+                        try:
+                            walk_selected = _execute_route_transition_direct_menu_selection(
+                                proposal,
+                                direct_entry=navigation_walk_entry,
+                                screen_point=screen_point,
+                                plan=plan,
+                                result=result,
+                                hover_options=hover_options,
+                                input_controller=input_controller,
+                                backend=backend,
+                                before_click=before_click,
+                                snapshot_fetch_func=snapshot_fetch_func,
+                                sleep_func=sleep_func,
+                                monotonic_func=monotonic_func,
+                                wall_time_millis_func=wall_time_millis_func,
+                                entry_matcher=_entry_matches_navigation_walk_here,
+                                event_source="navigation_walk_here_lower_menu_entry",
+                                open_reason="navigation_walk_here_lower_menu_entry",
+                                row_label="navigation walk here menu row",
+                            )
+                        except Exception as error:  # noqa: BLE001
+                            result.status = "FAIL"
+                            result.warnings.append(f"right-click navigation Walk here menu selection failed: {type(error).__name__}: {error}")
+                            lifecycle = lifecycle_state_for_proposal(proposal)
+                            lifecycle.current_state = "blocked"
+                            lifecycle.reason = "right_click_walk_here_menu_select_failed"
+                            _apply_lifecycle(result, lifecycle)
+                            _set_trace_final(result, "right_click_menu_select_failed")
+                            _attach_human_input_trace(result, input_controller)
+                            return result
+                        if walk_selected:
+                            lifecycle = lifecycle_after_execution(proposal, executed=result.executed, dry_run=dry_run)
+                            _apply_lifecycle(result, lifecycle)
+                            _set_trace_final(result, "right_click_walk_here_selected")
+                            _attach_human_input_trace(result, input_controller)
+                            return result
                         result.status = "FAIL"
-                        result.warnings.append(f"right-click navigation Walk here menu selection failed: {type(error).__name__}: {error}")
                         lifecycle = lifecycle_state_for_proposal(proposal)
                         lifecycle.current_state = "blocked"
                         lifecycle.reason = "right_click_walk_here_menu_select_failed"
@@ -10719,31 +10778,17 @@ def execute_action(
                         _set_trace_final(result, "right_click_menu_select_failed")
                         _attach_human_input_trace(result, input_controller)
                         return result
-                    if walk_selected:
-                        lifecycle = lifecycle_after_execution(proposal, executed=result.executed, dry_run=dry_run)
-                        _apply_lifecycle(result, lifecycle)
-                        _set_trace_final(result, "right_click_walk_here_selected")
-                        _attach_human_input_trace(result, input_controller)
-                        return result
                     result.status = "FAIL"
+                    result.warnings.append(f"pre-click hover confirmation failed: {pre_click_confirmation.get('reason') or 'unknown'}")
+                    if "hover_menu" not in result.missing_capabilities:
+                        result.missing_capabilities.append("hover_menu")
                     lifecycle = lifecycle_state_for_proposal(proposal)
                     lifecycle.current_state = "blocked"
-                    lifecycle.reason = "right_click_walk_here_menu_select_failed"
+                    lifecycle.reason = "pre_click_hover_confirm_failed"
                     _apply_lifecycle(result, lifecycle)
-                    _set_trace_final(result, "right_click_menu_select_failed")
+                    _set_trace_final(result, "hover_mismatch_skipped")
                     _attach_human_input_trace(result, input_controller)
                     return result
-                result.status = "FAIL"
-                result.warnings.append(f"pre-click hover confirmation failed: {pre_click_confirmation.get('reason') or 'unknown'}")
-                if "hover_menu" not in result.missing_capabilities:
-                    result.missing_capabilities.append("hover_menu")
-                lifecycle = lifecycle_state_for_proposal(proposal)
-                lifecycle.current_state = "blocked"
-                lifecycle.reason = "pre_click_hover_confirm_failed"
-                _apply_lifecycle(result, lifecycle)
-                _set_trace_final(result, "hover_mismatch_skipped")
-                _attach_human_input_trace(result, input_controller)
-                return result
             _update_trace_from_hover(result, pre_click_confirmation)
             volatility = _navigation_volatile_hover_zone(proposal, pre_click_confirmation)
             if volatility is not None:
@@ -10918,12 +10963,17 @@ def execute_action(
                             result.action_trace["rightClickMenuSelectionFallback"] = "left_click_dialogue_opener"
                     else:
                         result.status = "FAIL"
+                        blocked_reason = (
+                            "floor_selection_option_missing"
+                            if direct_selection_reason == "floor_selection_option_missing"
+                            else "route_target_hover_not_confirmed"
+                            if direct_selection_reason == "menu_open_not_observed"
+                            else "right_click_menu_select_failed"
+                        )
                         observed = result.observed_result if isinstance(result.observed_result, dict) else {}
                         observed.update(
                             {
-                                "observedResult": "route_target_hover_not_confirmed"
-                                if direct_selection_reason == "menu_open_not_observed"
-                                else "right_click_menu_select_failed",
+                                "observedResult": blocked_reason,
                                 "resultOutcome": "blocked",
                                 "resultComplete": True,
                                 "nextActionAllowed": True,
@@ -10936,22 +10986,13 @@ def execute_action(
                         result.verification_status = "FAIL"
                         lifecycle = lifecycle_state_for_proposal(proposal)
                         lifecycle.current_state = "blocked"
-                        lifecycle.reason = (
-                            "route_target_hover_not_confirmed"
-                            if direct_selection_reason == "menu_open_not_observed"
-                            else "right_click_menu_select_failed"
-                        )
+                        lifecycle.reason = blocked_reason
                         lifecycle.observed_result = observed
                         lifecycle.result_complete = True
                         lifecycle.result_outcome = "blocked"
                         lifecycle.next_action_allowed = True
                         _apply_lifecycle(result, lifecycle)
-                        _set_trace_final(
-                            result,
-                            "route_target_hover_not_confirmed"
-                            if direct_selection_reason == "menu_open_not_observed"
-                            else "right_click_menu_select_failed",
-                        )
+                        _set_trace_final(result, blocked_reason)
                         _attach_human_input_trace(result, input_controller)
                         return result
                 lifecycle = lifecycle_after_execution(proposal, executed=result.executed, dry_run=dry_run)

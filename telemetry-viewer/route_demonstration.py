@@ -15,6 +15,15 @@ FLOOR_SELECTION_OPTIONS = {
     "middle floor": "Middle floor",
     "top floor": "Top floor",
 }
+PLANE1_RECOVERY_OPTIONS = {
+    "bottom floor": "Bottom floor",
+    "middle floor": "Middle floor",
+    "top floor": "Top floor",
+    "climb-down": "Climb-down",
+    "climb down": "Climb-down",
+    "climb-up": "Climb-up",
+    "climb up": "Climb-up",
+}
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -58,12 +67,17 @@ def _text(value: Any) -> str:
 
 
 def _text_key(value: Any) -> str:
-    return " ".join(_text(value).lower().split())
+    return " ".join(_text(value).lower().replace("-", " ").replace("_", " ").split())
 
 
 def _floor_selection_option(value: Any) -> str | None:
     key = _text_key(value)
     return FLOOR_SELECTION_OPTIONS.get(key)
+
+
+def _plane1_recovery_option(value: Any) -> str | None:
+    key = _text_key(value)
+    return PLANE1_RECOVERY_OPTIONS.get(key)
 
 
 def _floor_destination_plane(option: Any) -> int | None:
@@ -425,6 +439,155 @@ def _direct_plane_skips_from_interactions(interactions: list[dict[str, Any]]) ->
     return skips
 
 
+def _probe_stale_menu_evidence(probe: dict[str, Any]) -> bool:
+    freshness = _dict(_dict(probe.get("snapshotFreshness")).get("freshness") or probe.get("freshness"))
+    if bool(freshness.get("allCachedPacketsStale")):
+        return True
+    for attempt in _list(probe.get("attempts")):
+        for key in ("hoverMenu", "rightClickMenu"):
+            hot = _dict(_dict(_dict(attempt).get(key)).get("clientTickHot"))
+            age = _int(hot.get("postMenuSortAgeMillis"), None)
+            if age is not None and age > 5000:
+                return True
+    return False
+
+
+def plane1_recovery_interaction_from_probe(probe: dict[str, Any]) -> dict[str, Any]:
+    probe = _dict(probe)
+    if not probe or _probe_stale_menu_evidence(probe):
+        return {}
+    player = _tile(probe.get("player"))
+    if not player or player.get("plane") != 1 or not bool(probe.get("nearPlane1RecoveryState")):
+        return {}
+    entries = [_dict(item) for item in _list(probe.get("matchingMenuEntries")) if isinstance(item, dict)]
+    if not entries:
+        return {}
+    staircases = [_dict(item) for item in _list(probe.get("staircaseObjects")) if isinstance(item, dict)]
+    target = next((item for item in staircases if _int(item.get("objectId"), None) is not None and _tile(item.get("world"))), {})
+    target_world = _tile(target.get("world"))
+    object_id = _int(target.get("objectId"), None)
+    if not target or object_id is None or not target_world or target_world.get("plane") != 1:
+        return {}
+    target_name = _text(target.get("name") or target.get("targetName") or "Staircase")
+    if "stair" not in _text_key(target_name):
+        return {}
+    match = None
+    for entry in entries:
+        option = _plane1_recovery_option(entry.get("option"))
+        if not option:
+            continue
+        target_text = _text_key(entry.get("target"))
+        if option not in FLOOR_SELECTION_OPTIONS.values() and target_text and "stair" not in target_text:
+            continue
+        identifier = _int(entry.get("identifier"), None)
+        if identifier is not None and identifier != object_id:
+            continue
+        if option not in FLOOR_SELECTION_OPTIONS.values() and identifier is None and "stair" not in target_text:
+            continue
+        match = {**entry, "normalizedOption": option}
+        break
+    if not match:
+        return {}
+    option = _text(match.get("normalizedOption"))
+    return {
+        "schema": "route_demonstration_plane1_recovery_interaction.v1",
+        "interactionType": "plane1_recovery",
+        "action": option,
+        "option": option,
+        "targetName": target_name,
+        "target": target_name,
+        "targetId": object_id,
+        "objectId": object_id,
+        "targetKind": "object",
+        "world": target_world,
+        "sourcePlane": 1,
+        "allowedSourcePlanes": [1],
+        "destinationPlane": _floor_destination_plane(option) if _floor_selection_option(option) else 0 if _text_key(option) == "climb-down" else 2 if _text_key(option) == "climb-up" else None,
+        "expectedPlaneChange": -1 if _text_key(option) == "climb-down" else 1 if _text_key(option) == "climb-up" else None,
+        "sourceProbe": probe.get("probeFolder"),
+        "evidence": {
+            "capturedMenuOption": match.get("option"),
+            "capturedMenuTarget": match.get("target"),
+            "capturedMenuIdentifier": match.get("identifier"),
+            "menuRowBoundsCaptured": bool(match.get("rowBounds") or probe.get("menuRowBoundsCaptured")),
+            "labelOnlyEvidenceAccepted": False,
+        },
+    }
+
+
+def floor_selection_interaction_from_probe(probe: dict[str, Any]) -> dict[str, Any]:
+    probe = _dict(probe)
+    if not probe or _probe_stale_menu_evidence(probe) or bool(probe.get("menuEvidenceStale")):
+        return {}
+    freshness = _dict(probe.get("evidenceFreshness"))
+    if freshness and freshness.get("status") == "FAIL":
+        return {}
+    current = _tile(probe.get("currentWorld") or probe.get("player"))
+    source_plane = _int(probe.get("sourcePlane") if probe.get("sourcePlane") is not None else probe.get("currentPlane"), None)
+    if source_plane is None and current:
+        source_plane = current.get("plane")
+    target_world = _tile(probe.get("staircaseWorld") or probe.get("targetWorld"))
+    object_id = _int(probe.get("staircaseObjectId") or probe.get("targetObjectId"), None)
+    if source_plane is None or target_world is None or object_id is None:
+        return {}
+    if target_world.get("plane") != source_plane:
+        return {}
+    entries = [_dict(item) for item in _list(probe.get("matchingMenuEntries") or probe.get("menuRows")) if isinstance(item, dict)]
+    match: dict[str, Any] | None = None
+    for entry in entries:
+        option = _floor_selection_option(entry.get("option"))
+        if option != "Bottom floor":
+            continue
+        target_text = _text_key(entry.get("target"))
+        if target_text and "stair" not in target_text:
+            continue
+        identifier = _int(entry.get("identifier"), None)
+        if identifier is not None and identifier != object_id:
+            continue
+        match = {**entry, "normalizedOption": option}
+        break
+    if not match:
+        return {}
+    option = _text(match.get("normalizedOption"))
+    destination_plane = _floor_destination_plane(option)
+    return {
+        "schema": "route_demonstration_floor_selection_interaction.v1",
+        "interactionType": "floor_selection",
+        "routeName": probe.get("expectedRouteLeg") or "Bank_to_Woodcutting_area",
+        "action": option,
+        "option": option,
+        "targetName": "Staircase",
+        "target": "Staircase",
+        "targetId": object_id,
+        "objectId": object_id,
+        "targetKind": "object",
+        "world": target_world,
+        "sourcePlane": source_plane,
+        "destinationPlane": destination_plane,
+        "allowedSourcePlanes": [source_plane],
+        "planeBefore": source_plane,
+        "planeAfter": destination_plane,
+        "expectedPlaneChange": (destination_plane - source_plane) if destination_plane is not None else None,
+        "postcondition": {
+            "type": "plane_change",
+            "planeChanged": True,
+            "sourcePlane": source_plane,
+            "destinationPlane": destination_plane,
+        },
+        "sourceProbe": probe.get("probeFolder"),
+        "source": "live_floor_selection_probe",
+        "evidence": {
+            "floorSelectionOptionCaptured": True,
+            "capturedMenuOption": match.get("option"),
+            "capturedMenuTarget": match.get("target"),
+            "capturedMenuIdentifier": match.get("identifier"),
+            "menuRowBoundsCaptured": bool(match.get("rowBounds") or probe.get("menuRowBoundsCaptured")),
+            "labelOnlyEvidenceAccepted": False,
+            "currentWorld": current,
+        },
+    }
+
+
 def build_route_guide(recording_paths: list[str | Path], *, route_name: str | None = None) -> dict[str, Any]:
     path_points: list[dict[str, Any]] = []
     interactions: list[dict[str, Any]] = []
@@ -699,7 +862,31 @@ def _direct_plane_skip_crossing_current(guide: dict[str, Any], current: dict[str
     if current_plane is None:
         return {}
     best: tuple[float, dict[str, Any]] | None = None
-    for item in _list(guide.get("directPlaneSkips")):
+    candidates = list(_list(guide.get("directPlaneSkips")))
+    for interaction in _list(guide.get("floorSelectionInteractions")):
+        interaction = _dict(interaction)
+        source_plane = _int(interaction.get("sourcePlane"), None)
+        destination_plane = _int(interaction.get("destinationPlane"), None)
+        skipped = _skipped_planes(source_plane, destination_plane)
+        if skipped:
+            candidates.append(
+                {
+                    "schema": "route_demonstration_direct_plane_skip.v1",
+                    "interactionType": "direct_plane_skip",
+                    "routeName": interaction.get("routeName") or guide.get("routeName"),
+                    "sourcePlane": source_plane,
+                    "destinationPlane": destination_plane,
+                    "skippedPlanes": skipped,
+                    "option": interaction.get("option") or interaction.get("action"),
+                    "target": interaction.get("targetName") or interaction.get("target"),
+                    "objectId": interaction.get("objectId") or interaction.get("targetId"),
+                    "world": interaction.get("world"),
+                    "postcondition": interaction.get("postcondition"),
+                    "sourceProbe": interaction.get("sourceProbe"),
+                    "evidence": interaction.get("evidence"),
+                }
+            )
+    for item in candidates:
         if not isinstance(item, dict):
             continue
         skipped_planes = [_int(value, None) for value in _list(item.get("skippedPlanes"))]
@@ -723,7 +910,7 @@ def _reentry_likely_reason(direct_skip: dict[str, Any]) -> str | None:
     evidence = _dict(item.get("evidence"))
     option = _text(item.get("option"))
     if _floor_selection_option(option):
-        return "successful guide used a captured floor-selection option; plane-1 recovery is not demonstrated"
+        return "expected Bottom floor direct transition was missed or not used; plane-1 recovery is not demonstrated"
     if evidence.get("recordingLabelMentionsFloorSelection"):
         return "successful recording label indicates a Bottom floor direct transition; plane-1 recovery is not demonstrated"
     return "successful guide used a direct multi-plane stair transition; plane-1 recovery is not demonstrated"
@@ -890,6 +1077,13 @@ def resolve_progress(
         if distance is not None and distance <= 8:
             next_interaction = dict(item)
             break
+    nearest_floor_selection = _nearest_floor_selection_for_plane(_list(guide.get("floorSelectionInteractions")), current, max_distance=14)
+    next_floor_selection = _dict(nearest_floor_selection.get("item"))
+    if next_floor_selection:
+        floor_distance = _float(nearest_floor_selection.get("distanceTiles"))
+        interaction_distance = tile_distance(current, _tile(_dict(next_interaction).get("world"))) if next_interaction else None
+        if next_interaction is None or interaction_distance is None or floor_distance is None or floor_distance <= interaction_distance + 2:
+            next_interaction = dict(next_floor_selection)
     if next_interaction and next_point:
         interaction_world = _tile(next_interaction.get("world"))
         point_world = _tile(_dict(next_point).get("world"))
@@ -910,6 +1104,7 @@ def resolve_progress(
         "skippedReachedGuidePoints": [idx for idx in range(0, max(progress_index, -1) + 1)],
         "nextGuidePoint": next_point,
         "nextGuideInteraction": next_interaction,
+        "nextFloorSelectionInteraction": next_floor_selection,
         "guideProgressReason": "nearest_reached" if reached_indices else "between_sparse_demonstrated_points",
         "blocker": blocker,
     }
