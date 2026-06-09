@@ -1,6 +1,64 @@
 # Codex Questions / Blockers
 
-Updated: 2026-06-08
+Updated: 2026-06-09
+
+## Current Blocker: Live Input Geometry Source Is Stale
+
+Do not run the live bot loop or patch route/woodcutting/banking logic until this
+gate passes.
+
+### Exact blocker
+
+`input_geometry_stale`
+
+The current geometry check failed before live execution. This is an
+environment/current-source blocker, not a route or task-logic blocker.
+
+Latest command:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+```
+
+Evidence from the failed check:
+
+- Status: `FAIL`
+- `inputGeometryPass=false`
+- Loaded-scene proof: `loadedSceneVerified=false`
+- Game state field present but stale: `gameState=LOGGED_IN`
+- Source tick: `766`
+- Stale loaded-scene blocker: `client_tick_hot_stale_age_ms_5284672`
+- Geometry source: `file_session.baseline.inputGeometry`
+- Geometry freshness: about `5285255 ms`
+- Foreground window title: `Codex`
+- RuneLite window matched: `false`
+- Context endpoint `8890`: refused connection
+- Snapshot endpoint `8893`: refused connection
+- Local port check found no listener on `8890` or `8893`
+- Local process/window check found no visible RuneLite/Java window title
+
+### User/environment action needed
+
+1. Open or restore RuneLite and load into the game world.
+2. Make the RuneLite game window visible, not minimized, and focusable.
+3. Start the telemetry stack so these endpoints respond:
+
+```text
+http://127.0.0.1:8890/health
+http://127.0.0.1:8893/health
+```
+
+4. Rerun:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+```
+
+Only after input geometry passes should Codex run:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```
 
 ## Repeated Blocker: Lumbridge Castle Bank Route Advancement
 

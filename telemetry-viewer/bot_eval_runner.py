@@ -26,6 +26,7 @@ BOT_EVAL_SUMMARY_SCHEMA = "bot_eval_summary.v1"
 BOT_LIVE_READINESS_SCHEMA = "bot_live_readiness.v1"
 BOT_PREFLIGHT_SCHEMA = "bot_live_preflight.v1"
 BOT_INPUT_GEOMETRY_SCHEMA = "bot_input_geometry_check.v1"
+LIVE_NOT_REAL_ACTION_WARNING = "This is not real action execution. Use --live --execute-actions for real actions."
 
 DEFAULT_FULL_LOOP_RECORDING = "20260607_171427_Wood_cutting_attacked"
 DEFAULT_DAEMON_URL = "http://127.0.0.1:8890"
@@ -3068,7 +3069,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-actions", type=int)
     parser.add_argument("--preflight", action="store_true", help="Check live-run wiring without running the bot or sending input.")
     parser.add_argument("--check-input-geometry", action="store_true", help="Check and self-heal RuneLite input geometry without sending gameplay input.")
-    parser.add_argument("--live", action="store_true", help="Run guarded live readiness evaluation instead of replay. Defaults to no-input/dry-run.")
+    parser.add_argument("--live", action="store_true", help="Use live context. Real actions require --live --execute-actions; --live by itself fails closed.")
     parser.add_argument("--live-smoke", action="store_true", help="Run bounded live readiness smoke; no input is sent.")
     parser.add_argument("--execute-actions", action="store_true", help="Run real live actions through execute_next_action.py. Requires --live and readiness PASS.")
     parser.add_argument("--auto-recover-loaded-scene", action="store_true", help="Run existing loaded-scene recovery before live readiness/action execution.")
@@ -3077,8 +3078,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--allow-jagex-launcher-automation", action="store_true", help="Allow launcher automation during recovery; credentials are still never typed.")
     parser.add_argument("--wait-for-manual-loaded-scene", action="store_true", help="Poll for a real loaded scene after recovery fails due to login/disconnected state; does not dry-run or send input.")
     parser.add_argument("--manual-loaded-scene-timeout-seconds", type=float, default=600.0, help="Maximum seconds to wait for manually restored loaded-scene proof.")
-    parser.add_argument("--no-input", action="store_true", default=True, help="Keep live evaluation no-input. This is the default.")
-    parser.add_argument("--dry-run-actions", action="store_true", default=True, help="Do not execute actions during live evaluation. This is the default.")
+    parser.add_argument("--no-input", action="store_true", default=False, help="Explicitly keep live evaluation no-input.")
+    parser.add_argument("--dry-run-actions", action="store_true", default=False, help="Explicitly run live evaluation without executing actions.")
     parser.add_argument("--stop-on-warning", action="store_true", help="Stop live smoke after the first WARN or FAIL readiness sample.")
     parser.add_argument("--require-readiness-pass", action="store_true", help="Return FAIL unless readiness status is PASS.")
     parser.add_argument("--daemon-url", default=DEFAULT_DAEMON_URL)
@@ -3092,6 +3093,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out-dir", default=str(repo_root() / "bot_runs"))
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
+
+
+def build_live_mode_guard_summary(
+    *,
+    task: str,
+    output_root: str | Path | None,
+    command: list[str],
+    reason: str,
+    errors: list[str],
+) -> dict[str, Any]:
+    started = datetime.now().strftime("%Y%m%d_%H%M%S")
+    root = Path(output_root).expanduser() if output_root else repo_root() / "bot_runs"
+    output_dir = root / f"{started}_{task}_{reason}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "schema": BOT_EVAL_SUMMARY_SCHEMA,
+        "status": "FAIL",
+        "generatedAtUtc": utc_now(),
+        "task": task,
+        "mode": reason,
+        "command": command,
+        "outputFolder": str(output_dir),
+        "liveInputExecuted": False,
+        "actionCommandsSent": 0,
+        "dryRunActions": False,
+        "noInput": True,
+        "warnings": [LIVE_NOT_REAL_ACTION_WARNING],
+        "errors": errors,
+        "hint": "Real action execution requires exactly --live --execute-actions without --dry-run-actions or --no-input.",
+    }
+    atomic_write_json(output_dir / "bot_eval_summary.json", summary)
+    return summary
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3110,6 +3143,14 @@ def main(argv: list[str] | None = None) -> int:
                 task=args.task,
                 output_root=args.out_dir,
                 arduino_port=args.arduino_port,
+            )
+        elif args.live and args.execute_actions and (args.dry_run_actions or args.no_input or args.live_smoke):
+            summary = build_live_mode_guard_summary(
+                task=args.task,
+                output_root=args.out_dir,
+                command=command,
+                reason="live_action_conflicting_dry_run_flags",
+                errors=["live_action_conflicting_dry_run_flags"],
             )
         elif args.live and args.execute_actions:
             summary = run_live_action(
@@ -3133,6 +3174,14 @@ def main(argv: list[str] | None = None) -> int:
                 manual_loaded_scene_timeout_seconds=args.manual_loaded_scene_timeout_seconds,
                 command=command,
             )
+        elif args.live and not args.live_smoke and not args.dry_run_actions and not args.no_input:
+            summary = build_live_mode_guard_summary(
+                task=args.task,
+                output_root=args.out_dir,
+                command=command,
+                reason="live_requires_execute_actions",
+                errors=["live_requires_execute_actions"],
+            )
         elif args.live_smoke or args.live:
             summary = run_live_smoke(
                 task=args.task,
@@ -3144,8 +3193,8 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.readiness_timeout,
                 max_telemetry_age_ms=args.max_telemetry_age_ms,
                 poll_interval=args.poll_interval,
-                no_input=args.no_input,
-                dry_run_actions=args.dry_run_actions,
+                no_input=True,
+                dry_run_actions=True,
                 require_readiness_pass=args.require_readiness_pass,
                 stop_on_warning=args.stop_on_warning,
                 command=command,
@@ -3170,6 +3219,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"{summary['status']} bot eval {summary.get('mode')}: {summary['outputFolder']}")
         if summary.get("mode") in {"live_smoke", "live_dry_run"}:
+            print(LIVE_NOT_REAL_ACTION_WARNING)
             readiness = _dict(summary.get("readiness"))
             print(
                 "readiness="

@@ -1,4 +1,5 @@
 import json
+import io
 import subprocess
 import sys
 import tempfile
@@ -527,6 +528,46 @@ class BotEvalRunnerTest(unittest.TestCase):
             self.assertTrue(Path(summary["artifacts"]["readiness"]).exists())
             self.assertTrue(Path(summary["artifacts"]["observations"]).exists())
             self.assertTrue(Path(summary["artifacts"]["actions"]).exists())
+
+    def test_live_without_execute_actions_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = io.StringIO()
+            with patch("sys.stdout", output):
+                code = bot_eval_runner.main(["--live", "--duration", "0", "--out-dir", str(Path(tmp) / "bot_runs"), "--json"])
+
+            self.assertEqual(code, 1)
+            summary = json.loads(output.getvalue())
+            self.assertEqual(summary["status"], "FAIL")
+            self.assertEqual(summary["mode"], "live_requires_execute_actions")
+            self.assertFalse(summary["liveInputExecuted"])
+            self.assertEqual(summary["actionCommandsSent"], 0)
+            self.assertIn("live_requires_execute_actions", summary["errors"])
+            self.assertIn(bot_eval_runner.LIVE_NOT_REAL_ACTION_WARNING, summary["warnings"])
+
+    def test_live_action_rejects_conflicting_dry_run_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = io.StringIO()
+            with patch("sys.stdout", output):
+                code = bot_eval_runner.main(
+                    [
+                        "--live",
+                        "--execute-actions",
+                        "--dry-run-actions",
+                        "--duration",
+                        "0",
+                        "--out-dir",
+                        str(Path(tmp) / "bot_runs"),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 1)
+            summary = json.loads(output.getvalue())
+            self.assertEqual(summary["status"], "FAIL")
+            self.assertEqual(summary["mode"], "live_action_conflicting_dry_run_flags")
+            self.assertFalse(summary["liveInputExecuted"])
+            self.assertIn("live_action_conflicting_dry_run_flags", summary["errors"])
+            self.assertIn(bot_eval_runner.LIVE_NOT_REAL_ACTION_WARNING, summary["warnings"])
 
     def test_live_smoke_missing_context_service_fails_clearly(self):
         with tempfile.TemporaryDirectory() as tmp:
