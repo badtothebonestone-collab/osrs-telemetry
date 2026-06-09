@@ -2,35 +2,35 @@
 
 Date: 2026-06-09
 
-## 1. Git Branch
+## 1. Branch And Git Status
+
+Branch:
 
 ```text
 stabilization/live-loop-recovery-20260609
 ```
 
-## 2. Git Status Before / After
-
-Before work:
+Status before the final commit pass:
 
 ```text
-git status --short
-<clean>
+M telemetry-viewer/bot_eval_runner.py
+M telemetry-viewer/input_control/action_lifecycle.py
+M telemetry-viewer/input_control/action_proposal.py
+M telemetry-viewer/input_control/executor.py
+M telemetry-viewer/live_readiness_core.py
+M telemetry-viewer/tests/test_action_lifecycle.py
+M telemetry-viewer/tests/test_action_proposal.py
+M telemetry-viewer/tests/test_bot_eval_runner.py
+M telemetry-viewer/tests/test_input_control_executor.py
+M telemetry-viewer/tests/test_live_readiness.py
+M telemetry-viewer/knowledge_base/*.json
+?? logs/live_core_daemon_restart_20260609_134221.err.txt
+?? logs/live_core_daemon_restart_20260609_134221.out.txt
 ```
 
-After the fix commit and push, the only remaining change is this report
-finalization update.
+The generated daemon restart text logs were not committed. `.gitignore` now ignores `logs/*.txt`.
 
-After edits and before the fix commit:
-
-```text
-M docs\codex_questions.md
-M docs\knowledge\ENTRYPOINTS.md
-M telemetry-viewer\bot_eval_runner.py
-M telemetry-viewer\tests\test_bot_eval_runner.py
-A docs\live_loop_execution_fix_report.md
-```
-
-## 3. Docs Read
+## 2. Docs Read
 
 - `AGENTS.md`
 - `docs\knowledge\ENTRYPOINTS.md`
@@ -42,31 +42,71 @@ A docs\live_loop_execution_fix_report.md
 - `docs\knowledge\DECISIONS.md`
 - `docs\next_live_loop_recovery_plan.md`
 - `docs\stabilization_checkpoint_report.md`
-- `docs\live_bot_regression_audit.md`
 - `docs\project_bootstrap_sweep.md`
 
-## 4. Preflight Result
+## 3. Telemetry Stack Repair
 
-Command:
-
-```powershell
-python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --preflight --json
-```
-
-Result: `WARN`
-
-Mandatory failures: none.
-
-Reason for warning:
+`Start-NormalLiveStack.ps1` was inspected, but its configured path points at stale local state:
 
 ```text
-Start Game is classified as dev_gradle_run.
+C:\Users\stone\osrs-telemetry\example-plugin
 ```
 
-This is the known warning that the Gradle/dev launch can start RuneLite but does
-not prove authenticated loaded-scene state by itself.
+The live stack was repaired by restarting the canonical repo daemon directly:
 
-## 5. Input Geometry Result
+```powershell
+python telemetry-viewer\live_core_daemon.py --latest-session --profile woodcutting --daily-mode snapshot-no-files --input-source plugin-snapshot --plugin-snapshot-tier hot --preset woodcut_bank --goal-count 5 --context-port 8890 --write-overlay-state --overlay-mode intent --overlay-backup-candidates 2 --overlay-debug-target-limit 32 --human-dashboard --summary --benchmark
+```
+
+Endpoint result after repair:
+
+```text
+8890 /health: 200, status ok, latestTick 8284
+8893 /health: 200 via readiness check
+8893 /snapshot: 200 with POST, latestTick 8284
+```
+
+Current listening processes at the final check:
+
+```text
+8890: python PID 7080
+8893: java/RuneLite PID 2508
+```
+
+## 4. RuneLite Window And Focus
+
+RuneLite was found, attached, restored/focused, and verified as foreground:
+
+```text
+Process: java PID 2508
+Window title: RuneLite - KCLBolus
+HWND: 9307348
+Window rect: x=137 y=30 width=1282 height=906
+Foreground window: RuneLite - KCLBolus
+Matched RuneLite window: true
+Visible: true
+Minimized: false
+```
+
+## 5. Loaded Scene Result
+
+Loaded-scene recovery used the canonical context-service path:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3
+```
+
+Result:
+
+```text
+status: recovered_loaded_scene
+loadedSceneVerified: true
+latestTick: 8284 at final geometry check
+```
+
+The recovery path handled disconnected/login prompts before the final live run.
+
+## 6. Input Geometry Result
 
 Command:
 
@@ -74,215 +114,154 @@ Command:
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
 ```
 
-Result: `FAIL`
+Result:
 
-Exact blockers:
+```text
+status: PASS
+inputGeometryPass: true
+source: daemon_status.inputGeometry
+canvasRect: x=148 y=57 width=1229 height=868
+clientRect: x=137 y=30 width=1282 height=906
+dpiScale: 1.75 x 1.75
+screenToClientAvailable: true
+clientToScreenAvailable: true
+foregroundWindowTitle: RuneLite - KCLBolus
+blockerCode: input_geometry_pass
+```
 
-- `loaded_scene_not_ready`
-- `input_geometry_stale`
-- `client_tick_hot_stale_age_ms_5284672`
-- `context_health_unreachable`
-- `context_status_unreachable`
-- `snapshot_health_unreachable`
+## 7. Real Live Command Result
 
-Important fields:
-
-- `loadedSceneVerified=false`
-- `gameState=LOGGED_IN`
-- `latestTick=766`
-- `worldModelObjectTotal=498`
-- `inputGeometryPass=false`
-- Geometry source: `file_session.baseline.inputGeometry`
-- Geometry freshness: about `5285255 ms`
-- Foreground window title: `Codex`
-- RuneLite window matched: `false`
-- Context endpoint `8890`: refused connection
-- Snapshot endpoint `8893`: refused connection
-
-Additional local checks:
-
-- No listener was found on local ports `8890` or `8893`.
-- No visible RuneLite/Java window title was found by the local process/window
-  check.
-
-Conclusion: this is an environment/current-source blocker. Route,
-woodcutting, banking, and click-planning logic were not touched.
-
-## 6. Live Command Run
-
-The real live command was not run because input geometry failed:
+Command run without dry-run or no-input flags:
 
 ```powershell
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
 ```
 
-This follows the gate rule: no live bot actions when input geometry is stale or
-telemetry endpoints are down.
-
-## 7. Live Run Folder
-
-None. The real live loop did not start.
-
-## 8. Linked Recording Folder
-
-None. Record Everything was not started for a live run because the input
-geometry gate failed first.
-
-## 9. Bot Actions Sent
+Latest run:
 
 ```text
-0
+Run folder: C:\Users\badto\osrs-telemetry\bot_runs\20260609_135357_live_woodcutting_loop
+Linked recording: C:\Users\badto\osrs-telemetry\recordings\20260609_135443_live_woodcutting_loop_20260609_135443
+Status: FAIL
+Executor reason: max_runtime_reached
+Live input executed: yes
+Dry run: false
+Action results: 46
+Actions executed: 1
+Actual gameplay clicks: 1
+Successful actions: 1
+Deposit successes: 1
+Service complete events: 1
+Return routes started: 1
+Return routes completed: 0
+Route transition attempts: 1
+Route transition first-try successes: 1
+Final phase: return_to_resource
+Final active intent: return_to_resource_area
+Loop complete: no
 ```
 
-## 10. Live Input Executed
+The loop advanced past the previous environment blocker, verified geometry, sent Arduino-backed live input, completed deposit proof, and started the return route.
+
+## 8. Fixes Made
+
+Patched in the fix commit:
+
+- `bot_eval_runner.py`: added bounded status fallback for loaded-scene/readiness when health or file-session data is stale, and made input geometry status use the longer diagnostic status path.
+- `live_readiness_core.py`: allowed fresh live service-object and bank-UI action sources through known stale file-session/session-match false positives, including `bank_close_keyboard`.
+- `input_control\executor.py`: added bounded waiting after a confirmed service-object click when bank UI proof may arrive late, and added context-wait reacquire handling when service route context exists.
+- `input_control\action_proposal.py`: added deposit target fallback through bank inventory/resource widgets and classified keyboard bank close as a canonical bank UI action target.
+- `input_control\action_lifecycle.py`: accepted fresh inventory resource progress and free-slot increase as deposit proof when bank-operation resource counts are stale.
+- Tests were added or updated for the readiness fallback, geometry diagnostic timeout, executor wait/reacquire behavior, bank UI close readiness, deposit target fallback, and deposit verification.
+- Knowledge JSON indexes were refreshed.
+- `.gitignore` now excludes generated `logs/*.txt` files.
+
+## 9. Remaining Blocker
+
+The current blocker is no longer environment, input geometry, loaded scene, bank deposit, or live input.
+
+Latest proven blocker:
 
 ```text
-no
+return_route_staircase_hover_menu
 ```
 
-## 11. Loop Completion
+Evidence from:
 
 ```text
-no
+C:\Users\badto\osrs-telemetry\bot_runs\20260609_135357_live_woodcutting_loop\bot_action_trace.jsonl
+C:\Users\badto\osrs-telemetry\bot_runs\20260609_135357_live_woodcutting_loop\bot_candidate_trace.jsonl
+C:\Users\badto\osrs-telemetry\bot_runs\20260609_135357_live_woodcutting_loop\bot_postcondition_trace.jsonl
 ```
 
-The loop was not attempted because the geometry gate failed.
-
-## 12. Exact Blocker If Failed
-
-Current blocker:
+The first return-route Staircase transition succeeded and changed plane. The later plane-1 Staircase target repeatedly produced either:
 
 ```text
-input_geometry_stale
+hover confirmation failed: hover_confirm_timeout; top menu=Walk here
+right-click menu selection failed: menu did not open
 ```
 
-Root cause from this run:
+The target involved `Staircase` object id `16672` at world tile `3204,3229,1`, expected `Climb-down`, with planned screen point near `535,347`.
+
+## 10. Tests And Checks Run
+
+Passed:
+
+```powershell
+python -m py_compile telemetry-viewer\bot_eval_runner.py telemetry-viewer\live_readiness_core.py telemetry-viewer\input_control\input_geometry.py telemetry-viewer\input_control\executor.py telemetry-viewer\context_service.py telemetry-viewer\start_game_command.py telemetry-viewer\input_control\action_proposal.py telemetry-viewer\input_control\action_lifecycle.py
+python telemetry-viewer\tests\test_bot_eval_runner.py
+python telemetry-viewer\tests\test_live_readiness.py
+python telemetry-viewer\tests\test_action_proposal.py
+python telemetry-viewer\tests\test_project_knowledge.py
+python telemetry-viewer\tests\test_telemetry_ui.py
+python telemetry-viewer\tests\test_action_lifecycle.py ActionLifecycleTest.test_expected_result_verified_for_deposit_when_resources_clear ActionLifecycleTest.test_deposit_verification_uses_fresh_inventory_progress_when_bank_operation_count_stale ActionLifecycleTest.test_deposit_verification_uses_free_slot_increase_when_resource_count_stale
+python telemetry-viewer\telemetry_ui.py --check
+python telemetry-viewer\update_project_knowledge.py --check
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+```
+
+Known test limitation:
 
 ```text
-Telemetry endpoints 8890 and 8893 are not running/refuse connection, the latest
-live source files are stale, foreground is Codex, and no RuneLite window was
-matched.
+python telemetry-viewer\tests\test_action_lifecycle.py
 ```
 
-## 13. First Proven Blocker Patched
+The full file timed out after 124 seconds. The focused deposit lifecycle tests covering the touched verifier paths passed.
 
-Patched blocker:
-
-```text
---live without --execute-actions could silently enter live_dry_run behavior.
-```
-
-New behavior:
-
-- `--live --execute-actions` is required for real live action.
-- `--live` alone fails closed with:
-
-```text
-This is not real action execution. Use --live --execute-actions for real actions.
-```
-
-- `--live --execute-actions --dry-run-actions` fails closed as conflicting.
-- Explicit no-input/smoke behavior remains available through clearly named
-  dry-run/smoke flags.
-
-Unpatched blocker:
-
-```text
-input_geometry_stale
-```
-
-Reason: the evidence points to an environment/current-source issue, not a code
-bug in the geometry resolver.
-
-## 14. Files Changed
-
-- `telemetry-viewer\bot_eval_runner.py`
-- `telemetry-viewer\tests\test_bot_eval_runner.py`
-- `docs\knowledge\ENTRYPOINTS.md`
-- `docs\codex_questions.md`
-- `docs\live_loop_execution_fix_report.md`
-
-## 15. Tests / Checks Run
-
-Compile checks:
-
-- `python -m py_compile telemetry-viewer\bot_eval_runner.py`
-- `python -m py_compile telemetry-viewer\execute_next_action.py`
-- `python -m py_compile telemetry-viewer\task_script_api.py`
-- `python -m py_compile telemetry-viewer\knowledge_fabric.py`
-- `python -m py_compile telemetry-viewer\context_service.py`
-- `python -m py_compile telemetry-viewer\input_control\executor.py`
-- `python -m py_compile telemetry-viewer\input_control\action_proposal.py`
-- `python -m py_compile telemetry-viewer\candidate_core.py`
-- `python -m py_compile telemetry-viewer\live_readiness_core.py`
-- `python -m py_compile telemetry-viewer\input_control\input_geometry.py`
-
-Focused tests/checks:
-
-- `python telemetry-viewer\tests\test_bot_eval_runner.py` - 26 tests OK.
-- `python telemetry-viewer\tests\test_task_script_api.py` - 31 tests OK.
-- `python telemetry-viewer\tests\test_knowledge_fabric.py` - 44 tests OK.
-- `python telemetry-viewer\tests\test_context_service.py` - 50 tests OK.
-- `python telemetry-viewer\tests\test_action_proposal.py` - 86 tests OK.
-- `python telemetry-viewer\tests\test_live_readiness.py` - 51 tests OK.
-- `python telemetry-viewer\tests\test_project_knowledge.py` - 7 tests OK.
-- `python telemetry-viewer\tests\test_telemetry_ui.py` - 38 tests OK.
-- `python telemetry-viewer\telemetry_ui.py --check` - PASS.
-- `python telemetry-viewer\update_project_knowledge.py --check` - PASS:
-  `recordings=80 capabilities=26 gaps=12`.
-
-Skipped:
-
-- `run_stabilization_suite.py`
-
-Reason: focused checks passed, the live path is blocked by an external
-telemetry/geometry gate, and the previous stabilization checkpoint recorded a
-timeout for the full suite.
-
-## 16. Commit Hash
+## 11. Commit And Push
 
 Fix commit:
 
 ```text
-73b41ced1357b5c482d9c4209b7fee6b8d43b7c8
+c45c89c fix live environment readiness and woodcutting loop execution
 ```
 
-Commit message:
+Push result:
 
 ```text
-fix live woodcutting loop blocker from stabilized branch
+origin/stabilization/live-loop-recovery-20260609 updated successfully
 ```
 
-## 17. Push Result
+## 12. Human Or Environment Questions
 
-Push succeeded to:
+None. No manual RuneLite focus/login request is needed for the current state. The environment self-heal paths succeeded.
+
+## 13. Exact Next Action
+
+Patch the return-route Staircase hover/menu blocker from the latest live trace. Inspect first:
 
 ```text
-origin/stabilization/live-loop-recovery-20260609
+telemetry-viewer\input_control\executor.py
+telemetry-viewer\input_control\action_proposal.py
+telemetry-viewer\candidate_core.py
+telemetry-viewer\route_demonstration.py
+telemetry-viewer\route_template.py
+bot_runs\20260609_135357_live_woodcutting_loop\bot_action_trace.jsonl
 ```
 
-## 18. Exact Next Action
-
-User/environment action:
-
-1. Open or restore RuneLite.
-2. Load into the game world.
-3. Make RuneLite visible and focusable.
-4. Start the telemetry stack so both endpoints respond:
-
-```text
-http://127.0.0.1:8890/health
-http://127.0.0.1:8893/health
-```
-
-Then rerun:
+After that focused patch, rerun:
 
 ```powershell
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
-```
-
-Only after that passes, run the real live command:
-
-```powershell
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
 ```
