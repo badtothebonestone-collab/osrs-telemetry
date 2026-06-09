@@ -1,0 +1,313 @@
+{
+  "schema": "route_template.v1",
+  "templateVersion": 1,
+  "templateRevision": 3,
+  "routeName": "Bank_to_Woodcutting_area",
+  "createdFromRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+  "createdAtUtc": "2026-06-06T15:42:38.822970Z",
+  "updatedAtUtc": "2026-06-06T21:30:00Z",
+  "updatedReason": "Tightened area_arrival so broad woodcutting_area labels and distance-only second-walk progress do not complete final arrival.",
+  "templateNotes": [
+    "User confirmed this route does not require opening a door.",
+    "Door/Open and Large door events are navigation support or review evidence, not required route progress.",
+    "area_arrival requires proximity to the woodcutting end cluster; broad woodcutting_area label alone is insufficient.",
+    "distanceAfterLastTransition is route progress evidence, not final arrival evidence."
+  ],
+  "templateSemantics": {
+    "optionalDoorTransitions": true,
+    "requiredSegmentTypes": [
+      "area_arrival",
+      "area_start",
+      "ladder_transition",
+      "plane_transition",
+      "stair_transition",
+      "walk_segment"
+    ]
+  },
+  "start": {
+    "areaLabel": "bank_area",
+    "world": {
+      "worldX": 3208,
+      "worldY": 3220,
+      "plane": 2
+    },
+    "toleranceTiles": 8
+  },
+  "end": {
+    "areaLabel": "woodcutting_area",
+    "world": {
+      "worldX": 3193,
+      "worldY": 3243,
+      "plane": 0
+    },
+    "toleranceTiles": 8,
+    "endCluster": {
+      "world": {
+        "worldX": 3197,
+        "worldY": 3244,
+        "plane": 0
+      },
+      "toleranceTiles": 8,
+      "source": "20260606_154108_manual_route-bank_to_woodcutting_area offline arrival"
+    }
+  },
+  "segments": [
+    {
+      "schema": "route_template_segment.v1",
+      "segmentIndex": 1,
+      "segmentType": "area_start",
+      "label": "Start: bank_area",
+      "required": true,
+      "order": "strict",
+      "primaryAction": {
+        "option": null,
+        "target": null,
+        "targetKind": null
+      },
+      "expectedPostcondition": {
+        "type": "area_start",
+        "planeDelta": 0,
+        "minDistanceMoved": null
+      },
+      "qualityRequirements": {
+        "minTargetQuality": null,
+        "allowMissingRowGeometry": true
+      },
+      "tolerances": {
+        "timeWindowMs": 5000,
+        "tickWindow": 8,
+        "positionToleranceTiles": 8
+      },
+      "notes": []
+    },
+    {
+      "schema": "route_template_segment.v1",
+      "segmentIndex": 2,
+      "segmentType": "walk_segment",
+      "label": "Walk",
+      "required": true,
+      "order": "flexible",
+      "primaryAction": {
+        "option": "Walk",
+        "target": null,
+        "targetKind": "ground"
+      },
+      "expectedPostcondition": {
+        "type": "movement",
+        "planeDelta": 0,
+        "minDistanceMoved": 1.0
+      },
+      "qualityRequirements": {
+        "minTargetQuality": null,
+        "allowMissingRowGeometry": true
+      },
+      "tolerances": {
+        "timeWindowMs": 5000,
+        "tickWindow": 8,
+        "positionToleranceTiles": 12
+      },
+      "notes": []
+    },
+    {
+      "schema": "route_template_segment.v1",
+      "segmentIndex": 3,
+      "segmentType": "stair_transition",
+      "label": "Climb-down Staircase",
+      "required": true,
+      "order": "strict",
+      "primaryAction": {
+        "option": "Climb-down",
+        "target": "Staircase",
+        "targetKind": "object"
+      },
+      "expectedPostcondition": {
+        "type": "plane_change",
+        "planeDelta": -2,
+        "minDistanceMoved": null
+      },
+      "qualityRequirements": {
+        "minTargetQuality": null,
+        "allowMissingRowGeometry": true
+      },
+      "tolerances": {
+        "timeWindowMs": 5000,
+        "tickWindow": 8,
+        "positionToleranceTiles": 8
+      },
+      "notes": []
+    },
+    {
+      "schema": "route_template_segment.v1",
+      "segmentIndex": 4,
+      "segmentType": "walk_segment",
+      "label": "Walk",
+      "required": true,
+      "order": "flexible",
+      "primaryAction": {
+        "option": "Walk",
+        "target": null,
+        "targetKind": "ground"
+      },
+      "expectedPostcondition": {
+        "type": "movement",
+        "planeDelta": 0,
+        "minDistanceMoved": 1.0
+      },
+      "qualityRequirements": {
+        "minTargetQuality": null,
+        "allowMissingRowGeometry": true
+      },
+      "tolerances": {
+        "timeWindowMs": 5000,
+        "tickWindow": 8,
+        "positionToleranceTiles": 12
+      },
+      "notes": []
+    },
+    {
+      "schema": "route_template_segment.v1",
+      "segmentIndex": 5,
+      "segmentType": "area_arrival",
+      "label": "Arrive: woodcutting_area",
+      "required": true,
+      "order": "strict",
+      "primaryAction": {
+        "option": null,
+        "target": null,
+        "targetKind": null
+      },
+      "expectedPostcondition": {
+        "type": "area_arrival",
+        "planeDelta": 0,
+        "minDistanceMoved": null
+      },
+      "qualityRequirements": {
+        "minTargetQuality": null,
+        "allowMissingRowGeometry": true
+      },
+      "tolerances": {
+        "timeWindowMs": 5000,
+        "tickWindow": 8,
+        "positionToleranceTiles": 8
+      },
+      "notes": []
+    }
+  ],
+  "optionalSegments": [
+    {
+      "schema": "route_template_segment.v1",
+      "segmentIndex": 1,
+      "segmentType": "door_transition",
+      "label": "Open Door",
+      "required": false,
+      "order": "strict",
+      "routeRole": "navigation_support",
+      "primaryAction": {
+        "option": "Open",
+        "target": "Door",
+        "targetKind": "object"
+      },
+      "expectedPostcondition": {
+        "type": "movement",
+        "planeDelta": 0,
+        "minDistanceMoved": 1.0
+      },
+      "qualityRequirements": {
+        "minTargetQuality": "medium",
+        "allowMissingRowGeometry": true
+      },
+      "tolerances": {
+        "timeWindowMs": 4000,
+        "tickWindow": 6,
+        "positionToleranceTiles": 8
+      },
+      "notes": [
+        "Observed in the original v2 extraction but not required by the Bank_to_Woodcutting_area route.",
+        "Missing Door/Open must not make this route WARN or FAIL."
+      ]
+    }
+  ],
+  "reviewEvidenceNotes": [
+    {
+      "evidenceId": "raw_step_002",
+      "type": "menu_selection",
+      "action": null,
+      "targetName": "Bank table",
+      "reviewReason": "bank context did not produce a route-progress postcondition"
+    },
+    {
+      "evidenceId": "raw_step_005",
+      "type": "object_action",
+      "action": "Climb-up",
+      "targetName": "Staircase",
+      "reviewReason": "route target evidence lacked a matching movement, plane, or widget postcondition"
+    }
+  ],
+  "warnings": [
+    "2 review evidence item(s) were kept as notes, not required segments",
+    "Door/Open was demoted from required route progress to optional navigation support."
+  ],
+  "variants": [],
+  "deprecatedVariants": [
+    {
+      "schema": "route_template_variant.v1",
+      "variantName": "walk_here_large_door",
+      "deprecated": true,
+      "deprecatedReason": "Base Door/Open is no longer a required segment; Walk here Large door is handled as navigation support evidence.",
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_105427_manual_route-bank_to_woodcutting_area_v3",
+      "routeName": "Bank_to_Woodcutting_area",
+      "description": "Walk here Large door movement-support segment satisfies Door/Open when route progress and endpoint evidence are strong.",
+      "segmentOverrides": [
+        {
+          "baseSegmentIndex": 5,
+          "baseSegmentLabel": "Open Door",
+          "allowedAlternatives": [
+            {
+              "segmentType": "walk_segment",
+              "primaryAction": {
+                "option": "Walk here",
+                "target": "Large door"
+              },
+              "satisfiesBaseSegment": true,
+              "requiresPostcondition": {
+                "type": "movement",
+                "minDistanceMoved": 3
+              },
+              "qualityRequirements": {
+                "minTargetQuality": "medium"
+              },
+              "notes": [
+                "Navigation-support click near/through door can satisfy door transition when route progress is confirmed."
+              ]
+            }
+          ]
+        }
+      ],
+      "allowedExtraSegments": [
+        {
+          "recordingSegmentIndex": 6,
+          "segmentType": "stair_transition",
+          "label": "Climb-up Staircase",
+          "postcondition": {
+            "type": "movement",
+            "result": "partial"
+          },
+          "reason": "harmless_navigation_or_post_arrival_evidence"
+        },
+        {
+          "recordingSegmentIndex": 7,
+          "segmentType": "ladder_transition",
+          "label": "Climb-up Ladder",
+          "postcondition": {
+            "type": "movement",
+            "result": "partial"
+          },
+          "reason": "harmless_navigation_or_post_arrival_evidence"
+        }
+      ],
+      "allowedReviewEvidence": [],
+      "sharedEndpointRequirements": true,
+      "warnings": []
+    }
+  ]
+}

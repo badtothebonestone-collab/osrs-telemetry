@@ -297,6 +297,74 @@ def _activity_recent_signals(status: dict[str, Any]) -> list[str]:
     return [str(signal).lower() for signal in signals if signal is not None]
 
 
+def _player_animation(status: dict[str, Any]) -> int | None:
+    player = _player_context(status)
+    for source in (
+        player,
+        _dict(status.get("player")),
+        _dict(status.get("currentPlayer")),
+        _dict(_dict(status.get("currentContextSummary")).get("player")),
+    ):
+        for key in ("animation", "playerAnimation", "currentAnimation"):
+            value = _int(source.get(key))
+            if value is not None:
+                return value
+    for key in ("playerAnimation", "animation", "currentAnimation"):
+        value = _int(status.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _woodcutting_animation_event(status: dict[str, Any]) -> bool:
+    candidates: list[Any] = [
+        status.get("latestEventSummary"),
+        status.get("lastEventSummary"),
+        status.get("latestEvent"),
+        status.get("eventSummary"),
+    ]
+    for context_name in ("activityContext", "activity", "overlayDebugContext", "overlayDebug"):
+        context = _context(status, context_name)
+        candidates.extend(
+            [
+                context.get("latestEventSummary"),
+                context.get("lastEventSummary"),
+                context.get("latestEvent"),
+                context.get("eventSummary"),
+            ]
+        )
+        summary = _dict(context.get("summary"))
+        candidates.extend(
+            [
+                summary.get("latestEventSummary"),
+                summary.get("lastEventSummary"),
+                summary.get("latestEvent"),
+                summary.get("eventSummary"),
+            ]
+        )
+        raw = _dict(context.get("raw"))
+        candidates.extend(
+            [
+                raw.get("latestEventSummary"),
+                raw.get("lastEventSummary"),
+                raw.get("latestEvent"),
+                raw.get("eventSummary"),
+            ]
+        )
+    for value in candidates:
+        text = str(value or "").strip().lower()
+        if "879" in text and ("animation" in text or "woodcut" in text or "chop" in text):
+            return True
+    return False
+
+
+def _woodcutting_animation_started(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    after_animation = _player_animation(after)
+    if after_animation == 879 and _player_animation(before) != 879:
+        return True
+    return _woodcutting_animation_event(after)
+
+
 def _blocking_conditions(status: dict[str, Any]) -> list[str]:
     value = generic_state(status).get("blockingConditions") or status.get("blockingConditions") or []
     if not isinstance(value, list):
@@ -1101,6 +1169,8 @@ def verify_expected_result(
             _add_signal(observed, f"activity_{current_activity}")
         if any("depleted" in signal for signal in _activity_recent_signals(after)):
             _add_signal(observed, "target_depleted_recently")
+        if _woodcutting_animation_started(before, after):
+            _add_signal(observed, "woodcutting_animation_879")
         if is_waiting_for_result(after):
             _add_signal(observed, "wait_for_result_state")
         signals = set(observed["observedSignals"])
@@ -1113,7 +1183,7 @@ def verify_expected_result(
         if "resource_progress_increased" in signals:
             observed["resourceProgressClassification"] = "resource_delayed_inventory_success" if observed.get("elapsedMillis") else "resource_progress_success"
             return _finish(observed, status="PASS", result="resource_progress_increased", outcome="progress", complete=True, next_allowed=True)
-        if any(signal.startswith("activity_") for signal in signals):
+        if any(signal.startswith("activity_") for signal in signals) or "woodcutting_animation_879" in signals:
             observed["resourceProgressClassification"] = "resource_animation_started_pending"
             return _finish(observed, status="PASS", result="activity_progress", outcome="progress", complete=True, next_allowed=True)
         if phase == "blocked" or _blocking_conditions(after):

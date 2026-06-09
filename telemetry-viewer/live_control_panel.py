@@ -131,6 +131,7 @@ def script_supports_flag(script: Path, flag: str) -> bool:
 
 
 def build_runelite_command() -> list[str]:
+    # Legacy dev-panel launcher only. Broad UI/recovery/bot Start Game flows use start_game_command.py.
     if os.name == "nt":
         return ["cmd.exe", "/c", "gradlew.bat", "run"]
     return ["./gradlew", "run"]

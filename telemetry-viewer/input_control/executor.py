@@ -8,7 +8,7 @@ import urllib.request
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import client_tick_core
 from . import camera_control
@@ -22,7 +22,7 @@ from .action_lifecycle import (
     verify_expected_result,
 )
 from .action_proposal import ActionProposal, build_action_proposal
-from .input_geometry import CLICK_FAILURE_BUCKETS, resolve_screen_click_point
+from .input_geometry import CLICK_FAILURE_BUCKETS, resolve_screen_click_point, validate_screen_point_inside_geometry
 from .backend_pyautogui import PyAutoGuiBackend
 from .backend_pydirectinput import PyDirectInputBackend
 from .backend_arduino_hid import DEFAULT_COMMAND_TIMEOUT_MS, ArduinoHIDBackend, check_arduino_monitor_status
@@ -181,6 +181,72 @@ def daemon_status_url(daemon_url: str) -> str:
     return daemon_url.rstrip("/") + "/status"
 
 
+def daemon_context_url(daemon_url: str) -> str:
+    return daemon_url.rstrip("/") + "/context"
+
+
+def daemon_action_summary_url(daemon_url: str) -> str:
+    return daemon_url.rstrip("/") + "/action-summary"
+
+
+def action_context_request_payload(*, task: str = "woodcutting") -> dict[str, Any]:
+    return {
+        "schema": "context_request.v1",
+        "task": task,
+        "needs": [
+            "baseline",
+            "inventory",
+            "activity",
+            "candidates",
+            "world_model_summary",
+            "resource_object_census",
+            "service_object_census",
+            "route_object_census",
+            "pathing_frontier",
+            "knowledge_current_debug_context",
+            "knowledge_resource_candidates",
+            "knowledge_service_candidates",
+            "knowledge_route_objects",
+            "knowledge_path_frontier",
+            "click_plan",
+            "route_monitor",
+            "bank_state",
+            "woodcutting_loop_lifecycle",
+            "interruption_lifecycle",
+        ],
+        "maxCandidates": 8,
+        "maxEvents": 5,
+        "responseMode": "compact",
+    }
+
+
+def fetch_action_context(daemon_url: str, timeout: float = 1.0, *, task: str = "woodcutting") -> dict[str, Any]:
+    try:
+        summary = fetch_json(daemon_action_summary_url(daemon_url), timeout=timeout)
+        if isinstance(summary, dict) and summary.get("schema") == "live_core_action_summary.v1":
+            proposal = summary.get("actionProposal") if isinstance(summary.get("actionProposal"), dict) else {}
+            return {
+                "schema": "context_response.v1",
+                "status": summary.get("status") or "WARN",
+                "latestTick": summary.get("latestTick"),
+                "inventory": summary.get("inventory") if isinstance(summary.get("inventory"), dict) else {},
+                "knowledgeCurrentDebugContext": {
+                    "schema": "knowledge_fabric_current_debug_context.v1",
+                    "source": "live_core_action_summary",
+                    "data": {
+                        "actionProposal": proposal,
+                        "liveStatus": summary.get("liveStatus") if isinstance(summary.get("liveStatus"), dict) else {},
+                        "readiness": summary.get("readiness") if isinstance(summary.get("readiness"), dict) else {},
+                    },
+                },
+                "warnings": summary.get("warnings") if isinstance(summary.get("warnings"), list) else [],
+                "missingCapabilities": summary.get("missingCapabilities") if isinstance(summary.get("missingCapabilities"), list) else [],
+            }
+    except Exception:
+        pass
+    return post_json(daemon_context_url(daemon_url), action_context_request_payload(task=task), timeout=timeout)
+
+
 def plugin_snapshot_endpoint_url(snapshot_url: str) -> str:
     base = (snapshot_url or "http://127.0.0.1:8893").rstrip("/")
     return base if base.endswith("/snapshot") else base + "/snapshot"
@@ -193,8 +259,13 @@ def fetch_plugin_snapshot(
     client_tick_tail: int = 0,
     menu_entry_limit: int = 5,
     tile_projection_requests: list[dict[str, Any]] | None = None,
+    extra_needs: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     needs = ["baseline", "interaction_hot"]
+    for need in extra_needs or ():
+        normalized_need = str(need or "").strip()
+        if normalized_need and normalized_need not in needs:
+            needs.append(normalized_need)
     tail = max(0, int(client_tick_tail or 0))
     if tail > 0:
         needs.append("client_tick_tail")
@@ -622,6 +693,36 @@ def _start_live_input_session(options: Any | None, backend: Any) -> dict[str, An
     return status
 
 
+def _ensure_live_input_session_for_action(options: Any | None, backend: Any, status: dict[str, Any] | None) -> None:
+    if not isinstance(status, dict):
+        return
+    if not _live_input_operation_requested(options) or not _is_arduino_backend(backend):
+        return
+    if bool(getattr(backend, "armed", False)):
+        return
+    try:
+        recovered = False
+        ensure_armed = getattr(backend, "ensure_armed", None)
+        if callable(ensure_armed):
+            recovered = bool(ensure_armed())
+        if not recovered:
+            token = getattr(backend, "session_token", None) or getattr(options, "arduino_session_token", None)
+            if token and str(token).strip().lower() != "auto":
+                backend.arm(str(token))
+                recovered = bool(getattr(backend, "armed", False))
+        if not recovered:
+            raise RuntimeError("Arduino live session is not armed and could not be re-armed")
+        status["arduinoRearmedBeforeActionCount"] = int(status.get("arduinoRearmedBeforeActionCount") or 0) + 1
+        if callable(getattr(backend, "status", None)):
+            status["arduino"] = backend.status()
+        _write_input_backend_status(options, backend, armed=True, direct_backend_bypass_count=0)
+    except Exception as error:  # noqa: BLE001
+        status["status"] = "FAIL"
+        status["blockReason"] = "arduino_rearm_failed"
+        status["arduinoRearmError"] = f"{type(error).__name__}: {error}"
+        raise RuntimeError(status["arduinoRearmError"]) from error
+
+
 def _finish_live_input_session(backend: Any, status: dict[str, Any] | None, *, options: Any | None = None) -> None:
     if not isinstance(status, dict) or not _is_arduino_backend(backend):
         return
@@ -804,6 +905,18 @@ def _live_input_blocked_result(options: Any, backend: Any, status: dict[str, Any
         },
     )
     return result
+
+
+def _recovery_verified_loaded_scene(recovery: dict[str, Any] | None) -> bool:
+    if not isinstance(recovery, dict):
+        return False
+    if recovery.get("loadedSceneVerified") is True or recovery.get("finalLoadedSceneVerified") is True:
+        return True
+    final_state = recovery.get("finalState") if isinstance(recovery.get("finalState"), dict) else {}
+    if final_state.get("loadedSceneVerified") is True:
+        return True
+    proof = final_state.get("loadedSceneProof") if isinstance(final_state.get("loadedSceneProof"), dict) else {}
+    return proof.get("loadedSceneVerified") is True
 
 
 def _input_controller_from_options(
@@ -1051,17 +1164,38 @@ def _route_transition_direct_menu_entry(
             "syntheticEntry": True,
             "reason": "left_click_is_generic_dialogue_opener",
         }
-    entries = sample.get("entries")
-    if not isinstance(entries, list):
+    entries = _menu_entries_display_order(sample)
+    if not entries:
         return synthetic_direct_entry
-    for index, raw_entry in enumerate(entries):
-        if not isinstance(raw_entry, dict):
-            continue
-        entry = dict(raw_entry)
-        entry["entryIndex"] = index
+    for entry in entries:
         if _entry_matches_route_transition_direct_option(entry, proposal):
             return entry
     return synthetic_direct_entry
+
+
+def _entry_matches_navigation_walk_here(entry: dict[str, Any], proposal: ActionProposal) -> bool:
+    if not (_is_navigation_path_proposal(proposal) or proposal.proposed_action in NAVIGATION_ACTIONS):
+        return False
+    return client_tick_core.is_walk_here_entry(entry)
+
+
+def _navigation_walk_here_menu_entry(
+    proposal: ActionProposal,
+    confirmation: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not (_is_navigation_path_proposal(proposal) or proposal.proposed_action in NAVIGATION_ACTIONS):
+        return None
+    confirmation = confirmation if isinstance(confirmation, dict) else {}
+    sample = confirmation.get("sample") if isinstance(confirmation.get("sample"), dict) else _confirmation_hover_sample(confirmation)
+    if not isinstance(sample, dict):
+        return None
+    selected = client_tick_core.get_left_click_entry(sample)
+    if isinstance(selected, dict) and client_tick_core.is_walk_here_entry(selected):
+        return None
+    for entry in _menu_entries_display_order(sample):
+        if _entry_matches_navigation_walk_here(entry, proposal):
+            return entry
+    return None
 
 
 def _route_transition_left_click_is_dialogue_opener(
@@ -1088,9 +1222,43 @@ def _route_transition_left_click_is_dialogue_opener(
     return _entry_matches_route_transition_dialogue_opener(raw_top, proposal)
 
 
-def _menu_row_canvas_point(sample: dict[str, Any], row_index: int) -> dict[str, int] | None:
+def _menu_entries_display_order(sample: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(sample, dict):
+        return []
+    entries = sample.get("entries")
+    if not isinstance(entries, list):
+        return []
+    source = str(sample.get("sourceEvent") or sample.get("sampleSource") or "")
+    order = str(sample.get("entriesDisplayOrder") or sample.get("entryOrder") or "").strip().lower()
+    reverse_raw_order = False
+    if order in {"top_to_bottom", "display_top_to_bottom", "display_order"}:
+        reverse_raw_order = False
+    elif order in {"client_order", "raw_client_order", "bottom_to_top"}:
+        reverse_raw_order = True
+    elif source == "MenuOpened":
+        # TelemetryPlugin versions before entriesDisplayOrder emitted MenuOpened
+        # entries in RuneLite client-array order, while PostMenuSort emits top-first.
+        reverse_raw_order = True
+    indexed = list(enumerate(entries))
+    if reverse_raw_order:
+        indexed = list(reversed(indexed))
+    display_entries: list[dict[str, Any]] = []
+    for display_index, (source_index, raw_entry) in enumerate(indexed):
+        if not isinstance(raw_entry, dict):
+            continue
+        entry = dict(raw_entry)
+        entry["sourceEntryIndex"] = source_index
+        entry["displayEntryIndex"] = display_index
+        entry["entryIndex"] = display_index
+        entry["entriesDisplayOrder"] = "top_to_bottom"
+        entry["entriesDisplayOrderSource"] = "normalized_menu_opened" if reverse_raw_order else (order or source or "as_emitted")
+        display_entries.append(entry)
+    return display_entries
+
+
+def _menu_row_canvas_geometry(sample: dict[str, Any], row_index: int) -> dict[str, Any] | None:
     bounds = sample.get("menuBounds") if isinstance(sample, dict) else None
-    entries = sample.get("entries") if isinstance(sample, dict) else None
+    entries = _menu_entries_display_order(sample)
     if not isinstance(bounds, dict) or not isinstance(entries, list):
         return None
     displayed_count = _int_or_none(sample.get("entryCount"))
@@ -1117,7 +1285,24 @@ def _menu_row_canvas_point(sample: dict[str, Any], row_index: int) -> dict[str, 
     row_x = x + width / 2.0
     if row_x < x or row_x > x + width or row_y < y or row_y > y + height:
         return None
-    return {"x": int(round(row_x)), "y": int(round(row_y))}
+    return {
+        "point": {"x": int(round(row_x)), "y": int(round(row_y))},
+        "rowIndex": row_index,
+        "displayEntryCount": count,
+        "entryCount": displayed_count,
+        "visibleEntryCount": len(entries),
+        "menuBounds": dict(bounds),
+        "headerHeight": header_height if height > 22 else 0.0,
+        "rowHeight": row_height,
+        "optionsTop": options_top,
+        "entriesDisplayOrder": "top_to_bottom",
+    }
+
+
+def _menu_row_canvas_point(sample: dict[str, Any], row_index: int) -> dict[str, int] | None:
+    geometry = _menu_row_canvas_geometry(sample, row_index)
+    point = geometry.get("point") if isinstance(geometry, dict) else None
+    return dict(point) if isinstance(point, dict) else None
 
 
 def _screen_point_from_canvas(backend: Any, point: dict[str, int]) -> dict[str, int] | None:
@@ -1254,11 +1439,16 @@ def _execute_route_transition_direct_menu_selection(
     sleep_func=time.sleep,
     monotonic_func=time.monotonic,
     wall_time_millis_func=_wall_time_millis,
+    entry_matcher: Callable[[dict[str, Any], ActionProposal], bool] | None = None,
+    event_source: str = "route_transition_direct_expected_option",
+    open_reason: str = "route_transition_direct_expected_option",
+    row_label: str = "route transition menu row",
 ) -> bool:
+    matches_entry = entry_matcher or _entry_matches_route_transition_direct_option
     event: dict[str, Any] = {
         "schema": "right_click_menu_select.v1",
         "expectedEntry": dict(direct_entry),
-        "source": "route_transition_direct_expected_option",
+        "source": event_source,
         "status": "started",
         "clientTickTailRequested": _menu_open_poll_client_tick_tail(hover_options),
         "menuEntryLimitRequested": max(8, hover_options.menu_entry_limit),
@@ -1268,7 +1458,7 @@ def _execute_route_transition_direct_menu_selection(
             "type": "right_click_menu_open",
             "clickPoint": plan.click_point.to_dict(),
             "button": "right",
-            "reason": "route_transition_direct_expected_option",
+            "reason": open_reason,
         }
     )
     right_click_started_wall_ms = int(wall_time_millis_func())
@@ -1296,12 +1486,8 @@ def _execute_route_transition_direct_menu_selection(
         result.hover_confirmation["rightClickMenuSelection"] = event
         return False
     selected_entry: dict[str, Any] | None = None
-    for index, raw_entry in enumerate(menu_sample.get("entries") or []):
-        if not isinstance(raw_entry, dict):
-            continue
-        entry = dict(raw_entry)
-        entry["entryIndex"] = index
-        if _entry_matches_route_transition_direct_option(entry, proposal):
+    for entry in _menu_entries_display_order(menu_sample):
+        if matches_entry(entry, proposal):
             selected_entry = entry
             break
     if selected_entry is None:
@@ -1311,10 +1497,12 @@ def _execute_route_transition_direct_menu_selection(
         result.hover_confirmation["rightClickMenuSelection"] = event
         return False
     row_index = int(selected_entry.get("entryIndex") or 0)
-    canvas_row = _menu_row_canvas_point(menu_sample, row_index)
+    row_geometry = _menu_row_canvas_geometry(menu_sample, row_index)
+    canvas_row = dict(row_geometry.get("point")) if isinstance(row_geometry, dict) and isinstance(row_geometry.get("point"), dict) else None
     screen_row = _screen_point_from_canvas_for_proposal(proposal, backend, canvas_row)
     event["selectedEntry"] = dict(selected_entry)
     event["rowCanvasPoint"] = canvas_row
+    event["rowCanvasGeometry"] = row_geometry
     event["rowScreenPoint"] = screen_row
     if screen_row is None:
         event["status"] = "FAIL"
@@ -1331,7 +1519,7 @@ def _execute_route_transition_direct_menu_selection(
             radius_px=6,
             width_px=max(24, _int_or_none((menu_sample.get("menuBounds") or {}).get("width")) or 24),
             height_px=14,
-            label="route transition menu row",
+            label=row_label,
             source="right_click_menu",
         ),
         MouseMovementProfile(name="linear_debug", min_duration_ms=80, max_duration_ms=260, waypoint_count=12),
@@ -1368,7 +1556,7 @@ def _execute_route_transition_direct_menu_selection(
     result.hover_confirmation["clickClassification"] = click_classification
     event["actualClickedMenu"] = after_click
     event["clickClassification"] = click_classification
-    direct_option_clicked = _entry_matches_route_transition_direct_option(after_click or {}, proposal)
+    direct_option_clicked = matches_entry(after_click or {}, proposal)
     event["directOptionClicked"] = bool(direct_option_clicked)
     if not direct_option_clicked:
         event["status"] = "FAIL"
@@ -1419,6 +1607,811 @@ def _status_context(status: dict[str, Any], context_name: str) -> dict[str, Any]
         return value
     value = status.get(context_name)
     return value if isinstance(value, dict) else {}
+
+
+def _point_xy(value: Any) -> dict[str, int] | None:
+    point = value if isinstance(value, dict) else {}
+    x = _int_or_none(point.get("x"))
+    y = _int_or_none(point.get("y"))
+    if x is None:
+        x = _int_or_none(point.get("canvasX"))
+    if y is None:
+        y = _int_or_none(point.get("canvasY"))
+    if x is None or y is None:
+        return None
+    return {"x": x, "y": y}
+
+
+def _list_of_strings(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None]
+
+
+def _context_action_proposal_payload(context_response: dict[str, Any] | None) -> dict[str, Any]:
+    response = context_response if isinstance(context_response, dict) else {}
+    debug = _dict(response.get("knowledgeCurrentDebugContext"))
+    data = _dict(debug.get("data"))
+    for value in (
+        data.get("actionProposal"),
+        response.get("actionProposal"),
+        _dict(response.get("currentDebugContext")).get("actionProposal"),
+    ):
+        if isinstance(value, dict) and value:
+            return value
+    return {}
+
+
+def _proposal_from_context_payload(payload: dict[str, Any]) -> ActionProposal | None:
+    if not isinstance(payload, dict) or not payload:
+        return None
+    click_point = _point_xy(payload.get("suggestedClickPoint"))
+    resolved_point = _point_xy(payload.get("resolvedScreenClickPoint"))
+    proposal = ActionProposal(
+        proposed_action=str(payload.get("proposedAction") or payload.get("action") or "none"),
+        target_kind=str(payload.get("targetKind") or "none"),
+        target_name=str(payload.get("targetName")) if payload.get("targetName") is not None else None,
+        target_tile=_dict(payload.get("targetTile")) or None,
+        suggested_click_point=click_point,
+        click_point_space=str(payload.get("clickPointSpace") or "screen"),
+        resolved_screen_click_point=resolved_point,
+        click_point_resolution=_dict(payload.get("clickPointResolution")) or None,
+        input_geometry=_dict(payload.get("inputGeometry")) or None,
+        suggested_world_tile=_dict(payload.get("suggestedWorldTile")) or None,
+        key_action=_dict(payload.get("keyAction")) or None,
+        target_explanation=_dict(payload.get("targetExplanation")) or None,
+        reason=str(payload.get("reason") or "context_action_proposal"),
+        confidence=float(payload.get("confidence")) if isinstance(payload.get("confidence"), (int, float)) else 0.0,
+        required_context=_list_of_strings(payload.get("requiredContext")),
+        missing_capabilities=_list_of_strings(payload.get("missingCapabilities")),
+        warnings=_list_of_strings(payload.get("warnings")),
+        status=str(payload.get("status") or "PASS"),
+        source_tick=_int_or_none(payload.get("sourceTick")),
+        action_target_source=str(payload.get("actionTargetSource")) if payload.get("actionTargetSource") is not None else None,
+        actionability=str(payload.get("actionability")) if payload.get("actionability") is not None else None,
+    )
+    if isinstance(payload.get("selectedTarget"), dict):
+        proposal.target_explanation = proposal.target_explanation or {}
+        proposal.target_explanation.setdefault("selectedTarget", dict(payload.get("selectedTarget")))
+    return proposal
+
+
+def _inventory_context_from_context_response(context_response: dict[str, Any]) -> dict[str, Any]:
+    inventory = _dict(context_response.get("inventory"))
+    if not inventory:
+        return {}
+    context: dict[str, Any] = {}
+    for key in ("freeSlots", "filledSlots", "inventoryFull", "known"):
+        if key in inventory:
+            context[key] = inventory.get(key)
+    progress: dict[str, Any] = {}
+    for key in ("currentHeldCount", "currentHeldResourceCount", "heldResourceCount", "displayedGoalProgress", "goalProgress"):
+        value = _int_or_none(inventory.get(key))
+        if value is not None:
+            progress[key] = value
+    item_count = None
+    for key in ("normalLogs", "logs", "resourceCount", "logCount"):
+        item_count = _int_or_none(inventory.get(key))
+        if item_count is not None:
+            break
+    item_counts = inventory.get("itemCounts") if isinstance(inventory.get("itemCounts"), dict) else {}
+    if item_count is None:
+        for key in ("1511", 1511, "Logs", "logs"):
+            item_count = _int_or_none(item_counts.get(key))
+            if item_count is not None:
+                break
+    items = inventory.get("items") if isinstance(inventory.get("items"), list) else []
+    if item_count is None and items:
+        total = 0
+        found = False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_id = _int_or_none(item.get("itemId") if item.get("itemId") is not None else item.get("id"))
+            name = str(item.get("name") or item.get("itemName") or "").lower()
+            if item_id == 1511 or name == "logs":
+                total += max(1, _int_or_none(item.get("quantity")) or 1)
+                found = True
+        if found:
+            item_count = total
+    if item_count is not None:
+        progress.setdefault("currentHeldCount", item_count)
+        progress.setdefault("currentHeldResourceCount", item_count)
+        progress.setdefault("displayedGoalProgress", item_count)
+    if progress:
+        context["progress"] = progress
+    return context
+
+
+def _target_from_context_action_proposal(proposal_payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(proposal_payload, dict) or not proposal_payload:
+        return {}
+    explanation = _dict(proposal_payload.get("targetExplanation"))
+    target = dict(explanation) if explanation else {}
+    if not target:
+        selected = _dict(proposal_payload.get("selectedTarget"))
+        if selected:
+            target.update(selected)
+    name = proposal_payload.get("targetName") or target.get("targetName") or target.get("name")
+    if name is not None:
+        target.setdefault("targetName", name)
+        target.setdefault("name", name)
+    if proposal_payload.get("targetKind") is not None:
+        target.setdefault("targetType", proposal_payload.get("targetKind"))
+    if proposal_payload.get("sourceTick") is not None:
+        target.setdefault("sourceTick", proposal_payload.get("sourceTick"))
+        target.setdefault("tick", proposal_payload.get("sourceTick"))
+    for source_key in ("suggestedClickPoint", "aimPoint", "canvasAimPoint", "rawAimPoint"):
+        value = proposal_payload.get(source_key) if source_key == "suggestedClickPoint" else target.get(source_key)
+        point = _point_xy(value)
+        if point:
+            target.setdefault("aimPoint", {"x": point["x"], "y": point["y"]})
+            break
+    safe = _dict(target.get("safeAimPoint"))
+    if safe:
+        target["safeAimPoint"] = safe
+        if safe.get("status") == "PASS":
+            target.setdefault("geometryAvailable", True)
+            target.setdefault("onScreen", True)
+    if proposal_payload.get("actionTargetSource") is not None:
+        target.setdefault("actionTargetSource", proposal_payload.get("actionTargetSource"))
+    if proposal_payload.get("actionability") is not None:
+        target.setdefault("actionability", proposal_payload.get("actionability"))
+    return target
+
+
+def _merge_context_response_into_status(status: dict[str, Any], context_response: dict[str, Any]) -> dict[str, Any]:
+    enriched = deepcopy(status if isinstance(status, dict) else {})
+    context = context_response if isinstance(context_response, dict) else {}
+    enriched["contextServiceResponse"] = context
+    debug = _dict(context.get("knowledgeCurrentDebugContext"))
+    debug_data = _dict(debug.get("data"))
+    live_status = _dict(debug_data.get("liveStatus") or context.get("liveStatus"))
+    if live_status:
+        for key in ("sessionPath", "latestTick", "latestExportSeq", "inputSourceActive", "profile", "activeProfile"):
+            if enriched.get(key) is None and live_status.get(key) is not None:
+                enriched[key] = live_status.get(key)
+    for key in ("latestTick", "latestExportSeq", "sourceAgeMs"):
+        if enriched.get(key) is None and context.get(key) is not None:
+            enriched[key] = context.get(key)
+    brain = dict(enriched.get("brain")) if isinstance(enriched.get("brain"), dict) else {}
+    inventory_context = _inventory_context_from_context_response(context)
+    if inventory_context:
+        brain["inventoryContext"] = inventory_context
+        enriched["inventoryContext"] = inventory_context
+    if isinstance(context.get("bankState"), dict):
+        brain["bankUiContext"] = dict(context.get("bankState"))
+        enriched["bankUiContext"] = dict(context.get("bankState"))
+    if isinstance(context.get("routeMonitor"), dict):
+        brain["routeMonitorContext"] = dict(context.get("routeMonitor"))
+        enriched["routeMonitorContext"] = dict(context.get("routeMonitor"))
+    proposal_payload = _context_action_proposal_payload(context)
+    if proposal_payload:
+        brain["contextActionProposal"] = proposal_payload
+        enriched["contextActionProposal"] = proposal_payload
+        if isinstance(proposal_payload.get("inputGeometry"), dict) and not enriched.get("inputGeometry"):
+            enriched["inputGeometry"] = dict(proposal_payload.get("inputGeometry"))
+        target = _target_from_context_action_proposal(proposal_payload)
+        if target:
+            generic = dict(brain.get("genericTaskState")) if isinstance(brain.get("genericTaskState"), dict) else {}
+            generic.setdefault("phase", "target_selected")
+            generic.setdefault("activeIntent", "select_target")
+            generic.setdefault("activeIntentTarget", target)
+            brain["genericTaskState"] = generic
+            overlay = dict(brain.get("intentOverlayContext")) if isinstance(brain.get("intentOverlayContext"), dict) else {}
+            overlay.setdefault("selectedMarker", target)
+            overlay.setdefault("markers", [dict(target, markerType="selected_target")])
+            brain["intentOverlayContext"] = overlay
+    if brain:
+        enriched["brain"] = brain
+    return enriched
+
+
+def _plugin_snapshot_payload(snapshot: dict[str, Any], need: str) -> dict[str, Any]:
+    payloads = _dict(snapshot.get("payloads"))
+    payload = _dict(payloads.get(need))
+    if payload:
+        return payload
+    return _dict(snapshot.get(need))
+
+
+def _plugin_snapshot_inventory_context(snapshot: dict[str, Any]) -> dict[str, Any]:
+    inventory_payload = _plugin_snapshot_payload(snapshot, "inventory")
+    inventory = _dict(inventory_payload.get("inventory") or inventory_payload)
+    if not inventory:
+        return {}
+    context: dict[str, Any] = {}
+    for key in ("freeSlots", "filledSlots", "inventoryFull", "known", "slotCount", "occupiedSlots"):
+        if inventory.get(key) is not None:
+            context[key] = inventory.get(key)
+    free_slots = _int_or_none(context.get("freeSlots"))
+    if free_slots is not None:
+        context.setdefault("inventoryFull", free_slots <= 0)
+    totals = _dict(inventory.get("totalQuantityByItemId") or inventory.get("itemCounts"))
+    normal_logs = _int_or_none(totals.get("1511") if totals.get("1511") is not None else totals.get(1511))
+    oak_logs = _int_or_none(totals.get("1521") if totals.get("1521") is not None else totals.get(1521))
+    if normal_logs is None or oak_logs is None:
+        normal_total = 0
+        oak_total = 0
+        saw_normal = False
+        saw_oak = False
+        for item in inventory.get("items") if isinstance(inventory.get("items"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            item_id = _int_or_none(item.get("itemId") if item.get("itemId") is not None else item.get("id"))
+            quantity = max(1, _int_or_none(item.get("quantity")) or 1)
+            if item_id == 1511:
+                normal_total += quantity
+                saw_normal = True
+            elif item_id == 1521:
+                oak_total += quantity
+                saw_oak = True
+        if normal_logs is None and saw_normal:
+            normal_logs = normal_total
+        if oak_logs is None and saw_oak:
+            oak_logs = oak_total
+    woodcutting_logs = (normal_logs or 0) + (oak_logs or 0)
+    progress: dict[str, Any] = {}
+    if woodcutting_logs:
+        progress["currentHeldCount"] = woodcutting_logs
+        progress["currentHeldResourceCount"] = woodcutting_logs
+        progress["displayedGoalProgress"] = woodcutting_logs
+        progress["woodcuttingLogCount"] = woodcutting_logs
+    if normal_logs is not None:
+        progress["normalLogs"] = normal_logs
+    if oak_logs is not None:
+        progress["oakLogs"] = oak_logs
+    if inventory.get("signature") is not None:
+        progress["currentInventorySignature"] = inventory.get("signature")
+    if progress:
+        context["progress"] = progress
+    context["source"] = "plugin_snapshot_inventory"
+    return context
+
+
+def _plugin_snapshot_player_context(snapshot: dict[str, Any]) -> dict[str, Any]:
+    baseline = _plugin_snapshot_payload(snapshot, "baseline")
+    player = _dict(baseline.get("player"))
+    if not player:
+        return {}
+    context = dict(player)
+    world_x = _int_or_none(context.get("worldX"))
+    world_y = _int_or_none(context.get("worldY"))
+    plane = _int_or_none(context.get("plane"))
+    if world_x is not None and world_y is not None:
+        context["worldTile"] = {"worldX": world_x, "worldY": world_y, "plane": plane}
+    context["source"] = "plugin_snapshot_baseline"
+    return context
+
+
+def _plugin_snapshot_activity_context(snapshot: dict[str, Any]) -> dict[str, Any]:
+    activity = _plugin_snapshot_payload(snapshot, "activity")
+    if not activity:
+        return {}
+    context = dict(activity)
+    context["source"] = "plugin_snapshot_activity"
+    return context
+
+
+def _plugin_snapshot_resource_candidates(snapshot: dict[str, Any], *, limit: int = 24) -> list[dict[str, Any]]:
+    projection = _plugin_snapshot_payload(snapshot, "projection")
+    candidates: list[dict[str, Any]] = []
+    for value in projection.get("visibleObjectRefs") if isinstance(projection.get("visibleObjectRefs"), list) else []:
+        if not isinstance(value, dict):
+            continue
+        name = str(value.get("name") or value.get("targetName") or "").strip()
+        actions = [str(item).strip() for item in value.get("actions") if str(item).strip()] if isinstance(value.get("actions"), list) else []
+        action_text = " ".join(actions).lower()
+        name_text = name.lower()
+        if "chop down" not in action_text and "tree" not in name_text and "oak" not in name_text:
+            continue
+        candidate = dict(value)
+        candidate["targetName"] = candidate.get("targetName") or name or "Tree"
+        candidate["classId"] = candidate.get("classId") or ("oak_tree" if "oak" in name_text else "tree")
+        candidate["targetType"] = candidate.get("targetType") or "sceneObject"
+        candidate["actionTargetSource"] = candidate.get("actionTargetSource") or "plugin_snapshot_projection"
+        candidate["sourceTick"] = candidate.get("sourceTick") or snapshot.get("latestTick")
+        candidate["tick"] = candidate.get("tick") or snapshot.get("latestTick")
+        if candidate.get("aimPoint") is not None and candidate.get("suggestedClickPoint") is None:
+            candidate["suggestedClickPoint"] = candidate.get("aimPoint")
+        candidates.append(candidate)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def _plugin_snapshot_route_transition_candidates(snapshot: dict[str, Any], *, limit: int = 8) -> list[dict[str, Any]]:
+    projection = _plugin_snapshot_payload(snapshot, "projection")
+    candidates: list[dict[str, Any]] = []
+    transition_names = ("ladder", "stair", "staircase", "stairs", "trapdoor", "door", "gate", "bank", "booth", "banker", "deposit")
+    preferred_actions = ("climb", "bank", "deposit", "use", "open", "enter", "exit")
+    negative_only_actions = {"close", "examine", "cancel"}
+    for value in projection.get("visibleObjectRefs") if isinstance(projection.get("visibleObjectRefs"), list) else []:
+        if not isinstance(value, dict):
+            continue
+        name = str(value.get("name") or value.get("targetName") or "").strip()
+        actions = [str(item).strip() for item in value.get("actions") if str(item).strip()] if isinstance(value.get("actions"), list) else []
+        name_text = name.lower()
+        action_text = " ".join(actions).lower()
+        if not any(term in name_text for term in transition_names):
+            continue
+        actionable = [action for action in actions if action.strip().lower() not in negative_only_actions]
+        if not any(term in action_text for term in preferred_actions):
+            continue
+        if not actionable:
+            continue
+        candidate = dict(value)
+        candidate["targetName"] = candidate.get("targetName") or name or "Route transition"
+        candidate["classId"] = candidate.get("classId") or (
+            "bank_service" if any(term in name_text or term in action_text for term in ("bank", "booth", "banker", "deposit")) else "service_route_transition"
+        )
+        candidate["targetType"] = candidate.get("targetType") or "sceneObject"
+        candidate["actions"] = actions
+        candidate["expectedOptions"] = actionable
+        candidate["expectedTargets"] = [name] if name else []
+        candidate["routeStepType"] = "service_interact" if candidate["classId"] == "bank_service" else "interact_object"
+        candidate["routeStepLabel"] = candidate["targetName"]
+        candidate["actionTargetSource"] = candidate.get("actionTargetSource") or "plugin_snapshot_projection"
+        candidate["source"] = candidate.get("source") or "plugin_snapshot_projection"
+        candidate["sourceTick"] = candidate.get("sourceTick") or snapshot.get("latestTick")
+        candidate["tick"] = candidate.get("tick") or snapshot.get("latestTick")
+        candidate["verifiedLive"] = True
+        candidate["routeRelevance"] = {
+            "schema": "route_relevance.v1",
+            "candidateName": candidate["targetName"],
+            "candidateActions": actionable,
+            "relevanceStatus": "PASS",
+            "rejectionReason": None,
+            "candidateWouldAdvanceRoute": True,
+            "source": "plugin_snapshot_projection",
+        }
+        if candidate.get("aimPoint") is not None and candidate.get("suggestedClickPoint") is None:
+            candidate["suggestedClickPoint"] = candidate.get("aimPoint")
+        candidates.append(candidate)
+        if len(candidates) >= limit:
+            break
+    candidates.sort(
+        key=lambda item: (
+            0 if any("climb" in str(action).lower() for action in item.get("actions") or []) else 1,
+            0 if any(term in str(item.get("targetName") or "").lower() for term in ("ladder", "stair", "trapdoor")) else 1,
+            str(item.get("targetName") or ""),
+        )
+    )
+    return candidates
+
+
+def _inventory_context_full(inventory_context: dict[str, Any], status: dict[str, Any]) -> bool:
+    if _bool_or_none(inventory_context.get("inventoryFull")) is True:
+        return True
+    free_slots = _int_or_none(inventory_context.get("freeSlots"))
+    if free_slots == 0:
+        return True
+    existing = _dict(_dict(status.get("brain")).get("inventoryContext") or status.get("inventoryContext"))
+    if _bool_or_none(existing.get("inventoryFull")) is True:
+        return True
+    free_slots = _int_or_none(existing.get("freeSlots") if existing else status.get("inventoryFreeSlots"))
+    return free_slots == 0
+
+
+def _snapshot_tick_newer_or_equal(snapshot_tick: int | None, status_tick: int | None) -> bool:
+    if snapshot_tick is None:
+        return False
+    if status_tick is None:
+        return True
+    return snapshot_tick >= status_tick
+
+
+def _merge_plugin_snapshot_into_status(status: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(status, dict) or not isinstance(snapshot, dict):
+        return status
+    hot = snapshot.get("clientTickHot") if isinstance(snapshot.get("clientTickHot"), dict) else {}
+    payloads = _dict(snapshot.get("payloads"))
+    if not hot:
+        hot = _dict(payloads.get("interaction_hot"))
+    snapshot_tick = _int_or_none(snapshot.get("latestTick"))
+    status_tick = _int_or_none(status.get("latestTick"))
+    enriched = dict(status)
+    if hot:
+        enriched["clientTickHot"] = hot
+        if hot.get("sessionPath") is not None:
+            enriched["sessionPath"] = hot.get("sessionPath")
+    if _snapshot_tick_newer_or_equal(snapshot_tick, status_tick):
+        enriched["latestTick"] = snapshot_tick
+    if snapshot.get("freshness") is not None:
+        enriched["pluginSnapshotFreshness"] = snapshot.get("freshness")
+    enriched["pluginSnapshotAgeMillis"] = snapshot.get("maxCacheAgeMillis") or _dict(snapshot.get("freshness")).get("maxCacheAgeMillis") or snapshot.get("snapshotAgeMillis")
+    brain = dict(enriched.get("brain")) if isinstance(enriched.get("brain"), dict) else {}
+    inventory_context = _plugin_snapshot_inventory_context(snapshot)
+    if inventory_context:
+        brain["inventoryContext"] = inventory_context
+        enriched["inventoryContext"] = inventory_context
+    player_context = _plugin_snapshot_player_context(snapshot)
+    if player_context:
+        brain["playerContext"] = player_context
+        enriched["playerContext"] = player_context
+        world_tile = _dict(player_context.get("worldTile"))
+        if world_tile:
+            enriched["playerLocation"] = dict(world_tile)
+            enriched["playerLocationSource"] = "plugin_snapshot_baseline"
+    activity_context = _plugin_snapshot_activity_context(snapshot)
+    if activity_context:
+        brain["activityContext"] = activity_context
+        enriched["activityContext"] = activity_context
+        animation = _int_or_none(activity_context.get("animation"))
+        if animation is not None:
+            enriched["playerAnimation"] = animation
+            if animation == 879:
+                enriched["latestEventSummary"] = "Player animation changed: 879"
+        generic = dict(brain.get("genericTaskState")) if isinstance(brain.get("genericTaskState"), dict) else {}
+        if generic.get("phase") == "blocked" and animation is not None:
+            generic["phase"] = "target_selected" if animation == 879 else "observe"
+            generic["activeIntent"] = "continue_current_target" if animation == 879 else "observe"
+            generic["blockingConditions"] = []
+            brain["genericTaskState"] = generic
+    resource_candidates = _plugin_snapshot_resource_candidates(snapshot)
+    if resource_candidates:
+        existing_candidates = [item for item in brain.get("candidateTargets") if isinstance(item, dict)] if isinstance(brain.get("candidateTargets"), list) else []
+        brain["candidateTargets"] = [*resource_candidates, *existing_candidates]
+        brain["profileCandidates"] = brain["candidateTargets"]
+        enriched["candidateTargets"] = brain["candidateTargets"]
+        if not _dict(brain.get("genericTaskState")).get("activeIntentTarget"):
+            generic = dict(brain.get("genericTaskState")) if isinstance(brain.get("genericTaskState"), dict) else {}
+            generic.setdefault("phase", "target_selected")
+            generic.setdefault("activeIntent", "select_target")
+            generic["activeIntentTarget"] = dict(resource_candidates[0])
+            brain["genericTaskState"] = generic
+    route_candidates = _plugin_snapshot_route_transition_candidates(snapshot)
+    if route_candidates and _inventory_context_full(inventory_context, enriched):
+        route_context = dict(brain.get("serviceRouteContext")) if isinstance(brain.get("serviceRouteContext"), dict) else {}
+        if not _dict(route_context.get("visibleInteractionTarget") or route_context.get("visibleServiceTarget") or route_context.get("selectedServiceObject")):
+            selected_route_candidate = dict(route_candidates[0])
+            step_type = str(selected_route_candidate.get("routeStepType") or "interact_object")
+            route_context.update(
+                {
+                    "schema": route_context.get("schema") or "service_route_context.v1",
+                    "routeId": route_context.get("routeId") or "plugin_snapshot_route_to_service",
+                    "routeStepStatus": "plugin_snapshot_route_transition_visible",
+                    "actionReady": True,
+                    "currentStepIndex": route_context.get("currentStepIndex", 0),
+                    "currentStep": {
+                        "type": step_type,
+                        "label": selected_route_candidate.get("targetName") or "Route transition",
+                        "expectedOptions": list(selected_route_candidate.get("expectedOptions") or selected_route_candidate.get("actions") or []),
+                        "expectedTargetContains": list(selected_route_candidate.get("expectedTargets") or [selected_route_candidate.get("targetName")]),
+                    },
+                    "visibleInteractionTarget": selected_route_candidate if step_type != "service_interact" else route_context.get("visibleInteractionTarget"),
+                    "visibleServiceTarget": selected_route_candidate if step_type == "service_interact" else route_context.get("visibleServiceTarget"),
+                    "pluginSnapshotRouteTransitionCandidates": route_candidates,
+                    "source": "plugin_snapshot_projection",
+                }
+            )
+            brain["serviceRouteContext"] = route_context
+            enriched["serviceRouteContext"] = route_context
+            service_context = dict(brain.get("serviceContext")) if isinstance(brain.get("serviceContext"), dict) else {}
+            service_context.setdefault("serviceNeeded", True)
+            service_context.setdefault("serviceRequired", True)
+            service_context.setdefault("serviceReady", False)
+            service_context["serviceRouteContext"] = route_context
+            brain["serviceContext"] = service_context
+            enriched["serviceContext"] = service_context
+    if brain:
+        enriched["brain"] = brain
+    return enriched
+
+
+def _context_fallback_task(options: Any) -> str:
+    task = getattr(options, "task", None) or getattr(options, "eval_task", None) or "woodcutting"
+    normalized = str(task or "woodcutting").strip().lower()
+    if "woodcutting" in normalized:
+        return "woodcutting"
+    return normalized or "woodcutting"
+
+
+def _proposal_needs_context_fallback(proposal: ActionProposal) -> bool:
+    return proposal.proposed_action in {"none", "wait_for_context"} or not proposal.executable
+
+
+def _context_navigation_proposal_is_stale(proposal: ActionProposal | None) -> bool:
+    if proposal is None:
+        return False
+    if proposal.proposed_action not in NAVIGATION_ACTIONS and proposal.target_kind != "path_tile":
+        return False
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    freshness = explanation.get("freshness") if isinstance(explanation.get("freshness"), dict) else {}
+    if freshness.get("stale") is True:
+        return True
+    if str(freshness.get("status") or "").strip().lower() == "stale":
+        return True
+    if str(freshness.get("targetCandidateFreshness") or "").strip().lower() == "stale":
+        return True
+    age_ms = _int_or_none(freshness.get("daemonStatusAgeMillis"))
+    if age_ms is not None and age_ms > 10_000:
+        return True
+    return False
+
+
+def _status_without_context_action_proposal(status: dict[str, Any]) -> dict[str, Any]:
+    fresh = deepcopy(status if isinstance(status, dict) else {})
+    fresh.pop("contextActionProposal", None)
+    brain = dict(fresh.get("brain")) if isinstance(fresh.get("brain"), dict) else {}
+    brain.pop("contextActionProposal", None)
+    brain.pop("intentOverlayContext", None)
+    generic = dict(brain.get("genericTaskState")) if isinstance(brain.get("genericTaskState"), dict) else {}
+    active_target = generic.get("activeIntentTarget")
+    if isinstance(active_target, dict) and active_target.get("sourceTick") is not None:
+        generic.pop("activeIntentTarget", None)
+    if generic:
+        brain["genericTaskState"] = generic
+    if brain:
+        fresh["brain"] = brain
+    return fresh
+
+
+def _maybe_context_action_proposal(
+    daemon_url: str,
+    options: Any,
+    status: dict[str, Any],
+    proposal: ActionProposal,
+    *,
+    timeout: float,
+) -> tuple[dict[str, Any], ActionProposal, dict[str, Any] | None]:
+    if not _proposal_needs_context_fallback(proposal):
+        return status, proposal, None
+    fallback: dict[str, Any] = {
+        "schema": "context_action_fallback.v1",
+        "status": "MISS",
+        "originalAction": proposal.proposed_action,
+        "originalReason": proposal.reason,
+    }
+    try:
+        context_response = fetch_action_context(daemon_url, timeout=min(max(timeout, 0.2), 1.5), task=_context_fallback_task(options))
+    except Exception as error:  # noqa: BLE001
+        fallback.update(
+            {
+                "status": "FAIL",
+                "reason": "context_unavailable",
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+        proposal.warnings.append(f"context action fallback unavailable: {fallback['error']}")
+        if "context.action_proposal" not in proposal.missing_capabilities:
+            proposal.missing_capabilities.append("context.action_proposal")
+        proposal.target_explanation = proposal.target_explanation or {}
+        proposal.target_explanation["contextActionFallback"] = fallback
+        return status, proposal, fallback
+    enriched_status = _merge_context_response_into_status(status, context_response)
+    payload = _context_action_proposal_payload(context_response)
+    context_proposal = _proposal_from_context_payload(payload)
+    if context_proposal is None:
+        fallback.update(
+            {
+                "status": "MISS",
+                "reason": "context_action_proposal_missing",
+                "contextStatus": context_response.get("status"),
+            }
+        )
+        proposal.target_explanation = proposal.target_explanation or {}
+        proposal.target_explanation["contextActionFallback"] = fallback
+        return enriched_status, proposal, fallback
+    if not context_proposal.executable:
+        fresh_status = _status_without_context_action_proposal(enriched_status)
+        fresh_status_proposal = build_action_proposal(fresh_status)
+        if (
+            _status_inventory_full(enriched_status) is True
+            and fresh_status_proposal.proposed_action == "select_resource_target"
+        ):
+            fallback.update(
+                {
+                    "status": "WARN",
+                    "reason": "context_action_proposal_rejected_inventory_full",
+                    "contextStatus": context_response.get("status"),
+                    "contextProposalAction": context_proposal.proposed_action,
+                    "contextProposalExecutable": False,
+                    "freshProposalAction": fresh_status_proposal.proposed_action,
+                    "freshProposalExecutable": bool(fresh_status_proposal.executable),
+                }
+            )
+            proposal.warnings.append(
+                "fresh status/plugin state proposed resource collection while inventory is full; keeping route/bank blocker"
+            )
+            proposal.target_explanation = proposal.target_explanation or {}
+            proposal.target_explanation["contextActionFallback"] = fallback
+            return enriched_status, proposal, fallback
+        if fresh_status_proposal.executable:
+            fallback.update(
+                {
+                    "status": "WARN",
+                    "reason": "context_action_proposal_rejected_non_executable",
+                    "contextStatus": context_response.get("status"),
+                    "contextProposalAction": context_proposal.proposed_action,
+                    "contextProposalExecutable": False,
+                    "freshProposalAction": fresh_status_proposal.proposed_action,
+                    "freshProposalExecutable": True,
+                }
+            )
+            fresh_status_proposal.target_explanation = fresh_status_proposal.target_explanation or {}
+            fresh_status_proposal.target_explanation["contextActionFallback"] = fallback
+            fresh_status_proposal.warnings = list(
+                dict.fromkeys(
+                    fresh_status_proposal.warnings
+                    + ["non-executable context action fallback rejected; using fresh status/plugin state"]
+                )
+            )
+            return enriched_status, fresh_status_proposal, fallback
+    if _context_navigation_proposal_is_stale(context_proposal):
+        fresh_status = _status_without_context_action_proposal(enriched_status)
+        fresh_status_proposal = build_action_proposal(fresh_status)
+        fallback.update(
+            {
+                "status": "WARN",
+                "reason": "context_action_proposal_rejected_stale_navigation",
+                "contextStatus": context_response.get("status"),
+                "contextProposalAction": context_proposal.proposed_action,
+                "contextProposalExecutable": bool(context_proposal.executable),
+                "freshProposalAction": fresh_status_proposal.proposed_action,
+                "freshProposalExecutable": bool(fresh_status_proposal.executable),
+            }
+        )
+        selected = fresh_status_proposal if fresh_status_proposal.executable else proposal
+        selected.target_explanation = selected.target_explanation or {}
+        selected.target_explanation["contextActionFallback"] = fallback
+        selected.warnings = list(
+            dict.fromkeys(
+                selected.warnings
+                + ["stale context navigation fallback rejected; using fresh status/plugin state"]
+            )
+        )
+        return enriched_status, selected, fallback
+    if (
+        _status_inventory_full(enriched_status) is True
+        and context_proposal.proposed_action == "select_resource_target"
+        and str(proposal.reason or "") == "inventory_full_route_context_missing"
+    ):
+        fallback.update(
+            {
+                "status": "WARN",
+                "reason": "context_action_proposal_rejected_inventory_full",
+                "contextStatus": context_response.get("status"),
+                "contextProposalAction": context_proposal.proposed_action,
+                "contextProposalExecutable": bool(context_proposal.executable),
+            }
+        )
+        proposal.warnings.append(
+            "context action fallback proposed resource collection while inventory is full; keeping route/bank blocker"
+        )
+        proposal.target_explanation = proposal.target_explanation or {}
+        proposal.target_explanation["contextActionFallback"] = fallback
+        return enriched_status, proposal, fallback
+    fallback.update(
+        {
+            "status": "PASS" if context_proposal.executable else "WARN",
+            "reason": "context_action_proposal_used" if context_proposal.executable else "context_action_proposal_not_executable",
+            "contextStatus": context_response.get("status"),
+            "contextProposalAction": context_proposal.proposed_action,
+            "contextProposalExecutable": bool(context_proposal.executable),
+        }
+    )
+    context_proposal.target_explanation = context_proposal.target_explanation or {}
+    context_proposal.target_explanation["contextActionFallback"] = fallback
+    context_proposal.warnings = list(dict.fromkeys(context_proposal.warnings + ["proposal sourced from context_service action fallback"]))
+    return enriched_status, context_proposal, fallback
+
+
+def _fetch_status_or_action_context(
+    daemon_url: str,
+    options: Any,
+    *,
+    fetch_json_func=fetch_json,
+    timeout: float = 3.0,
+    purpose: str = "status",
+) -> dict[str, Any]:
+    def attach_plugin_hot(payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return payload
+        try:
+            snapshot = fetch_plugin_snapshot(
+                str(getattr(options, "snapshot_url", "http://127.0.0.1:8893")),
+                timeout=min(max(timeout, 0.2), 1.0),
+                extra_needs=["inventory", "activity", "projection"],
+            )
+        except Exception:
+            return payload
+        return _merge_plugin_snapshot_into_status(payload, snapshot)
+
+    try:
+        status = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
+        if isinstance(status, dict):
+            try:
+                context_response = fetch_action_context(
+                    daemon_url,
+                    timeout=min(max(timeout, 0.2), 1.5),
+                    task=_context_fallback_task(options),
+                )
+                proposal_payload = _context_action_proposal_payload(context_response)
+                context_proposal = _proposal_from_context_payload(proposal_payload)
+                status_proposal = build_action_proposal(status)
+                should_enrich = bool(
+                context_proposal is not None
+                and context_proposal.executable
+                and not _context_navigation_proposal_is_stale(context_proposal)
+                and (
+                    not status.get("sessionPath")
+                    or not _dict(status.get("inputGeometry")).get("inputGeometryAvailable")
+                        or not status_proposal.executable
+                    )
+                )
+                if should_enrich:
+                    enriched = _merge_context_response_into_status(status, context_response)
+                    fallback = dict(enriched.get("daemonStatusFallback") or {})
+                    fallback.update(
+                        {
+                            "schema": "daemon_status_fallback.v1",
+                            "status": "PASS",
+                            "purpose": purpose,
+                            "source": "action_summary_or_context",
+                            "statusEndpointReason": "status_payload_missing_action_context",
+                        }
+                    )
+                    enriched["daemonStatusFallback"] = fallback
+                    return attach_plugin_hot(enriched)
+            except Exception:
+                pass
+            return attach_plugin_hot(status)
+    except Exception as status_error:  # noqa: BLE001
+        try:
+            context_response = fetch_action_context(
+                daemon_url,
+                timeout=min(max(timeout, 0.2), 1.5),
+                task=_context_fallback_task(options),
+            )
+        except Exception as context_error:  # noqa: BLE001
+            snapshot = fetch_plugin_snapshot(
+                str(getattr(options, "snapshot_url", "http://127.0.0.1:8893")),
+                timeout=min(max(timeout, 0.2), 1.0),
+                extra_needs=["inventory", "activity", "projection"],
+            )
+            enriched = _merge_plugin_snapshot_into_status(
+                {
+                    "schema": "plugin_snapshot_status_fallback.v1",
+                    "status": "WARN",
+                    "daemonStatusFallback": {
+                        "schema": "daemon_status_fallback.v1",
+                        "status": "WARN",
+                        "purpose": purpose,
+                        "source": "plugin_snapshot",
+                        "statusEndpointError": f"{type(status_error).__name__}: {status_error}",
+                        "contextEndpointError": f"{type(context_error).__name__}: {context_error}",
+                    },
+                },
+                snapshot,
+            )
+            warnings = list(enriched.get("warnings") or [])
+            warnings.append(
+                f"daemon status and compact action context unavailable; using plugin snapshot: "
+                f"{type(status_error).__name__}: {status_error}; {type(context_error).__name__}: {context_error}"
+            )
+            enriched["warnings"] = list(dict.fromkeys(str(item) for item in warnings if item is not None))
+            return enriched
+        enriched = _merge_context_response_into_status(
+            {
+                "schema": "context_status_fallback.v1",
+                "status": "WARN",
+                "daemonStatusFallback": {
+                    "schema": "daemon_status_fallback.v1",
+                    "status": "PASS",
+                    "purpose": purpose,
+                    "source": "action_summary_or_context",
+                    "statusEndpointError": f"{type(status_error).__name__}: {status_error}",
+                },
+            },
+            context_response,
+        )
+        warnings = list(enriched.get("warnings") or [])
+        warnings.extend(str(item) for item in context_response.get("warnings") or [] if item is not None)
+        warnings.append(f"daemon status endpoint unavailable; using compact action context: {type(status_error).__name__}: {status_error}")
+        enriched["warnings"] = list(dict.fromkeys(str(item) for item in warnings if item is not None))
+        return attach_plugin_hot(enriched)
+    return {}
 
 
 def _status_phase_intent(status: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -1984,6 +2977,15 @@ def _navigation_not_executed_observation(result: ExecutionResult) -> dict[str, A
     result.observed_result = observed
     result.verification_status = str(observed.get("verificationStatus") or result.verification_status or "UNKNOWN")
     return observed
+
+
+def _navigation_not_executed_allows_retry(observed: dict[str, Any] | None) -> bool:
+    observed = observed if isinstance(observed, dict) else {}
+    return bool(
+        observed.get("observedResult") in {"no_click_safety_skip", "hover_confirm_timeout"}
+        and observed.get("resultOutcome") == "skipped"
+        and observed.get("nextActionAllowed") is True
+    )
 
 
 def _result_has_click_command(result: ExecutionResult) -> bool:
@@ -3423,7 +4425,13 @@ def _maybe_final_reconcile(
     last_observed: dict[str, Any] | None = None
     while True:
         try:
-            latest_status = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
+            latest_status = _fetch_status_or_action_context(
+                daemon_url,
+                options,
+                fetch_json_func=fetch_json_func,
+                timeout=timeout,
+                purpose="final_reconcile",
+            )
         except Exception:  # noqa: BLE001
             return
         sample_now = _safe_monotonic(monotonic_func)
@@ -3488,7 +4496,13 @@ def _verify_action_after_execution(
     progress_min_distance = _nav_progress_min_distance(options) if nav_action else None
     if not nav_action and not path_to_interact_action:
         try:
-            after_status = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
+            after_status = _fetch_status_or_action_context(
+                daemon_url,
+                options,
+                fetch_json_func=fetch_json_func,
+                timeout=timeout,
+                purpose="post_action_verification",
+            )
         except Exception:
             raise
         observed = verify_expected_result(
@@ -3529,7 +4543,13 @@ def _verify_action_after_execution(
     last_status: dict[str, Any] | None = None
     last_observed: dict[str, Any] | None = None
     while True:
-        last_status = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
+        last_status = _fetch_status_or_action_context(
+            daemon_url,
+            options,
+            fetch_json_func=fetch_json_func,
+            timeout=timeout,
+            purpose="post_action_navigation_verification",
+        )
         now_value = _safe_monotonic(monotonic_func)
         elapsed_ms = wait_ms + int(max(0.0, (now_value if now_value is not None else start) - start) * 1000)
         observed = verify_expected_result(
@@ -3986,8 +5006,6 @@ def _route_stability_issue(
             ],
         }
     if recent_waypoints and key == recent_waypoints[-1]:
-        if _navigation_progress_observed(last_result):
-            return None
         current_player_tile = _status_player_tile(current_status)
         distance_to_repeated_waypoint = _tile_distance(current_player_tile, proposal.target_tile)
         if distance_to_repeated_waypoint is not None and distance_to_repeated_waypoint <= 1:
@@ -4007,6 +5025,8 @@ def _route_stability_issue(
                     for item in recent_waypoints[-4:]
                 ],
             }
+        if _navigation_progress_observed(last_result):
+            return None
         block_evidence = _navigation_block_evidence(status=current_status, result=last_result)
         if not block_evidence:
             return {
@@ -4036,6 +5056,97 @@ def _route_stability_issue(
     return None
 
 
+def _transition_direction(value: Any) -> str | None:
+    text = str(value or "").strip().lower().replace("_", "-")
+    if "climb-up" in text or "climb up" in text or text in {"up", "go-up", "go up"}:
+        return "up"
+    if "climb-down" in text or "climb down" in text or text in {"down", "go-down", "go down"}:
+        return "down"
+    return None
+
+
+def _opposite_transition_direction(a: str | None, b: str | None) -> bool:
+    return {a, b} == {"up", "down"}
+
+
+def _proposal_transition_option(proposal: ActionProposal) -> str | None:
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    for key in ("expectedOptions", "actions"):
+        values = explanation.get(key)
+        if isinstance(values, list) and values:
+            return str(values[0])
+    return None
+
+
+def _same_transition_location_without_plane(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    ax = _int_or_none(a.get("worldX") if a.get("worldX") is not None else a.get("x"))
+    ay = _int_or_none(a.get("worldY") if a.get("worldY") is not None else a.get("y"))
+    bx = _int_or_none(b.get("worldX") if b.get("worldX") is not None else b.get("x"))
+    by = _int_or_none(b.get("worldY") if b.get("worldY") is not None else b.get("y"))
+    return ax is not None and ay is not None and ax == bx and ay == by
+
+
+def _route_transition_reverse_issue(
+    proposal: ActionProposal,
+    last_transition: dict[str, Any] | None,
+    *,
+    current_status: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if proposal.proposed_action not in ROUTE_TRANSITION_ACTIONS:
+        return None
+    previous = last_transition if isinstance(last_transition, dict) else {}
+    if not previous:
+        return None
+    previous_direction = _transition_direction(
+        previous.get("expectedAction") or _dict(previous.get("clickedMenuAfter")).get("option")
+    )
+    current_option = _proposal_transition_option(proposal)
+    current_direction = _transition_direction(current_option)
+    if not _opposite_transition_direction(previous_direction, current_direction):
+        return None
+    previous_before = _int_or_none(previous.get("planeBefore"))
+    previous_after = _int_or_none(previous.get("planeAfter"))
+    if previous_before is None or previous_after is None or previous_before == previous_after:
+        return None
+    player_tile = _status_player_tile(current_status)
+    if isinstance(player_tile, dict) and _int_or_none(player_tile.get("plane")) != previous_after:
+        return None
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    current_world = explanation.get("worldLocation") if isinstance(explanation.get("worldLocation"), dict) else proposal.target_tile
+    previous_world = previous.get("worldLocation") if isinstance(previous.get("worldLocation"), dict) else None
+    current_name = str(explanation.get("name") or proposal.target_name or "").strip().lower()
+    previous_name = str(previous.get("objectName") or "").strip().lower()
+    current_route = explanation.get("routeId")
+    previous_route = previous.get("routeId")
+    same_location = _same_transition_location_without_plane(current_world, previous_world)
+    same_named_route = bool(current_name and previous_name and current_name == previous_name and current_route and previous_route and current_route == previous_route)
+    if not same_location and not same_named_route:
+        return None
+    return {
+        "classification": "route_transition_reverse_oscillation_prevented",
+        "oscillationDetected": True,
+        "backtrackingDetected": True,
+        "reason": "proposed route transition would immediately undo the previous plane change",
+        "previousTransition": {
+            "expectedAction": previous.get("expectedAction"),
+            "objectName": previous.get("objectName"),
+            "worldLocation": previous_world,
+            "planeBefore": previous_before,
+            "planeAfter": previous_after,
+            "routeId": previous_route,
+        },
+        "proposedTransition": {
+            "expectedAction": current_option,
+            "objectName": explanation.get("name") or proposal.target_name,
+            "worldLocation": dict(current_world) if isinstance(current_world, dict) else None,
+            "routeId": current_route,
+        },
+        "playerWorldPosition": dict(player_tile) if isinstance(player_tile, dict) else None,
+    }
+
+
 def _executed_navigation_waypoint_key(proposal: ActionProposal, result: ExecutionResult) -> tuple[int, int, int] | None:
     if proposal.proposed_action not in NAVIGATION_ACTIONS:
         return None
@@ -4054,14 +5165,15 @@ def _blocked_by_route_stability_result(
     options: Any,
 ) -> ExecutionResult:
     lifecycle = lifecycle_state_for_proposal(proposal)
-    lifecycle.current_state = "blocked"
+    advance_recommended = issue.get("advanceRecommended") is True
+    lifecycle.current_state = "waiting_for_context" if advance_recommended else "blocked"
     lifecycle.reason = str(issue.get("classification") or "route_stability_blocked")
     lifecycle.warnings = [str(issue.get("reason") or "route navigation stability guard refused this waypoint")]
     observed = {
         "observedResult": issue.get("classification") or "route_stability_blocked",
         "resultOutcome": "skipped",
         "resultComplete": True,
-        "nextActionAllowed": False,
+        "nextActionAllowed": advance_recommended,
         "verificationStatus": "SKIPPED",
         "skipReason": issue.get("classification") or "route_stability_blocked",
     }
@@ -4743,6 +5855,55 @@ def _blocked_by_liveness_recovery_result(options: Any, backend: Any, recovery: d
     return result
 
 
+def _blocked_by_no_executable_result(
+    proposal: ActionProposal,
+    *,
+    status: dict[str, Any],
+    options: Any,
+    reason: str | None = None,
+) -> ExecutionResult:
+    blocker = str(reason or proposal.reason or "no_executable_action")
+    observed = {
+        "schema": "action_observation.v1",
+        "observedResult": blocker,
+        "resultOutcome": "blocked",
+        "resultComplete": False,
+        "nextActionAllowed": False,
+        "verificationStatus": "BLOCKED",
+        "sourceTick": proposal.source_tick or status.get("latestTick"),
+    }
+    lifecycle = ActionLifecycleState(
+        current_state="blocked",
+        last_action=proposal.proposed_action,
+        last_action_tick=proposal.source_tick or status.get("latestTick"),
+        expected_result=expected_result_for_action(proposal.proposed_action),
+        observed_result=observed,
+        attempts=1,
+        max_attempts=max(1, int(getattr(options, "max_actions", 1) or 1)),
+        reason=blocker,
+        warnings=list(proposal.warnings),
+    )
+    result = ExecutionResult(
+        status="FAIL",
+        proposed_action=proposal.proposed_action,
+        dry_run=not bool(getattr(options, "execute", False)),
+        action_id=proposal_action_id(proposal),
+        backend_name=str(getattr(options, "backend", "unknown")),
+        movement_profile=str(getattr(options, "movement_profile", "linear_debug")),
+        proposal=proposal.to_dict(),
+        click_point_resolution=proposal.click_point_resolution,
+        warnings=list(proposal.warnings),
+        missing_capabilities=list(proposal.missing_capabilities),
+        expected_result=lifecycle.expected_result,
+        observed_result=observed,
+        verification_status="BLOCKED",
+    )
+    result.action_trace = _new_action_trace(proposal)
+    result.action_trace["finalClassification"] = blocker
+    _apply_lifecycle(result, lifecycle)
+    return result
+
+
 def _readiness_gate_required(options: Any, proposal: ActionProposal) -> bool:
     if getattr(options, "require_live_readiness", None) is False:
         return False
@@ -4780,7 +5941,13 @@ def _maybe_auto_recover_loaded_scene(
     )
     if recovery.get("status") in {"loaded_scene_ready", "recovered_loaded_scene"}:
         try:
-            refreshed = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
+            refreshed = _fetch_status_or_action_context(
+                daemon_url,
+                options,
+                fetch_json_func=fetch_json_func,
+                timeout=timeout,
+                purpose="post_liveness_recovery",
+            )
         except Exception as error:  # noqa: BLE001
             failed = dict(recovery)
             failed["status"] = "daemon_rebind_failed"
@@ -4827,8 +5994,21 @@ def _wait_until_ready(
             return current_status, current_proposal, last_readiness
         sleep_func(_poll_interval_seconds(options))
         try:
-            current_status = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
+            current_status = _fetch_status_or_action_context(
+                daemon_url,
+                options,
+                fetch_json_func=fetch_json_func,
+                timeout=timeout,
+                purpose="readiness_wait",
+            )
             current_proposal = build_action_proposal(_status_with_navigation_option_overrides(current_status, options))
+            current_status, current_proposal, _fallback = _maybe_context_action_proposal(
+                daemon_url,
+                options,
+                current_status,
+                current_proposal,
+                timeout=timeout,
+            )
         except Exception as error:  # noqa: BLE001
             last_readiness = {
                 "schema": "live_readiness.v2",
@@ -7985,6 +9165,101 @@ def _attach_human_input_trace(result: ExecutionResult, input_controller: HumanIn
     }
 
 
+def human_click_profile_handoff(profile: dict[str, Any] | None, *, activity: str | None = None) -> dict[str, Any]:
+    profile = profile if isinstance(profile, dict) else {}
+    task_profile = {}
+    if activity:
+        task_profile = _dict(_dict(profile.get("taskProfiles")).get(activity) or profile.get("taskProfile"))
+    landing = _dict(profile.get("landing"))
+    clicks = _dict(profile.get("clicks"))
+    camera = _dict(profile.get("camera"))
+    return {
+        "schema": "human_click_profile_executor_handoff.v1",
+        "status": "PASS" if profile and profile.get("status") != "FAIL" else "WARN",
+        "activity": activity,
+        "recordingCount": profile.get("recordingCount"),
+        "clickLanding": {
+            "medianAimDistancePx": landing.get("medianAimDistancePx") or _dict(task_profile.get("clickLandingDistancePx")).get("median"),
+            "p75AimDistancePx": landing.get("p75AimDistancePx") or _dict(task_profile.get("clickLandingDistancePx")).get("p75"),
+            "p90AimDistancePx": landing.get("p90AimDistancePx") or _dict(task_profile.get("clickLandingDistancePx")).get("p90"),
+            "aimDistanceBucketsPx": landing.get("aimDistanceBucketsPx"),
+            "targetRelativeClickCount": clicks.get("targetRelativeClicks") or task_profile.get("targetRelativeClickCount"),
+            "strongOrMediumTargetRate": task_profile.get("strongOrMediumTargetRate"),
+        },
+        "menuBehavior": {
+            "menuRowSelectionCount": clicks.get("menuRowSelectionCount") or task_profile.get("menuRowSelectionCount"),
+            "rightClickMenuOpenCount": clicks.get("rightClickMenuOpenCount") or task_profile.get("rightClickMenuOpenCount"),
+        },
+        "cameraBehavior": {
+            "cameraBeforeClickCount": camera.get("cameraBeforeClickCount"),
+            "cameraBeforeClickFrequency": task_profile.get("cameraBeforeClickFrequency"),
+            "middleMouseDragCount": camera.get("middleMouseDragCount"),
+            "medianCameraToClickMs": camera.get("medianCameraToClickMs"),
+        },
+        "imperfectSuccessfulClickCount": profile.get("imperfectSuccessfulClickCount") or task_profile.get("imperfectSuccessfulClickCount"),
+        "warnings": profile.get("warnings") or [],
+        "missingCapabilities": profile.get("missingCapabilities") or [],
+        "rule": "Advisory only; live execution must still use target/readiness/hover proof before clicking.",
+    }
+
+
+def get_human_click_profile_executor_handoff(profile: dict[str, Any] | None, *, activity: str | None = None) -> dict[str, Any]:
+    return human_click_profile_handoff(profile, activity=activity)
+
+
+def build_click_plan_from_handoff(
+    handoff: dict[str, Any] | None,
+    *,
+    target: dict[str, Any] | None = None,
+    action: str | None = None,
+    activity: str | None = None,
+    readiness: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from input_control import click_planner
+
+    handoff = handoff if isinstance(handoff, dict) else {}
+    profile = {
+        "schema": "human_click_profile_compact.v1",
+        "status": handoff.get("status") or "WARN",
+        "recordingCount": handoff.get("recordingCount"),
+        "landing": {
+            "medianAimDistancePx": _dict(handoff.get("clickLanding")).get("medianAimDistancePx"),
+            "p75AimDistancePx": _dict(handoff.get("clickLanding")).get("p75AimDistancePx"),
+            "p90AimDistancePx": _dict(handoff.get("clickLanding")).get("p90AimDistancePx"),
+            "aimDistanceBucketsPx": _dict(handoff.get("clickLanding")).get("aimDistanceBucketsPx"),
+        },
+        "taskProfile": {
+            "cameraBeforeClickFrequency": _dict(handoff.get("cameraBehavior")).get("cameraBeforeClickFrequency"),
+            "menuRowSelectionCount": _dict(handoff.get("menuBehavior")).get("menuRowSelectionCount"),
+            "rightClickMenuOpenCount": _dict(handoff.get("menuBehavior")).get("rightClickMenuOpenCount"),
+            "strongOrMediumTargetRate": _dict(handoff.get("clickLanding")).get("strongOrMediumTargetRate"),
+        },
+        "camera": {
+            "middleMouseDragCount": _dict(handoff.get("cameraBehavior")).get("middleMouseDragCount"),
+            "medianCameraToClickMs": _dict(handoff.get("cameraBehavior")).get("medianCameraToClickMs"),
+        },
+        "warnings": handoff.get("warnings") or [],
+        "missingCapabilities": handoff.get("missingCapabilities") or [],
+    }
+    source = {
+        "readiness": readiness or {},
+        "humanClickProfile": profile,
+    }
+    return click_planner.build_click_plan(
+        source,
+        target=target or {},
+        action=action,
+        activity=activity or handoff.get("activity"),
+        human_profile=profile,
+    )
+
+
+def compare_center_click_vs_profile_click(plan: dict[str, Any] | None) -> dict[str, Any]:
+    from input_control import click_planner
+
+    return click_planner.compare_center_click_vs_profile_click(plan if isinstance(plan, dict) else {})
+
+
 def _attach_readiness_trace(result: ExecutionResult, readiness: dict[str, Any] | None) -> None:
     if not isinstance(readiness, dict) or not isinstance(result.action_trace, dict):
         return
@@ -8535,6 +9810,48 @@ def execute_action(
         lifecycle.current_state = "blocked"
         lifecycle.reason = "click_point_unavailable"
         _apply_lifecycle(result, lifecycle)
+        _attach_human_input_trace(result, input_controller)
+        return result
+    geometry_validation = validate_screen_point_inside_geometry(
+        screen_point,
+        proposal.input_geometry if isinstance(proposal.input_geometry, dict) and proposal.input_geometry else click_resolution,
+    )
+    if isinstance(result.click_point_resolution, dict):
+        result.click_point_resolution = dict(result.click_point_resolution)
+        result.click_point_resolution["inputGeometryValidation"] = geometry_validation
+    if isinstance(result.action_trace, dict):
+        result.action_trace["inputGeometryStatus"] = geometry_validation.get("inputGeometryStatus")
+        result.action_trace["inputGeometryValidation"] = geometry_validation
+    if not dry_run and geometry_validation.get("status") != "PASS":
+        reason = str(geometry_validation.get("reason") or "input_geometry_invalid")
+        result.status = "FAIL"
+        result.warnings.append(f"input geometry safety blocked click: {reason}")
+        for capability in ("input.geometry", "screen_click_point"):
+            if capability not in result.missing_capabilities:
+                result.missing_capabilities.append(capability)
+        observed = {
+            "observedResult": "no_click_safety_block",
+            "resultOutcome": "blocked",
+            "resultComplete": True,
+            "nextActionAllowed": False,
+            "verificationStatus": "FAIL",
+            "skipReason": reason,
+            "inputGeometryStatus": geometry_validation.get("inputGeometryStatus"),
+            "targetScreenPoint": geometry_validation.get("targetScreenPoint"),
+            "canvasRect": geometry_validation.get("canvasRect"),
+            "clientRect": geometry_validation.get("clientRect"),
+        }
+        result.observed_result = observed
+        result.verification_status = "FAIL"
+        lifecycle = lifecycle_state_for_proposal(proposal)
+        lifecycle.current_state = "blocked"
+        lifecycle.reason = reason
+        lifecycle.observed_result = observed
+        lifecycle.result_complete = True
+        lifecycle.result_outcome = "blocked"
+        lifecycle.next_action_allowed = False
+        _apply_lifecycle(result, lifecycle)
+        _set_trace_final(result, reason)
         _attach_human_input_trace(result, input_controller)
         return result
     if _movement_safety_preflight_failed(movement_safety_preflight):
@@ -9176,6 +10493,57 @@ def execute_action(
             if isinstance(result.hover_confirmation, dict):
                 result.hover_confirmation["preClickConfirmation"] = pre_click_confirmation
             if pre_click_confirmation.get("confirmed") is not True:
+                navigation_walk_entry = _navigation_walk_here_menu_entry(proposal, pre_click_confirmation)
+                if navigation_walk_entry is not None:
+                    if isinstance(result.action_trace, dict):
+                        result.action_trace["navigationWalkHereMenuCandidate"] = dict(navigation_walk_entry)
+                    before_click = pre_click_confirmation.get("lastMenuOptionClickedBefore") if isinstance(pre_click_confirmation.get("lastMenuOptionClickedBefore"), dict) else None
+                    if before_click is None:
+                        before_click = confirmation.get("lastMenuOptionClickedBefore") if isinstance(confirmation.get("lastMenuOptionClickedBefore"), dict) else None
+                    try:
+                        walk_selected = _execute_route_transition_direct_menu_selection(
+                            proposal,
+                            direct_entry=navigation_walk_entry,
+                            screen_point=screen_point,
+                            plan=plan,
+                            result=result,
+                            hover_options=hover_options,
+                            input_controller=input_controller,
+                            backend=backend,
+                            before_click=before_click,
+                            snapshot_fetch_func=snapshot_fetch_func,
+                            sleep_func=sleep_func,
+                            monotonic_func=monotonic_func,
+                            wall_time_millis_func=wall_time_millis_func,
+                            entry_matcher=_entry_matches_navigation_walk_here,
+                            event_source="navigation_walk_here_lower_menu_entry",
+                            open_reason="navigation_walk_here_lower_menu_entry",
+                            row_label="navigation walk here menu row",
+                        )
+                    except Exception as error:  # noqa: BLE001
+                        result.status = "FAIL"
+                        result.warnings.append(f"right-click navigation Walk here menu selection failed: {type(error).__name__}: {error}")
+                        lifecycle = lifecycle_state_for_proposal(proposal)
+                        lifecycle.current_state = "blocked"
+                        lifecycle.reason = "right_click_walk_here_menu_select_failed"
+                        _apply_lifecycle(result, lifecycle)
+                        _set_trace_final(result, "right_click_menu_select_failed")
+                        _attach_human_input_trace(result, input_controller)
+                        return result
+                    if walk_selected:
+                        lifecycle = lifecycle_after_execution(proposal, executed=result.executed, dry_run=dry_run)
+                        _apply_lifecycle(result, lifecycle)
+                        _set_trace_final(result, "right_click_walk_here_selected")
+                        _attach_human_input_trace(result, input_controller)
+                        return result
+                    result.status = "FAIL"
+                    lifecycle = lifecycle_state_for_proposal(proposal)
+                    lifecycle.current_state = "blocked"
+                    lifecycle.reason = "right_click_walk_here_menu_select_failed"
+                    _apply_lifecycle(result, lifecycle)
+                    _set_trace_final(result, "right_click_menu_select_failed")
+                    _attach_human_input_trace(result, input_controller)
+                    return result
                 result.status = "FAIL"
                 result.warnings.append(f"pre-click hover confirmation failed: {pre_click_confirmation.get('reason') or 'unknown'}")
                 if "hover_menu" not in result.missing_capabilities:
@@ -9507,7 +10875,10 @@ def execute_next_action(
                 fetch_json_func=fetch_json_func,
                 timeout=timeout,
             )
-            if recovery is not None and recovery.get("status") in {"loaded_scene_ready", "recovered_loaded_scene"}:
+            if recovery is not None and (
+                recovery.get("status") in {"loaded_scene_ready", "recovered_loaded_scene"}
+                or _recovery_verified_loaded_scene(recovery)
+            ):
                 pass
             elif recovery is not None:
                 return _blocked_by_liveness_recovery_result(options, backend, recovery)
@@ -9537,7 +10908,7 @@ def execute_next_action(
             fetch_json_func=fetch_json_func,
             timeout=timeout,
         )
-    if recovery is not None and recovery.get("status") not in {"loaded_scene_ready", "recovered_loaded_scene"}:
+    if recovery is not None and recovery.get("status") not in {"loaded_scene_ready", "recovered_loaded_scene"} and not _recovery_verified_loaded_scene(recovery):
         return _blocked_by_liveness_recovery_result(options, backend, recovery)
     if is_waiting_for_result(status):
         source_tick = status.get("latestTick") if isinstance(status.get("latestTick"), int) else None
@@ -9591,6 +10962,20 @@ def execute_next_action(
             )
         return result
     proposal = build_action_proposal(_status_with_navigation_option_overrides(status, options))
+    status, proposal, _context_fallback = _maybe_context_action_proposal(
+        daemon_url,
+        options,
+        status,
+        proposal,
+        timeout=timeout,
+    )
+    if proposal.proposed_action in {"none", "wait_for_context"} or not proposal.executable:
+        return _blocked_by_no_executable_result(
+            proposal,
+            status=status,
+            options=options,
+            reason=proposal.reason or "no_executable_action",
+        )
     readiness: dict[str, Any] | None = None
     if _readiness_gate_required(options, proposal):
         status, proposal, readiness = _wait_until_ready(
@@ -9615,6 +11000,14 @@ def execute_next_action(
         return _live_input_blocked_result(options, backend, status, proposed_action=proposal.proposed_action)
     result: ExecutionResult
     try:
+        try:
+            _ensure_live_input_session_for_action(options, backend, live_input_status)
+        except Exception:  # noqa: BLE001
+            status = _live_input_status(options, backend)
+            status.update(live_input_status if isinstance(live_input_status, dict) else {})
+            status["status"] = "FAIL"
+            status["blockReason"] = status.get("blockReason") or "arduino_rearm_failed"
+            return _live_input_blocked_result(options, backend, status, proposed_action=proposal.proposed_action)
         input_controller = _input_controller_from_options(backend, options, sleep_func=sleep_func, monotonic_func=monotonic_func)
         if proposal.proposed_action in NAVIGATION_ACTIONS or proposal.target_kind == "path_tile":
             _record_navigation_trace(
@@ -9778,12 +11171,21 @@ def execute_action_loop(
                 timeout=timeout,
             )
         except Exception as error:  # noqa: BLE001
-            recovery = {
-                "schema": "liveness_recovery_result.v1",
-                "status": "daemon_rebind_failed",
-                "blocker": f"daemon status unavailable before auto recovery: {type(error).__name__}: {error}",
-            }
-        if recovery is not None and recovery.get("status") not in {"loaded_scene_ready", "recovered_loaded_scene"}:
+            pre_status = {}
+            _updated_status, recovery = _maybe_auto_recover_loaded_scene(
+                daemon_url,
+                options,
+                status=pre_status,
+                fetch_json_func=fetch_json_func,
+                timeout=timeout,
+            )
+            if recovery is None:
+                recovery = {
+                    "schema": "liveness_recovery_result.v1",
+                    "status": "daemon_rebind_failed",
+                    "blocker": f"daemon status unavailable before auto recovery: {type(error).__name__}: {error}",
+                }
+        if recovery is not None and recovery.get("status") not in {"loaded_scene_ready", "recovered_loaded_scene"} and not _recovery_verified_loaded_scene(recovery):
             summary = _new_loop_summary()
             summary["livenessRecoveryLastResult"] = recovery
             return LoopExecutionResult(
@@ -9849,6 +11251,7 @@ def execute_action_loop(
     last_reacquire_scope_key: tuple[Any, ...] | None = None
     recent_navigation_waypoints: list[tuple[int, int, int]] = []
     last_route_transition_retry: dict[str, Any] | None = None
+    last_successful_route_transition: dict[str, Any] | None = None
 
     while len([result for result in results if result.executed]) < max_actions:
         if max_total_actions > 0 and len(results) >= max_total_actions:
@@ -9860,7 +11263,13 @@ def execute_action_loop(
             break
         if lifecycle.current_state == "waiting_for_result":
             try:
-                latest_status = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
+                latest_status = _fetch_status_or_action_context(
+                    daemon_url,
+                    options,
+                    fetch_json_func=fetch_json_func,
+                    timeout=timeout,
+                    purpose="cooldown_poll",
+                )
             except Exception as error:  # noqa: BLE001
                 warnings.append(f"daemon status unavailable during cooldown: {type(error).__name__}: {error}")
                 status_value = "WARN"
@@ -9951,13 +11360,19 @@ def execute_action_loop(
                     lifecycle.observed_result = observed
                     lifecycle.observed_signals = list(observed.get("observedSignals") or [])
                 if (lifecycle.last_action or "") in ROUTE_TRANSITION_ACTIONS.union({"interface_dialogue_choice"}):
-                    _attach_route_transition_ledger(
+                    transition_ledger = _attach_route_transition_ledger(
                         latest_result,
                         before_status=wait_before_status,
                         after_status=latest_status,
                         observed=observed,
                         retry_of_action_id=observed.get("retryOfActionId") if isinstance(observed.get("retryOfActionId"), str) else None,
                     )
+                    if (
+                        transition_ledger is not None
+                        and (lifecycle.last_action or "") in ROUTE_TRANSITION_ACTIONS
+                        and observed.get("resultOutcome") in {"success", "progress", "depleted"}
+                    ):
+                        last_successful_route_transition = transition_ledger
                 latest_result.observed_result = observed
                 latest_result.verification_status = str(observed.get("verificationStatus") or "UNKNOWN")
                 if observed.get("resourceProgressDuringViewRecovery") is True:
@@ -10217,7 +11632,13 @@ def execute_action_loop(
                 continue
 
         try:
-            before_status = fetch_json_func(daemon_status_url(daemon_url), timeout=timeout)
+            before_status = _fetch_status_or_action_context(
+                daemon_url,
+                options,
+                fetch_json_func=fetch_json_func,
+                timeout=timeout,
+                purpose="action_selection",
+            )
         except Exception as error:  # noqa: BLE001
             warnings.append(f"daemon status unavailable: {type(error).__name__}: {error}")
             status_value = "FAIL"
@@ -10272,6 +11693,15 @@ def execute_action_loop(
             options,
         )
         proposal = build_action_proposal(status_for_proposal)
+        before_status, proposal, context_fallback = _maybe_context_action_proposal(
+            daemon_url,
+            options,
+            before_status,
+            proposal,
+            timeout=timeout,
+        )
+        if context_fallback is not None:
+            loop_summary["contextActionFallback"] = context_fallback
         budget_type = _proposal_reacquire_budget_type(proposal)
         loop_summary["reacquireBudgetType"] = budget_type
         fresh_source = _proposal_fresh_executable_source(proposal)
@@ -10400,9 +11830,28 @@ def execute_action_loop(
                     break
                 continue
         if proposal.proposed_action in {"none", "wait_for_context"} or not proposal.executable:
-            lifecycle = lifecycle_state_for_proposal(proposal, max_attempts=max_actions)
-            status_value = "WARN" if status_value == "PASS" else status_value
-            reason = proposal.reason
+            action_result = _blocked_by_no_executable_result(
+                proposal,
+                status=before_status,
+                options=options,
+                reason=proposal.reason or "no_executable_action",
+            )
+            results.append(action_result)
+            _refresh_loop_summary(loop_summary, results)
+            lifecycle = ActionLifecycleState(
+                current_state="blocked",
+                last_action=proposal.proposed_action,
+                last_action_tick=proposal.source_tick,
+                expected_result=expected_result_for_action(proposal.proposed_action),
+                observed_result=action_result.observed_result,
+                attempts=len(results),
+                max_attempts=max_actions,
+                reason=proposal.reason or "no_executable_action",
+                warnings=list(action_result.warnings),
+            )
+            _apply_lifecycle(action_result, lifecycle)
+            status_value = "FAIL"
+            reason = proposal.reason or "no_executable_action"
             if proposal.proposed_action in NAVIGATION_ACTIONS or proposal.target_kind == "path_tile" or _status_has_navigation_context(before_status):
                 _record_navigation_trace(
                     options=options,
@@ -10418,11 +11867,7 @@ def execute_action_loop(
                         "nextActionAllowed": False,
                     },
                 )
-            if proposal.proposed_action == "select_resource_target" and "safe_aimpoint" in proposal.missing_capabilities:
-                _record_reacquire_wait(options, loop_summary, sleep_func, reason="no_safe_target")
-            else:
-                sleep_func(_poll_interval_seconds(options))
-            continue
+            break
         readiness: dict[str, Any] | None = None
         if _readiness_gate_required(options, proposal):
             before_status, proposal, readiness = _wait_until_ready(
@@ -10453,6 +11898,32 @@ def execute_action_loop(
                 _apply_lifecycle(action_result, lifecycle)
                 reason = "pre_action_readiness_failed"
                 break
+        route_transition_reverse_issue = _route_transition_reverse_issue(
+            proposal,
+            last_successful_route_transition,
+            current_status=before_status,
+        )
+        if route_transition_reverse_issue is not None:
+            action_result = _blocked_by_route_stability_result(proposal, route_transition_reverse_issue, options=options)
+            action_result.readiness = readiness
+            _attach_readiness_trace(action_result, readiness)
+            results.append(action_result)
+            _refresh_loop_summary(loop_summary, results)
+            route_stability_classification = str(route_transition_reverse_issue.get("classification") or "route_transition_reverse_blocked")
+            _capture_debug_bundle(
+                debug_bundles,
+                loop_summary,
+                route_stability_classification,
+                daemon_status=before_status,
+                proposal=proposal,
+                result=action_result,
+                readiness=readiness,
+                classification=route_stability_classification,
+                extra={"routeStabilityIssue": dict(route_transition_reverse_issue)},
+            )
+            status_value = "WARN" if status_value == "PASS" else status_value
+            reason = route_stability_classification
+            break
         route_stability_issue = _route_stability_issue(
             proposal,
             recent_navigation_waypoints,
@@ -10488,6 +11959,30 @@ def execute_action_loop(
                 classification=route_stability_classification,
                 extra={"routeStabilityIssue": dict(route_stability_issue)},
             )
+            if route_stability_issue.get("advanceRecommended") is True and route_stability_issue.get("barrierDetected") is not True:
+                advance_waits = int(loop_summary.get("routeWaypointAdvanceWaits") or 0) + 1
+                loop_summary["routeWaypointAdvanceWaits"] = advance_waits
+                max_advance_waits = max(1, _max_navigation_reacquire_rounds(options))
+                loop_summary["routeWaypointAdvanceWaitLimit"] = max_advance_waits
+                if advance_waits <= max_advance_waits:
+                    _record_reacquire_wait(options, loop_summary, sleep_func, reason=route_stability_classification)
+                    continue
+                stale_issue = dict(route_stability_issue)
+                stale_issue["classification"] = "route_waypoint_arrived_but_route_state_stale"
+                stale_issue["reason"] = "player is already at the repeated route waypoint, but route context did not advance after bounded reobserve attempts"
+                action_result.observed_result = {
+                    **(action_result.observed_result if isinstance(action_result.observed_result, dict) else {}),
+                    "observedResult": stale_issue["classification"],
+                    "skipReason": stale_issue["classification"],
+                    "nextActionAllowed": False,
+                }
+                action_result.warnings = [stale_issue["reason"]]
+                if isinstance(action_result.action_trace, dict):
+                    action_result.action_trace["routeStability"] = stale_issue
+                    _set_trace_final(action_result, stale_issue["classification"])
+                route_stability_classification = stale_issue["classification"]
+                _refresh_loop_summary(loop_summary, results)
+                reason = route_stability_classification
             status_value = "WARN" if status_value == "PASS" else status_value
             reason = route_stability_classification
             break
@@ -10529,6 +12024,22 @@ def execute_action_loop(
                     "nextActionAllowed": False,
                 },
             )
+        try:
+            _ensure_live_input_session_for_action(options, backend, live_input_status)
+        except Exception:  # noqa: BLE001
+            status = _live_input_status(options, backend)
+            status.update(live_input_status if isinstance(live_input_status, dict) else {})
+            status["status"] = "FAIL"
+            status["blockReason"] = status.get("blockReason") or "arduino_rearm_failed"
+            action_result = _live_input_blocked_result(options, backend, status, proposed_action=proposal.proposed_action)
+            action_result.proposal = proposal.to_dict()
+            action_result.readiness = readiness
+            _attach_readiness_trace(action_result, readiness)
+            results.append(action_result)
+            _refresh_loop_summary(loop_summary, results)
+            status_value = "FAIL"
+            reason = str(status.get("blockReason") or "arduino_rearm_failed")
+            break
         action_result = execute_action(
             proposal,
             backend=backend,
@@ -10643,6 +12154,10 @@ def execute_action_loop(
                 classification=trace_reason,
             )
             _refresh_loop_summary(loop_summary, results)
+            if _navigation_not_executed_allows_retry(navigation_not_executed):
+                status_value = "WARN" if status_value == "PASS" else status_value
+                reason = str(navigation_not_executed.get("observedResult") or "navigation_action_not_executed")
+                continue
             status_value = "FAIL" if action_result.status == "FAIL" else "WARN"
             reason = str(navigation_not_executed.get("observedResult") or "navigation_action_not_executed")
             break
@@ -10797,7 +12312,7 @@ def execute_action_loop(
                             observed_after["routeTransitionProgressClassification"] = f"{prefix}_retry_success"
                             observed_after["retryOfActionId"] = retry_of_action_id
                             last_route_transition_retry = None
-                        _attach_route_transition_ledger(
+                        transition_ledger = _attach_route_transition_ledger(
                             action_result,
                             before_status=before_status,
                             after_status=after_status,
@@ -10805,6 +12320,12 @@ def execute_action_loop(
                             retry_of_action_id=retry_of_action_id,
                             same_route_object_as_previous=same_route_object,
                         )
+                        if (
+                            transition_ledger is not None
+                            and action_result.proposed_action in ROUTE_TRANSITION_ACTIONS
+                            and lifecycle.result_outcome in {"success", "progress", "depleted"}
+                        ):
+                            last_successful_route_transition = transition_ledger
                     if isinstance(observed_after.get("navigationInProgress"), dict):
                         lifecycle.current_state = "waiting_for_result"
                         lifecycle.reason = "navigation_in_progress"

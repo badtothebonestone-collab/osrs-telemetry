@@ -478,6 +478,101 @@ def test_current_debug_context_reads_nested_context_status_shape():
 
     assert data["liveStatus"]["status"] is None or isinstance(data["liveStatus"]["status"], str)
     assert data["liveStatus"]["phase"]["phase"] == "inventory_full"
+
+
+def test_task_script_runtime_evidence_exposes_route_monitor_and_human_click_profile():
+    status = {
+        "schema": "context_status.v1",
+        "latestTick": 46,
+        "gameState": "LOGGED_IN",
+        "worldModelPayloads": synthetic_payloads(),
+        "routeMonitor": {
+            "schema": "route_monitor_status.v1",
+            "status": "PASS",
+            "routeName": "Bank_to_Woodcutting_area",
+            "routeState": "in_progress",
+            "currentSegmentIndex": 1,
+            "currentSegmentLabel": "Walk toward staircase",
+            "nextExpectedSegment": {"segmentIndex": 2, "segmentType": "stair_transition"},
+            "completedSegmentCount": 1,
+            "remainingSegmentCount": 4,
+            "offRoute": False,
+        },
+        "brain": {
+            "genericTaskState": {"phase": "pathing_to_resource", "cycleStage": "route_to_resource"},
+            "inventoryContext": {"freeSlots": 16, "occupiedSlots": 12, "inventoryFull": False},
+            "goalProgress": {"heldResourceCount": 12, "resourceGroup": "logs"},
+        },
+    }
+    fabric = knowledge_fabric.KnowledgeFabric.from_status(status)
+    readiness = {
+        "schema": "live_readiness.v1",
+        "status": "PASS",
+        "ready": True,
+        "actionReadiness": {"status": "PASS", "executionAllowed": True, "blockers": [], "warnings": []},
+        "loadedSceneProof": {"loadedSceneVerified": True},
+        "manualLoginRequired": False,
+    }
+    click_profile = {
+        "schema": "human_click_profile_compact.v1",
+        "status": "PASS",
+        "recordingCount": 4,
+        "landing": {"medianAimDistancePx": 18},
+        "warnings": [],
+        "missingCapabilities": [],
+    }
+
+    with patch.object(fabric, "_readiness_report", return_value=readiness), patch.object(
+        fabric, "_action_proposal", return_value={}
+    ), patch("task_script_api.get_human_click_profile", return_value=click_profile):
+        result = fabric.query_task_script_runtime_evidence()
+
+    variables = result["data"]["runtimeVariables"]
+    assert variables["routeMonitor"]["observed"] is True
+    assert variables["routeMonitor"]["value"]["routeState"] == "in_progress"
+    assert variables["humanClickProfile"]["observed"] is True
+    assert variables["humanClickProfile"]["value"]["recordingCount"] == 4
+    integrity = result["data"]["runtimeEvidenceIntegrity"]["variableIntegrity"]
+    assert "routeMonitor" in integrity
+    assert "humanClickProfile" in integrity
+
+
+def test_human_click_plan_query_returns_profile_informed_plan():
+    fabric = make_fabric()
+    readiness = {
+        "schema": "live_readiness.v1",
+        "status": "PASS",
+        "ready": True,
+        "actionReadiness": {"status": "PASS", "executionAllowed": True, "blockers": [], "warnings": []},
+        "loadedSceneProof": {"loadedSceneVerified": True},
+        "manualLoginRequired": False,
+    }
+    click_profile = {
+        "schema": "human_click_profile_compact.v1",
+        "status": "PASS",
+        "recordingCount": 4,
+        "landing": {"medianAimDistancePx": 24, "p75AimDistancePx": 36},
+        "warnings": [],
+        "missingCapabilities": [],
+    }
+    target = {
+        "name": "Tree",
+        "targetQuality": "strong",
+        "onScreen": True,
+        "geometryAvailable": True,
+        "aimPoint": {"x": 100, "y": 120},
+    }
+
+    with patch.object(fabric, "_readiness_report", return_value=readiness), patch.object(
+        fabric, "_action_proposal", return_value={}
+    ), patch("task_script_api.get_human_click_profile", return_value=click_profile):
+        result = fabric.human_click_plan(target=target, action="Chop down", activity="woodcutting")
+
+    plan = result["data"]
+    assert result["schema"] == "knowledge_fabric_human_click_plan.v1"
+    assert plan["schema"] == "human_click_plan.v1"
+    assert plan["status"] == "PASS"
+    assert plan["aim"]["basePoint"] != plan["aim"]["plannedPoint"]
     assert data["liveStatus"]["phase"]["cycleStage"] == "needs_service"
     assert data["liveStatus"]["location"]["worldLocation"]["worldX"] == 3203
     assert data["liveStatus"]["inventory"]["resourceCount"] == 15
@@ -796,6 +891,43 @@ def test_pathing_blocker_query_includes_route_context_and_frontier():
     assert data["routeContext"]["currentNodeId"] == "lumbridge_castle_west_approach"
     assert data["statusPathing"]["rejectedApproachTileReasons"] == [{"reason": "wrong_side_of_wall"}]
     assert len(data["frontier"]["frontier"]) == 1
+
+
+def test_route_demonstration_guide_queries_expose_progress():
+    fabric = make_fabric()
+    with tempfile.TemporaryDirectory() as tmp:
+        guide_path = Path(tmp) / "woodcutting_area_to_bank.route_guide.json"
+        guide_path.write_text(
+            json.dumps(
+                {
+                    "schema": "route_demonstration_guide.v1",
+                    "status": "PASS",
+                    "routeName": "woodcutting_area_to_bank",
+                    "sourceRecordings": ["synthetic"],
+                    "pathPoints": [
+                        {"orderIndex": 0, "world": {"worldX": 3203, "worldY": 3238, "plane": 0}, "reachedToleranceTiles": 2},
+                        {"orderIndex": 1, "world": {"worldX": 3208, "worldY": 3212, "plane": 0}, "reachedToleranceTiles": 2},
+                    ],
+                    "interactionSteps": [],
+                    "planeChanges": [],
+                    "cameraHints": [],
+                    "warnings": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        guide = fabric.route_demonstration_guide("woodcutting_area_to_bank", guide_dir=tmp)
+        progress = fabric.route_guide_progress(
+            "woodcutting_area_to_bank",
+            {"worldX": 3203, "worldY": 3238, "plane": 0},
+            guide_dir=tmp,
+        )
+
+    assert guide["data"]["routeGuideLoaded"] is True
+    assert guide["data"]["pathPointCount"] == 2
+    assert progress["data"]["status"] == "PASS"
+    assert progress["data"]["nextGuidePoint"]["world"] == {"worldX": 3208, "worldY": 3212, "plane": 0}
 
 
 def test_view_quality_query_includes_camera_recommendation_fields():
@@ -1319,6 +1451,45 @@ def test_navigation_decision_trace_summary_exposes_suspicious_route_decision():
     assert resource_payload["data"]["decisionCounts"] == {"click": 1, "wait": 1}
 
 
+def test_navigation_decision_trace_reads_session_jsonl_when_action_trace_missing():
+    with tempfile.TemporaryDirectory() as tmp:
+        session = Path(tmp) / "session"
+        live_dir = session / "interaction_geometry" / "live"
+        live_dir.mkdir(parents=True)
+        trace_record = {
+            "schema": "navigation_decision_trace.v1",
+            "tick": 42,
+            "decision": "wait",
+            "reason": "navigation_observation",
+            "routeStep": {
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "currentNodeId": "lumbridge_castle_bank",
+                "currentStepIndex": 5,
+                "routeStepStatus": "service_target_visible",
+            },
+            "chosenSubgoal": {"proposedAction": "navigate_to_service", "targetName": "Bank booth"},
+        }
+        (live_dir / "navigation_decision_trace.jsonl").write_text(json.dumps(trace_record) + "\n", encoding="utf-8")
+        fabric = knowledge_fabric.KnowledgeFabric.from_status(
+            {
+                "schema": "context_status.v1",
+                "sessionPath": str(session),
+                "latestTick": 42,
+                "worldModelPayloads": synthetic_payloads(),
+            }
+        )
+
+        summary = fabric.query_navigation_decision_trace(limit=5)
+
+    assert summary["status"] == "PASS"
+    assert summary["data"]["tracePresent"] is True
+    assert summary["data"]["source"] == "session_navigation_trace_jsonl"
+    assert summary["data"]["diagnosticOnly"] is True
+    assert summary["data"]["blockingEligible"] is False
+    assert summary["data"]["decisionCounts"] == {"wait": 1}
+    assert summary["data"]["contextRows"][0]["sourcePath"].endswith("navigation_decision_trace.jsonl")
+
+
 def test_action_input_visibility_exposes_trace_input_and_phase_evidence():
     with tempfile.TemporaryDirectory() as tmp:
         session = Path(tmp) / "session"
@@ -1591,6 +1762,9 @@ class KnowledgeFabricTest(unittest.TestCase):
 
     def test_pathing_blocker_query_includes_route_context_and_frontier(self):
         test_pathing_blocker_query_includes_route_context_and_frontier()
+
+    def test_route_demonstration_guide_queries_expose_progress(self):
+        test_route_demonstration_guide_queries_expose_progress()
 
     def test_view_quality_query_includes_camera_recommendation_fields(self):
         test_view_quality_query_includes_camera_recommendation_fields()

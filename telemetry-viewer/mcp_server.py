@@ -11,6 +11,8 @@ import external_knowledge
 import external_knowledge_cache
 import knowledge_fabric
 import task_script_api
+import woodcutting_lifecycle
+import interruption_lifecycle
 
 
 SERVER_NAME = "osrs-telemetry-knowledge-fabric"
@@ -246,6 +248,132 @@ def tool_definitions() -> list[dict[str, Any]]:
             "name": "get_pipeline_health",
             "description": "Report the current official pipeline, retired components, config UI keys, and legacy live-packet disk status.",
             "inputSchema": {"type": "object", "properties": {"daemonUrl": string, "snapshotUrl": string, "timeout": number}},
+        },
+        {
+            "name": "get_health",
+            "description": "Return the local context service health payload for a session or latest session.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string}},
+        },
+        {
+            "name": "get_status",
+            "description": "Return the local context service status payload for a session or latest session.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string}},
+        },
+        {
+            "name": "get_schema",
+            "description": "Return the context service schema and supported needs.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "get_capabilities",
+            "description": "Return capability and telemetry field-presence summaries.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string}},
+        },
+        {
+            "name": "get_context",
+            "description": "Return a compact context_response.v1 payload with requested telemetry sections.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": string,
+                    "latestSession": {"type": "boolean"},
+                    "sessionsDir": string,
+                    "needs": {"type": "array", "items": string},
+                    "request": {"type": "object"},
+                    "maxCandidates": integer,
+                    "responseMode": string,
+                },
+            },
+        },
+        {
+            "name": "get_woodcutting_lifecycle",
+            "description": "Return compact woodcutting action lifecycle evidence from the current context.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_banking_state",
+            "description": "Return compact read-only current bank/deposit-box state and direct-bank evidence.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_banking_lifecycle",
+            "description": "Return compact read-only banking lifecycle evidence from current context.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_inventory_delta",
+            "description": "Return compact inventory delta evidence relevant to deposit/withdraw checks.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_deposit_result",
+            "description": "Return compact read-only deposit completion evidence and deposited items.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_combat_state",
+            "description": "Return compact read-only combat state, hostile targeting, hitsplat, and health evidence.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_interruption_lifecycle",
+            "description": "Return compact task interruption lifecycle evidence from current context.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_combat_damage_summary",
+            "description": "Return compact combat damage taken/dealt, primary opponent, HP, hitsplat, actor-death, and task-resume evidence.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_damage_taken",
+            "description": "Return compact damage-taken evidence from combat damage summary.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_damage_dealt",
+            "description": "Return compact damage-dealt evidence from combat damage summary.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_primary_opponent",
+            "description": "Return compact primary combat opponent evidence.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_recent_combat_summary",
+            "description": "Return compact recent combat window, damage, hitsplat, opponent, and task-resume evidence.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_recent_hitsplats",
+            "description": "Return compact recent hitsplat evidence when combat_state is available.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_recent_stat_changes",
+            "description": "Return compact recent stat/level change evidence when combat_state is available.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "get_recent_game_messages",
+            "description": "Return compact recent chat/game message evidence when combat_state is available.",
+            "inputSchema": {"type": "object", "properties": {"session": string, "latestSession": {"type": "boolean"}, "sessionsDir": string, "responseMode": string}},
+        },
+        {
+            "name": "list_recordings",
+            "description": "List manual telemetry recordings under the repo recordings folder.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "summarize_recording",
+            "description": "Return or generate summary.json for a manual telemetry recording.",
+            "inputSchema": {"type": "object", "properties": {"recording": string}},
+        },
+        {
+            "name": "get_schema_gap_report",
+            "description": "Return the Markdown schema gap report for a manual telemetry recording.",
+            "inputSchema": {"type": "object", "properties": {"recording": string}},
         },
         {
             "name": "probe_task",
@@ -486,6 +614,30 @@ def _fabric(args: dict[str, Any]) -> knowledge_fabric.KnowledgeFabric:
     )
 
 
+def _context_args(args: dict[str, Any]) -> SimpleNamespace:
+    latest = args.get("latestSession")
+    if latest is None:
+        latest = not bool(args.get("session"))
+    return SimpleNamespace(
+        session=args.get("session"),
+        sessions_dir=args.get("sessionsDir"),
+        latest_session=bool(latest),
+        reload_interval=0,
+        max_candidates=int(args.get("maxCandidates") or args.get("limit") or 3),
+        max_response_bytes=int(args.get("maxResponseBytes") or 1_000_000),
+        auth_token=None,
+        no_auth_token=True,
+        debug=False,
+        compact_include_source_files=bool(args.get("includeSourceFiles", False)),
+        compact_include_liveness_examples=int(args.get("compactLivenessExamples") or 0),
+    )
+
+
+def _context_payload(args: dict[str, Any]) -> dict[str, Any]:
+    state = context_service.ContextState(_context_args(args))
+    return state.load_context(force=True)
+
+
 def call_tool(name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     args = _dict(arguments)
     try:
@@ -600,6 +752,103 @@ def call_tool(name: str, arguments: dict[str, Any] | None = None) -> dict[str, A
                     sessions_dir=args.get("sessionsDir"),
                 )
             )
+        elif name == "get_health":
+            payload = context_service.health_payload(_context_payload(args))
+        elif name == "get_status":
+            payload = context_service.status_payload(_context_payload(args))
+        elif name == "get_schema":
+            payload = context_service.schema_payload()
+        elif name == "get_capabilities":
+            payload = context_service.capabilities_payload(_context_payload(args))
+        elif name == "get_context":
+            state = context_service.ContextState(_context_args(args))
+            request = args.get("request") if isinstance(args.get("request"), dict) else {}
+            if not request:
+                request = {
+                    "schema": context_service.REQUEST_SCHEMA,
+                    "needs": args.get("needs") if isinstance(args.get("needs"), list) else ["baseline", "diagnostics"],
+                    "maxCandidates": int(args.get("maxCandidates") or args.get("limit") or 3),
+                    "responseMode": str(args.get("responseMode") or "compact"),
+                }
+            payload = context_service.handle_context_request(state.load_context(force=True), request, state)
+        elif name == "get_woodcutting_lifecycle":
+            state = context_service.ContextState(_context_args(args))
+            lifecycle = woodcutting_lifecycle.analyze_context(state.load_context(force=True))
+            payload = (
+                woodcutting_lifecycle.compact_lifecycle(lifecycle)
+                if str(args.get("responseMode") or "compact") == "compact"
+                else lifecycle
+            )
+        elif name == "get_interruption_lifecycle":
+            state = context_service.ContextState(_context_args(args))
+            lifecycle = interruption_lifecycle.analyze_context(state.load_context(force=True))
+            payload = (
+                interruption_lifecycle.compact_lifecycle(lifecycle)
+                if str(args.get("responseMode") or "compact") == "compact"
+                else lifecycle
+            )
+        elif name in {"get_combat_state", "get_recent_hitsplats", "get_recent_stat_changes", "get_recent_game_messages", "get_combat_damage_summary", "get_damage_taken", "get_damage_dealt", "get_primary_opponent", "get_recent_combat_summary"}:
+            state = context_service.ContextState(_context_args(args))
+            need_map = {
+                "get_combat_state": ["combat_state", "combat"],
+                "get_recent_hitsplats": ["combat_state", "recent_hitsplats"],
+                "get_recent_stat_changes": ["combat_state", "recent_stat_changes"],
+                "get_recent_game_messages": ["combat_state", "recent_chat_messages"],
+                "get_combat_damage_summary": ["combat_state", "combat_damage_summary"],
+                "get_damage_taken": ["combat_state", "damage_taken"],
+                "get_damage_dealt": ["combat_state", "damage_dealt"],
+                "get_primary_opponent": ["combat_state", "primary_opponent"],
+                "get_recent_combat_summary": ["combat_state", "recent_combat_summary"],
+            }
+            response = context_service.handle_context_request(
+                state.load_context(force=True),
+                {
+                    "schema": context_service.REQUEST_SCHEMA,
+                    "needs": need_map[name],
+                    "responseMode": str(args.get("responseMode") or "compact"),
+                },
+                state,
+            )
+            payload = {
+                "get_combat_state": response.get("combat") or response.get("combatState"),
+                "get_recent_hitsplats": response.get("recentHitsplats"),
+                "get_recent_stat_changes": response.get("recentStatChanges"),
+                "get_recent_game_messages": response.get("recentChatMessages"),
+                "get_combat_damage_summary": response.get("combatDamageSummary"),
+                "get_damage_taken": response.get("damageTaken"),
+                "get_damage_dealt": response.get("damageDealt"),
+                "get_primary_opponent": response.get("primaryOpponent"),
+                "get_recent_combat_summary": response.get("recentCombatSummary"),
+            }[name] or response
+        elif name in {"get_banking_state", "get_banking_lifecycle", "get_inventory_delta", "get_deposit_result"}:
+            state = context_service.ContextState(_context_args(args))
+            need_map = {
+                "get_banking_state": ["bank_state"],
+                "get_banking_lifecycle": ["banking_lifecycle"],
+                "get_inventory_delta": ["inventory_delta"],
+                "get_deposit_result": ["deposit_result"],
+            }
+            response = context_service.handle_context_request(
+                state.load_context(force=True),
+                {
+                    "schema": context_service.REQUEST_SCHEMA,
+                    "needs": need_map[name],
+                    "responseMode": str(args.get("responseMode") or "compact"),
+                },
+                state,
+            )
+            payload = {
+                "get_banking_state": response.get("bankState"),
+                "get_banking_lifecycle": response.get("bankingLifecycle"),
+                "get_inventory_delta": response.get("inventoryDelta"),
+                "get_deposit_result": response.get("depositResult"),
+            }[name] or response
+        elif name == "list_recordings":
+            payload = context_service.list_recordings_payload()
+        elif name == "summarize_recording":
+            payload = context_service.recording_summary_payload(args.get("recording"))
+        elif name == "get_schema_gap_report":
+            payload = context_service.recording_schema_gap_payload(args.get("recording"))
         elif name == "probe_task":
             payload = _fabric(args).probe_task(
                 str(args.get("taskDescription") or ""),

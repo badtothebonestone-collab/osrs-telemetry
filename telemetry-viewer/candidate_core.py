@@ -378,6 +378,88 @@ def aim_point(target: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _has_safe_aimpoint_payload(target: dict[str, Any]) -> bool:
+    safe = target.get("safeAimPoint")
+    if not isinstance(safe, dict):
+        return False
+    status = str(safe.get("status") or "").upper()
+    if status and status != "PASS":
+        return False
+    return (
+        _numeric_coordinate(_first_present(safe.get("canvasX"), safe.get("x"))) is not None
+        and _numeric_coordinate(_first_present(safe.get("canvasY"), safe.get("y"))) is not None
+    )
+
+
+def _has_live_click_geometry(target: dict[str, Any]) -> bool:
+    if aim_point(target) is not None or _has_safe_aimpoint_payload(target):
+        return True
+    if target.get("geometryAvailable") is True:
+        for key in (
+            "clickboxBounds",
+            "bounds",
+            "convexHullBounds",
+            "clickboxPolygon",
+            "convexHullPolygon",
+            "canvasTilePolygon",
+            "tilePolygon",
+            "canvasLocation",
+            "canvasCenter",
+        ):
+            if target.get(key) is not None:
+                return True
+    return False
+
+
+def _is_resource_target_identity(target: dict[str, Any]) -> bool:
+    class_ids = _target_class_ids(target)
+    name = target_name(target).strip().lower()
+    return (
+        woodcutting_required_level(target) is not None
+        or bool(class_ids & TREE_CLASSES)
+        or "tree" in name
+        or str(target.get("targetType") or "").lower() == "resource"
+    )
+
+
+def _is_current_resource_target_identity(target: dict[str, Any], *, latest_tick: int | None, selected_tick: int | None) -> bool:
+    if latest_tick is None or selected_tick is None:
+        return False
+    if latest_tick - selected_tick > 3:
+        return False
+    return _is_resource_target_identity(target)
+
+
+def _is_current_resource_context(target: dict[str, Any], *, latest_tick: int | None, selected_tick: int | None) -> bool:
+    if latest_tick is None:
+        return False
+    if selected_tick is not None and latest_tick - selected_tick > 3:
+        return False
+    return _is_resource_target_identity(target)
+
+
+def _is_explicit_live_resource_target(target: dict[str, Any]) -> bool:
+    source = str(
+        target.get("actionTargetSource")
+        or target.get("targetSourceType")
+        or _dict(target.get("targetSource")).get("type")
+        or ""
+    ).strip().lower()
+    if source not in {"live_resource_candidate", "hover_discovered_object"}:
+        return False
+    return _is_resource_target_identity(target)
+
+
+def _is_current_live_resource_target(target: dict[str, Any], *, latest_tick: int | None, selected_tick: int | None) -> bool:
+    if not _is_current_resource_target_identity(target, latest_tick=latest_tick, selected_tick=selected_tick):
+        return False
+    return _has_live_click_geometry(target)
+
+
+def _waivable_daemon_freshness_reason(reason: str) -> bool:
+    return reason.startswith("targetCandidateFreshness=") or reason.startswith("daemon status age ")
+
+
 def _aim_source(target: dict[str, Any]) -> str | None:
     for key in ("aimPoint", "aimPointContext", "suggestedClickPoint"):
         value = target.get(key)
@@ -407,13 +489,30 @@ def _target_freshness_status(status: dict[str, Any], target: dict[str, Any], sou
             stale_reasons.append(f"daemon status age {age_ms}ms")
     elif isinstance(status.get("latestUpdateUtc"), str):
         stale_reasons.append("latestUpdateUtc could not be parsed")
+    freshness_override = None
+    if stale_reasons and (
+        _is_current_live_resource_target(target, latest_tick=latest_tick, selected_tick=selected_tick)
+        or _is_current_resource_target_identity(target, latest_tick=latest_tick, selected_tick=selected_tick)
+        or _is_current_resource_context(target, latest_tick=latest_tick, selected_tick=selected_tick)
+        or _is_explicit_live_resource_target(target)
+    ):
+        retained_reasons = [reason for reason in stale_reasons if not _waivable_daemon_freshness_reason(reason)]
+        if len(retained_reasons) != len(stale_reasons):
+            freshness_override = {
+                "mode": "current_live_resource_target",
+                "waivedReasons": [reason for reason in stale_reasons if _waivable_daemon_freshness_reason(reason)],
+            }
+            stale_reasons = retained_reasons
     status_text = "stale" if stale_reasons else str(freshness or "unknown")
+    if freshness_override and not stale_reasons:
+        status_text = "fresh"
     return {
         "status": status_text,
         "latestTick": latest_tick,
         "targetTick": selected_tick,
         "targetCandidateFreshness": freshness,
         "daemonStatusAgeMillis": age_ms,
+        "freshnessOverride": freshness_override,
         "stale": bool(stale_reasons),
         "staleReasons": stale_reasons,
     }
@@ -529,6 +628,14 @@ def explain_candidate(
         "routeStepIndex": target.get("routeStepIndex"),
         "routeStepType": target.get("routeStepType"),
         "routeMode": target.get("routeMode"),
+        "routeCorridorMatch": target.get("routeCorridorMatch"),
+        "routeProgressScore": target.get("routeProgressScore"),
+        "routeCandidateValidation": target.get("routeCandidateValidation") if isinstance(target.get("routeCandidateValidation"), dict) else None,
+        "routeGuideLoaded": target.get("routeGuideLoaded"),
+        "routeGuideName": target.get("routeGuideName"),
+        "routeGuideSource": target.get("routeGuideSource"),
+        "routeGuideProgress": target.get("routeGuideProgress") if isinstance(target.get("routeGuideProgress"), dict) else None,
+        "cameraReadiness": target.get("cameraReadiness") if isinstance(target.get("cameraReadiness"), dict) else None,
         "goalDirectedFallback": target.get("goalDirectedFallback"),
         "selectedServiceAnchor": target.get("selectedServiceAnchor"),
         "selectedApproachNode": target.get("selectedApproachNode"),

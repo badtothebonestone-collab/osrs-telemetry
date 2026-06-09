@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import external_knowledge
+import human_click_profile
 import task_script_api
 import target_view_core
 import world_model_client
@@ -206,6 +207,38 @@ def _navigation_trace_records_from_debug(debug_evidence: dict[str, Any]) -> list
                 copied.setdefault("_sourcePath", trace.get("path"))
                 records.append(copied)
     return records
+
+
+def _navigation_trace_records_from_session_files(session_path: Path | None, *, limit: int = 50) -> list[dict[str, Any]]:
+    if session_path is None:
+        return []
+    live_dir = session_path / LIVE_DIR
+    candidates = [
+        live_dir / "navigation_decision_trace.jsonl",
+        live_dir / "navigation_decisions.jsonl",
+    ]
+    records: list[dict[str, Any]] = []
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        start_line = max(0, len(lines) - max(1, int(limit or 50)))
+        for offset, line in enumerate(lines[start_line:], start=start_line + 1):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict) and item.get("schema") == "navigation_decision_trace.v1":
+                copied = dict(item)
+                copied.setdefault("_sourcePath", str(path))
+                copied.setdefault("_line", offset)
+                records.append(copied)
+    return records[-max(1, int(limit or 50)) :]
 
 
 def _navigation_trace_compact_row(record: dict[str, Any]) -> dict[str, Any]:
@@ -2977,11 +3010,19 @@ class KnowledgeFabric:
             source = "supplied_action_trace"
         else:
             trace_records = _navigation_trace_records_from_debug(self.debug_evidence)
+            if trace_records:
+                source = "latest_action_trace_index"
+            else:
+                trace_records = _navigation_trace_records_from_session_files(self.session_path, limit=cap)
+                if trace_records:
+                    source = "session_navigation_trace_jsonl"
         summary = _navigation_trace_summary(trace_records, limit=cap)
         data = {
             **summary,
             "tracePresent": bool(trace_records),
             "source": source,
+            "diagnosticOnly": source == "session_navigation_trace_jsonl",
+            "blockingEligible": source != "session_navigation_trace_jsonl",
             "sessionPath": self.debug_evidence.get("sessionPath"),
             "latestActionTraceCount": len(_list(self.debug_evidence.get("latestActionTraces"))),
             "routeContext": _compact_route_context(self.daemon_status),
@@ -4309,6 +4350,86 @@ class KnowledgeFabric:
     def task_script_api_spec(self) -> dict[str, Any]:
         return task_script_api.script_api_spec()
 
+    def human_click_profile(self, activity: str | None = None, source: Any = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        profile = human_click_profile.load_profile(source)
+        data = human_click_profile.compact_profile(profile, activity=activity) if profile else {
+            "schema": "human_click_profile_compact.v1",
+            "status": "FAIL",
+            "recordingCount": 0,
+            "warnings": ["human click profile source was not available"],
+            "missingCapabilities": ["human_click_profile"],
+        }
+        return _query_response(
+            "knowledge_fabric_human_click_profile.v1",
+            data,
+            started=started,
+            source="human_click_profile",
+            freshness=self.freshness(),
+            warnings=data.get("warnings") or [],
+            status=data.get("status") or "WARN",
+        )
+
+    def human_click_plan(
+        self,
+        *,
+        target: dict[str, Any] | None = None,
+        action: str | None = None,
+        activity: str | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        visibility = self.query_action_input_visibility().get("data") or {}
+        runtime = self.query_task_script_runtime_evidence().get("data") or {}
+        plan = task_script_api.get_human_click_plan(
+            target=target,
+            action=action,
+            activity=activity,
+            source={
+                "actionInputVisibility": visibility,
+                "taskScriptRuntimeEvidence": {"data": runtime},
+            },
+        )
+        return _query_response(
+            "knowledge_fabric_human_click_plan.v1",
+            plan,
+            started=started,
+            source="task_script_api+human_click_profile",
+            freshness=self.freshness(),
+            warnings=plan.get("warnings") or [],
+            status=plan.get("status") or "WARN",
+        )
+
+    def route_demonstration_guide(self, route_name: str, guide_dir: str | Path | None = None) -> dict[str, Any]:
+        started = time.perf_counter()
+        guide = task_script_api.get_route_demonstration_guide(route_name, guide_dir=guide_dir)
+        return _query_response(
+            "knowledge_fabric_route_demonstration_guide.v1",
+            guide,
+            started=started,
+            source="task_script_api+route_demonstration",
+            freshness=self.freshness(),
+            warnings=guide.get("warnings") or [],
+            status=guide.get("status") or "WARN",
+        )
+
+    def route_guide_progress(
+        self,
+        route_name: str,
+        current_world: dict[str, Any],
+        guide_dir: str | Path | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        progress = task_script_api.get_route_guide_progress(route_name, current_world, guide_dir=guide_dir)
+        return _query_response(
+            "knowledge_fabric_route_guide_progress.v1",
+            progress,
+            started=started,
+            source="task_script_api+route_demonstration",
+            freshness=self.freshness(),
+            warnings=progress.get("warnings") or [],
+            status=progress.get("status") or "WARN",
+        )
+
     def validate_task_script(self, script: dict[str, Any] | str | Path) -> dict[str, Any]:
         return task_script_api.validate_task_script(script)
 
@@ -4332,13 +4453,142 @@ class KnowledgeFabric:
         hot = _dict(status.get("clientTickHot"))
         hover = _dict(hot.get("postMenuSort")) or _dict(hot.get("hoverMenu"))
         last_click = _dict(hot.get("lastMenuOptionClicked"))
+        route_monitor_status = _dict(
+            status.get("routeMonitor")
+            or status.get("route_monitor")
+            or status.get("routeMonitorStatus")
+            or status.get("route_monitor_status")
+        )
         bank_ui = _dict(brain.get("bankUiContext") or status.get("bankUiContext") or status.get("bankUi"))
+        combat_state = _dict(brain.get("combatState") or brain.get("combat_state") or status.get("combatState") or status.get("combat_state"))
         bank_open = _first_present(bank_ui.get("bankOpen"), bank_ui.get("bank_open"), status.get("bankOpen"), generic.get("bankOpen"))
+        deposit_box_open = _first_present(bank_ui.get("depositBoxOpen"), bank_ui.get("deposit_box_open"), status.get("depositBoxOpen"))
+        bank_state = {
+            "bankOpen": bank_open,
+            "depositBoxOpen": deposit_box_open,
+            "activeBankLikeInterface": _first_present(bank_ui.get("activeBankLikeInterface"), "deposit_box" if deposit_box_open is True else None, "bank" if bank_open is True else None),
+            "bankContainerAvailable": _first_present(bank_ui.get("bankContainerAvailable"), bank_ui.get("bankContainerVisible"), bank_ui.get("bankReadable")),
+            "bankContainerDeltaAvailable": bool(_dict(bank_ui.get("bankContainerDelta")).get("available")),
+            "bankUiPresent": bool(bank_ui),
+            "missingCapabilities": [] if bank_ui else ["banking.bankUi"],
+            "warnings": [] if bank_ui else ["bank_ui context missing from daemon status"],
+        }
+        banking_lifecycle_value = {
+            "status": "PASS" if bank_state["bankOpen"] is True and bank_state["bankContainerAvailable"] else ("WARN" if bank_state["bankOpen"] is True else "FAIL"),
+            "phase": "bank_open" if bank_state["bankOpen"] is True else "unknown",
+            "confidence": 0.7 if bank_state["bankOpen"] is True else 0.0,
+            **bank_state,
+        }
         visibility_data = _dict(visibility)
         readiness_data = _dict(readiness)
         action_need = _dict(readiness_data.get("actionNeed"))
         loaded_scene = _dict(readiness_data.get("loadedSceneProof"))
         input_integrity = visibility_data.get("input_integrity_status") or self._input_integrity_summary()
+        deposit_result = {
+            "depositComplete": _first_present(action_need.get("bankingComplete"), generic.get("bankingComplete")),
+            "depositedItems": [],
+            "depositConfirmationLevel": "live_state_only",
+            "bankContainerDeltaAvailable": bank_state["bankContainerDeltaAvailable"],
+            "confidence": banking_lifecycle_value["confidence"],
+            "missingCapabilities": bank_state["missingCapabilities"],
+            "warnings": bank_state["warnings"],
+        }
+        combat_summary = {
+            "inCombat": combat_state.get("inCombat"),
+            "playerInteracting": combat_state.get("playerInteracting"),
+            "actorsInteractingWithPlayer": combat_state.get("actorsInteractingWithPlayer") or [],
+            "nearbyHostileNpcs": combat_state.get("nearbyHostileNpcs") or [],
+            "recentHitsplats": combat_state.get("recentHitsplats") or [],
+            "recentStatChanges": combat_state.get("recentStatChanges") or [],
+            "recentChatMessages": combat_state.get("recentChatMessages") or [],
+            "playerHealth": combat_state.get("playerHealth"),
+            "missingCapabilities": [] if combat_state else ["combat_state"],
+            "warnings": [] if combat_state else ["combat_state context missing from daemon status"],
+        }
+        interruption_value = {
+            "interruptionDetected": bool(combat_summary["inCombat"] or combat_summary["actorsInteractingWithPlayer"] or combat_summary["recentHitsplats"]),
+            "interruptionType": "combat" if bool(combat_summary["inCombat"] or combat_summary["actorsInteractingWithPlayer"] or combat_summary["recentHitsplats"]) else "unknown",
+            "primaryCause": "hostile_npc" if combat_summary["actorsInteractingWithPlayer"] or combat_summary["nearbyHostileNpcs"] else ("player_combat" if combat_summary["inCombat"] else "unknown"),
+            "combatObserved": bool(combat_summary["inCombat"] or combat_summary["actorsInteractingWithPlayer"] or combat_summary["recentHitsplats"]),
+            "hitsplatsSeen": len(combat_summary["recentHitsplats"]),
+            "confidence": 0.75 if combat_state else 0.0,
+            "missingCapabilities": combat_summary["missingCapabilities"],
+            "warnings": combat_summary["warnings"],
+        }
+        combat_damage_value = task_script_api.get_combat_damage_summary(
+            {
+                "combat_state": combat_state,
+                "interruption_lifecycle": interruption_value,
+            }
+        ) if combat_state else {
+            "status": "FAIL",
+            "combatObserved": False,
+            "damageTakenTotal": None,
+            "damageDealtTotal": None,
+            "hitsplatCount": 0,
+            "missingCapabilities": ["combat.damageSummary"],
+            "warnings": ["combat_state context missing from daemon status"],
+        }
+        woodcutting_loop_value = task_script_api.get_woodcutting_loop_lifecycle(
+            {
+                "woodcutting_lifecycle": {
+                    "schema": "woodcutting_lifecycle.v1",
+                    "status": "PASS" if inventory.get("resourceCount") is not None or inventory.get("inventoryFull") is not None else "WARN",
+                    "phase": "inventory_full" if inventory.get("inventoryFull") is True else _first_present(phase.get("cycleStage"), phase.get("phase"), "unknown"),
+                    "confidence": 0.55 if inventory else 0.0,
+                    "inventory": {
+                        "freeSlotsStart": inventory.get("freeSlots"),
+                        "freeSlotsEnd": inventory.get("freeSlots"),
+                        "normalLogsStart": inventory.get("resourceCount"),
+                        "normalLogsEnd": inventory.get("resourceCount"),
+                        "normalLogsGained": 0,
+                        "inventoryFull": inventory.get("inventoryFull"),
+                    },
+                    "clicks": {"freshChopClickCount": 0},
+                    "animation": {"activeSnapshotCount": 0},
+                    "current": {"freeSlots": inventory.get("freeSlots"), "inventoryFull": inventory.get("inventoryFull")},
+                },
+                "banking_lifecycle": {
+                    "schema": "banking_lifecycle.v1",
+                    "status": banking_lifecycle_value.get("status"),
+                    "phase": banking_lifecycle_value.get("phase"),
+                    "confidence": banking_lifecycle_value.get("confidence"),
+                    "bank": {
+                        "openSeen": bank_state.get("bankOpen"),
+                        "depositBoxOpenSeen": bank_state.get("depositBoxOpen"),
+                        "containerAvailable": bank_state.get("bankContainerAvailable"),
+                        "bankUiPresent": bank_state.get("bankUiPresent"),
+                        "bankContainerDeltaAvailable": bank_state.get("bankContainerDeltaAvailable"),
+                    },
+                    "deposit": {
+                        "detected": deposit_result.get("depositComplete") is True,
+                        "items": deposit_result.get("depositedItems") or [],
+                        "totalDepositedCount": sum(
+                            (_dict(item).get("quantity") or 0)
+                            if isinstance(_dict(item).get("quantity") or 0, (int, float))
+                            else 0
+                            for item in deposit_result.get("depositedItems") or []
+                        ),
+                        "confirmationLevel": deposit_result.get("depositConfirmationLevel"),
+                    },
+                },
+                "interruption_lifecycle": interruption_value,
+                "combat_damage_summary": combat_damage_value,
+            }
+        )
+        route_monitor_value = task_script_api.get_route_monitor_status(
+            {"route_monitor": route_monitor_status}
+        ) if route_monitor_status else {
+            "schema": "route_monitor_status.v1",
+            "status": "WARN",
+            "routeState": _first_present(route.get("routeState"), route.get("routeStepStatus"), "unknown"),
+            "currentArea": route.get("currentArea"),
+            "nextExpectedSegment": route.get("nextExpectedSegment"),
+            "offRoute": route.get("offRoute"),
+            "warnings": ["route monitor status was not present in live daemon status"],
+            "missingCapabilities": ["route_monitor"],
+        }
+        human_click_profile_value = task_script_api.get_human_click_profile()
 
         def observed(value: Any) -> bool:
             if isinstance(value, dict):
@@ -4369,12 +4619,26 @@ class KnowledgeFabric:
                 "source": "inventorySummary/actionNeed",
             },
             "bankOpen": {"observed": bank_open is not None, "value": bank_open, "source": "bankUiContext/status"},
+            "bankState": {"observed": observed(bank_state), "value": bank_state, "source": "bankUiContext/status"},
+            "bankingLifecycle": {"observed": observed(banking_lifecycle_value), "value": banking_lifecycle_value, "source": "bankUiContext/status"},
+            "combatState": {"observed": observed(combat_state), "value": combat_summary, "source": "combatState/status"},
+            "interruptionLifecycle": {"observed": observed(combat_state), "value": interruption_value, "source": "combatState/status"},
+            "combatDamageSummary": {"observed": observed(combat_state), "value": combat_damage_value, "source": "combatState/status"},
+            "woodcuttingLoopLifecycle": {"observed": observed(woodcutting_loop_value), "value": woodcutting_loop_value, "source": "inventory/bank/combat live summaries"},
+            "inventoryDelta": {"observed": bool(action_need.get("resourceCount") is not None or inventory), "value": {"inventory": inventory, "resourceCount": action_need.get("resourceCount")}, "source": "inventorySummary/actionNeed"},
+            "depositResult": {"observed": deposit_result.get("depositComplete") is not None or bank_state["bankOpen"] is True, "value": deposit_result, "source": "genericTaskState/actionNeed/bankUiContext"},
             "menuOptionClicked": {"observed": observed(menu_evidence), "value": menu_evidence, "source": "clientTickHot/actionTrace"},
             "hoverTarget": {"observed": observed(hover_evidence), "value": hover_evidence, "source": "PostMenuSort/actionTrace"},
             "location": {"observed": observed(location.get("worldLocation")), "value": location, "source": "playerLocation"},
             "routeProgress": {"observed": observed(route), "value": route, "source": "serviceRouteContext/pathingContext"},
+            "routeMonitor": {"observed": observed(route_monitor_status), "value": route_monitor_value, "source": "routeMonitor/status"},
             "phaseIntent": {"observed": observed(phase_intent), "value": phase_intent, "source": "genericTaskState/readiness"},
             "loadedScene": {"observed": observed(loaded_scene), "value": loaded_scene, "source": "readiness.loadedSceneProof"},
+            "humanClickProfile": {
+                "observed": human_click_profile_value.get("status") not in {None, "FAIL"},
+                "value": human_click_profile_value,
+                "source": "knowledge_base/human_click_profile.json",
+            },
             "inputIntegrity": {"observed": observed(input_integrity), "value": input_integrity, "source": "input_integrity/action_visibility"},
         }
         return variables
@@ -4405,7 +4669,9 @@ class KnowledgeFabric:
             "hoverTarget",
             "location",
             "routeProgress",
+            "routeMonitor",
             "phaseIntent",
+            "humanClickProfile",
         }
         variable_integrity: dict[str, Any] = {}
         advisory_variables: list[str] = []

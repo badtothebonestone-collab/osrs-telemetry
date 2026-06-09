@@ -15,6 +15,7 @@ STATE_SCHEMA = "liveness_state.v1"
 LOADED_SCENE_PROOF_SCHEMA = "loaded_scene_proof.v1"
 CACHE_TTL_SECONDS = 5.0
 CLIENT_TICK_HOT_MAX_AGE_MS = 1000
+LOADED_SCENE_STABILITY_SECONDS = 3.0
 
 RECOVERABLE_STATES = {
     "plugin_endpoint_down",
@@ -40,6 +41,10 @@ def _dict(value: Any) -> dict[str, Any]:
 
 def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _state_name(state: dict[str, Any] | None) -> str:
+    return str(_dict(state).get("state") or "unknown")
 
 
 def _int(value: Any) -> int | None:
@@ -68,10 +73,31 @@ def _daemon_status_url(daemon_url: str) -> str:
     return str(daemon_url or "http://127.0.0.1:8890").rstrip("/") + "/status"
 
 
+def _daemon_health_url(daemon_url: str) -> str:
+    return str(daemon_url or "http://127.0.0.1:8890").rstrip("/") + "/health"
+
+
 def fetch_daemon_status(daemon_url: str, *, timeout: float = 1.0) -> dict[str, Any]:
-    with urllib.request.urlopen(_daemon_status_url(daemon_url), timeout=timeout) as response:
-        decoded = json.loads(response.read().decode("utf-8", errors="replace"))
-    return decoded if isinstance(decoded, dict) else {}
+    status_error: Exception | None = None
+    try:
+        with urllib.request.urlopen(_daemon_status_url(daemon_url), timeout=timeout) as response:
+            decoded = json.loads(response.read().decode("utf-8", errors="replace"))
+        payload = decoded if isinstance(decoded, dict) else {}
+        payload.setdefault("daemonEndpoint", "status")
+        return payload
+    except Exception as error:  # noqa: BLE001
+        status_error = error
+    try:
+        with urllib.request.urlopen(_daemon_health_url(daemon_url), timeout=timeout) as response:
+            decoded = json.loads(response.read().decode("utf-8", errors="replace"))
+        payload = decoded if isinstance(decoded, dict) else {}
+        payload["daemonEndpoint"] = "health"
+        payload["statusEndpointError"] = f"{type(status_error).__name__}: {status_error}"
+        return payload
+    except Exception:
+        if status_error is not None:
+            raise status_error
+        raise
 
 
 def _client_tick_age_from_hot(hot: dict[str, Any]) -> int | None:
@@ -100,14 +126,29 @@ def loaded_scene_proof(snapshot_payload: dict[str, Any] | None, *, reachable: bo
     summary = bootstrap.snapshot_summary(payload, reachable=reachable)
     hot = bootstrap.snapshot_client_tick_hot(payload)
     client_tick_fresh, client_tick_age = _client_tick_fresh_from_hot(hot)
+    payloads = _dict(payload.get("payloads"))
+    baseline = _dict(payloads.get("baseline"))
+    baseline_source = _dict(baseline.get("source"))
+    source_scene_objects = _int(
+        baseline_source.get("sceneObjectsSeen")
+        or baseline_source.get("sceneObjectsCaptured")
+        or baseline_source.get("objectTotal")
+    )
     object_total = _int(summary.get("worldModelObjectTotal"))
+    if object_total is None and source_scene_objects is not None:
+        object_total = source_scene_objects
+    source_scene_knowledge = baseline_source.get("sourceSceneKnowledgeComplete") is True
+    world_model_available = bool(summary.get("worldModelAvailable")) or bool(
+        source_scene_knowledge and object_total is not None and object_total > 0
+    )
     latest_tick = _int(summary.get("latestTick"))
+    latest_export_seq = _int(payload.get("latestExportSeq") or payload.get("exportSeq"))
     loaded = bool(
         summary.get("snapshotReachable")
         and str(summary.get("gameState") or "").upper() == "LOGGED_IN"
         and latest_tick is not None
         and summary.get("baselinePresent") is True
-        and summary.get("worldModelAvailable") is True
+        and world_model_available
         and object_total is not None
         and object_total > 0
         and summary.get("clientTickHotPresent") is True
@@ -121,13 +162,16 @@ def loaded_scene_proof(snapshot_payload: dict[str, Any] | None, *, reachable: bo
         "snapshotFresh": reachable and latest_tick is not None,
         "gameState": summary.get("gameState"),
         "latestTick": latest_tick,
+        "latestExportSeq": latest_export_seq,
         "baselinePresent": bool(summary.get("baselinePresent")),
         "clientTickHotPresent": bool(summary.get("clientTickHotPresent")),
         "clientTickHotFresh": client_tick_fresh,
         "clientTickHotAgeMillis": client_tick_age,
         "clientTickHotMaxAgeMillis": CLIENT_TICK_HOT_MAX_AGE_MS,
-        "worldModelAvailable": bool(summary.get("worldModelAvailable")),
+        "worldModelAvailable": world_model_available,
         "worldModelObjectTotal": object_total,
+        "sourceSceneKnowledgeComplete": source_scene_knowledge,
+        "sourceSceneObjectsSeen": source_scene_objects,
         "finalPlayPanelPending": bool(summary.get("finalPlayPanelPending")),
         "staleLoggedInNoScene": bool(summary.get("staleLoggedInNoScene")),
         "screenClassification": summary.get("screenClassification"),
@@ -400,6 +444,223 @@ def _run_bootstrap_recovery(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
+def _compact_click_details(details: dict[str, Any]) -> dict[str, Any]:
+    if not details:
+        return {}
+    pre_focus = _dict(details.get("preClickFocus"))
+    return {
+        "status": details.get("status"),
+        "warning": details.get("warning"),
+        "timeoutClassification": details.get("timeoutClassification"),
+        "retryRequiresScreenRecheck": details.get("retryRequiresScreenRecheck"),
+        "inputBackend": details.get("inputBackend") or details.get("backend"),
+        "command": details.get("command") or details.get("commandSent"),
+        "targetWindowAtPoint": pre_focus.get("targetWindowAtPoint"),
+        "foregroundTitle": pre_focus.get("foregroundTitle"),
+        "focusMethod": pre_focus.get("focusMethod"),
+    }
+
+
+def _compact_clicked_candidate(candidate: Any) -> dict[str, Any]:
+    item = _dict(candidate)
+    return {
+        "name": item.get("name"),
+        "source": item.get("source"),
+        "candidateMethod": item.get("candidateMethod"),
+        "screenPoint": item.get("screenPoint"),
+        "targetPointLogical": item.get("targetPointLogical"),
+        "targetPointPhysical": item.get("targetPointPhysical"),
+        "targetValidationStatus": item.get("targetValidationStatus"),
+        "targetInsideRuneLiteWindow": item.get("targetInsideRuneLiteWindow"),
+        "targetInsideSafeClickRegion": item.get("targetInsideSafeClickRegion"),
+        "expectedStateAfterClick": item.get("expectedStateAfterClick"),
+        "clickResult": item.get("clickResult"),
+        "reason": item.get("reason"),
+        "clickDetails": _compact_click_details(_dict(item.get("clickDetails"))),
+    }
+
+
+def _compact_bootstrap_snapshot(recovery: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _dict(recovery.get("snapshot"))
+    return {
+        "gameState": snapshot.get("gameState"),
+        "loggedIn": snapshot.get("loggedIn"),
+        "loadedSceneVerified": snapshot.get("loadedSceneVerified"),
+        "worldModelObjectTotal": snapshot.get("worldModelObjectTotal") or snapshot.get("objectTotal"),
+        "screenClassification": snapshot.get("screenClassification"),
+        "staleLoggedInNoScene": snapshot.get("staleLoggedInNoScene"),
+        "finalPlayPanelPending": snapshot.get("finalPlayPanelPending"),
+    }
+
+
+def _clicked_candidates_from_actions(actions_taken: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    clicked: list[dict[str, Any]] = []
+    for action in actions_taken:
+        details = _list(_dict(action).get("clickedCandidateDetails"))
+        if details:
+            clicked.extend(_dict(item) for item in details if isinstance(item, dict))
+            continue
+        for name in _list(_dict(action).get("clickedCandidates")):
+            clicked.append({"name": name})
+    return clicked
+
+
+def classify_recovery_failure(
+    *,
+    initial_state: dict[str, Any],
+    final_state: dict[str, Any],
+    actions_taken: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    actions = actions_taken or []
+    clicked = _clicked_candidates_from_actions(actions)
+    clicked_names = [str(item.get("name") or "") for item in clicked if item.get("name")]
+    initial_name = _state_name(initial_state)
+    final_name = _state_name(final_state)
+    proof = _dict(final_state.get("loadedSceneProof"))
+    game_state = str(proof.get("gameState") or "").upper()
+    object_total = _int(proof.get("worldModelObjectTotal"))
+    client_hot_fresh = bool(proof.get("clientTickHotFresh"))
+    loaded = bool(proof.get("loadedSceneVerified"))
+    evidence: list[str] = []
+    if clicked_names:
+        evidence.append("clicked=" + ",".join(clicked_names))
+    if game_state:
+        evidence.append(f"gameState={game_state}")
+    if object_total is not None:
+        evidence.append(f"worldObjects={object_total}")
+    evidence.append(f"clientTickHotFresh={client_hot_fresh}")
+    evidence.append(f"initial={initial_name}")
+    evidence.append(f"final={final_name}")
+
+    if loaded:
+        failure_class = "none"
+        reason = "loaded_scene_verified"
+    elif (
+        initial_name == "disconnected_dialog"
+        and final_name == "disconnected_dialog"
+        and ("disconnected_ok" in clicked_names or "play_now" in clicked_names)
+    ):
+        failure_class = "disconnected_loop"
+        reason = "safe recovery clicks were sent, but the client returned to the disconnected dialog"
+    elif "play_now" in clicked_names and final_name in {"saved_account_play_now", "login_screen"}:
+        failure_class = "play_now_no_transition"
+        reason = "saved-account Play Now was clicked, but no loading or logged-in scene followed"
+    elif final_name == "login_screen" and "play_now" not in clicked_names and "disconnected_ok" not in clicked_names:
+        failure_class = "login_surface_no_saved_account"
+        reason = "login surface is present without a safe saved-account or disconnected recovery target"
+    elif final_name in {"loading", "click_here_to_play"}:
+        failure_class = "loading_timeout"
+        reason = "client did not reach loaded-scene proof before the recovery budget expired"
+    elif final_name == "stale_logged_in_no_scene" or (game_state == "LOGGED_IN" and (object_total is None or object_total <= 0)):
+        failure_class = "logged_in_without_scene"
+        reason = "client reports logged-in state but current world/player scene proof is unavailable"
+    elif not client_hot_fresh:
+        failure_class = "stale_hot_client"
+        reason = "hot client sample is stale, so recovery cannot prove current loaded scene"
+    else:
+        failure_class = "unknown"
+        reason = "loaded-scene proof is missing and no narrower recovery failure class matched"
+    return {
+        "schema": "liveness_recovery_failure_classification.v1",
+        "failureClass": failure_class,
+        "reason": reason,
+        "initialState": initial_name,
+        "finalState": final_name,
+        "clickedCandidates": clicked_names,
+        "loadedSceneVerified": loaded,
+        "finalGameState": game_state or None,
+        "worldModelObjectTotal": object_total,
+        "clientTickHotFresh": client_hot_fresh,
+        "evidence": evidence,
+    }
+
+
+def build_recovery_state_machine(
+    *,
+    initial_state: dict[str, Any],
+    final_state: dict[str, Any],
+    actions_taken: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    actions = actions_taken or []
+    clicked = _clicked_candidates_from_actions(actions)
+    clicks: list[dict[str, Any]] = []
+    relaunch_attempts: list[dict[str, Any]] = []
+    previous_state = _state_name(initial_state)
+    for index, click in enumerate(clicked):
+        name = str(click.get("name") or "unknown")
+        if name == "disconnected_ok":
+            state_before = "disconnected_dialog"
+        elif name == "play_now":
+            state_before = "saved_account_visible" if previous_state in {"disconnected_dialog", "login_surface"} else previous_state
+        elif name == "click_here_to_play":
+            state_before = "click_here_to_play"
+        else:
+            state_before = previous_state
+        expected = click.get("expectedStateAfterClick")
+        clicks.append(
+            {
+                "attemptIndex": index,
+                "stateBefore": state_before,
+                "selectedRecoveryAction": name,
+                "screenPoint": click.get("screenPoint") or click.get("targetPointLogical"),
+                "targetValidationStatus": click.get("targetValidationStatus"),
+                "clickResult": click.get("clickResult"),
+                "expectedNextState": expected,
+                "stateAfter": _state_name(final_state) if index == len(clicked) - 1 else None,
+                "transitionSuccess": bool(index == len(clicked) - 1 and _dict(final_state.get("loadedSceneProof")).get("loadedSceneVerified")),
+                "reason": click.get("reason"),
+                "clickEvidence": click,
+            }
+        )
+        previous_state = str(expected or previous_state)
+    for index, action in enumerate(actions):
+        item = _dict(action)
+        if item.get("action") not in {"relaunch_required", "relaunch_client", "wait_for_loaded_scene_after_relaunch"}:
+            continue
+        relaunch_attempts.append(
+            {
+                "attemptIndex": index,
+                "stateBefore": item.get("state") or previous_state,
+                "selectedRecoveryAction": item.get("action"),
+                "startGameCommand": item.get("startGameCommand") or item.get("relaunchCommand"),
+                "startGameCommandSource": item.get("startGameCommandSource"),
+                "launchMode": item.get("launchMode"),
+                "relaunchResult": item.get("result"),
+                "stateAfter": item.get("stateAfter"),
+                "transitionSuccess": bool(item.get("loadedSceneVerified") or item.get("transitionSuccess")),
+                "reason": item.get("reason"),
+            }
+        )
+    classification = classify_recovery_failure(initial_state=initial_state, final_state=final_state, actions_taken=actions)
+    return {
+        "schema": "liveness_recovery_state_machine.v1",
+        "states": [
+            {
+                "label": "initial",
+                "state": _state_name(initial_state),
+                "loadedSceneVerified": bool(initial_state.get("loadedSceneVerified")),
+                "loadedSceneProof": _dict(initial_state.get("loadedSceneProof")),
+            },
+            {
+                "label": "final",
+                "state": _state_name(final_state),
+                "loadedSceneVerified": bool(final_state.get("loadedSceneVerified")),
+                "loadedSceneProof": _dict(final_state.get("loadedSceneProof")),
+            },
+        ],
+        "clickAttempts": clicks,
+        "relaunchAttempts": relaunch_attempts,
+        "failureClassification": classification,
+        "transitionObserved": bool(
+            (clicks or relaunch_attempts)
+            and (
+                _state_name(final_state) != _state_name(initial_state)
+                or bool(_dict(final_state.get("loadedSceneProof")).get("loadedSceneVerified"))
+            )
+        ),
+    }
+
+
 def _result(
     *,
     status: str,
@@ -413,14 +674,33 @@ def _result(
     manual_action_required: str | None = None,
     next_recommendation: str | None = None,
     warnings: list[str] | None = None,
+    relaunch_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     proof = _dict(final_state.get("loadedSceneProof"))
     daemon = _dict(final_state.get("daemon"))
+    relaunch = dict(relaunch_info or {})
+    classification = classify_recovery_failure(
+        initial_state=initial_state,
+        final_state=final_state,
+        actions_taken=actions_taken,
+    )
+    failure_class = str(classification.get("failureClass") or "unknown")
+    effective_blocker = blocker
+    if effective_blocker in {None, "loaded_scene_not_verified"} and failure_class not in {"none", "unknown"}:
+        effective_blocker = failure_class
+    state_machine = build_recovery_state_machine(
+        initial_state=initial_state,
+        final_state=final_state,
+        actions_taken=actions_taken,
+    )
     return {
         "schema": SCHEMA,
         "status": status,
         "initialState": initial_state,
         "finalState": final_state,
+        "recoveryFailureClass": failure_class,
+        "recoveryFailureReason": classification.get("reason"),
+        "recoveryStateMachine": state_machine,
         "actionsTaken": actions_taken,
         "elapsedMs": max(0, _now_ms(monotonic_func) - started_ms),
         "attempts": attempts or {},
@@ -430,8 +710,32 @@ def _result(
         "clientTickHotFresh": bool(proof.get("clientTickHotFresh")),
         "worldModelObjectTotal": proof.get("worldModelObjectTotal"),
         "currentSessionPath": daemon.get("sessionPath"),
+        "disconnectedLoopDetected": bool(relaunch.get("disconnectedLoopDetected")),
+        "relaunchRequired": bool(relaunch.get("relaunchRequired")),
+        "relaunchAttempted": bool(relaunch.get("relaunchAttempted")),
+        "launchMode": relaunch.get("launchMode"),
+        "launchModeReason": relaunch.get("launchModeReason"),
+        "launchModeWarnings": list(relaunch.get("launchModeWarnings") or []),
+        "startGameCommand": relaunch.get("startGameCommand"),
+        "startGameCommandSource": relaunch.get("startGameCommandSource"),
+        "relaunchCommand": relaunch.get("relaunchCommand") or relaunch.get("startGameCommand"),
+        "relaunchResult": relaunch.get("relaunchResult"),
+        "relaunchSucceeded": bool(relaunch.get("relaunchSucceeded")),
+        "launchedProcessPid": relaunch.get("launchedProcessPid"),
+        "loadedSceneAfterRelaunch": bool(
+            relaunch.get("loadedSceneAfterRelaunch")
+            or (relaunch.get("relaunchAttempted") and proof.get("loadedSceneVerified"))
+        ),
+        "loginScreenAfterRelaunch": bool(relaunch.get("loginScreenAfterRelaunch")),
+        "finalHotGameState": proof.get("gameState"),
+        "finalLoadedSceneVerified": bool(proof.get("loadedSceneVerified")),
+        "finalWorldObjectCount": proof.get("worldModelObjectTotal"),
+        "finalTick": proof.get("latestTick"),
+        "finalExportSeq": proof.get("latestExportSeq"),
+        "failureReason": effective_blocker,
         "manualActionRequired": manual_action_required,
-        "blocker": blocker,
+        "blocker": effective_blocker,
+        "rawBlocker": blocker,
         "nextRecommendation": next_recommendation or final_state.get("nextRecommendation"),
         "warnings": list(dict.fromkeys(warnings or [])),
     }
@@ -467,6 +771,79 @@ def _remember_success(snapshot_url: str, daemon_url: str, payload: dict[str, Any
     }
 
 
+def _resolve_start_game_command() -> dict[str, Any]:
+    import start_game_command
+
+    return start_game_command.resolve_start_game_command(prefer_authenticated=True)
+
+
+def _launch_start_game(command_info: dict[str, Any]) -> dict[str, Any]:
+    import start_game_command
+
+    return start_game_command.launch_start_game(command_info, execute=True)
+
+
+def _relaunch_failure_blocker(final_state: dict[str, Any]) -> str:
+    proof = _dict(final_state.get("loadedSceneProof"))
+    state = _state_name(final_state)
+    game_state = str(proof.get("gameState") or "").upper()
+    if state in {"disconnected_dialog", "login_screen", "saved_account_play_now"} or game_state == "LOGIN_SCREEN":
+        return "stale_login_screen_after_relaunch"
+    if not bool(proof.get("clientTickHotFresh")):
+        return "stale_hot_client_after_relaunch"
+    if state == "plugin_endpoint_down" or not final_state.get("snapshotReachable"):
+        return "snapshot_unreachable_after_relaunch"
+    if state == "daemon_down":
+        return "daemon_down_after_relaunch"
+    if state == "daemon_stale":
+        return "daemon_stale_after_relaunch"
+    return "relaunch_loaded_scene_not_verified"
+
+
+def _confirm_stable_loaded_scene(
+    *,
+    final_state: dict[str, Any],
+    snapshot_url: str,
+    daemon_url: str,
+    fetch_snapshot_func: Callable[..., dict[str, Any]],
+    fetch_daemon_status_func: Callable[..., dict[str, Any]],
+    window_finder: Callable[[list[str]], dict[str, Any]],
+    button_candidates_func: Callable[..., tuple[list[Any], list[str]]],
+    sleep_func: Callable[[float], None],
+    warnings: list[str],
+    actions: list[dict[str, Any]],
+    state_label: str,
+) -> dict[str, Any]:
+    if not final_state.get("loadedSceneVerified"):
+        return final_state
+    sleep_func(LOADED_SCENE_STABILITY_SECONDS)
+    stable_state, stable_warnings = _inspect_state(
+        snapshot_url=snapshot_url,
+        daemon_url=daemon_url,
+        fetch_snapshot_func=fetch_snapshot_func,
+        fetch_daemon_status_func=fetch_daemon_status_func,
+        window_finder=window_finder,
+        button_candidates_func=button_candidates_func,
+        timeout=1.0,
+    )
+    warnings.extend(stable_warnings)
+    stable = bool(stable_state.get("loadedSceneVerified") and _dict(stable_state.get("daemon")).get("fresh"))
+    actions.append(
+        {
+            "action": "loaded_scene_stability_check",
+            "state": state_label,
+            "status": "PASS" if stable else "FAIL",
+            "stableSeconds": LOADED_SCENE_STABILITY_SECONDS,
+            "loadedSceneVerified": bool(stable_state.get("loadedSceneVerified")),
+            "stateAfter": _state_name(stable_state),
+            "reason": "loaded scene remained current" if stable else "loaded scene did not remain current after recovery",
+        }
+    )
+    if not stable:
+        warnings.append("loaded scene proof disappeared during stability check")
+    return stable_state
+
+
 def ensure_loaded_scene(
     *,
     daemon_url: str = "http://127.0.0.1:8890",
@@ -477,6 +854,7 @@ def ensure_loaded_scene(
     max_attempts_per_state: int = 2,
     allow_jagex_launcher: bool = False,
     allow_credentials: bool = False,
+    allow_relaunch: bool = True,
     use_cache: bool = True,
     fetch_snapshot_func: Callable[..., dict[str, Any]] = bootstrap.fetch_snapshot,
     fetch_daemon_status_func: Callable[..., dict[str, Any]] = fetch_daemon_status,
@@ -484,6 +862,8 @@ def ensure_loaded_scene(
     button_candidates_func: Callable[..., tuple[list[Any], list[str]]] = bootstrap.button_candidates,
     run_bootstrap_recovery_func: Callable[[argparse.Namespace], dict[str, Any]] = _run_bootstrap_recovery,
     start_daemon_func: Callable[..., dict[str, Any]] = bootstrap.start_daemon,
+    resolve_start_game_command_func: Callable[[], dict[str, Any]] = _resolve_start_game_command,
+    launch_start_game_func: Callable[[dict[str, Any]], dict[str, Any]] = _launch_start_game,
     sleep_func: Callable[[float], None] = time.sleep,
     monotonic_func: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
@@ -491,6 +871,17 @@ def ensure_loaded_scene(
     warnings: list[str] = []
     actions: list[dict[str, Any]] = []
     attempts: dict[str, int] = {}
+    relaunch_info: dict[str, Any] = {
+        "disconnectedLoopDetected": False,
+        "relaunchRequired": False,
+        "relaunchAttempted": False,
+        "relaunchSucceeded": False,
+        "loadedSceneAfterRelaunch": False,
+        "loginScreenAfterRelaunch": False,
+        "launchMode": None,
+        "launchModeReason": None,
+        "launchModeWarnings": [],
+    }
     if use_cache:
         cached = _cached_success(snapshot_url, daemon_url, monotonic_func)
         if cached:
@@ -592,16 +983,38 @@ def ensure_loaded_scene(
             allow_jagex_launcher=allow_jagex_launcher,
         )
         recovery = run_bootstrap_recovery_func(recovery_args)
+        clicked_details = [
+            _compact_clicked_candidate(item)
+            for item in _list(recovery.get("clickedCandidates"))
+            if isinstance(item, dict)
+        ]
+        bootstrap_state = _dict(recovery.get("bootstrapState"))
         actions.append(
             {
                 "action": "run_bootstrap_recovery",
                 "state": state_name,
                 "status": recovery.get("status"),
                 "loadedSceneVerified": recovery.get("loadedSceneVerified"),
-                "clickedCandidates": [
-                    _dict(item).get("name")
-                    for item in _list(recovery.get("clickedCandidates"))
-                    if isinstance(item, dict)
+                "startupStage": recovery.get("startupStage"),
+                "clickedCandidates": [item.get("name") for item in clicked_details if item.get("name")],
+                "clickedCandidateDetails": clicked_details,
+                "bootstrapState": {
+                    "state": bootstrap_state.get("state"),
+                    "confidence": bootstrap_state.get("confidence"),
+                    "selectedBootstrapAction": bootstrap_state.get("selectedBootstrapAction"),
+                    "verificationResult": bootstrap_state.get("verificationResult"),
+                    "nextStep": bootstrap_state.get("nextStep"),
+                    "blocker": bootstrap_state.get("blocker"),
+                },
+                "snapshot": _compact_bootstrap_snapshot(recovery),
+                "stages": [
+                    {
+                        "stage": _dict(stage).get("stage"),
+                        "status": _dict(stage).get("status"),
+                        "reason": _dict(stage).get("reason"),
+                    }
+                    for stage in _list(recovery.get("stages"))
+                    if isinstance(stage, dict)
                 ],
                 "daemon": recovery.get("daemon"),
                 "failures": recovery.get("failures") or [],
@@ -645,6 +1058,207 @@ def ensure_loaded_scene(
             timeout=1.0,
         )
         warnings.extend(final_warnings)
+    if actions and final_state.get("loadedSceneVerified") and _dict(final_state.get("daemon")).get("fresh"):
+        attempts["loaded_scene_stability_check"] = attempts.get("loaded_scene_stability_check", 0) + 1
+        final_state = _confirm_stable_loaded_scene(
+            final_state=final_state,
+            snapshot_url=snapshot_url,
+            daemon_url=daemon_url,
+            fetch_snapshot_func=fetch_snapshot_func,
+            fetch_daemon_status_func=fetch_daemon_status_func,
+            window_finder=window_finder,
+            button_candidates_func=button_candidates_func,
+            sleep_func=sleep_func,
+            warnings=warnings,
+            actions=actions,
+            state_label="post_recovery_loaded_scene",
+        )
+    if allow_relaunch and not final_state.get("loadedSceneVerified"):
+        classification = classify_recovery_failure(
+            initial_state=initial_state,
+            final_state=final_state,
+            actions_taken=actions,
+        )
+        if classification.get("failureClass") == "disconnected_loop":
+            relaunch_info["disconnectedLoopDetected"] = True
+            relaunch_info["relaunchRequired"] = True
+            attempts["relaunch_required"] = attempts.get("relaunch_required", 0) + 1
+            command_info = resolve_start_game_command_func()
+            launch_mode = str(command_info.get("launchMode") or "unknown")
+            relaunch_info["startGameCommand"] = command_info.get("command")
+            relaunch_info["startGameCommandSource"] = command_info.get("commandSource")
+            relaunch_info["relaunchCommand"] = command_info.get("command")
+            relaunch_info["launchMode"] = launch_mode
+            relaunch_info["launchModeReason"] = command_info.get("launchModeReason")
+            relaunch_info["launchModeWarnings"] = list(command_info.get("launchModeWarnings") or [])
+            warnings.extend(str(item) for item in relaunch_info["launchModeWarnings"])
+            actions.append(
+                {
+                    "action": "relaunch_required",
+                    "state": "disconnected_loop",
+                    "reason": classification.get("reason"),
+                    "startGameCommand": command_info.get("command"),
+                    "startGameCommandSource": command_info.get("commandSource"),
+                    "launchMode": launch_mode,
+                    "launchModeWarnings": list(command_info.get("launchModeWarnings") or []),
+                    "stateAfter": "relaunch_required",
+                }
+            )
+            if command_info.get("status") != "PASS":
+                relaunch_info["relaunchResult"] = {
+                    "status": "FAIL",
+                    "reason": "relaunch_command_missing",
+                    "command": command_info.get("command"),
+                    "commandSource": command_info.get("commandSource"),
+                }
+                return _result(
+                    status="unsafe",
+                    initial_state=initial_state,
+                    final_state=final_state,
+                    actions_taken=actions,
+                    started_ms=started_ms,
+                    monotonic_func=monotonic_func,
+                    attempts=attempts,
+                    blocker="relaunch_command_missing",
+                    next_recommendation="configure the same Start Game command used by Simple Mode",
+                    warnings=warnings,
+                    relaunch_info=relaunch_info,
+                )
+            attempts["relaunching_client"] = attempts.get("relaunching_client", 0) + 1
+            launch = launch_start_game_func(command_info)
+            relaunch_info["relaunchAttempted"] = bool(launch.get("relaunchAttempted") or launch.get("status") == "PASS")
+            relaunch_info["relaunchSucceeded"] = bool(launch.get("relaunchSucceeded"))
+            relaunch_info["launchedProcessPid"] = launch.get("launchedProcessPid")
+            relaunch_info["relaunchResult"] = launch
+            actions.append(
+                {
+                    "action": "relaunch_client",
+                    "state": "relaunch_required",
+                    "status": launch.get("status"),
+                    "reason": launch.get("reason"),
+                    "startGameCommand": command_info.get("command"),
+                    "startGameCommandSource": command_info.get("commandSource"),
+                    "launchMode": launch_mode,
+                    "launchModeWarnings": list(command_info.get("launchModeWarnings") or []),
+                    "result": launch,
+                    "stateAfter": "relaunching_client",
+                }
+            )
+            if launch.get("status") != "PASS" or not launch.get("relaunchSucceeded"):
+                return _result(
+                    status="unsafe",
+                    initial_state=initial_state,
+                    final_state=final_state,
+                    actions_taken=actions,
+                    started_ms=started_ms,
+                    monotonic_func=monotonic_func,
+                    attempts=attempts,
+                    blocker="relaunch_failed",
+                    next_recommendation="inspect Start Game command and client process launch",
+                    warnings=warnings,
+                    relaunch_info=relaunch_info,
+                )
+            relaunch_poll_count = 0
+            relaunch_deadline = (float(started_ms) / 1000.0) + max(1.0, float(max_total_ms) / 1000.0)
+            while monotonic_func() < relaunch_deadline:
+                sleep_func(2.0)
+                relaunch_poll_count += 1
+                current_state, current_warnings = _inspect_state(
+                    snapshot_url=snapshot_url,
+                    daemon_url=daemon_url,
+                    fetch_snapshot_func=fetch_snapshot_func,
+                    fetch_daemon_status_func=fetch_daemon_status_func,
+                    window_finder=window_finder,
+                    button_candidates_func=button_candidates_func,
+                    timeout=1.0,
+                )
+                warnings.extend(current_warnings)
+                final_state = current_state
+                if final_state.get("loadedSceneVerified") and not _dict(final_state.get("daemon")).get("fresh"):
+                    attempts["daemon_rebind_after_relaunch"] = attempts.get("daemon_rebind_after_relaunch", 0) + 1
+                    start = start_daemon_func(execute=True)
+                    actions.append({"action": "start_or_rebind_daemon", "state": "loaded_scene_after_relaunch_without_fresh_daemon", "result": start})
+                    sleep_func(2.0)
+                    final_state, final_warnings = _inspect_state(
+                        snapshot_url=snapshot_url,
+                        daemon_url=daemon_url,
+                        fetch_snapshot_func=fetch_snapshot_func,
+                        fetch_daemon_status_func=fetch_daemon_status_func,
+                        window_finder=window_finder,
+                        button_candidates_func=button_candidates_func,
+                        timeout=1.0,
+                    )
+                    warnings.extend(final_warnings)
+                if final_state.get("loadedSceneVerified") and _dict(final_state.get("daemon")).get("fresh"):
+                    attempts["loaded_scene_stability_check_after_relaunch"] = attempts.get("loaded_scene_stability_check_after_relaunch", 0) + 1
+                    final_state = _confirm_stable_loaded_scene(
+                        final_state=final_state,
+                        snapshot_url=snapshot_url,
+                        daemon_url=daemon_url,
+                        fetch_snapshot_func=fetch_snapshot_func,
+                        fetch_daemon_status_func=fetch_daemon_status_func,
+                        window_finder=window_finder,
+                        button_candidates_func=button_candidates_func,
+                        sleep_func=sleep_func,
+                        warnings=warnings,
+                        actions=actions,
+                        state_label="post_relaunch_loaded_scene",
+                    )
+                if final_state.get("loadedSceneVerified") and _dict(final_state.get("daemon")).get("fresh"):
+                    relaunch_info["loadedSceneAfterRelaunch"] = True
+                    actions.append(
+                        {
+                            "action": "wait_for_loaded_scene_after_relaunch",
+                            "state": "relaunching_client",
+                            "status": "PASS",
+                            "polls": relaunch_poll_count,
+                            "loadedSceneVerified": True,
+                            "stateAfter": "loaded_scene_verified",
+                            "reason": "loaded-scene proof became current after Start Game relaunch",
+                        }
+                    )
+                    break
+            if not relaunch_info.get("loadedSceneAfterRelaunch"):
+                blocker_after_relaunch = _relaunch_failure_blocker(final_state)
+                proof_after_relaunch = _dict(final_state.get("loadedSceneProof"))
+                state_after_relaunch = _state_name(final_state)
+                game_state_after_relaunch = str(proof_after_relaunch.get("gameState") or "").upper()
+                login_after_relaunch = bool(
+                    state_after_relaunch in {"disconnected_dialog", "login_screen", "saved_account_play_now", "stale_logged_in_no_scene"}
+                    or game_state_after_relaunch == "LOGIN_SCREEN"
+                )
+                relaunch_info["loginScreenAfterRelaunch"] = login_after_relaunch
+                if launch_mode == "dev_gradle_run" and login_after_relaunch:
+                    blocker_after_relaunch = "dev_launch_not_loaded"
+                    warnings.append(
+                        "Start Game uses a Gradle/dev launch path; it launched a client but did not produce authenticated loaded-scene proof."
+                    )
+                actions.append(
+                    {
+                        "action": "wait_for_loaded_scene_after_relaunch",
+                        "state": "relaunching_client",
+                        "status": "FAIL",
+                        "polls": relaunch_poll_count,
+                        "loadedSceneVerified": False,
+                        "stateAfter": _state_name(final_state),
+                        "launchMode": launch_mode,
+                        "loginScreenAfterRelaunch": login_after_relaunch,
+                        "reason": blocker_after_relaunch,
+                    }
+                )
+                return _result(
+                    status="unsafe",
+                    initial_state=initial_state,
+                    final_state=final_state,
+                    actions_taken=actions,
+                    started_ms=started_ms,
+                    monotonic_func=monotonic_func,
+                    attempts=attempts,
+                    blocker=blocker_after_relaunch,
+                    next_recommendation="inspect client/login/network state after Start Game relaunch",
+                    warnings=warnings,
+                    relaunch_info=relaunch_info,
+                )
     elapsed = _now_ms(monotonic_func) - started_ms
     if final_state.get("loadedSceneVerified") and _dict(final_state.get("daemon")).get("fresh"):
         payload = _result(
@@ -657,6 +1271,7 @@ def ensure_loaded_scene(
             attempts=attempts,
             warnings=warnings,
             next_recommendation="continue",
+            relaunch_info=relaunch_info,
         )
         _remember_success(snapshot_url, daemon_url, payload, monotonic_func)
         return payload
@@ -705,6 +1320,7 @@ def format_compact_result(payload: dict[str, Any]) -> str:
         f"world objects: {payload.get('worldModelObjectTotal')}",
         f"session: {payload.get('currentSessionPath') or 'unknown'}",
         f"actions: {len(_list(payload.get('actionsTaken')))}",
+        f"relaunch: required={bool(payload.get('relaunchRequired'))} attempted={bool(payload.get('relaunchAttempted'))} loaded_after={bool(payload.get('loadedSceneAfterRelaunch'))}",
         f"blocker: {payload.get('blocker') or 'none'}",
         f"next: {payload.get('nextRecommendation') or 'none'}",
     ]

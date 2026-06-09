@@ -321,6 +321,35 @@ class ActionLifecycleTest(unittest.TestCase):
         self.assertIn("held_resource_count_increased", observed["observedSignals"])
         self.assertNotIn("blocked_phase", observed["observedSignals"])
 
+    def test_select_resource_animation_wins_over_stale_blocked_phase(self):
+        before = resource_status(free_slots=18, held_count=10, progress_count=4)
+        after = resource_status(
+            phase="blocked",
+            active_intent="observe",
+            free_slots=18,
+            held_count=10,
+            progress_count=4,
+            blocking_conditions=["needs_more_context"],
+        )
+        after["brain"]["playerContext"] = {"animation": 879}
+        after["brain"]["overlayDebugContext"] = {
+            "latestEventSummary": "Player animation changed: 879",
+        }
+
+        observed = verify_expected_result(
+            "select_resource_target",
+            before,
+            after,
+            elapsed_ms=15000,
+            timeout_ms=15000,
+        )
+
+        self.assertEqual(observed["verificationStatus"], "PASS")
+        self.assertEqual(observed["observedResult"], "activity_progress")
+        self.assertEqual(observed["resultOutcome"], "progress")
+        self.assertIn("woodcutting_animation_879", observed["observedSignals"])
+        self.assertNotIn("blocked_phase", observed["observedSignals"])
+
     def test_service_route_object_expects_transition_progress(self):
         expected = verify_expected_result(
             "interact_service_route_object",

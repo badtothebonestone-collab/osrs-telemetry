@@ -1,0 +1,6180 @@
+{
+  "schema": "human_click_profile.v1",
+  "status": "PASS",
+  "generatedAtUtc": "2026-06-07T19:58:17.937Z",
+  "recordingCount": 7,
+  "activityBuckets": [
+    "banking",
+    "camera_input_sample",
+    "menu_interaction",
+    "route_traversal",
+    "woodcutting"
+  ],
+  "recordings": [
+    {
+      "schema": "human_click_profile_recording_summary.v1",
+      "status": "PASS",
+      "recordingId": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+      "recordingPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+      "activityBuckets": [
+        "route_traversal",
+        "menu_interaction",
+        "camera_input_sample"
+      ],
+      "primaryActivity": "route_traversal",
+      "durationSeconds": 35.11,
+      "clicks": {
+        "rawClickCount": 5,
+        "eligibleGameActionClicks": 2,
+        "targetRelativeClicks": 2,
+        "strongTargetClicks": 1,
+        "mediumTargetClicks": 1,
+        "weakTargetClicks": 0,
+        "unmatchedTargetClicks": 0,
+        "insideClickboxCount": 0,
+        "outsideRecoveredGeometryCount": 2,
+        "unknownClickboxCount": 0,
+        "unavailableClickboxCount": 0,
+        "menuRowSelectionCount": 1,
+        "rightClickMenuOpenCount": 1,
+        "duplicateClickLikelyCount": 0,
+        "classificationCounts": {
+          "ambiguous_click": 1,
+          "menu_selection_click": 1,
+          "object_action_click": 1,
+          "right_click_menu_open": 1,
+          "ui_control_click": 1
+        }
+      },
+      "landing": {
+        "aimDistancesPx": [
+          170.141,
+          116.103
+        ],
+        "aimDistancePx": {
+          "count": 2,
+          "min": 116.103,
+          "max": 170.141,
+          "average": 143.122,
+          "median": 143.122,
+          "p75": 156.631,
+          "p90": 164.737
+        },
+        "aimDistanceBucketsPx": {
+          "le12": 0,
+          "le30": 0,
+          "le80": 0,
+          "gt80": 2,
+          "unknown": 0
+        },
+        "menuRowCenterDistancePx": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "menuRowCounts": {
+          "inside": 0,
+          "outside": 0,
+          "unknown": 0,
+          "missingBounds": 1
+        }
+      },
+      "hover": {
+        "hoverBeforeClickSamples": 1,
+        "hoverBeforeClickMs": {
+          "count": 1,
+          "min": 7859.0,
+          "max": 7859.0,
+          "average": 7859.0,
+          "median": 7859.0,
+          "p75": 7859.0,
+          "p90": 7859.0
+        },
+        "examples": [
+          {
+            "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+            "eventSeq": 32,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Bank table",
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+            "eventSeq": 33,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Bank table",
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+            "eventSeq": 34,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Bank table",
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+            "eventSeq": 154,
+            "classification": "ambiguous_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+            "eventSeq": 159,
+            "classification": "ambiguous_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+            "eventSeq": 160,
+            "classification": "ambiguous_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+            "eventSeq": 184,
+            "classification": "ui_control_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+            "eventSeq": 185,
+            "classification": "ui_control_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          }
+        ]
+      },
+      "camera": {
+        "cameraSegmentCount": 2,
+        "middleMouseDragCount": 0,
+        "arrowKeyCameraSegmentCount": 0,
+        "cameraBeforeClickCount": 1,
+        "cameraBeforeStrongOrMediumClickCount": 1,
+        "cameraToClickMs": {
+          "count": 1,
+          "min": 7859.0,
+          "max": 7859.0,
+          "average": 7859.0,
+          "median": 7859.0,
+          "p75": 7859.0,
+          "p90": 7859.0
+        },
+        "averageCameraSegmentDurationMs": 8070.5,
+        "averageYawDelta": 1002.0,
+        "averagePitchDelta": 58.5,
+        "examples": [
+          {
+            "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+            "segmentId": "cam_001",
+            "source": "unknown",
+            "durationMs": 4297,
+            "deltaYaw": 1008.0,
+            "deltaPitch": 117.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": 95,
+            "nextClickTargetName": "Staircase",
+            "nextClickTargetAction": "Climb-down",
+            "nextClickTargetQuality": "medium"
+          },
+          {
+            "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+            "segmentId": "cam_002",
+            "source": "unknown",
+            "durationMs": 11844,
+            "deltaYaw": -996.0,
+            "deltaPitch": 0.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": null,
+            "nextClickTargetName": null,
+            "nextClickTargetAction": null,
+            "nextClickTargetQuality": null
+          }
+        ]
+      },
+      "mousePath": {
+        "movementSegments": 162,
+        "mouseMoveEventCount": 164,
+        "pathLengthPx": 4143.912,
+        "pathSegmentDistancePx": {
+          "count": 162,
+          "min": 2.0,
+          "max": 518.322,
+          "average": 25.58,
+          "median": 8.0,
+          "p75": 22.038,
+          "p90": 62.298
+        },
+        "speedPxPerSec": {
+          "count": 159,
+          "min": 2.41,
+          "max": 3893.605,
+          "average": 201.413,
+          "median": 88.388,
+          "p75": 193.923,
+          "p90": 435.82
+        },
+        "pauseCount": 34,
+        "examples": [
+          {
+            "start": {
+              "x": 1533.0,
+              "y": 97.0,
+              "elapsed": 0.344,
+              "kind": "mouse_move"
+            },
+            "end": {
+              "x": 725.0,
+              "y": 395.0,
+              "elapsed": 34.281,
+              "kind": "mouse_move"
+            },
+            "pathLengthPx": 4143.912
+          }
+        ]
+      },
+      "woodcutting": {
+        "status": "WARN",
+        "phase": "idle",
+        "confidence": 0.25,
+        "freshChopClickCount": 0,
+        "inputActionChopClickCount": 0,
+        "inputTreeTargetEvidenceCount": null,
+        "normalLogsGained": 0,
+        "inventoryFull": false,
+        "animationActiveSnapshotCount": 0
+      },
+      "banking": {
+        "status": "WARN",
+        "phase": "partial",
+        "confidence": 0.3,
+        "bankOpenSeen": false,
+        "depositBoxOpenSeen": false,
+        "bankUiPresent": true,
+        "bankContainerAvailable": false,
+        "bankContainerDeltaAvailable": false,
+        "depositedItems": [],
+        "depositConfirmationLevel": "none"
+      },
+      "traversal": {
+        "status": "PASS",
+        "routeName": "Bank_to_Woodcutting_area",
+        "phase": "arrived",
+        "confidence": 0.817,
+        "routeSegmentCount": 5,
+        "successfulSegmentCount": 5,
+        "partialSegmentCount": 0,
+        "reviewEvidenceCount": 1,
+        "planeChangeCount": 1,
+        "distanceApprox": 53.327,
+        "routeSegments": [
+          {
+            "segmentIndex": 1,
+            "segmentType": "area_start",
+            "label": "Start: bank_area",
+            "startWorld": {
+              "worldX": 3209,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3209,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "startPlane": 2,
+            "endPlane": 2,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_start",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.85,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 2,
+            "segmentType": "walk_segment",
+            "label": "Walk",
+            "startWorld": {
+              "worldX": 3209,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3205,
+              "worldY": 3209,
+              "plane": 2
+            },
+            "startPlane": 2,
+            "endPlane": 2,
+            "primaryAction": {
+              "option": "Walk",
+              "target": null,
+              "targetQuality": null
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_001"
+            ],
+            "confidence": 0.75,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 3,
+            "segmentType": "stair_transition",
+            "label": "Climb-down Staircase",
+            "startWorld": {
+              "worldX": 3205,
+              "worldY": 3209,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3206,
+              "worldY": 3208,
+              "plane": 0
+            },
+            "startPlane": 2,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Climb-down",
+              "target": "Staircase",
+              "targetQuality": "medium"
+            },
+            "postcondition": {
+              "type": "plane_change",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_004",
+              "raw_step_003"
+            ],
+            "confidence": 0.95,
+            "warnings": [
+              "click_outside_clickbox",
+              "large_distance_from_aim_px=116.103"
+            ]
+          },
+          {
+            "segmentIndex": 4,
+            "segmentType": "walk_segment",
+            "label": "Walk",
+            "startWorld": {
+              "worldX": 3206,
+              "worldY": 3208,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3196,
+              "worldY": 3245,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Walk",
+              "target": null,
+              "targetQuality": null
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_005"
+            ],
+            "confidence": 0.75,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 5,
+            "segmentType": "area_arrival",
+            "label": "Arrive: woodcutting_area",
+            "startWorld": {
+              "worldX": 3196,
+              "worldY": 3245,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3196,
+              "worldY": 3245,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_arrival",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.88,
+            "warnings": []
+          }
+        ]
+      },
+      "imperfectSuccessfulClicks": [
+        {
+          "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+          "eventSeq": 34,
+          "action": null,
+          "target": "Bank table",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 465.0,
+              "y": 156.0
+            }
+          },
+          "aimDistancePx": 170.141,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_bounds_missing",
+            "selection_inferred_from_game_target_without_row_geometry",
+            "menu_row_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+          "eventSeq": 95,
+          "action": "Climb-down",
+          "target": "Staircase",
+          "classification": "object_action_click",
+          "targetQuality": "medium",
+          "targetScore": 0.96,
+          "clickPoint": {
+            "canvas": {
+              "x": 190.0,
+              "y": 66.0
+            }
+          },
+          "aimDistancePx": 116.103,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": true,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "click_outside_clickbox",
+            "large_distance_from_aim_px=116.103"
+          ]
+        }
+      ],
+      "imperfectSuccessfulClickCount": 2,
+      "warnings": [],
+      "missingCapabilities": [],
+      "artifactStatus": {
+        "inputEvents": true,
+        "inputActionClassifications": true,
+        "targetMatchQuality": true,
+        "cameraBehavior": true,
+        "menuInteractions": true,
+        "coordinateAlignment": true,
+        "vmMouseArduinoMapping": true
+      }
+    },
+    {
+      "schema": "human_click_profile_recording_summary.v1",
+      "status": "PASS",
+      "recordingId": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+      "recordingPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+      "activityBuckets": [
+        "woodcutting",
+        "route_traversal",
+        "menu_interaction",
+        "camera_input_sample"
+      ],
+      "primaryActivity": "woodcutting",
+      "durationSeconds": 155.969,
+      "clicks": {
+        "rawClickCount": 10,
+        "eligibleGameActionClicks": 4,
+        "targetRelativeClicks": 4,
+        "strongTargetClicks": 4,
+        "mediumTargetClicks": 0,
+        "weakTargetClicks": 0,
+        "unmatchedTargetClicks": 0,
+        "insideClickboxCount": 0,
+        "outsideRecoveredGeometryCount": 2,
+        "unknownClickboxCount": 0,
+        "unavailableClickboxCount": 2,
+        "menuRowSelectionCount": 4,
+        "rightClickMenuOpenCount": 2,
+        "duplicateClickLikelyCount": 0,
+        "classificationCounts": {
+          "ambiguous_click": 2,
+          "camera_drag_release": 1,
+          "menu_selection_click": 4,
+          "right_click_menu_open": 2,
+          "ui_control_click": 1
+        }
+      },
+      "landing": {
+        "aimDistancesPx": [
+          155.39,
+          343.839,
+          215.128,
+          283.805
+        ],
+        "aimDistancePx": {
+          "count": 4,
+          "min": 155.39,
+          "max": 343.839,
+          "average": 249.541,
+          "median": 249.466,
+          "p75": 298.813,
+          "p90": 325.829
+        },
+        "aimDistanceBucketsPx": {
+          "le12": 0,
+          "le30": 0,
+          "le80": 0,
+          "gt80": 4,
+          "unknown": 0
+        },
+        "menuRowCenterDistancePx": {
+          "count": 1,
+          "min": 62.367,
+          "max": 62.367,
+          "average": 62.367,
+          "median": 62.367,
+          "p75": 62.367,
+          "p90": 62.367
+        },
+        "menuRowCounts": {
+          "inside": 1,
+          "outside": 0,
+          "unknown": 0,
+          "missingBounds": 3
+        }
+      },
+      "hover": {
+        "hoverBeforeClickSamples": 0,
+        "hoverBeforeClickMs": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "examples": [
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "eventSeq": 25,
+            "classification": "camera_drag_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "eventSeq": 30,
+            "classification": "camera_drag_release",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "eventSeq": 31,
+            "classification": "camera_drag_release",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "eventSeq": 74,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Ladder",
+            "targetAction": "Climb-up"
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "eventSeq": 75,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Ladder",
+            "targetAction": "Climb-up"
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "eventSeq": 76,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Ladder",
+            "targetAction": "Climb-up"
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "eventSeq": 96,
+            "classification": "menu_selection_click",
+            "hoverOption": "Chop down",
+            "hoverTarget": "<col=ffff>Tree",
+            "targetName": "Gate",
+            "targetAction": "Open"
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "eventSeq": 97,
+            "classification": "menu_selection_click",
+            "hoverOption": "Chop down",
+            "hoverTarget": "<col=ffff>Tree",
+            "targetName": "Gate",
+            "targetAction": "Open"
+          }
+        ]
+      },
+      "camera": {
+        "cameraSegmentCount": 6,
+        "middleMouseDragCount": 1,
+        "arrowKeyCameraSegmentCount": 0,
+        "cameraBeforeClickCount": 5,
+        "cameraBeforeStrongOrMediumClickCount": 5,
+        "cameraToClickMs": {
+          "count": 5,
+          "min": 16.0,
+          "max": 45282.0,
+          "average": 18053.4,
+          "median": 9188.0,
+          "p75": 31203.0,
+          "p90": 39650.4
+        },
+        "averageCameraSegmentDurationMs": 9192.667,
+        "averageYawDelta": 665.667,
+        "averagePitchDelta": 0.333,
+        "examples": [
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "segmentId": "cam_001",
+            "source": "middle_mouse_drag",
+            "durationMs": 14781,
+            "deltaYaw": -82.0,
+            "deltaPitch": -2.0,
+            "mouseDrag": {
+              "start": {
+                "x": 1397,
+                "y": 347
+              },
+              "end": {
+                "x": 1209,
+                "y": 330
+              },
+              "dx": -188,
+              "dy": -17
+            },
+            "nextClickEventSeq": 76,
+            "nextClickTargetName": "Ladder",
+            "nextClickTargetAction": "Climb-up",
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "segmentId": "cam_002",
+            "source": "unknown",
+            "durationMs": 4344,
+            "deltaYaw": 252.0,
+            "deltaPitch": 0.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": 98,
+            "nextClickTargetName": "Gate",
+            "nextClickTargetAction": "Open",
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "segmentId": "cam_003",
+            "source": "unknown",
+            "durationMs": 5328,
+            "deltaYaw": -1897.0,
+            "deltaPitch": 0.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": 200,
+            "nextClickTargetName": "Stepladder",
+            "nextClickTargetAction": null,
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "segmentId": "cam_004",
+            "source": "unknown",
+            "durationMs": 5297,
+            "deltaYaw": 1578.0,
+            "deltaPitch": 0.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": 358,
+            "nextClickTargetName": "Stepladder",
+            "nextClickTargetAction": null,
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "segmentId": "cam_005",
+            "source": "unknown",
+            "durationMs": 20547,
+            "deltaYaw": -135.0,
+            "deltaPitch": 0.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": 358,
+            "nextClickTargetName": "Stepladder",
+            "nextClickTargetAction": null,
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+            "segmentId": "cam_006",
+            "source": "unknown",
+            "durationMs": 4859,
+            "deltaYaw": 50.0,
+            "deltaPitch": 0.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": null,
+            "nextClickTargetName": null,
+            "nextClickTargetAction": null,
+            "nextClickTargetQuality": null
+          }
+        ]
+      },
+      "mousePath": {
+        "movementSegments": 346,
+        "mouseMoveEventCount": 352,
+        "pathLengthPx": 12454.953,
+        "pathSegmentDistancePx": {
+          "count": 346,
+          "min": 2.0,
+          "max": 461.637,
+          "average": 35.997,
+          "median": 8.246,
+          "p75": 27.749,
+          "p90": 119.505
+        },
+        "speedPxPerSec": {
+          "count": 338,
+          "min": 0.409,
+          "max": 4016.32,
+          "average": 162.756,
+          "median": 53.242,
+          "p75": 155.7,
+          "p90": 383.275
+        },
+        "pauseCount": 195,
+        "examples": [
+          {
+            "start": {
+              "x": 1311.0,
+              "y": 411.0,
+              "elapsed": 0.047,
+              "kind": "mouse_move"
+            },
+            "end": {
+              "x": 734.0,
+              "y": 473.0,
+              "elapsed": 155.235,
+              "kind": "mouse_move"
+            },
+            "pathLengthPx": 12454.953
+          }
+        ]
+      },
+      "woodcutting": {
+        "status": "PASS",
+        "phase": "inventory_full",
+        "confidence": 0.95,
+        "freshChopClickCount": 2,
+        "inputActionChopClickCount": 2,
+        "inputTreeTargetEvidenceCount": null,
+        "normalLogsGained": 11,
+        "inventoryFull": true,
+        "animationActiveSnapshotCount": 22
+      },
+      "banking": {
+        "status": "WARN",
+        "phase": "partial",
+        "confidence": 0.2,
+        "bankOpenSeen": false,
+        "depositBoxOpenSeen": false,
+        "bankUiPresent": true,
+        "bankContainerAvailable": false,
+        "bankContainerDeltaAvailable": false,
+        "depositedItems": [],
+        "depositConfirmationLevel": "none"
+      },
+      "traversal": {
+        "status": "PASS",
+        "routeName": "route_unknown",
+        "phase": "moving",
+        "confidence": 0.785,
+        "routeSegmentCount": 4,
+        "successfulSegmentCount": 3,
+        "partialSegmentCount": 1,
+        "reviewEvidenceCount": 3,
+        "planeChangeCount": 0,
+        "distanceApprox": 35.303,
+        "routeSegments": [
+          {
+            "segmentIndex": 1,
+            "segmentType": "area_start",
+            "label": "Start: woodcutting_area",
+            "startWorld": {
+              "worldX": 3196,
+              "worldY": 3244,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3196,
+              "worldY": 3244,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_start",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.85,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 2,
+            "segmentType": "walk_segment",
+            "label": "Walk",
+            "startWorld": {
+              "worldX": 3196,
+              "worldY": 3244,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3203,
+              "worldY": 3245,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Walk",
+              "target": null,
+              "targetQuality": null
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_001"
+            ],
+            "confidence": 0.75,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 3,
+            "segmentType": "ladder_transition",
+            "label": "Cancel Ladder",
+            "startWorld": {
+              "worldX": 3195,
+              "worldY": 3245,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3199,
+              "worldY": 3246,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Cancel",
+              "target": "Ladder",
+              "targetQuality": "strong"
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "partial"
+            },
+            "evidenceRefs": [
+              "raw_step_002"
+            ],
+            "confidence": 0.82,
+            "warnings": [
+              "climb-style action had position change but no plane change in window",
+              "climb_target_without_plane_change_in_window"
+            ]
+          },
+          {
+            "segmentIndex": 4,
+            "segmentType": "area_arrival",
+            "label": "Arrive: woodcutting_area",
+            "startWorld": {
+              "worldX": 3203,
+              "worldY": 3245,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3203,
+              "worldY": 3245,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_arrival",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.88,
+            "warnings": []
+          }
+        ]
+      },
+      "imperfectSuccessfulClicks": [
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 76,
+          "action": "Climb-up",
+          "target": "Ladder",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 458.0,
+              "y": 190.0
+            }
+          },
+          "aimDistancePx": 155.39,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_positionChanged_inventoryChanged_widgetOpened",
+          "warnings": [
+            "climb_target_without_plane_change_in_window"
+          ]
+        },
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 98,
+          "action": "Open",
+          "target": "Gate",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 66.0,
+              "y": 260.0
+            }
+          },
+          "aimDistancePx": 343.839,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_not_on_screen"
+          ]
+        },
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 200,
+          "action": null,
+          "target": "Stepladder",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 0.92,
+          "clickPoint": {
+            "canvas": {
+              "x": 591.0,
+              "y": 357.0
+            }
+          },
+          "aimDistancePx": 215.128,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": true,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_animationStarted_inventoryChanged_widgetOpened",
+          "warnings": [
+            "menu_row_bounds_missing",
+            "selection_inferred_from_game_target_without_row_geometry",
+            "menu_row_geometry_missing",
+            "target_not_on_screen",
+            "climb_target_without_plane_change_in_window"
+          ]
+        },
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 358,
+          "action": null,
+          "target": "Stepladder",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 102.0,
+              "y": 371.0
+            }
+          },
+          "aimDistancePx": 283.805,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": true,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_animationStarted_inventoryChanged_widgetOpened",
+          "warnings": [
+            "menu_row_bounds_missing",
+            "selection_inferred_from_game_target_without_row_geometry",
+            "menu_row_geometry_missing",
+            "climb_target_without_plane_change_in_window"
+          ]
+        }
+      ],
+      "imperfectSuccessfulClickCount": 4,
+      "warnings": [],
+      "missingCapabilities": [],
+      "artifactStatus": {
+        "inputEvents": true,
+        "inputActionClassifications": true,
+        "targetMatchQuality": true,
+        "cameraBehavior": true,
+        "menuInteractions": true,
+        "coordinateAlignment": true,
+        "vmMouseArduinoMapping": true
+      }
+    },
+    {
+      "schema": "human_click_profile_recording_summary.v1",
+      "status": "PASS",
+      "recordingId": "20260607_120446_Bank_opening_deposit",
+      "recordingPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_120446_Bank_opening_deposit",
+      "activityBuckets": [
+        "banking"
+      ],
+      "primaryActivity": "banking",
+      "durationSeconds": 12.141,
+      "clicks": {
+        "rawClickCount": 3,
+        "eligibleGameActionClicks": 0,
+        "targetRelativeClicks": 0,
+        "strongTargetClicks": 0,
+        "mediumTargetClicks": 0,
+        "weakTargetClicks": 0,
+        "unmatchedTargetClicks": 0,
+        "insideClickboxCount": 0,
+        "outsideRecoveredGeometryCount": 0,
+        "unknownClickboxCount": 0,
+        "unavailableClickboxCount": 0,
+        "menuRowSelectionCount": 0,
+        "rightClickMenuOpenCount": 0,
+        "duplicateClickLikelyCount": 0,
+        "classificationCounts": {
+          "chatbox_click": 1,
+          "inventory_click": 1,
+          "minimap_click": 1
+        }
+      },
+      "landing": {
+        "aimDistancesPx": [],
+        "aimDistancePx": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "aimDistanceBucketsPx": {
+          "le12": 0,
+          "le30": 0,
+          "le80": 0,
+          "gt80": 0,
+          "unknown": 0
+        },
+        "menuRowCenterDistancePx": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "menuRowCounts": {
+          "inside": 0,
+          "outside": 0,
+          "unknown": 0,
+          "missingBounds": 0
+        }
+      },
+      "hover": {
+        "hoverBeforeClickSamples": 0,
+        "hoverBeforeClickMs": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "examples": [
+          {
+            "recording": "20260607_120446_Bank_opening_deposit",
+            "eventSeq": 5,
+            "classification": "inventory_click",
+            "hoverOption": "Cancel",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_120446_Bank_opening_deposit",
+            "eventSeq": 6,
+            "classification": "inventory_click",
+            "hoverOption": "Cancel",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_120446_Bank_opening_deposit",
+            "eventSeq": 7,
+            "classification": "inventory_click",
+            "hoverOption": "Cancel",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_120446_Bank_opening_deposit",
+            "eventSeq": 14,
+            "classification": "chatbox_click",
+            "hoverOption": "Deposit-All",
+            "hoverTarget": "<col=ff9040>Logs</col>",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_120446_Bank_opening_deposit",
+            "eventSeq": 15,
+            "classification": "chatbox_click",
+            "hoverOption": "Deposit-All",
+            "hoverTarget": "<col=ff9040>Logs</col>",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_120446_Bank_opening_deposit",
+            "eventSeq": 16,
+            "classification": "chatbox_click",
+            "hoverOption": "Deposit-All",
+            "hoverTarget": "<col=ff9040>Logs</col>",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_120446_Bank_opening_deposit",
+            "eventSeq": 33,
+            "classification": "minimap_click",
+            "hoverOption": "Deposit-All",
+            "hoverTarget": "<col=ff9040>Tinderbox</col>",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_120446_Bank_opening_deposit",
+            "eventSeq": 34,
+            "classification": "minimap_click",
+            "hoverOption": "Close",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          }
+        ]
+      },
+      "camera": {
+        "cameraSegmentCount": 0,
+        "middleMouseDragCount": 0,
+        "arrowKeyCameraSegmentCount": 0,
+        "cameraBeforeClickCount": 0,
+        "cameraBeforeStrongOrMediumClickCount": 0,
+        "cameraToClickMs": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "averageCameraSegmentDurationMs": null,
+        "averageYawDelta": null,
+        "averagePitchDelta": null,
+        "examples": []
+      },
+      "mousePath": {
+        "movementSegments": 36,
+        "mouseMoveEventCount": 37,
+        "pathLengthPx": 2205.525,
+        "pathSegmentDistancePx": {
+          "count": 36,
+          "min": 2.0,
+          "max": 657.362,
+          "average": 61.265,
+          "median": 18.308,
+          "p75": 36.856,
+          "p90": 127.439
+        },
+        "speedPxPerSec": {
+          "count": 33,
+          "min": 3.656,
+          "max": 3491.619,
+          "average": 577.234,
+          "median": 266.213,
+          "p75": 814.036,
+          "p90": 1243.82
+        },
+        "pauseCount": 7,
+        "examples": [
+          {
+            "start": {
+              "x": 1910.0,
+              "y": 526.0,
+              "elapsed": 0.031,
+              "kind": "mouse_move"
+            },
+            "end": {
+              "x": 656.0,
+              "y": 311.0,
+              "elapsed": 11.188,
+              "kind": "mouse_move"
+            },
+            "pathLengthPx": 2205.525
+          }
+        ]
+      },
+      "woodcutting": {
+        "status": "WARN",
+        "phase": "idle",
+        "confidence": 0.25,
+        "freshChopClickCount": 0,
+        "inputActionChopClickCount": null,
+        "inputTreeTargetEvidenceCount": null,
+        "normalLogsGained": -16,
+        "inventoryFull": false,
+        "animationActiveSnapshotCount": 0
+      },
+      "banking": {
+        "status": "PASS",
+        "phase": "complete",
+        "confidence": 0.95,
+        "bankOpenSeen": true,
+        "depositBoxOpenSeen": false,
+        "bankUiPresent": true,
+        "bankContainerAvailable": true,
+        "bankContainerDeltaAvailable": true,
+        "depositedItems": [
+          {
+            "id": 1511,
+            "name": "Logs",
+            "quantity": 16,
+            "before": 16,
+            "after": 0,
+            "source": "inventory_delta|bank_delta|menu_action",
+            "confirmationLevel": "bank_container_delta_confirmed"
+          }
+        ],
+        "depositConfirmationLevel": "bank_container_delta_confirmed"
+      },
+      "traversal": {
+        "status": "WARN",
+        "routeName": "route_unknown",
+        "phase": "unknown",
+        "confidence": 0.0,
+        "routeSegmentCount": 2,
+        "successfulSegmentCount": 2,
+        "partialSegmentCount": 0,
+        "reviewEvidenceCount": 0,
+        "planeChangeCount": 0,
+        "distanceApprox": 0.0,
+        "routeSegments": [
+          {
+            "segmentIndex": 1,
+            "segmentType": "area_start",
+            "label": "Start: bank_area",
+            "startWorld": {
+              "worldX": 3209,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3209,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "startPlane": 2,
+            "endPlane": 2,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_start",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.85,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 2,
+            "segmentType": "area_arrival",
+            "label": "Arrive: bank_area",
+            "startWorld": {
+              "worldX": 3209,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3209,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "startPlane": 2,
+            "endPlane": 2,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_arrival",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.88,
+            "warnings": []
+          }
+        ]
+      },
+      "imperfectSuccessfulClicks": [],
+      "imperfectSuccessfulClickCount": 0,
+      "warnings": [
+        "20260607_120446_Bank_opening_deposit: target_match_quality.jsonl missing or empty"
+      ],
+      "missingCapabilities": [
+        "target_match_quality"
+      ],
+      "artifactStatus": {
+        "inputEvents": true,
+        "inputActionClassifications": true,
+        "targetMatchQuality": false,
+        "cameraBehavior": true,
+        "menuInteractions": true,
+        "coordinateAlignment": true,
+        "vmMouseArduinoMapping": true
+      }
+    },
+    {
+      "schema": "human_click_profile_recording_summary.v1",
+      "status": "PASS",
+      "recordingId": "20260606_201613_Bank_to_tree_area",
+      "recordingPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area",
+      "activityBuckets": [
+        "route_traversal",
+        "menu_interaction",
+        "camera_input_sample"
+      ],
+      "primaryActivity": "route_traversal",
+      "durationSeconds": 28.454,
+      "clicks": {
+        "rawClickCount": 5,
+        "eligibleGameActionClicks": 5,
+        "targetRelativeClicks": 5,
+        "strongTargetClicks": 5,
+        "mediumTargetClicks": 0,
+        "weakTargetClicks": 0,
+        "unmatchedTargetClicks": 0,
+        "insideClickboxCount": 1,
+        "outsideRecoveredGeometryCount": 4,
+        "unknownClickboxCount": 0,
+        "unavailableClickboxCount": 0,
+        "menuRowSelectionCount": 5,
+        "rightClickMenuOpenCount": 0,
+        "duplicateClickLikelyCount": 0,
+        "classificationCounts": {
+          "menu_selection_click": 5
+        }
+      },
+      "landing": {
+        "aimDistancesPx": [
+          108.116,
+          138.708,
+          52.555,
+          50.537,
+          136.125
+        ],
+        "aimDistancePx": {
+          "count": 5,
+          "min": 50.537,
+          "max": 138.708,
+          "average": 97.208,
+          "median": 108.116,
+          "p75": 136.125,
+          "p90": 137.675
+        },
+        "aimDistanceBucketsPx": {
+          "le12": 0,
+          "le30": 0,
+          "le80": 2,
+          "gt80": 3,
+          "unknown": 0
+        },
+        "menuRowCenterDistancePx": {
+          "count": 4,
+          "min": 1.875,
+          "max": 60.722,
+          "average": 24.911,
+          "median": 18.523,
+          "p75": 32.023,
+          "p90": 49.242
+        },
+        "menuRowCounts": {
+          "inside": 4,
+          "outside": 0,
+          "unknown": 0,
+          "missingBounds": 1
+        }
+      },
+      "hover": {
+        "hoverBeforeClickSamples": 2,
+        "hoverBeforeClickMs": {
+          "count": 2,
+          "min": 5688.0,
+          "max": 20297.0,
+          "average": 12992.5,
+          "median": 12992.5,
+          "p75": 16644.75,
+          "p90": 18836.1
+        },
+        "examples": [
+          {
+            "recording": "20260606_201613_Bank_to_tree_area",
+            "eventSeq": 2,
+            "classification": "menu_selection_click",
+            "hoverOption": "Climb-down",
+            "hoverTarget": "<col=ffff>Staircase",
+            "targetName": "Bank table",
+            "targetAction": null
+          },
+          {
+            "recording": "20260606_201613_Bank_to_tree_area",
+            "eventSeq": 3,
+            "classification": "menu_selection_click",
+            "hoverOption": "Climb-down",
+            "hoverTarget": "<col=ffff>Staircase",
+            "targetName": "Bank table",
+            "targetAction": null
+          },
+          {
+            "recording": "20260606_201613_Bank_to_tree_area",
+            "eventSeq": 4,
+            "classification": "menu_selection_click",
+            "hoverOption": "Climb-down",
+            "hoverTarget": "<col=ffff>Staircase",
+            "targetName": "Bank table",
+            "targetAction": null
+          },
+          {
+            "recording": "20260606_201613_Bank_to_tree_area",
+            "eventSeq": 39,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Staircase",
+            "targetAction": "Climb-down"
+          },
+          {
+            "recording": "20260606_201613_Bank_to_tree_area",
+            "eventSeq": 40,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Staircase",
+            "targetAction": "Climb-down"
+          },
+          {
+            "recording": "20260606_201613_Bank_to_tree_area",
+            "eventSeq": 41,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Staircase",
+            "targetAction": "Climb-down"
+          },
+          {
+            "recording": "20260606_201613_Bank_to_tree_area",
+            "eventSeq": 75,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Door",
+            "targetAction": "Open"
+          },
+          {
+            "recording": "20260606_201613_Bank_to_tree_area",
+            "eventSeq": 80,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Door",
+            "targetAction": "Open"
+          }
+        ]
+      },
+      "camera": {
+        "cameraSegmentCount": 1,
+        "middleMouseDragCount": 0,
+        "arrowKeyCameraSegmentCount": 0,
+        "cameraBeforeClickCount": 0,
+        "cameraBeforeStrongOrMediumClickCount": 0,
+        "cameraToClickMs": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "averageCameraSegmentDurationMs": 17890.0,
+        "averageYawDelta": 907.0,
+        "averagePitchDelta": 45.0,
+        "examples": [
+          {
+            "recording": "20260606_201613_Bank_to_tree_area",
+            "segmentId": "cam_001",
+            "source": "unknown",
+            "durationMs": 17890,
+            "deltaYaw": -907.0,
+            "deltaPitch": 45.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": null,
+            "nextClickTargetName": null,
+            "nextClickTargetAction": null,
+            "nextClickTargetQuality": null
+          }
+        ]
+      },
+      "mousePath": {
+        "movementSegments": 118,
+        "mouseMoveEventCount": 121,
+        "pathLengthPx": 3933.655,
+        "pathSegmentDistancePx": {
+          "count": 118,
+          "min": 2.0,
+          "max": 294.749,
+          "average": 33.336,
+          "median": 7.936,
+          "p75": 30.449,
+          "p90": 78.268
+        },
+        "speedPxPerSec": {
+          "count": 118,
+          "min": 0.852,
+          "max": 1916.442,
+          "average": 220.822,
+          "median": 75.711,
+          "p75": 190.25,
+          "p90": 553.163
+        },
+        "pauseCount": 25,
+        "examples": [
+          {
+            "start": {
+              "x": 1205.0,
+              "y": 216.0,
+              "elapsed": 1.61,
+              "kind": "mouse_move"
+            },
+            "end": {
+              "x": 640.0,
+              "y": 339.0,
+              "elapsed": 28.204,
+              "kind": "mouse_move"
+            },
+            "pathLengthPx": 3933.655
+          }
+        ]
+      },
+      "woodcutting": {
+        "status": "WARN",
+        "phase": "idle",
+        "confidence": 0.25,
+        "freshChopClickCount": 0,
+        "inputActionChopClickCount": null,
+        "inputTreeTargetEvidenceCount": null,
+        "normalLogsGained": 0,
+        "inventoryFull": false,
+        "animationActiveSnapshotCount": 0
+      },
+      "banking": {
+        "status": null,
+        "phase": null,
+        "confidence": null,
+        "bankOpenSeen": null,
+        "depositBoxOpenSeen": null,
+        "bankUiPresent": null,
+        "bankContainerAvailable": null,
+        "bankContainerDeltaAvailable": null,
+        "depositedItems": [],
+        "depositConfirmationLevel": null
+      },
+      "traversal": {
+        "status": "PASS",
+        "routeName": "Bank_to_Woodcutting_area",
+        "phase": "arrived",
+        "confidence": 0.824,
+        "routeSegmentCount": 7,
+        "successfulSegmentCount": 6,
+        "partialSegmentCount": 1,
+        "reviewEvidenceCount": 2,
+        "planeChangeCount": 1,
+        "distanceApprox": 45.495,
+        "routeSegments": [
+          {
+            "segmentIndex": 1,
+            "segmentType": "area_start",
+            "label": "Start: bank_area",
+            "startWorld": {
+              "worldX": 3206,
+              "worldY": 3215,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3206,
+              "worldY": 3215,
+              "plane": 2
+            },
+            "startPlane": 2,
+            "endPlane": 2,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_start",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.85,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 2,
+            "segmentType": "walk_segment",
+            "label": "Walk",
+            "startWorld": {
+              "worldX": 3206,
+              "worldY": 3215,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3205,
+              "worldY": 3209,
+              "plane": 2
+            },
+            "startPlane": 2,
+            "endPlane": 2,
+            "primaryAction": {
+              "option": "Walk",
+              "target": null,
+              "targetQuality": null
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_001"
+            ],
+            "confidence": 0.75,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 3,
+            "segmentType": "stair_transition",
+            "label": "Climb-down Staircase",
+            "startWorld": {
+              "worldX": 3205,
+              "worldY": 3209,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3206,
+              "worldY": 3208,
+              "plane": 0
+            },
+            "startPlane": 2,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Climb-down",
+              "target": "Staircase",
+              "targetQuality": "strong"
+            },
+            "postcondition": {
+              "type": "plane_change",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_004",
+              "raw_step_003"
+            ],
+            "confidence": 0.95,
+            "warnings": [
+              "menu_row_geometry_missing"
+            ]
+          },
+          {
+            "segmentIndex": 4,
+            "segmentType": "walk_segment",
+            "label": "Walk",
+            "startWorld": {
+              "worldX": 3206,
+              "worldY": 3208,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3195,
+              "worldY": 3243,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Walk",
+              "target": null,
+              "targetQuality": null
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_005"
+            ],
+            "confidence": 0.75,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 5,
+            "segmentType": "walk_segment",
+            "label": "Walk here Door",
+            "startWorld": {
+              "worldX": 3198,
+              "worldY": 3220,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3195,
+              "worldY": 3230,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Walk here",
+              "target": "Door",
+              "targetQuality": "strong"
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_007"
+            ],
+            "confidence": 0.85,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 6,
+            "segmentType": "stair_transition",
+            "label": "Cancel Staircase",
+            "startWorld": {
+              "worldX": 3195,
+              "worldY": 3230,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3195,
+              "worldY": 3241,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Cancel",
+              "target": "Staircase",
+              "targetQuality": "strong"
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "partial"
+            },
+            "evidenceRefs": [
+              "raw_step_008"
+            ],
+            "confidence": 0.82,
+            "warnings": [
+              "climb-style action had position change but no plane change in window",
+              "climb_target_without_plane_change_in_window"
+            ]
+          },
+          {
+            "segmentIndex": 7,
+            "segmentType": "area_arrival",
+            "label": "Arrive: woodcutting_area",
+            "startWorld": {
+              "worldX": 3195,
+              "worldY": 3243,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3195,
+              "worldY": 3243,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_arrival",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.88,
+            "warnings": []
+          }
+        ]
+      },
+      "imperfectSuccessfulClicks": [
+        {
+          "recording": "20260606_201613_Bank_to_tree_area",
+          "eventSeq": 4,
+          "action": null,
+          "target": "Bank table",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 326.0,
+              "y": 123.0
+            }
+          },
+          "aimDistancePx": 108.116,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": []
+        },
+        {
+          "recording": "20260606_201613_Bank_to_tree_area",
+          "eventSeq": 41,
+          "action": "Climb-down",
+          "target": "Staircase",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 136.0,
+              "y": 64.0
+            }
+          },
+          "aimDistancePx": 138.708,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260606_201613_Bank_to_tree_area",
+          "eventSeq": 100,
+          "action": "Open",
+          "target": "Door",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 465.0,
+              "y": 179.0
+            }
+          },
+          "aimDistancePx": 50.537,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": []
+        },
+        {
+          "recording": "20260606_201613_Bank_to_tree_area",
+          "eventSeq": 120,
+          "action": "Climb-up",
+          "target": "Staircase",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 422.0,
+              "y": 279.0
+            }
+          },
+          "aimDistancePx": 136.125,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_positionChanged_widgetOpened",
+          "warnings": [
+            "climb_target_without_plane_change_in_window"
+          ]
+        }
+      ],
+      "imperfectSuccessfulClickCount": 4,
+      "warnings": [],
+      "missingCapabilities": [],
+      "artifactStatus": {
+        "inputEvents": true,
+        "inputActionClassifications": true,
+        "targetMatchQuality": true,
+        "cameraBehavior": true,
+        "menuInteractions": true,
+        "coordinateAlignment": true,
+        "vmMouseArduinoMapping": true
+      }
+    },
+    {
+      "schema": "human_click_profile_recording_summary.v1",
+      "status": "PASS",
+      "recordingId": "20260607_143719_Open_Bank_Deposit_logs_CLose_bank",
+      "recordingPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_143719_Open_Bank_Deposit_logs_CLose_bank",
+      "activityBuckets": [
+        "banking"
+      ],
+      "primaryActivity": "banking",
+      "durationSeconds": 21.844,
+      "clicks": {
+        "rawClickCount": 4,
+        "eligibleGameActionClicks": 0,
+        "targetRelativeClicks": 0,
+        "strongTargetClicks": 0,
+        "mediumTargetClicks": 0,
+        "weakTargetClicks": 0,
+        "unmatchedTargetClicks": 0,
+        "insideClickboxCount": 0,
+        "outsideRecoveredGeometryCount": 0,
+        "unknownClickboxCount": 0,
+        "unavailableClickboxCount": 0,
+        "menuRowSelectionCount": 0,
+        "rightClickMenuOpenCount": 0,
+        "duplicateClickLikelyCount": 0,
+        "classificationCounts": {
+          "chatbox_click": 2,
+          "inventory_click": 1,
+          "ui_control_click": 1
+        }
+      },
+      "landing": {
+        "aimDistancesPx": [],
+        "aimDistancePx": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "aimDistanceBucketsPx": {
+          "le12": 0,
+          "le30": 0,
+          "le80": 0,
+          "gt80": 0,
+          "unknown": 0
+        },
+        "menuRowCenterDistancePx": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "menuRowCounts": {
+          "inside": 0,
+          "outside": 0,
+          "unknown": 0,
+          "missingBounds": 0
+        }
+      },
+      "hover": {
+        "hoverBeforeClickSamples": 0,
+        "hoverBeforeClickMs": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "examples": [
+          {
+            "recording": "20260607_143719_Open_Bank_Deposit_logs_CLose_bank",
+            "eventSeq": 9,
+            "classification": "inventory_click",
+            "hoverOption": "Cancel",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_143719_Open_Bank_Deposit_logs_CLose_bank",
+            "eventSeq": 10,
+            "classification": "inventory_click",
+            "hoverOption": "Deposit-All",
+            "hoverTarget": "<col=ff9040>Logs</col>",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_143719_Open_Bank_Deposit_logs_CLose_bank",
+            "eventSeq": 11,
+            "classification": "inventory_click",
+            "hoverOption": "Deposit-All",
+            "hoverTarget": "<col=ff9040>Logs</col>",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_143719_Open_Bank_Deposit_logs_CLose_bank",
+            "eventSeq": 23,
+            "classification": "chatbox_click",
+            "hoverOption": "Deposit-All",
+            "hoverTarget": "<col=ff9040>Logs</col>",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_143719_Open_Bank_Deposit_logs_CLose_bank",
+            "eventSeq": 24,
+            "classification": "chatbox_click",
+            "hoverOption": "Deposit-All",
+            "hoverTarget": "<col=ff9040>Logs</col>",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_143719_Open_Bank_Deposit_logs_CLose_bank",
+            "eventSeq": 25,
+            "classification": "chatbox_click",
+            "hoverOption": "Deposit-All",
+            "hoverTarget": "<col=ff9040>Logs</col>",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_143719_Open_Bank_Deposit_logs_CLose_bank",
+            "eventSeq": 32,
+            "classification": "chatbox_click",
+            "hoverOption": "Cancel",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_143719_Open_Bank_Deposit_logs_CLose_bank",
+            "eventSeq": 37,
+            "classification": "chatbox_click",
+            "hoverOption": "Cancel",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          }
+        ]
+      },
+      "camera": {
+        "cameraSegmentCount": 0,
+        "middleMouseDragCount": 0,
+        "arrowKeyCameraSegmentCount": 0,
+        "cameraBeforeClickCount": 0,
+        "cameraBeforeStrongOrMediumClickCount": 0,
+        "cameraToClickMs": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "averageCameraSegmentDurationMs": null,
+        "averageYawDelta": null,
+        "averagePitchDelta": null,
+        "examples": []
+      },
+      "mousePath": {
+        "movementSegments": 61,
+        "mouseMoveEventCount": 63,
+        "pathLengthPx": 3363.557,
+        "pathSegmentDistancePx": {
+          "count": 61,
+          "min": 1.0,
+          "max": 580.05,
+          "average": 55.14,
+          "median": 13.416,
+          "p75": 45.0,
+          "p90": 157.035
+        },
+        "speedPxPerSec": {
+          "count": 58,
+          "min": 1.958,
+          "max": 3380.204,
+          "average": 417.075,
+          "median": 108.808,
+          "p75": 594.977,
+          "p90": 1240.477
+        },
+        "pauseCount": 22,
+        "examples": [
+          {
+            "start": {
+              "x": 1258.0,
+              "y": 301.0,
+              "elapsed": 0.031,
+              "kind": "mouse_move"
+            },
+            "end": {
+              "x": 653.0,
+              "y": 260.0,
+              "elapsed": 21.797,
+              "kind": "mouse_move"
+            },
+            "pathLengthPx": 3363.557
+          }
+        ]
+      },
+      "woodcutting": {
+        "status": "WARN",
+        "phase": "idle",
+        "confidence": 0.25,
+        "freshChopClickCount": 0,
+        "inputActionChopClickCount": 0,
+        "inputTreeTargetEvidenceCount": null,
+        "normalLogsGained": -11,
+        "inventoryFull": false,
+        "animationActiveSnapshotCount": 0
+      },
+      "banking": {
+        "status": "PASS",
+        "phase": "complete",
+        "confidence": 0.95,
+        "bankOpenSeen": true,
+        "depositBoxOpenSeen": false,
+        "bankUiPresent": true,
+        "bankContainerAvailable": true,
+        "bankContainerDeltaAvailable": true,
+        "depositedItems": [
+          {
+            "id": 1511,
+            "name": "Logs",
+            "quantity": 11,
+            "before": 11,
+            "after": 0,
+            "source": "inventory_delta|bank_delta|menu_action",
+            "confirmationLevel": "bank_container_delta_confirmed"
+          },
+          {
+            "id": 1521,
+            "name": "Oak logs",
+            "quantity": 5,
+            "before": 5,
+            "after": 0,
+            "source": "inventory_delta|bank_delta|menu_action",
+            "confirmationLevel": "bank_container_delta_confirmed"
+          }
+        ],
+        "depositConfirmationLevel": "bank_container_delta_confirmed"
+      },
+      "traversal": {
+        "status": "WARN",
+        "routeName": "route_unknown",
+        "phase": "unknown",
+        "confidence": 0.0,
+        "routeSegmentCount": 2,
+        "successfulSegmentCount": 2,
+        "partialSegmentCount": 0,
+        "reviewEvidenceCount": 0,
+        "planeChangeCount": 0,
+        "distanceApprox": 0.0,
+        "routeSegments": [
+          {
+            "segmentIndex": 1,
+            "segmentType": "area_start",
+            "label": "Start: bank_area",
+            "startWorld": {
+              "worldX": 3208,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3208,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "startPlane": 2,
+            "endPlane": 2,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_start",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.85,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 2,
+            "segmentType": "area_arrival",
+            "label": "Arrive: bank_area",
+            "startWorld": {
+              "worldX": 3208,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3208,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "startPlane": 2,
+            "endPlane": 2,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_arrival",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.88,
+            "warnings": []
+          }
+        ]
+      },
+      "imperfectSuccessfulClicks": [],
+      "imperfectSuccessfulClickCount": 0,
+      "warnings": [
+        "20260607_143719_Open_Bank_Deposit_logs_CLose_bank: target_match_quality.jsonl missing or empty"
+      ],
+      "missingCapabilities": [
+        "target_match_quality"
+      ],
+      "artifactStatus": {
+        "inputEvents": true,
+        "inputActionClassifications": true,
+        "targetMatchQuality": false,
+        "cameraBehavior": true,
+        "menuInteractions": true,
+        "coordinateAlignment": true,
+        "vmMouseArduinoMapping": true
+      }
+    },
+    {
+      "schema": "human_click_profile_recording_summary.v1",
+      "status": "PASS",
+      "recordingId": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+      "recordingPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+      "activityBuckets": [
+        "route_traversal",
+        "menu_interaction",
+        "camera_input_sample"
+      ],
+      "primaryActivity": "route_traversal",
+      "durationSeconds": 25.063,
+      "clicks": {
+        "rawClickCount": 3,
+        "eligibleGameActionClicks": 2,
+        "targetRelativeClicks": 2,
+        "strongTargetClicks": 2,
+        "mediumTargetClicks": 0,
+        "weakTargetClicks": 0,
+        "unmatchedTargetClicks": 0,
+        "insideClickboxCount": 0,
+        "outsideRecoveredGeometryCount": 2,
+        "unknownClickboxCount": 0,
+        "unavailableClickboxCount": 0,
+        "menuRowSelectionCount": 2,
+        "rightClickMenuOpenCount": 0,
+        "duplicateClickLikelyCount": 0,
+        "classificationCounts": {
+          "menu_selection_click": 2,
+          "ui_control_click": 1
+        }
+      },
+      "landing": {
+        "aimDistancesPx": [
+          167.887,
+          72.993
+        ],
+        "aimDistancePx": {
+          "count": 2,
+          "min": 72.993,
+          "max": 167.887,
+          "average": 120.44,
+          "median": 120.44,
+          "p75": 144.163,
+          "p90": 158.398
+        },
+        "aimDistanceBucketsPx": {
+          "le12": 0,
+          "le30": 0,
+          "le80": 1,
+          "gt80": 1,
+          "unknown": 0
+        },
+        "menuRowCenterDistancePx": {
+          "count": 1,
+          "min": 50.789,
+          "max": 50.789,
+          "average": 50.789,
+          "median": 50.789,
+          "p75": 50.789,
+          "p90": 50.789
+        },
+        "menuRowCounts": {
+          "inside": 1,
+          "outside": 0,
+          "unknown": 0,
+          "missingBounds": 1
+        }
+      },
+      "hover": {
+        "hoverBeforeClickSamples": 0,
+        "hoverBeforeClickMs": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "examples": [
+          {
+            "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+            "eventSeq": 7,
+            "classification": "menu_selection_click",
+            "hoverOption": "Climb-down",
+            "hoverTarget": "<col=ffff>Staircase",
+            "targetName": "Bank table",
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+            "eventSeq": 8,
+            "classification": "menu_selection_click",
+            "hoverOption": "Climb-down",
+            "hoverTarget": "<col=ffff>Staircase",
+            "targetName": "Bank table",
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+            "eventSeq": 108,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Door",
+            "targetAction": "Open"
+          },
+          {
+            "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+            "eventSeq": 109,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Door",
+            "targetAction": "Open"
+          },
+          {
+            "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+            "eventSeq": 110,
+            "classification": "menu_selection_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": "Door",
+            "targetAction": "Open"
+          },
+          {
+            "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+            "eventSeq": 134,
+            "classification": "ui_control_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+            "eventSeq": 139,
+            "classification": "ui_control_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+            "eventSeq": 140,
+            "classification": "ui_control_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          }
+        ]
+      },
+      "camera": {
+        "cameraSegmentCount": 1,
+        "middleMouseDragCount": 0,
+        "arrowKeyCameraSegmentCount": 0,
+        "cameraBeforeClickCount": 0,
+        "cameraBeforeStrongOrMediumClickCount": 0,
+        "cameraToClickMs": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "averageCameraSegmentDurationMs": 18891.0,
+        "averageYawDelta": 1026.0,
+        "averagePitchDelta": 0.0,
+        "examples": [
+          {
+            "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+            "segmentId": "cam_001",
+            "source": "unknown",
+            "durationMs": 18891,
+            "deltaYaw": -1026.0,
+            "deltaPitch": 0.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": null,
+            "nextClickTargetName": null,
+            "nextClickTargetAction": null,
+            "nextClickTargetQuality": null
+          }
+        ]
+      },
+      "mousePath": {
+        "movementSegments": 118,
+        "mouseMoveEventCount": 120,
+        "pathLengthPx": 3157.241,
+        "pathSegmentDistancePx": {
+          "count": 118,
+          "min": 2.0,
+          "max": 281.016,
+          "average": 26.756,
+          "median": 10.025,
+          "p75": 28.224,
+          "p90": 66.361
+        },
+        "speedPxPerSec": {
+          "count": 115,
+          "min": 2.014,
+          "max": 2159.443,
+          "average": 173.426,
+          "median": 75.51,
+          "p75": 177.399,
+          "p90": 392.858
+        },
+        "pauseCount": 32,
+        "examples": [
+          {
+            "start": {
+              "x": 1351.0,
+              "y": 94.0,
+              "elapsed": 0.281,
+              "kind": "mouse_move"
+            },
+            "end": {
+              "x": 695.0,
+              "y": 316.0,
+              "elapsed": 25.016,
+              "kind": "drag_end"
+            },
+            "pathLengthPx": 3157.241
+          }
+        ]
+      },
+      "woodcutting": {
+        "status": "WARN",
+        "phase": "idle",
+        "confidence": 0.25,
+        "freshChopClickCount": 0,
+        "inputActionChopClickCount": 0,
+        "inputTreeTargetEvidenceCount": null,
+        "normalLogsGained": 0,
+        "inventoryFull": false,
+        "animationActiveSnapshotCount": 0
+      },
+      "banking": {
+        "status": "WARN",
+        "phase": "partial",
+        "confidence": 0.3,
+        "bankOpenSeen": false,
+        "depositBoxOpenSeen": false,
+        "bankUiPresent": true,
+        "bankContainerAvailable": false,
+        "bankContainerDeltaAvailable": false,
+        "depositedItems": [],
+        "depositConfirmationLevel": "none"
+      },
+      "traversal": {
+        "status": "PASS",
+        "routeName": "Bank_to_Woodcutting_area",
+        "phase": "arrived",
+        "confidence": 0.797,
+        "routeSegmentCount": 5,
+        "successfulSegmentCount": 5,
+        "partialSegmentCount": 0,
+        "reviewEvidenceCount": 2,
+        "planeChangeCount": 1,
+        "distanceApprox": 41.124,
+        "routeSegments": [
+          {
+            "segmentIndex": 1,
+            "segmentType": "area_start",
+            "label": "Start: bank_area",
+            "startWorld": {
+              "worldX": 3208,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3208,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "startPlane": 2,
+            "endPlane": 2,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_start",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.85,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 2,
+            "segmentType": "walk_segment",
+            "label": "Walk",
+            "startWorld": {
+              "worldX": 3208,
+              "worldY": 3220,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3205,
+              "worldY": 3209,
+              "plane": 2
+            },
+            "startPlane": 2,
+            "endPlane": 2,
+            "primaryAction": {
+              "option": "Walk",
+              "target": null,
+              "targetQuality": null
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_001"
+            ],
+            "confidence": 0.75,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 3,
+            "segmentType": "stair_transition",
+            "label": "Climb-down Staircase",
+            "startWorld": {
+              "worldX": 3205,
+              "worldY": 3209,
+              "plane": 2
+            },
+            "endWorld": {
+              "worldX": 3206,
+              "worldY": 3208,
+              "plane": 0
+            },
+            "startPlane": 2,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Climb-down",
+              "target": "Staircase",
+              "targetQuality": null
+            },
+            "postcondition": {
+              "type": "plane_change",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_003"
+            ],
+            "confidence": 0.89,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 4,
+            "segmentType": "walk_segment",
+            "label": "Walk",
+            "startWorld": {
+              "worldX": 3206,
+              "worldY": 3208,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3195,
+              "worldY": 3234,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Walk",
+              "target": null,
+              "targetQuality": null
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_004"
+            ],
+            "confidence": 0.75,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 5,
+            "segmentType": "area_arrival",
+            "label": "Arrive: woodcutting_area",
+            "startWorld": {
+              "worldX": 3195,
+              "worldY": 3234,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3195,
+              "worldY": 3234,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_arrival",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.88,
+            "warnings": []
+          }
+        ]
+      },
+      "imperfectSuccessfulClicks": [
+        {
+          "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+          "eventSeq": 8,
+          "action": null,
+          "target": "Bank table",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 459.0,
+              "y": 131.0
+            }
+          },
+          "aimDistancePx": 167.887,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_bounds_missing",
+            "selection_inferred_from_game_target_without_row_geometry",
+            "menu_row_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+          "eventSeq": 110,
+          "action": "Open",
+          "target": "Door",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 494.0,
+              "y": 184.0
+            }
+          },
+          "aimDistancePx": 72.993,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": []
+        }
+      ],
+      "imperfectSuccessfulClickCount": 2,
+      "warnings": [],
+      "missingCapabilities": [],
+      "artifactStatus": {
+        "inputEvents": true,
+        "inputActionClassifications": true,
+        "targetMatchQuality": true,
+        "cameraBehavior": true,
+        "menuInteractions": true,
+        "coordinateAlignment": true,
+        "vmMouseArduinoMapping": true
+      }
+    },
+    {
+      "schema": "human_click_profile_recording_summary.v1",
+      "status": "PASS",
+      "recordingId": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+      "recordingPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+      "activityBuckets": [
+        "woodcutting",
+        "menu_interaction",
+        "camera_input_sample"
+      ],
+      "primaryActivity": "woodcutting",
+      "durationSeconds": 293.828,
+      "clicks": {
+        "rawClickCount": 45,
+        "eligibleGameActionClicks": 20,
+        "targetRelativeClicks": 20,
+        "strongTargetClicks": 19,
+        "mediumTargetClicks": 1,
+        "weakTargetClicks": 0,
+        "unmatchedTargetClicks": 0,
+        "insideClickboxCount": 0,
+        "outsideRecoveredGeometryCount": 1,
+        "unknownClickboxCount": 0,
+        "unavailableClickboxCount": 19,
+        "menuRowSelectionCount": 20,
+        "rightClickMenuOpenCount": 2,
+        "duplicateClickLikelyCount": 0,
+        "classificationCounts": {
+          "ambiguous_click": 9,
+          "camera_drag_release": 12,
+          "chatbox_click": 1,
+          "menu_selection_click": 20,
+          "right_click_menu_open": 2,
+          "ui_control_click": 1
+        }
+      },
+      "landing": {
+        "aimDistancesPx": [
+          173.934,
+          300.483,
+          440.218,
+          440.542,
+          403.184,
+          367.418,
+          467.749,
+          567.168,
+          522.946
+        ],
+        "aimDistancePx": {
+          "count": 9,
+          "min": 173.934,
+          "max": 567.168,
+          "average": 409.294,
+          "median": 440.218,
+          "p75": 467.749,
+          "p90": 531.79
+        },
+        "aimDistanceBucketsPx": {
+          "le12": 0,
+          "le30": 0,
+          "le80": 0,
+          "gt80": 9,
+          "unknown": 0
+        },
+        "menuRowCenterDistancePx": {
+          "count": 6,
+          "min": 7.539,
+          "max": 84.567,
+          "average": 51.567,
+          "median": 63.259,
+          "p75": 77.412,
+          "p90": 82.722
+        },
+        "menuRowCounts": {
+          "inside": 6,
+          "outside": 0,
+          "unknown": 0,
+          "missingBounds": 14
+        }
+      },
+      "hover": {
+        "hoverBeforeClickSamples": 0,
+        "hoverBeforeClickMs": {
+          "count": 0,
+          "min": null,
+          "max": null,
+          "average": null,
+          "median": null,
+          "p75": null,
+          "p90": null
+        },
+        "examples": [
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "eventSeq": 37,
+            "classification": "chatbox_click",
+            "hoverOption": "Chop down",
+            "hoverTarget": "<col=ffff>Tree",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "eventSeq": 42,
+            "classification": "chatbox_click",
+            "hoverOption": "Chop down",
+            "hoverTarget": "<col=ffff>Tree",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "eventSeq": 43,
+            "classification": "chatbox_click",
+            "hoverOption": "Chop down",
+            "hoverTarget": "<col=ffff>Tree",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "eventSeq": 59,
+            "classification": "camera_drag_click",
+            "hoverOption": "Chop down",
+            "hoverTarget": "<col=ffff>Tree",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "eventSeq": 68,
+            "classification": "camera_drag_release",
+            "hoverOption": "Chop down",
+            "hoverTarget": "<col=ffff>Tree",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "eventSeq": 69,
+            "classification": "camera_drag_release",
+            "hoverOption": "Chop down",
+            "hoverTarget": "<col=ffff>Tree",
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "eventSeq": 128,
+            "classification": "ambiguous_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "eventSeq": 133,
+            "classification": "ambiguous_click",
+            "hoverOption": "Walk here",
+            "hoverTarget": null,
+            "targetName": null,
+            "targetAction": null
+          }
+        ]
+      },
+      "camera": {
+        "cameraSegmentCount": 10,
+        "middleMouseDragCount": 3,
+        "arrowKeyCameraSegmentCount": 0,
+        "cameraBeforeClickCount": 9,
+        "cameraBeforeStrongOrMediumClickCount": 9,
+        "cameraToClickMs": {
+          "count": 9,
+          "min": 1953.0,
+          "max": 37578.0,
+          "average": 13585.111,
+          "median": 10563.0,
+          "p75": 16610.0,
+          "p90": 26140.4
+        },
+        "averageCameraSegmentDurationMs": 14377.9,
+        "averageYawDelta": 476.3,
+        "averagePitchDelta": 17.0,
+        "examples": [
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "segmentId": "cam_001",
+            "source": "middle_mouse_drag",
+            "durationMs": 47047,
+            "deltaYaw": -443.0,
+            "deltaPitch": -12.0,
+            "mouseDrag": {
+              "start": {
+                "x": 1320,
+                "y": 411
+              },
+              "end": {
+                "x": 1078,
+                "y": 386
+              },
+              "dx": -242,
+              "dy": -25
+            },
+            "nextClickEventSeq": 362,
+            "nextClickTargetName": "Tree",
+            "nextClickTargetAction": "Chop down",
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "segmentId": "cam_002",
+            "source": "middle_mouse_drag",
+            "durationMs": 13421,
+            "deltaYaw": -436.0,
+            "deltaPitch": 24.0,
+            "mouseDrag": {
+              "start": {
+                "x": 1190,
+                "y": 317
+              },
+              "end": {
+                "x": 1295,
+                "y": 281
+              },
+              "dx": 105,
+              "dy": -36
+            },
+            "nextClickEventSeq": 402,
+            "nextClickTargetName": "Tree",
+            "nextClickTargetAction": "Chop down",
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "segmentId": "cam_003",
+            "source": "unknown",
+            "durationMs": 12766,
+            "deltaYaw": 480.0,
+            "deltaPitch": 32.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": 485,
+            "nextClickTargetName": "Tree",
+            "nextClickTargetAction": "Chop down",
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "segmentId": "cam_004",
+            "source": "middle_mouse_drag",
+            "durationMs": 16937,
+            "deltaYaw": -504.0,
+            "deltaPitch": -22.0,
+            "mouseDrag": {
+              "start": {
+                "x": 1347,
+                "y": 333
+              },
+              "end": {
+                "x": 1289,
+                "y": 380
+              },
+              "dx": -58,
+              "dy": 47
+            },
+            "nextClickEventSeq": 633,
+            "nextClickTargetName": "Staircase",
+            "nextClickTargetAction": "Climb-up",
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "segmentId": "cam_005",
+            "source": "unknown",
+            "durationMs": 5797,
+            "deltaYaw": -452.0,
+            "deltaPitch": 5.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": 779,
+            "nextClickTargetName": "Staircase",
+            "nextClickTargetAction": "Climb-up",
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "segmentId": "cam_006",
+            "source": "unknown",
+            "durationMs": 5203,
+            "deltaYaw": 508.0,
+            "deltaPitch": -33.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": 970,
+            "nextClickTargetName": "Tree",
+            "nextClickTargetAction": "Chop down",
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "segmentId": "cam_007",
+            "source": "unknown",
+            "durationMs": 5453,
+            "deltaYaw": -445.0,
+            "deltaPitch": -17.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": 970,
+            "nextClickTargetName": "Tree",
+            "nextClickTargetAction": "Chop down",
+            "nextClickTargetQuality": "strong"
+          },
+          {
+            "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+            "segmentId": "cam_008",
+            "source": "unknown",
+            "durationMs": 6140,
+            "deltaYaw": 885.0,
+            "deltaPitch": 25.0,
+            "mouseDrag": null,
+            "nextClickEventSeq": 1189,
+            "nextClickTargetName": "Tree",
+            "nextClickTargetAction": "Chop down",
+            "nextClickTargetQuality": "strong"
+          }
+        ]
+      },
+      "mousePath": {
+        "movementSegments": 1071,
+        "mouseMoveEventCount": 1133,
+        "pathLengthPx": 36054.957,
+        "pathSegmentDistancePx": {
+          "count": 1071,
+          "min": 1.0,
+          "max": 699.926,
+          "average": 33.665,
+          "median": 9.22,
+          "p75": 31.694,
+          "p90": 89.56
+        },
+        "speedPxPerSec": {
+          "count": 1051,
+          "min": 0.219,
+          "max": 11188.198,
+          "average": 282.87,
+          "median": 93.75,
+          "p75": 250.972,
+          "p90": 626.132
+        },
+        "pauseCount": 267,
+        "examples": [
+          {
+            "start": {
+              "x": 1026.0,
+              "y": 377.0,
+              "elapsed": 0.015,
+              "kind": "mouse_move"
+            },
+            "end": {
+              "x": 688.0,
+              "y": 310.0,
+              "elapsed": 291.812,
+              "kind": "mouse_move"
+            },
+            "pathLengthPx": 36054.957
+          }
+        ]
+      },
+      "woodcutting": {
+        "status": "PASS",
+        "phase": "chopping",
+        "confidence": 0.95,
+        "freshChopClickCount": 11,
+        "inputActionChopClickCount": 11,
+        "inputTreeTargetEvidenceCount": null,
+        "normalLogsGained": 27,
+        "inventoryFull": false,
+        "animationActiveSnapshotCount": 28
+      },
+      "banking": {
+        "status": "WARN",
+        "phase": "partial",
+        "confidence": 0.2,
+        "bankOpenSeen": false,
+        "depositBoxOpenSeen": false,
+        "bankUiPresent": true,
+        "bankContainerAvailable": false,
+        "bankContainerDeltaAvailable": false,
+        "depositedItems": [],
+        "depositConfirmationLevel": "none"
+      },
+      "traversal": {
+        "status": "WARN",
+        "routeName": "route_unknown",
+        "phase": "moving",
+        "confidence": 0.787,
+        "routeSegmentCount": 15,
+        "successfulSegmentCount": 7,
+        "partialSegmentCount": 8,
+        "reviewEvidenceCount": 8,
+        "planeChangeCount": 0,
+        "distanceApprox": 113.836,
+        "routeSegments": [
+          {
+            "segmentIndex": 1,
+            "segmentType": "area_start",
+            "label": "Start: woodcutting_area",
+            "startWorld": {
+              "worldX": 3198,
+              "worldY": 3243,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3198,
+              "worldY": 3243,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": null,
+            "postcondition": {
+              "type": "area_start",
+              "result": "success"
+            },
+            "evidenceRefs": [],
+            "confidence": 0.85,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 2,
+            "segmentType": "walk_segment",
+            "label": "Walk",
+            "startWorld": {
+              "worldX": 3198,
+              "worldY": 3243,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3194,
+              "worldY": 3225,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Walk",
+              "target": null,
+              "targetQuality": null
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_001"
+            ],
+            "confidence": 0.75,
+            "warnings": []
+          },
+          {
+            "segmentIndex": 3,
+            "segmentType": "door_transition",
+            "label": "Open Gate",
+            "startWorld": {
+              "worldX": 3192,
+              "worldY": 3242,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3190,
+              "worldY": 3240,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Open",
+              "target": "Gate",
+              "targetQuality": "strong"
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "success"
+            },
+            "evidenceRefs": [
+              "raw_step_002"
+            ],
+            "confidence": 0.85,
+            "warnings": [
+              "menu_row_geometry_missing",
+              "target_geometry_missing"
+            ]
+          },
+          {
+            "segmentIndex": 4,
+            "segmentType": "door_transition",
+            "label": "Open Door",
+            "startWorld": {
+              "worldX": 3191,
+              "worldY": 3228,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3191,
+              "worldY": 3228,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Open",
+              "target": "Door",
+              "targetQuality": "strong"
+            },
+            "postcondition": {
+              "type": "inventory_change",
+              "result": "partial"
+            },
+            "evidenceRefs": [
+              "raw_step_008"
+            ],
+            "confidence": 0.82,
+            "warnings": [
+              "door/open action lacks clear movement-through evidence",
+              "menu_row_geometry_missing",
+              "target_not_on_screen"
+            ]
+          },
+          {
+            "segmentIndex": 5,
+            "segmentType": "stair_transition",
+            "label": "Climb-up Staircase",
+            "startWorld": {
+              "worldX": 3195,
+              "worldY": 3226,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3195,
+              "worldY": 3222,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Climb-up",
+              "target": "Staircase",
+              "targetQuality": "strong"
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "partial"
+            },
+            "evidenceRefs": [
+              "raw_step_011"
+            ],
+            "confidence": 0.82,
+            "warnings": [
+              "climb-style action had position change but no plane change in window",
+              "climb_target_without_plane_change_in_window",
+              "menu_row_geometry_missing",
+              "target_not_on_screen"
+            ]
+          },
+          {
+            "segmentIndex": 6,
+            "segmentType": "stair_transition",
+            "label": "Climb-up Staircase",
+            "startWorld": {
+              "worldX": 3195,
+              "worldY": 3226,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3195,
+              "worldY": 3222,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Climb-up",
+              "target": "Staircase",
+              "targetQuality": "strong"
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "partial"
+            },
+            "evidenceRefs": [
+              "raw_step_012"
+            ],
+            "confidence": 0.82,
+            "warnings": [
+              "climb-style action had position change but no plane change in window",
+              "climb_target_without_plane_change_in_window",
+              "menu_row_geometry_missing",
+              "target_not_on_screen"
+            ]
+          },
+          {
+            "segmentIndex": 7,
+            "segmentType": "stair_transition",
+            "label": "Climb-up Staircase",
+            "startWorld": {
+              "worldX": 3195,
+              "worldY": 3222,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3195,
+              "worldY": 3226,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Climb-up",
+              "target": "Staircase",
+              "targetQuality": "strong"
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "partial"
+            },
+            "evidenceRefs": [
+              "raw_step_013"
+            ],
+            "confidence": 0.82,
+            "warnings": [
+              "climb-style action had position change but no plane change in window",
+              "climb_target_without_plane_change_in_window",
+              "menu_row_geometry_missing",
+              "target_not_on_screen"
+            ]
+          },
+          {
+            "segmentIndex": 8,
+            "segmentType": "stair_transition",
+            "label": "Cancel Staircase",
+            "startWorld": {
+              "worldX": 3195,
+              "worldY": 3226,
+              "plane": 0
+            },
+            "endWorld": {
+              "worldX": 3189,
+              "worldY": 3240,
+              "plane": 0
+            },
+            "startPlane": 0,
+            "endPlane": 0,
+            "primaryAction": {
+              "option": "Cancel",
+              "target": "Staircase",
+              "targetQuality": "strong"
+            },
+            "postcondition": {
+              "type": "movement",
+              "result": "partial"
+            },
+            "evidenceRefs": [
+              "raw_step_014"
+            ],
+            "confidence": 0.82,
+            "warnings": [
+              "climb-style action had position change but no plane change in window",
+              "climb_target_without_plane_change_in_window",
+              "target_not_on_screen"
+            ]
+          }
+        ]
+      },
+      "imperfectSuccessfulClicks": [
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 160,
+          "action": "Chop down",
+          "target": "Tree",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 114.0,
+              "y": 358.0
+            }
+          },
+          "aimDistancePx": null,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": null
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 243,
+          "action": "Open",
+          "target": "Door",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 648.0,
+              "y": 190.0
+            }
+          },
+          "aimDistancePx": 173.934,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": true,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "target_not_on_screen"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 362,
+          "action": "Chop down",
+          "target": "Tree",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 366.0,
+              "y": 248.0
+            }
+          },
+          "aimDistancePx": null,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": null
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": true,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 402,
+          "action": "Chop down",
+          "target": "Tree",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 309.0,
+              "y": 231.0
+            }
+          },
+          "aimDistancePx": null,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": null
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": true,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 455,
+          "action": "Chop down",
+          "target": "Yew tree",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 545.0,
+              "y": 206.0
+            }
+          },
+          "aimDistancePx": null,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": null
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": true,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "target_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 485,
+          "action": "Chop down",
+          "target": "Tree",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 480.0,
+              "y": 219.0
+            }
+          },
+          "aimDistancePx": null,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": null
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": true,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 585,
+          "action": "Open",
+          "target": "Door",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 301.0,
+              "y": 274.0
+            }
+          },
+          "aimDistancePx": 300.483,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_not_on_screen"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 633,
+          "action": "Climb-up",
+          "target": "Staircase",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 179.0,
+              "y": 348.0
+            }
+          },
+          "aimDistancePx": 440.218,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": true,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_animationStarted_widgetOpened",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_not_on_screen",
+            "climb_target_without_plane_change_in_window"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 709,
+          "action": "Climb-up",
+          "target": "Staircase",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 419.0,
+              "y": 282.0
+            }
+          },
+          "aimDistancePx": 440.542,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": true,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_positionChanged_animationStarted_inventoryChanged",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_not_on_screen",
+            "climb_target_without_plane_change_in_window"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 720,
+          "action": "Climb-up",
+          "target": "Staircase",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 686.0,
+              "y": 364.0
+            }
+          },
+          "aimDistancePx": 403.184,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": true,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_positionChanged_animationStarted_inventoryChanged",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_not_on_screen",
+            "climb_target_without_plane_change_in_window"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 735,
+          "action": "Climb-up",
+          "target": "Staircase",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 742.0,
+              "y": 389.0
+            }
+          },
+          "aimDistancePx": 367.418,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": true,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_positionChanged_animationStarted_inventoryChanged",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_not_on_screen",
+            "climb_target_without_plane_change_in_window"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 779,
+          "action": "Climb-up",
+          "target": "Staircase",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 697.0,
+              "y": 295.0
+            }
+          },
+          "aimDistancePx": 467.749,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": true,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_positionChanged_animationStarted_widgetOpened",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_not_on_screen",
+            "climb_target_without_plane_change_in_window"
+          ]
+        }
+      ],
+      "imperfectSuccessfulClickCount": 20,
+      "warnings": [],
+      "missingCapabilities": [],
+      "artifactStatus": {
+        "inputEvents": true,
+        "inputActionClassifications": true,
+        "targetMatchQuality": true,
+        "cameraBehavior": true,
+        "menuInteractions": true,
+        "coordinateAlignment": true,
+        "vmMouseArduinoMapping": true
+      }
+    }
+  ],
+  "clicks": {
+    "rawClickCount": 75,
+    "eligibleGameActionClicks": 33,
+    "targetRelativeClicks": 33,
+    "strongTargetClicks": 31,
+    "mediumTargetClicks": 2,
+    "weakTargetClicks": 0,
+    "unmatchedTargetClicks": 0,
+    "insideClickboxCount": 1,
+    "outsideRecoveredGeometryCount": 11,
+    "unknownClickboxCount": 0,
+    "unavailableClickboxCount": 21,
+    "menuRowSelectionCount": 32,
+    "rightClickMenuOpenCount": 5,
+    "duplicateClickLikelyCount": 0,
+    "classificationCounts": {
+      "ambiguous_click": 12,
+      "camera_drag_release": 13,
+      "chatbox_click": 4,
+      "inventory_click": 2,
+      "menu_selection_click": 32,
+      "minimap_click": 1,
+      "object_action_click": 1,
+      "right_click_menu_open": 5,
+      "ui_control_click": 5
+    },
+    "qualityCounts": {
+      "strong": 31,
+      "medium": 2,
+      "weak": 0,
+      "unmatched": 0
+    }
+  },
+  "landing": {
+    "aimDistanceBucketsPx": {
+      "le12": 0,
+      "le30": 0,
+      "le80": 3,
+      "gt80": 19,
+      "unknown": 0
+    },
+    "aimDistancePx": {
+      "count": 22,
+      "min": 50.537,
+      "max": 567.168,
+      "average": 258.862,
+      "median": 194.531,
+      "p75": 394.243,
+      "p90": 465.028
+    },
+    "medianAimDistancePx": 194.531,
+    "p75AimDistancePx": 394.243,
+    "p90AimDistancePx": 465.028,
+    "clickboxCounts": {
+      "inside": 1,
+      "outside": 11,
+      "unknown": 0,
+      "unavailable": 21
+    },
+    "menuRowCounts": {
+      "inside": 12,
+      "outside": 0,
+      "unknown": 0,
+      "missingBounds": 20
+    },
+    "examples": [
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "eventSeq": 34,
+        "action": null,
+        "target": "Bank table",
+        "classification": "menu_selection_click",
+        "targetQuality": "strong",
+        "targetScore": 1.0,
+        "clickPoint": {
+          "canvas": {
+            "x": 465.0,
+            "y": 156.0
+          }
+        },
+        "aimDistancePx": 170.141,
+        "geometryStatus": {
+          "insideClickbox": false,
+          "clickboxAvailable": true,
+          "targetOnScreen": true
+        },
+        "postcondition": {
+          "planeChanged": false,
+          "positionChanged": true,
+          "animationStarted": false,
+          "inventoryChanged": false,
+          "widgetOpened": true,
+          "menuClosed": false,
+          "matchedExpectedOutcome": true
+        },
+        "whyItStillSucceeded": "matched_expected_postcondition",
+        "warnings": [
+          "menu_row_bounds_missing",
+          "selection_inferred_from_game_target_without_row_geometry",
+          "menu_row_geometry_missing"
+        ]
+      },
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "eventSeq": 95,
+        "action": "Climb-down",
+        "target": "Staircase",
+        "classification": "object_action_click",
+        "targetQuality": "medium",
+        "targetScore": 0.96,
+        "clickPoint": {
+          "canvas": {
+            "x": 190.0,
+            "y": 66.0
+          }
+        },
+        "aimDistancePx": 116.103,
+        "geometryStatus": {
+          "insideClickbox": false,
+          "clickboxAvailable": true,
+          "targetOnScreen": true
+        },
+        "postcondition": {
+          "planeChanged": true,
+          "positionChanged": true,
+          "animationStarted": false,
+          "inventoryChanged": false,
+          "widgetOpened": true,
+          "menuClosed": true,
+          "matchedExpectedOutcome": true
+        },
+        "whyItStillSucceeded": "matched_expected_postcondition",
+        "warnings": [
+          "click_outside_clickbox",
+          "large_distance_from_aim_px=116.103"
+        ]
+      },
+      {
+        "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+        "eventSeq": 76,
+        "action": "Climb-up",
+        "target": "Ladder",
+        "classification": "menu_selection_click",
+        "targetQuality": "strong",
+        "targetScore": 1.0,
+        "clickPoint": {
+          "canvas": {
+            "x": 458.0,
+            "y": 190.0
+          }
+        },
+        "aimDistancePx": 155.39,
+        "geometryStatus": {
+          "insideClickbox": false,
+          "clickboxAvailable": true,
+          "targetOnScreen": true
+        },
+        "postcondition": {
+          "planeChanged": false,
+          "positionChanged": true,
+          "animationStarted": false,
+          "inventoryChanged": true,
+          "widgetOpened": true,
+          "menuClosed": false,
+          "matchedExpectedOutcome": false
+        },
+        "whyItStillSucceeded": "postcondition_positionChanged_inventoryChanged_widgetOpened",
+        "warnings": [
+          "climb_target_without_plane_change_in_window"
+        ]
+      },
+      {
+        "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+        "eventSeq": 98,
+        "action": "Open",
+        "target": "Gate",
+        "classification": "menu_selection_click",
+        "targetQuality": "strong",
+        "targetScore": 1.0,
+        "clickPoint": {
+          "canvas": {
+            "x": 66.0,
+            "y": 260.0
+          }
+        },
+        "aimDistancePx": 343.839,
+        "geometryStatus": {
+          "insideClickbox": null,
+          "clickboxAvailable": false,
+          "targetOnScreen": false
+        },
+        "postcondition": {
+          "planeChanged": false,
+          "positionChanged": false,
+          "animationStarted": false,
+          "inventoryChanged": false,
+          "widgetOpened": true,
+          "menuClosed": false,
+          "matchedExpectedOutcome": true
+        },
+        "whyItStillSucceeded": "matched_expected_postcondition",
+        "warnings": [
+          "menu_row_geometry_missing",
+          "target_not_on_screen"
+        ]
+      },
+      {
+        "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+        "eventSeq": 200,
+        "action": null,
+        "target": "Stepladder",
+        "classification": "menu_selection_click",
+        "targetQuality": "strong",
+        "targetScore": 0.92,
+        "clickPoint": {
+          "canvas": {
+            "x": 591.0,
+            "y": 357.0
+          }
+        },
+        "aimDistancePx": 215.128,
+        "geometryStatus": {
+          "insideClickbox": null,
+          "clickboxAvailable": false,
+          "targetOnScreen": false
+        },
+        "postcondition": {
+          "planeChanged": false,
+          "positionChanged": false,
+          "animationStarted": true,
+          "inventoryChanged": true,
+          "widgetOpened": true,
+          "menuClosed": false,
+          "matchedExpectedOutcome": false
+        },
+        "whyItStillSucceeded": "postcondition_animationStarted_inventoryChanged_widgetOpened",
+        "warnings": [
+          "menu_row_bounds_missing",
+          "selection_inferred_from_game_target_without_row_geometry",
+          "menu_row_geometry_missing",
+          "target_not_on_screen",
+          "climb_target_without_plane_change_in_window"
+        ]
+      },
+      {
+        "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+        "eventSeq": 358,
+        "action": null,
+        "target": "Stepladder",
+        "classification": "menu_selection_click",
+        "targetQuality": "strong",
+        "targetScore": 1.0,
+        "clickPoint": {
+          "canvas": {
+            "x": 102.0,
+            "y": 371.0
+          }
+        },
+        "aimDistancePx": 283.805,
+        "geometryStatus": {
+          "insideClickbox": false,
+          "clickboxAvailable": true,
+          "targetOnScreen": true
+        },
+        "postcondition": {
+          "planeChanged": false,
+          "positionChanged": false,
+          "animationStarted": true,
+          "inventoryChanged": true,
+          "widgetOpened": true,
+          "menuClosed": false,
+          "matchedExpectedOutcome": false
+        },
+        "whyItStillSucceeded": "postcondition_animationStarted_inventoryChanged_widgetOpened",
+        "warnings": [
+          "menu_row_bounds_missing",
+          "selection_inferred_from_game_target_without_row_geometry",
+          "menu_row_geometry_missing",
+          "climb_target_without_plane_change_in_window"
+        ]
+      },
+      {
+        "recording": "20260606_201613_Bank_to_tree_area",
+        "eventSeq": 4,
+        "action": null,
+        "target": "Bank table",
+        "classification": "menu_selection_click",
+        "targetQuality": "strong",
+        "targetScore": 1.0,
+        "clickPoint": {
+          "canvas": {
+            "x": 326.0,
+            "y": 123.0
+          }
+        },
+        "aimDistancePx": 108.116,
+        "geometryStatus": {
+          "insideClickbox": false,
+          "clickboxAvailable": true,
+          "targetOnScreen": true
+        },
+        "postcondition": {
+          "planeChanged": true,
+          "positionChanged": true,
+          "animationStarted": false,
+          "inventoryChanged": false,
+          "widgetOpened": true,
+          "menuClosed": false,
+          "matchedExpectedOutcome": true
+        },
+        "whyItStillSucceeded": "matched_expected_postcondition",
+        "warnings": []
+      },
+      {
+        "recording": "20260606_201613_Bank_to_tree_area",
+        "eventSeq": 41,
+        "action": "Climb-down",
+        "target": "Staircase",
+        "classification": "menu_selection_click",
+        "targetQuality": "strong",
+        "targetScore": 1.0,
+        "clickPoint": {
+          "canvas": {
+            "x": 136.0,
+            "y": 64.0
+          }
+        },
+        "aimDistancePx": 138.708,
+        "geometryStatus": {
+          "insideClickbox": false,
+          "clickboxAvailable": true,
+          "targetOnScreen": true
+        },
+        "postcondition": {
+          "planeChanged": true,
+          "positionChanged": true,
+          "animationStarted": false,
+          "inventoryChanged": false,
+          "widgetOpened": true,
+          "menuClosed": false,
+          "matchedExpectedOutcome": true
+        },
+        "whyItStillSucceeded": "matched_expected_postcondition",
+        "warnings": [
+          "menu_row_geometry_missing"
+        ]
+      }
+    ]
+  },
+  "hover": {
+    "hoverBeforeClickSamples": 3,
+    "medianHoverMs": 10425.75,
+    "hoverBeforeClickMs": {
+      "count": 2,
+      "min": 7859.0,
+      "max": 12992.5,
+      "average": 10425.75,
+      "median": 10425.75,
+      "p75": 11709.125,
+      "p90": 12479.15
+    },
+    "examples": [
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "eventSeq": 32,
+        "classification": "menu_selection_click",
+        "hoverOption": "Walk here",
+        "hoverTarget": null,
+        "targetName": "Bank table",
+        "targetAction": null
+      },
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "eventSeq": 33,
+        "classification": "menu_selection_click",
+        "hoverOption": "Walk here",
+        "hoverTarget": null,
+        "targetName": "Bank table",
+        "targetAction": null
+      },
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "eventSeq": 34,
+        "classification": "menu_selection_click",
+        "hoverOption": "Walk here",
+        "hoverTarget": null,
+        "targetName": "Bank table",
+        "targetAction": null
+      },
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "eventSeq": 154,
+        "classification": "ambiguous_click",
+        "hoverOption": "Walk here",
+        "hoverTarget": null,
+        "targetName": null,
+        "targetAction": null
+      },
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "eventSeq": 159,
+        "classification": "ambiguous_click",
+        "hoverOption": "Walk here",
+        "hoverTarget": null,
+        "targetName": null,
+        "targetAction": null
+      },
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "eventSeq": 160,
+        "classification": "ambiguous_click",
+        "hoverOption": "Walk here",
+        "hoverTarget": null,
+        "targetName": null,
+        "targetAction": null
+      },
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "eventSeq": 184,
+        "classification": "ui_control_click",
+        "hoverOption": "Walk here",
+        "hoverTarget": null,
+        "targetName": null,
+        "targetAction": null
+      },
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "eventSeq": 185,
+        "classification": "ui_control_click",
+        "hoverOption": "Walk here",
+        "hoverTarget": null,
+        "targetName": null,
+        "targetAction": null
+      }
+    ]
+  },
+  "camera": {
+    "cameraSegmentCount": 20,
+    "middleMouseDragCount": 4,
+    "cameraBeforeClickCount": 15,
+    "medianCameraToClickMs": 9188.0,
+    "cameraToClickMs": {
+      "count": 3,
+      "min": 7859.0,
+      "max": 10563.0,
+      "average": 9203.333,
+      "median": 9188.0,
+      "p75": 9875.5,
+      "p90": 10288.0
+    },
+    "examples": [
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "segmentId": "cam_001",
+        "source": "unknown",
+        "durationMs": 4297,
+        "deltaYaw": 1008.0,
+        "deltaPitch": 117.0,
+        "mouseDrag": null,
+        "nextClickEventSeq": 95,
+        "nextClickTargetName": "Staircase",
+        "nextClickTargetAction": "Climb-down",
+        "nextClickTargetQuality": "medium"
+      },
+      {
+        "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+        "segmentId": "cam_002",
+        "source": "unknown",
+        "durationMs": 11844,
+        "deltaYaw": -996.0,
+        "deltaPitch": 0.0,
+        "mouseDrag": null,
+        "nextClickEventSeq": null,
+        "nextClickTargetName": null,
+        "nextClickTargetAction": null,
+        "nextClickTargetQuality": null
+      },
+      {
+        "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+        "segmentId": "cam_001",
+        "source": "middle_mouse_drag",
+        "durationMs": 14781,
+        "deltaYaw": -82.0,
+        "deltaPitch": -2.0,
+        "mouseDrag": {
+          "start": {
+            "x": 1397,
+            "y": 347
+          },
+          "end": {
+            "x": 1209,
+            "y": 330
+          },
+          "dx": -188,
+          "dy": -17
+        },
+        "nextClickEventSeq": 76,
+        "nextClickTargetName": "Ladder",
+        "nextClickTargetAction": "Climb-up",
+        "nextClickTargetQuality": "strong"
+      },
+      {
+        "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+        "segmentId": "cam_002",
+        "source": "unknown",
+        "durationMs": 4344,
+        "deltaYaw": 252.0,
+        "deltaPitch": 0.0,
+        "mouseDrag": null,
+        "nextClickEventSeq": 98,
+        "nextClickTargetName": "Gate",
+        "nextClickTargetAction": "Open",
+        "nextClickTargetQuality": "strong"
+      },
+      {
+        "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+        "segmentId": "cam_003",
+        "source": "unknown",
+        "durationMs": 5328,
+        "deltaYaw": -1897.0,
+        "deltaPitch": 0.0,
+        "mouseDrag": null,
+        "nextClickEventSeq": 200,
+        "nextClickTargetName": "Stepladder",
+        "nextClickTargetAction": null,
+        "nextClickTargetQuality": "strong"
+      },
+      {
+        "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+        "segmentId": "cam_004",
+        "source": "unknown",
+        "durationMs": 5297,
+        "deltaYaw": 1578.0,
+        "deltaPitch": 0.0,
+        "mouseDrag": null,
+        "nextClickEventSeq": 358,
+        "nextClickTargetName": "Stepladder",
+        "nextClickTargetAction": null,
+        "nextClickTargetQuality": "strong"
+      },
+      {
+        "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+        "segmentId": "cam_005",
+        "source": "unknown",
+        "durationMs": 20547,
+        "deltaYaw": -135.0,
+        "deltaPitch": 0.0,
+        "mouseDrag": null,
+        "nextClickEventSeq": 358,
+        "nextClickTargetName": "Stepladder",
+        "nextClickTargetAction": null,
+        "nextClickTargetQuality": "strong"
+      },
+      {
+        "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+        "segmentId": "cam_006",
+        "source": "unknown",
+        "durationMs": 4859,
+        "deltaYaw": 50.0,
+        "deltaPitch": 0.0,
+        "mouseDrag": null,
+        "nextClickEventSeq": null,
+        "nextClickTargetName": null,
+        "nextClickTargetAction": null,
+        "nextClickTargetQuality": null
+      }
+    ]
+  },
+  "mousePath": {
+    "movementSegments": 1912,
+    "medianPathLengthPx": 3933.655,
+    "medianSpeedPxPerSec": 88.388,
+    "pauseCount": 582,
+    "examples": [
+      {
+        "start": {
+          "x": 1533.0,
+          "y": 97.0,
+          "elapsed": 0.344,
+          "kind": "mouse_move"
+        },
+        "end": {
+          "x": 725.0,
+          "y": 395.0,
+          "elapsed": 34.281,
+          "kind": "mouse_move"
+        },
+        "pathLengthPx": 4143.912
+      },
+      {
+        "start": {
+          "x": 1311.0,
+          "y": 411.0,
+          "elapsed": 0.047,
+          "kind": "mouse_move"
+        },
+        "end": {
+          "x": 734.0,
+          "y": 473.0,
+          "elapsed": 155.235,
+          "kind": "mouse_move"
+        },
+        "pathLengthPx": 12454.953
+      },
+      {
+        "start": {
+          "x": 1910.0,
+          "y": 526.0,
+          "elapsed": 0.031,
+          "kind": "mouse_move"
+        },
+        "end": {
+          "x": 656.0,
+          "y": 311.0,
+          "elapsed": 11.188,
+          "kind": "mouse_move"
+        },
+        "pathLengthPx": 2205.525
+      },
+      {
+        "start": {
+          "x": 1205.0,
+          "y": 216.0,
+          "elapsed": 1.61,
+          "kind": "mouse_move"
+        },
+        "end": {
+          "x": 640.0,
+          "y": 339.0,
+          "elapsed": 28.204,
+          "kind": "mouse_move"
+        },
+        "pathLengthPx": 3933.655
+      },
+      {
+        "start": {
+          "x": 1258.0,
+          "y": 301.0,
+          "elapsed": 0.031,
+          "kind": "mouse_move"
+        },
+        "end": {
+          "x": 653.0,
+          "y": 260.0,
+          "elapsed": 21.797,
+          "kind": "mouse_move"
+        },
+        "pathLengthPx": 3363.557
+      },
+      {
+        "start": {
+          "x": 1351.0,
+          "y": 94.0,
+          "elapsed": 0.281,
+          "kind": "mouse_move"
+        },
+        "end": {
+          "x": 695.0,
+          "y": 316.0,
+          "elapsed": 25.016,
+          "kind": "drag_end"
+        },
+        "pathLengthPx": 3157.241
+      }
+    ]
+  },
+  "taskProfiles": {
+    "banking": {
+      "schema": "human_click_profile_task_bucket.v1",
+      "activity": "banking",
+      "recordingCount": 2,
+      "clickCount": 7,
+      "targetRelativeClickCount": 0,
+      "strongTargetClickCount": 0,
+      "mediumTargetClickCount": 0,
+      "weakTargetClickCount": 0,
+      "strongOrMediumTargetRate": null,
+      "menuRowSelectionCount": 0,
+      "rightClickMenuOpenCount": 0,
+      "hoverBeforeClickMs": {
+        "count": 0,
+        "min": null,
+        "max": null,
+        "average": null,
+        "median": null,
+        "p75": null,
+        "p90": null
+      },
+      "clickLandingDistancePx": {
+        "count": 0,
+        "min": null,
+        "max": null,
+        "average": null,
+        "median": null,
+        "p75": null,
+        "p90": null
+      },
+      "cameraBeforeClickFrequency": null,
+      "imperfectSuccessfulClickCount": 0,
+      "usefulImperfectExamples": [],
+      "warnings": [
+        "20260607_120446_Bank_opening_deposit: target_match_quality.jsonl missing or empty",
+        "20260607_143719_Open_Bank_Deposit_logs_CLose_bank: target_match_quality.jsonl missing or empty"
+      ],
+      "missingCapabilities": [
+        "target_match_quality"
+      ],
+      "banking": {
+        "bankOpenSeenRecordings": 2,
+        "bankUiPresentRecordings": 2,
+        "bankContainerAvailableRecordings": 2,
+        "bankContainerDeltaAvailableRecordings": 2,
+        "depositedItems": [
+          {
+            "id": 1511,
+            "name": "Logs",
+            "quantity": 16,
+            "before": 16,
+            "after": 0,
+            "source": "inventory_delta|bank_delta|menu_action",
+            "confirmationLevel": "bank_container_delta_confirmed"
+          },
+          {
+            "id": 1511,
+            "name": "Logs",
+            "quantity": 11,
+            "before": 11,
+            "after": 0,
+            "source": "inventory_delta|bank_delta|menu_action",
+            "confirmationLevel": "bank_container_delta_confirmed"
+          },
+          {
+            "id": 1521,
+            "name": "Oak logs",
+            "quantity": 5,
+            "before": 5,
+            "after": 0,
+            "source": "inventory_delta|bank_delta|menu_action",
+            "confirmationLevel": "bank_container_delta_confirmed"
+          }
+        ]
+      }
+    },
+    "camera_input_sample": {
+      "schema": "human_click_profile_task_bucket.v1",
+      "activity": "camera_input_sample",
+      "recordingCount": 5,
+      "clickCount": 68,
+      "targetRelativeClickCount": 33,
+      "strongTargetClickCount": 31,
+      "mediumTargetClickCount": 2,
+      "weakTargetClickCount": 0,
+      "strongOrMediumTargetRate": 1.0,
+      "menuRowSelectionCount": 32,
+      "rightClickMenuOpenCount": 5,
+      "hoverBeforeClickMs": {
+        "count": 2,
+        "min": 7859.0,
+        "max": 12992.5,
+        "average": 10425.75,
+        "median": 10425.75,
+        "p75": 11709.125,
+        "p90": 12479.15
+      },
+      "clickLandingDistancePx": {
+        "count": 22,
+        "min": 50.537,
+        "max": 567.168,
+        "average": 258.862,
+        "median": 194.531,
+        "p75": 394.243,
+        "p90": 465.028
+      },
+      "cameraBeforeClickFrequency": 0.75,
+      "imperfectSuccessfulClickCount": 32,
+      "usefulImperfectExamples": [
+        {
+          "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+          "eventSeq": 34,
+          "action": null,
+          "target": "Bank table",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 465.0,
+              "y": 156.0
+            }
+          },
+          "aimDistancePx": 170.141,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_bounds_missing",
+            "selection_inferred_from_game_target_without_row_geometry",
+            "menu_row_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+          "eventSeq": 95,
+          "action": "Climb-down",
+          "target": "Staircase",
+          "classification": "object_action_click",
+          "targetQuality": "medium",
+          "targetScore": 0.96,
+          "clickPoint": {
+            "canvas": {
+              "x": 190.0,
+              "y": 66.0
+            }
+          },
+          "aimDistancePx": 116.103,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": true,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "click_outside_clickbox",
+            "large_distance_from_aim_px=116.103"
+          ]
+        },
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 76,
+          "action": "Climb-up",
+          "target": "Ladder",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 458.0,
+              "y": 190.0
+            }
+          },
+          "aimDistancePx": 155.39,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_positionChanged_inventoryChanged_widgetOpened",
+          "warnings": [
+            "climb_target_without_plane_change_in_window"
+          ]
+        },
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 98,
+          "action": "Open",
+          "target": "Gate",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 66.0,
+              "y": 260.0
+            }
+          },
+          "aimDistancePx": 343.839,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_not_on_screen"
+          ]
+        },
+        {
+          "recording": "20260606_201613_Bank_to_tree_area",
+          "eventSeq": 4,
+          "action": null,
+          "target": "Bank table",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 326.0,
+              "y": 123.0
+            }
+          },
+          "aimDistancePx": 108.116,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": []
+        },
+        {
+          "recording": "20260606_201613_Bank_to_tree_area",
+          "eventSeq": 41,
+          "action": "Climb-down",
+          "target": "Staircase",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 136.0,
+              "y": 64.0
+            }
+          },
+          "aimDistancePx": 138.708,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing"
+          ]
+        }
+      ],
+      "warnings": [],
+      "missingCapabilities": []
+    },
+    "menu_interaction": {
+      "schema": "human_click_profile_task_bucket.v1",
+      "activity": "menu_interaction",
+      "recordingCount": 5,
+      "clickCount": 68,
+      "targetRelativeClickCount": 33,
+      "strongTargetClickCount": 31,
+      "mediumTargetClickCount": 2,
+      "weakTargetClickCount": 0,
+      "strongOrMediumTargetRate": 1.0,
+      "menuRowSelectionCount": 32,
+      "rightClickMenuOpenCount": 5,
+      "hoverBeforeClickMs": {
+        "count": 2,
+        "min": 7859.0,
+        "max": 12992.5,
+        "average": 10425.75,
+        "median": 10425.75,
+        "p75": 11709.125,
+        "p90": 12479.15
+      },
+      "clickLandingDistancePx": {
+        "count": 22,
+        "min": 50.537,
+        "max": 567.168,
+        "average": 258.862,
+        "median": 194.531,
+        "p75": 394.243,
+        "p90": 465.028
+      },
+      "cameraBeforeClickFrequency": 0.75,
+      "imperfectSuccessfulClickCount": 32,
+      "usefulImperfectExamples": [
+        {
+          "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+          "eventSeq": 34,
+          "action": null,
+          "target": "Bank table",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 465.0,
+              "y": 156.0
+            }
+          },
+          "aimDistancePx": 170.141,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_bounds_missing",
+            "selection_inferred_from_game_target_without_row_geometry",
+            "menu_row_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+          "eventSeq": 95,
+          "action": "Climb-down",
+          "target": "Staircase",
+          "classification": "object_action_click",
+          "targetQuality": "medium",
+          "targetScore": 0.96,
+          "clickPoint": {
+            "canvas": {
+              "x": 190.0,
+              "y": 66.0
+            }
+          },
+          "aimDistancePx": 116.103,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": true,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "click_outside_clickbox",
+            "large_distance_from_aim_px=116.103"
+          ]
+        },
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 76,
+          "action": "Climb-up",
+          "target": "Ladder",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 458.0,
+              "y": 190.0
+            }
+          },
+          "aimDistancePx": 155.39,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_positionChanged_inventoryChanged_widgetOpened",
+          "warnings": [
+            "climb_target_without_plane_change_in_window"
+          ]
+        },
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 98,
+          "action": "Open",
+          "target": "Gate",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 66.0,
+              "y": 260.0
+            }
+          },
+          "aimDistancePx": 343.839,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_not_on_screen"
+          ]
+        },
+        {
+          "recording": "20260606_201613_Bank_to_tree_area",
+          "eventSeq": 4,
+          "action": null,
+          "target": "Bank table",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 326.0,
+              "y": 123.0
+            }
+          },
+          "aimDistancePx": 108.116,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": []
+        },
+        {
+          "recording": "20260606_201613_Bank_to_tree_area",
+          "eventSeq": 41,
+          "action": "Climb-down",
+          "target": "Staircase",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 136.0,
+              "y": 64.0
+            }
+          },
+          "aimDistancePx": 138.708,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing"
+          ]
+        }
+      ],
+      "warnings": [],
+      "missingCapabilities": []
+    },
+    "route_traversal": {
+      "schema": "human_click_profile_task_bucket.v1",
+      "activity": "route_traversal",
+      "recordingCount": 4,
+      "clickCount": 23,
+      "targetRelativeClickCount": 13,
+      "strongTargetClickCount": 12,
+      "mediumTargetClickCount": 1,
+      "weakTargetClickCount": 0,
+      "strongOrMediumTargetRate": 1.0,
+      "menuRowSelectionCount": 12,
+      "rightClickMenuOpenCount": 3,
+      "hoverBeforeClickMs": {
+        "count": 2,
+        "min": 7859.0,
+        "max": 12992.5,
+        "average": 10425.75,
+        "median": 10425.75,
+        "p75": 11709.125,
+        "p90": 12479.15
+      },
+      "clickLandingDistancePx": {
+        "count": 13,
+        "min": 50.537,
+        "max": 343.839,
+        "average": 154.717,
+        "median": 138.708,
+        "p75": 170.141,
+        "p90": 270.07
+      },
+      "cameraBeforeClickFrequency": 0.6,
+      "imperfectSuccessfulClickCount": 12,
+      "usefulImperfectExamples": [
+        {
+          "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+          "eventSeq": 34,
+          "action": null,
+          "target": "Bank table",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 465.0,
+              "y": 156.0
+            }
+          },
+          "aimDistancePx": 170.141,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_bounds_missing",
+            "selection_inferred_from_game_target_without_row_geometry",
+            "menu_row_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+          "eventSeq": 95,
+          "action": "Climb-down",
+          "target": "Staircase",
+          "classification": "object_action_click",
+          "targetQuality": "medium",
+          "targetScore": 0.96,
+          "clickPoint": {
+            "canvas": {
+              "x": 190.0,
+              "y": 66.0
+            }
+          },
+          "aimDistancePx": 116.103,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": true,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "click_outside_clickbox",
+            "large_distance_from_aim_px=116.103"
+          ]
+        },
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 76,
+          "action": "Climb-up",
+          "target": "Ladder",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 458.0,
+              "y": 190.0
+            }
+          },
+          "aimDistancePx": 155.39,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_positionChanged_inventoryChanged_widgetOpened",
+          "warnings": [
+            "climb_target_without_plane_change_in_window"
+          ]
+        },
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 98,
+          "action": "Open",
+          "target": "Gate",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 66.0,
+              "y": 260.0
+            }
+          },
+          "aimDistancePx": 343.839,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_not_on_screen"
+          ]
+        },
+        {
+          "recording": "20260606_201613_Bank_to_tree_area",
+          "eventSeq": 4,
+          "action": null,
+          "target": "Bank table",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 326.0,
+              "y": 123.0
+            }
+          },
+          "aimDistancePx": 108.116,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": []
+        },
+        {
+          "recording": "20260606_201613_Bank_to_tree_area",
+          "eventSeq": 41,
+          "action": "Climb-down",
+          "target": "Staircase",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 136.0,
+              "y": 64.0
+            }
+          },
+          "aimDistancePx": 138.708,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": true,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing"
+          ]
+        }
+      ],
+      "warnings": [],
+      "missingCapabilities": [],
+      "traversal": {
+        "routeNames": [
+          "Bank_to_Woodcutting_area",
+          "route_unknown"
+        ],
+        "routeSegmentCount": 21,
+        "successfulSegmentCount": 19,
+        "planeChangeCount": 3,
+        "distanceApproxTotal": 175.249
+      }
+    },
+    "woodcutting": {
+      "schema": "human_click_profile_task_bucket.v1",
+      "activity": "woodcutting",
+      "recordingCount": 2,
+      "clickCount": 55,
+      "targetRelativeClickCount": 24,
+      "strongTargetClickCount": 23,
+      "mediumTargetClickCount": 1,
+      "weakTargetClickCount": 0,
+      "strongOrMediumTargetRate": 1.0,
+      "menuRowSelectionCount": 24,
+      "rightClickMenuOpenCount": 4,
+      "hoverBeforeClickMs": {
+        "count": 0,
+        "min": null,
+        "max": null,
+        "average": null,
+        "median": null,
+        "p75": null,
+        "p90": null
+      },
+      "clickLandingDistancePx": {
+        "count": 13,
+        "min": 155.39,
+        "max": 567.168,
+        "average": 360.139,
+        "median": 367.418,
+        "p75": 440.542,
+        "p90": 511.907
+      },
+      "cameraBeforeClickFrequency": 0.875,
+      "imperfectSuccessfulClickCount": 24,
+      "usefulImperfectExamples": [
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 76,
+          "action": "Climb-up",
+          "target": "Ladder",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 458.0,
+              "y": 190.0
+            }
+          },
+          "aimDistancePx": 155.39,
+          "geometryStatus": {
+            "insideClickbox": false,
+            "clickboxAvailable": true,
+            "targetOnScreen": true
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": false
+          },
+          "whyItStillSucceeded": "postcondition_positionChanged_inventoryChanged_widgetOpened",
+          "warnings": [
+            "climb_target_without_plane_change_in_window"
+          ]
+        },
+        {
+          "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+          "eventSeq": 98,
+          "action": "Open",
+          "target": "Gate",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 66.0,
+              "y": 260.0
+            }
+          },
+          "aimDistancePx": 343.839,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": false,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_not_on_screen"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 160,
+          "action": "Chop down",
+          "target": "Tree",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 114.0,
+              "y": 358.0
+            }
+          },
+          "aimDistancePx": null,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": null
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": true,
+            "animationStarted": false,
+            "inventoryChanged": true,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "menu_row_geometry_missing",
+            "target_geometry_missing"
+          ]
+        },
+        {
+          "recording": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+          "eventSeq": 243,
+          "action": "Open",
+          "target": "Door",
+          "classification": "menu_selection_click",
+          "targetQuality": "strong",
+          "targetScore": 1.0,
+          "clickPoint": {
+            "canvas": {
+              "x": 648.0,
+              "y": 190.0
+            }
+          },
+          "aimDistancePx": 173.934,
+          "geometryStatus": {
+            "insideClickbox": null,
+            "clickboxAvailable": false,
+            "targetOnScreen": false
+          },
+          "postcondition": {
+            "planeChanged": false,
+            "positionChanged": false,
+            "animationStarted": true,
+            "inventoryChanged": false,
+            "widgetOpened": true,
+            "menuClosed": false,
+            "matchedExpectedOutcome": true
+          },
+          "whyItStillSucceeded": "matched_expected_postcondition",
+          "warnings": [
+            "target_not_on_screen"
+          ]
+        }
+      ],
+      "warnings": [],
+      "missingCapabilities": [],
+      "woodcutting": {
+        "freshChopClickCount": 13,
+        "inputActionChopClickCount": 13,
+        "inputTreeTargetEvidenceCount": 0,
+        "animation879Recordings": 2,
+        "inventoryFullRecordings": 1,
+        "normalLogsGainedTotal": 38
+      }
+    }
+  },
+  "imperfectSuccessfulClickCount": 32,
+  "imperfectSuccessfulClicks": [
+    {
+      "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+      "eventSeq": 34,
+      "action": null,
+      "target": "Bank table",
+      "classification": "menu_selection_click",
+      "targetQuality": "strong",
+      "targetScore": 1.0,
+      "clickPoint": {
+        "canvas": {
+          "x": 465.0,
+          "y": 156.0
+        }
+      },
+      "aimDistancePx": 170.141,
+      "geometryStatus": {
+        "insideClickbox": false,
+        "clickboxAvailable": true,
+        "targetOnScreen": true
+      },
+      "postcondition": {
+        "planeChanged": false,
+        "positionChanged": true,
+        "animationStarted": false,
+        "inventoryChanged": false,
+        "widgetOpened": true,
+        "menuClosed": false,
+        "matchedExpectedOutcome": true
+      },
+      "whyItStillSucceeded": "matched_expected_postcondition",
+      "warnings": [
+        "menu_row_bounds_missing",
+        "selection_inferred_from_game_target_without_row_geometry",
+        "menu_row_geometry_missing"
+      ]
+    },
+    {
+      "recording": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+      "eventSeq": 95,
+      "action": "Climb-down",
+      "target": "Staircase",
+      "classification": "object_action_click",
+      "targetQuality": "medium",
+      "targetScore": 0.96,
+      "clickPoint": {
+        "canvas": {
+          "x": 190.0,
+          "y": 66.0
+        }
+      },
+      "aimDistancePx": 116.103,
+      "geometryStatus": {
+        "insideClickbox": false,
+        "clickboxAvailable": true,
+        "targetOnScreen": true
+      },
+      "postcondition": {
+        "planeChanged": true,
+        "positionChanged": true,
+        "animationStarted": false,
+        "inventoryChanged": false,
+        "widgetOpened": true,
+        "menuClosed": true,
+        "matchedExpectedOutcome": true
+      },
+      "whyItStillSucceeded": "matched_expected_postcondition",
+      "warnings": [
+        "click_outside_clickbox",
+        "large_distance_from_aim_px=116.103"
+      ]
+    },
+    {
+      "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+      "eventSeq": 76,
+      "action": "Climb-up",
+      "target": "Ladder",
+      "classification": "menu_selection_click",
+      "targetQuality": "strong",
+      "targetScore": 1.0,
+      "clickPoint": {
+        "canvas": {
+          "x": 458.0,
+          "y": 190.0
+        }
+      },
+      "aimDistancePx": 155.39,
+      "geometryStatus": {
+        "insideClickbox": false,
+        "clickboxAvailable": true,
+        "targetOnScreen": true
+      },
+      "postcondition": {
+        "planeChanged": false,
+        "positionChanged": true,
+        "animationStarted": false,
+        "inventoryChanged": true,
+        "widgetOpened": true,
+        "menuClosed": false,
+        "matchedExpectedOutcome": false
+      },
+      "whyItStillSucceeded": "postcondition_positionChanged_inventoryChanged_widgetOpened",
+      "warnings": [
+        "climb_target_without_plane_change_in_window"
+      ]
+    },
+    {
+      "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+      "eventSeq": 98,
+      "action": "Open",
+      "target": "Gate",
+      "classification": "menu_selection_click",
+      "targetQuality": "strong",
+      "targetScore": 1.0,
+      "clickPoint": {
+        "canvas": {
+          "x": 66.0,
+          "y": 260.0
+        }
+      },
+      "aimDistancePx": 343.839,
+      "geometryStatus": {
+        "insideClickbox": null,
+        "clickboxAvailable": false,
+        "targetOnScreen": false
+      },
+      "postcondition": {
+        "planeChanged": false,
+        "positionChanged": false,
+        "animationStarted": false,
+        "inventoryChanged": false,
+        "widgetOpened": true,
+        "menuClosed": false,
+        "matchedExpectedOutcome": true
+      },
+      "whyItStillSucceeded": "matched_expected_postcondition",
+      "warnings": [
+        "menu_row_geometry_missing",
+        "target_not_on_screen"
+      ]
+    },
+    {
+      "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+      "eventSeq": 200,
+      "action": null,
+      "target": "Stepladder",
+      "classification": "menu_selection_click",
+      "targetQuality": "strong",
+      "targetScore": 0.92,
+      "clickPoint": {
+        "canvas": {
+          "x": 591.0,
+          "y": 357.0
+        }
+      },
+      "aimDistancePx": 215.128,
+      "geometryStatus": {
+        "insideClickbox": null,
+        "clickboxAvailable": false,
+        "targetOnScreen": false
+      },
+      "postcondition": {
+        "planeChanged": false,
+        "positionChanged": false,
+        "animationStarted": true,
+        "inventoryChanged": true,
+        "widgetOpened": true,
+        "menuClosed": false,
+        "matchedExpectedOutcome": false
+      },
+      "whyItStillSucceeded": "postcondition_animationStarted_inventoryChanged_widgetOpened",
+      "warnings": [
+        "menu_row_bounds_missing",
+        "selection_inferred_from_game_target_without_row_geometry",
+        "menu_row_geometry_missing",
+        "target_not_on_screen",
+        "climb_target_without_plane_change_in_window"
+      ]
+    },
+    {
+      "recording": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+      "eventSeq": 358,
+      "action": null,
+      "target": "Stepladder",
+      "classification": "menu_selection_click",
+      "targetQuality": "strong",
+      "targetScore": 1.0,
+      "clickPoint": {
+        "canvas": {
+          "x": 102.0,
+          "y": 371.0
+        }
+      },
+      "aimDistancePx": 283.805,
+      "geometryStatus": {
+        "insideClickbox": false,
+        "clickboxAvailable": true,
+        "targetOnScreen": true
+      },
+      "postcondition": {
+        "planeChanged": false,
+        "positionChanged": false,
+        "animationStarted": true,
+        "inventoryChanged": true,
+        "widgetOpened": true,
+        "menuClosed": false,
+        "matchedExpectedOutcome": false
+      },
+      "whyItStillSucceeded": "postcondition_animationStarted_inventoryChanged_widgetOpened",
+      "warnings": [
+        "menu_row_bounds_missing",
+        "selection_inferred_from_game_target_without_row_geometry",
+        "menu_row_geometry_missing",
+        "climb_target_without_plane_change_in_window"
+      ]
+    },
+    {
+      "recording": "20260606_201613_Bank_to_tree_area",
+      "eventSeq": 4,
+      "action": null,
+      "target": "Bank table",
+      "classification": "menu_selection_click",
+      "targetQuality": "strong",
+      "targetScore": 1.0,
+      "clickPoint": {
+        "canvas": {
+          "x": 326.0,
+          "y": 123.0
+        }
+      },
+      "aimDistancePx": 108.116,
+      "geometryStatus": {
+        "insideClickbox": false,
+        "clickboxAvailable": true,
+        "targetOnScreen": true
+      },
+      "postcondition": {
+        "planeChanged": true,
+        "positionChanged": true,
+        "animationStarted": false,
+        "inventoryChanged": false,
+        "widgetOpened": true,
+        "menuClosed": false,
+        "matchedExpectedOutcome": true
+      },
+      "whyItStillSucceeded": "matched_expected_postcondition",
+      "warnings": []
+    },
+    {
+      "recording": "20260606_201613_Bank_to_tree_area",
+      "eventSeq": 41,
+      "action": "Climb-down",
+      "target": "Staircase",
+      "classification": "menu_selection_click",
+      "targetQuality": "strong",
+      "targetScore": 1.0,
+      "clickPoint": {
+        "canvas": {
+          "x": 136.0,
+          "y": 64.0
+        }
+      },
+      "aimDistancePx": 138.708,
+      "geometryStatus": {
+        "insideClickbox": false,
+        "clickboxAvailable": true,
+        "targetOnScreen": true
+      },
+      "postcondition": {
+        "planeChanged": true,
+        "positionChanged": true,
+        "animationStarted": false,
+        "inventoryChanged": false,
+        "widgetOpened": true,
+        "menuClosed": false,
+        "matchedExpectedOutcome": true
+      },
+      "whyItStillSucceeded": "matched_expected_postcondition",
+      "warnings": [
+        "menu_row_geometry_missing"
+      ]
+    },
+    {
+      "recording": "20260606_201613_Bank_to_tree_area",
+      "eventSeq": 100,
+      "action": "Open",
+      "target": "Door",
+      "classification": "menu_selection_click",
+      "targetQuality": "strong",
+      "targetScore": 1.0,
+      "clickPoint": {
+        "canvas": {
+          "x": 465.0,
+          "y": 179.0
+        }
+      },
+      "aimDistancePx": 50.537,
+      "geometryStatus": {
+        "insideClickbox": false,
+        "clickboxAvailable": true,
+        "targetOnScreen": true
+      },
+      "postcondition": {
+        "planeChanged": false,
+        "positionChanged": true,
+        "animationStarted": false,
+        "inventoryChanged": false,
+        "widgetOpened": true,
+        "menuClosed": false,
+        "matchedExpectedOutcome": true
+      },
+      "whyItStillSucceeded": "matched_expected_postcondition",
+      "warnings": []
+    },
+    {
+      "recording": "20260606_201613_Bank_to_tree_area",
+      "eventSeq": 120,
+      "action": "Climb-up",
+      "target": "Staircase",
+      "classification": "menu_selection_click",
+      "targetQuality": "strong",
+      "targetScore": 1.0,
+      "clickPoint": {
+        "canvas": {
+          "x": 422.0,
+          "y": 279.0
+        }
+      },
+      "aimDistancePx": 136.125,
+      "geometryStatus": {
+        "insideClickbox": false,
+        "clickboxAvailable": true,
+        "targetOnScreen": true
+      },
+      "postcondition": {
+        "planeChanged": false,
+        "positionChanged": true,
+        "animationStarted": false,
+        "inventoryChanged": false,
+        "widgetOpened": true,
+        "menuClosed": false,
+        "matchedExpectedOutcome": false
+      },
+      "whyItStillSucceeded": "postcondition_positionChanged_widgetOpened",
+      "warnings": [
+        "climb_target_without_plane_change_in_window"
+      ]
+    },
+    {
+      "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+      "eventSeq": 8,
+      "action": null,
+      "target": "Bank table",
+      "classification": "menu_selection_click",
+      "targetQuality": "strong",
+      "targetScore": 1.0,
+      "clickPoint": {
+        "canvas": {
+          "x": 459.0,
+          "y": 131.0
+        }
+      },
+      "aimDistancePx": 167.887,
+      "geometryStatus": {
+        "insideClickbox": false,
+        "clickboxAvailable": true,
+        "targetOnScreen": true
+      },
+      "postcondition": {
+        "planeChanged": false,
+        "positionChanged": true,
+        "animationStarted": false,
+        "inventoryChanged": false,
+        "widgetOpened": true,
+        "menuClosed": false,
+        "matchedExpectedOutcome": true
+      },
+      "whyItStillSucceeded": "matched_expected_postcondition",
+      "warnings": [
+        "menu_row_bounds_missing",
+        "selection_inferred_from_game_target_without_row_geometry",
+        "menu_row_geometry_missing"
+      ]
+    },
+    {
+      "recording": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+      "eventSeq": 110,
+      "action": "Open",
+      "target": "Door",
+      "classification": "menu_selection_click",
+      "targetQuality": "strong",
+      "targetScore": 1.0,
+      "clickPoint": {
+        "canvas": {
+          "x": 494.0,
+          "y": 184.0
+        }
+      },
+      "aimDistancePx": 72.993,
+      "geometryStatus": {
+        "insideClickbox": false,
+        "clickboxAvailable": true,
+        "targetOnScreen": true
+      },
+      "postcondition": {
+        "planeChanged": false,
+        "positionChanged": true,
+        "animationStarted": false,
+        "inventoryChanged": false,
+        "widgetOpened": true,
+        "menuClosed": false,
+        "matchedExpectedOutcome": true
+      },
+      "whyItStillSucceeded": "matched_expected_postcondition",
+      "warnings": []
+    }
+  ],
+  "warnings": [
+    "20260607_120446_Bank_opening_deposit: target_match_quality.jsonl missing or empty",
+    "20260607_143719_Open_Bank_Deposit_logs_CLose_bank: target_match_quality.jsonl missing or empty"
+  ],
+  "missingCapabilities": [
+    "target_match_quality"
+  ],
+  "exampleRecordings": [
+    {
+      "recordingId": "20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor",
+      "primaryActivity": "route_traversal",
+      "status": "PASS",
+      "path": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor"
+    },
+    {
+      "recordingId": "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
+      "primaryActivity": "woodcutting",
+      "status": "PASS",
+      "path": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory"
+    },
+    {
+      "recordingId": "20260607_120446_Bank_opening_deposit",
+      "primaryActivity": "banking",
+      "status": "PASS",
+      "path": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_120446_Bank_opening_deposit"
+    },
+    {
+      "recordingId": "20260606_201613_Bank_to_tree_area",
+      "primaryActivity": "route_traversal",
+      "status": "PASS",
+      "path": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "recordingId": "20260607_143719_Open_Bank_Deposit_logs_CLose_bank",
+      "primaryActivity": "banking",
+      "status": "PASS",
+      "path": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_143719_Open_Bank_Deposit_logs_CLose_bank"
+    },
+    {
+      "recordingId": "20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area",
+      "primaryActivity": "route_traversal",
+      "status": "PASS",
+      "path": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area"
+    },
+    {
+      "recordingId": "20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs",
+      "primaryActivity": "woodcutting",
+      "status": "PASS",
+      "path": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_144144_Wood_cutting_area_empty_inventory_to_full_regular_logs"
+    }
+  ]
+}

@@ -2,6 +2,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 
@@ -14,6 +15,58 @@ import task_script_api
 
 
 EXAMPLE_PATH = VIEWER_DIR / "examples" / "woodcut_bank_task_script.json"
+
+
+BANKING_LIFECYCLE = {
+    "schema": "banking_lifecycle.v1",
+    "status": "PASS",
+    "phase": "complete",
+    "confidence": 0.95,
+    "bankLikeInterface": "bank",
+    "depositConfirmationLevel": "bank_container_delta_confirmed",
+    "bankContainerDeltaAvailable": True,
+    "bank": {
+        "openSeen": True,
+        "depositBoxOpenSeen": False,
+        "widgetRootSeen": True,
+        "containerAvailable": True,
+        "bankUiPresent": True,
+        "bankUiSnapshotCount": 2,
+        "bankContainerDeltaAvailable": True,
+    },
+    "inventory": {
+        "freeSlotsBefore": 0,
+        "freeSlotsAfter": 16,
+        "freeSlotDelta": 16,
+        "normalLogsBefore": 16,
+        "normalLogsAfter": 0,
+    },
+    "deposit": {
+        "detected": True,
+        "totalDepositedCount": 16,
+        "items": [{"id": 1511, "name": "Logs", "quantity": 16, "confirmationLevel": "bank_container_delta_confirmed"}],
+    },
+    "withdraw": {"detected": False, "items": [], "totalWithdrawnCount": 0},
+    "missingCapabilities": [],
+    "warnings": [],
+}
+
+
+COMBAT_DAMAGE_SUMMARY = {
+    "schema": "combat_damage_summary.v1",
+    "status": "PASS",
+    "combatObserved": True,
+    "primaryOpponent": {"name": "Mugger", "kind": "npc", "id": 513, "confidence": 0.95},
+    "damageTaken": {"total": 5, "hitsplatCount": 23, "sources": [{"name": "Mugger", "total": 5}]},
+    "damageDealt": {"total": 9, "hitsplatCount": 14, "targets": [{"name": "Mugger", "total": 9}]},
+    "health": {"hpBefore": 10, "hpAfter": 7, "lowestObservedHp": 6, "healthChanged": True},
+    "hitsplats": {"total": 37, "localPlayerHitsplats": 23, "opponentHitsplats": 14, "ambiguousHitsplats": 0},
+    "actorDeaths": [{"name": "Mugger", "kind": "npc"}],
+    "taskResume": {"taskResumed": True},
+    "confidence": 0.95,
+    "warnings": [],
+    "missingCapabilities": [],
+}
 
 
 def load_example() -> dict:
@@ -190,13 +243,15 @@ def clean_failure_classification() -> dict:
     }
 
 
-def navigation_trace_snapshot(*, suspicious: bool = False, trace_present: bool = True) -> dict:
+def navigation_trace_snapshot(*, suspicious: bool = False, trace_present: bool = True, blocking_eligible: bool = True) -> dict:
     return {
         "schema": "navigation_decision_trace_summary.v1",
         "status": "WARN" if suspicious or not trace_present else "PASS",
         "warnings": ["navigation_decision_trace_missing"] if not trace_present else [],
         "data": {
             "source": "test_navigation_trace",
+            "diagnosticOnly": not blocking_eligible,
+            "blockingEligible": blocking_eligible,
             "tracePresent": trace_present,
             "latestActionTraceCount": 1 if trace_present else 0,
             "decisionCount": 1 if trace_present else 0,
@@ -231,6 +286,34 @@ def navigation_trace_snapshot(*, suspicious: bool = False, trace_present: bool =
 
 
 class TaskScriptApiTest(unittest.TestCase):
+    def test_script_banking_helpers_expose_deposit_result(self):
+        self.assertTrue(task_script_api.is_bank_open(BANKING_LIFECYCLE))
+        self.assertFalse(task_script_api.is_deposit_box_open(BANKING_LIFECYCLE))
+        self.assertEqual(task_script_api.get_active_bank_like_interface(BANKING_LIFECYCLE), "bank")
+        result = task_script_api.get_deposit_result(BANKING_LIFECYCLE)
+        self.assertTrue(result["depositComplete"])
+        self.assertEqual(result["depositedItems"][0]["id"], 1511)
+        self.assertTrue(task_script_api.did_deposit_item(BANKING_LIFECYCLE, 1511))
+        self.assertEqual(task_script_api.get_banking_missing_capabilities(BANKING_LIFECYCLE), [])
+
+    def test_script_combat_damage_helpers_expose_damage_result(self):
+        compact = task_script_api.get_combat_damage_summary(COMBAT_DAMAGE_SUMMARY)
+        self.assertEqual(compact["damageTakenTotal"], 5)
+        self.assertEqual(compact["damageDealtTotal"], 9)
+        self.assertEqual(task_script_api.get_damage_taken(COMBAT_DAMAGE_SUMMARY)["hpAfter"], 7)
+        self.assertEqual(task_script_api.get_primary_opponent(COMBAT_DAMAGE_SUMMARY)["name"], "Mugger")
+        self.assertTrue(task_script_api.did_take_damage(COMBAT_DAMAGE_SUMMARY))
+        self.assertTrue(task_script_api.did_deal_damage(COMBAT_DAMAGE_SUMMARY))
+
+    def test_deposit_evidence_plan_includes_rich_banking_variables(self):
+        script = {"name": "deposit-only", "steps": [{"primitive": "deposit"}]}
+        plan = task_script_api.build_task_script_evidence_plan(script)
+        covered = plan["data"]["coveredVariables"]
+        self.assertIn("bankState", covered)
+        self.assertIn("bankingLifecycle", covered)
+        self.assertIn("inventoryDelta", covered)
+        self.assertIn("depositResult", covered)
+
     def test_spec_lists_required_primitives_and_no_raw_input_contract(self):
         spec = task_script_api.script_api_spec()
 
@@ -279,6 +362,8 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(evidence_plan["missingLifecycleVariables"], [])
         self.assertIn("inventory", evidence_plan["coveredVariables"])
         self.assertIn("bankOpen", evidence_plan["coveredVariables"])
+        self.assertIn("bankState", evidence_plan["coveredVariables"])
+        self.assertIn("depositResult", evidence_plan["coveredVariables"])
         self.assertIn("hoverTarget", evidence_plan["coveredVariables"])
         self.assertIn("routeProgress", evidence_plan["coveredVariables"])
         self.assertIn("select_resource_target", data["actionProposalActions"])
@@ -339,8 +424,12 @@ class TaskScriptApiTest(unittest.TestCase):
         before = runtime_snapshot(
             {
                 "inventory": {"freeSlots": 0, "resourceItems": ["Logs"] * 16},
+                "inventoryDelta": {"freeSlotDelta": 0, "depositedItems": []},
                 "resourceCount": 16,
                 "bankOpen": True,
+                "bankState": {"bankOpen": True, "bankContainerAvailable": True},
+                "bankingLifecycle": {"status": "PASS", "phase": "bank_open", "confidence": 0.8},
+                "depositResult": {"depositComplete": False, "depositedItems": [], "depositConfirmationLevel": "none"},
                 "menuOptionClicked": {"option": "Bank", "target": "Bank booth"},
                 "phaseIntent": {"phase": "banking", "bankingComplete": False},
             }
@@ -348,8 +437,12 @@ class TaskScriptApiTest(unittest.TestCase):
         after = runtime_snapshot(
             {
                 "inventory": {"freeSlots": 28, "resourceItems": []},
+                "inventoryDelta": {"freeSlotDelta": 16, "depositedItems": [{"id": 1511, "quantity": 16}]},
                 "resourceCount": 0,
                 "bankOpen": True,
+                "bankState": {"bankOpen": True, "bankContainerAvailable": True, "bankContainerDeltaAvailable": True},
+                "bankingLifecycle": {"status": "PASS", "phase": "complete", "confidence": 0.95},
+                "depositResult": {"depositComplete": True, "depositedItems": [{"id": 1511, "quantity": 16}], "depositConfirmationLevel": "bank_container_delta_confirmed"},
                 "menuOptionClicked": {"option": "Deposit inventory", "target": ""},
                 "phaseIntent": {"phase": "banking", "bankingComplete": True},
             }
@@ -375,16 +468,24 @@ class TaskScriptApiTest(unittest.TestCase):
         before = runtime_snapshot(
             {
                 "inventory": {"freeSlots": 0, "resourceItems": ["Logs"] * 16},
+                "inventoryDelta": {"freeSlotDelta": 0, "depositedItems": []},
                 "resourceCount": 16,
                 "bankOpen": True,
+                "bankState": {"bankOpen": True, "bankContainerAvailable": True},
+                "bankingLifecycle": {"status": "PASS", "phase": "bank_open", "confidence": 0.8},
+                "depositResult": {"depositComplete": False, "depositedItems": []},
                 "phaseIntent": {"phase": "banking", "bankingComplete": False},
             }
         )
         after = runtime_snapshot(
             {
                 "inventory": {"freeSlots": 28, "resourceItems": []},
+                "inventoryDelta": {"freeSlotDelta": 16, "depositedItems": [{"id": 1511, "quantity": 16}]},
                 "resourceCount": 0,
                 "bankOpen": True,
+                "bankState": {"bankOpen": True, "bankContainerAvailable": True, "bankContainerDeltaAvailable": True},
+                "bankingLifecycle": {"status": "PASS", "phase": "complete", "confidence": 0.95},
+                "depositResult": {"depositComplete": True, "depositedItems": [{"id": 1511, "quantity": 16}]},
                 "phaseIntent": {"phase": "banking", "bankingComplete": True},
             }
         )
@@ -608,6 +709,34 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertFalse(data["expectedRuntimeVariableProof"]["variableIntegrity"]["resourceCount"]["proofEligibleNow"])
         self.assertIn("expected_runtime_variable_not_proof_eligible:resourceCount", readiness["warnings"])
 
+    def test_step_readiness_treats_session_jsonl_navigation_trace_as_diagnostic_only(self):
+        readiness = task_script_api.assess_task_step_readiness(
+            load_example(),
+            primitive="return_to_resource",
+            runtime_evidence=runtime_snapshot(
+                {
+                    "location": {"worldX": 3204, "worldY": 3229, "plane": 1},
+                    "routeProgress": {
+                        "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                        "currentStepIndex": 4,
+                    },
+                    "phaseIntent": {"phase": "return_to_resource", "activeIntent": "return_to_resource_area"},
+                }
+            ),
+            action_input_visibility=action_visibility_snapshot(
+                execution_allowed=True,
+                planned_action="interact_service_route_object",
+            ),
+            failure_classification=clean_failure_classification(),
+            navigation_decision_trace=navigation_trace_snapshot(suspicious=True, blocking_eligible=False),
+        )
+
+        self.assertEqual(readiness["status"], "WARN")
+        self.assertTrue(readiness["data"]["requestAllowedNow"])
+        self.assertNotIn("suspicious_navigation_decision_trace", readiness["blockers"])
+        self.assertIn("diagnostic_navigation_decision_trace_not_blocking", readiness["warnings"])
+        self.assertFalse(readiness["data"]["navigationDecisionTrace"]["blockingEligible"])
+
     def test_run_readiness_infers_deposit_and_delegates_step_gate(self):
         readiness = task_script_api.assess_task_run_readiness(
             load_example(),
@@ -767,6 +896,8 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertTrue(runtime["data"]["runtimeVariables"]["inventory"]["observed"])
         self.assertEqual(runtime["data"]["runtimeVariables"]["resourceCount"]["value"], 16)
         self.assertEqual(runtime["data"]["runtimeVariables"]["bankOpen"]["value"], False)
+        self.assertIn("bankState", runtime["data"]["runtimeVariables"])
+        self.assertIn("depositResult", runtime["data"]["runtimeVariables"])
         self.assertTrue(runtime["data"]["runtimeVariables"]["menuOptionClicked"]["observed"])
         integrity = runtime["data"]["runtimeEvidenceIntegrity"]
         self.assertEqual(integrity["schema"], "task_runtime_evidence_integrity.v1")
@@ -790,6 +921,10 @@ class TaskScriptApiTest(unittest.TestCase):
         forbidden_raw_names = {"mouseDown", "mouseUp", "keyDown", "keyUp", "click", "raw_click", "raw_mouse_down"}
 
         self.assertIn("get_task_script_api_spec", tool_names)
+        self.assertIn("get_banking_state", tool_names)
+        self.assertIn("get_banking_lifecycle", tool_names)
+        self.assertIn("get_inventory_delta", tool_names)
+        self.assertIn("get_deposit_result", tool_names)
         self.assertIn("validate_task_script", tool_names)
         self.assertIn("compile_task_script", tool_names)
         self.assertIn("explain_script_plan", tool_names)
@@ -871,6 +1006,182 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(run_readiness_payload["schema"], "task_run_readiness.v1")
         self.assertEqual(run_readiness_resource["schema"], "task_run_readiness.v1")
         self.assertEqual(probe_payload["schema"], "task_scene_probe.v1")
+
+    def test_woodcutting_loop_helpers_expose_next_phase(self):
+        source = {
+            "woodcutting_loop_lifecycle": {
+                "schema": "woodcutting_loop_lifecycle.v1",
+                "status": "PASS",
+                "loopState": "inventory_full",
+                "confidence": 0.95,
+                "currentPhase": {"phase": "inventory_full", "label": "Inventory full"},
+                "nextExpectedPhase": {"phase": "route_to_bank", "label": "Route to bank"},
+                "detectedPhases": [{"phase": "cutting"}, {"phase": "inventory_full"}],
+                "woodcutting": {"inventoryFull": True, "freeSlotsEnd": 0},
+                "banking": {},
+                "interruptions": {},
+                "warnings": [],
+                "missingCapabilities": [],
+            }
+        }
+        self.assertEqual(task_script_api.get_current_task_phase(source), "inventory_full")
+        self.assertEqual(task_script_api.get_next_expected_phase(source), "route_to_bank")
+        self.assertTrue(task_script_api.is_inventory_full_for_woodcutting(source))
+        self.assertTrue(task_script_api.should_route_to_bank(source))
+
+    def test_script_helpers_expose_woodcutting_and_route_monitor(self):
+        source = {
+            "woodcutting_lifecycle": {
+                "schema": "woodcutting_lifecycle.v1",
+                "status": "PASS",
+                "phase": "cutting",
+                "confidence": 0.9,
+                "inventory": {"normalLogsGained": 3, "inventoryFull": False, "freeSlotsEnd": 25},
+                "animation": {"activeSnapshotCount": 2},
+                "clicks": {"freshChopClickCount": 1},
+                "current": {"normalLogs": 3, "freeSlots": 25, "animationActive": True},
+            },
+            "route_monitor": {
+                "schema": "route_monitor_status.v1",
+                "status": "PASS",
+                "routeName": "Bank_to_Woodcutting_area",
+                "routeState": "in_progress",
+                "currentSegmentIndex": 1,
+                "currentSegmentLabel": "Walk toward staircase",
+                "nextExpectedSegment": {"segmentIndex": 2, "segmentType": "stair_transition", "label": "Climb-up Staircase"},
+                "completedSegmentCount": 1,
+                "remainingSegmentCount": 4,
+                "offRoute": False,
+            },
+        }
+        woodcutting = task_script_api.get_woodcutting_lifecycle(source)
+        route_status = task_script_api.get_route_monitor_status(source)
+
+        self.assertEqual(woodcutting["phase"], "cutting")
+        self.assertEqual(route_status["routeState"], "in_progress")
+        self.assertFalse(task_script_api.is_off_route(source))
+        self.assertEqual(task_script_api.get_current_route_segment(source)["label"], "Walk toward staircase")
+        self.assertEqual(task_script_api.get_next_route_segment(source)["segmentType"], "stair_transition")
+
+    def test_route_demonstration_helpers_resolve_next_recorded_step(self):
+        with TemporaryDirectory() as tmp:
+            guide_path = Path(tmp) / "woodcutting_area_to_bank.route_guide.json"
+            guide_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "route_demonstration_guide.v1",
+                        "status": "PASS",
+                        "routeName": "woodcutting_area_to_bank",
+                        "sourceRecordings": ["synthetic"],
+                        "pathPoints": [
+                            {"orderIndex": 0, "world": {"worldX": 3203, "worldY": 3238, "plane": 0}, "reachedToleranceTiles": 2},
+                            {"orderIndex": 1, "world": {"worldX": 3208, "worldY": 3212, "plane": 0}, "reachedToleranceTiles": 2},
+                        ],
+                        "interactionSteps": [
+                            {
+                                "orderIndex": 0,
+                                "segmentIndex": 1,
+                                "action": "Climb-down",
+                                "target": {"name": "Trapdoor"},
+                                "world": {"worldX": 3209, "worldY": 3216, "plane": 0},
+                                "planeBefore": 0,
+                                "planeAfter": 2,
+                                "cameraHints": [{"segmentId": "cam_001"}],
+                                "postcondition": {"type": "plane_change", "planeChanged": True},
+                            }
+                        ],
+                        "planeChanges": [{"startPlane": 0, "endPlane": 2}],
+                        "cameraHints": [{"segmentId": "cam_001"}],
+                        "warnings": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            guide = task_script_api.get_route_demonstration_guide("woodcutting_area_to_bank", guide_dir=tmp)
+            progress = task_script_api.get_route_guide_progress(
+                "woodcutting_area_to_bank",
+                {"worldX": 3203, "worldY": 3238, "plane": 0},
+                guide_dir=tmp,
+            )
+
+        self.assertTrue(guide["routeGuideLoaded"])
+        self.assertEqual(guide["pathPointCount"], 2)
+        self.assertEqual(guide["interactionSteps"][0]["targetName"], "Trapdoor")
+        self.assertEqual(progress["status"], "PASS")
+        self.assertEqual(progress["nextGuidePoint"]["world"], {"worldX": 3208, "worldY": 3212, "plane": 0})
+        self.assertIn(0, progress["skippedReachedGuidePoints"])
+
+    def test_click_planning_helpers_return_warn_without_target_and_plan_with_target(self):
+        missing = task_script_api.get_next_click_plan({"humanClickProfile": {"status": "PASS", "landing": {"medianAimDistancePx": 20}}})
+        self.assertEqual(missing["status"], "WARN")
+        self.assertIn("target_missing", missing["readiness"]["blockedReasons"])
+
+        plan = task_script_api.get_human_click_plan(
+            target={
+                "name": "Tree",
+                "targetQuality": "strong",
+                "onScreen": True,
+                "geometryAvailable": True,
+                "aimPoint": {"x": 100, "y": 120},
+            },
+            action="Chop down",
+            activity="woodcutting",
+            source={"humanClickProfile": {"status": "PASS", "landing": {"medianAimDistancePx": 20, "p75AimDistancePx": 30}}},
+        )
+        self.assertEqual(plan["status"], "PASS")
+        self.assertNotEqual(plan["aim"]["basePoint"], plan["aim"]["plannedPoint"])
+
+    def test_run_readiness_uses_woodcutting_loop_next_phase(self):
+        runtime = runtime_snapshot(
+            {
+                "loadedScene": {"loadedSceneVerified": True},
+                "inventory": {"freeSlots": 0, "inventoryFull": True},
+                "bankOpen": False,
+                "woodcuttingLoopLifecycle": {
+                    "status": "PASS",
+                    "loopState": "inventory_full",
+                    "currentPhase": "inventory_full",
+                    "nextExpectedPhase": "route_to_bank",
+                },
+            }
+        )
+        readiness = task_script_api.assess_task_run_readiness(
+            load_example(),
+            runtime_evidence=runtime,
+            action_input_visibility=action_visibility_snapshot(planned_action="Chop down"),
+            failure_classification=clean_failure_classification(),
+            navigation_decision_trace=navigation_trace_snapshot(),
+        )
+
+        inferred = readiness["data"]["inferredNextPrimitive"]
+        self.assertEqual(inferred["primitive"], "bank")
+        self.assertEqual(inferred["reason"], "woodcutting_loop_next_expected_phase_route_to_bank")
+
+    def test_run_readiness_reports_off_route_before_next_phase(self):
+        runtime = runtime_snapshot(
+            {
+                "loadedScene": {"loadedSceneVerified": True},
+                "routeMonitor": {"routeState": "off_route", "offRoute": True},
+                "woodcuttingLoopLifecycle": {
+                    "status": "PASS",
+                    "loopState": "routing_to_bank",
+                    "currentPhase": "routing_to_bank",
+                    "nextExpectedPhase": "banking_deposit",
+                },
+            }
+        )
+        readiness = task_script_api.assess_task_run_readiness(
+            load_example(),
+            runtime_evidence=runtime,
+            action_input_visibility=action_visibility_snapshot(planned_action="walk_to"),
+            failure_classification=clean_failure_classification(),
+            navigation_decision_trace=navigation_trace_snapshot(),
+        )
+
+        inferred = readiness["data"]["inferredNextPrimitive"]
+        self.assertEqual(inferred["primitive"], "wait_for_evidence")
+        self.assertEqual(inferred["reason"], "route_monitor_reports_off_route")
 
 
 if __name__ == "__main__":

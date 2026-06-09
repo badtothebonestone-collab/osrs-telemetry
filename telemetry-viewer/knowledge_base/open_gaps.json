@@ -1,0 +1,172 @@
+{
+  "schema": "project_open_gaps.v1",
+  "updatedAtUtc": "2026-06-09T15:39:55.360466Z",
+  "gaps": [
+    {
+      "id": "deposit_all_region_classification",
+      "title": "Deposit-All menu-context click can be region-classified as minimap_click",
+      "severity": "low",
+      "requiredLayer": "analyzer",
+      "status": "open",
+      "evidence": [
+        "20260607_120446_Bank_opening_deposit"
+      ],
+      "suggestedNextTask": "Use menu context to override screen-region labels for bank UI menu clicks."
+    },
+    {
+      "id": "bank_container_slot_provenance",
+      "title": "Bank container compact delta lacks slot-level and event provenance",
+      "severity": "medium",
+      "requiredLayer": "plugin/analyzer",
+      "status": "open",
+      "evidence": [
+        "bankContainerDelta snapshot diff is implemented"
+      ],
+      "suggestedNextTask": "Add ItemContainerChanged provenance only if a task needs slot-level proof."
+    },
+    {
+      "id": "selected_item_spell_widget",
+      "title": "Selected item/spell/widget state remains a targeted bridge export gap",
+      "severity": "medium",
+      "requiredLayer": "plugin",
+      "status": "open",
+      "evidence": [
+        "telemetry_schema selected_item_spell_widget_state"
+      ],
+      "suggestedNextTask": "Record an item-on-object or spell interaction sample, then export only the missing selected state."
+    },
+    {
+      "id": "route_template_coverage",
+      "title": "Route template coverage should grow per proven route direction",
+      "severity": "medium",
+      "requiredLayer": "recording/analyzer",
+      "status": "open",
+      "evidence": [
+        "Bank_to_Woodcutting_area and woodcutting_area_to_bank templates exist"
+      ],
+      "suggestedNextTask": "Extract templates for new proven route directions after two clean recordings."
+    },
+    {
+      "id": "live_mirror_ownership",
+      "title": "Full live mirror ownership remains advanced and experimental",
+      "severity": "medium",
+      "requiredLayer": "input/arduino",
+      "status": "open",
+      "evidence": [
+        "map_only duplicate-click prevention is stable"
+      ],
+      "suggestedNextTask": "Keep normal Record Everything map-only/no-live-click; test live mirror only in isolated validation recordings."
+    },
+    {
+      "id": "input_geometry_live_source_stale",
+      "title": "Live input geometry must come from a current RuneLite/window source before actions",
+      "severity": "medium",
+      "requiredLayer": "telemetry/live_readiness/input",
+      "status": "open",
+      "evidence": [
+        "2026-06-09 check-input-geometry saw refused telemetry endpoints, no RuneLite window match, and only stale file-session geometry."
+      ],
+      "suggestedNextTask": "Restore or attach RuneLite plus context/snapshot endpoints, then rerun --check-input-geometry and allow live actions only after input_geometry_pass."
+    },
+    {
+      "id": "clickbox_geometry_incomplete_for_profile",
+      "title": "Tree clickbox/hull geometry is still missing after Tree aim recovery",
+      "severity": "medium",
+      "requiredLayer": "analyzer/geometry",
+      "status": "open",
+      "evidence": [
+        "20260607_190145_Cutting_a_tree_or_two_with_camera_movement now recovers Tree aimPoint and rejects Gate/Close, but clickboxAvailable remains false and insideClickbox is unknown."
+      ],
+      "suggestedNextTask": "Record/verify a woodcutting sample with object clickbox or tile polygon export so click-plan validation can compare actual clicks against hull containment, not only aim distance."
+    },
+    {
+      "id": "menu_row_geometry_profile_gaps",
+      "title": "Menu row geometry is sometimes missing in useful human recordings",
+      "severity": "low",
+      "requiredLayer": "analyzer",
+      "status": "open",
+      "evidence": [
+        "menu_row_geometry_missing warnings in route and woodcutting recordings"
+      ],
+      "suggestedNextTask": "Keep menu hover/target/postcondition evidence as backup when row bounds are absent."
+    },
+    {
+      "id": "pure_normal_logs_woodcutting_fixture",
+      "title": "Pure normal-log-only full-inventory woodcutting fixture is still useful",
+      "severity": "low",
+      "requiredLayer": "recording",
+      "status": "open",
+      "evidence": [
+        "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory included normal logs and oak logs"
+      ],
+      "suggestedNextTask": "Record one tree-area sample that fills inventory with only normal Logs if a task needs item-specific timing."
+    },
+    {
+      "id": "combat_damage_source_attribution_multi_actor",
+      "title": "Multi-actor combat damage attribution still needs a fixture",
+      "severity": "low",
+      "requiredLayer": "recording",
+      "status": "open",
+      "evidence": [
+        "20260607_154606_Wood_cutting_attacked proves single Mugger attribution"
+      ],
+      "suggestedNextTask": "If combat routing matters later, collect a multi-NPC interruption fixture to validate source attribution under ambiguity."
+    },
+    {
+      "id": "validate_human_click_plans_against_recordings",
+      "title": "Human-profile click plans need replay/recording validation before live placement",
+      "severity": "medium",
+      "requiredLayer": "recording/input_control",
+      "status": "open",
+      "evidence": [
+        "human_click_planning is advisory and dry-run only"
+      ],
+      "suggestedNextTask": "Compare dry-run planned aim points against successful human clicks in future Record Everything fixtures before changing live click generation."
+    },
+    {
+      "id": "knowledge_manual_curation",
+      "title": "Project knowledge is generated plus manual notes, not a substitute for curated decisions",
+      "severity": "low",
+      "requiredLayer": "docs",
+      "status": "open",
+      "evidence": [
+        "docs/knowledge manual note sections"
+      ],
+      "suggestedNextTask": "After each milestone, add one concise manual note when generated summaries miss intent."
+    }
+  ],
+  "nextTasks": [
+    {
+      "id": "fix_deposit_region_label",
+      "priority": 1,
+      "task": "Clean up Deposit-All menu-context region classification.",
+      "successCriteria": [
+        "Deposit-All bank UI clicks no longer appear as minimap_click when menu context proves bank UI."
+      ]
+    },
+    {
+      "id": "record_second_bank_direct_sample",
+      "priority": 2,
+      "task": "Record another bank open/deposit/close sample with bankContainerDelta explicit plugin field.",
+      "successCriteria": [
+        "bankContainerDeltaSource is explicit plugin delta or recorded diff, lifecycle PASS."
+      ]
+    },
+    {
+      "id": "extract_more_route_templates",
+      "priority": 3,
+      "task": "Extract templates for new route directions after repeated PASS recordings.",
+      "successCriteria": [
+        "Two clean route recordings compare PASS against the new template."
+      ]
+    },
+    {
+      "id": "selected_state_recording",
+      "priority": 5,
+      "task": "Record a selected item/spell/widget interaction to decide the smallest bridge export.",
+      "successCriteria": [
+        "Schema gap identifies exact selected-state fields needed."
+      ]
+    }
+  ]
+}

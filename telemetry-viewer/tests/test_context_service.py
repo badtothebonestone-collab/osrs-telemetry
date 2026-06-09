@@ -378,6 +378,29 @@ class ContextServiceTest(unittest.TestCase):
             self.assertIn("recentInventoryDeltas", response)
             self.assertIn("recentActivityEvents", response)
 
+    def test_context_click_plan_need_returns_compact_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(Path(tmp), candidates=[candidate(2, 95)])
+            context = service.LiveContextCache(session, reload_interval=0).load(force=True)
+            response = service.build_context_response(
+                context,
+                {
+                    "schema": "context_request.v1",
+                    "task": "woodcutting",
+                    "activity": "woodcutting",
+                    "action": "Chop down",
+                    "needs": ["click_plan"],
+                    "responseMode": "compact",
+                    "maxCandidates": 1,
+                },
+            )
+
+            self.assertIn("clickPlan", response)
+            self.assertIn(response["clickPlan"]["status"], {"PASS", "WARN"})
+            self.assertEqual(response["clickPlan"]["action"], "Chop down")
+            self.assertEqual(response["clickPlan"]["target"], "Tree")
+            self.assertIsInstance(response["clickPlan"]["plannedPoint"], dict)
+
     def test_context_events_need_returns_recent_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = make_session(Path(tmp))
@@ -452,6 +475,37 @@ class ContextServiceTest(unittest.TestCase):
             )
             self.assertTrue(response["inventory"]["changedRecently"])
             self.assertEqual(response["recentInventoryDeltas"][0]["changes"][0]["itemId"], 1511)
+
+    def test_context_response_includes_compact_deposit_result(self):
+        bank_ui = {
+            "schema": "bank_ui_context_payload.v1",
+            "bankOpen": True,
+            "depositBoxOpen": False,
+            "bankRootVisible": True,
+            "bankContainerVisible": True,
+            "bankSummary": {"known": True, "itemCount": 142, "totalQuantityByItemId": {"1511": 142}},
+            "inventorySummary": {"known": True, "freeSlots": 16, "items": []},
+        }
+        context = {
+            "baseline": {"latestTick": 10, "inventory": {"known": True, "freeSlots": 16, "items": []}},
+            "status": {"latestTickProcessed": 10},
+            "activity": {"inventoryState": {"known": True, "freeSlots": 16, "items": []}},
+            "bank_ui": bank_ui,
+            "candidates": [],
+            "events": [],
+            "warnings": [],
+            "missingFields": [],
+            "sourceFiles": [],
+        }
+        response = service.build_context_response(
+            context,
+            {"schema": "context_request.v1", "needs": ["bank_state", "deposit_result"], "responseMode": "compact"},
+        )
+        self.assertTrue(response["bankState"]["bankOpenSeen"])
+        self.assertTrue(response["bankState"]["bankContainerAvailable"])
+        self.assertIn("depositResult", response)
+        self.assertFalse(response["depositResult"]["depositComplete"])
+        self.assertIn("missingCapabilities", response["depositResult"])
 
     def test_compact_context_inventory_preserves_item_list_for_progress(self):
         with tempfile.TemporaryDirectory() as tmp:

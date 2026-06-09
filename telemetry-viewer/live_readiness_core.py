@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import urllib.error
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -156,8 +157,8 @@ def _game_state_from_hot(status: dict[str, Any], hot: dict[str, Any], hover: dic
     for value in (
         status.get("gameState"),
         status.get("pluginGameState"),
-        hot.get("gameState"),
         hover.get("gameState"),
+        hot.get("gameState"),
         _dict(baseline.get("client")).get("gameState"),
         baseline.get("gameState"),
     ):
@@ -165,6 +166,13 @@ def _game_state_from_hot(status: dict[str, Any], hot: dict[str, Any], hover: dic
         if text:
             return text
     return None
+
+
+def _wall_time_age_millis(value: Any) -> int | None:
+    millis = _int_or_none(value)
+    if millis is None:
+        return None
+    return max(0, int(time.time() * 1000) - millis)
 
 
 def _is_logged_in_game_state(game_state: str | None) -> bool | None:
@@ -259,14 +267,16 @@ def _client_tick_hot_state(status: dict[str, Any]) -> dict[str, Any]:
     hover = _dict(hot.get("postMenuSort")) or _dict(hot.get("hoverMenu"))
     age_millis = _int_or_none(latency.get("ageMillis"))
     latest_post_menu_age = _int_or_none(latency.get("postMenuSortAgeMillis"))
+    if latest_post_menu_age is None:
+        latest_post_menu_age = _wall_time_age_millis(hover.get("wallTimeMillis"))
     if age_millis is None:
-        age_millis = latest_post_menu_age
+        age_millis = latest_post_menu_age if latest_post_menu_age is not None else _wall_time_age_millis(hot.get("wallTimeMillis"))
     last_click_age = _int_or_none(latency.get("lastClickAgeMillis"))
     snapshot_age = _int_or_none(status.get("pluginSnapshotAgeMillis") or status.get("snapshotAgeMillis"))
     daemon_tick_age = _int_or_none(status.get("daemonLatestTickAgeMillis") or status.get("latestTickAgeMillis"))
     game_state = _game_state_from_hot(status, hot, hover)
     is_logged_in = _is_logged_in_game_state(game_state)
-    source_event = _text(hot.get("sourceEvent") or hot.get("sampleSource"))
+    source_event = _text(hover.get("sourceEvent") or hover.get("sampleSource") or hot.get("sourceEvent") or hot.get("sampleSource"))
     source_key = source_event.lower()
     game_state_changed_only = source_key == "gamestatechanged"
     explicit_available = status.get("clientTickHotAvailable")
@@ -613,8 +623,14 @@ def _action_safety_evidence(
         "live_route_object",
         "live_service_object",
         "hover_discovered_object",
+        "plugin_snapshot_projection",
     }
     safe_aimpoint_ready = safe_status == "PASS" or bool(proposal_payload.get("suggestedClickPoint"))
+    hover_guarded_live_target = bool(
+        live_target_source
+        and proposal_actionability == "needs_hover_confirmation"
+        and (client_tick_hot.get("fresh") or source == "plugin_snapshot_projection")
+    )
     return {
         "schema": "action_safety_evidence.v1",
         "proposalExecutable": bool(getattr(proposal, "executable", False)),
@@ -627,11 +643,12 @@ def _action_safety_evidence(
         "hoverConfirmationRequired": proposal_actionability == "needs_hover_confirmation",
         "hoverConfirmationDeferredToExecutor": proposal_actionability == "needs_hover_confirmation",
         "liveTargetSource": live_target_source,
+        "hoverGuardedLiveTarget": hover_guarded_live_target,
         "canUseLiveTargetWithoutOverlayMarker": bool(
             getattr(proposal, "executable", False)
             and live_target_source
             and safe_aimpoint_ready
-            and freshness.get("stale") is not True
+            and (freshness.get("stale") is not True or hover_guarded_live_target)
         ),
     }
 
@@ -831,8 +848,10 @@ def build_readiness_report(
     effective_snapshot_url = str(source_metadata.get("snapshotUrl") or plugin_snapshot_source["snapshotUrl"])
     raw_snapshot_failures = _snapshot_failure_warnings(status)
     snapshot_failures, suppressed_snapshot_failures = _current_snapshot_failures(status, raw_snapshot_failures)
+    pending_plugin_snapshot_blockers: list[dict[str, Any]] = []
+    pending_plugin_snapshot_missing: list[str] = []
     if plugin_snapshot_required and snapshot_failures:
-        blockers.append(
+        pending_plugin_snapshot_blockers.append(
             _blocker(
                 "plugin_snapshot_source_not_ready",
                 snapshot_failures[0],
@@ -844,7 +863,7 @@ def build_readiness_report(
                 healthUrl=plugin_snapshot_source["healthUrl"],
             )
         )
-        missing.append("plugin.snapshot")
+        pending_plugin_snapshot_missing.append("plugin.snapshot")
     for warning in suppressed_snapshot_failures:
         non_applicable_context_warnings.append(
             f"historical plugin snapshot warning suppressed because daemon live status is fresh: {warning}"
@@ -868,7 +887,7 @@ def build_readiness_report(
     highlighter_session = Path(sessions["highlighterSessionPath"]).expanduser() if isinstance(sessions.get("highlighterSessionPath"), str) else None
     selected_target = selected_target_from_status(status)
     from action_proposal_core import build_action_proposal
-    from input_control.input_geometry import input_geometry_from_status
+    from input_control.input_geometry import resolve_input_geometry_status
 
     proposal = build_action_proposal(status)
     proposal_payload = proposal.to_dict()
@@ -981,6 +1000,65 @@ def build_readiness_report(
             )
         )
     )
+    safe_live_action_source = bool(
+        resource_target_required
+        and getattr(proposal, "executable", False)
+        and proposal_action_target_source in {"live_resource_candidate", "hover_discovered_object", "plugin_snapshot_projection"}
+        and proposal_actionability == "needs_hover_confirmation"
+        and (
+            _safe_aimpoint_status(proposal_target, selected_target) == "PASS"
+            or bool(proposal_payload.get("suggestedClickPoint"))
+        )
+    )
+    live_hover_guarded_action_source = bool(
+        safe_live_action_source
+        and (client_tick_hot.get("fresh") or proposal_action_target_source == "plugin_snapshot_projection")
+    )
+    live_navigation_waypoint_source = bool(
+        navigation_target_required
+        and getattr(proposal, "executable", False)
+        and isinstance(getattr(proposal, "target_tile", None), dict)
+        and proposal_action_target_source
+        in {"local_frontier_waypoint", "live_route_waypoint", "pathing_frontier", "plugin_snapshot_projection"}
+        and proposal_actionability in {"needs_live_projection", "live_projected", "fresh", "ready"}
+        and client_tick_hot.get("fresh")
+    )
+    plugin_snapshot_route_transition = bool(
+        proposal_action_target_source == "plugin_snapshot_projection"
+        or str(proposal_payload.get("reason") or "").strip() == "plugin_snapshot_route_transition_visible"
+        or str(proposal_target.get("routeStepStatus") or "").strip() == "plugin_snapshot_route_transition_visible"
+    )
+    live_route_transition_source = bool(
+        route_transition_required
+        and getattr(proposal, "executable", False)
+        and proposal.target_kind == "service_route_object"
+        and (
+            proposal_action_target_source in {"plugin_snapshot_projection", "live_route_transition", "live_route_object", "service_route_context"}
+            or plugin_snapshot_route_transition
+        )
+        and proposal_actionability in {"", "needs_hover_confirmation", "live_projected", "fresh", "ready"}
+        and bool(proposal_payload.get("suggestedClickPoint") or proposal_payload.get("resolvedScreenClickPoint"))
+        and (client_tick_hot.get("fresh") or plugin_snapshot_route_transition)
+    )
+    plugin_snapshot_required_for_action = bool(plugin_snapshot_required and not live_navigation_waypoint_source)
+    if pending_plugin_snapshot_blockers:
+        if plugin_snapshot_required_for_action:
+            blockers.extend(pending_plugin_snapshot_blockers)
+            missing.extend(pending_plugin_snapshot_missing)
+        else:
+            action_warnings.append(
+                (
+                    pending_plugin_snapshot_blockers[0].get("message")
+                    or snapshot_failures[0]
+                    or "plugin snapshot source is not ready"
+                )
+                + "; using fresh live navigation waypoint from client/player position"
+            )
+            optional_capabilities.extend(pending_plugin_snapshot_missing)
+    if not plugin_snapshot_required_for_action and "plugin.snapshot" in required_capabilities:
+        required_capabilities = [item for item in required_capabilities if item != "plugin.snapshot"]
+    if not plugin_snapshot_required_for_action and "plugin.snapshot" not in optional_capabilities:
+        optional_capabilities.append("plugin.snapshot")
     if daemon_session is None:
         blockers.append(_blocker("daemon_session_missing", "daemon /status does not include sessionPath", action="start/restart daemon after RuneLite is logged in"))
         missing.append("daemon.sessionPath")
@@ -999,20 +1077,31 @@ def build_readiness_report(
     elif client_tick_hot_required and not client_tick_hot["fresh"]:
         age_text = "unknown" if client_tick_hot.get("ageMillis") is None else f"{client_tick_hot['ageMillis']} ms"
         stale_reason = client_tick_hot.get("staleReason") or "unknown"
-        blockers.append(
-            _blocker(
-                "client_tick_hot_stale",
-                f"client-tick hot interaction state is stale: age={age_text}; reason={stale_reason}",
-                action=client_tick_hot.get("recovery") or "wait for fresh client tick/menu samples or refocus/restart RuneLite",
-                ageMillis=client_tick_hot.get("ageMillis"),
-                maxAgeMillis=client_tick_hot.get("maxAgeMillis"),
-                staleReason=stale_reason,
-                gameState=client_tick_hot.get("gameState"),
-                isLoggedIn=client_tick_hot.get("isLoggedIn"),
-                recovery=client_tick_hot.get("recovery"),
+        if live_hover_guarded_action_source:
+            action_warnings.append(
+                f"client-tick hot interaction state is stale before hover confirmation: age={age_text}; reason={stale_reason}"
             )
-        )
-        missing.append("client_tick_hot.fresh")
+            optional_capabilities.append("client_tick_hot.fresh")
+        elif live_route_transition_source:
+            action_warnings.append(
+                f"client-tick hot interaction state is stale before route-transition hover confirmation: age={age_text}; reason={stale_reason}"
+            )
+            optional_capabilities.append("client_tick_hot.fresh")
+        else:
+            blockers.append(
+                _blocker(
+                    "client_tick_hot_stale",
+                    f"client-tick hot interaction state is stale: age={age_text}; reason={stale_reason}",
+                    action=client_tick_hot.get("recovery") or "wait for fresh client tick/menu samples or refocus/restart RuneLite",
+                    ageMillis=client_tick_hot.get("ageMillis"),
+                    maxAgeMillis=client_tick_hot.get("maxAgeMillis"),
+                    staleReason=stale_reason,
+                    gameState=client_tick_hot.get("gameState"),
+                    isLoggedIn=client_tick_hot.get("isLoggedIn"),
+                    recovery=client_tick_hot.get("recovery"),
+                )
+            )
+            missing.append("client_tick_hot.fresh")
 
     if latest_live_session is None:
         if resource_target_required:
@@ -1021,20 +1110,51 @@ def build_readiness_report(
         else:
             non_applicable_context_warnings.append("no session with live overlay/candidate outputs was found")
     elif daemon_session is not None and not same_path(daemon_session, latest_live_session):
-        blockers.append(
-            _blocker(
-                "daemon_latest_live_session_mismatch",
-                "daemon session does not match newest live overlay/candidate session",
-                action="restart daemon after RuneLite creates the current live session",
+        if live_hover_guarded_action_source:
+            action_warnings.append(
+                "daemon session differs from newest live overlay/candidate session; using fresh live action proposal with executor hover confirmation"
             )
-        )
-        missing.append("session.match")
+            optional_capabilities.append("session.match")
+        elif live_navigation_waypoint_source:
+            action_warnings.append(
+                "daemon session differs from newest live overlay/candidate session; using fresh live navigation waypoint"
+            )
+            optional_capabilities.append("session.match")
+        elif live_route_transition_source:
+            action_warnings.append(
+                "daemon session differs from newest live overlay/candidate session; using fresh plugin-snapshot route transition target"
+            )
+            optional_capabilities.append("session.match")
+        else:
+            blockers.append(
+                _blocker(
+                    "daemon_latest_live_session_mismatch",
+                    "daemon session does not match newest live overlay/candidate session",
+                    action="restart daemon after RuneLite creates the current live session",
+                )
+            )
+            missing.append("session.match")
 
     if latest_session is not None and daemon_session is not None and not same_path(daemon_session, latest_session):
         if latest_live_session is not None and same_path(daemon_session, latest_live_session):
             non_applicable_context_warnings.append(
                 "latest file session differs from daemon session; daemon/plugin live-output session is the current source of truth"
             )
+        elif live_hover_guarded_action_source:
+            action_warnings.append(
+                "latest file session differs from daemon action session; using fresh live action proposal with executor hover confirmation"
+            )
+            optional_capabilities.append("session.match")
+        elif live_navigation_waypoint_source:
+            action_warnings.append(
+                "latest file session differs from daemon action session; using fresh live navigation waypoint"
+            )
+            optional_capabilities.append("session.match")
+        elif live_route_transition_source:
+            action_warnings.append(
+                "latest file session differs from daemon action session; using fresh plugin-snapshot route transition target"
+            )
+            optional_capabilities.append("session.match")
         else:
             blockers.append(
                 _blocker(
@@ -1126,10 +1246,23 @@ def build_readiness_report(
                 "daemon selected target is not present in highlighter marker source; using live action safety evidence"
             )
 
-        on_screen = _target_check_value(selected_target, matched_target, "onScreen")
-        geometry_available = _target_check_value(selected_target, matched_target, "geometryAvailable")
-        has_aim = _has_aim_point(selected_target) or _has_aim_point(matched_target) or bool(selected_checks.get("hasAimPoint"))
-        ui_blocked = _target_check_value(selected_target, matched_target, "uiBlocked")
+        use_proposal_target = bool(action_safety_evidence.get("canUseLiveTargetWithoutOverlayMarker") and proposal_target)
+        if use_proposal_target:
+            on_screen = _first_value(proposal_target.get("onScreen"), _target_check_value(selected_target, matched_target, "onScreen"))
+            geometry_available = _first_value(proposal_target.get("geometryAvailable"), _target_check_value(selected_target, matched_target, "geometryAvailable"))
+            has_aim = (
+                _has_aim_point(proposal_target)
+                or action_safety_evidence.get("safeAimPointReady") is True
+                or _has_aim_point(selected_target)
+                or _has_aim_point(matched_target)
+                or bool(selected_checks.get("hasAimPoint"))
+            )
+            ui_blocked = _first_value(proposal_target.get("uiBlocked"), _target_check_value(selected_target, matched_target, "uiBlocked"))
+        else:
+            on_screen = _target_check_value(selected_target, matched_target, "onScreen")
+            geometry_available = _target_check_value(selected_target, matched_target, "geometryAvailable")
+            has_aim = _has_aim_point(selected_target) or _has_aim_point(matched_target) or bool(selected_checks.get("hasAimPoint"))
+            ui_blocked = _target_check_value(selected_target, matched_target, "uiBlocked")
         if on_screen is False:
             blockers.append(_blocker("selected_target_offscreen", "selected target is not on screen", action="wait for an on-screen Tree/Oak target"))
             missing.append("target.onScreen")
@@ -1280,14 +1413,24 @@ def build_readiness_report(
 
     freshness = _dict(candidate_report.get("freshness"))
     if freshness.get("stale") and resource_target_required:
-        blockers.append(
-            _blocker(
-                "candidate_data_stale",
-                "; ".join(str(reason) for reason in freshness.get("staleReasons") or []) or "candidate data is stale",
-                action="wait for fresh candidate tick or restart daemon",
+        if action_safety_evidence.get("canUseLiveTargetWithoutOverlayMarker"):
+            action_warnings.append(
+                (
+                    "; ".join(str(reason) for reason in freshness.get("staleReasons") or [])
+                    or "candidate data is stale"
+                )
+                + "; using fresh live action proposal with executor hover confirmation"
             )
-        )
-        missing.append("target.freshness")
+            optional_capabilities.append("target.freshness")
+        else:
+            blockers.append(
+                _blocker(
+                    "candidate_data_stale",
+                    "; ".join(str(reason) for reason in freshness.get("staleReasons") or []) or "candidate data is stale",
+                    action="wait for fresh candidate tick or restart daemon",
+                )
+            )
+            missing.append("target.freshness")
     elif freshness.get("stale"):
         selected_resource_target_freshness_status = str(freshness.get("targetCandidateFreshness") or "stale")
         non_applicable_context_warnings.append(
@@ -1298,16 +1441,30 @@ def build_readiness_report(
             + f"; not applicable while current intent is {current_intent}"
         )
 
-    input_geometry = input_geometry_from_status(status)
+    loaded_scene_verified_for_geometry = bool(_dict(liveness_recovery.get("loadedSceneProof")).get("loadedSceneVerified"))
+    input_geometry = resolve_input_geometry_status(
+        status,
+        session=daemon_session or latest_live_session or latest_session,
+        allow_focus_repair=loaded_scene_verified_for_geometry,
+        max_age_ms=5000,
+    )
     if not input_geometry.get("inputGeometryAvailable"):
-        blockers.append(
-            _blocker(
-                "input_geometry_unavailable",
-                f"RuneLite canvas/input geometry unavailable: {input_geometry.get('reason') or 'unknown'}",
-                action="wait for RuneLite canvas geometry or focus/show the client window",
+        if live_route_transition_source:
+            action_warnings.append(
+                "dynamic input geometry unavailable; executor will validate the plugin-snapshot route transition point with backend window geometry fallback"
             )
-        )
-        missing.append("input.geometry")
+            optional_capabilities.append("input.geometry")
+        else:
+            blockers.append(
+                _blocker(
+                    str(input_geometry.get("blockerCode") or "input_geometry_unavailable"),
+                    f"RuneLite canvas/input geometry unavailable: {input_geometry.get('reason') or 'unknown'}",
+                    action="wait for RuneLite canvas geometry or focus/show the client window",
+                    inputGeometryStatus=input_geometry.get("status"),
+                    inputGeometrySource=input_geometry.get("source"),
+                )
+            )
+            missing.append("input.geometry")
 
     candidate_warnings = [str(item) for item in candidate_report.get("warnings") or []]
     if candidate_warnings:
@@ -1470,7 +1627,7 @@ def build_readiness_report(
                 "daemonReachable": daemon_reachable and bool(status),
                 "daemonSessionKnown": daemon_session is not None,
                 "latestTickKnown": tick is not None,
-                "pluginSnapshotRequired": plugin_snapshot_required,
+                "pluginSnapshotRequired": plugin_snapshot_required_for_action,
                 "pluginSnapshotAvailable": False if snapshot_failures else status.get("pluginSnapshotAvailable"),
                 "daemonSessionFresh": daemon_session_fresh,
                 "pluginSnapshotFresh": plugin_snapshot_fresh,
@@ -1561,7 +1718,7 @@ def build_readiness_report(
             },
             "pluginSnapshot": {
                 **plugin_snapshot_source,
-                "required": plugin_snapshot_required,
+                "required": plugin_snapshot_required_for_action,
                 "available": False if snapshot_failures else status.get("pluginSnapshotAvailable"),
                 "status": status.get("pluginSnapshotStatus"),
                 "inputSourceActive": status.get("inputSourceActive"),

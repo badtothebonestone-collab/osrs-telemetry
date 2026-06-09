@@ -1037,6 +1037,90 @@ class LiveCoreState:
         )
         return payload
 
+    def action_summary(self) -> dict:
+        context = self.context()
+        source_status = dict(self.source_status)
+        baseline = context.get("baseline") if isinstance(context.get("baseline"), dict) else {}
+        input_geometry = input_geometry_from_status({"baseline": baseline})
+        brain = self.brain_decision if isinstance(self.brain_decision, dict) else {}
+        status = dict(source_status)
+        status.update(
+            {
+                "schema": STATUS_SCHEMA,
+                "service": "live_core_daemon",
+                "liveCoreDaemonActive": True,
+                "latestUpdateUtc": self.generated_at_utc,
+                "baseline": baseline,
+                "brain": brain or None,
+                "brainPhase": brain.get("phase"),
+                "brainProgress": brain.get("goalProgress") if isinstance(brain.get("goalProgress"), dict) else None,
+                "inputGeometry": input_geometry,
+                "inputGeometryAvailable": input_geometry.get("inputGeometryAvailable"),
+                "canvasScreenOrigin": input_geometry.get("canvasScreenOrigin"),
+                "canvasSize": input_geometry.get("canvasSize"),
+                "sourceCanvasSize": input_geometry.get("sourceCanvasSize"),
+                "profileCandidates": list(context.get("profileCandidates") or context.get("candidates") or [])[:64],
+                "broadCandidates": list(context.get("broadCandidates") or [])[:64],
+                "loadedServiceScene": list(context.get("loadedServiceScene") or [])[:64],
+                "worldModelPayloads": context.get("worldModelPayloads") if isinstance(context.get("worldModelPayloads"), dict) else {},
+            }
+        )
+        intent_overlay = self.analysis_result.intent_overlay if self.analysis_result else None
+        if intent_overlay is not None:
+            status["intentOverlayContext"] = {
+                **intent_overlay.contract_payload(),
+                "selectedMarker": intent_overlay.selected_marker,
+                "backupMarkers": list(intent_overlay.backup_markers),
+                "markers": list(intent_overlay.markers),
+            }
+        try:
+            from input_control.action_proposal import build_action_proposal
+
+            proposal = build_action_proposal(status)
+            action_proposal = proposal.to_dict() if hasattr(proposal, "to_dict") else {}
+        except Exception as error:  # noqa: BLE001
+            action_proposal = {
+                "schema": "action_proposal_unavailable.v1",
+                "status": "WARN",
+                "proposedAction": "wait_for_context",
+                "reason": "action_proposal_unavailable",
+                "error": f"{type(error).__name__}: {error}",
+                "executable": False,
+            }
+        inventory_context = brain.get("inventoryContext") if isinstance(brain.get("inventoryContext"), dict) else {}
+        progress = inventory_context.get("progress") if isinstance(inventory_context.get("progress"), dict) else {}
+        return {
+            "schema": "live_core_action_summary.v1",
+            "status": "PASS" if action_proposal.get("executable") else "WARN",
+            "generatedAtUtc": utc_now(),
+            "latestTick": source_status.get("lastProcessedTick") or source_status.get("latestTickProcessed") or source_status.get("latestTick"),
+            "service": "live_core_daemon",
+            "candidateCount": len(context.get("candidates") or []),
+            "profileCandidateCount": len(context.get("profileCandidates") or []),
+            "brainPhase": brain.get("phase"),
+            "activeIntent": brain.get("activeIntent"),
+            "inventory": {
+                "known": bool(inventory_context),
+                "freeSlots": inventory_context.get("freeSlots"),
+                "inventoryFull": inventory_context.get("inventoryFull"),
+                "currentHeldCount": progress.get("currentHeldCount") or progress.get("currentHeldResourceCount"),
+                "displayedGoalProgress": progress.get("displayedGoalProgress") or progress.get("goalProgress"),
+            },
+            "liveStatus": {
+                "schema": source_status.get("schema"),
+                "status": source_status.get("status"),
+                "latestTick": source_status.get("lastProcessedTick") or source_status.get("latestTickProcessed") or source_status.get("latestTick"),
+                "sessionPath": source_status.get("sessionPath"),
+                "inputSourceActive": source_status.get("inputSourceActive"),
+                "candidateCount": len(context.get("candidates") or []),
+                "gameState": source_status.get("gameState"),
+            },
+            "actionProposal": action_proposal,
+            "warnings": list(dict.fromkeys(list(source_status.get("warnings") or []) + list(action_proposal.get("warnings") or []))),
+            "missingCapabilities": list(action_proposal.get("missingCapabilities") or []),
+            "readOnlyTelemetry": True,
+        }
+
     def status(self) -> dict:
         context = self.context()
         payload = context_service.status_payload(context)
@@ -3029,12 +3113,14 @@ class LiveCoreRequestHandler(BaseHTTPRequestHandler):
             payload["service"] = "live_core_daemon"
             payload["notes"] = list(dict.fromkeys((payload.get("notes") or []) + READ_ONLY_NOTES))
             payload["endpoints"] = {
-                "GET": ["/health", "/schema", "/status", "/summary", "/brain", "/capabilities", "/watches", "/control"],
+                "GET": ["/health", "/schema", "/status", "/action-summary", "/summary", "/brain", "/capabilities", "/watches", "/control"],
                 "POST": ["/context", "/context/batch", "/brain", "/watch-request", "/control"],
             }
             self.send_json(payload)
         elif path == "/status":
             self.send_json(self.daemon.state.status())
+        elif path == "/action-summary":
+            self.send_json(self.daemon.state.action_summary())
         elif path == "/control":
             self.send_json(self.daemon.runtime_control_payload())
         elif path == "/summary":

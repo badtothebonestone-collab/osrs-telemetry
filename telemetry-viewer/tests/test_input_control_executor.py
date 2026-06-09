@@ -13,7 +13,7 @@ from argparse import Namespace
 
 import execute_next_action as execute_cli
 from input_control.action_lifecycle import ActionLifecycleState
-from input_control.action_proposal import ActionProposal
+from input_control.action_proposal import ActionProposal, build_action_proposal
 from input_control.backend_pyautogui import scale_canvas_point_to_screen
 from input_control.camera_control import camera_input_spec, fitts_hold_duration_ms, hold_camera_input, smooth_drag_segments
 from input_control.human_input_controller import HumanInputController
@@ -38,19 +38,28 @@ from input_control.executor import (
     _record_target_hover_failure,
     _record_target_no_progress_failure,
     _record_navigation_trace,
+    _recovery_verified_loaded_scene,
     _route_transition_retry_required_observation,
     _goal_reached_with_only_recoverable_failures,
+    _fetch_status_or_action_context,
+    human_click_profile_handoff,
+    build_click_plan_from_handoff,
+    compare_center_click_vs_profile_click,
     _target_key_from_proposal,
     _verify_action_after_execution,
     _mark_navigation_no_progress,
     _navigation_motion_lock_observation,
+    _navigation_not_executed_allows_retry,
     _navigation_decision_from_observed,
     _navigation_alternate_tile_requests,
     _navigation_hover_failure_reason,
+    _navigation_walk_here_menu_entry,
     _try_navigation_alternate_hover,
     _route_stability_issue,
+    _route_transition_reverse_issue,
     _executed_navigation_waypoint_key,
     _menu_row_canvas_point,
+    _maybe_context_action_proposal,
     camera_exposure_score,
     next_camera_direction_from_exposure,
     classify_last_menu_option_clicked,
@@ -130,6 +139,40 @@ class FailingCanvasBackend(FakeBackend):
         raise AssertionError("dynamic geometry should avoid backend fallback conversion")
 
 
+class RecoveryResultTest(unittest.TestCase):
+    def test_daemon_rebind_failure_can_still_prove_loaded_scene(self):
+        recovery = {
+            "status": "daemon_rebind_failed",
+            "finalState": {
+                "state": "daemon_down",
+                "loadedSceneVerified": True,
+                "loadedSceneProof": {"loadedSceneVerified": True},
+            },
+        }
+
+        self.assertTrue(_recovery_verified_loaded_scene(recovery))
+
+    def test_retryable_navigation_safety_skip_does_not_end_loop(self):
+        observed = {
+            "observedResult": "no_click_safety_skip",
+            "resultOutcome": "skipped",
+            "nextActionAllowed": True,
+            "skipReason": "volatile_hover_zone",
+        }
+
+        self.assertTrue(_navigation_not_executed_allows_retry(observed))
+        self.assertTrue(
+            _navigation_not_executed_allows_retry(
+                {**observed, "observedResult": "hover_confirm_timeout"}
+            )
+        )
+        self.assertFalse(
+            _navigation_not_executed_allows_retry(
+                {**observed, "nextActionAllowed": False, "observedResult": "no_click_safety_block"}
+            )
+        )
+
+
 class CameraMotorMathTest(unittest.TestCase):
     def test_fitts_hold_duration_shrinks_as_exposure_error_decreases(self):
         far = fitts_hold_duration_ms(900, tolerance_px=72, min_ms=120, max_ms=900)
@@ -147,6 +190,65 @@ class CameraMotorMathTest(unittest.TestCase):
         self.assertEqual(sum(dy for _dx, dy in segments), 0)
         self.assertLess(abs(segments[0][0]), abs(segments[2][0]))
         self.assertLess(abs(segments[-1][0]), abs(segments[2][0]))
+
+    def test_human_click_profile_handoff_exposes_click_and_camera_guidance(self):
+        profile = {
+            "schema": "human_click_profile.v1",
+            "status": "PASS",
+            "recordingCount": 3,
+            "clicks": {"targetRelativeClicks": 12, "menuRowSelectionCount": 4, "rightClickMenuOpenCount": 2},
+            "landing": {"medianAimDistancePx": 35, "p75AimDistancePx": 60, "p90AimDistancePx": 90, "aimDistanceBucketsPx": {"le80": 8}},
+            "camera": {"cameraBeforeClickCount": 5, "middleMouseDragCount": 1, "medianCameraToClickMs": 900},
+            "taskProfiles": {
+                "woodcutting": {
+                    "strongOrMediumTargetRate": 0.92,
+                    "cameraBeforeClickFrequency": 0.5,
+                    "imperfectSuccessfulClickCount": 7,
+                }
+            },
+            "warnings": ["geometry is advisory"],
+        }
+
+        handoff = human_click_profile_handoff(profile, activity="woodcutting")
+
+        self.assertEqual(handoff["schema"], "human_click_profile_executor_handoff.v1")
+        self.assertEqual(handoff["status"], "PASS")
+        self.assertEqual(handoff["clickLanding"]["medianAimDistancePx"], 35)
+        self.assertEqual(handoff["clickLanding"]["strongOrMediumTargetRate"], 0.92)
+        self.assertEqual(handoff["cameraBehavior"]["cameraBeforeClickFrequency"], 0.5)
+        self.assertEqual(handoff["imperfectSuccessfulClickCount"], 7)
+        self.assertIn("Advisory only", handoff["rule"])
+
+    def test_click_plan_from_handoff_compares_center_and_profile_point(self):
+        handoff = human_click_profile_handoff(
+            {
+                "schema": "human_click_profile.v1",
+                "status": "PASS",
+                "recordingCount": 3,
+                "landing": {"medianAimDistancePx": 30, "p75AimDistancePx": 40},
+                "taskProfiles": {"woodcutting": {"cameraBeforeClickFrequency": 0.25}},
+            },
+            activity="woodcutting",
+        )
+
+        plan = build_click_plan_from_handoff(
+            handoff,
+            target={
+                "name": "Tree",
+                "targetQuality": "strong",
+                "onScreen": True,
+                "geometryAvailable": True,
+                "aimPoint": {"x": 100, "y": 120},
+            },
+            action="Chop down",
+            activity="woodcutting",
+        )
+        comparison = compare_center_click_vs_profile_click(plan)
+
+        self.assertEqual(plan["schema"], "human_click_plan.v1")
+        self.assertEqual(comparison["schema"], "center_vs_profile_click.v1")
+        self.assertTrue(comparison["differentFromCenter"])
+        self.assertEqual(comparison["centerPoint"], {"x": 100, "y": 120})
 
 
 def status_payload_for_loop(
@@ -338,6 +440,657 @@ class IncrementingClock:
 
 
 class InputControlExecutorTest(unittest.TestCase):
+    def test_status_fetch_falls_back_to_compact_action_context(self):
+        context_response = {
+            "schema": "context_response.v1",
+            "status": "WARN",
+            "latestTick": 91,
+            "knowledgeCurrentDebugContext": {
+                "data": {
+                    "actionProposal": {
+                        "schema": "action_proposal.v1",
+                        "status": "PASS",
+                        "proposedAction": "select_resource_target",
+                        "targetKind": "resource",
+                        "targetName": "Tree",
+                        "targetTile": {"worldX": 3192, "worldY": 3238, "plane": 0},
+                        "suggestedClickPoint": {"x": 222, "y": 178},
+                        "reason": "resource_target_selected",
+                        "confidence": 0.95,
+                        "sourceTick": 91,
+                    }
+                }
+            },
+            "warnings": ["compact context warning"],
+        }
+
+        with (
+            patch("input_control.executor.fetch_action_context", return_value=context_response),
+            patch("input_control.executor.fetch_plugin_snapshot", return_value={}),
+        ):
+            status = _fetch_status_or_action_context(
+                "http://daemon",
+                Namespace(task="woodcutting_loop"),
+                fetch_json_func=lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("status too large")),
+                timeout=0.01,
+                purpose="test",
+            )
+
+        self.assertEqual(status["schema"], "context_status_fallback.v1")
+        self.assertEqual(status["latestTick"], 91)
+        self.assertEqual(status["brain"]["contextActionProposal"]["targetName"], "Tree")
+        self.assertEqual(status["daemonStatusFallback"]["status"], "PASS")
+        self.assertIn("compact context warning", status["warnings"])
+
+    def test_status_fetch_falls_back_to_plugin_snapshot_when_daemon_and_context_timeout(self):
+        snapshot = {
+            "schema": "plugin_snapshot_response.v1",
+            "latestTick": 122,
+            "freshness": {"maxCacheAgeMillis": 20},
+            "payloads": {
+                "interaction_hot": {
+                    "schema": "client_tick_hot.v1",
+                    "sessionPath": "C:/sessions/fresh",
+                    "gameState": "LOGGED_IN",
+                },
+                "baseline": {
+                    "player": {
+                        "worldX": 3196,
+                        "worldY": 3247,
+                        "plane": 0,
+                    }
+                },
+                "inventory": {
+                    "inventory": {
+                        "known": True,
+                        "freeSlots": 0,
+                        "filledSlots": 28,
+                        "totalQuantityByItemId": {"1511": 28},
+                        "signature": "full",
+                    }
+                },
+                "activity": {"animation": -1},
+            },
+        }
+
+        with (
+            patch("input_control.executor.fetch_action_context", side_effect=TimeoutError("context too slow")),
+            patch("input_control.executor.fetch_plugin_snapshot", return_value=snapshot),
+        ):
+            status = _fetch_status_or_action_context(
+                "http://daemon",
+                Namespace(task="woodcutting_loop", snapshot_url="http://snapshot"),
+                fetch_json_func=lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("status too slow")),
+                timeout=0.01,
+                purpose="action_selection",
+            )
+
+        self.assertEqual(status["schema"], "plugin_snapshot_status_fallback.v1")
+        self.assertEqual(status["latestTick"], 122)
+        self.assertEqual(status["sessionPath"], "C:/sessions/fresh")
+        self.assertEqual(status["playerLocation"], {"worldX": 3196, "worldY": 3247, "plane": 0})
+        self.assertEqual(status["brain"]["inventoryContext"]["freeSlots"], 0)
+        self.assertEqual(status["daemonStatusFallback"]["source"], "plugin_snapshot")
+        self.assertIn("using plugin snapshot", " ".join(status["warnings"]))
+
+    def test_plugin_snapshot_full_inventory_blocks_unproven_ladder_transition(self):
+        snapshot = {
+            "schema": "plugin_snapshot_response.v1",
+            "latestTick": 124,
+            "freshness": {"maxCacheAgeMillis": 20},
+            "payloads": {
+                "interaction_hot": {
+                    "schema": "client_tick_hot.v1",
+                    "sessionPath": "C:/sessions/fresh",
+                    "gameState": "LOGGED_IN",
+                },
+                "baseline": {
+                    "player": {
+                        "worldX": 3203,
+                        "worldY": 3238,
+                        "plane": 0,
+                    }
+                },
+                "inventory": {
+                    "inventory": {
+                        "known": True,
+                        "freeSlots": 0,
+                        "filledSlots": 28,
+                        "totalQuantityByItemId": {"1511": 22, "1521": 6},
+                        "signature": "full-at-route-anchor",
+                    }
+                },
+                "projection": {
+                    "visibleObjectRefs": [
+                        {
+                            "id": 16683,
+                            "name": "Ladder",
+                            "targetType": "sceneObject",
+                            "worldX": 3204,
+                            "worldY": 3238,
+                            "plane": 0,
+                            "onScreen": True,
+                            "geometryAvailable": True,
+                            "aimPoint": {"canvasX": 498, "canvasY": 122, "source": "clickboxBoundsCenter"},
+                            "actions": ["Climb-up"],
+                        },
+                        {
+                            "id": 1541,
+                            "name": "Door",
+                            "targetType": "sceneObject",
+                            "worldX": 3205,
+                            "worldY": 3238,
+                            "plane": 0,
+                            "onScreen": True,
+                            "geometryAvailable": True,
+                            "aimPoint": {"canvasX": 518, "canvasY": 97, "source": "clickboxBoundsCenter"},
+                            "actions": ["Close"],
+                        },
+                    ]
+                },
+            },
+        }
+
+        with (
+            patch("input_control.executor.fetch_action_context", side_effect=TimeoutError("context too slow")),
+            patch("input_control.executor.fetch_plugin_snapshot", return_value=snapshot),
+        ):
+            status = _fetch_status_or_action_context(
+                "http://daemon",
+                Namespace(task="woodcutting_loop", snapshot_url="http://snapshot"),
+                fetch_json_func=lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("status too slow")),
+                timeout=0.01,
+                purpose="action_selection",
+            )
+
+        route_context = status["brain"]["serviceRouteContext"]
+        self.assertEqual(route_context["routeStepStatus"], "plugin_snapshot_route_transition_visible")
+        self.assertEqual(route_context["visibleInteractionTarget"]["targetName"], "Ladder")
+        proposal = build_action_proposal(status)
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.target_kind, "service_route_object")
+        self.assertEqual(proposal.target_name, "Ladder")
+        self.assertEqual(proposal.reason, "route_object_not_on_expected_segment")
+        self.assertFalse(proposal.executable)
+        self.assertIsNone(proposal.suggested_click_point)
+        self.assertFalse(proposal.target_explanation["routeCorridorMatch"])
+        self.assertIn("unrelated_route_object", proposal.target_explanation["rejectedReasons"])
+
+    def test_status_fetch_enriches_sparse_status_from_compact_action_context(self):
+        context_response = {
+            "schema": "context_response.v1",
+            "status": "PASS",
+            "latestTick": 91,
+            "knowledgeCurrentDebugContext": {
+                "data": {
+                    "liveStatus": {
+                        "sessionPath": "C:/sessions/current",
+                        "latestTick": 91,
+                        "inputSourceActive": "plugin-snapshot",
+                    },
+                    "actionProposal": {
+                        "schema": "action_proposal.v1",
+                        "status": "PASS",
+                        "proposedAction": "select_resource_target",
+                        "targetKind": "resource",
+                        "targetName": "Tree",
+                        "suggestedClickPoint": {"x": 222, "y": 178},
+                        "inputGeometry": {"schema": "input_geometry.v1", "inputGeometryAvailable": True},
+                        "targetExplanation": {
+                            "schema": "candidate_explanation.v1",
+                            "name": "Tree",
+                            "classId": "tree",
+                            "safeAimPoint": {"status": "PASS", "canvasX": 222, "canvasY": 178},
+                        },
+                        "actionTargetSource": "live_resource_candidate",
+                        "actionability": "needs_hover_confirmation",
+                        "reason": "resource_target_visible",
+                        "confidence": 0.95,
+                        "sourceTick": 91,
+                    },
+                }
+            },
+        }
+        sparse_status = {"schema": "live_status.v1", "latestTick": 91}
+
+        with (
+            patch("input_control.executor.fetch_action_context", return_value=context_response),
+            patch("input_control.executor.fetch_plugin_snapshot", return_value={}),
+        ):
+            status = _fetch_status_or_action_context(
+                "http://daemon",
+                Namespace(task="woodcutting_loop"),
+                fetch_json_func=lambda *_args, **_kwargs: dict(sparse_status),
+                timeout=0.01,
+                purpose="test",
+            )
+
+        self.assertEqual(status["sessionPath"], "C:/sessions/current")
+        self.assertTrue(status["inputGeometry"]["inputGeometryAvailable"])
+        self.assertEqual(status["brain"]["genericTaskState"]["activeIntentTarget"]["targetName"], "Tree")
+        self.assertEqual(status["brain"]["genericTaskState"]["activeIntentTarget"]["safeAimPoint"]["status"], "PASS")
+        self.assertEqual(status["daemonStatusFallback"]["statusEndpointReason"], "status_payload_missing_action_context")
+
+    def test_status_fetch_merges_plugin_inventory_and_activity_snapshot(self):
+        context_response = {
+            "schema": "context_response.v1",
+            "status": "PASS",
+            "latestTick": 91,
+            "knowledgeCurrentDebugContext": {
+                "data": {
+                    "actionProposal": {
+                        "schema": "action_proposal.v1",
+                        "status": "PASS",
+                        "proposedAction": "select_resource_target",
+                        "targetKind": "resource",
+                        "targetName": "Tree",
+                        "suggestedClickPoint": {"x": 222, "y": 178},
+                        "reason": "resource_target_visible",
+                        "confidence": 0.95,
+                        "sourceTick": 91,
+                    },
+                }
+            },
+        }
+        blocked_status = {
+            "schema": "live_status.v1",
+            "latestTick": 90,
+            "brain": {
+                "genericTaskState": {
+                    "phase": "blocked",
+                    "activeIntent": "observe",
+                    "blockingConditions": ["stale_context"],
+                }
+            },
+        }
+        snapshot = {
+            "schema": "plugin_snapshot_response.v1",
+            "latestTick": 120,
+            "freshness": {"maxCacheAgeMillis": 20},
+            "payloads": {
+                "interaction_hot": {"sessionPath": "C:/sessions/fresh", "gameState": "LOGGED_IN"},
+                "baseline": {
+                    "player": {
+                        "worldX": 3189,
+                        "worldY": 3254,
+                        "plane": 0,
+                        "animation": 879,
+                        "poseAnimation": 808,
+                    }
+                },
+                "inventory": {
+                    "inventory": {
+                        "known": True,
+                        "freeSlots": 10,
+                        "filledSlots": 18,
+                        "totalQuantityByItemId": {"1511": 12, "1521": 6},
+                        "signature": "fresh-sig",
+                    }
+                },
+                "activity": {"animation": 879, "poseAnimation": 808},
+                "projection": {
+                    "visibleObjectRefs": [
+                        {
+                            "id": 1278,
+                            "name": "Tree",
+                            "targetType": "sceneObject",
+                            "worldX": 3190,
+                            "worldY": 3255,
+                            "plane": 0,
+                            "onScreen": True,
+                            "geometryAvailable": True,
+                            "aimPoint": {"canvasX": 318, "canvasY": 139, "source": "clickboxBoundsCenter"},
+                            "bounds": {"x": 276, "y": 81, "w": 84, "h": 116},
+                            "actions": ["Chop down"],
+                        }
+                    ]
+                },
+            },
+        }
+
+        with (
+            patch("input_control.executor.fetch_action_context", return_value=context_response),
+            patch("input_control.executor.fetch_plugin_snapshot", return_value=snapshot),
+        ):
+            status = _fetch_status_or_action_context(
+                "http://daemon",
+                Namespace(task="woodcutting_loop"),
+                fetch_json_func=lambda *_args, **_kwargs: dict(blocked_status),
+                timeout=0.01,
+                purpose="post_action_verification",
+            )
+
+        self.assertEqual(status["latestTick"], 120)
+        self.assertEqual(status["sessionPath"], "C:/sessions/fresh")
+        self.assertEqual(status["brain"]["playerContext"]["animation"], 879)
+        self.assertEqual(status["brain"]["inventoryContext"]["freeSlots"], 10)
+        self.assertEqual(status["brain"]["inventoryContext"]["progress"]["currentHeldCount"], 18)
+        self.assertEqual(status["brain"]["inventoryContext"]["progress"]["currentInventorySignature"], "fresh-sig")
+        self.assertEqual(status["brain"]["genericTaskState"]["phase"], "target_selected")
+        self.assertEqual(status["brain"]["genericTaskState"]["activeIntentTarget"]["targetName"], "Tree")
+        self.assertEqual(status["brain"]["candidateTargets"][0]["targetName"], "Tree")
+        self.assertEqual(status["brain"]["candidateTargets"][0]["sourceTick"], 120)
+        self.assertEqual(status["latestEventSummary"], "Player animation changed: 879")
+        proposal = build_action_proposal(status)
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertNotEqual(proposal.reason, "candidate_data_stale")
+
+    def test_context_action_fallback_rehydrates_executable_tree_proposal(self):
+        current = ActionProposal(
+            status="WARN",
+            proposed_action="wait_for_context",
+            target_kind="none",
+            reason="no_executable_action",
+            missing_capabilities=["live.action_context"],
+        )
+        context_response = {
+            "schema": "context_response.v1",
+            "status": "WARN",
+            "latestTick": 77,
+            "inventory": {
+                "known": True,
+                "freeSlots": 18,
+                "filledSlots": 10,
+                "itemCounts": {"1511": 10},
+            },
+            "knowledgeCurrentDebugContext": {
+                "data": {
+                    "actionProposal": {
+                        "schema": "action_proposal.v1",
+                        "status": "PASS",
+                        "proposedAction": "select_resource_target",
+                        "targetKind": "resource",
+                        "targetName": "Tree",
+                        "targetTile": {"worldX": 3192, "worldY": 3238, "plane": 0},
+                        "suggestedClickPoint": {"x": 222, "y": 178},
+                        "clickPointSpace": "canvas",
+                        "resolvedScreenClickPoint": {"x": 505, "y": 364},
+                        "clickPointResolution": {"status": "PASS", "method": "safe_aimpoint"},
+                        "targetExplanation": {"classId": "tree"},
+                        "reason": "resource_target_selected",
+                        "confidence": 0.95,
+                        "sourceTick": 77,
+                    }
+                }
+            },
+        }
+
+        with patch("input_control.executor.fetch_action_context", return_value=context_response):
+            enriched, proposal, fallback = _maybe_context_action_proposal(
+                "http://daemon",
+                Namespace(task="woodcutting_loop"),
+                {"schema": "context_status.v1", "latestTick": 77},
+                current,
+                timeout=0.01,
+            )
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.target_name, "Tree")
+        self.assertEqual(proposal.suggested_click_point, {"x": 222, "y": 178})
+        self.assertEqual(proposal.resolved_screen_click_point, {"x": 505, "y": 364})
+        self.assertEqual(fallback["status"], "PASS")
+        self.assertEqual(enriched["brain"]["inventoryContext"]["freeSlots"], 18)
+        self.assertEqual(enriched["brain"]["inventoryContext"]["progress"]["currentHeldCount"], 10)
+
+    def test_context_action_fallback_rejects_tree_collection_when_inventory_full_route_missing(self):
+        current = ActionProposal(
+            status="FAIL",
+            proposed_action="wait_for_context",
+            target_kind="none",
+            reason="inventory_full_route_context_missing",
+            missing_capabilities=["service_route.route_to_bank", "pathing.route_to_bank"],
+        )
+        context_response = {
+            "schema": "context_response.v1",
+            "status": "WARN",
+            "latestTick": 77,
+            "inventory": {
+                "known": True,
+                "freeSlots": 0,
+                "filledSlots": 28,
+                "itemCounts": {"1511": 28},
+            },
+            "knowledgeCurrentDebugContext": {
+                "data": {
+                    "actionProposal": {
+                        "schema": "action_proposal.v1",
+                        "status": "PASS",
+                        "proposedAction": "select_resource_target",
+                        "targetKind": "resource",
+                        "targetName": "Tree",
+                        "targetTile": {"worldX": 3192, "worldY": 3238, "plane": 0},
+                        "suggestedClickPoint": {"x": 222, "y": 178},
+                        "reason": "resource_target_selected",
+                        "confidence": 0.95,
+                        "sourceTick": 77,
+                    }
+                }
+            },
+        }
+
+        with patch("input_control.executor.fetch_action_context", return_value=context_response):
+            enriched, proposal, fallback = _maybe_context_action_proposal(
+                "http://daemon",
+                Namespace(task="woodcutting_loop"),
+                {"schema": "context_status.v1", "latestTick": 77},
+                current,
+                timeout=0.01,
+            )
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertFalse(proposal.executable)
+        self.assertEqual(proposal.reason, "inventory_full_route_context_missing")
+        self.assertEqual(fallback["status"], "WARN")
+        self.assertEqual(fallback["reason"], "context_action_proposal_rejected_inventory_full")
+        self.assertEqual(enriched["brain"]["inventoryContext"]["freeSlots"], 0)
+        self.assertTrue(any("inventory is full" in warning for warning in proposal.warnings))
+
+    def test_context_action_fallback_rejects_stale_navigation_when_fresh_route_guide_available(self):
+        current = ActionProposal(
+            status="FAIL",
+            proposed_action="wait_for_context",
+            target_kind="none",
+            reason="route_object_not_on_expected_segment",
+            missing_capabilities=["service_route.route_to_bank"],
+        )
+        context_response = {
+            "schema": "context_response.v1",
+            "status": "WARN",
+            "latestTick": 3406,
+            "inventory": {
+                "known": True,
+                "freeSlots": 0,
+                "filledSlots": 28,
+                "itemCounts": {"1511": 28},
+            },
+            "knowledgeCurrentDebugContext": {
+                "data": {
+                    "actionProposal": {
+                        "schema": "action_proposal.v1",
+                        "status": "PASS",
+                        "proposedAction": "navigate_to_service",
+                        "targetKind": "path_tile",
+                        "targetName": "Lumbridge Castle entrance or ground-floor courtyard",
+                        "targetTile": {"worldX": 3200, "worldY": 3233, "plane": 0},
+                        "suggestedClickPoint": {"x": 456, "y": 616},
+                        "reason": "pathing_to_service",
+                        "confidence": 0.74,
+                        "sourceTick": 3406,
+                        "targetExplanation": {
+                            "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                            "freshness": {
+                                "status": "stale",
+                                "targetCandidateFreshness": "stale",
+                                "daemonStatusAgeMillis": 210277,
+                            },
+                        },
+                    }
+                }
+            },
+        }
+        live_status = {
+            "schema": "context_status.v1",
+            "latestTick": 3796,
+            "playerWorldPosition": {"worldX": 3201, "worldY": 3236, "plane": 0},
+            "brain": {
+                "inventoryContext": {
+                    "freeSlots": 0,
+                    "inventoryFull": True,
+                    "progress": {"currentHeldCount": 28},
+                },
+                "genericTaskState": {"phase": "needs_service", "activeIntent": "needs_service"},
+            },
+        }
+
+        with patch("input_control.executor.fetch_action_context", return_value=context_response):
+            enriched, proposal, fallback = _maybe_context_action_proposal(
+                "http://daemon",
+                Namespace(task="woodcutting_loop"),
+                live_status,
+                current,
+                timeout=0.01,
+            )
+
+        self.assertEqual(fallback["status"], "WARN")
+        self.assertEqual(fallback["reason"], "context_action_proposal_rejected_stale_navigation")
+        self.assertEqual(fallback["freshProposalAction"], "navigate_to_service")
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.reason, "route_guide_progress_without_live_route_context")
+        self.assertEqual(proposal.target_tile, {"worldX": 3208, "worldY": 3212, "plane": 0})
+        self.assertEqual(proposal.target_explanation["routeGuideName"], "woodcutting_area_to_bank")
+        self.assertEqual(enriched["brain"]["inventoryContext"]["freeSlots"], 0)
+
+    def test_context_action_fallback_rejects_non_executable_when_fresh_route_guide_available(self):
+        current = ActionProposal(
+            status="FAIL",
+            proposed_action="wait_for_context",
+            target_kind="none",
+            reason="route_object_not_on_expected_segment",
+            missing_capabilities=["service_route.route_to_bank"],
+        )
+        context_response = {
+            "schema": "context_response.v1",
+            "status": "WARN",
+            "latestTick": 3406,
+            "inventory": {
+                "known": True,
+                "freeSlots": 0,
+                "filledSlots": 28,
+                "itemCounts": {"1511": 28},
+            },
+            "knowledgeCurrentDebugContext": {
+                "data": {
+                    "actionProposal": {
+                        "schema": "action_proposal.v1",
+                        "status": "FAIL",
+                        "proposedAction": "wait_for_context",
+                        "targetKind": "none",
+                        "reason": "inventory_full_route_context_missing",
+                        "confidence": 0.45,
+                        "missingCapabilities": ["service_route.route_to_bank", "pathing.route_to_bank"],
+                    }
+                }
+            },
+        }
+        live_status = {
+            "schema": "context_status.v1",
+            "latestTick": 3796,
+            "playerWorldPosition": {"worldX": 3201, "worldY": 3219, "plane": 0},
+            "brain": {
+                "inventoryContext": {
+                    "freeSlots": 0,
+                    "inventoryFull": True,
+                    "progress": {"currentHeldCount": 28},
+                },
+                "genericTaskState": {"phase": "needs_service", "activeIntent": "needs_service"},
+            },
+        }
+
+        with patch("input_control.executor.fetch_action_context", return_value=context_response):
+            enriched, proposal, fallback = _maybe_context_action_proposal(
+                "http://daemon",
+                Namespace(task="woodcutting_loop"),
+                live_status,
+                current,
+                timeout=0.01,
+            )
+
+        self.assertEqual(fallback["status"], "WARN")
+        self.assertEqual(fallback["reason"], "context_action_proposal_rejected_non_executable")
+        self.assertEqual(fallback["freshProposalAction"], "navigate_to_service")
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.reason, "route_guide_progress_without_live_route_context")
+        self.assertEqual(proposal.target_tile, {"worldX": 3209, "worldY": 3216, "plane": 0})
+        self.assertEqual(proposal.target_explanation["routeGuideName"], "woodcutting_area_to_bank")
+        self.assertEqual(enriched["brain"]["inventoryContext"]["freeSlots"], 0)
+
+    def test_context_action_fallback_rejects_fresh_tree_proposal_when_inventory_full(self):
+        current = ActionProposal(
+            status="FAIL",
+            proposed_action="wait_for_context",
+            target_kind="service_route_object",
+            target_name="Staircase",
+            reason="route_object_not_on_expected_segment",
+            missing_capabilities=["service_route.route_to_bank"],
+        )
+        context_response = {
+            "schema": "context_response.v1",
+            "status": "WARN",
+            "latestTick": 5628,
+            "inventory": {
+                "known": True,
+                "freeSlots": 0,
+                "filledSlots": 28,
+                "itemCounts": {"1511": 28},
+            },
+            "knowledgeCurrentDebugContext": {
+                "data": {
+                    "actionProposal": {
+                        "schema": "action_proposal.v1",
+                        "status": "FAIL",
+                        "proposedAction": "navigate_to_service",
+                        "targetKind": "path_tile",
+                        "targetName": "Demonstrated woodcutting-to-bank route waypoint",
+                        "reason": "route_guide_next_step_missing_after_3203_3238",
+                        "confidence": 0.45,
+                    }
+                }
+            },
+        }
+        fresh_tree = ActionProposal(
+            status="PASS",
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Tree",
+            target_tile={"worldX": 3195, "worldY": 3220, "plane": 0},
+            suggested_click_point={"x": 65, "y": 118},
+            reason="resource_target_visible",
+            confidence=0.82,
+        )
+
+        with (
+            patch("input_control.executor.fetch_action_context", return_value=context_response),
+            patch("input_control.executor.build_action_proposal", return_value=fresh_tree),
+        ):
+            enriched, proposal, fallback = _maybe_context_action_proposal(
+                "http://daemon",
+                Namespace(task="woodcutting_loop"),
+                {"schema": "context_status.v1", "latestTick": 5628},
+                current,
+                timeout=0.01,
+            )
+
+        self.assertEqual(fallback["status"], "WARN")
+        self.assertEqual(fallback["reason"], "context_action_proposal_rejected_inventory_full")
+        self.assertEqual(fallback["freshProposalAction"], "select_resource_target")
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.reason, "route_object_not_on_expected_segment")
+        self.assertFalse(proposal.executable)
+        self.assertEqual(enriched["brain"]["inventoryContext"]["freeSlots"], 0)
+
     def test_unsafe_geometry_skip_counts_as_suppressible_failure(self):
         result = ExecutionResult(
             status="WARN",
@@ -1274,6 +2027,33 @@ class InputControlExecutorTest(unittest.TestCase):
 
         self.assertEqual(_executed_navigation_waypoint_key(proposal, result), (3211, 3228, 0))
 
+    def test_navigation_walk_here_menu_entry_detects_lower_walk_here_under_npc(self):
+        proposal = ActionProposal(
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_tile={"worldX": 3205, "worldY": 3214, "plane": 0},
+        )
+        confirmation = {
+            "confirmed": False,
+            "sample": {
+                "menuOpen": False,
+                "topOption": "Attack",
+                "topTarget": "<col=ffff00>Rat<col=80ff00>  (level-1)",
+                "topType": "NPC_SECOND_OPTION",
+                "entries": [
+                    {"option": "Attack", "target": "<col=ffff00>Rat<col=80ff00>  (level-1)", "type": "NPC_SECOND_OPTION"},
+                    {"option": "Walk here", "target": "", "type": "WALK", "param0": 447, "param1": 172},
+                    {"option": "Examine", "target": "<col=ffff>Crate", "type": "EXAMINE_OBJECT"},
+                    {"option": "Cancel", "target": "", "type": "CANCEL"},
+                ],
+            },
+        }
+
+        entry = _navigation_walk_here_menu_entry(proposal, confirmation)
+
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["option"], "Walk here")
+
     def test_route_stability_allows_repeat_after_navigation_progress(self):
         proposal = ActionProposal(
             proposed_action="navigate_to_service",
@@ -1348,7 +2128,11 @@ class InputControlExecutorTest(unittest.TestCase):
                 proposed_action="navigate_to_service",
                 dry_run=False,
                 executed=True,
-                observed_result={"observedResult": "service_navigation_no_progress", "resultOutcome": "no_change_timeout"},
+                observed_result={
+                    "observedResult": "service_route_object_reacquired",
+                    "resultOutcome": "progress",
+                    "observedSignals": ["route_object_reacquired"],
+                },
             ),
             current_status=status,
         )
@@ -1357,6 +2141,38 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(issue["classification"], "route_waypoint_arrived_advance_required")
         self.assertTrue(issue["advanceRecommended"])
         self.assertFalse(issue["barrierDetected"])
+
+    def test_route_transition_reverse_oscillation_is_blocked_before_click(self):
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Ladder",
+            target_tile={"worldX": 3211, "worldY": 3242, "plane": 1},
+            target_explanation={
+                "name": "Ladder",
+                "expectedOptions": ["Climb-down"],
+                "worldLocation": {"worldX": 3211, "worldY": 3242, "plane": 1},
+                "routeId": "plugin_snapshot_route_to_service",
+            },
+        )
+        previous = {
+            "expectedAction": "Climb-up",
+            "objectName": "Ladder",
+            "worldLocation": {"worldX": 3211, "worldY": 3242, "plane": 0},
+            "planeBefore": 0,
+            "planeAfter": 1,
+            "routeId": "plugin_snapshot_route_to_service",
+        }
+        issue = _route_transition_reverse_issue(
+            proposal,
+            previous,
+            current_status=route_transition_status_payload(tick=8, x=3211, y=3243, plane=1),
+        )
+
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["classification"], "route_transition_reverse_oscillation_prevented")
+        self.assertTrue(issue["backtrackingDetected"])
+        self.assertEqual(issue["proposedTransition"]["expectedAction"], "Climb-down")
 
     def test_route_stability_repeat_with_block_evidence_can_enter_wall_hug_recovery(self):
         proposal = ActionProposal(
@@ -2323,6 +3139,58 @@ class InputControlExecutorTest(unittest.TestCase):
 
         self.assertEqual(result.observed_result["clickFailureBucket"], "coordinate_transform_error")
         self.assertEqual(result.action_trace["clickFailureBucket"], "coordinate_transform_error")
+
+    def test_executor_allows_inside_canvas_screen_point_when_geometry_passes(self):
+        backend = FakeBackend()
+        proposal = ActionProposal(
+            status="PASS",
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Tree",
+            suggested_click_point={"x": 1200, "y": 2146},
+            click_point_space="screen",
+            input_geometry={
+                "inputGeometryAvailable": True,
+                "canvasScreenOrigin": {"x": 1000, "y": 2000},
+                "canvasSize": {"width": 800, "height": 600},
+                "clientWindowBounds": {"x": 990, "y": 1980, "width": 840, "height": 650},
+            },
+            target_explanation={"safeAimPoint": {"status": "PASS", "actionable": True}},
+        )
+
+        result = execute_action(proposal, backend=backend, movement_profile="instant_test", dry_run=False)
+
+        self.assertEqual(result.status, "PASS")
+        self.assertTrue(result.executed)
+        self.assertTrue(backend.calls)
+        self.assertEqual(result.action_trace["inputGeometryValidation"]["status"], "PASS")
+
+    def test_executor_blocks_outside_canvas_screen_point_before_click(self):
+        backend = FakeBackend()
+        proposal = ActionProposal(
+            status="PASS",
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Tree",
+            suggested_click_point={"x": 2500, "y": 2146},
+            click_point_space="screen",
+            input_geometry={
+                "inputGeometryAvailable": True,
+                "canvasScreenOrigin": {"x": 1000, "y": 2000},
+                "canvasSize": {"width": 800, "height": 600},
+                "clientWindowBounds": {"x": 990, "y": 1980, "width": 840, "height": 650},
+            },
+            target_explanation={"safeAimPoint": {"status": "PASS", "actionable": True}},
+        )
+
+        result = execute_action(proposal, backend=backend, movement_profile="instant_test", dry_run=False)
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.executed)
+        self.assertEqual(backend.calls, [])
+        self.assertEqual(result.lifecycle_state["reason"], "planned_point_outside_canvas")
+        self.assertIn("input.geometry", result.missing_capabilities)
+        self.assertEqual(result.action_trace["inputGeometryValidation"]["reason"], "planned_point_outside_canvas")
 
     def test_cursor_start_outside_allowed_region_is_coordinate_bucket(self):
         result = ExecutionResult(
@@ -4127,6 +4995,71 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(args.max_debug_screenshots, 3)
         self.assertEqual(args.debug_screenshot_dir, "C:\\tmp\\visual-bundles")
 
+    def test_cli_persists_latest_action_trace_under_active_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            payload = {
+                "schema": "input_control_execution_result.v1",
+                "status": "FAIL",
+                "proposedAction": "interact_service_route_object",
+                "actionId": "1:interact_service_route_object:Staircase",
+                "executed": True,
+                "readiness": {"session": {"activeSessionPath": str(session)}},
+                "observedResult": {"observedResult": "no_change_timeout"},
+                "hoverConfirmation": {
+                    "rightClickMenuSelection": {
+                        "reason": "clicked_direct_menu_mismatch",
+                        "selectedEntry": {"option": "Climb-down"},
+                    }
+                },
+                "actionTrace": {
+                    "actionTraceSchema": "action_trace.v2",
+                    "proposedAction": "interact_service_route_object",
+                    "finalClassification": "clicked_direct_menu_mismatch",
+                    "rightClickMenuSelection": {"reason": "clicked_direct_menu_mismatch"},
+                    "inputIntegrityPhaseReport": {
+                        "live_action_phase": {
+                            "injectedEventsDelta": 0,
+                            "lowerIlInjectedEventsDelta": 0,
+                            "directBackendBypassCountDelta": 0,
+                        }
+                    },
+                },
+            }
+
+            persisted = execute_cli.persist_latest_action_trace(payload)
+            path = Path(persisted["path"])
+            record = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(persisted["status"], "PASS")
+        self.assertEqual(path.name, "last_action_trace.json")
+        self.assertEqual(record["schema"], "latest_action_trace_record.v1")
+        self.assertEqual(record["actionTrace"]["finalClassification"], "clicked_direct_menu_mismatch")
+        self.assertEqual(record["inputIntegrityPhaseReport"]["live_action_phase"]["directBackendBypassCountDelta"], 0)
+
+    def test_cli_persists_latest_action_trace_from_daemon_session_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            payload = {
+                "schema": "input_control_execution_result.v1",
+                "status": "PASS",
+                "proposedAction": "interact_service_route_object",
+                "actionTrace": {
+                    "actionTraceSchema": "action_trace.v2",
+                    "proposedAction": "interact_service_route_object",
+                    "finalClassification": "route_transition_progress",
+                },
+            }
+
+            with patch.object(execute_cli, "_session_path_from_daemon_url", return_value=session):
+                persisted = execute_cli.persist_latest_action_trace(payload, daemon_url="http://127.0.0.1:8890")
+            path = Path(persisted["path"])
+            record = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(persisted["status"], "PASS")
+        self.assertEqual(record["source"], "execute_next_action")
+        self.assertEqual(record["actionTrace"]["finalClassification"], "route_transition_progress")
+
     def test_cli_parses_target_suppression_options(self):
         args = execute_cli.parse_args(
             [
@@ -4782,7 +5715,7 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertTrue(result.confirmed)
         self.assertEqual(result.reason, "hover_menu_confirmed")
 
-    def test_hover_menu_parser_rejects_oak_top_for_tree_target_with_lower_tree_entry(self):
+    def test_hover_menu_parser_accepts_oak_top_for_generic_tree_woodcutting_target(self):
         proposal = ActionProposal(
             proposed_action="select_resource_target",
             target_kind="resource",
@@ -4812,10 +5745,9 @@ class InputControlExecutorTest(unittest.TestCase):
             min_wall_time_millis=1000,
         )
 
-        self.assertFalse(result.confirmed)
-        self.assertEqual(result.reason, "top_target_not_expected")
+        self.assertTrue(result.confirmed)
+        self.assertEqual(result.reason, "hover_menu_confirmed")
         self.assertTrue(result.details["expectedEntryPresentButNotTop"])
-        self.assertTrue(result.details["rightClickResourceSelectionDeferred"])
 
     def test_hover_menu_parser_rejects_walk_here(self):
         proposal = ActionProposal(
@@ -5340,6 +6272,13 @@ class InputControlExecutorTest(unittest.TestCase):
             "menuOpen": False,
             "entryCount": 6,
             "menuBounds": {"x": 124, "y": 148, "width": 150, "height": 112},
+            "entries": [
+                {"option": "Examine", "target": "<col=ffff>Staircase", "type": "EXAMINE_OBJECT", "identifier": 16672},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+                {"option": "Climb-down", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_THIRD_OPTION", "identifier": 16672},
+                {"option": "Climb-up", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_SECOND_OPTION", "identifier": 16672},
+                {"option": "Climb", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 16672},
+            ],
         }
         clicked_sample = {
             "clientTick": 22,
@@ -5980,6 +6919,13 @@ class InputControlExecutorTest(unittest.TestCase):
             "menuOpen": False,
             "entryCount": 6,
             "menuBounds": {"x": 124, "y": 148, "width": 150, "height": 112},
+            "entries": [
+                {"option": "Examine", "target": "<col=ffff>Staircase", "type": "EXAMINE_OBJECT", "identifier": 16672},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+                {"option": "Climb-down", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_THIRD_OPTION", "identifier": 16672},
+                {"option": "Climb-up", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_SECOND_OPTION", "identifier": 16672},
+                {"option": "Climb", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 16672},
+            ],
         }
         clicked_sample = {
             "clientTick": 22,
@@ -6036,10 +6982,14 @@ class InputControlExecutorTest(unittest.TestCase):
 
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.hover_confirmation["rightClickMenuSelection"]["menuOpenSample"]["sourceEvent"], "MenuOpened")
-        self.assertEqual(result.hover_confirmation["rightClickMenuSelection"]["selectedEntry"]["option"], "Climb-up")
-        row_screen = result.hover_confirmation["rightClickMenuSelection"]["rowScreenPoint"]
+        selection = result.hover_confirmation["rightClickMenuSelection"]
+        self.assertEqual(selection["selectedEntry"]["option"], "Climb-up")
+        self.assertEqual(selection["selectedEntry"]["sourceEntryIndex"], 3)
+        self.assertEqual(selection["selectedEntry"]["displayEntryIndex"], 1)
+        row_screen = selection["rowScreenPoint"]
         self.assertGreater(row_screen["y"], 558)
         self.assertLess(row_screen["y"], 569)
+        self.assertEqual(selection["rowCanvasGeometry"]["rowIndex"], 1)
         self.assertIn(("mouse_down", "right"), backend.calls)
         self.assertIn(("mouse_up", "right"), backend.calls)
 

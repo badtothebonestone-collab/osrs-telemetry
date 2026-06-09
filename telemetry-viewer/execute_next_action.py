@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import time
+import urllib.request
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--movement-profile", choices=["instant_test", "linear_debug", "smooth_bezier", "fitts_guided", "wind_mouse"], default="linear_debug")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--plan-next-click", action="store_true", help="Build a human-profile-informed click plan without executing input.")
+    parser.add_argument("--print-click-plan", action="store_true", help="Print the click plan in human-readable form.")
+    parser.add_argument("--dry-run-click-plan", action="store_true", help="Alias for --plan-next-click; never executes input.")
     parser.add_argument("--explain-target", action="store_true", help="Print the shared selected-target explanation when available.")
     parser.add_argument("--verify-coordinates", action="store_true", help="Resolve click coordinates without adding execution behavior.")
     parser.add_argument("--focus-runelite", dest="focus_runelite", action="store_true")
@@ -233,6 +237,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def apply_focus_default(args: argparse.Namespace) -> argparse.Namespace:
+    if args.dry_run_click_plan or args.print_click_plan:
+        args.plan_next_click = True
+    if args.plan_next_click:
+        args.execute = False
+        args.hover_only = False
     if getattr(args, "input_integrity_self_test_no_move", False):
         args.input_integrity_self_test = True
     if getattr(args, "no_overlay", False):
@@ -294,6 +303,80 @@ def apply_focus_default(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
+def build_click_plan_payload(args: argparse.Namespace) -> dict[str, Any]:
+    warnings: list[str] = []
+    plan: dict[str, Any]
+    fabric_status: dict[str, Any] = {}
+    try:
+        import knowledge_fabric
+
+        fabric = knowledge_fabric.fabric_from_live(
+            daemon_url=args.daemon_url,
+            snapshot_url=args.snapshot_url,
+            timeout=max(0.5, float(args.timeout or 3.0)),
+        )
+        fabric_status = fabric.status()
+        response = fabric.human_click_plan()
+        plan = response.get("data") if isinstance(response.get("data"), dict) else {}
+        warnings.extend(response.get("warnings") or [])
+    except Exception as error:  # noqa: BLE001
+        import task_script_api
+
+        plan = task_script_api.get_next_click_plan()
+        warnings.append(f"live click-planning context unavailable: {type(error).__name__}: {error}")
+    if not plan:
+        plan = {
+            "schema": "human_click_plan.v1",
+            "status": "FAIL",
+            "warnings": ["click plan could not be built"],
+            "missingCapabilities": ["click_plan"],
+        }
+    return {
+        "schema": "execute_next_action_click_plan.v1",
+        "status": plan.get("status") or "WARN",
+        "dryRun": True,
+        "executed": False,
+        "clickPlan": plan,
+        "knowledgeFabricStatus": {
+            "indexesBuilt": fabric_status.get("indexesBuilt"),
+            "objectCount": (fabric_status.get("liveWorldIndex") or {}).get("spatialIndexSummary", {}).get("objectCount")
+            if isinstance(fabric_status.get("liveWorldIndex"), dict)
+            else None,
+        },
+        "warnings": list(dict.fromkeys(warnings + (plan.get("warnings") or []))),
+    }
+
+
+def format_click_plan_payload(payload: dict[str, Any]) -> str:
+    plan = payload.get("clickPlan") if isinstance(payload.get("clickPlan"), dict) else {}
+    target = plan.get("target") if isinstance(plan.get("target"), dict) else {}
+    readiness = plan.get("readiness") if isinstance(plan.get("readiness"), dict) else {}
+    aim = plan.get("aim") if isinstance(plan.get("aim"), dict) else {}
+    lines = [
+        f"CLICK PLAN - {plan.get('status') or payload.get('status') or 'UNKNOWN'}",
+        "",
+        f"Task: {plan.get('task') or 'unknown'}",
+        f"Action: {plan.get('action') or 'unknown'}",
+        f"Target: {target.get('name') or 'unknown'} ({target.get('targetQuality') or 'unknown'})",
+        f"Center/base point: {aim.get('basePoint') or 'none'}",
+        f"Profile point: {aim.get('plannedPoint') or 'none'}",
+        f"Offset: {aim.get('offset') or 'none'} source={aim.get('offsetSource') or 'unknown'}",
+        f"Confidence: {plan.get('confidence') if plan.get('confidence') is not None else 'unknown'}",
+        "",
+        "Readiness:",
+        f"  hover={readiness.get('hoverConfirmed')} menu={readiness.get('menuConfirmed')} visible={readiness.get('targetVisible')} geometry={readiness.get('geometryAvailable')}",
+        f"  blockers={readiness.get('blockedReasons') or []}",
+        "",
+        "Reasons:",
+    ]
+    reasons = plan.get("reasons") if isinstance(plan.get("reasons"), list) else []
+    lines.extend(f"  {reason}" for reason in reasons) if reasons else lines.append("  none")
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    lines.extend(["", "Warnings:"])
+    lines.extend(f"  WARN: {warning}" for warning in warnings) if warnings else lines.append("  none")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def client_hot_records_from_payload(payload: dict[str, Any], *, max_samples: int = 128) -> list[dict[str, Any]]:
     results = payload.get("actionResults") if isinstance(payload.get("actionResults"), list) else [payload]
     records: list[dict[str, Any]] = []
@@ -345,6 +428,82 @@ def maybe_record_client_hot(payload: dict[str, Any], args: argparse.Namespace) -
     with output.open("a", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, separators=(",", ":"), sort_keys=False) + "\n")
+
+
+def _session_path_from_action_payload(payload: dict[str, Any]) -> Path | None:
+    candidates: list[dict[str, Any]] = []
+    if isinstance(payload.get("readiness"), dict):
+        candidates.append(payload["readiness"])
+    for result in payload.get("actionResults") or []:
+        if isinstance(result, dict) and isinstance(result.get("readiness"), dict):
+            candidates.append(result["readiness"])
+    for readiness in candidates:
+        session = readiness.get("session") if isinstance(readiness.get("session"), dict) else {}
+        for key in ("activeSessionPath", "sessionPath"):
+            value = session.get(key)
+            if isinstance(value, str) and value.strip():
+                return Path(value)
+    return None
+
+
+def _session_path_from_daemon_url(daemon_url: str | None) -> Path | None:
+    if not daemon_url:
+        return None
+    try:
+        status_url = str(daemon_url).rstrip("/") + "/status"
+        with urllib.request.urlopen(status_url, timeout=1.5) as response:
+            status = json.loads(response.read().decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001
+        return None
+    for key in ("activeSessionPath", "sessionPath"):
+        value = status.get(key)
+        if isinstance(value, str) and value.strip():
+            return Path(value)
+    session = status.get("session") if isinstance(status.get("session"), dict) else {}
+    for key in ("activeSessionPath", "sessionPath"):
+        value = session.get(key)
+        if isinstance(value, str) and value.strip():
+            return Path(value)
+    return None
+
+
+def _latest_action_result_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    results = payload.get("actionResults") if isinstance(payload.get("actionResults"), list) else None
+    if results:
+        for result in reversed(results):
+            if isinstance(result, dict) and isinstance(result.get("actionTrace"), dict):
+                return result
+    if isinstance(payload.get("actionTrace"), dict):
+        return payload
+    return None
+
+
+def persist_latest_action_trace(payload: dict[str, Any], *, daemon_url: str | None = None) -> dict[str, Any] | None:
+    latest = _latest_action_result_payload(payload)
+    if not isinstance(latest, dict):
+        return None
+    session_path = _session_path_from_action_payload(payload) or _session_path_from_daemon_url(daemon_url)
+    if session_path is None:
+        return None
+    live_dir = session_path / "interaction_geometry" / "live"
+    live_dir.mkdir(parents=True, exist_ok=True)
+    path = live_dir / "last_action_trace.json"
+    record = {
+        "schema": "latest_action_trace_record.v1",
+        "generatedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source": "execute_next_action",
+        "actionId": latest.get("actionId"),
+        "status": latest.get("status"),
+        "proposedAction": latest.get("proposedAction"),
+        "executed": latest.get("executed"),
+        "verificationStatus": latest.get("verificationStatus"),
+        "observedResult": latest.get("observedResult"),
+        "hoverConfirmation": latest.get("hoverConfirmation"),
+        "inputIntegrityPhaseReport": (latest.get("actionTrace") or {}).get("inputIntegrityPhaseReport"),
+        "actionTrace": latest.get("actionTrace"),
+    }
+    path.write_text(json.dumps(record, indent=2, sort_keys=False), encoding="utf-8")
+    return {"schema": "latest_action_trace_persisted.v1", "path": str(path), "status": "PASS"}
 
 
 def format_human(payload: dict[str, Any]) -> str:
@@ -2125,6 +2284,7 @@ def run_arduino_pointer_calibration_test(args: argparse.Namespace, backend: Any)
         "cursorLeftAllowedRegion": False,
         "foregroundWindowBefore": _foreground_window_info(),
         "foregroundWindowAfter": None,
+        "preCalibrationFocus": None,
         "clickSent": False,
         "keySent": False,
         "stopAllBefore": None,
@@ -2196,6 +2356,11 @@ def run_arduino_pointer_calibration_test(args: argparse.Namespace, backend: Any)
             local_monitor.start()
             payload["calibrationMonitorStarted"] = True
             time.sleep(0.20)
+        if str(getattr(args, "allowed_window", "runelite") or "").strip().lower() == "runelite":
+            payload["preCalibrationFocus"] = _restore_post_test_focus(
+                "runelite",
+                window_title_filter=getattr(args, "window_title_filter", "RuneLite"),
+            )
         root, window_context, allowed_region, foreground_titles = _calibration_window_context(args)
         payload["allowedRegion"] = allowed_region
         screen = _screen_size()
@@ -2512,6 +2677,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         args.execute = False
     apply_focus_default(args)
+    if args.plan_next_click:
+        payload = build_click_plan_payload(args)
+        print(json.dumps(payload, indent=2, sort_keys=False) if args.json else format_click_plan_payload(payload), end="")
+        return 0 if payload.get("status") != "FAIL" else 1
     backend = backend_from_options(args)
     overlay_info = None
     if args.show_input_integrity_overlay and not args.input_integrity_self_test:
@@ -2534,6 +2703,12 @@ def main(argv: list[str] | None = None) -> int:
         payload = run_arduino_pointer_calibration_test(args, backend)
         print(json.dumps(payload, indent=2, sort_keys=False) if args.json else format_arduino_pointer_calibration(payload), end="")
         return 0 if payload.get("status") != "FAIL" else 1
+    pre_action_focus = None
+    if bool(getattr(args, "focus_runelite", False)) and (args.execute or args.hover_only or args.camera_self_test):
+        pre_action_focus = _restore_post_test_focus(
+            "runelite",
+            window_title_filter=getattr(args, "window_title_filter", "RuneLite"),
+        )
     if args.auto_recover_loaded_scene and (args.execute or args.hover_only or args.loop or args.max_actions > 1):
         import liveness_recovery_core
 
@@ -2572,6 +2747,7 @@ def main(argv: list[str] | None = None) -> int:
                 "liveRuneLiteClicksBlocked": True,
                 "overrideFlag": "--allow-uncalibrated-arduino-movement",
                 "pointerCalibration": calibration_status,
+                "preActionFocus": pre_action_focus,
                 "warnings": [
                     "Arduino live RuneLite movement is blocked until a closed-loop pointer calibration record is present and valid."
                 ],
@@ -2595,6 +2771,7 @@ def main(argv: list[str] | None = None) -> int:
                 "liveRuneLiteClicksBlocked": True,
                 "pointerCalibration": calibration_status,
                 "movementSafety": movement_safety,
+                "preActionFocus": pre_action_focus,
                 "warnings": [
                     "Arduino live RuneLite movement is blocked because the pointer calibration could not be applied as a closed-loop movement guard."
                 ],
@@ -2625,9 +2802,14 @@ def main(argv: list[str] | None = None) -> int:
     run_loop = bool(args.loop or args.max_actions > 1)
     result = execute_action_loop(args.daemon_url, args, backend=backend) if run_loop else execute_next_action(args.daemon_url, args, backend=backend)
     payload = result.to_dict()
+    if pre_action_focus is not None:
+        payload["preActionFocus"] = pre_action_focus
     if overlay_info is not None:
         payload["inputIntegrityOverlay"] = overlay_info
     maybe_record_client_hot(payload, args)
+    trace_persist = persist_latest_action_trace(payload, daemon_url=args.daemon_url)
+    if trace_persist is not None:
+        payload["latestActionTracePersisted"] = trace_persist
     print(json.dumps(payload, indent=2, sort_keys=False) if args.json else format_human(payload), end="")
     return 0 if payload.get("status") != "FAIL" else 1
 

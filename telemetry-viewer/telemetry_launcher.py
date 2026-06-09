@@ -78,6 +78,7 @@ class ProcessSpec:
 
 
 PROCESS_SPECS = {
+    # Legacy dev launcher. Do not use this as the canonical Start Game resolver.
     "runelite": ProcessSpec(
         "runelite",
         "RuneLite Dev Client",

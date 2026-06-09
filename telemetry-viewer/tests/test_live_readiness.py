@@ -4,9 +4,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,11 +20,41 @@ sys.path.insert(0, str(VIEWER_DIR))
 import diagnose_live_readiness
 import live_readiness
 from input_control.executor import execute_next_action
+from input_control.input_geometry import resolve_input_geometry_status
 
 
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def write_baseline_geometry(session: Path, *, width: int = 800, height: int = 600, generated_tick: int = 10) -> None:
+    write_json(
+        session / "interaction_geometry" / "live" / "live_baseline_state.json",
+        {
+            "schema": "live_baseline_state.v1",
+            "generatedAtUtc": datetime.now(timezone.utc).isoformat(),
+            "latestTick": generated_tick,
+            "gameState": "LOGGED_IN",
+            "player": {"worldX": 3200, "worldY": 3201, "plane": 0},
+            "sceneCache": {"presentObjectCount": 25},
+            "inputGeometry": {
+                "schema": "input_geometry.v1",
+                "geometryAvailable": True,
+                "reason": "available",
+                "canvasScreenX": 1000,
+                "canvasScreenY": 2000,
+                "canvasWidth": width,
+                "canvasHeight": height,
+                "clientWindowX": 990,
+                "clientWindowY": 1980,
+                "clientWindowWidth": width + 20,
+                "clientWindowHeight": height + 40,
+                "isCanvasShowing": True,
+                "isClientFocused": True,
+            },
+        },
+    )
 
 
 def target(name="Tree", key="tree-a", tick=10):
@@ -201,6 +233,39 @@ class LiveReadinessTest(unittest.TestCase):
             self.assertTrue(report["actionReadiness"]["executionAllowed"])
             self.assertTrue(report["selectedTargetChecks"]["inHighlighterSource"])
 
+    def test_nested_post_menu_sort_hot_sample_overrides_stale_game_state_changed_shell(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target()
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [marker]})
+            status = enable_plugin_snapshot(
+                status_for(session, marker),
+                post_menu_age_ms=100_000,
+                game_state="LOGIN_SCREEN",
+                source_event="GameStateChanged",
+            )
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            hot = status["clientTickHot"]
+            hot.pop("latency", None)
+            hot["wallTimeMillis"] = now_ms - 100_000
+            hot["postMenuSort"].update(
+                {
+                    "sourceEvent": "PostMenuSort",
+                    "sampleSource": "PostMenuSort",
+                    "gameState": "LOGGED_IN",
+                    "wallTimeMillis": now_ms,
+                }
+            )
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertNotIn("client_tick_hot_stale", [item["code"] for item in report["blockers"]])
+            self.assertEqual(report["clientTickHot"]["gameState"], "LOGGED_IN")
+            self.assertEqual(report["clientTickHot"]["clientTickHotSource"], "PostMenuSort")
+            self.assertTrue(report["clientTickHot"]["fresh"])
+
     def test_daemon_unavailable_is_fail(self):
         report = live_readiness.build_readiness_report(
             fetch_json_func=lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("daemon down"))
@@ -334,6 +399,138 @@ class LiveReadinessTest(unittest.TestCase):
             self.assertFalse(report["overlayHealth"]["overlayBlocksCurrentAction"])
             self.assertIn("highlighter.markers", report["optionalCapabilities"])
 
+    def test_hover_guarded_live_candidate_ignores_stale_file_candidate_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target(tick=10)
+            marker["targetLiveState"] = "live_assumed"
+            marker["directReachability"] = "reachable"
+            marker["safeAimPoint"] = {"status": "PASS", "actionable": True, "canvasX": 100, "canvasY": 120}
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
+            status = enable_plugin_snapshot(status_for(session, marker, latest_tick=100))
+            status["brain"]["contextActionProposal"] = {
+                "schema": "action_proposal.v1",
+                "status": "PASS",
+                "proposedAction": "select_resource_target",
+                "targetKind": "resource",
+                "targetName": "Tree",
+                "targetTile": {"worldX": 3200, "worldY": 3201, "plane": 0},
+                "suggestedClickPoint": {"x": 100, "y": 120},
+                "targetExplanation": {
+                    "name": "Tree",
+                    "classId": "tree",
+                    "safeAimPoint": {"status": "PASS", "actionable": True, "canvasX": 100, "canvasY": 120},
+                    "actionTargetSource": "live_resource_candidate",
+                    "actionability": "needs_hover_confirmation",
+                },
+                "actionTargetSource": "live_resource_candidate",
+                "actionability": "needs_hover_confirmation",
+                "sourceTick": 100,
+                "confidence": 0.9,
+            }
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+            blocker_codes = [item["code"] for item in report["blockers"]]
+
+            self.assertEqual(report["status"], "WARN")
+            self.assertTrue(report["readinessPassed"])
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertNotIn("candidate_data_stale", blocker_codes)
+            self.assertTrue(report["actionSafetyEvidence"]["hoverGuardedLiveTarget"])
+            self.assertTrue(report["actionSafetyEvidence"]["canUseLiveTargetWithoutOverlayMarker"])
+            self.assertIn("target.freshness", report["optionalCapabilities"])
+
+    def test_plugin_snapshot_projection_candidate_supplies_aim_and_freshness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            stale_selected = {"targetType": "none", "tick": 10, "sourceTick": 10}
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
+            status = enable_plugin_snapshot(status_for(session, stale_selected, latest_tick=100))
+            status["brain"]["contextActionProposal"] = {
+                "schema": "action_proposal.v1",
+                "status": "PASS",
+                "proposedAction": "select_resource_target",
+                "targetKind": "resource",
+                "targetName": "Tree",
+                "targetTile": {"worldX": 3200, "worldY": 3201, "plane": 0},
+                "suggestedClickPoint": {"x": 100, "y": 120},
+                "targetExplanation": {
+                    "name": "Tree",
+                    "classId": "tree",
+                    "onScreen": True,
+                    "geometryAvailable": True,
+                    "safeAimPoint": {"status": "PASS", "actionable": True, "canvasX": 100, "canvasY": 120},
+                    "actionTargetSource": "plugin_snapshot_projection",
+                    "actionability": "needs_hover_confirmation",
+                },
+                "actionTargetSource": "plugin_snapshot_projection",
+                "actionability": "needs_hover_confirmation",
+                "sourceTick": 100,
+                "confidence": 0.9,
+            }
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+            blocker_codes = [item["code"] for item in report["blockers"]]
+
+            self.assertEqual(report["status"], "WARN")
+            self.assertTrue(report["readinessPassed"])
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertNotIn("selected_target_aim_missing", blocker_codes)
+            self.assertNotIn("candidate_data_stale", blocker_codes)
+            self.assertTrue(report["actionSafetyEvidence"]["canUseLiveTargetWithoutOverlayMarker"])
+
+    def test_plugin_snapshot_projection_can_hover_confirm_with_stale_hot_sample(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            stale_selected = {"targetType": "none", "tick": 10, "sourceTick": 10}
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
+            status = enable_plugin_snapshot(
+                status_for(session, stale_selected, latest_tick=100),
+                post_menu_age_ms=60_000,
+            )
+            status["brain"]["contextActionProposal"] = {
+                "schema": "action_proposal.v1",
+                "status": "PASS",
+                "proposedAction": "select_resource_target",
+                "targetKind": "resource",
+                "targetName": "Tree",
+                "targetTile": {"worldX": 3200, "worldY": 3201, "plane": 0},
+                "suggestedClickPoint": {"x": 100, "y": 120},
+                "targetExplanation": {
+                    "name": "Tree",
+                    "classId": "tree",
+                    "onScreen": True,
+                    "geometryAvailable": True,
+                    "safeAimPoint": {"status": "PASS", "actionable": True, "canvasX": 100, "canvasY": 120},
+                    "actionTargetSource": "plugin_snapshot_projection",
+                    "actionability": "needs_hover_confirmation",
+                },
+                "actionTargetSource": "plugin_snapshot_projection",
+                "actionability": "needs_hover_confirmation",
+                "sourceTick": 100,
+                "confidence": 0.9,
+            }
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+            blocker_codes = [item["code"] for item in report["blockers"]]
+
+            self.assertEqual(report["status"], "WARN")
+            self.assertTrue(report["readinessPassed"])
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertFalse(report["clientTickHot"]["fresh"])
+            self.assertNotIn("client_tick_hot_stale", blocker_codes)
+            self.assertNotIn("selected_target_aim_missing", blocker_codes)
+            self.assertNotIn("candidate_data_stale", blocker_codes)
+            self.assertTrue(report["actionSafetyEvidence"]["hoverGuardedLiveTarget"])
+            self.assertTrue(report["actionSafetyEvidence"]["canUseLiveTargetWithoutOverlayMarker"])
+            self.assertIn("client_tick_hot.fresh", report["optionalCapabilities"])
+
     def test_service_context_policy_is_not_immediate_service_need_with_free_slots(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "sessions"
@@ -463,6 +660,28 @@ class LiveReadinessTest(unittest.TestCase):
             self.assertEqual(report["capabilities"]["pluginSnapshot"]["url"], "http://127.0.0.1:8893/snapshot")
             self.assertTrue(report["capabilities"]["pluginSnapshot"]["required"])
             self.assertFalse(report["capabilities"]["pluginSnapshot"]["available"])
+
+    def test_plugin_snapshot_request_failure_warns_for_fresh_live_navigation_waypoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target()
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [marker]})
+            status = enable_plugin_snapshot(navigation_status_for(session, resource_marker=marker), post_menu_age_ms=25)
+            status["pluginSnapshotAvailable"] = False
+            status["warnings"] = ["plugin snapshot request failed: TimeoutError: timed out"]
+
+            report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertEqual(report["currentIntent"], "navigation_waypoint_action")
+            self.assertEqual(report["actionReadiness"]["status"], "WARN")
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertNotIn("plugin_snapshot_source_not_ready", [item["code"] for item in report["blockers"]])
+            self.assertNotIn("plugin.snapshot", report["requiredCapabilities"])
+            self.assertIn("plugin.snapshot", report["optionalCapabilities"])
+            self.assertFalse(report["capabilities"]["pluginSnapshot"]["required"])
+            self.assertTrue(any("fresh live navigation waypoint" in warning for warning in report["actionReadiness"]["warnings"]))
 
     def test_fresh_daemon_suppresses_historical_plugin_snapshot_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -675,6 +894,151 @@ class LiveReadinessTest(unittest.TestCase):
             self.assertEqual(report["selectedResourceTargetFreshnessStatus"], "stale")
             self.assertIn("target.candidateFreshness", report["actionReadiness"]["checksSkippedAsNotApplicable"])
             self.assertTrue(any("not applicable while current intent is navigation_waypoint_action" in warning for warning in report["nonApplicableContextWarnings"]))
+
+    def test_live_navigation_waypoint_allows_newer_live_session_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            daemon_session = root / "daemon"
+            newer_session = root / "newer"
+            selected = target(key="selected")
+            write_json(daemon_session / "manifest.json", {"sessionId": "daemon"})
+            write_json(newer_session / "manifest.json", {"sessionId": "newer"})
+            write_json(daemon_session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [selected]})
+            newer_overlay = newer_session / "interaction_geometry" / "live" / "overlay_debug_state.json"
+            write_json(newer_overlay, {"markers": []})
+            os.utime(newer_overlay, (time_value := 4102444800, time_value))
+            status = enable_plugin_snapshot(
+                navigation_status_for(daemon_session, resource_marker=selected, latest_tick=20),
+                post_menu_age_ms=25,
+            )
+
+            report = live_readiness.build_readiness_report(
+                daemon_status=status,
+                sessions_dir=root,
+            )
+
+            self.assertEqual(report["currentIntent"], "navigation_waypoint_action")
+            self.assertEqual(report["actionReadiness"]["status"], "WARN")
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            self.assertNotIn("daemon_latest_live_session_mismatch", [item["code"] for item in report["blockers"]])
+            self.assertNotIn("daemon_latest_session_mismatch", [item["code"] for item in report["blockers"]])
+            self.assertIn("session.match", report["optionalCapabilities"])
+            self.assertTrue(any("fresh live navigation waypoint" in warning for warning in report["actionReadiness"]["warnings"]))
+
+    def test_plugin_snapshot_route_transition_allows_session_mismatch_and_geometry_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            daemon_session = root / "daemon"
+            newer_session = root / "newer"
+            selected = target(key="selected")
+            write_json(daemon_session / "manifest.json", {"sessionId": "daemon"})
+            write_json(newer_session / "manifest.json", {"sessionId": "newer"})
+            write_json(daemon_session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
+            newer_overlay = newer_session / "interaction_geometry" / "live" / "overlay_debug_state.json"
+            write_json(newer_overlay, {"markers": []})
+            os.utime(newer_overlay, (time_value := 4102444800, time_value))
+            status = enable_plugin_snapshot(
+                navigation_status_for(daemon_session, resource_marker=selected, latest_tick=20, input_geometry=False),
+                post_menu_age_ms=60_000,
+            )
+            route_target = {
+                "targetName": "Ladder",
+                "name": "Ladder",
+                "classId": "service_route_transition",
+                "targetType": "sceneObject",
+                "id": 16683,
+                "worldX": 3204,
+                "worldY": 3238,
+                "plane": 0,
+                "onScreen": True,
+                "geometryAvailable": True,
+                "aimPoint": {"canvasX": 498, "canvasY": 122, "source": "clickboxBoundsCenter"},
+                "actions": ["Climb-up"],
+                "actionTargetSource": "plugin_snapshot_projection",
+                "actionability": "needs_hover_confirmation",
+            }
+            status["brain"]["serviceRouteContext"].update(
+                {
+                    "currentStep": {"type": "interact_object", "label": "Ladder", "expectedOptions": ["Climb-up"]},
+                    "routeStepStatus": "plugin_snapshot_route_transition_visible",
+                    "actionReady": True,
+                    "visibleInteractionTarget": route_target,
+                }
+            )
+
+            report = live_readiness.build_readiness_report(
+                daemon_status=status,
+                sessions_dir=root,
+            )
+
+            self.assertEqual(report["currentIntent"], "route_transition_action")
+            self.assertEqual(report["proposedAction"], "interact_service_route_object")
+            self.assertEqual(report["actionReadiness"]["status"], "WARN")
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            blocker_codes = [item["code"] for item in report["blockers"]]
+            self.assertNotIn("daemon_latest_live_session_mismatch", blocker_codes)
+            self.assertNotIn("daemon_latest_session_mismatch", blocker_codes)
+            self.assertNotIn("input_geometry_unavailable", blocker_codes)
+            self.assertIn("input.geometry", report["optionalCapabilities"])
+            self.assertIn("client_tick_hot.fresh", report["optionalCapabilities"])
+            self.assertTrue(any("route transition target" in warning for warning in report["actionReadiness"]["warnings"]))
+
+    def test_live_route_object_transition_allows_session_mismatch_warning_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            daemon_session = root / "daemon"
+            newer_session = root / "newer"
+            selected = target(key="selected")
+            write_json(daemon_session / "manifest.json", {"sessionId": "daemon"})
+            write_json(newer_session / "manifest.json", {"sessionId": "newer"})
+            write_json(daemon_session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": []})
+            newer_overlay = newer_session / "interaction_geometry" / "live" / "overlay_debug_state.json"
+            write_json(newer_overlay, {"markers": []})
+            os.utime(newer_overlay, (time_value := 4102444800, time_value))
+            status = enable_plugin_snapshot(
+                navigation_status_for(daemon_session, resource_marker=selected, latest_tick=20, input_geometry=True),
+                post_menu_age_ms=25,
+            )
+            route_target = {
+                "targetName": "Staircase",
+                "name": "Staircase",
+                "classId": "route_transition",
+                "targetType": "sceneObject",
+                "id": 56230,
+                "worldX": 3204,
+                "worldY": 3229,
+                "plane": 0,
+                "onScreen": True,
+                "geometryAvailable": True,
+                "aimPoint": {"canvasX": 339, "canvasY": 53, "source": "canvasLocation"},
+                "safeAimPoint": {"status": "PASS", "canvasX": 339, "canvasY": 53},
+                "actions": ["Climb-up", "Top-floor"],
+                "expectedOptions": ["Climb-up", "Climb up", "Top-floor"],
+                "actionTargetSource": "live_route_object",
+                "actionability": "needs_hover_confirmation",
+            }
+            status["brain"]["serviceRouteContext"].update(
+                {
+                    "currentStep": {"type": "interact_object", "label": "Staircase", "expectedOptions": ["Climb-up"]},
+                    "routeStepStatus": "route_interaction_visible",
+                    "actionReady": True,
+                    "visibleInteractionTarget": route_target,
+                }
+            )
+
+            report = live_readiness.build_readiness_report(
+                daemon_status=status,
+                sessions_dir=root,
+            )
+
+            self.assertEqual(report["currentIntent"], "route_transition_action")
+            self.assertEqual(report["proposedAction"], "interact_service_route_object")
+            self.assertEqual(report["actionReadiness"]["status"], "WARN")
+            self.assertTrue(report["actionReadiness"]["executionAllowed"])
+            blocker_codes = [item["code"] for item in report["blockers"]]
+            self.assertNotIn("daemon_latest_live_session_mismatch", blocker_codes)
+            self.assertNotIn("daemon_latest_session_mismatch", blocker_codes)
+            self.assertIn("session.match", report["optionalCapabilities"])
 
     def test_resource_intent_treats_stale_resource_target_as_applicable_blocker(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1111,13 +1475,17 @@ class ExecutorReadinessGateTest(unittest.TestCase):
                     write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [marker]})
                 return status_for(session, marker)
 
-            result = execute_next_action(
-                "http://127.0.0.1:8890",
-                options,
-                fetch_json_func=fetch_status,
-                backend=backend,
-                sleep_func=lambda *_args, **_kwargs: None,
-            )
+            with (
+                patch("input_control.executor.fetch_action_context", side_effect=RuntimeError("offline unit test")),
+                patch("input_control.executor.fetch_plugin_snapshot", side_effect=RuntimeError("offline unit test")),
+            ):
+                result = execute_next_action(
+                    "http://127.0.0.1:8890",
+                    options,
+                    fetch_json_func=fetch_status,
+                    backend=backend,
+                    sleep_func=lambda *_args, **_kwargs: None,
+                )
 
             self.assertEqual(result.status, "PASS")
             self.assertTrue(result.executed)
@@ -1144,19 +1512,114 @@ class ExecutorReadinessGateTest(unittest.TestCase):
             )
             monotonic_values = iter([0.0, 0.0, 0.02])
 
-            result = execute_next_action(
-                "http://127.0.0.1:8890",
-                options,
-                fetch_json_func=lambda *_args, **_kwargs: status_for(session),
-                backend=backend,
-                sleep_func=lambda *_args, **_kwargs: None,
-                monotonic_func=monotonic_values.__next__,
-            )
+            with (
+                patch("input_control.executor.fetch_action_context", side_effect=RuntimeError("offline unit test")),
+                patch("input_control.executor.fetch_plugin_snapshot", side_effect=RuntimeError("offline unit test")),
+            ):
+                result = execute_next_action(
+                    "http://127.0.0.1:8890",
+                    options,
+                    fetch_json_func=lambda *_args, **_kwargs: status_for(session),
+                    backend=backend,
+                    sleep_func=lambda *_args, **_kwargs: None,
+                    monotonic_func=monotonic_values.__next__,
+                )
 
             self.assertEqual(result.status, "FAIL")
             self.assertFalse(result.executed)
             self.assertEqual(backend.calls, [])
             self.assertIn("session.liveOutputs", result.missing_capabilities)
+
+
+class InputGeometryResolverTest(unittest.TestCase):
+    def test_valid_file_session_geometry_passes_with_window_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "sessions" / "session"
+            write_baseline_geometry(session)
+
+            with patch("input_control.input_geometry.find_runelite_window", return_value={"runeliteWindowMatched": False, "matchedWindow": None}):
+                status = resolve_input_geometry_status({}, session=session)
+
+            self.assertEqual(status["status"], "PASS")
+            self.assertEqual(status["source"], "file_session.baseline.inputGeometry")
+            self.assertEqual(status["canvasWidth"], 800)
+            self.assertEqual(status["canvasHeight"], 600)
+            self.assertTrue(status["screenToClientAvailable"])
+            self.assertTrue(status["clientToScreenAvailable"])
+            self.assertIsNotNone(status["canvasRect"])
+            self.assertIsNotNone(status["clientRect"])
+
+    def test_zero_canvas_fails_with_canvas_missing(self):
+        with patch("input_control.input_geometry.find_runelite_window", return_value={"runeliteWindowMatched": False, "matchedWindow": None}):
+            status = resolve_input_geometry_status(
+                {"inputGeometry": {"inputGeometryAvailable": True, "canvasScreenX": 10, "canvasScreenY": 10, "canvasWidth": 0, "canvasHeight": 0}},
+                sessions_dir=Path(tempfile.gettempdir()) / "missing-osrs-geometry-test-sessions",
+            )
+
+        self.assertEqual(status["status"], "FAIL")
+        self.assertIn("input_geometry_canvas_missing", status["blockers"])
+
+    def test_stale_file_geometry_fails_explicitly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "sessions" / "session"
+            write_baseline_geometry(session)
+
+            with patch("input_control.input_geometry.find_runelite_window", return_value={"runeliteWindowMatched": False, "matchedWindow": None}):
+                status = resolve_input_geometry_status({}, session=session, now=time.time() + 10, max_age_ms=1)
+
+            self.assertEqual(status["status"], "FAIL")
+            self.assertEqual(status["blockerCode"], "input_geometry_stale")
+
+    def test_focus_repair_attempts_for_minimized_runelite(self):
+        first_window = {
+            "runeliteWindowMatched": True,
+            "matchedWindow": {"hwnd": 123, "title": "RuneLite", "visible": True, "minimized": True, "foreground": False},
+        }
+        repaired = {
+            "focusRepairAttempted": True,
+            "focusRepairSucceeded": True,
+            "windowRestoreAttempted": True,
+            "windowRestoreSucceeded": True,
+            "after": {
+                "runeliteWindowMatched": True,
+                "matchedWindow": {"hwnd": 123, "title": "RuneLite", "visible": True, "minimized": False, "foreground": True},
+                "foregroundWindowTitle": "RuneLite",
+            },
+        }
+        with (
+            patch("input_control.input_geometry.find_runelite_window", return_value=first_window),
+            patch("input_control.input_geometry.repair_runelite_focus", return_value=repaired),
+        ):
+            status = resolve_input_geometry_status(
+                {
+                    "inputGeometry": {
+                        "inputGeometryAvailable": True,
+                        "canvasScreenOrigin": {"x": 100, "y": 200},
+                        "canvasSize": {"width": 800, "height": 600},
+                    }
+                },
+                allow_focus_repair=True,
+            )
+
+        self.assertTrue(status["focusRepairAttempted"])
+        self.assertTrue(status["focusRepairSucceeded"])
+
+    def test_readiness_uses_latest_baseline_geometry_when_daemon_geometry_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            session = root / "session"
+            marker = target(tick=20)
+            write_json(session / "manifest.json", {"sessionId": "session"})
+            write_json(session / "interaction_geometry" / "live" / "overlay_debug_state.json", {"markers": [marker]})
+            write_baseline_geometry(session, generated_tick=20)
+            status = status_for(session, marker, latest_tick=20, input_geometry=False)
+
+            with patch("input_control.input_geometry.find_runelite_window", return_value={"runeliteWindowMatched": False, "matchedWindow": None}):
+                report = live_readiness.build_readiness_report(daemon_status=status, sessions_dir=root)
+
+            self.assertNotIn("input_geometry_unavailable", [item["code"] for item in report["blockers"]])
+            self.assertTrue(report["inputGeometry"]["inputGeometryAvailable"])
+            self.assertEqual(report["inputGeometry"]["source"], "file_session.baseline.inputGeometry")
 
 
 if __name__ == "__main__":

@@ -53,6 +53,7 @@ public class PluginSnapshotEndpoint implements Closeable
 			"collision_window",
 			"bank_ui",
 			"dialogue_state",
+			"combat_state",
 			"interaction_hot",
 			"client_tick_tail",
 			"world_model_summary",
@@ -1536,6 +1537,7 @@ public class PluginSnapshotEndpoint implements Closeable
 				.replace("collisionWindow", "collision_window")
 				.replace("bankUi", "bank_ui")
 				.replace("dialogueState", "dialogue_state")
+				.replace("combatState", "combat_state")
 				.replace("worldModelSummary", "world_model_summary")
 				.replace("sceneObjectCensus", "scene_object_census")
 				.replace("routeObjectCensus", "route_object_census")
@@ -2107,6 +2109,7 @@ public class PluginSnapshotEndpoint implements Closeable
 		map.put("collision_window", "live_collision_window_packet.v1");
 		map.put("bank_ui", "live_bank_ui_packet.v1");
 		map.put("dialogue_state", "live_dialogue_state_packet.v1");
+		map.put("combat_state", "live_combat_state_packet.v1");
 		map.put("writer_health", "live_writer_health_packet.v1");
 		map.put("watch_values", "live_watch_values_packet.v1");
 		return map;

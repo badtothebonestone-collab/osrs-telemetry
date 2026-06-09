@@ -1,0 +1,1327 @@
+{
+  "schema": "route_demonstration_guide.v1",
+  "status": "PASS",
+  "routeName": "Bank_to_Woodcutting_area",
+  "sourceRecordings": [
+    "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+    "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC",
+    "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+  ],
+  "startArea": "bank_area",
+  "endArea": "woodcutting_area",
+  "pathPoints": [
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 0,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3208,
+        "worldY": 3220,
+        "plane": 2
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Start: bank_area",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+      "sourceKind": "segment_start",
+      "segmentIndex": 1,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 1,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3205,
+        "worldY": 3209,
+        "plane": 2
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Walk",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+      "sourceKind": "segment_end",
+      "segmentIndex": 2,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 2,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Climb-down Staircase",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+      "sourceKind": "segment_end",
+      "segmentIndex": 3,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 3,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3193,
+        "worldY": 3243,
+        "plane": 0
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Walk",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+      "sourceKind": "segment_end",
+      "segmentIndex": 4,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 4,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3198,
+        "worldY": 3218,
+        "plane": 0
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Open Door",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+      "sourceKind": "segment_start",
+      "segmentIndex": 5,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 5,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3196,
+        "worldY": 3236,
+        "plane": 0
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Open Door",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+      "sourceKind": "segment_end",
+      "segmentIndex": 5,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 6,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3205,
+        "worldY": 3208,
+        "plane": 2
+      },
+      "sourceTick": 183,
+      "sourceTime": 13.391,
+      "areaLabel": "plane_transition",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+      "sourceKind": "step_plane_transition",
+      "segmentIndex": null,
+      "stepIndex": 2
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 7,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3207,
+        "worldY": 3217,
+        "plane": 0
+      },
+      "sourceTick": 208,
+      "sourceTime": 29.829,
+      "areaLabel": "object_action",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+      "sourceKind": "step_object_action",
+      "segmentIndex": null,
+      "stepIndex": 4
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 8,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3209,
+        "worldY": 3220,
+        "plane": 2
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Start: bank_area",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC",
+      "sourceKind": "segment_start",
+      "segmentIndex": 1,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 9,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3206,
+        "worldY": 3215,
+        "plane": 2
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Cancel",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC",
+      "sourceKind": "segment_start",
+      "segmentIndex": 3,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 10,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3195,
+        "worldY": 3244,
+        "plane": 0
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Walk",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC",
+      "sourceKind": "segment_end",
+      "segmentIndex": 5,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 11,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3210,
+        "worldY": 3216,
+        "plane": 2
+      },
+      "sourceTick": 104,
+      "sourceTime": 9.062,
+      "areaLabel": "menu_selection",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC",
+      "sourceKind": "step_menu_selection",
+      "segmentIndex": null,
+      "stepIndex": 2
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 12,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3195,
+        "worldY": 3243,
+        "plane": 0
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Walk",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area",
+      "sourceKind": "segment_end",
+      "segmentIndex": 5,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 13,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3198,
+        "worldY": 3220,
+        "plane": 0
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Walk here Tree",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area",
+      "sourceKind": "segment_start",
+      "segmentIndex": 6,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 14,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3195,
+        "worldY": 3230,
+        "plane": 0
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Walk here Tree",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area",
+      "sourceKind": "segment_end",
+      "segmentIndex": 6,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 15,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3195,
+        "worldY": 3241,
+        "plane": 0
+      },
+      "sourceTick": null,
+      "sourceTime": null,
+      "areaLabel": "Cancel Staircase",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area",
+      "sourceKind": "segment_end",
+      "segmentIndex": 7,
+      "stepIndex": null
+    },
+    {
+      "schema": "route_demonstration_path_point.v1",
+      "orderIndex": 16,
+      "routeName": "Bank_to_Woodcutting_area",
+      "world": {
+        "worldX": 3204,
+        "worldY": 3229,
+        "plane": 0
+      },
+      "sourceTick": 56,
+      "sourceTime": 24.719,
+      "areaLabel": "object_action",
+      "reachedToleranceTiles": 2,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area",
+      "sourceKind": "step_object_action",
+      "segmentIndex": null,
+      "stepIndex": 6
+    }
+  ],
+  "planeChanges": [
+    {
+      "schema": "route_demonstration_plane_change.v1",
+      "segmentIndex": 3,
+      "label": "Climb-down Staircase",
+      "startPlane": 2,
+      "endPlane": 0,
+      "startWorld": {
+        "worldX": 3205,
+        "worldY": 3209,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "schema": "route_demonstration_plane_change.v1",
+      "segmentIndex": 4,
+      "label": "Climb-down Staircase",
+      "startPlane": 2,
+      "endPlane": 0,
+      "startWorld": {
+        "worldX": 3205,
+        "worldY": 3209,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "schema": "route_demonstration_plane_change.v1",
+      "segmentIndex": 3,
+      "label": "Walk here Staircase",
+      "startPlane": 2,
+      "endPlane": 0,
+      "startWorld": {
+        "worldX": 3206,
+        "worldY": 3215,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "schema": "route_demonstration_plane_change.v1",
+      "segmentIndex": 4,
+      "label": "Climb-down Staircase",
+      "startPlane": 2,
+      "endPlane": 0,
+      "startWorld": {
+        "worldX": 3205,
+        "worldY": 3209,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    }
+  ],
+  "interactionSteps": [
+    {
+      "schema": "route_demonstration_interaction_step.v1",
+      "orderIndex": 0,
+      "routeName": "Bank_to_Woodcutting_area",
+      "segmentIndex": 2,
+      "sourceStepId": "route_step_002",
+      "action": "Climb-down",
+      "targetName": "Staircase",
+      "targetId": 56231,
+      "targetKind": "object",
+      "world": {
+        "worldX": 3205,
+        "worldY": 3208,
+        "plane": 2
+      },
+      "planeBefore": 2,
+      "planeAfter": 0,
+      "expectedPlaneChange": -2,
+      "targetQuality": null,
+      "menuSelection": {},
+      "hoverOrMenuEvidence": {
+        "menuConfirmed": false,
+        "hoverConfirmed": false,
+        "inputEventSeq": null
+      },
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success",
+        "planeChanged": true,
+        "positionChanged": true,
+        "beforeWorld": {
+          "worldX": 3205,
+          "worldY": 3209,
+          "plane": 2
+        },
+        "afterWorld": {
+          "worldX": 3206,
+          "worldY": 3208,
+          "plane": 0
+        }
+      },
+      "cameraHints": [
+        {
+          "schema": "route_demonstration_camera_hint.v1",
+          "segmentId": "cam_001",
+          "startTime": 1.047,
+          "endTime": 2.157,
+          "deltaYaw": 128.0,
+          "deltaPitch": -77.0,
+          "durationMs": 1110,
+          "source": "unknown",
+          "timeBeforeStepSeconds": 7.531
+        },
+        {
+          "schema": "route_demonstration_camera_hint.v1",
+          "segmentId": "cam_001",
+          "startTime": 1.047,
+          "endTime": 2.157,
+          "deltaYaw": 128.0,
+          "deltaPitch": -77.0,
+          "durationMs": 1110,
+          "source": "unknown",
+          "timeBeforeStepSeconds": 7.531
+        }
+      ],
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "schema": "route_demonstration_interaction_step.v1",
+      "orderIndex": 1,
+      "routeName": "Bank_to_Woodcutting_area",
+      "segmentIndex": 3,
+      "sourceStepId": "route_step_003",
+      "action": "Climb-down",
+      "targetName": "Staircase",
+      "targetId": 56231,
+      "targetKind": "object",
+      "world": {
+        "worldX": 3205,
+        "worldY": 3208,
+        "plane": 2
+      },
+      "planeBefore": 2,
+      "planeAfter": 0,
+      "expectedPlaneChange": -2,
+      "targetQuality": null,
+      "menuSelection": {},
+      "hoverOrMenuEvidence": {
+        "menuConfirmed": false,
+        "hoverConfirmed": false,
+        "inputEventSeq": null
+      },
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success",
+        "planeChanged": true,
+        "positionChanged": true,
+        "beforeWorld": {
+          "worldX": 3205,
+          "worldY": 3209,
+          "plane": 2
+        },
+        "afterWorld": {
+          "worldX": 3206,
+          "worldY": 3208,
+          "plane": 0
+        }
+      },
+      "cameraHints": [
+        {
+          "schema": "route_demonstration_camera_hint.v1",
+          "segmentId": "cam_001",
+          "startTime": 0.969,
+          "endTime": 3.047,
+          "deltaYaw": 645.0,
+          "deltaPitch": 0.0,
+          "durationMs": 2078,
+          "source": "unknown",
+          "timeBeforeStepSeconds": 4.078
+        },
+        {
+          "schema": "route_demonstration_camera_hint.v1",
+          "segmentId": "cam_001",
+          "startTime": 0.969,
+          "endTime": 3.047,
+          "deltaYaw": 645.0,
+          "deltaPitch": 0.0,
+          "durationMs": 2078,
+          "source": "unknown",
+          "timeBeforeStepSeconds": 4.078
+        }
+      ],
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "schema": "route_demonstration_interaction_step.v1",
+      "orderIndex": 2,
+      "routeName": "Bank_to_Woodcutting_area",
+      "segmentIndex": 3,
+      "sourceStepId": "route_step_003",
+      "action": "Climb-down",
+      "targetName": "Staircase",
+      "targetId": 56231,
+      "targetKind": "object",
+      "world": {
+        "worldX": 3205,
+        "worldY": 3208,
+        "plane": 2
+      },
+      "planeBefore": 2,
+      "planeAfter": 0,
+      "expectedPlaneChange": -2,
+      "targetQuality": "strong",
+      "menuSelection": {
+        "present": true,
+        "selectedRowIndex": 0,
+        "option": "Climb-down",
+        "target": "Staircase",
+        "rowBoundsPresent": false,
+        "insideRowBounds": null,
+        "rowGeometrySource": "option_target_match",
+        "selectedSnapshotId": "menu_snapshot_0003"
+      },
+      "hoverOrMenuEvidence": {
+        "menuConfirmed": false,
+        "hoverConfirmed": false,
+        "inputEventSeq": 41
+      },
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success",
+        "planeChanged": true,
+        "positionChanged": true,
+        "beforeWorld": {
+          "worldX": 3205,
+          "worldY": 3209,
+          "plane": 2
+        },
+        "afterWorld": {
+          "worldX": 3206,
+          "worldY": 3208,
+          "plane": 0
+        }
+      },
+      "cameraHints": [],
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    }
+  ],
+  "routeLegs": [
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 1,
+      "segmentType": "area_start",
+      "label": "Start: bank_area",
+      "startWorld": {
+        "worldX": 3208,
+        "worldY": 3220,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3208,
+        "worldY": 3220,
+        "plane": 2
+      },
+      "primaryAction": null,
+      "postcondition": {
+        "type": "area_start",
+        "result": "success"
+      },
+      "confidence": 0.85,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 2,
+      "segmentType": "walk_segment",
+      "label": "Walk",
+      "startWorld": {
+        "worldX": 3208,
+        "worldY": 3220,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3205,
+        "worldY": 3209,
+        "plane": 2
+      },
+      "primaryAction": {
+        "option": "Walk",
+        "target": null,
+        "targetQuality": null
+      },
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "confidence": 0.75,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 3,
+      "segmentType": "stair_transition",
+      "label": "Climb-down Staircase",
+      "startWorld": {
+        "worldX": 3205,
+        "worldY": 3209,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "primaryAction": {
+        "option": "Climb-down",
+        "target": "Staircase",
+        "targetQuality": null
+      },
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success"
+      },
+      "confidence": 0.89,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 4,
+      "segmentType": "walk_segment",
+      "label": "Walk",
+      "startWorld": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "endWorld": {
+        "worldX": 3193,
+        "worldY": 3243,
+        "plane": 0
+      },
+      "primaryAction": {
+        "option": "Walk",
+        "target": null,
+        "targetQuality": null
+      },
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "confidence": 0.75,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 5,
+      "segmentType": "door_transition",
+      "label": "Open Door",
+      "startWorld": {
+        "worldX": 3198,
+        "worldY": 3218,
+        "plane": 0
+      },
+      "endWorld": {
+        "worldX": 3196,
+        "worldY": 3236,
+        "plane": 0
+      },
+      "primaryAction": {
+        "option": "Open",
+        "target": "Door",
+        "targetQuality": "strong"
+      },
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "confidence": 0.85,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 6,
+      "segmentType": "area_arrival",
+      "label": "Arrive: woodcutting_area",
+      "startWorld": {
+        "worldX": 3193,
+        "worldY": 3243,
+        "plane": 0
+      },
+      "endWorld": {
+        "worldX": 3193,
+        "worldY": 3243,
+        "plane": 0
+      },
+      "primaryAction": null,
+      "postcondition": {
+        "type": "area_arrival",
+        "result": "success"
+      },
+      "confidence": 0.88,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 1,
+      "segmentType": "area_start",
+      "label": "Start: bank_area",
+      "startWorld": {
+        "worldX": 3209,
+        "worldY": 3220,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3209,
+        "worldY": 3220,
+        "plane": 2
+      },
+      "primaryAction": null,
+      "postcondition": {
+        "type": "area_start",
+        "result": "success"
+      },
+      "confidence": 0.85,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 2,
+      "segmentType": "walk_segment",
+      "label": "Walk",
+      "startWorld": {
+        "worldX": 3209,
+        "worldY": 3220,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3205,
+        "worldY": 3209,
+        "plane": 2
+      },
+      "primaryAction": {
+        "option": "Walk",
+        "target": null,
+        "targetQuality": null
+      },
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "confidence": 0.75,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 3,
+      "segmentType": "menu_selection",
+      "label": "Cancel",
+      "startWorld": {
+        "worldX": 3206,
+        "worldY": 3215,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3205,
+        "worldY": 3209,
+        "plane": 2
+      },
+      "primaryAction": {
+        "option": "Cancel",
+        "target": null,
+        "targetQuality": "strong"
+      },
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "confidence": 0.85,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 4,
+      "segmentType": "stair_transition",
+      "label": "Climb-down Staircase",
+      "startWorld": {
+        "worldX": 3205,
+        "worldY": 3209,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "primaryAction": {
+        "option": "Climb-down",
+        "target": "Staircase",
+        "targetQuality": null
+      },
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success"
+      },
+      "confidence": 0.89,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 5,
+      "segmentType": "walk_segment",
+      "label": "Walk",
+      "startWorld": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "endWorld": {
+        "worldX": 3195,
+        "worldY": 3244,
+        "plane": 0
+      },
+      "primaryAction": {
+        "option": "Walk",
+        "target": null,
+        "targetQuality": null
+      },
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "confidence": 0.75,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 6,
+      "segmentType": "area_arrival",
+      "label": "Arrive: woodcutting_area",
+      "startWorld": {
+        "worldX": 3195,
+        "worldY": 3244,
+        "plane": 0
+      },
+      "endWorld": {
+        "worldX": 3195,
+        "worldY": 3244,
+        "plane": 0
+      },
+      "primaryAction": null,
+      "postcondition": {
+        "type": "area_arrival",
+        "result": "success"
+      },
+      "confidence": 0.88,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 1,
+      "segmentType": "area_start",
+      "label": "Start: bank_area",
+      "startWorld": {
+        "worldX": 3206,
+        "worldY": 3215,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3206,
+        "worldY": 3215,
+        "plane": 2
+      },
+      "primaryAction": null,
+      "postcondition": {
+        "type": "area_start",
+        "result": "success"
+      },
+      "confidence": 0.85,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 2,
+      "segmentType": "walk_segment",
+      "label": "Walk",
+      "startWorld": {
+        "worldX": 3206,
+        "worldY": 3215,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3205,
+        "worldY": 3209,
+        "plane": 2
+      },
+      "primaryAction": {
+        "option": "Walk",
+        "target": null,
+        "targetQuality": null
+      },
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "confidence": 0.75,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 3,
+      "segmentType": "walk_segment",
+      "label": "Walk here Staircase",
+      "startWorld": {
+        "worldX": 3206,
+        "worldY": 3215,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "primaryAction": {
+        "option": "Walk here",
+        "target": "Staircase",
+        "targetQuality": "strong"
+      },
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success"
+      },
+      "confidence": 0.95,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 4,
+      "segmentType": "stair_transition",
+      "label": "Climb-down Staircase",
+      "startWorld": {
+        "worldX": 3205,
+        "worldY": 3209,
+        "plane": 2
+      },
+      "endWorld": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "primaryAction": {
+        "option": "Climb-down",
+        "target": "Staircase",
+        "targetQuality": "strong"
+      },
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success"
+      },
+      "confidence": 0.95,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 5,
+      "segmentType": "walk_segment",
+      "label": "Walk",
+      "startWorld": {
+        "worldX": 3206,
+        "worldY": 3208,
+        "plane": 0
+      },
+      "endWorld": {
+        "worldX": 3195,
+        "worldY": 3243,
+        "plane": 0
+      },
+      "primaryAction": {
+        "option": "Walk",
+        "target": null,
+        "targetQuality": null
+      },
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "confidence": 0.75,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 6,
+      "segmentType": "walk_segment",
+      "label": "Walk here Tree",
+      "startWorld": {
+        "worldX": 3198,
+        "worldY": 3220,
+        "plane": 0
+      },
+      "endWorld": {
+        "worldX": 3195,
+        "worldY": 3230,
+        "plane": 0
+      },
+      "primaryAction": {
+        "option": "Walk here",
+        "target": "Tree",
+        "targetQuality": "medium"
+      },
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "confidence": 0.78,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 7,
+      "segmentType": "stair_transition",
+      "label": "Cancel Staircase",
+      "startWorld": {
+        "worldX": 3195,
+        "worldY": 3230,
+        "plane": 0
+      },
+      "endWorld": {
+        "worldX": 3195,
+        "worldY": 3241,
+        "plane": 0
+      },
+      "primaryAction": {
+        "option": "Cancel",
+        "target": "Staircase",
+        "targetQuality": "strong"
+      },
+      "postcondition": {
+        "type": "movement",
+        "result": "partial"
+      },
+      "confidence": 0.82,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "schema": "route_demonstration_leg.v1",
+      "segmentIndex": 8,
+      "segmentType": "area_arrival",
+      "label": "Arrive: woodcutting_area",
+      "startWorld": {
+        "worldX": 3195,
+        "worldY": 3243,
+        "plane": 0
+      },
+      "endWorld": {
+        "worldX": 3195,
+        "worldY": 3243,
+        "plane": 0
+      },
+      "primaryAction": null,
+      "postcondition": {
+        "type": "area_arrival",
+        "result": "success"
+      },
+      "confidence": 0.88,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    }
+  ],
+  "cameraHints": [
+    {
+      "schema": "route_demonstration_camera_hint.v1",
+      "segmentId": "cam_001",
+      "startTime": 1.047,
+      "endTime": 2.157,
+      "deltaYaw": 128.0,
+      "deltaPitch": -77.0,
+      "durationMs": 1110,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "schema": "route_demonstration_camera_hint.v1",
+      "segmentId": "cam_002",
+      "startTime": 13.391,
+      "endTime": 20.063,
+      "deltaYaw": 1011.0,
+      "deltaPitch": 40.0,
+      "durationMs": 6672,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "schema": "route_demonstration_camera_hint.v1",
+      "segmentId": "cam_003",
+      "startTime": 29.829,
+      "endTime": 33.469,
+      "deltaYaw": 0.0,
+      "deltaPitch": 86.0,
+      "durationMs": 3640,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "schema": "route_demonstration_camera_hint.v1",
+      "segmentId": "cam_001",
+      "startTime": 0.969,
+      "endTime": 3.047,
+      "deltaYaw": 645.0,
+      "deltaPitch": 0.0,
+      "durationMs": 2078,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "schema": "route_demonstration_camera_hint.v1",
+      "segmentId": "cam_002",
+      "startTime": 9.062,
+      "endTime": 17.0,
+      "deltaYaw": 1382.0,
+      "deltaPitch": 0.0,
+      "durationMs": 7938,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "schema": "route_demonstration_camera_hint.v1",
+      "segmentId": "cam_001",
+      "startTime": 6.829,
+      "endTime": 24.719,
+      "deltaYaw": -907.0,
+      "deltaPitch": 45.0,
+      "durationMs": 17890,
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    }
+  ],
+  "postconditions": [
+    {
+      "segmentIndex": 1,
+      "postcondition": {
+        "type": "area_start",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "segmentIndex": 2,
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "segmentIndex": 3,
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "segmentIndex": 4,
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "segmentIndex": 5,
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "segmentIndex": 6,
+      "postcondition": {
+        "type": "area_arrival",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+    },
+    {
+      "segmentIndex": 1,
+      "postcondition": {
+        "type": "area_start",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "segmentIndex": 2,
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "segmentIndex": 3,
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "segmentIndex": 4,
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "segmentIndex": 5,
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "segmentIndex": 6,
+      "postcondition": {
+        "type": "area_arrival",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+    },
+    {
+      "segmentIndex": 1,
+      "postcondition": {
+        "type": "area_start",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "segmentIndex": 2,
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "segmentIndex": 3,
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "segmentIndex": 4,
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "segmentIndex": 5,
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "segmentIndex": 6,
+      "postcondition": {
+        "type": "movement",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "segmentIndex": 7,
+      "postcondition": {
+        "type": "movement",
+        "result": "partial"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    },
+    {
+      "segmentIndex": 8,
+      "postcondition": {
+        "type": "area_arrival",
+        "result": "success"
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+    }
+  ],
+  "toleratedVariants": [],
+  "warnings": []
+}

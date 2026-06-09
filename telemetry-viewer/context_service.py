@@ -14,6 +14,18 @@ from urllib.parse import parse_qs, urlparse
 import live_context_query as query
 import external_knowledge
 import knowledge_fabric
+import telemetry_capabilities
+import telemetry_schema
+import route_monitor
+import route_template
+import banking_lifecycle
+import task_script_api
+import traversal_lifecycle
+import woodcutting_lifecycle
+import human_click_profile
+import interruption_lifecycle
+import combat_damage_summary
+import woodcutting_loop_lifecycle
 from live_context_format import format_context_human
 from telemetry_paths import find_newest_session, get_sessions_dir
 
@@ -56,7 +68,63 @@ SUPPORTED_RESPONSE_MODES = ["compact", "normal", "full"]
 SUPPORTED_NEEDS = [
     "baseline",
     "inventory",
+    "equipment",
+    "bank",
+    "bank_ui",
+    "banking",
+    "banking_lifecycle",
+    "bank_state",
+    "inventory_delta",
+    "deposit_result",
+    "combat_state",
+    "combat",
+    "recent_hitsplats",
+    "recent_stat_changes",
+    "recent_chat_messages",
+    "interruption_lifecycle",
+    "current_interruption",
+    "task_interruption_status",
+    "combat_damage_summary",
+    "damage_taken",
+    "damage_dealt",
+    "primary_opponent",
+    "recent_combat_summary",
+    "widgets",
+    "hover",
+    "menu",
+    "nearby_objects",
+    "route_objects",
+    "nearby_npcs",
     "activity",
+    "woodcutting_lifecycle",
+    "woodcutting_loop",
+    "woodcutting_loop_lifecycle",
+    "task_loop",
+    "next_expected_phase",
+    "lifecycle:woodcutting",
+    "task_summary:woodcutting",
+    "traversal_lifecycle",
+    "route_summary",
+    "latest_recording_traversal",
+    "route_template",
+    "route_template_comparison",
+    "latest_route_comparison",
+    "route_monitor",
+    "route_readiness",
+    "route_progress",
+    "route_next_segment",
+    "route_history",
+    "route_session_state",
+    "route_progress_timeline",
+    "route_completed_segments",
+    "route_remaining_segments",
+    "human_click_profile",
+    "task_click_profile",
+    "click_landing_profile",
+    "camera_action_profile",
+    "click_plan",
+    "human_click_plan",
+    "click_planning_context",
     "liveness",
     "diagnostics",
     "navigation_readiness",
@@ -101,6 +169,12 @@ SUPPORTED_NEEDS = [
     "knowledge_handoff_summary",
     "best:<classId>",
     "nearest:<classId>",
+    "best:object:<name_or_class>",
+    "best:npc:<name_or_class>",
+    "best:route:<name_or_class>",
+    "nearest:object:<name_or_class>",
+    "nearest:npc:<name_or_class>",
+    "nearest:route:<name_or_class>",
     "reachability:<classId>",
 ]
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -123,6 +197,14 @@ NAMED_QUERY_NEEDS = {
     "external-knowledge-status": ["external_knowledge_status"],
     "handoff-summary": ["knowledge_handoff_summary"],
 }
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def utc_now() -> str:
@@ -382,16 +464,20 @@ def capabilities_payload(context: dict) -> dict:
         item["availableNow"] = item["runtimeStatus"] == "available"
         item["watchable"] = item.get("status") == "watchable" or str(item.get("id", "")).startswith("watch:")
         capabilities.append(item)
+    telemetry_discovery = telemetry_capabilities.capability_summary_from_context(context)
     return {
         "schema": CAPABILITY_REGISTRY_SCHEMA,
         "generatedAtUtc": utc_now(),
         "sessionPath": str(context.get("session")) if context.get("session") else None,
         "capabilities": capabilities,
+        "telemetryDiscovery": telemetry_discovery,
         "runtimeSummary": {
             "available": sum(1 for item in capabilities if item.get("runtimeStatus") == "available"),
             "missing": sum(1 for item in capabilities if item.get("runtimeStatus") in {"missing", "stale"}),
             "watchable": sum(1 for item in capabilities if item.get("watchable")),
             "unsupported": sum(1 for item in capabilities if item.get("runtimeStatus") == "unsupported"),
+            "telemetryFieldsAvailable": len(telemetry_discovery.get("available_fields") or []),
+            "telemetryFieldsMissing": len(telemetry_discovery.get("missing_fields") or []),
         },
     }
 
@@ -1018,6 +1104,576 @@ def requested_class_needs(needs: list[str], prefix: str) -> list[str]:
     return values
 
 
+def requested_typed_target_needs(needs: list[str], prefix: str) -> list[tuple[str, str]]:
+    values: list[tuple[str, str]] = []
+    marker = prefix + ":"
+    for need in needs:
+        if not isinstance(need, str) or not need.startswith(marker):
+            continue
+        rest = need[len(marker) :]
+        parts = rest.split(":", 1)
+        if len(parts) != 2:
+            continue
+        kind, query_text = parts[0].strip().lower(), parts[1].strip()
+        if kind in {"object", "npc", "route"} and query_text:
+            values.append((kind, query_text))
+    return values
+
+
+def normalized_context_model(context: dict, *, max_items: int) -> dict:
+    return telemetry_schema.normalized_telemetry(context, max_items=max_items)
+
+
+def compact_section_missing(section: Any) -> bool:
+    return isinstance(section, dict) and section.get("missing") is True
+
+
+def compact_target_helper(model: dict, *, kind: str, query_text: str, mode: str, limit: int) -> dict:
+    result = telemetry_schema.select_target(model, kind=kind, query=query_text, mode=mode, limit=limit)
+    candidate = result.get("candidate")
+    if isinstance(candidate, dict):
+        result["candidate"] = {
+            key: candidate.get(key)
+            for key in (
+                "ref",
+                "kind",
+                "rawId",
+                "effectiveId",
+                "effectiveName",
+                "effectiveActions",
+                "worldPoint",
+                "localPoint",
+                "distance",
+                "onScreen",
+                "geometry",
+                "menuActionAvailable",
+                "routeObjectCandidate",
+                "routeObjectKind",
+                "freshness",
+                "confidence",
+                "reasons",
+                "missingFields",
+                "source",
+            )
+            if key in candidate
+        }
+    return result
+
+
+def recordings_root() -> Path:
+    return _repo_root() / "recordings"
+
+
+def resolve_recording_path(identifier: str | None, *, root: Path | None = None) -> Path | None:
+    if not identifier:
+        return None
+    text = str(identifier)
+    candidate = Path(text).expanduser()
+    if candidate.exists():
+        return candidate
+    root = root or recordings_root()
+    safe_name = Path(text).name
+    if not safe_name:
+        return None
+    return root / safe_name
+
+
+def list_recordings_payload(root: Path | None = None) -> dict[str, Any]:
+    root = root or recordings_root()
+    items = []
+    if root.exists():
+        for child in sorted((item for item in root.iterdir() if item.is_dir()), key=lambda item: item.name, reverse=True):
+            summary_path = child / "summary.json"
+            manifest_path = child / "manifest.json"
+            manifest = safe_load_json(manifest_path, {})
+            summary = safe_load_json(summary_path, {})
+            target_quality = compact_target_quality_counts(summary)
+            menu_interactions = compact_menu_interaction_counts(summary)
+            banking = compact_banking_lifecycle_counts(summary)
+            woodcutting_loop = compact_woodcutting_loop_counts(summary)
+            traversal = compact_traversal_lifecycle_counts(summary)
+            route_comparison = compact_route_template_counts(summary)
+            items.append(
+                {
+                    "id": child.name,
+                    "path": str(child),
+                    "label": manifest.get("label") or summary.get("label"),
+                    "description": manifest.get("description") or summary.get("description") or "",
+                    "createdAtUtc": manifest.get("created_at_utc") or manifest.get("createdAtUtc"),
+                    "durationSeconds": summary.get("duration_seconds") or manifest.get("duration_seconds"),
+                    "snapshotCount": summary.get("snapshot_count") or manifest.get("snapshot_count"),
+                    "eventCount": summary.get("event_count") or manifest.get("event_count"),
+                    "targetMatchQualityCounts": target_quality.get("targetMatchQualityCounts"),
+                    "menuInteractionCounts": menu_interactions.get("menuInteractionCounts"),
+                    "bankingLifecycleStatus": banking.get("bankingLifecycleStatus"),
+                    "bankOpenSeen": banking.get("bankOpenSeen"),
+                    "bankContainerAvailable": banking.get("bankContainerAvailable"),
+                    "depositedItemCount": banking.get("depositedItemCount"),
+                    "depositedItems": banking.get("depositedItems"),
+                    "woodcuttingLoopStatus": woodcutting_loop.get("woodcuttingLoopStatus"),
+                    "woodcuttingLoopState": woodcutting_loop.get("woodcuttingLoopState"),
+                    "woodcuttingLoopNextExpectedPhase": woodcutting_loop.get("woodcuttingLoopNextExpectedPhase"),
+                    "traversalStatus": traversal.get("traversalStatus"),
+                    "routeName": traversal.get("routeName"),
+                    "traversalStepCount": traversal.get("traversalStepCount"),
+                    "routeSegmentCount": traversal.get("routeSegmentCount"),
+                    "reviewEvidenceCount": traversal.get("reviewEvidenceCount"),
+                    "routeTemplateStatus": route_comparison.get("routeTemplateStatus"),
+                    "routeTemplateStatusReason": route_comparison.get("routeTemplateStatusReason"),
+                    "routeTemplateScore": route_comparison.get("routeTemplateScore"),
+                    "matchedVariantName": route_comparison.get("matchedVariantName"),
+                    "routeTemplateMissingSegmentCount": route_comparison.get("missingSegmentCount"),
+                    "summaryAvailable": summary_path.exists(),
+                    "schemaGapReportAvailable": (child / "schema_gap_report.md").exists(),
+                }
+            )
+    return {
+        "schema": "manual_recordings_list.v1",
+        "generatedAtUtc": utc_now(),
+        "recordingsRoot": str(root),
+        "recordings": items,
+        "count": len(items),
+    }
+
+
+def compact_target_quality_counts(summary: dict[str, Any]) -> dict[str, Any]:
+    target_summary = summary.get("target_match_summary") if isinstance(summary.get("target_match_summary"), dict) else {}
+    counts = target_summary.get("qualityCounts") if isinstance(target_summary.get("qualityCounts"), dict) else {}
+    examples = target_summary.get("examples") if isinstance(target_summary.get("examples"), list) else []
+    return {
+        "targetMatchQualityCounts": {
+            "strong": int(counts.get("strong") or target_summary.get("strongMatchCount") or 0),
+            "medium": int(counts.get("medium") or target_summary.get("mediumMatchCount") or 0),
+            "weak": int(counts.get("weak") or target_summary.get("weakMatchCount") or 0),
+            "unmatched": int(counts.get("unmatched") or target_summary.get("unmatchedCount") or 0),
+        },
+        "strongTargetClicks": [item for item in examples if isinstance(item, dict) and item.get("quality") == "strong"][:5],
+        "mediumTargetClicks": [item for item in examples if isinstance(item, dict) and item.get("quality") == "medium"][:5],
+        "weakTargetClicks": [item for item in examples if isinstance(item, dict) and item.get("quality") == "weak"][:5],
+        "unmatchedTargetClicks": [item for item in examples if isinstance(item, dict) and item.get("quality") == "unmatched"][:5],
+    }
+
+
+def compact_menu_interaction_counts(summary: dict[str, Any]) -> dict[str, Any]:
+    menu_summary = summary.get("menu_interaction_summary") if isinstance(summary.get("menu_interaction_summary"), dict) else {}
+    examples = menu_summary.get("examples") if isinstance(menu_summary.get("examples"), list) else []
+    return {
+        "menuInteractionCounts": {
+            "rightClickMenuOpens": int(menu_summary.get("rightClickMenuOpenCount") or 0),
+            "menuSelections": int(menu_summary.get("menuSelectionCount") or 0),
+            "menuRowsResolved": int(menu_summary.get("menuRowsResolvedCount") or 0),
+            "menuSelectionsWithRowGeometry": int(menu_summary.get("menuSelectionsWithRowGeometryCount") or 0),
+            "menuSelectionsLinkedToTargets": int(menu_summary.get("menuSelectionsLinkedToTargetsCount") or 0),
+            "menuSelectionsMissingRowGeometry": int(menu_summary.get("menuSelectionsMissingRowGeometryCount") or 0),
+        },
+        "menuSelections": examples[:5],
+        "menuSelectionsWithRowGeometry": [item for item in examples if isinstance(item, dict) and item.get("rowBoundsPresent")][:5],
+        "menuSelectionsLinkedToTargets": [item for item in examples if isinstance(item, dict) and item.get("linkedTarget")][:5],
+    }
+
+
+def compact_traversal_lifecycle_counts(summary: dict[str, Any]) -> dict[str, Any]:
+    lifecycle = summary.get("traversal_lifecycle") if isinstance(summary.get("traversal_lifecycle"), dict) else {}
+    if not lifecycle:
+        return {
+            "traversalStatus": None,
+            "routeName": None,
+            "traversalStepCount": 0,
+            "routeSegmentCount": 0,
+            "successfulSegmentCount": 0,
+            "partialSegmentCount": 0,
+            "reviewEvidenceCount": 0,
+            "traversalSummary": None,
+        }
+    compact = traversal_lifecycle.compact_lifecycle(lifecycle)
+    return {
+        "traversalStatus": compact.get("status"),
+        "routeName": compact.get("routeName"),
+        "traversalStepCount": compact.get("stepCount"),
+        "routeSegmentCount": compact.get("routeSegmentCount"),
+        "successfulSegmentCount": compact.get("successfulSegmentCount"),
+        "partialSegmentCount": compact.get("partialSegmentCount"),
+        "reviewEvidenceCount": compact.get("reviewEvidenceCount"),
+        "startArea": (compact.get("start") or {}).get("areaLabel") if isinstance(compact.get("start"), dict) else None,
+        "endArea": (compact.get("end") or {}).get("areaLabel") if isinstance(compact.get("end"), dict) else None,
+        "traversalSummary": compact,
+    }
+
+
+def compact_banking_lifecycle_counts(summary: dict[str, Any]) -> dict[str, Any]:
+    lifecycle = summary.get("banking_lifecycle") if isinstance(summary.get("banking_lifecycle"), dict) else {}
+    if not lifecycle:
+        return {
+            "bankingLifecycleStatus": None,
+            "bankOpenSeen": False,
+            "depositBoxOpenSeen": False,
+        "bankContainerAvailable": False,
+            "bankContainerDeltaAvailable": False,
+            "bankUiPresent": False,
+            "depositedItemCount": 0,
+            "depositedItems": [],
+            "bankingSummary": None,
+        }
+    compact = banking_lifecycle.compact_lifecycle(lifecycle)
+    return {
+        "bankingLifecycleStatus": compact.get("status"),
+        "bankingPhase": compact.get("phase"),
+        "bankLikeInterface": compact.get("bankLikeInterface"),
+        "bankOpenSeen": compact.get("bankOpenSeen"),
+        "depositBoxOpenSeen": compact.get("depositBoxOpenSeen"),
+        "bankWidgetRootSeen": compact.get("bankWidgetRootSeen"),
+        "bankContainerAvailable": compact.get("bankContainerAvailable"),
+        "bankContainerDeltaAvailable": compact.get("bankContainerDeltaAvailable"),
+        "depositConfirmationLevel": compact.get("depositConfirmationLevel"),
+        "bankUiPresent": compact.get("bankUiPresent"),
+        "bankUiSnapshotCount": compact.get("bankUiSnapshotCount"),
+        "bankUiFreshness": compact.get("bankUiFreshness"),
+        "depositDetected": compact.get("depositDetected"),
+        "withdrawDetected": compact.get("withdrawDetected"),
+        "depositedItemCount": compact.get("depositedItemCount") or 0,
+        "depositedItems": compact.get("depositedItems") or [],
+        "withdrawnItemCount": compact.get("withdrawnItemCount") or 0,
+        "withdrawnItems": compact.get("withdrawnItems") or [],
+        "bankingMissingCapabilities": compact.get("missingCapabilities") or [],
+        "bankingWarnings": compact.get("warnings") or [],
+        "bankingSummary": compact,
+    }
+
+
+def compact_interruption_lifecycle_counts(summary: dict[str, Any]) -> dict[str, Any]:
+    lifecycle = summary.get("interruption_lifecycle") if isinstance(summary.get("interruption_lifecycle"), dict) else {}
+    damage_summary = summary.get("combat_damage_summary") if isinstance(summary.get("combat_damage_summary"), dict) else {}
+    if not lifecycle:
+        damage_compact = combat_damage_summary.compact_summary(damage_summary) if damage_summary else {}
+        return {
+            "interruptionLifecycleStatus": None,
+            "interruptionDetected": False,
+            "interruptionType": None,
+            "interruptionPrimaryCause": None,
+            "interruptionTaskResumed": False,
+            "combatObserved": bool(damage_compact.get("combatObserved")),
+            "hitsplatsSeen": damage_compact.get("hitsplatCount") or 0,
+            "damageTakenTotal": damage_compact.get("damageTakenTotal"),
+            "damageDealtTotal": damage_compact.get("damageDealtTotal"),
+            "primaryOpponent": damage_compact.get("primaryOpponent"),
+            "interruptionSummary": None,
+        }
+    compact = interruption_lifecycle.compact_lifecycle(lifecycle)
+    if damage_summary:
+        damage_compact = combat_damage_summary.compact_summary(damage_summary)
+        compact.update({key: value for key, value in damage_compact.items() if value not in (None, "", [], {})})
+    return {
+        "interruptionLifecycleStatus": compact.get("status"),
+        "interruptionDetected": compact.get("interruptionDetected"),
+        "interruptionType": compact.get("interruptionType"),
+        "interruptionPrimaryCause": compact.get("primaryCause"),
+        "interruptionTaskResumed": compact.get("taskResumed"),
+        "combatObserved": compact.get("combatObserved"),
+        "hitsplatsSeen": compact.get("hitsplatsSeen") or 0,
+        "damageTakenTotal": compact.get("damageTakenTotal"),
+        "damageDealtTotal": compact.get("damageDealtTotal"),
+        "primaryOpponent": compact.get("primaryOpponent"),
+        "npcTargetedPlayer": compact.get("npcTargetedPlayer"),
+        "playerTargetedNpc": compact.get("playerTargetedNpc"),
+        "interruptionMissingCapabilities": compact.get("missingCapabilities") or [],
+        "interruptionWarnings": compact.get("warnings") or [],
+        "interruptionSummary": compact,
+    }
+
+
+def compact_woodcutting_loop_counts(summary: dict[str, Any]) -> dict[str, Any]:
+    lifecycle = summary.get("woodcutting_loop_lifecycle") if isinstance(summary.get("woodcutting_loop_lifecycle"), dict) else {}
+    if not lifecycle:
+        return {
+            "woodcuttingLoopStatus": None,
+            "woodcuttingLoopState": None,
+            "woodcuttingLoopCurrentPhase": None,
+            "woodcuttingLoopNextExpectedPhase": None,
+            "woodcuttingLoopSummary": None,
+        }
+    compact = woodcutting_loop_lifecycle.compact_lifecycle(lifecycle)
+    return {
+        "woodcuttingLoopStatus": compact.get("status"),
+        "woodcuttingLoopState": compact.get("loopState"),
+        "woodcuttingLoopCurrentPhase": compact.get("currentPhase"),
+        "woodcuttingLoopNextExpectedPhase": compact.get("nextExpectedPhase"),
+        "woodcuttingLoopConfidence": compact.get("confidence"),
+        "woodcuttingLoopDetectedPhases": compact.get("detectedPhases") or [],
+        "woodcuttingLoopSummary": compact,
+    }
+
+
+def compact_route_template_counts(summary: dict[str, Any]) -> dict[str, Any]:
+    comparison = summary.get("route_template_comparison") if isinstance(summary.get("route_template_comparison"), dict) else {}
+    if not comparison:
+        return {
+            "routeTemplatePath": summary.get("routeTemplatePath"),
+            "detectedRouteName": summary.get("detectedRouteName"),
+            "detectedStartArea": summary.get("detectedStartArea"),
+            "detectedEndArea": summary.get("detectedEndArea"),
+            "routeTemplateAutoSelection": summary.get("routeTemplateAutoSelection"),
+            "routeTemplateDirectionMismatch": bool(summary.get("routeTemplateDirectionMismatch")),
+            "untemplatedRoute": bool(summary.get("untemplatedRoute")),
+            "suggestedTemplateName": summary.get("suggestedTemplateName"),
+            "routeTemplateStatus": None,
+            "routeTemplateStatusReason": None,
+            "routeTemplateScore": None,
+            "routeTemplateRevision": None,
+            "matchedVariantName": None,
+            "validUnregisteredVariant": False,
+            "matchedSegmentCount": 0,
+            "requiredSegmentCount": 0,
+            "optionalSegmentCount": 0,
+            "missingSegmentCount": 0,
+            "reviewEvidenceCount": 0,
+            "navigationSupportSubstitutions": 0,
+            "navigationSupportEvidenceCount": 0,
+            "allowedExtraSegmentCount": 0,
+            "routeTemplateComparison": None,
+        }
+    compact = route_template.compact_comparison(comparison)
+    return {
+        "routeTemplatePath": summary.get("routeTemplatePath"),
+        "routeTemplateComparisonPath": summary.get("routeTemplateComparisonPath"),
+        "detectedRouteName": summary.get("detectedRouteName") or compact.get("detectedRouteName"),
+        "detectedStartArea": summary.get("detectedStartArea") or compact.get("detectedStartArea"),
+        "detectedEndArea": summary.get("detectedEndArea") or compact.get("detectedEndArea"),
+        "routeTemplateAutoSelection": summary.get("routeTemplateAutoSelection"),
+        "routeTemplateDirectionMismatch": bool(summary.get("routeTemplateDirectionMismatch") or compact.get("routeTemplateDirectionMismatch")),
+        "untemplatedRoute": bool(summary.get("untemplatedRoute")),
+        "suggestedTemplateName": summary.get("suggestedTemplateName"),
+        "routeTemplateStatus": compact.get("status"),
+        "routeTemplateStatusReason": compact.get("statusReason"),
+        "routeTemplateScore": compact.get("score"),
+        "routeTemplateRevision": compact.get("templateRevision"),
+        "matchedVariantName": compact.get("matchedVariantName"),
+        "validUnregisteredVariant": compact.get("validUnregisteredVariant"),
+        "matchedSegmentCount": compact.get("matchedSegmentCount"),
+        "requiredSegmentCount": compact.get("requiredSegmentCount"),
+        "optionalSegmentCount": comparison.get("optionalSegmentCount"),
+        "missingSegmentCount": compact.get("missingSegmentCount"),
+        "extraSegmentCount": compact.get("extraSegmentCount"),
+        "allowedExtraSegmentCount": compact.get("allowedExtraSegmentCount"),
+        "navigationSupportSubstitutions": compact.get("navigationSupportSubstitutionCount"),
+        "navigationSupportEvidenceCount": compact.get("navigationSupportEvidenceCount"),
+        "reviewEvidenceCount": compact.get("reviewEvidenceCount"),
+        "reviewEvidenceSegmentCount": compact.get("reviewEvidenceSegmentCount"),
+        "weakSegmentCount": compact.get("weakSegmentCount"),
+        "routeTemplateWarningCount": compact.get("warningCount"),
+        "routeTemplateComparison": compact,
+    }
+
+
+def compact_route_monitor_counts(summary: dict[str, Any]) -> dict[str, Any]:
+    monitor = summary.get("route_monitor") if isinstance(summary.get("route_monitor"), dict) else {}
+    if not monitor:
+        return {
+            "routeMonitorStatus": None,
+            "routeState": None,
+            "routeMonitorRouteName": None,
+            "routeMonitorTemplateRevision": None,
+            "routeMonitorCurrentArea": None,
+            "nextExpectedSegment": None,
+            "routeMonitorCompletedSegmentCount": 0,
+            "routeMonitorRemainingSegmentCount": 0,
+            "offRoute": False,
+            "routeMonitor": None,
+        }
+    compact = route_monitor.compact_status(monitor)
+    return {
+        "routeMonitorStatus": compact.get("status"),
+        "routeState": compact.get("routeState"),
+        "routeMonitorRouteName": compact.get("routeName"),
+        "routeMonitorTemplateRevision": compact.get("templateRevision"),
+        "routeMonitorCurrentArea": compact.get("currentArea"),
+        "nextExpectedSegment": compact.get("nextExpectedSegment"),
+        "routeMonitorCompletedSegmentCount": compact.get("completedSegmentCount"),
+        "routeMonitorRemainingSegmentCount": compact.get("remainingSegmentCount"),
+        "offRoute": compact.get("offRoute"),
+        "routeMonitor": compact,
+    }
+
+
+def compact_route_history_counts(summary: dict[str, Any]) -> dict[str, Any]:
+    history = summary.get("route_history") if isinstance(summary.get("route_history"), dict) else {}
+    if not history:
+        return {
+            "routeHistoryStatus": None,
+            "routeHistoryState": None,
+            "routeHistorySessionId": None,
+            "routeHistoryCompletedSegmentCount": 0,
+            "routeHistoryRemainingSegmentCount": 0,
+            "routeHistory": None,
+        }
+    return {
+        "routeHistoryStatus": history.get("status"),
+        "routeHistoryState": history.get("routeState"),
+        "routeHistorySessionId": history.get("sessionId"),
+        "routeHistoryRouteName": history.get("routeName"),
+        "routeHistoryCurrentArea": history.get("currentArea"),
+        "routeHistoryCompletedSegmentCount": history.get("completedSegmentCount"),
+        "routeHistoryRemainingSegmentCount": history.get("remainingSegmentCount"),
+        "routeHistoryOffRoute": history.get("offRoute"),
+        "routeHistory": {
+            "status": history.get("status"),
+            "sessionId": history.get("sessionId"),
+            "routeName": history.get("routeName"),
+            "routeState": history.get("routeState"),
+            "currentArea": history.get("currentArea"),
+            "completedSegmentCount": history.get("completedSegmentCount"),
+            "remainingSegmentCount": history.get("remainingSegmentCount"),
+            "nextExpectedSegment": history.get("nextExpectedSegment"),
+            "offRoute": history.get("offRoute"),
+            "warnings": (history.get("warnings") or [])[:5],
+        },
+    }
+
+
+def resolve_route_template_request_path(value: Any) -> Path | str | None:
+    if not str(value or "").strip():
+        return None
+    if str(value).strip().lower() == "auto":
+        return "auto"
+    resolution = route_template.resolve_route_template(value)
+    if resolution.get("status") != "PASS" or not resolution.get("resolvedPath"):
+        return None
+    return Path(str(resolution.get("resolvedPath")))
+
+
+def latest_route_session_state(root: Path | None = None) -> dict[str, Any]:
+    root = root or route_monitor.DEFAULT_ROUTE_HISTORY_ROOT
+    try:
+        candidates = list(root.glob("*/*/route_session_state.json"))
+    except OSError:
+        candidates = []
+    if not candidates:
+        return {}
+    newest = max(candidates, key=lambda path: path.stat().st_mtime)
+    state = safe_load_json(newest, {})
+    if state:
+        state.setdefault("statePath", str(newest))
+    return state
+
+
+def compact_route_session_state(state: dict[str, Any]) -> dict[str, Any]:
+    if not state:
+        return {}
+    return {
+        "schema": state.get("schema"),
+        "sessionId": state.get("sessionId"),
+        "routeName": state.get("routeName"),
+        "templateRevision": state.get("templateRevision"),
+        "routeState": state.get("routeState"),
+        "currentArea": state.get("currentArea"),
+        "currentWorld": state.get("currentWorld"),
+        "currentSegment": {
+            "segmentIndex": state.get("currentSegmentIndex"),
+            "label": state.get("currentSegmentLabel"),
+        },
+        "nextExpectedSegment": state.get("nextExpectedSegment"),
+        "completedSegmentCount": len(state.get("completedSegments") or []),
+        "remainingSegmentCount": len(state.get("remainingSegments") or []),
+        "completedSegments": state.get("completedSegments") or [],
+        "remainingSegments": state.get("remainingSegments") or [],
+        "offRoute": state.get("offRoute"),
+        "arrivalGateStatus": state.get("arrivalGateStatus"),
+        "distanceToEndCluster": state.get("distanceToEndCluster"),
+        "endClusterToleranceTiles": state.get("endClusterToleranceTiles"),
+        "nearEndCluster": state.get("nearEndCluster"),
+        "nearEndClusterSampleCount": state.get("nearEndClusterSampleCount"),
+        "distanceAfterLastTransition": state.get("distanceAfterLastTransition"),
+        "arrivalGateRequiresEndCluster": state.get("arrivalGateRequiresEndCluster"),
+        "distanceOnlyProgressRejected": state.get("distanceOnlyProgressRejected"),
+        "arrivalGateRejectedReason": state.get("arrivalGateRejectedReason"),
+        "arrivalGatePassedReason": state.get("arrivalGatePassedReason"),
+        "arrivalGateWarnings": (state.get("arrivalGateWarnings") or [])[:5],
+        "freshness": state.get("freshness"),
+        "warnings": (state.get("warnings") or [])[:5],
+        "statePath": state.get("statePath"),
+        "actualRouteMonitorFolder": str(Path(state.get("statePath")).parent) if state.get("statePath") else None,
+    }
+
+
+def recording_summary_payload(identifier: str | None, *, root: Path | None = None) -> dict[str, Any]:
+    recording = resolve_recording_path(identifier, root=root)
+    if recording is None or not recording.exists():
+        return {"schema": "manual_recording_summary.v1", "status": "FAIL", "error": "recording not found", "recording": identifier}
+    summary_path = recording / "summary.json"
+    if summary_path.exists():
+        summary = safe_load_json(summary_path, {})
+    else:
+        import analyze_manual_recording
+
+        summary = analyze_manual_recording.update_outputs(recording)
+    if not isinstance(summary, dict):
+        summary = {}
+    if not isinstance(summary.get("traversal_lifecycle"), dict):
+        lifecycle = safe_load_json(recording / "traversal_lifecycle.json", {})
+        if lifecycle:
+            summary["traversal_lifecycle"] = lifecycle
+    if not isinstance(summary.get("banking_lifecycle"), dict):
+        lifecycle = safe_load_json(recording / "banking_lifecycle.json", {})
+        if lifecycle:
+            summary["banking_lifecycle"] = lifecycle
+    if not isinstance(summary.get("interruption_lifecycle"), dict):
+        lifecycle = safe_load_json(recording / "interruption_lifecycle.json", {})
+        if lifecycle:
+            summary["interruption_lifecycle"] = lifecycle
+    if not isinstance(summary.get("combat_damage_summary"), dict):
+        damage = safe_load_json(recording / "combat_damage_summary.json", {})
+        if damage:
+            summary["combat_damage_summary"] = damage
+    if not isinstance(summary.get("woodcutting_loop_lifecycle"), dict):
+        lifecycle = safe_load_json(recording / "woodcutting_loop_lifecycle.json", {})
+        if lifecycle:
+            summary["woodcutting_loop_lifecycle"] = lifecycle
+    if not isinstance(summary.get("route_template_comparison"), dict):
+        comparison = safe_load_json(recording / "route_template_comparison.json", {})
+        if comparison:
+            summary["route_template_comparison"] = comparison
+    if not isinstance(summary.get("route_monitor"), dict):
+        monitor = safe_load_json(recording / "route_monitor_status.json", {})
+        if monitor:
+            summary["route_monitor"] = monitor
+    summary.setdefault("schema", "manual_recording_summary.v1")
+    summary.setdefault("status", "PASS")
+    summary.update({key: value for key, value in compact_target_quality_counts(summary).items() if key not in summary})
+    summary.update({key: value for key, value in compact_menu_interaction_counts(summary).items() if key not in summary})
+    summary.update({key: value for key, value in compact_banking_lifecycle_counts(summary).items() if key not in summary})
+    summary.update({key: value for key, value in compact_interruption_lifecycle_counts(summary).items() if key not in summary})
+    summary.update({key: value for key, value in compact_woodcutting_loop_counts(summary).items() if key not in summary})
+    summary.update({key: value for key, value in compact_traversal_lifecycle_counts(summary).items() if key not in summary})
+    summary.update({key: value for key, value in compact_route_template_counts(summary).items() if key not in summary})
+    summary.update({key: value for key, value in compact_route_monitor_counts(summary).items() if key not in summary})
+    if not isinstance(summary.get("route_history"), dict):
+        history = safe_load_json(recording / "route_history_summary.json", {})
+        if history:
+            summary["route_history"] = history
+    summary.update({key: value for key, value in compact_route_history_counts(summary).items() if key not in summary})
+    return summary
+
+
+def recording_schema_gap_payload(identifier: str | None, *, root: Path | None = None) -> dict[str, Any]:
+    recording = resolve_recording_path(identifier, root=root)
+    if recording is None or not recording.exists():
+        return {"schema": "manual_recording_schema_gap.v1", "status": "FAIL", "error": "recording not found", "recording": identifier}
+    report_path = recording / "schema_gap_report.md"
+    if not report_path.exists():
+        import analyze_manual_recording
+
+        analyze_manual_recording.update_outputs(recording)
+    try:
+        report = report_path.read_text(encoding="utf-8")
+    except OSError as error:
+        return {"schema": "manual_recording_schema_gap.v1", "status": "FAIL", "error": f"{type(error).__name__}: {error}", "recording": str(recording)}
+    return {
+        "schema": "manual_recording_schema_gap.v1",
+        "status": "PASS",
+        "recording": str(recording),
+        "reportMarkdown": report,
+    }
+
+
 def build_context_response(
     context: dict,
     request: dict,
@@ -1042,6 +1698,7 @@ def build_context_response(
         max_events = 5
     args = request_args(request, max_candidates)
     scoped_context = constrained_context(context, request)
+    telemetry_model = normalized_context_model(scoped_context, max_items=max_candidates)
     warnings = list(scoped_context.get("warnings") or [])
     missing = list(scoped_context.get("missingFields") or [])
     status = "PASS"
@@ -1058,6 +1715,7 @@ def build_context_response(
         "requestId": request_id,
         "generatedAtUtc": query.utc_now(),
         "latestTick": query.latest_tick(scoped_context),
+        "latestExportSequence": telemetry_model.get("latest_export_sequence"),
         "status": "PASS",
         "freshness": freshness,
         "warnings": [],
@@ -1078,6 +1736,115 @@ def build_context_response(
         status = combine_status(status, inventory.get("status", "WARN"))
         warnings.extend(inventory.get("warnings") or [])
         missing.extend(inventory.get("missingFields") or [])
+    for section in ("equipment", "bank", "widgets", "hover", "menu"):
+        if section in needs:
+            value = telemetry_model.get(section)
+            response[section] = value
+            if compact_section_missing(value):
+                status = combine_status(status, "WARN")
+                missing.append(section)
+                warnings.append(f"{section} telemetry is not available in the current source set.")
+    if "bank_ui" in needs:
+        value = telemetry_model.get("bank")
+        response["bankUi"] = value
+        if compact_section_missing(value):
+            status = combine_status(status, "WARN")
+            missing.append("bank_ui")
+            warnings.append("bank_ui telemetry is not available in the current source set.")
+    if "nearby_objects" in needs:
+        response["nearbyObjects"] = {
+            "count": len(telemetry_model.get("nearby_objects") or []),
+            "items": (telemetry_model.get("nearby_objects") or [])[:max_candidates],
+        }
+        if not response["nearbyObjects"]["items"]:
+            status = combine_status(status, "WARN")
+            missing.append("nearby_objects")
+    if "route_objects" in needs:
+        response["routeObjects"] = {
+            "count": len(telemetry_model.get("route_objects") or []),
+            "items": (telemetry_model.get("route_objects") or [])[:max_candidates],
+        }
+        if not response["routeObjects"]["items"]:
+            status = combine_status(status, "WARN")
+            missing.append("route_objects")
+    if "nearby_npcs" in needs:
+        response["nearbyNpcs"] = {
+            "count": len(telemetry_model.get("nearby_npcs") or []),
+            "items": (telemetry_model.get("nearby_npcs") or [])[:max_candidates],
+        }
+        if not response["nearbyNpcs"]["items"]:
+            status = combine_status(status, "WARN")
+            missing.append("nearby_npcs")
+    if any(need in needs for need in ("combat_state", "combat", "recent_hitsplats", "recent_stat_changes", "recent_chat_messages", "combat_damage_summary", "damage_taken", "damage_dealt", "primary_opponent", "recent_combat_summary")):
+        combat_value = _dict(
+            query.first_value(
+                context.get("combat_state"),
+                context.get("combatState"),
+                _dict(context.get("normalized")).get("combat"),
+                telemetry_model.get("combat"),
+            )
+        )
+        response["combatState"] = combat_value
+        if compact_section_missing(combat_value):
+            status = combine_status(status, "WARN")
+            missing.append("combat_state")
+            warnings.append("combat_state telemetry is not available in the current source set.")
+        else:
+            if "combat" in needs:
+                response["combat"] = {
+                    "inCombat": combat_value.get("inCombat"),
+                    "playerInteracting": combat_value.get("playerInteracting"),
+                    "actorsInteractingWithPlayer": (combat_value.get("actorsInteractingWithPlayer") or [])[:max_candidates],
+                    "nearbyHostileNpcs": (combat_value.get("nearbyHostileNpcs") or [])[:max_candidates],
+                    "playerHealth": combat_value.get("playerHealth"),
+                }
+            if "recent_hitsplats" in needs:
+                response["recentHitsplats"] = (combat_value.get("recentHitsplats") or [])[:max_candidates]
+            if "recent_stat_changes" in needs:
+                response["recentStatChanges"] = (combat_value.get("recentStatChanges") or [])[:max_candidates]
+            if "recent_chat_messages" in needs:
+                response["recentChatMessages"] = (combat_value.get("recentChatMessages") or [])[:max_candidates]
+            if any(need in needs for need in ("combat_damage_summary", "damage_taken", "damage_dealt", "primary_opponent", "recent_combat_summary")):
+                lifecycle = interruption_lifecycle.analyze_context(
+                    {
+                        "combat_state": combat_value,
+                        "woodcutting_lifecycle": _dict(response.get("woodcuttingLifecycle")),
+                    }
+                )
+                damage = combat_damage_summary.analyze_context(
+                    {
+                        "combat_state": combat_value,
+                        "interruption_lifecycle": lifecycle,
+                    }
+                )
+                compact_damage = combat_damage_summary.compact_summary(damage)
+                response["combatDamageSummary"] = compact_damage if response_mode == "compact" else damage
+                if "damage_taken" in needs:
+                    response["damageTaken"] = {
+                        "total": compact_damage.get("damageTakenTotal"),
+                        "hitsplats": compact_damage.get("damageTakenHitsplats"),
+                        "hpChanged": compact_damage.get("hpChanged"),
+                    }
+                if "damage_dealt" in needs:
+                    response["damageDealt"] = {
+                        "total": compact_damage.get("damageDealtTotal"),
+                        "hitsplats": compact_damage.get("damageDealtHitsplats"),
+                        "targets": _dict(damage.get("damageDealt")).get("targets") or [],
+                    }
+                if "primary_opponent" in needs:
+                    response["primaryOpponent"] = compact_damage.get("primaryOpponent") or {}
+                if "recent_combat_summary" in needs:
+                    response["recentCombatSummary"] = {
+                        "combatObserved": compact_damage.get("combatObserved"),
+                        "primaryOpponent": compact_damage.get("primaryOpponent"),
+                        "damageTakenTotal": compact_damage.get("damageTakenTotal"),
+                        "damageDealtTotal": compact_damage.get("damageDealtTotal"),
+                        "hitsplatCount": compact_damage.get("hitsplatCount"),
+                        "hpChanged": compact_damage.get("hpChanged"),
+                        "actorDeathSeen": compact_damage.get("actorDeathSeen"),
+                        "taskResumed": compact_damage.get("taskResumed"),
+                        "warnings": compact_damage.get("warnings") or [],
+                    }
     if "activity" in needs:
         activity = query.activity_payload(scoped_context)
         response["activity"] = activity.get("activityState") if response_mode != "full" else activity
@@ -1089,6 +1856,333 @@ def build_context_response(
         status = combine_status(status, activity.get("status", "WARN"))
         warnings.extend(activity.get("warnings") or [])
         missing.extend(activity.get("missingFields") or [])
+    if "woodcutting_lifecycle" in needs or "lifecycle:woodcutting" in needs:
+        lifecycle = woodcutting_lifecycle.analyze_context(scoped_context)
+        response["woodcuttingLifecycle"] = (
+            woodcutting_lifecycle.compact_lifecycle(lifecycle)
+            if response_mode == "compact"
+            else lifecycle
+        )
+        status = combine_status(status, lifecycle.get("status", "WARN"))
+        warnings.extend(lifecycle.get("warnings") or [])
+    if any(need in needs for need in ("interruption_lifecycle", "current_interruption", "task_interruption_status")):
+        lifecycle = interruption_lifecycle.analyze_context({"combat_state": telemetry_model.get("combat"), "woodcutting_lifecycle": _dict(response.get("woodcuttingLifecycle"))})
+        compact = interruption_lifecycle.compact_lifecycle(lifecycle)
+        response["interruptionLifecycle"] = compact if response_mode == "compact" else lifecycle
+        if "current_interruption" in needs:
+            response["currentInterruption"] = {
+                "interruptionDetected": compact.get("interruptionDetected"),
+                "interruptionType": compact.get("interruptionType"),
+                "primaryCause": compact.get("primaryCause"),
+                "combatObserved": compact.get("combatObserved"),
+                "taskResumed": compact.get("taskResumed"),
+                "confidence": compact.get("confidence"),
+                "warnings": compact.get("warnings") or [],
+            }
+        if "task_interruption_status" in needs:
+            response["taskInterruptionStatus"] = {
+                "status": compact.get("status"),
+                "interruptionDetected": compact.get("interruptionDetected"),
+                "cause": compact.get("primaryCause"),
+                "missingCapabilities": compact.get("missingCapabilities") or [],
+            }
+        status = combine_status(status, lifecycle.get("status", "WARN"))
+        warnings.extend(lifecycle.get("warnings") or [])
+        missing.extend(lifecycle.get("missingCapabilities") or [])
+    if any(need in needs for need in ("banking", "banking_lifecycle", "bank_state", "inventory_delta", "deposit_result")):
+        lifecycle = banking_lifecycle.analyze_context(scoped_context)
+        compact = banking_lifecycle.compact_lifecycle(lifecycle)
+        response["bankingLifecycle"] = compact if response_mode == "compact" else lifecycle
+        if "banking" in needs:
+            response["banking"] = compact if response_mode == "compact" else lifecycle
+        if "bank_state" in needs:
+            response["bankState"] = {
+                "bankOpenSeen": compact.get("bankOpenSeen"),
+                "depositBoxOpenSeen": compact.get("depositBoxOpenSeen"),
+                "bankWidgetRootSeen": compact.get("bankWidgetRootSeen"),
+                "bankContainerAvailable": compact.get("bankContainerAvailable"),
+                "bankContainerDeltaAvailable": compact.get("bankContainerDeltaAvailable"),
+                "bankLikeInterface": compact.get("bankLikeInterface"),
+                "bankUiPresent": compact.get("bankUiPresent"),
+                "bankUiFreshness": compact.get("bankUiFreshness"),
+                "inventoryFreeSlots": compact.get("freeSlotsAfter"),
+                "depositedItems": compact.get("depositedItems") or [],
+                "depositConfirmationLevel": compact.get("depositConfirmationLevel"),
+                "missingCapabilities": compact.get("missingCapabilities") or [],
+                "warnings": compact.get("warnings") or [],
+            }
+        if "inventory_delta" in needs:
+            response["inventoryDelta"] = {
+                "freeSlotsBefore": compact.get("freeSlotsBefore"),
+                "freeSlotsAfter": compact.get("freeSlotsAfter"),
+                "freeSlotDelta": compact.get("freeSlotDelta"),
+                "depositedItems": compact.get("depositedItems") or [],
+                "withdrawnItems": compact.get("withdrawnItems") or [],
+            }
+        if "deposit_result" in needs:
+            response["depositResult"] = {
+                "depositComplete": bool(compact.get("depositDetected")),
+                "depositedItems": compact.get("depositedItems") or [],
+                "totalDepositedCount": compact.get("depositedItemCount") or 0,
+                "depositConfirmationLevel": compact.get("depositConfirmationLevel"),
+                "bankContainerDeltaAvailable": compact.get("bankContainerDeltaAvailable"),
+                "bankOpen": compact.get("bankOpenSeen"),
+                "depositBoxOpen": compact.get("depositBoxOpenSeen"),
+                "activeBankLikeInterface": compact.get("bankLikeInterface"),
+                "confidence": compact.get("confidence"),
+                "missingCapabilities": compact.get("missingCapabilities") or [],
+                "warnings": compact.get("warnings") or [],
+            }
+        status = combine_status(status, lifecycle.get("status", "WARN"))
+        warnings.extend(lifecycle.get("warnings") or [])
+        missing.extend(lifecycle.get("missingCapabilities") or [])
+    if any(need in needs for need in ("woodcutting_loop", "woodcutting_loop_lifecycle", "task_loop", "next_expected_phase")):
+        wood_lifecycle = woodcutting_lifecycle.analyze_context(scoped_context)
+        bank_lifecycle = banking_lifecycle.analyze_context(scoped_context)
+        interruption = interruption_lifecycle.analyze_context(
+            {"combat_state": telemetry_model.get("combat"), "woodcutting_lifecycle": wood_lifecycle}
+        )
+        damage = _dict(response.get("combatDamageSummary"))
+        loop = woodcutting_loop_lifecycle.analyze_context(
+            {
+                "woodcutting_lifecycle": wood_lifecycle,
+                "banking_lifecycle": bank_lifecycle,
+                "interruption_lifecycle": interruption,
+                "combat_damage_summary": damage,
+            }
+        )
+        compact = woodcutting_loop_lifecycle.compact_lifecycle(loop)
+        response["woodcuttingLoop"] = compact if response_mode == "compact" else loop
+        if "woodcutting_loop_lifecycle" in needs:
+            response["woodcuttingLoopLifecycle"] = compact if response_mode == "compact" else loop
+        if "task_loop" in needs:
+            response["taskLoop"] = {
+                "status": compact.get("status"),
+                "loopState": compact.get("loopState"),
+                "currentPhase": compact.get("currentPhase"),
+                "nextExpectedPhase": compact.get("nextExpectedPhase"),
+                "confidence": compact.get("confidence"),
+                "warnings": compact.get("warnings") or [],
+            }
+        if "next_expected_phase" in needs:
+            response["nextExpectedPhase"] = {
+                "phase": compact.get("nextExpectedPhase"),
+                "label": compact.get("nextExpectedPhaseLabel"),
+                "currentPhase": compact.get("currentPhase"),
+                "loopState": compact.get("loopState"),
+            }
+        status = combine_status(status, loop.get("status", "WARN"))
+        warnings.extend(loop.get("warnings") or [])
+        missing.extend(loop.get("missingCapabilities") or [])
+    if "traversal_lifecycle" in needs or "route_summary" in needs or "latest_recording_traversal" in needs:
+        latest = latest_recording_path = None
+        recordings = []
+        root = recordings_root()
+        if root.exists():
+            recordings = sorted([path for path in root.iterdir() if path.is_dir()], key=lambda path: path.stat().st_mtime)
+        latest_recording_path = recordings[-1] if recordings else None
+        lifecycle = {}
+        if latest_recording_path:
+            summary = safe_load_json(latest_recording_path / "summary.json", {})
+            lifecycle = summary.get("traversal_lifecycle") if isinstance(summary.get("traversal_lifecycle"), dict) else {}
+            if not lifecycle:
+                lifecycle = safe_load_json(latest_recording_path / "traversal_lifecycle.json", {})
+        if lifecycle:
+            latest = traversal_lifecycle.compact_lifecycle(lifecycle) if response_mode == "compact" else lifecycle
+            response["latestRecordingTraversal"] = latest
+            response["routeSummary"] = latest
+            status = combine_status(status, lifecycle.get("status", "WARN"))
+            warnings.extend(lifecycle.get("warnings") or [])
+        else:
+            response["latestRecordingTraversal"] = None
+            response["routeSummary"] = None
+            status = combine_status(status, "WARN")
+            warnings.append("latest recording traversal lifecycle is not available")
+    if "route_template" in needs or "route_template_comparison" in needs or "latest_route_comparison" in needs:
+        latest_recording_path = None
+        recordings = []
+        root = recordings_root()
+        if root.exists():
+            recordings = sorted([path for path in root.iterdir() if path.is_dir()], key=lambda path: path.stat().st_mtime)
+        latest_recording_path = recordings[-1] if recordings else None
+        comparison = {}
+        route_template_payload = {}
+        if latest_recording_path:
+            summary = safe_load_json(latest_recording_path / "summary.json", {})
+            comparison = summary.get("route_template_comparison") if isinstance(summary.get("route_template_comparison"), dict) else {}
+            if not comparison:
+                comparison = safe_load_json(latest_recording_path / "route_template_comparison.json", {})
+            template_path = summary.get("routeTemplatePath")
+            if template_path:
+                route_template_payload = safe_load_json(Path(template_path), {})
+        if route_template_payload and "route_template" in needs:
+            response["routeTemplate"] = route_template_payload if response_mode != "compact" else {
+                "schema": route_template_payload.get("schema"),
+                "routeName": route_template_payload.get("routeName"),
+                "templateRevision": route_template_payload.get("templateRevision"),
+                "segmentCount": len(route_template_payload.get("segments") or []),
+                "optionalSegmentCount": len(route_template_payload.get("optionalSegments") or []),
+                "templateNotes": (route_template_payload.get("templateNotes") or [])[:5],
+                "warnings": (route_template_payload.get("warnings") or [])[:5],
+            }
+        if comparison:
+            compact = route_template.compact_comparison(comparison)
+            response["latestRouteComparison"] = compact if response_mode == "compact" else comparison
+            response["routeTemplateComparison"] = compact if response_mode == "compact" else comparison
+            status = combine_status(status, comparison.get("status", "WARN"))
+            warnings.extend(comparison.get("warnings") or [])
+        else:
+            response["latestRouteComparison"] = None
+            response["routeTemplateComparison"] = None
+            status = combine_status(status, "WARN")
+            warnings.append("latest route template comparison is not available")
+    if any(need in needs for need in ("route_monitor", "route_readiness", "route_progress", "route_next_segment")):
+        template_path = resolve_route_template_request_path(request.get("routeTemplate") or request.get("routeTemplatePath"))
+        if template_path is None:
+            response["routeMonitor"] = None
+            status = combine_status(status, "WARN")
+            missing.append("route_template")
+            warnings.append("route monitor requested without routeTemplate path")
+        else:
+            monitor = route_monitor.monitor_live_context(str(template_path), scoped_context)
+            compact = route_monitor.compact_status(monitor)
+            response["routeMonitor"] = compact if response_mode == "compact" else monitor
+            response["routeReadiness"] = {
+                "status": compact.get("status"),
+                "routeState": compact.get("routeState"),
+                "currentArea": compact.get("currentArea"),
+                "offRoute": compact.get("offRoute"),
+                "warnings": compact.get("warnings") or [],
+            }
+            response["routeProgress"] = {
+                "completedSegmentCount": compact.get("completedSegmentCount"),
+                "remainingSegmentCount": compact.get("remainingSegmentCount"),
+                "nextExpectedSegment": compact.get("nextExpectedSegment"),
+            }
+            response["routeNextSegment"] = compact.get("nextExpectedSegment")
+            status = combine_status(status, monitor.get("status", "WARN"))
+            warnings.extend(monitor.get("warnings") or [])
+            missing.extend(monitor.get("missingCapabilities") or [])
+    if any(need in needs for need in ("route_history", "route_session_state", "route_progress_timeline", "route_completed_segments", "route_remaining_segments")):
+        state_path = request.get("routeSessionState") or request.get("routeSessionStatePath")
+        state_payload = safe_load_json(Path(state_path), {}) if state_path else latest_route_session_state()
+        if state_payload:
+            compact_state = compact_route_session_state(state_payload)
+            response["routeHistory"] = compact_state if response_mode == "compact" else state_payload
+            response["routeSessionState"] = compact_state if response_mode == "compact" else state_payload
+            response["routeCompletedSegments"] = compact_state.get("completedSegments") or []
+            response["routeRemainingSegments"] = compact_state.get("remainingSegments") or []
+            response["routeProgressTimeline"] = {
+                "available": bool(compact_state.get("statePath")),
+                "statePath": compact_state.get("statePath"),
+                "recentPath": (state_payload.get("recentPath") or [])[-10:],
+                "planeChanges": (state_payload.get("planeChanges") or [])[-10:],
+            }
+            state_freshness = state_payload.get("freshness") if isinstance(state_payload.get("freshness"), dict) else {}
+            status = combine_status(status, "WARN" if state_freshness.get("status") == "stale" else "PASS")
+            warnings.extend(state_payload.get("warnings") or [])
+        else:
+            template_path = resolve_route_template_request_path(request.get("routeTemplate") or request.get("routeTemplatePath"))
+            if template_path is not None:
+                monitor = route_monitor.monitor_live_context(str(template_path), scoped_context)
+                compact = route_monitor.compact_status(monitor)
+                response["routeHistory"] = {
+                    "fallback": "snapshot_route_monitor",
+                    "routeName": compact.get("routeName"),
+                    "routeState": compact.get("routeState"),
+                    "currentArea": compact.get("currentArea"),
+                    "nextExpectedSegment": compact.get("nextExpectedSegment"),
+                    "completedSegmentCount": compact.get("completedSegmentCount"),
+                    "remainingSegmentCount": compact.get("remainingSegmentCount"),
+                    "offRoute": compact.get("offRoute"),
+                    "freshness": compact.get("freshness"),
+                    "warnings": compact.get("warnings") or [],
+                }
+                status = combine_status(status, monitor.get("status", "WARN"))
+                warnings.extend(monitor.get("warnings") or [])
+            else:
+                response["routeHistory"] = None
+                status = combine_status(status, "WARN")
+                missing.append("route_session_state")
+                warnings.append("route history requested but no route session state or routeTemplate path is available")
+    if any(need in needs for need in ("human_click_profile", "task_click_profile", "click_landing_profile", "camera_action_profile")):
+        profile_path = request.get("humanClickProfile") or request.get("humanClickProfilePath")
+        profile = human_click_profile.load_profile(profile_path)
+        activity = request.get("activity") or request.get("taskActivity")
+        compact = human_click_profile.compact_profile(profile, activity=str(activity) if activity else None) if profile else {}
+        if profile:
+            response["humanClickProfile"] = compact if response_mode == "compact" else profile
+            if "task_click_profile" in needs:
+                response["taskClickProfile"] = compact.get("taskProfile")
+            if "click_landing_profile" in needs:
+                response["clickLandingProfile"] = compact.get("landing")
+            if "camera_action_profile" in needs:
+                response["cameraActionProfile"] = compact.get("camera")
+            status = combine_status(status, profile.get("status", "WARN"))
+            warnings.extend(profile.get("warnings") or [])
+            missing.extend(profile.get("missingCapabilities") or [])
+        else:
+            response["humanClickProfile"] = None
+            status = combine_status(status, "WARN")
+            missing.append("human_click_profile")
+            warnings.append("human click profile is not available; run human_click_profile.py or analyzer --human-click-profile")
+    if any(need in needs for need in ("click_plan", "human_click_plan", "click_planning_context")):
+        profile_path = request.get("humanClickProfile") or request.get("humanClickProfilePath")
+        profile = human_click_profile.load_profile(profile_path)
+        activity = request.get("activity") or request.get("taskActivity") or request.get("task")
+        target = _dict(request.get("target") or request.get("plannedTarget"))
+        if not target and scoped_context.get("candidates"):
+            target = _dict(scoped_context["candidates"][0])
+        action = request.get("action") or request.get("plannedAction")
+        if not action:
+            actions = target.get("actions") if isinstance(target.get("actions"), list) else target.get("effectiveActions")
+            action = actions[0] if isinstance(actions, list) and actions else target.get("action")
+        compact_profile = human_click_profile.compact_profile(profile, activity=str(activity) if activity else None) if profile else {}
+        plan_source = {
+            "target": target,
+            "action": action,
+            "humanClickProfile": compact_profile,
+            "actionInputVisibility": {
+                "plannedAction": action,
+                "plannedTarget": target,
+            },
+        }
+        if request.get("woodcuttingLoopLifecycle"):
+            plan_source["woodcuttingLoopLifecycle"] = request.get("woodcuttingLoopLifecycle")
+        if request.get("routeMonitor"):
+            plan_source["routeMonitor"] = request.get("routeMonitor")
+        if request.get("depositResult"):
+            plan_source["depositResult"] = request.get("depositResult")
+        plan = task_script_api.get_human_click_plan(
+            target=target,
+            action=str(action or "unknown"),
+            activity=str(activity) if activity else None,
+            source=plan_source,
+        )
+        if "click_planning_context" in needs:
+            response["clickPlanningContext"] = task_script_api.get_click_planning_context(activity=str(activity) if activity else None, source=plan_source)
+        response["clickPlan"] = click_plan = (
+            {
+                "status": plan.get("status"),
+                "task": plan.get("task"),
+                "action": plan.get("action"),
+                "target": _dict(plan.get("target")).get("name"),
+                "plannedPoint": _dict(plan.get("aim")).get("plannedPoint"),
+                "centerPoint": _dict(plan.get("aim")).get("basePoint"),
+                "offset": _dict(plan.get("aim")).get("offset"),
+                "confidence": plan.get("confidence"),
+                "reasons": plan.get("reasons") or [],
+                "warnings": plan.get("warnings") or [],
+                "blockedReasons": _dict(plan.get("readiness")).get("blockedReasons") or [],
+            }
+            if response_mode == "compact"
+            else plan
+        )
+        if "human_click_plan" in needs:
+            response["humanClickPlan"] = click_plan
+        status = combine_status(status, plan.get("status", "WARN"))
+        warnings.extend(plan.get("warnings") or [])
+        missing.extend(plan.get("missingCapabilities") or [])
     if "liveness" in needs:
         liveness = query.liveness_payload(scoped_context)
         if response_mode == "compact":
@@ -1346,6 +2440,8 @@ def build_context_response(
     best_candidates: dict[str, dict | None] = {}
     nearest_candidates: dict[str, dict | None] = {}
     for class_id in requested_class_needs(needs, "best"):
+        if ":" in class_id:
+            continue
         answer, answer_status, confidence, reasons, answer_warnings, answer_missing = select_class_candidate(scoped_context, class_id, "best", args)
         best_candidates[class_id] = compact_candidate_answer(answer, response_mode)
         status = combine_status(status, answer_status)
@@ -1355,6 +2451,8 @@ def build_context_response(
         if response_mode != "compact" and isinstance(best_candidates[class_id], dict):
             best_candidates[class_id]["reasons"] = reasons if best_candidates[class_id] else reasons
     for class_id in requested_class_needs(needs, "nearest"):
+        if ":" in class_id:
+            continue
         answer, answer_status, confidence, reasons, answer_warnings, answer_missing = select_class_candidate(scoped_context, class_id, "nearest", args)
         nearest_candidates[class_id] = compact_candidate_answer(answer, response_mode)
         status = combine_status(status, answer_status)
@@ -1367,6 +2465,30 @@ def build_context_response(
         response["bestCandidates"] = best_candidates
     if nearest_candidates:
         response["nearestCandidates"] = nearest_candidates
+    typed_best: dict[str, dict[str, Any]] = {}
+    typed_nearest: dict[str, dict[str, Any]] = {}
+    for kind, query_text in requested_typed_target_needs(needs, "best"):
+        result = compact_target_helper(telemetry_model, kind=kind, query_text=query_text, mode="best", limit=max_candidates * 4)
+        typed_best.setdefault(kind, {})[query_text] = result
+        status = combine_status(status, result.get("status", "WARN"))
+        warnings.extend(result.get("warnings") or [])
+        missing.extend(result.get("missingFields") or [])
+        candidate = result.get("candidate")
+        if isinstance(candidate, dict) and isinstance(candidate.get("confidence"), (int, float)):
+            confidence_values.append(float(candidate.get("confidence")))
+    for kind, query_text in requested_typed_target_needs(needs, "nearest"):
+        result = compact_target_helper(telemetry_model, kind=kind, query_text=query_text, mode="nearest", limit=max_candidates * 4)
+        typed_nearest.setdefault(kind, {})[query_text] = result
+        status = combine_status(status, result.get("status", "WARN"))
+        warnings.extend(result.get("warnings") or [])
+        missing.extend(result.get("missingFields") or [])
+        candidate = result.get("candidate")
+        if isinstance(candidate, dict) and isinstance(candidate.get("confidence"), (int, float)):
+            confidence_values.append(float(candidate.get("confidence")))
+    if typed_best:
+        response["bestTargets"] = typed_best
+    if typed_nearest:
+        response["nearestTargets"] = typed_nearest
     if "aim_point" in needs:
         source = None
         if best_candidates:
@@ -1386,8 +2508,8 @@ def build_context_response(
             status = combine_status(status, "WARN")
             missing.append("aimPoint")
             warnings.append("No aim point available in requested context.")
-    if "task_summary" in needs or request.get("task"):
-        task = str(request.get("task") or "").lower()
+    if "task_summary" in needs or "task_summary:woodcutting" in needs or request.get("task"):
+        task = str(request.get("task") or ("woodcutting" if "task_summary:woodcutting" in needs else "")).lower()
         if task == "woodcutting":
             task_payload = query.woodcutting_task_payload(scoped_context, args)
             response["taskSummary"] = query.compact_json_payload(task_payload, args) if response_mode == "compact" else task_payload
@@ -1464,11 +2586,14 @@ def health_payload(context: dict) -> dict:
 def status_payload(context: dict) -> dict:
     status_doc = context.get("status") or {}
     context_index = context.get("context") or {}
+    telemetry_discovery = telemetry_capabilities.capability_summary_from_context(context)
     return {
         "schema": STATUS_SCHEMA,
         "status": "ok" if status_doc else "warn",
         "sessionPath": str(context.get("session")) if context.get("session") else None,
         "latestTick": query.latest_tick(context),
+        "latestExportSequence": telemetry_discovery.get("latest_export_sequence"),
+        "sourceFreshness": telemetry_discovery.get("source_freshness"),
         "liveProcessorFreshness": health_payload(context).get("liveFreshness"),
         "activeProfile": status_doc.get("profile") or context_index.get("activeProfile"),
         "candidateCount": len(context.get("candidates") or []),
@@ -1492,13 +2617,13 @@ def schema_payload() -> dict:
     return {
         "schema": SCHEMA_SCHEMA,
         "supportedRequestSchemas": [REQUEST_SCHEMA, WATCH_REQUEST_SCHEMA],
-        "supportedResponseSchemas": [RESPONSE_SCHEMA, HEALTH_SCHEMA, STATUS_SCHEMA, CAPABILITY_REGISTRY_SCHEMA, WATCH_LIBRARY_SCHEMA, WATCH_RESPONSE_SCHEMA],
+        "supportedResponseSchemas": [RESPONSE_SCHEMA, HEALTH_SCHEMA, STATUS_SCHEMA, CAPABILITY_REGISTRY_SCHEMA, WATCH_LIBRARY_SCHEMA, WATCH_RESPONSE_SCHEMA, "manual_recordings_list.v1", "manual_recording_summary.v1", "manual_recording_schema_gap.v1"],
         "supportedNeeds": SUPPORTED_NEEDS,
         "supportedTasks": SUPPORTED_TASKS,
         "supportedResponseModes": SUPPORTED_RESPONSE_MODES,
         "supportedRequestOptions": ["maxCandidates", "maxEvents", "responseMode", "constraints", "maxAgeTicks", "maxAgeMillis"],
         "endpoints": {
-            "GET": ["/health", "/schema", "/status", "/summary", "/capabilities", "/watches"],
+            "GET": ["/health", "/schema", "/status", "/summary", "/capabilities", "/watches", "/recordings", "/recordings/<id>/summary", "/recordings/<id>/schema-gap"],
             "POST": ["/context", "/context/batch", "/watch-request"],
         },
         "notes": [
@@ -1573,6 +2698,14 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
             self.send_json(capabilities_payload(context))
         elif path == "/watches":
             self.send_json(watches_payload(context))
+        elif path == "/recordings":
+            self.send_json(list_recordings_payload())
+        elif path.startswith("/recordings/") and path.endswith("/summary"):
+            recording_id = path[len("/recordings/") : -len("/summary")].strip("/")
+            self.send_json(recording_summary_payload(recording_id))
+        elif path.startswith("/recordings/") and path.endswith("/schema-gap"):
+            recording_id = path[len("/recordings/") : -len("/schema-gap")].strip("/")
+            self.send_json(recording_schema_gap_payload(recording_id))
         else:
             self.send_json(error_payload(f"unknown endpoint: {self.path}"), status_code=404)
 
@@ -1704,7 +2837,7 @@ def serve(args) -> int:
     server.context_state = state
     print(f"Read-only context service listening on http://{args.host}:{args.port}")
     print(f"session: {state.cache.session}")
-    print("endpoints: GET /health /schema /status /capabilities /watches, POST /context /context/batch /watch-request")
+    print("endpoints: GET /health /schema /status /capabilities /watches /recordings, POST /context /context/batch /watch-request")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -2310,6 +3443,162 @@ def pipeline_health_cli(args) -> int:
     return print_json_response(pipeline_health_payload(args))
 
 
+def _write_jsonl_records(path: Path, records: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for record in records:
+            handle.write(json.dumps(record, separators=(",", ":"), sort_keys=False, default=str))
+            handle.write("\n")
+
+
+def _recovery_click_attempts(payload: dict[str, Any], command: list[str]) -> list[dict[str, Any]]:
+    machine = _dict(payload.get("recoveryStateMachine"))
+    classification = _dict(machine.get("failureClassification"))
+    attempts = _list(machine.get("clickAttempts"))
+    records: list[dict[str, Any]] = []
+    for index, attempt in enumerate(attempts):
+        item = _dict(attempt)
+        records.append(
+            {
+                "schema": "loaded_scene_recovery_attempt.v1",
+                "generatedAtUtc": utc_now(),
+                "attemptIndex": item.get("attemptIndex", index),
+                "command": command,
+                "status": payload.get("status"),
+                "loadedSceneVerified": bool(payload.get("loadedSceneVerified")),
+                "blocker": payload.get("blocker"),
+                "recoveryFailureClass": classification.get("failureClass"),
+                "stateBefore": item.get("stateBefore"),
+                "selectedRecoveryAction": item.get("selectedRecoveryAction"),
+                "clickEvidence": item.get("clickEvidence"),
+                "stateAfter": item.get("stateAfter"),
+                "transitionSuccess": bool(item.get("transitionSuccess")),
+                "reason": item.get("reason") or classification.get("reason"),
+            }
+        )
+    for index, attempt in enumerate(_list(machine.get("relaunchAttempts")), start=len(records)):
+        item = _dict(attempt)
+        records.append(
+            {
+                "schema": "loaded_scene_recovery_attempt.v1",
+                "generatedAtUtc": utc_now(),
+                "attemptIndex": item.get("attemptIndex", index),
+                "command": command,
+                "status": payload.get("status"),
+                "loadedSceneVerified": bool(payload.get("loadedSceneVerified")),
+                "blocker": payload.get("blocker"),
+                "recoveryFailureClass": payload.get("recoveryFailureClass"),
+                "stateBefore": item.get("stateBefore"),
+                "selectedRecoveryAction": item.get("selectedRecoveryAction"),
+                "startGameCommand": item.get("startGameCommand"),
+                "startGameCommandSource": item.get("startGameCommandSource"),
+                "launchMode": item.get("launchMode"),
+                "relaunchResult": item.get("relaunchResult"),
+                "stateAfter": item.get("stateAfter"),
+                "transitionSuccess": bool(item.get("transitionSuccess")),
+                "reason": item.get("reason") or classification.get("reason"),
+            }
+        )
+    if not records:
+        records.append(
+            {
+                "schema": "loaded_scene_recovery_attempt.v1",
+                "generatedAtUtc": utc_now(),
+                "attemptIndex": 0,
+                "command": command,
+                "status": payload.get("status"),
+                "loadedSceneVerified": bool(payload.get("loadedSceneVerified")),
+                "blocker": payload.get("blocker"),
+                "recoveryFailureClass": payload.get("recoveryFailureClass"),
+                "initialState": _dict(payload.get("initialState")),
+                "finalState": _dict(payload.get("finalState")),
+                "actionsTaken": _list(payload.get("actionsTaken")),
+                "warnings": _list(payload.get("warnings")),
+            }
+        )
+    return records
+
+
+def write_loaded_scene_recovery_artifacts(args, payload: dict[str, Any]) -> dict[str, str]:
+    root = Path(getattr(args, "recovery_artifact_dir", "") or Path(__file__).resolve().parents[1] / "bot_runs" / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_loaded_scene_recovery")
+    root.mkdir(parents=True, exist_ok=True)
+    command = [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:]
+    latest_state = {
+        "schema": "loaded_scene_latest_recovery_state.v1",
+        "generatedAtUtc": utc_now(),
+        "status": payload.get("status"),
+        "loadedSceneVerified": bool(payload.get("loadedSceneVerified")),
+        "blocker": payload.get("blocker"),
+        "recoveryFailureClass": payload.get("recoveryFailureClass"),
+        "recoveryFailureReason": payload.get("recoveryFailureReason"),
+        "disconnectedLoopDetected": bool(payload.get("disconnectedLoopDetected")),
+        "relaunchRequired": bool(payload.get("relaunchRequired")),
+        "relaunchAttempted": bool(payload.get("relaunchAttempted")),
+        "launchMode": payload.get("launchMode"),
+        "launchModeReason": payload.get("launchModeReason"),
+        "launchModeWarnings": payload.get("launchModeWarnings") or [],
+        "relaunchCommand": payload.get("relaunchCommand"),
+        "startGameCommand": payload.get("startGameCommand"),
+        "startGameCommandSource": payload.get("startGameCommandSource"),
+        "relaunchResult": payload.get("relaunchResult"),
+        "relaunchSucceeded": bool(payload.get("relaunchSucceeded")),
+        "loadedSceneAfterRelaunch": bool(payload.get("loadedSceneAfterRelaunch")),
+        "loginScreenAfterRelaunch": bool(payload.get("loginScreenAfterRelaunch")),
+        "finalHotGameState": payload.get("finalHotGameState"),
+        "finalLoadedSceneVerified": bool(payload.get("finalLoadedSceneVerified")),
+        "finalWorldObjectCount": payload.get("finalWorldObjectCount"),
+        "finalTick": payload.get("finalTick"),
+        "finalExportSeq": payload.get("finalExportSeq"),
+        "initialState": _dict(payload.get("initialState")),
+        "finalState": _dict(payload.get("finalState")),
+        "recoveryStateMachine": _dict(payload.get("recoveryStateMachine")),
+    }
+    summary = {
+        "schema": "loaded_scene_recovery_summary.v1",
+        "generatedAtUtc": utc_now(),
+        "status": payload.get("status"),
+        "loadedSceneVerified": bool(payload.get("loadedSceneVerified")),
+        "blocker": payload.get("blocker"),
+        "rawBlocker": payload.get("rawBlocker"),
+        "recoveryFailureClass": payload.get("recoveryFailureClass"),
+        "recoveryFailureReason": payload.get("recoveryFailureReason"),
+        "disconnectedLoopDetected": bool(payload.get("disconnectedLoopDetected")),
+        "relaunchRequired": bool(payload.get("relaunchRequired")),
+        "relaunchAttempted": bool(payload.get("relaunchAttempted")),
+        "launchMode": payload.get("launchMode"),
+        "launchModeReason": payload.get("launchModeReason"),
+        "launchModeWarnings": payload.get("launchModeWarnings") or [],
+        "relaunchCommand": payload.get("relaunchCommand"),
+        "startGameCommand": payload.get("startGameCommand"),
+        "startGameCommandSource": payload.get("startGameCommandSource"),
+        "relaunchResult": payload.get("relaunchResult"),
+        "relaunchSucceeded": bool(payload.get("relaunchSucceeded")),
+        "loadedSceneAfterRelaunch": bool(payload.get("loadedSceneAfterRelaunch")),
+        "loginScreenAfterRelaunch": bool(payload.get("loginScreenAfterRelaunch")),
+        "finalHotGameState": payload.get("finalHotGameState"),
+        "finalLoadedSceneVerified": bool(payload.get("finalLoadedSceneVerified")),
+        "finalWorldObjectCount": payload.get("finalWorldObjectCount"),
+        "finalTick": payload.get("finalTick"),
+        "finalExportSeq": payload.get("finalExportSeq"),
+        "manualActionRequired": payload.get("manualActionRequired"),
+        "nextRecommendation": payload.get("nextRecommendation"),
+        "command": command,
+        "payload": payload,
+    }
+    latest_path = root / "latest_recovery_state.json"
+    summary_path = root / "recovery_summary.json"
+    attempts_path = root / "recovery_attempts.jsonl"
+    atomic_write_json(latest_path, latest_state)
+    atomic_write_json(summary_path, summary)
+    _write_jsonl_records(attempts_path, _recovery_click_attempts(payload, command))
+    return {
+        "folder": str(root),
+        "latestRecoveryState": str(latest_path),
+        "recoverySummary": str(summary_path),
+        "recoveryAttempts": str(attempts_path),
+    }
+
+
 def ensure_loaded_scene_cli(args) -> int:
     import liveness_recovery_core
 
@@ -2323,6 +3612,8 @@ def ensure_loaded_scene_cli(args) -> int:
         allow_jagex_launcher=bool(args.allow_jagex_launcher_automation),
         allow_credentials=False,
     )
+    if not bool(getattr(args, "no_recovery_artifacts", False)):
+        payload["recoveryArtifacts"] = write_loaded_scene_recovery_artifacts(args, payload)
     print(json.dumps(payload, separators=(",", ":"), sort_keys=False))
     return 0 if payload.get("status") in {"loaded_scene_ready", "recovered_loaded_scene"} else 1
 
@@ -2391,6 +3682,8 @@ def parse_args():
     parser.add_argument("--allow-jagex-launcher-automation", action="store_true", help="Allow Jagex Launcher automation for --ensure-loaded-scene; credentials are still never typed.")
     parser.add_argument("--liveness-max-total-seconds", type=float, default=120.0, help="Maximum total seconds for --ensure-loaded-scene.")
     parser.add_argument("--liveness-max-attempts-per-state", type=int, default=2, help="Maximum attempts per known liveness state for --ensure-loaded-scene.")
+    parser.add_argument("--recovery-artifact-dir", help="Optional output folder for --ensure-loaded-scene recovery artifacts.")
+    parser.add_argument("--no-recovery-artifacts", action="store_true", help="Do not write recovery artifacts for --ensure-loaded-scene.")
     parser.add_argument("--context-json", help="Use a saved context/status JSON file for Knowledge Fabric CLI commands.")
     parser.add_argument("--live-timeout", type=float, default=1.0, help="HTTP timeout for live Knowledge Fabric CLI commands.")
     parser.add_argument("--world-max-objects", type=int, default=160, help="Max world objects requested by live Knowledge Fabric CLI commands.")

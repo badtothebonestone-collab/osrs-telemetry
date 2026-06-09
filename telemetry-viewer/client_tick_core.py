@@ -7,6 +7,17 @@ from typing import Any
 
 CLIENT_TICK_HOT_SCHEMA = "client_tick_hot.v1"
 _MENU_TAG_RE = re.compile(r"<[^>]*>")
+WOODCUTTING_COMPATIBLE_TARGETS = {
+    "tree",
+    "oak",
+    "oak tree",
+    "willow",
+    "willow tree",
+    "maple tree",
+    "yew tree",
+    "magic tree",
+    "dead tree",
+}
 
 
 def _clean_menu_text(value: Any) -> str:
@@ -497,6 +508,10 @@ def _target_matches(sample: dict[str, Any], intent: ActionIntent, *, top_prefix:
     target = _lower_menu_text(sample.get("topTarget" if top_prefix else "target") or sample.get("target"))
     if not intent.expected_targets and not intent.expected_object_ids:
         return True
+    if intent.activity == "woodcutting" and target in WOODCUTTING_COMPATIBLE_TARGETS:
+        expected_keys = {_lower_menu_text(expected) for expected in intent.expected_targets if _lower_menu_text(expected)}
+        if expected_keys.intersection({"tree", "oak", "oak tree"}):
+            return True
     return any(_target_text_matches_expected(target, expected) for expected in intent.expected_targets if _lower_menu_text(expected))
 
 

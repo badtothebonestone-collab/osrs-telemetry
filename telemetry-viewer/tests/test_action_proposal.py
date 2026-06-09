@@ -134,6 +134,39 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.proposed_action, "select_resource_target")
         self.assertEqual(proposal.target_kind, "resource")
 
+    def test_inventory_full_without_route_context_reports_specific_blocker(self):
+        proposal = build_action_proposal(
+            status_for(
+                inventory_full=True,
+                free_slots=0,
+                service={"serviceNeeded": True, "serviceRequired": True, "serviceReady": False},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.reason, "inventory_full_route_context_missing")
+        self.assertIn("service_route.route_to_bank", proposal.missing_capabilities)
+        self.assertIn("pathing.route_to_bank", proposal.missing_capabilities)
+
+    def test_inventory_full_sparse_route_guide_position_proposes_next_bank_point(self):
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+        )
+        status["playerWorldPosition"] = {"worldX": 3201, "worldY": 3219, "plane": 0}
+        status["brain"]["genericTaskState"]["activeIntentTarget"] = None
+        status["brain"]["intentOverlayContext"] = {"selectedMarker": None}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.reason, "route_guide_progress_without_live_route_context")
+        self.assertEqual(proposal.target_tile, {"worldX": 3209, "worldY": 3216, "plane": 0})
+        self.assertEqual(proposal.target_explanation["routeGuideName"], "woodcutting_area_to_bank")
+
     def test_logs_held_at_actionable_service_target_proposes_open_service_with_free_slots(self):
         service_target = {
             "targetName": "Bank Deposit Box",
@@ -717,6 +750,189 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(payload["actionability"], "needs_live_projection")
         self.assertEqual(proposal.target_explanation["advisoryTargetSource"], "static_route_prior")
 
+    def test_arrived_route_destination_uses_route_guide_before_stale_reverse_waypoint(self):
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceReady": False},
+            pathing={
+                "pathingNeeded": True,
+                "destinationTile": {"worldX": 3203, "worldY": 3238, "plane": 0},
+                "pathTargetTile": {"worldX": 3203, "worldY": 3238, "plane": 0},
+                "predictedPathTiles": [
+                    {"worldX": 3207, "worldY": 3238, "plane": 0},
+                    {"worldX": 3206, "worldY": 3238, "plane": 0},
+                    {"worldX": 3205, "worldY": 3238, "plane": 0},
+                    {"worldX": 3204, "worldY": 3238, "plane": 0},
+                    {"worldX": 3203, "worldY": 3238, "plane": 0},
+                ],
+            },
+        )
+        status["playerWorldPosition"] = {"worldX": 3203, "worldY": 3238, "plane": 0}
+        status["contextActionProposal"] = {
+            "schema": "action_proposal.v1",
+            "status": "PASS",
+            "proposedAction": "navigate_to_service",
+            "targetKind": "path_tile",
+            "targetName": "Lumbridge Castle west approach",
+            "targetTile": {"worldX": 3203, "worldY": 3238, "plane": 0},
+            "reason": "pathing_to_service",
+            "confidence": 0.74,
+            "requiredContext": ["pathing"],
+            "actionTargetSource": "local_frontier_waypoint",
+            "actionability": "needs_live_projection",
+            "targetExplanation": {
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "routeStepIndex": 0,
+                "routeStepType": "navigate_world",
+                "destinationTile": {"worldX": 3203, "worldY": 3238, "plane": 0},
+                "pathTargetTile": {"worldX": 3203, "worldY": 3238, "plane": 0},
+                "predictedPathTiles": [
+                    {"worldX": 3207, "worldY": 3238, "plane": 0},
+                    {"worldX": 3206, "worldY": 3238, "plane": 0},
+                    {"worldX": 3205, "worldY": 3238, "plane": 0},
+                    {"worldX": 3204, "worldY": 3238, "plane": 0},
+                    {"worldX": 3203, "worldY": 3238, "plane": 0},
+                ],
+                "routeWaypointSelection": {
+                    "schema": "route_waypoint_selection.v1",
+                    "reason": "long_visible_route_progress",
+                    "selectedTile": {"worldX": 3203, "worldY": 3238, "plane": 0},
+                    "nextWaypointTile": {"worldX": 3207, "worldY": 3238, "plane": 0},
+                },
+            },
+        }
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertTrue(proposal.executable)
+        self.assertNotEqual(proposal.target_tile, {"worldX": 3203, "worldY": 3238, "plane": 0})
+        self.assertEqual(proposal.target_tile, {"worldX": 3208, "worldY": 3212, "plane": 0})
+        self.assertEqual(proposal.actionability, "needs_live_projection")
+        selection = proposal.target_explanation["routeWaypointSelection"]
+        self.assertEqual(selection["reason"], "arrived_waypoint_advanced_by_demonstrated_route_guide")
+        self.assertEqual(selection["playerTile"], {"worldX": 3203, "worldY": 3238, "plane": 0})
+        self.assertNotEqual(selection.get("selectedTile"), {"worldX": 3207, "worldY": 3238, "plane": 0})
+        self.assertTrue(proposal.target_explanation["routeGuideLoaded"])
+        self.assertEqual(proposal.target_explanation["routeGuideName"], "woodcutting_area_to_bank")
+
+    def test_route_guide_interaction_preferred_over_cross_plane_path_point(self):
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceReady": False},
+            pathing={
+                "pathingNeeded": True,
+                "destinationTile": {"worldX": 3208, "worldY": 3212, "plane": 0},
+                "pathTargetTile": {"worldX": 3208, "worldY": 3212, "plane": 0},
+                "predictedPathTiles": [
+                    {"worldX": 3208, "worldY": 3212, "plane": 0},
+                    {"worldX": 3205, "worldY": 3209, "plane": 2},
+                ],
+            },
+        )
+        status["playerWorldPosition"] = {"worldX": 3208, "worldY": 3212, "plane": 0}
+        status["contextActionProposal"] = {
+            "schema": "action_proposal.v1",
+            "status": "PASS",
+            "proposedAction": "navigate_to_service",
+            "targetKind": "path_tile",
+            "targetName": "Castle bank approach waypoint",
+            "targetTile": {"worldX": 3208, "worldY": 3212, "plane": 0},
+            "reason": "pathing_to_service",
+            "confidence": 0.74,
+            "requiredContext": ["pathing"],
+            "actionTargetSource": "local_frontier_waypoint",
+            "actionability": "needs_live_projection",
+            "targetExplanation": {
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                "destinationTile": {"worldX": 3208, "worldY": 3212, "plane": 0},
+                "pathTargetTile": {"worldX": 3208, "worldY": 3212, "plane": 0},
+                "predictedPathTiles": [
+                    {"worldX": 3208, "worldY": 3212, "plane": 0},
+                    {"worldX": 3205, "worldY": 3209, "plane": 2},
+                ],
+            },
+        }
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertFalse(proposal.executable)
+        self.assertEqual(proposal.reason, "route_guide_interaction_needs_live_target")
+        self.assertIn("route.interaction.liveTarget", proposal.missing_capabilities)
+        self.assertEqual(proposal.target_explanation["name"], "Trapdoor")
+        self.assertEqual(proposal.target_explanation["routeGuideName"], "woodcutting_area_to_bank")
+
+    def test_live_service_route_uses_guide_from_pathing_player_tile_and_service_route_id(self):
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False},
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank",
+                    "routeStepStatus": "pathing_to_service",
+                    "currentNavigationTarget": {
+                        "targetName": "Lumbridge Castle entrance or ground-floor courtyard",
+                        "worldX": 3205,
+                        "worldY": 3232,
+                        "plane": 0,
+                        "source": "static_route_prior",
+                    },
+                },
+                pathing={
+                    "pathingNeeded": True,
+                    "currentPlayerTile": {"worldX": 3202, "worldY": 3237, "plane": 0},
+                    "nextWaypointTile": {"worldX": 3202, "worldY": 3237, "plane": 0},
+                    "destinationTile": {"worldX": 3205, "worldY": 3232, "plane": 0},
+                    "pathTargetTile": {"worldX": 3205, "worldY": 3232, "plane": 0},
+                    "predictedPathTiles": [
+                        {"worldX": 3202, "worldY": 3237, "plane": 0},
+                        {"worldX": 3201, "worldY": 3236, "plane": 0},
+                    ],
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_tile, {"worldX": 3208, "worldY": 3212, "plane": 0})
+        self.assertEqual(proposal.action_target_source, "local_frontier_waypoint")
+        self.assertTrue(proposal.target_explanation["routeGuideLoaded"])
+        self.assertEqual(proposal.target_explanation["routeGuideName"], "woodcutting_area_to_bank")
+        self.assertEqual(proposal.target_explanation["routeWaypointSelection"]["reason"], "demonstrated_route_guide_next_point")
+
+    def test_inventory_full_without_route_context_uses_demonstrated_route_guide(self):
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceReady": False},
+            pathing={},
+        )
+        status["playerWorldPosition"] = {"worldX": 3201, "worldY": 3236, "plane": 0}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.reason, "route_guide_progress_without_live_route_context")
+        self.assertEqual(proposal.target_tile, {"worldX": 3208, "worldY": 3212, "plane": 0})
+        self.assertEqual(proposal.target_explanation["routeGuideName"], "woodcutting_area_to_bank")
+        self.assertIn("route_guide", proposal.required_context)
+
     def test_goal_directed_service_fallback_metadata_reaches_navigation_proposal(self):
         proposal = build_action_proposal(
             status_for(
@@ -820,6 +1036,50 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.suggested_click_point, {"x": 250, "y": 260})
         self.assertIn("Climb-up", proposal.target_explanation["expectedOptions"])
         self.assertEqual(proposal.target_explanation["expectedPlaneChange"], "+1")
+
+    def test_route_to_bank_rejects_ladder_not_on_expected_stair_segment(self):
+        route_target = {
+            "targetName": "Ladder",
+            "classId": "service_route_transition",
+            "targetType": "sceneObject",
+            "id": 16683,
+            "worldX": 3211,
+            "worldY": 3242,
+            "plane": 0,
+            "aimPoint": aim(250, 260),
+            "actions": ["Climb-up"],
+            "routeId": "plugin_snapshot_route_to_service",
+        }
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False, "candidateCount": 0},
+                service_route={
+                    "schema": "service_route_context.v1",
+                    "routeAvailable": True,
+                    "routeStepStatus": "plugin_snapshot_route_transition_visible",
+                    "actionReady": True,
+                    "currentStep": {
+                        "type": "interact_object",
+                        "expectedOptions": ["Climb-up", "Top-floor"],
+                        "expectedTargetContains": ["Stair", "Staircase"],
+                        "planeChange": "+1",
+                    },
+                    "visibleInteractionTarget": route_target,
+                },
+                bank_ui={"bankOpen": False},
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertFalse(proposal.executable)
+        self.assertEqual(proposal.reason, "route_object_not_on_expected_segment")
+        self.assertFalse(proposal.target_explanation["routeCorridorMatch"])
+        self.assertIn("route_object_not_on_expected_segment", proposal.target_explanation["rejectedReasons"])
 
     def test_visible_service_route_transition_includes_safe_aimpoint_samples(self):
         route_target = {
@@ -1609,6 +1869,185 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.proposed_action, "return_to_resource_area")
         self.assertEqual(proposal.target_tile, predicted[0])
         self.assertEqual(proposal.target_explanation["routeWaypointSelection"]["reason"], "close_destination_detour_precision")
+
+    def test_adaptive_service_route_skips_arrived_current_waypoint(self):
+        predicted = [
+            {"worldX": 3204, "worldY": 3237, "plane": 0},
+            {"worldX": 3203, "worldY": 3237, "plane": 0},
+            {"worldX": 3202, "worldY": 3237, "plane": 0},
+            {"worldX": 3201, "worldY": 3236, "plane": 0},
+            {"worldX": 3200, "worldY": 3235, "plane": 0},
+            {"worldX": 3200, "worldY": 3234, "plane": 0},
+            {"worldX": 3200, "worldY": 3233, "plane": 0},
+            {"worldX": 3200, "worldY": 3232, "plane": 0},
+            {"worldX": 3200, "worldY": 3231, "plane": 0},
+            {"worldX": 3200, "worldY": 3230, "plane": 0},
+            {"worldX": 3200, "worldY": 3229, "plane": 0},
+            {"worldX": 3200, "worldY": 3228, "plane": 0},
+            {"worldX": 3200, "worldY": 3227, "plane": 0},
+        ]
+        proposal = build_action_proposal(
+            status_for(
+                phase="needs_service",
+                active_intent="needs_service",
+                inventory_full=True,
+                free_slots=0,
+                active_target=None,
+                service={"serviceNeeded": True, "serviceReady": False},
+                pathing={
+                    "pathingNeeded": True,
+                    "nextWaypointTile": predicted[0],
+                    "predictedPathTiles": predicted,
+                    "destinationTile": {"worldX": 3205, "worldY": 3232, "plane": 0},
+                    "distanceToDestination": 5,
+                    "routeWaypointDistanceMode": "adaptive",
+                    "routeWaypointLookaheadTiles": 12,
+                    "routeWaypointMaxHorizonTiles": 25,
+                    "minRouteProgressTiles": 3,
+                    "currentPlayerTile": predicted[0],
+                },
+            )
+        )
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_tile, predicted[1])
+        self.assertEqual(
+            proposal.target_explanation["routeWaypointSelection"]["reason"],
+            "close_destination_current_waypoint_arrived_forward_step",
+        )
+
+    def test_adaptive_service_route_uses_live_player_world_position_to_skip_arrived_waypoint(self):
+        predicted = [
+            {"worldX": 3203, "worldY": 3237, "plane": 0},
+            {"worldX": 3202, "worldY": 3237, "plane": 0},
+            {"worldX": 3201, "worldY": 3236, "plane": 0},
+            {"worldX": 3200, "worldY": 3235, "plane": 0},
+            {"worldX": 3200, "worldY": 3234, "plane": 0},
+            {"worldX": 3200, "worldY": 3233, "plane": 0},
+            {"worldX": 3200, "worldY": 3232, "plane": 0},
+            {"worldX": 3200, "worldY": 3231, "plane": 0},
+            {"worldX": 3200, "worldY": 3230, "plane": 0},
+            {"worldX": 3200, "worldY": 3229, "plane": 0},
+            {"worldX": 3200, "worldY": 3228, "plane": 0},
+            {"worldX": 3200, "worldY": 3227, "plane": 0},
+            {"worldX": 3200, "worldY": 3226, "plane": 0},
+        ]
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceReady": False},
+            pathing={
+                "pathingNeeded": True,
+                "nextWaypointTile": predicted[0],
+                "predictedPathTiles": predicted,
+                "destinationTile": {"worldX": 3205, "worldY": 3232, "plane": 0},
+                "distanceToDestination": 5,
+                "routeWaypointDistanceMode": "adaptive",
+                "routeWaypointLookaheadTiles": 12,
+                "routeWaypointMaxHorizonTiles": 25,
+                "minRouteProgressTiles": 3,
+            },
+        )
+        status["playerWorldPosition"] = predicted[0]
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_tile, predicted[1])
+        self.assertEqual(
+            proposal.target_explanation["routeWaypointSelection"]["reason"],
+            "close_destination_current_waypoint_arrived_forward_step",
+        )
+
+    def test_context_route_proposal_advances_past_arrived_current_tile(self):
+        current = {"worldX": 3203, "worldY": 3237, "plane": 0}
+        next_tile = {"worldX": 3202, "worldY": 3237, "plane": 0}
+        predicted = [
+            current,
+            next_tile,
+            {"worldX": 3201, "worldY": 3236, "plane": 0},
+        ]
+
+        proposal = build_action_proposal(
+            {
+                "playerWorldPosition": current,
+                "contextActionProposal": {
+                    "proposedAction": "navigate_to_service",
+                    "targetKind": "path_tile",
+                    "targetName": "Castle bank approach waypoint",
+                    "targetTile": current,
+                    "suggestedWorldTile": current,
+                    "suggestedClickPoint": {"x": 512, "y": 320},
+                    "clickPointSpace": "screen",
+                    "targetExplanation": {
+                        "freshness": {"stale": True},
+                        "predictedPathTiles": predicted,
+                        "routeWaypointSelection": {
+                            "reason": "close_destination_detour_precision",
+                            "selectedTile": current,
+                        },
+                    },
+                    "actionTargetSource": "live_projected_waypoint",
+                    "actionability": "clickable",
+                    "confidence": 0.72,
+                },
+            }
+        )
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_tile, next_tile)
+        self.assertEqual(proposal.suggested_world_tile, next_tile)
+        self.assertIsNone(proposal.suggested_click_point)
+        self.assertEqual(proposal.action_target_source, "local_frontier_waypoint")
+        self.assertEqual(proposal.actionability, "needs_live_projection")
+        self.assertTrue(proposal.executable)
+        explanation = proposal.target_explanation
+        self.assertTrue(explanation["waypointAlreadyReached"])
+        self.assertTrue(explanation["routeStateStale"])
+        self.assertTrue(explanation["livePositionFresh"])
+        self.assertEqual(explanation["reconciliationMethod"], "playerWorldPosition_progress")
+        selection = explanation["routeWaypointSelection"]
+        self.assertEqual(selection["reason"], "context_current_waypoint_arrived_forward_step")
+        self.assertEqual(selection["skippedWaypoint"], current)
+        self.assertEqual(selection["nextWaypoint"], next_tile)
+
+    def test_context_route_proposal_does_not_skip_same_xy_on_different_plane(self):
+        current = {"worldX": 3203, "worldY": 3237, "plane": 1}
+        target = {"worldX": 3203, "worldY": 3237, "plane": 0}
+        next_tile = {"worldX": 3202, "worldY": 3237, "plane": 0}
+
+        proposal = build_action_proposal(
+            {
+                "playerWorldPosition": current,
+                "contextActionProposal": {
+                    "proposedAction": "navigate_to_service",
+                    "targetKind": "path_tile",
+                    "targetName": "Castle bank approach waypoint",
+                    "targetTile": target,
+                    "suggestedWorldTile": target,
+                    "suggestedClickPoint": {"x": 512, "y": 320},
+                    "clickPointSpace": "screen",
+                    "targetExplanation": {
+                        "predictedPathTiles": [target, next_tile],
+                        "routeWaypointSelection": {
+                            "reason": "close_destination_detour_precision",
+                            "selectedTile": target,
+                        },
+                    },
+                    "actionTargetSource": "live_projected_waypoint",
+                    "actionability": "clickable",
+                    "confidence": 0.72,
+                },
+            }
+        )
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertEqual(proposal.target_tile, target)
+        self.assertEqual(proposal.suggested_click_point, {"x": 512, "y": 320})
+        self.assertNotIn("waypointAlreadyReached", proposal.target_explanation)
 
     def test_adaptive_return_route_blocks_close_destination_sideways_detour(self):
         predicted = [
@@ -2537,6 +2976,84 @@ class ActionProposalTest(unittest.TestCase):
         self.assertIn("target.freshness", proposal.missing_capabilities)
         self.assertTrue(any("candidate data stale" in warning for warning in proposal.warnings))
         self.assertFalse(proposal.executable)
+
+    def test_current_live_resource_target_ignores_lagging_daemon_status_age(self):
+        status = status_for(
+            latest_tick=20,
+            freshness="stale",
+            active_target={
+                "targetName": "Tree",
+                "classId": "tree",
+                "id": 1276,
+                "tick": 20,
+                "sourceTick": 20,
+                "onScreen": True,
+                "geometryAvailable": True,
+                "aimPoint": aim(110, 130),
+            },
+        )
+        status["latestUpdateUtc"] = "2000-01-01T00:00:00Z"
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertNotEqual(proposal.reason, "candidate_data_stale")
+        self.assertNotIn("target.freshness", proposal.missing_capabilities)
+        explanation = proposal.to_dict().get("targetExplanation") or {}
+        self.assertFalse(explanation.get("stale"))
+        self.assertEqual((explanation.get("freshness") or {}).get("status"), "fresh")
+
+    def test_current_resource_identity_waives_stale_label_but_keeps_geometry_guard(self):
+        status = status_for(
+            latest_tick=20,
+            freshness="stale",
+            active_target={
+                "targetName": "Tree",
+                "classId": "tree",
+                "id": 1276,
+                "tick": 20,
+                "sourceTick": 20,
+                "onScreen": True,
+                "geometryAvailable": False,
+            },
+        )
+        status["latestUpdateUtc"] = "2000-01-01T00:00:00Z"
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertNotEqual(proposal.reason, "candidate_data_stale")
+        self.assertNotIn("target.freshness", proposal.missing_capabilities)
+        self.assertIn("click_point", proposal.missing_capabilities)
+        self.assertFalse(proposal.executable)
+        explanation = proposal.to_dict().get("targetExplanation") or {}
+        self.assertFalse((explanation.get("freshness") or {}).get("stale"))
+
+    def test_brain_tick_resource_identity_waives_stale_label(self):
+        status = status_for(
+            latest_tick=20,
+            freshness="stale",
+            active_target={
+                "targetName": "Tree",
+                "classId": "tree",
+                "id": 1276,
+                "onScreen": True,
+                "geometryAvailable": False,
+            },
+        )
+        status.pop("latestTick", None)
+        status["latestUpdateUtc"] = "2000-01-01T00:00:00Z"
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.source_tick, 20)
+        self.assertEqual(proposal.proposed_action, "select_resource_target")
+        self.assertNotEqual(proposal.reason, "candidate_data_stale")
+        self.assertNotIn("target.freshness", proposal.missing_capabilities)
+        self.assertIn("click_point", proposal.missing_capabilities)
+        self.assertFalse(proposal.executable)
+        explanation = proposal.to_dict().get("targetExplanation") or {}
+        self.assertFalse((explanation.get("freshness") or {}).get("stale"))
 
     def test_select_resource_target_includes_candidate_explanation(self):
         proposal = build_action_proposal(

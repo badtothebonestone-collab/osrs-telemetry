@@ -17,7 +17,7 @@ import input_control.backend_arduino_hid as arduino_hid_module
 import input_control.arduino_monitor as arduino_monitor_module
 from input_control.backend_arduino_hid import ArduinoHIDBackend, ArduinoHIDError, check_arduino_monitor_status
 from input_control.backend_pyautogui import PyAutoGuiBackend
-from input_control.executor import _live_input_status
+from input_control.executor import _ensure_live_input_session_for_action, _live_input_status
 from input_control.human_input_controller import HumanInputController
 from input_control.mouse_movement import MouseMovementPlan, MousePoint, MouseTarget
 
@@ -547,6 +547,56 @@ class ArduinoLiveInputPolicyTest(unittest.TestCase):
         self.assertIn(("disarm",), backend.calls)
         self.assertNotIn(("click_at",), backend.calls)
         self.assertFalse(any(call[0] == "press" for call in backend.calls))
+
+    def test_pointer_calibration_focuses_runelite_for_runelite_allowed_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calibration_path = Path(tmp) / "pointer_calibration.json"
+            args = execute_cli.parse_args([
+                "--arduino-pointer-calibration-test",
+                "--allowed-window",
+                "runelite",
+                "--arduino-port",
+                "COM9",
+                "--arduino-pointer-calibration-path",
+                str(calibration_path),
+            ])
+            execute_cli.apply_focus_default(args)
+            backend = FakeCalibrationBackend()
+            original_context = execute_cli._calibration_window_context
+            original_cursor = execute_cli._cursor_position
+            original_foreground = execute_cli._foreground_window_info
+            original_focus = execute_cli._restore_post_test_focus
+            focus_calls = []
+            try:
+                execute_cli._calibration_window_context = lambda _args: (
+                    None,
+                    {
+                        "type": "runelite",
+                        "window": {"title": "RuneLite - Test", "bounds": {"x": 0, "y": 0, "width": 300, "height": 220}},
+                        "fallbackCalibrationWindow": False,
+                    },
+                    {"x": 10, "y": 10, "width": 100, "height": 80},
+                    ["RuneLite"],
+                )
+                execute_cli._cursor_position = lambda: {"x": 20, "y": 20}
+                execute_cli._foreground_window_info = lambda: {"available": True, "title": "RuneLite - Test", "pid": 123}
+
+                def fake_focus(target, *, window_title_filter="RuneLite"):
+                    focus_calls.append((target, window_title_filter))
+                    return {"schema": "post_test_focus_recovery.v1", "target": target, "status": "PASS", "reason": "foreground_restored"}
+
+                execute_cli._restore_post_test_focus = fake_focus
+                payload = execute_cli.run_arduino_pointer_calibration_test(args, backend)
+            finally:
+                execute_cli._calibration_window_context = original_context
+                execute_cli._cursor_position = original_cursor
+                execute_cli._foreground_window_info = original_foreground
+                execute_cli._restore_post_test_focus = original_focus
+
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(focus_calls, [("runelite", "RuneLite")])
+        self.assertEqual(payload["preCalibrationFocus"]["status"], "PASS")
+        self.assertFalse(payload["fallbackCalibrationWindow"])
 
     def test_pointer_calibration_stages_when_cursor_near_allowed_region(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1375,6 +1425,24 @@ class ArduinoLiveInputPolicyTest(unittest.TestCase):
         self.assertEqual(commands.count("ARM session"), 2)
         self.assertIn("KEY_PRESS 1 50", commands)
         self.assertEqual(controller.metrics()["backendBlockedCommandCount"], 0)
+
+    def test_executor_rearms_before_each_live_action_when_backend_is_unarmed(self):
+        backend = FakeCalibrationBackend()
+        backend.session_token = "session"
+        status = {
+            "schema": "live_input_policy.v1",
+            "liveInputBackend": "arduino",
+            "liveInputBackendRequired": True,
+            "requestedLiveInput": True,
+            "arduinoArmed": True,
+        }
+
+        _ensure_live_input_session_for_action(live_options(), backend, status)
+
+        self.assertTrue(backend.armed)
+        self.assertIn(("arm",), backend.calls)
+        self.assertEqual(status["arduinoRearmedBeforeActionCount"], 1)
+        self.assertTrue(status["arduino"]["armed"])
 
     def test_arduino_backend_does_not_rearm_stop_all_or_disarm(self):
         class DisarmNotArmedSerial(FakeSerial):

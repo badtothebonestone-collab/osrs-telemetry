@@ -68,6 +68,7 @@ import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.AnimationChanged;
+import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.DecorativeObjectDespawned;
 import net.runelite.api.events.DecorativeObjectSpawned;
@@ -137,10 +138,14 @@ public class TelemetryPlugin extends Plugin
 	private static final String PACKET_COLLISION_GRID = "live_collision_grid_packet.v1";
 	private static final String PACKET_BANK_UI = "live_bank_ui_packet.v1";
 	private static final String PACKET_DIALOGUE_STATE = "live_dialogue_state_packet.v1";
+	private static final String PACKET_COMBAT_STATE = "live_combat_state_packet.v1";
 	private static final String PACKET_WRITER_HEALTH = "live_writer_health_packet.v1";
 	private static final int DIALOGUE_WIDGET_SCAN_LIMIT = 160;
 	private static final int MAX_SERVICE_SCENE_OBJECTS = 32;
 	private static final int SERVICE_SCENE_OBJECT_RADIUS = 48;
+	private static final int MAX_RECENT_COMBAT_EVENTS = 20;
+	private static final int MAX_COMBAT_ACTORS = 12;
+	private static final int COMBAT_NPC_RADIUS_TILES = 16;
 	private static final int COMPACT_LIVE_GEOMETRY_MAX_REFS_HARD_CAP = 200;
 	private static final int COLLISION_MOVEMENT_MASK = CollisionDataFlag.BLOCK_MOVEMENT_NORTH_WEST
 			| CollisionDataFlag.BLOCK_MOVEMENT_NORTH
@@ -192,6 +197,14 @@ public class TelemetryPlugin extends Plugin
 	private long tickId = 0;
 	private long clientTickId = 0;
 	private long eventSeq = 0;
+	private final List<Map<String, Object>> recentInteractingChanges = new ArrayList<>();
+	private final List<Map<String, Object>> recentHitsplats = new ArrayList<>();
+	private final List<Map<String, Object>> recentActorDeaths = new ArrayList<>();
+	private final List<Map<String, Object>> recentAnimations = new ArrayList<>();
+	private final List<Map<String, Object>> recentGraphics = new ArrayList<>();
+	private final List<Map<String, Object>> recentOverheadText = new ArrayList<>();
+	private final List<Map<String, Object>> recentChatMessages = new ArrayList<>();
+	private final List<Map<String, Object>> recentStatChanges = new ArrayList<>();
 	private final Set<Integer> knownItemIds = new HashSet<>();
 	private final Set<Integer> knownNpcIds = new HashSet<>();
 	private final Set<Integer> knownObjectIds = new HashSet<>();
@@ -207,6 +220,7 @@ public class TelemetryPlugin extends Plugin
 	private long lastSceneIndexResyncTick = -1;
 	private String lastSceneProjectionStateHash;
 	private Map<String, Object> lastCompactInventorySnapshot;
+	private Map<String, Object> lastCompactBankContainerSnapshot;
 	private int lastActivityAnimation = Integer.MIN_VALUE;
 	private int lastActivityPoseAnimation = Integer.MIN_VALUE;
 	private String lastActivityInteractingSignature;
@@ -278,6 +292,7 @@ public class TelemetryPlugin extends Plugin
 		objectNameCache.clear();
 		clearSceneIndex("startup");
 		lastCompactInventorySnapshot = null;
+		lastCompactBankContainerSnapshot = null;
 		lastActivityAnimation = Integer.MIN_VALUE;
 		lastActivityPoseAnimation = Integer.MIN_VALUE;
 		lastActivityInteractingSignature = null;
@@ -652,7 +667,22 @@ public class TelemetryPlugin extends Plugin
 		payload.put("level", event.getLevel());
 		payload.put("boostedLevel", event.getBoostedLevel());
 
+		rememberRecent(recentStatChanges, payload);
 		logEvent("StatChanged", payload);
+	}
+
+	@Subscribe
+	public void onChatMessage(ChatMessage event)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("type", event.getType() == null ? null : String.valueOf(event.getType()));
+		payload.put("name", truncate(event.getName(), 128));
+		payload.put("sender", truncate(event.getSender(), 128));
+		payload.put("message", truncate(event.getMessage(), 256));
+		payload.put("timestamp", event.getTimestamp());
+
+		rememberRecent(recentChatMessages, payload);
+		logEvent("ChatMessage", payload);
 	}
 
 	@Subscribe
@@ -729,6 +759,7 @@ public class TelemetryPlugin extends Plugin
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("actor", actorPayload(event.getActor()));
 
+		rememberRecent(recentAnimations, payload);
 		logEvent("AnimationChanged", payload);
 	}
 
@@ -739,6 +770,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("source", actorPayload(event.getSource()));
 		payload.put("target", actorPayload(event.getTarget()));
 
+		rememberRecent(recentInteractingChanges, payload);
 		logEvent("InteractingChanged", payload);
 	}
 
@@ -758,6 +790,7 @@ public class TelemetryPlugin extends Plugin
 			payload.put("others", hitsplat.isOthers());
 		}
 
+		rememberRecent(recentHitsplats, payload);
 		logEvent("HitsplatApplied", payload);
 	}
 
@@ -788,7 +821,9 @@ public class TelemetryPlugin extends Plugin
 	@Subscribe
 	public void onGraphicsObjectCreated(GraphicsObjectCreated event)
 	{
-		logEvent("GraphicsObjectCreated", graphicsObjectPayload(event.getGraphicsObject()));
+		Map<String, Object> payload = graphicsObjectPayload(event.getGraphicsObject());
+		rememberRecent(recentGraphics, payload);
+		logEvent("GraphicsObjectCreated", payload);
 	}
 
 	@Subscribe
@@ -798,6 +833,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("actor", actorPayload(event.getActor()));
 		payload.put("text", truncate(event.getOverheadText(), 256));
 
+		rememberRecent(recentOverheadText, payload);
 		logEvent("OverheadTextChanged", payload);
 	}
 
@@ -837,7 +873,9 @@ public class TelemetryPlugin extends Plugin
 		if (event.getActor() instanceof NPC)
 		{
 			rememberNpc((NPC) event.getActor());
-			logEvent("NpcDeath", actorPayload(event.getActor()));
+			Map<String, Object> payload = actorPayload(event.getActor());
+			rememberRecent(recentActorDeaths, payload);
+			logEvent("NpcDeath", payload);
 		}
 	}
 
@@ -1109,6 +1147,11 @@ public class TelemetryPlugin extends Plugin
 		if (bankUiEffective)
 		{
 			currentWriter.updateLiveCache(PACKET_DIALOGUE_STATE, snapshot.tickId, snapshot.timestampUtc, dialogueStatePayload(snapshot));
+		}
+
+		if (compactPacketTypeEnabled("combatState"))
+		{
+			currentWriter.updateLiveCache(PACKET_COMBAT_STATE, snapshot.tickId, snapshot.timestampUtc, combatStatePayload(snapshot));
 		}
 
 		if (config.emitCompactNavigationPackets()
@@ -2221,7 +2264,9 @@ public class TelemetryPlugin extends Plugin
 		payload.put("inventorySlots", bankUi == null || bankUi.inventorySlotWidgets == null ? new TickSnapshot.InventorySlotWidgetSnapshot[0] : bankUi.inventorySlotWidgets);
 		payload.put("inventorySlotWidgets", bankUi == null || bankUi.inventorySlotWidgets == null ? new TickSnapshot.InventorySlotWidgetSnapshot[0] : bankUi.inventorySlotWidgets);
 		payload.put("inventorySummary", itemContainerSnapshot(snapshot == null ? null : snapshot.inventory));
-		payload.put("bankSummary", itemContainerSummary(bankUi == null ? null : bankUi.bankItems));
+		Map<String, Object> bankSummary = itemContainerSummary(bankUi == null ? null : bankUi.bankItems);
+		payload.put("bankSummary", bankSummary);
+		payload.put("bankContainerDelta", bankContainerDeltaPayload(snapshot, bankSummary));
 		return payload;
 	}
 
@@ -2243,6 +2288,154 @@ public class TelemetryPlugin extends Plugin
 		payload.put("latestClientTick", dialogue == null ? null : dialogue.latestClientTick);
 		payload.put("wallTimeMillis", dialogue == null ? null : dialogue.wallTimeMillis);
 		return payload;
+	}
+
+	private Map<String, Object> combatStatePayload(TickSnapshot snapshot)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		Player localPlayer = client.getLocalPlayer();
+		Actor playerInteracting = localPlayer == null ? null : localPlayer.getInteracting();
+		List<Map<String, Object>> actorsInteractingWithPlayer = actorsInteractingWithLocalPlayer(localPlayer, snapshot);
+		List<Map<String, Object>> nearbyHostileNpcs = nearbyHostileNpcs(localPlayer, snapshot);
+		Map<String, Object> playerHealth = new LinkedHashMap<>();
+		TickSnapshot.StatusSnapshot status = snapshot == null ? null : snapshot.status;
+
+		playerHealth.put("ratio", localPlayer == null ? null : localPlayer.getHealthRatio());
+		playerHealth.put("scale", localPlayer == null ? null : localPlayer.getHealthScale());
+		playerHealth.put("boostedHitpoints", status == null ? null : status.hitpointsBoosted);
+		playerHealth.put("realHitpoints", status == null ? null : status.hitpointsReal);
+
+		payload.put("schema", "combat_state.v1");
+		payload.put("tick", snapshot == null ? null : snapshot.tickId);
+		payload.put("exportSeq", null);
+		payload.put("stateAgeMs", 0);
+		payload.put("inCombat", playerInteracting != null || !actorsInteractingWithPlayer.isEmpty());
+		payload.put("playerInteracting", actorPayload(playerInteracting));
+		payload.put("actorsInteractingWithPlayer", actorsInteractingWithPlayer);
+		payload.put("nearbyHostileNpcs", nearbyHostileNpcs);
+		payload.put("recentInteractingChanges", recentCopy(recentInteractingChanges));
+		payload.put("recentHitsplats", recentCopy(recentHitsplats));
+		payload.put("recentActorDeaths", recentCopy(recentActorDeaths));
+		payload.put("recentAnimations", recentCopy(recentAnimations));
+		payload.put("recentGraphics", recentCopy(recentGraphics));
+		payload.put("recentOverheadText", recentCopy(recentOverheadText));
+		payload.put("recentChatMessages", recentCopy(recentChatMessages));
+		payload.put("recentStatChanges", recentCopy(recentStatChanges));
+		payload.put("playerHealth", playerHealth);
+		payload.put("warnings", List.of());
+		return payload;
+	}
+
+	private List<Map<String, Object>> actorsInteractingWithLocalPlayer(Player localPlayer, TickSnapshot snapshot)
+	{
+		List<Map<String, Object>> result = new ArrayList<>();
+		if (localPlayer == null || snapshot == null)
+		{
+			return result;
+		}
+		List<NPC> npcs = client.getNpcs();
+		if (npcs != null)
+		{
+			for (NPC npc : npcs)
+			{
+				if (npc != null && npc.getInteracting() == localPlayer)
+				{
+					Map<String, Object> actor = actorPayload(npc);
+					actor.put("distanceTiles", distanceTiles(localPlayer, npc));
+					result.add(actor);
+					if (result.size() >= MAX_COMBAT_ACTORS)
+					{
+						return result;
+					}
+				}
+			}
+		}
+		List<Player> players = client.getPlayers();
+		if (players == null)
+		{
+			return result;
+		}
+		for (Player player : players)
+		{
+			if (player != null && player != localPlayer && player.getInteracting() == localPlayer)
+			{
+				Map<String, Object> actor = actorPayload(player);
+				actor.put("distanceTiles", distanceTiles(localPlayer, player));
+				result.add(actor);
+				if (result.size() >= MAX_COMBAT_ACTORS)
+				{
+					return result;
+				}
+			}
+		}
+		return result;
+	}
+
+	private List<Map<String, Object>> nearbyHostileNpcs(Player localPlayer, TickSnapshot snapshot)
+	{
+		List<Map<String, Object>> result = new ArrayList<>();
+		if (localPlayer == null || snapshot == null || snapshot.npcs == null)
+		{
+			return result;
+		}
+		for (TickSnapshot.NpcSnapshot npc : snapshot.npcs)
+		{
+			if (npc == null || npc.combatLevel <= 0)
+			{
+				continue;
+			}
+			int distance = distanceTiles(localPlayer, npc.worldX, npc.worldY, npc.plane);
+			if (distance < 0 || distance > COMBAT_NPC_RADIUS_TILES)
+			{
+				continue;
+			}
+			Map<String, Object> record = new LinkedHashMap<>();
+			record.put("actorType", "NPC");
+			record.put("index", npc.index);
+			record.put("id", npc.id);
+			record.put("name", safeString(npc.name != null ? npc.name : npc.npcName));
+			record.put("combatLevel", npc.combatLevel);
+			record.put("worldX", npc.worldX);
+			record.put("worldY", npc.worldY);
+			record.put("plane", npc.plane);
+			record.put("animation", npc.animation);
+			record.put("healthRatio", npc.healthRatio);
+			record.put("healthScale", npc.healthScale);
+			record.put("dead", npc.dead);
+			record.put("distanceTiles", distance);
+			record.put("onScreen", npc.onScreen);
+			record.put("geometryAvailable", npc.geometryAvailable);
+			result.add(record);
+			if (result.size() >= MAX_COMBAT_ACTORS)
+			{
+				break;
+			}
+		}
+		result.sort(Comparator.comparingInt(item -> getInt(item.get("distanceTiles"), 999)));
+		return result;
+	}
+
+	private int distanceTiles(Actor source, Actor target)
+	{
+		WorldPoint sourcePoint = source == null ? null : source.getWorldLocation();
+		WorldPoint targetPoint = target == null ? null : target.getWorldLocation();
+		if (sourcePoint == null || targetPoint == null || sourcePoint.getPlane() != targetPoint.getPlane())
+		{
+			return -1;
+		}
+		return Math.max(
+				Math.abs(sourcePoint.getX() - targetPoint.getX()),
+				Math.abs(sourcePoint.getY() - targetPoint.getY()));
+	}
+
+	private int distanceTiles(Player localPlayer, int worldX, int worldY, int plane)
+	{
+		WorldPoint local = localPlayer == null ? null : localPlayer.getWorldLocation();
+		if (local == null || plane != local.getPlane())
+		{
+			return -1;
+		}
+		return Math.max(Math.abs(local.getX() - worldX), Math.abs(local.getY() - worldY));
 	}
 
 	private Map<String, Object> itemContainerSnapshot(TickSnapshot.InventorySlot[] slots)
@@ -2487,10 +2680,64 @@ public class TelemetryPlugin extends Plugin
 		return changes;
 	}
 
+	private Map<String, Object> bankContainerDeltaPayload(TickSnapshot snapshot, Map<String, Object> current)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		List<String> warnings = new ArrayList<>();
+		payload.put("schema", "bank_container_delta.v1");
+		payload.put("tick", snapshot == null ? null : snapshot.tickId);
+		payload.put("source", "gameTickBankSnapshot");
+		payload.put("changedItems", new ArrayList<Map<String, Object>>());
+		payload.put("warnings", warnings);
+
+		if (current == null || !Boolean.TRUE.equals(current.get("known")))
+		{
+			warnings.add("current bank container snapshot unavailable");
+			payload.put("available", false);
+			return payload;
+		}
+
+		Map<String, Object> previous = lastCompactBankContainerSnapshot;
+		lastCompactBankContainerSnapshot = current;
+		if (previous == null || !Boolean.TRUE.equals(previous.get("known")))
+		{
+			warnings.add("previous bank container snapshot unavailable");
+			payload.put("available", false);
+			return payload;
+		}
+
+		List<Map<String, Object>> changes = inventoryQuantityChanges(previous, current);
+		for (Map<String, Object> change : changes)
+		{
+			change.put("source", "snapshot_diff");
+		}
+		payload.put("available", !changes.isEmpty());
+		payload.put("changedItems", changes);
+		payload.put("itemCountBefore", nullableInt(previous.get("itemCount")));
+		payload.put("itemCountAfter", nullableInt(current.get("itemCount")));
+		payload.put("signatureBefore", stringValue(previous.get("signature")));
+		payload.put("signatureAfter", stringValue(current.get("signature")));
+		return payload;
+	}
+
 	@SuppressWarnings("unchecked")
 	private Map<Integer, Integer> itemQuantityById(Map<String, Object> snapshot)
 	{
 		Map<Integer, Integer> counts = new LinkedHashMap<>();
+		Object totalsObject = snapshot.get("totalQuantityByItemId");
+		if (totalsObject instanceof Map)
+		{
+			for (Map.Entry<?, ?> entry : ((Map<?, ?>) totalsObject).entrySet())
+			{
+				int itemId = getInt(entry.getKey(), -1);
+				int quantity = getInt(entry.getValue(), 0);
+				if (itemId > 0 && quantity > 0)
+				{
+					counts.put(itemId, counts.getOrDefault(itemId, 0) + quantity);
+				}
+			}
+			return counts;
+		}
 		Object itemsObject = snapshot.get("items");
 		if (!(itemsObject instanceof List))
 		{
@@ -2941,10 +3188,12 @@ public class TelemetryPlugin extends Plugin
 		payload.put("collisionWindowCachePresent", liveCachePayloadTypes.contains(PACKET_COLLISION_WINDOW));
 		payload.put("bankUiCachePresent", liveCachePayloadTypes.contains(PACKET_BANK_UI));
 		payload.put("dialogueStateCachePresent", liveCachePayloadTypes.contains(PACKET_DIALOGUE_STATE));
+		payload.put("combatStateCachePresent", liveCachePayloadTypes.contains(PACKET_COMBAT_STATE));
 		payload.put("navigationPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_NAVIGATION, snapshot));
 		payload.put("collisionWindowPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_COLLISION_WINDOW, snapshot));
 		payload.put("bankUiPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_BANK_UI, snapshot));
 		payload.put("dialogueStatePacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_DIALOGUE_STATE, snapshot));
+		payload.put("combatStatePacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_COMBAT_STATE, snapshot));
 		payload.put("emitNavigationEffective", emitNavigationEffective(currentWriter));
 		payload.put("emitCollisionWindowEffective", emitCollisionWindowEffective(currentWriter));
 		payload.put("emitBankUiEffective", emitBankUiEffective(currentWriter));
@@ -6035,6 +6284,44 @@ public class TelemetryPlugin extends Plugin
 		}
 	}
 
+	private void rememberRecent(List<Map<String, Object>> buffer, Map<String, Object> payload)
+	{
+		if (buffer == null || payload == null)
+		{
+			return;
+		}
+		Map<String, Object> record = new LinkedHashMap<>();
+		record.put("tick", tickId);
+		record.put("eventSeq", eventSeq + 1);
+		record.put("timestampUtc", Instant.now().toString());
+		record.putAll(payload);
+		synchronized (buffer)
+		{
+			buffer.add(record);
+			while (buffer.size() > MAX_RECENT_COMBAT_EVENTS)
+			{
+				buffer.remove(0);
+			}
+		}
+	}
+
+	private List<Map<String, Object>> recentCopy(List<Map<String, Object>> buffer)
+	{
+		if (buffer == null)
+		{
+			return List.of();
+		}
+		synchronized (buffer)
+		{
+			List<Map<String, Object>> copy = new ArrayList<>();
+			for (Map<String, Object> item : buffer)
+			{
+				copy.add(new LinkedHashMap<>(item));
+			}
+			return copy;
+		}
+	}
+
 	private Map<String, Object> actorPayload(Actor actor)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
@@ -6520,7 +6807,22 @@ public class TelemetryPlugin extends Plugin
 
 	private int getInt(Object value, int fallback)
 	{
-		return value instanceof Number ? ((Number) value).intValue() : fallback;
+		if (value instanceof Number)
+		{
+			return ((Number) value).intValue();
+		}
+		if (value instanceof String)
+		{
+			try
+			{
+				return Integer.parseInt(((String) value).trim());
+			}
+			catch (NumberFormatException ignored)
+			{
+				return fallback;
+			}
+		}
+		return fallback;
 	}
 
 	private String truncate(String value, int maxLength)

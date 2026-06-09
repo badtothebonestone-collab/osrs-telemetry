@@ -12,6 +12,10 @@ from candidate_core import (
     woodcutting_required_level,
 )
 import dialogue_core
+try:
+    import route_demonstration
+except Exception:  # pragma: no cover - optional at import time for isolated tests
+    route_demonstration = None
 import safe_aimpoint_core
 import target_view_core
 
@@ -37,6 +41,7 @@ KNOWN_ACTIONS = {
     "navigate_to_service",
     "interact_service_route_object",
     "service_view_recovery",
+    "camera_adjust_before_click",
     "interface_dialogue_choice",
     "open_service",
     "deposit_inventory",
@@ -45,6 +50,8 @@ KNOWN_ACTIONS = {
     "return_to_resource_area",
     "wait_for_context",
 }
+
+ROUTE_ACTIONS = {"navigate_to_service", "return_to_resource_area"}
 
 
 @dataclass
@@ -205,6 +212,293 @@ def _int(value: Any, default: int = 0) -> int:
         except ValueError:
             return default
     return default
+
+
+def _point_payload(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    x = _first_present(value.get("x"), value.get("canvasX"), value.get("screenX"))
+    y = _first_present(value.get("y"), value.get("canvasY"), value.get("screenY"))
+    x_int = _int(x, None)
+    y_int = _int(y, None)
+    if x_int is None or y_int is None:
+        return None
+    return {"x": x_int, "y": y_int}
+
+
+def _context_action_proposal(status: dict[str, Any], brain: dict[str, Any]) -> ActionProposal | None:
+    payload = _dict(status.get("contextActionProposal")) or _dict(brain.get("contextActionProposal"))
+    if not payload:
+        return None
+    proposed_action = str(payload.get("proposedAction") or payload.get("action") or "none")
+    if proposed_action not in KNOWN_ACTIONS:
+        return None
+    proposal = ActionProposal(
+        proposed_action=proposed_action,
+        target_kind=str(payload.get("targetKind") or "none"),
+        target_name=str(payload.get("targetName")) if payload.get("targetName") is not None else None,
+        target_tile=_dict(payload.get("targetTile")) or None,
+        suggested_click_point=_point_payload(payload.get("suggestedClickPoint")),
+        click_point_space=str(payload.get("clickPointSpace") or "screen"),
+        resolved_screen_click_point=_point_payload(payload.get("resolvedScreenClickPoint")),
+        click_point_resolution=_dict(payload.get("clickPointResolution")) or None,
+        input_geometry=_dict(payload.get("inputGeometry")) or input_geometry_from_status(status),
+        suggested_world_tile=_dict(payload.get("suggestedWorldTile")) or None,
+        key_action=_dict(payload.get("keyAction")) or None,
+        target_explanation=_dict(payload.get("targetExplanation")) or None,
+        reason=str(payload.get("reason") or "context_action_proposal"),
+        confidence=float(payload.get("confidence")) if isinstance(payload.get("confidence"), (int, float)) else 0.0,
+        required_context=[str(item) for item in _list(payload.get("requiredContext"))],
+        missing_capabilities=[str(item) for item in _list(payload.get("missingCapabilities"))],
+        warnings=[str(item) for item in _list(payload.get("warnings"))],
+        status=str(payload.get("status") or "PASS"),
+        source_tick=_int(payload.get("sourceTick"), None),
+        action_target_source=str(payload.get("actionTargetSource")) if payload.get("actionTargetSource") is not None else None,
+        actionability=str(payload.get("actionability")) if payload.get("actionability") is not None else None,
+    )
+    proposal = _reconcile_context_route_waypoint(proposal, status, brain)
+    if proposal.executable:
+        proposal.warnings = list(dict.fromkeys([*proposal.warnings, "proposal sourced from compact live action context"]))
+        return proposal
+    if str(proposal.actionability or "").startswith("blocked_"):
+        proposal.warnings = list(dict.fromkeys([*proposal.warnings, "blocked proposal sourced from compact live action context"]))
+        return proposal
+    return None
+
+
+def _route_tiles_from_context_proposal(proposal: ActionProposal, status: dict[str, Any], brain: dict[str, Any]) -> list[dict[str, Any]]:
+    explanation = _dict(proposal.target_explanation)
+    pathing = _dict(brain.get("pathingContext") or status.get("pathingContext"))
+    if not pathing:
+        pathing = {}
+    merged: dict[str, Any] = {}
+    for key in ("predictedPathTiles", "localScoutPath", "availableWaypointTiles"):
+        values = _list(explanation.get(key)) or _list(pathing.get(key)) or _list(status.get(f"pathing{key[0].upper()}{key[1:]}"))
+        if values:
+            merged[key] = values
+    return _path_tiles(merged)
+
+
+def _reconcile_context_route_waypoint(proposal: ActionProposal, status: dict[str, Any], brain: dict[str, Any]) -> ActionProposal:
+    if proposal.proposed_action not in {"navigate_to_service", "return_to_resource_area"} or proposal.target_kind != "path_tile":
+        return proposal
+    pathing = _dict(brain.get("pathingContext") or status.get("pathingContext"))
+    player_tile = _player_world_tile(status, brain) or _current_pathing_player_tile(pathing)
+    target_tile = _normalise_tile(proposal.target_tile)
+    distance = _route_tile_distance_same_plane(player_tile, target_tile)
+    if distance is None or distance > 1:
+        return proposal
+    tiles = _route_tiles_from_context_proposal(proposal, status, brain)
+    explanation = dict(proposal.target_explanation or {})
+    destination_tile = _normalise_tile(
+        explanation.get("destinationTile")
+        or explanation.get("pathTargetTile")
+        or _dict(brain.get("pathingContext")).get("destinationTile")
+        or _dict(brain.get("pathingContext")).get("pathTargetTile")
+        or status.get("pathingDestinationTile")
+        or status.get("pathingPathTargetTile")
+    )
+    at_destination = bool(
+        destination_tile
+        and player_tile
+        and _route_tile_distance_same_plane(player_tile, destination_tile) is not None
+        and (_route_tile_distance_same_plane(player_tile, destination_tile) or 0) <= 1
+    )
+    if at_destination:
+        guide_progress = _route_guide_progress_for_action(
+            proposal.proposed_action,
+            status,
+            brain,
+            player_tile=player_tile,
+            explanation=explanation,
+        )
+        guide_tile = _guide_point_tile(guide_progress)
+        guide_interaction = _guide_interaction_target(guide_progress)
+        if guide_interaction and _guide_interaction_should_win(guide_progress, guide_tile):
+            guide_interaction["actionability"] = "blocked_route_guide_interaction_needs_live_target"
+            guide_interaction["routeCandidateValidation"] = {
+                **_dict(guide_interaction.get("routeCandidateValidation")),
+                "status": "WARN",
+                "classification": "route_guide_interaction_needs_live_target",
+            }
+            return _proposal(
+                "wait_for_context",
+                target_kind="service_route_object",
+                target=guide_interaction,
+                reason="route_guide_interaction_needs_live_target",
+                confidence=0.58,
+                warnings=["demonstrated route guide expects an interaction step, but live target geometry is not actionable yet"],
+                missing=["route.interaction.liveTarget"],
+                required_context=["route_guide", "service_route", "client_tick"],
+                source_tick=proposal.source_tick,
+                input_geometry=proposal.input_geometry,
+                source_canvas_size=source_canvas_size_from_status(status),
+                status=status,
+                brain=brain,
+                suppress_click_point=True,
+            )
+        if guide_tile and _route_tile_distance_same_plane(guide_tile, player_tile) != 0:
+            previous_selection = _dict(explanation.get("routeWaypointSelection"))
+            explanation["routeGuideLoaded"] = True
+            explanation["routeGuideName"] = guide_progress.get("routeGuideName")
+            explanation["routeGuideProgress"] = dict(guide_progress)
+            explanation["routeGuideSource"] = "demonstrated_path_after_arrived_waypoint"
+            explanation["routeWaypointSelection"] = {
+                "schema": "route_waypoint_selection.v1",
+                "mode": "route_guide",
+                "reason": "arrived_waypoint_advanced_by_demonstrated_route_guide",
+                "waypointAlreadyReached": True,
+                "selectedTile": dict(guide_tile),
+                "skippedWaypoint": dict(target_tile) if target_tile else None,
+                "nextWaypoint": dict(guide_tile),
+                "arrivedWaypointTile": dict(target_tile) if target_tile else None,
+                "destinationTile": dict(destination_tile),
+                "playerTile": dict(player_tile),
+                "nearestGuidePoint": guide_progress.get("nearestGuidePoint"),
+                "routeGuideProgressIndex": guide_progress.get("routeGuideProgressIndex"),
+                "skippedReachedGuidePoints": guide_progress.get("skippedReachedGuidePoints"),
+                "previousSelection": previous_selection or None,
+            }
+            explanation["targetTileBeforeReconciliation"] = dict(target_tile) if target_tile else None
+            explanation["targetTile"] = dict(guide_tile)
+            explanation["waypointAlreadyReached"] = True
+            explanation["routeStateStale"] = bool(_dict(explanation.get("freshness")).get("stale"))
+            explanation["livePositionFresh"] = True
+            explanation["reconciliationMethod"] = "route_demonstration_guide_progress"
+            explanation["routeCandidateValidation"] = {
+                "schema": "route_candidate_validation.v1",
+                "status": "PASS",
+                "classification": "route_guide_path_point_after_arrived_waypoint",
+                "routeCorridorMatch": True,
+                "routeProgressScore": 0.85,
+                "rejectionReasons": [],
+            }
+            proposal.target_tile = dict(guide_tile)
+            proposal.suggested_world_tile = dict(guide_tile)
+            proposal.suggested_click_point = None
+            proposal.resolved_screen_click_point = None
+            proposal.click_point_resolution = None
+            proposal.action_target_source = "local_frontier_waypoint"
+            proposal.actionability = "needs_live_projection"
+            proposal.status = "PASS"
+            proposal.target_explanation = explanation
+            proposal.warnings = list(
+                dict.fromkeys(
+                    [
+                        *proposal.warnings,
+                        "route waypoint already reached; advanced using demonstrated route guide",
+                    ]
+                )
+            )
+            return proposal
+        if guide_interaction:
+            guide_interaction["actionability"] = "blocked_route_guide_interaction_needs_live_target"
+            guide_interaction["routeCandidateValidation"] = {
+                **_dict(guide_interaction.get("routeCandidateValidation")),
+                "status": "WARN",
+                "classification": "route_guide_interaction_needs_live_target",
+            }
+            return _proposal(
+                "wait_for_context",
+                target_kind="service_route_object",
+                target=guide_interaction,
+                reason="route_guide_interaction_needs_live_target",
+                confidence=0.58,
+                warnings=["demonstrated route guide expects an interaction step, but live target geometry is not actionable yet"],
+                missing=["route.interaction.liveTarget"],
+                required_context=["route_guide", "service_route", "client_tick"],
+                source_tick=proposal.source_tick,
+                input_geometry=proposal.input_geometry,
+                source_canvas_size=source_canvas_size_from_status(status),
+                status=status,
+                brain=brain,
+                suppress_click_point=True,
+            )
+        previous_selection = _dict(explanation.get("routeWaypointSelection"))
+        selection = {
+            "schema": "route_waypoint_selection.v1",
+            "mode": str(previous_selection.get("mode") or "adaptive"),
+            "reason": "arrived_destination_needs_next_route_segment",
+            "blocked": True,
+            "blockedReason": "live position is at the route waypoint/destination but route context has not advanced",
+            "waypointAlreadyReached": True,
+            "consideredTiles": len(tiles),
+            "selectedTile": dict(target_tile) if target_tile else None,
+            "arrivedWaypointTile": dict(target_tile) if target_tile else None,
+            "destinationTile": dict(destination_tile),
+            "playerTile": dict(player_tile),
+            "routeGuideProgress": guide_progress or None,
+            "previousSelection": previous_selection or None,
+        }
+        explanation["routeWaypointSelection"] = selection
+        explanation["waypointAlreadyReached"] = True
+        explanation["routeStateStale"] = bool(_dict(explanation.get("freshness")).get("stale"))
+        explanation["livePositionFresh"] = True
+        explanation["reconciliationMethod"] = "playerWorldPosition_arrived_destination"
+        explanation["routeCandidateValidation"] = {
+            "status": "FAIL",
+            "reason": "route_waypoint_arrived_needs_next_segment",
+            "rejectionReasons": ["current_tile_or_arrived_waypoint", "route_state_stale_needs_next_segment"],
+        }
+        proposal.actionability = "blocked_route_waypoint_arrived_needs_next_segment"
+        proposal.status = "WARN"
+        proposal.target_explanation = explanation
+        proposal.missing_capabilities = list(
+            dict.fromkeys([*proposal.missing_capabilities, "route.nextSegment", "route.state.fresh"])
+        )
+        proposal.warnings = list(
+            dict.fromkeys(
+                [
+                    *proposal.warnings,
+                    "route waypoint/destination already reached; no demonstrated next route guide step was available",
+                ]
+            )
+        )
+        return proposal
+    forward_tile, forward_index = _forward_tile_after_current(tiles, player_tile)
+    if not forward_tile:
+        return proposal
+    if _route_tile_distance_same_plane(forward_tile, target_tile) == 0:
+        return proposal
+    previous_selection = _dict(explanation.get("routeWaypointSelection"))
+    selection = {
+        "schema": "route_waypoint_selection.v1",
+        "mode": str(previous_selection.get("mode") or "adaptive"),
+        "reason": "context_current_waypoint_arrived_forward_step",
+        "waypointAlreadyReached": True,
+        "waypointDistanceTiles": max(1, int(forward_index or 0) + 1),
+        "consideredTiles": len(tiles),
+        "selectedTile": dict(forward_tile),
+        "skippedWaypoint": dict(target_tile),
+        "nextWaypoint": dict(forward_tile),
+        "arrivedWaypointTile": dict(target_tile),
+        "playerTile": dict(player_tile),
+        "previousSelection": previous_selection or None,
+    }
+    explanation["routeWaypointSelection"] = selection
+    explanation["targetTileBeforeReconciliation"] = dict(target_tile)
+    explanation["targetTile"] = dict(forward_tile)
+    explanation["waypointAlreadyReached"] = True
+    explanation["routeStateStale"] = bool(_dict(explanation.get("freshness")).get("stale"))
+    explanation["livePositionFresh"] = True
+    explanation["reconciliationMethod"] = "playerWorldPosition_progress"
+    proposal.target_tile = dict(forward_tile)
+    proposal.suggested_world_tile = dict(forward_tile)
+    proposal.suggested_click_point = None
+    proposal.resolved_screen_click_point = None
+    proposal.click_point_resolution = None
+    proposal.action_target_source = "local_frontier_waypoint"
+    proposal.actionability = "needs_live_projection"
+    proposal.target_explanation = explanation
+    proposal.warnings = list(
+        dict.fromkeys(
+            [
+                *proposal.warnings,
+                "current route waypoint already reached; advanced to next forward path tile from live player position",
+            ]
+        )
+    )
+    return proposal
 
 
 def _number(value: Any, default: float | None = None) -> float | None:
@@ -854,6 +1148,16 @@ def _tile_distance(a: dict[str, Any] | None, b: dict[str, Any] | None) -> int | 
     return int(max(abs(ax - bx), abs(ay - by)))
 
 
+def _route_tile_distance_same_plane(a: dict[str, Any] | None, b: dict[str, Any] | None) -> int | None:
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return None
+    a_plane = _int(a.get("plane"), 0)
+    b_plane = _int(b.get("plane"), 0)
+    if a_plane != b_plane:
+        return None
+    return _tile_distance(a, b)
+
+
 def _is_resource_return_navigation_target(target: Any) -> bool:
     target = _dict(target)
     if not target:
@@ -919,8 +1223,14 @@ def _resource_return_fallback_target(active_target: dict[str, Any], resource_ret
 def _player_world_tile(status: dict[str, Any], brain: dict[str, Any]) -> dict[str, Any] | None:
     for value in (
         status.get("playerLocation"),
+        status.get("playerWorldPosition"),
+        status.get("playerWorldTile"),
+        status.get("currentPlayerTile"),
         status.get("playerContext"),
         brain.get("playerLocation"),
+        brain.get("playerWorldPosition"),
+        brain.get("playerWorldTile"),
+        brain.get("currentPlayerTile"),
         brain.get("playerContext"),
         _dict(status.get("baseline")).get("player"),
         _dict(brain.get("baseline")).get("player"),
@@ -932,6 +1242,10 @@ def _player_world_tile(status: dict[str, Any], brain: dict[str, Any]) -> dict[st
         nested = _world_tile(value.get("worldTile") or value.get("tile"))
         if nested:
             return nested
+    x = _first_present(status.get("playerWorldX"), status.get("worldX"), brain.get("playerWorldX"), brain.get("worldX"))
+    y = _first_present(status.get("playerWorldY"), status.get("worldY"), brain.get("playerWorldY"), brain.get("worldY"))
+    if x is not None and y is not None:
+        return {"worldX": _int(x, 0), "worldY": _int(y, 0), "plane": _int(_first_present(status.get("playerPlane"), status.get("plane"), brain.get("playerPlane"), brain.get("plane")), 0)}
     return None
 
 
@@ -1555,6 +1869,185 @@ def _service_route_interaction_target(route_context: dict[str, Any]) -> dict[str
     if isinstance(merged.get("expectedOptions"), list) and not isinstance(merged.get("actions"), list):
         merged["actions"] = list(merged["expectedOptions"]) + list(_list(merged.get("dialogueOpenerOptions")))
     return merged
+
+
+def _compact_words(value: Any) -> str:
+    return " ".join(_lower(value).replace("-", " ").replace("_", " ").split())
+
+
+def _target_matches_expected_text(target_text: str, expected: list[Any]) -> bool:
+    if not expected:
+        return True
+    text = _compact_words(target_text)
+    return bool(text and any(_compact_words(item) and _compact_words(item) in text for item in expected))
+
+
+def _route_step_expected_options(route_context: dict[str, Any]) -> list[Any]:
+    step = _current_route_step(route_context)
+    return _list(step.get("expectedOptions")) + _list(step.get("dialogueOpenerOptions"))
+
+
+def _route_step_expected_targets(route_context: dict[str, Any]) -> list[Any]:
+    step = _current_route_step(route_context)
+    return _list(step.get("expectedTargetContains")) + _list(step.get("expectedTargets"))
+
+
+def _candidate_expected_options(target: dict[str, Any]) -> list[Any]:
+    return _list(target.get("actions")) + _list(target.get("expectedOptions")) + _list(target.get("dialogueOpenerOptions"))
+
+
+def _candidate_expected_targets(target: dict[str, Any]) -> list[Any]:
+    return [
+        target.get("targetName"),
+        target.get("name"),
+        target.get("classId"),
+        *_list(target.get("expectedTargets")),
+    ]
+
+
+def _route_context_has_explicit_segment_identity(route_context: dict[str, Any]) -> bool:
+    step = _current_route_step(route_context)
+    return bool(step and (_route_step_expected_options(route_context) or _route_step_expected_targets(route_context)))
+
+
+def _route_target_has_route_relevance_pass(target: dict[str, Any]) -> bool:
+    relevance = _dict(target.get("routeRelevance"))
+    return relevance.get("relevanceStatus") == "PASS" and _bool(
+        _first_present(
+            relevance.get("candidateWouldAdvanceRoute"),
+            target.get("candidateWouldAdvanceRoute"),
+            target.get("routeCorridorMatch"),
+        )
+    ) is not False
+
+
+def _route_target_validation_issue(target: dict[str, Any], route_context: dict[str, Any]) -> dict[str, Any] | None:
+    if not target:
+        return None
+    class_text = _compact_words(target.get("classId") or target.get("targetClass") or "")
+    target_type = _compact_words(target.get("targetType") or "")
+    routeish = any(token in f"{class_text} {target_type}" for token in ("route transition", "service route transition", "sceneobject"))
+    if not routeish:
+        return None
+    route_id = _text(target.get("routeId") or route_context.get("routeId") or route_context.get("returnRouteId"))
+    target_name = _text(target.get("targetName") or target.get("name"))
+    action_text = " ".join(str(item) for item in _candidate_expected_options(target))
+    explicit_step = _route_context_has_explicit_segment_identity(route_context)
+    expected_options = _route_step_expected_options(route_context) if explicit_step else []
+    expected_targets = _route_step_expected_targets(route_context) if explicit_step else []
+    route_relevance = _dict(target.get("routeRelevance"))
+    reasons: list[str] = []
+    plugin_only_route = route_id.startswith("plugin_snapshot")
+
+    if plugin_only_route:
+        reasons.append("route_object_not_on_expected_segment")
+        name_text = _compact_words(target_name)
+        if "ladder" in name_text or "stepladder" in name_text:
+            reasons.append("wrong_building_or_wrong_area")
+            reasons.append("unrelated_route_object")
+        if "climb down" in _compact_words(action_text):
+            reasons.append("does_not_advance_route")
+    elif route_relevance.get("relevanceStatus") == "FAIL":
+        reason = str(route_relevance.get("rejectionReason") or "route_object_not_on_expected_segment")
+        reasons.append(reason)
+    if not reasons and explicit_step:
+        if expected_targets and not _target_matches_expected_text(target_name, expected_targets):
+            reasons.append("route_object_not_on_expected_segment")
+        if expected_options and not _target_matches_expected_text(action_text, expected_options):
+            reasons.append("does_not_advance_route")
+        if not reasons:
+            return None
+    elif not reasons and _route_target_has_route_relevance_pass(target):
+        return None
+    elif not reasons:
+        non_template_route = not route_id or route_id.startswith("plugin_snapshot")
+        target_expected_targets = _list(target.get("expectedTargets"))
+        target_expected_options = _list(target.get("expectedOptions"))
+        self_described_only = bool(target_expected_targets or target_expected_options)
+        if (
+            not plugin_only_route
+            and route_id
+            and _target_matches_expected_text(target_name, target_expected_targets)
+            and _target_matches_expected_text(action_text, target_expected_options)
+        ):
+            return None
+        if plugin_only_route or non_template_route or self_described_only:
+            reasons.append("route_object_not_on_expected_segment")
+            name_text = _compact_words(target_name)
+            if "ladder" in name_text or "stepladder" in name_text:
+                reasons.append("wrong_building_or_wrong_area")
+                reasons.append("unrelated_route_object")
+            if "climb down" in _compact_words(action_text):
+                reasons.append("does_not_advance_route")
+
+    if not reasons:
+        return None
+    reasons = list(dict.fromkeys(str(item) for item in reasons if item))
+    return {
+        "schema": "route_candidate_validation.v1",
+        "status": "FAIL",
+        "classification": reasons[0],
+        "routeCorridorMatch": False,
+        "routeProgressScore": 0.0,
+        "rejectionReasons": reasons,
+        "routeId": route_id or None,
+        "candidateName": target_name or None,
+        "candidateActions": _candidate_expected_options(target),
+        "expectedTargets": expected_targets or _list(target.get("expectedTargets")),
+        "expectedOptions": expected_options or _list(target.get("expectedOptions")),
+        "cameraReadiness": {
+            "targetVisible": _bool(_first_present(target.get("onScreen"), _projection_from_target(target).get("onScreen"))),
+            "targetOnScreen": _bool(_first_present(target.get("onScreen"), _projection_from_target(target).get("onScreen"))),
+            "cameraAdjustmentRequired": False,
+            "blocker": "route_object_rejected_before_camera_adjustment",
+        },
+        "warnings": [
+            "visible route object did not prove it belongs to the active route segment",
+            "blocking route click instead of using unrelated nearby geometry",
+        ],
+        "missingCapabilities": ["service_route.expected_segment"] if not explicit_step and not _route_target_has_route_relevance_pass(target) else [],
+    }
+
+
+def _target_with_route_validation_issue(target: dict[str, Any], issue: dict[str, Any]) -> dict[str, Any]:
+    blocked = dict(target)
+    blocked["routeCorridorMatch"] = False
+    blocked["routeProgressScore"] = 0.0
+    blocked["routeCandidateValidation"] = dict(issue)
+    blocked["cameraReadiness"] = dict(issue.get("cameraReadiness") or {})
+    blocked["rejectedReasons"] = list(dict.fromkeys(_list(blocked.get("rejectedReasons")) + _list(issue.get("rejectionReasons"))))
+    blocked["actionability"] = "blocked_route_corridor"
+    return blocked
+
+
+def _route_candidate_blocker_proposal(
+    *,
+    target: dict[str, Any],
+    issue: dict[str, Any],
+    input_geometry: dict[str, Any] | None,
+    source_canvas_size: dict[str, Any] | None,
+    source_tick: int | None,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+    required_context: list[str],
+) -> ActionProposal:
+    blocked_target = _target_with_route_validation_issue(target, issue)
+    return _proposal(
+        "wait_for_context",
+        target_kind="service_route_object",
+        target=blocked_target,
+        reason=str(issue.get("classification") or "route_object_not_on_expected_segment"),
+        confidence=0.42,
+        warnings=list(_list(issue.get("warnings"))),
+        missing=list(_list(issue.get("missingCapabilities"))),
+        required_context=required_context,
+        source_tick=source_tick,
+        input_geometry=input_geometry,
+        source_canvas_size=source_canvas_size,
+        status=status,
+        brain=brain,
+        suppress_click_point=True,
+    )
 
 
 def _route_census_recovery_target(route_context: dict[str, Any]) -> dict[str, Any]:
@@ -2283,6 +2776,13 @@ def _service_required(
     return False
 
 
+def _inventory_full_for_service_route(*, inventory: dict[str, Any], status: dict[str, Any]) -> bool:
+    if _bool(_first_present(inventory.get("inventoryFull"), status.get("inventoryFull"))) is True:
+        return True
+    free_slots = _int(_first_present(inventory.get("freeSlots"), status.get("inventoryFreeSlots")), -1)
+    return free_slots == 0
+
+
 def _candidate_actions(candidate: dict[str, Any]) -> list[str]:
     actions: list[str] = []
     for key in ("actions", "menuActions", "actionNames", "expectedOptions"):
@@ -2429,6 +2929,211 @@ def _normalise_tile(value: Any) -> dict[str, Any] | None:
     return {"worldX": world_x, "worldY": world_y, "plane": _int(value.get("plane"), 0)}
 
 
+def _route_guide_route_name(proposal_action: str, status: dict[str, Any], brain: dict[str, Any], explanation: dict[str, Any] | None = None) -> str | None:
+    explanation = _dict(explanation)
+    exact_values = [
+        explanation.get("routeGuideName"),
+        explanation.get("routeName"),
+        explanation.get("templateRouteName"),
+        _dict(brain.get("serviceRouteContext")).get("routeName"),
+        _dict(_dict(brain.get("serviceContext")).get("serviceRouteContext")).get("routeName"),
+        _dict(brain.get("returnRouteContext")).get("routeName"),
+    ]
+    for value in exact_values:
+        text = str(value or "").strip()
+        if text == "woodcutting_area_to_bank":
+            return text
+        if text == "Bank_to_Woodcutting_area" and proposal_action != "navigate_to_service":
+            return text
+    route_text = " ".join(
+        str(value or "")
+        for value in (
+            explanation.get("routeId"),
+            _dict(brain.get("serviceRouteContext")).get("routeId"),
+            _dict(_dict(brain.get("serviceContext")).get("serviceRouteContext")).get("routeId"),
+            _dict(brain.get("returnRouteContext")).get("routeId"),
+            _dict(brain.get("genericTaskState")).get("phase"),
+            _dict(brain.get("genericTaskState")).get("activeIntent"),
+        )
+    ).lower()
+    if proposal_action == "navigate_to_service" and (
+        "woodcutting_area_to_bank" in route_text
+        or "to_bank" in route_text
+        or "castle_bank" in route_text
+        or "lumbridge_west_trees_to_lumbridge_castle_bank" in route_text
+    ):
+        return "woodcutting_area_to_bank"
+    if proposal_action == "return_to_resource_area":
+        return "Bank_to_Woodcutting_area"
+    if "return" in route_text or "bank_to_wood" in route_text:
+        return "Bank_to_Woodcutting_area"
+    if "woodcutting_area_to_bank" in route_text or "to_bank" in route_text or "castle_bank" in route_text:
+        return "woodcutting_area_to_bank"
+    return None
+
+
+def _load_route_guide_for_action(proposal_action: str, status: dict[str, Any], brain: dict[str, Any], explanation: dict[str, Any] | None = None) -> dict[str, Any]:
+    if route_demonstration is None:
+        return {}
+    route_name = _route_guide_route_name(proposal_action, status, brain, explanation)
+    if not route_name:
+        return {}
+    try:
+        return route_demonstration.load_route_guide(route_name)
+    except Exception:
+        return {}
+
+
+def _route_guide_progress_for_action(
+    proposal_action: str,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+    *,
+    player_tile: dict[str, Any] | None = None,
+    explanation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if route_demonstration is None:
+        return {}
+    player_tile = player_tile or _player_world_tile(status, brain)
+    guide = _load_route_guide_for_action(proposal_action, status, brain, explanation)
+    if not guide or not player_tile:
+        return {}
+    try:
+        return route_demonstration.resolve_progress(guide, player_tile)
+    except Exception:
+        return {}
+
+
+def _guide_point_tile(progress: dict[str, Any]) -> dict[str, Any] | None:
+    point = _dict(progress.get("nextGuidePoint"))
+    return _normalise_tile(point.get("world"))
+
+
+def _guide_interaction_target(progress: dict[str, Any]) -> dict[str, Any]:
+    interaction = _dict(progress.get("nextGuideInteraction"))
+    world = _normalise_tile(interaction.get("world"))
+    action = str(interaction.get("action") or "").strip()
+    target_name = str(interaction.get("targetName") or "Route interaction").strip()
+    if not interaction or not world or not action:
+        return {}
+    expected_targets = [target_name] if target_name else []
+    return {
+        "targetName": target_name,
+        "targetType": "sceneObject",
+        "classId": "service_route_transition",
+        "id": interaction.get("targetId"),
+        "worldX": world["worldX"],
+        "worldY": world["worldY"],
+        "plane": world["plane"],
+        "world": dict(world),
+        "actions": [action],
+        "expectedOptions": [action],
+        "expectedTargets": expected_targets,
+        "expectedPlaneChange": interaction.get("expectedPlaneChange"),
+        "routeId": progress.get("routeGuideName"),
+        "routeGuideLoaded": True,
+        "routeGuideName": progress.get("routeGuideName"),
+        "routeGuideProgress": dict(progress),
+        "routeGuideSource": "demonstrated_interaction",
+        "routeStepIndex": interaction.get("segmentIndex"),
+        "routeStepType": "interact_object",
+        "routeStepLabel": f"{action} {target_name}".strip(),
+        "source": "route_guide",
+        "actionTargetSource": "route_guide_interaction",
+        "routeCorridorMatch": True,
+        "routeProgressScore": 0.95,
+        "routeCandidateValidation": {
+            "schema": "route_candidate_validation.v1",
+            "status": "PASS",
+            "classification": "route_guide_interaction_match",
+            "routeCorridorMatch": True,
+            "routeProgressScore": 0.95,
+            "expectedTargets": expected_targets,
+            "expectedOptions": [action],
+            "rejectionReasons": [],
+        },
+        "cameraReadiness": {
+            "schema": "route_camera_readiness.v1",
+            "cameraProfileAvailable": bool(_list(interaction.get("cameraHints"))),
+            "cameraBeforeClickRecommended": bool(_list(interaction.get("cameraHints"))),
+            "targetVisible": None,
+            "targetOnScreen": None,
+            "blocker": None,
+            "cameraHints": _list(interaction.get("cameraHints"))[:3],
+        },
+        "postcondition": interaction.get("postcondition"),
+    }
+
+
+def _guide_interaction_should_win(progress: dict[str, Any], point_tile: dict[str, Any] | None) -> bool:
+    interaction = _dict(progress.get("nextGuideInteraction"))
+    if not interaction:
+        return False
+    current = _normalise_tile(progress.get("currentWorld"))
+    interaction_tile = _normalise_tile(interaction.get("world"))
+    if not current or not interaction_tile:
+        return bool(interaction)
+    if point_tile is not None and point_tile.get("plane") != current.get("plane"):
+        return True
+    interaction_distance = _route_tile_distance_same_plane(current, interaction_tile)
+    point_distance = _route_tile_distance_same_plane(current, point_tile)
+    if interaction_distance is not None and point_distance is not None:
+        return interaction_distance <= point_distance + 1
+    return interaction_distance is not None and interaction_distance <= 8
+
+
+def _apply_route_guide_to_path_target(target: dict[str, Any], progress: dict[str, Any], *, action: str) -> dict[str, Any]:
+    if not progress or progress.get("status") != "PASS":
+        return target
+    point_tile = _guide_point_tile(progress)
+    interaction_target = _guide_interaction_target(progress)
+    merged = dict(target)
+    if interaction_target and (not point_tile or _guide_interaction_should_win(progress, point_tile)):
+        return {**merged, **interaction_target}
+    if point_tile:
+        merged["targetTile"] = dict(point_tile)
+        merged["suggestedWorldTile"] = dict(point_tile)
+        merged["pathTargetTile"] = dict(point_tile)
+        merged["destinationTile"] = dict(point_tile)
+        merged["actionTargetSource"] = "local_frontier_waypoint"
+        merged["actionability"] = "needs_live_projection"
+        merged["source"] = "route_guide"
+        merged["routeGuideLoaded"] = True
+        merged["routeGuideName"] = progress.get("routeGuideName")
+        merged["routeGuideProgress"] = dict(progress)
+        merged["routeGuideSource"] = "demonstrated_path_point"
+        merged["routeWaypointSelection"] = {
+            "schema": "route_waypoint_selection.v1",
+            "mode": "route_guide",
+            "reason": "demonstrated_route_guide_next_point",
+            "selectedTile": dict(point_tile),
+            "routeGuideProgressIndex": progress.get("routeGuideProgressIndex"),
+            "nearestGuidePoint": progress.get("nearestGuidePoint"),
+            "nextGuidePoint": progress.get("nextGuidePoint"),
+            "skippedReachedGuidePoints": progress.get("skippedReachedGuidePoints"),
+        }
+        merged["routeCandidateValidation"] = {
+            "schema": "route_candidate_validation.v1",
+            "status": "PASS",
+            "classification": "route_guide_path_point",
+            "routeCorridorMatch": True,
+            "routeProgressScore": 0.85,
+            "rejectionReasons": [],
+        }
+        merged["routeCorridorMatch"] = True
+        merged["routeProgressScore"] = 0.85
+        merged["expectedPostcondition"] = {"type": "movement", "minDistanceMoved": 1.0}
+        merged["cameraReadiness"] = {
+            "schema": "route_camera_readiness.v1",
+            "targetVisible": None,
+            "targetOnScreen": None,
+            "cameraProfileAvailable": bool(_list(progress.get("cameraHints"))),
+            "cameraBeforeClickRecommended": False,
+            "blocker": None,
+        }
+    return merged
+
+
 def _path_tiles(pathing: dict[str, Any]) -> list[dict[str, Any]]:
     tiles: list[dict[str, Any]] = []
     seen: set[tuple[int | None, int | None, int | None]] = set()
@@ -2443,6 +3148,24 @@ def _path_tiles(pathing: dict[str, Any]) -> list[dict[str, Any]]:
             seen.add(tile_key)
             tiles.append(tile)
     return tiles
+
+
+def _current_pathing_player_tile(pathing: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("currentPlayerTile", "playerTile", "playerWorldTile", "playerWorldLocation", "playerLocation"):
+        tile = _normalise_tile(pathing.get(key))
+        if tile is not None:
+            return tile
+    return None
+
+
+def _forward_tile_after_current(tiles: list[dict[str, Any]], current_tile: dict[str, Any] | None) -> tuple[dict[str, Any] | None, int | None]:
+    if not current_tile:
+        return None, None
+    for index, tile in enumerate(tiles):
+        distance = _route_tile_distance_same_plane(tile, current_tile)
+        if distance is not None and distance > 0:
+            return tile, index
+    return None, None
 
 
 def _pathing_has_concrete_waypoint(pathing: dict[str, Any]) -> bool:
@@ -2469,6 +3192,7 @@ def _selected_route_waypoint(
     min_progress = max(1, _int(pathing.get("minRouteProgressTiles"), 3))
     close_destination_precision = max(1, _int(pathing.get("routeWaypointCloseDestinationPrecisionTiles"), 8))
     tiles = _path_tiles(pathing)
+    current_tile = _current_pathing_player_tile(pathing)
     suppressed_keys = {str(value) for value in _list(pathing.get("suppressedNavigationTargetKeys")) + _list(pathing.get("suppressedActionTargetKeys")) if value is not None}
     unsuppressed_tiles = [
         tile
@@ -2521,6 +3245,25 @@ def _selected_route_waypoint(
     direct_distance = _int(pathing.get("distanceToDestination"), None)
     if direct_distance is not None and direct_distance <= close_destination_precision and len(tiles) > lookahead:
         destination_tile = _normalise_tile(pathing.get("destinationTile") or pathing.get("pathTargetTile"))
+        forward_tile, forward_index = _forward_tile_after_current(tiles, current_tile)
+        next_is_current = bool(current_tile and next_tile and _route_tile_distance_same_plane(next_tile, current_tile) == 0)
+        if next_is_current and forward_tile:
+            return forward_tile, {
+                "schema": "route_waypoint_selection.v1",
+                "mode": "adaptive",
+                "reason": "close_destination_current_waypoint_arrived_forward_step",
+                "waypointDistanceTiles": max(1, int(forward_index or 0) + 1),
+                "consideredTiles": len(tiles),
+                "lookaheadTiles": lookahead,
+                "maxHorizonTiles": max_horizon,
+                "minRouteProgressTiles": min_progress,
+                "closeDestinationPrecisionTiles": close_destination_precision,
+                "directDistanceToDestination": direct_distance,
+                "selectedTile": dict(forward_tile),
+                "arrivedWaypointTile": dict(next_tile),
+                "playerTile": dict(current_tile),
+                "suppressedTargetKeys": sorted(suppressed_keys) if suppressed_keys else [],
+            }
         next_distance = _tile_distance(next_tile, destination_tile)
         detour_threshold = max(lookahead, max(1, direct_distance) * 4)
         if (
@@ -2801,12 +3544,19 @@ def _resource_selection_proposal(
 
 def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
     status, brain = _status_context(status_or_context)
+    context_proposal = _context_action_proposal(status, brain)
+    if context_proposal is not None:
+        return context_proposal
     input_geometry = input_geometry_from_status(status)
     source_canvas_size = source_canvas_size_from_status(status)
     generic = _dict(brain.get("genericTaskState"))
     inventory = _dict(brain.get("inventoryContext"))
     service = _dict(brain.get("serviceContext"))
     pathing = _dict(brain.get("pathingContext"))
+    player_tile = _player_world_tile(status, brain) or _current_pathing_player_tile(pathing)
+    if player_tile and not _current_pathing_player_tile(pathing):
+        pathing = dict(pathing)
+        pathing["currentPlayerTile"] = dict(player_tile)
     suppressed_action_keys = _suppressed_action_target_keys(status, brain)
     if suppressed_action_keys:
         pathing = dict(pathing)
@@ -2821,7 +3571,7 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
     return_route = _return_route_context(status, brain)
     active_target = _dict(generic.get("activeIntentTarget"))
     overlay_selected = _overlay_selected(status, brain)
-    source_tick = status.get("latestTick") if isinstance(status.get("latestTick"), int) else None
+    source_tick = _int(_first_present(status.get("latestTick"), brain.get("latestTick")), None)
     phase = _lower(generic.get("phase") or status.get("phase") or status.get("brainPhase"))
     active_intent = _lower(generic.get("activeIntent") or status.get("activeIntent"))
     returning_to_resource_intent = phase == "return_to_resource" or active_intent in {"return_to_resource_area", "navigate_to_resource_area"}
@@ -2985,66 +3735,72 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
         return_route_target = _route_hover_interaction_target(status=status, brain=brain, route_context=return_route)
     if returning_to_resource_intent or not service_required:
         if (_bool(return_route.get("returnActionReady")) is True or _bool(return_route.get("actionReady")) is True) and return_route_target:
-            return_route_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
-                return_route_target,
-                source_canvas_size=source_canvas_size,
-                status=status,
-                brain=brain,
-            )
-            if not isinstance(_safe_aimpoint, dict) or _safe_aimpoint.get("status") != "PASS":
-                exposure = _service_target_exposure(
+            route_issue = _route_target_validation_issue(return_route_target, return_route)
+            if route_issue:
+                return_route_target = _target_with_route_validation_issue(return_route_target, route_issue)
+            else:
+                return_route_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
                     return_route_target,
-                    _safe_aimpoint,
                     source_canvas_size=source_canvas_size,
                     status=status,
                     brain=brain,
                 )
-                if exposure.get("shouldAttemptCameraExposure") is True:
-                    return _service_view_recovery_proposal(
-                        target=return_route_target,
-                        exposure=exposure,
-                        input_geometry=input_geometry,
+                if not isinstance(_safe_aimpoint, dict) or _safe_aimpoint.get("status") != "PASS":
+                    exposure = _service_target_exposure(
+                        return_route_target,
+                        _safe_aimpoint,
                         source_canvas_size=source_canvas_size,
-                        source_tick=source_tick,
                         status=status,
                         brain=brain,
-                        reason="service_view_recovery_needed",
-                        confidence=0.76,
                     )
-            return _proposal(
-                "interact_service_route_object",
-                target_kind="service_route_object",
-                target=return_route_target,
-                reason=str(return_route.get("state") or return_route.get("routeStepStatus") or "return_transition_actionable"),
-                confidence=0.76,
-                required_context=["return_route", "client_tick"],
-                source_tick=source_tick,
-                input_geometry=input_geometry,
-                source_canvas_size=source_canvas_size,
-                status=status,
-                brain=brain,
-            )
+                    if exposure.get("shouldAttemptCameraExposure") is True:
+                        return _service_view_recovery_proposal(
+                            target=return_route_target,
+                            exposure=exposure,
+                            input_geometry=input_geometry,
+                            source_canvas_size=source_canvas_size,
+                            source_tick=source_tick,
+                            status=status,
+                            brain=brain,
+                            reason="service_view_recovery_needed",
+                            confidence=0.76,
+                        )
+                return _proposal(
+                    "interact_service_route_object",
+                    target_kind="service_route_object",
+                    target=return_route_target,
+                    reason=str(return_route.get("state") or return_route.get("routeStepStatus") or "return_transition_actionable"),
+                    confidence=0.76,
+                    required_context=["return_route", "client_tick"],
+                    source_tick=source_tick,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                )
         return_target_relevance = _dict(return_route_target.get("routeRelevance")) if return_route_target else {}
         if return_route_target and return_route_target.get("source") == "client_tick_hot_hover" and return_target_relevance.get("relevanceStatus") == "PASS":
-            return_route_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
-                return_route_target,
-                source_canvas_size=source_canvas_size,
-                status=status,
-                brain=brain,
-            )
-            return _proposal(
-                "interact_service_route_object",
-                target_kind="service_route_object",
-                target=return_route_target,
-                reason="client_tick_hot_return_route_object_hover",
-                confidence=0.73,
-                required_context=["return_route", "client_tick"],
-                source_tick=source_tick,
-                input_geometry=input_geometry,
-                source_canvas_size=source_canvas_size,
-                status=status,
-                brain=brain,
-            )
+            route_issue = _route_target_validation_issue(return_route_target, return_route)
+            if not route_issue:
+                return_route_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
+                    return_route_target,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                )
+                return _proposal(
+                    "interact_service_route_object",
+                    target_kind="service_route_object",
+                    target=return_route_target,
+                    reason="client_tick_hot_return_route_object_hover",
+                    confidence=0.73,
+                    required_context=["return_route", "client_tick"],
+                    source_tick=source_tick,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                )
 
         return_recovery_target = _route_census_recovery_target(return_route)
         if return_recovery_target:
@@ -3100,6 +3856,17 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
         return_navigation_target = _dict(return_route.get("currentNavigationTarget"))
         if return_navigation_target:
             target = _path_target(_pathing_for_resource_return(pathing), return_navigation_target, "Resource return")
+            target = _apply_route_guide_to_path_target(
+                target,
+                _route_guide_progress_for_action(
+                    "return_to_resource_area",
+                    status,
+                    brain,
+                    player_tile=player_tile or _current_pathing_player_tile(pathing),
+                    explanation=target,
+                ),
+                action="return_to_resource_area",
+            )
             return _proposal(
                 "return_to_resource_area",
                 target_kind="path_tile",
@@ -3116,6 +3883,17 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
 
         if active_intent in {"return_to_resource_area", "navigate_to_resource_area"} and _bool(pathing.get("pathingNeeded")) is True:
             target = _path_target(_pathing_for_resource_return(pathing), active_target, "Resource return")
+            target = _apply_route_guide_to_path_target(
+                target,
+                _route_guide_progress_for_action(
+                    "return_to_resource_area",
+                    status,
+                    brain,
+                    player_tile=player_tile or _current_pathing_player_tile(pathing),
+                    explanation=target,
+                ),
+                action="return_to_resource_area",
+            )
             return _proposal(
                 "return_to_resource_area",
                 target_kind="path_tile",
@@ -3133,6 +3911,17 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
         if _bool(resource_return.get("returnDestinationAvailable")) is True:
             fallback_target = _resource_return_fallback_target(active_target, resource_return)
             target = _path_target(_pathing_for_resource_return(pathing), fallback_target, "Resource return")
+            target = _apply_route_guide_to_path_target(
+                target,
+                _route_guide_progress_for_action(
+                    "return_to_resource_area",
+                    status,
+                    brain,
+                    player_tile=player_tile or _current_pathing_player_tile(pathing),
+                    explanation=target,
+                ),
+                action="return_to_resource_area",
+            )
             return _proposal(
                 "return_to_resource_area",
                 target_kind="path_tile",
@@ -3270,73 +4059,91 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
         if not route_target:
             route_target = _route_hover_interaction_target(status=status, brain=brain, route_context=service_route)
         if _bool(service_route.get("actionReady")) is True and route_target:
-            route_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
-                route_target,
-                source_canvas_size=source_canvas_size,
-                status=status,
-                brain=brain,
-            )
-            if not isinstance(_safe_aimpoint, dict) or _safe_aimpoint.get("status") != "PASS":
-                exposure = _service_target_exposure(
+            route_issue = _route_target_validation_issue(route_target, service_route)
+            if route_issue:
+                route_target = _target_with_route_validation_issue(route_target, route_issue)
+            else:
+                route_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
                     route_target,
-                    _safe_aimpoint,
                     source_canvas_size=source_canvas_size,
                     status=status,
                     brain=brain,
                 )
-                if exposure.get("shouldAttemptCameraExposure") is True:
-                    return _service_view_recovery_proposal(
-                        target=route_target,
-                        exposure=exposure,
-                        input_geometry=input_geometry,
+                if not isinstance(_safe_aimpoint, dict) or _safe_aimpoint.get("status") != "PASS":
+                    exposure = _service_target_exposure(
+                        route_target,
+                        _safe_aimpoint,
                         source_canvas_size=source_canvas_size,
-                        source_tick=source_tick,
                         status=status,
                         brain=brain,
-                        reason="service_view_recovery_needed",
-                        confidence=0.76,
                     )
-            return _proposal(
-                "interact_service_route_object",
-                target_kind="service_route_object",
-                target=route_target,
-                reason=str(service_route.get("routeStepStatus") or "service_route_interaction_ready"),
-                confidence=0.74,
-                required_context=["service_route", "client_tick"],
-                source_tick=source_tick,
-                input_geometry=input_geometry,
-                source_canvas_size=source_canvas_size,
-                status=status,
-                brain=brain,
-            )
+                    if exposure.get("shouldAttemptCameraExposure") is True:
+                        return _service_view_recovery_proposal(
+                            target=route_target,
+                            exposure=exposure,
+                            input_geometry=input_geometry,
+                            source_canvas_size=source_canvas_size,
+                            source_tick=source_tick,
+                            status=status,
+                            brain=brain,
+                            reason="service_view_recovery_needed",
+                            confidence=0.76,
+                        )
+                return _proposal(
+                    "interact_service_route_object",
+                    target_kind="service_route_object",
+                    target=route_target,
+                    reason=str(service_route.get("routeStepStatus") or "service_route_interaction_ready"),
+                    confidence=0.74,
+                    required_context=["service_route", "client_tick"],
+                    source_tick=source_tick,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                )
         route_target_relevance = _dict(route_target.get("routeRelevance")) if route_target else {}
         if route_target and route_target.get("source") == "client_tick_hot_hover" and route_target_relevance.get("relevanceStatus") == "PASS":
-            route_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
-                route_target,
-                source_canvas_size=source_canvas_size,
-                status=status,
-                brain=brain,
-            )
-            return _proposal(
-                "interact_service_route_object",
-                target_kind="service_route_object",
-                target=route_target,
-                reason="client_tick_hot_route_object_hover",
-                confidence=0.73,
-                required_context=["service_route", "client_tick"],
-                source_tick=source_tick,
-                input_geometry=input_geometry,
-                source_canvas_size=source_canvas_size,
-                status=status,
-                brain=brain,
-            )
+            route_issue = _route_target_validation_issue(route_target, service_route)
+            if not route_issue:
+                route_target, _safe_aimpoint = _resource_target_with_safe_aimpoint(
+                    route_target,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                )
+                return _proposal(
+                    "interact_service_route_object",
+                    target_kind="service_route_object",
+                    target=route_target,
+                    reason="client_tick_hot_route_object_hover",
+                    confidence=0.73,
+                    required_context=["service_route", "client_tick"],
+                    source_tick=source_tick,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                )
 
         route_navigation_target = _dict(service_route.get("currentNavigationTarget"))
         if _bool(pathing.get("pathingNeeded")) is True and (_pathing_has_concrete_waypoint(pathing) or route_navigation_target):
+            target = _path_target(pathing, route_navigation_target or _service_target(service, generic), "Service waypoint")
+            target = _apply_route_guide_to_path_target(
+                target,
+                _route_guide_progress_for_action(
+                    "navigate_to_service",
+                    status,
+                    brain,
+                    player_tile=player_tile or _current_pathing_player_tile(pathing),
+                    explanation=target,
+                ),
+                action="navigate_to_service",
+            )
             return _proposal(
                 "navigate_to_service",
                 target_kind="path_tile",
-                target=_path_target(pathing, route_navigation_target or _service_target(service, generic), "Service waypoint"),
+                target=target,
                 reason="pathing_to_service",
                 confidence=0.74,
                 required_context=["pathing"],
@@ -3376,10 +4183,22 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 )
 
         if _bool(pathing.get("pathingNeeded")) is True:
+            target = _path_target(pathing, route_navigation_target or _service_target(service, generic), "Service waypoint")
+            target = _apply_route_guide_to_path_target(
+                target,
+                _route_guide_progress_for_action(
+                    "navigate_to_service",
+                    status,
+                    brain,
+                    player_tile=player_tile or _current_pathing_player_tile(pathing),
+                    explanation=target,
+                ),
+                action="navigate_to_service",
+            )
             return _proposal(
                 "navigate_to_service",
                 target_kind="path_tile",
-                target=_path_target(pathing, route_navigation_target or _service_target(service, generic), "Service waypoint"),
+                target=target,
                 reason="pathing_to_service",
                 confidence=0.72,
                 required_context=["pathing"],
@@ -3389,6 +4208,99 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 status=status,
             brain=brain,
         )
+
+        if _inventory_full_for_service_route(inventory=inventory, status=status):
+            route_issue = _dict(route_target.get("routeCandidateValidation")) if route_target else {}
+            if route_issue:
+                return _route_candidate_blocker_proposal(
+                    target=route_target,
+                    issue=route_issue,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    source_tick=source_tick,
+                    status=status,
+                    brain=brain,
+                    required_context=["service_route", "route_template", "pathing"],
+                )
+            guide_progress: dict[str, Any] = {}
+            if route_demonstration is not None and player_tile:
+                try:
+                    guide_progress = route_demonstration.resolve_progress(
+                        route_demonstration.load_route_guide("woodcutting_area_to_bank"),
+                        player_tile,
+                    )
+                except Exception:
+                    guide_progress = {}
+            guide_tile = _guide_point_tile(guide_progress)
+            guide_interaction = _guide_interaction_target(guide_progress)
+            if guide_interaction and _guide_interaction_should_win(guide_progress, guide_tile):
+                guide_interaction["actionability"] = "blocked_route_guide_interaction_needs_live_target"
+                guide_interaction["routeCandidateValidation"] = {
+                    **_dict(guide_interaction.get("routeCandidateValidation")),
+                    "status": "WARN",
+                    "classification": "route_guide_interaction_needs_live_target",
+                }
+                return _proposal(
+                    "wait_for_context",
+                    target_kind="service_route_object",
+                    target=guide_interaction,
+                    reason="route_guide_interaction_needs_live_target",
+                    confidence=0.58,
+                    warnings=["demonstrated route guide expects an interaction step, but live target geometry is not actionable yet"],
+                    missing=["route.interaction.liveTarget"],
+                    required_context=["route_guide", "service_route", "client_tick"],
+                    source_tick=source_tick,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                    suppress_click_point=True,
+                )
+            if guide_tile and _route_tile_distance_same_plane(guide_tile, player_tile) != 0:
+                target = _apply_route_guide_to_path_target(
+                    {
+                        "targetName": "Demonstrated woodcutting-to-bank route waypoint",
+                        "classId": "service_route_anchor",
+                        "targetType": "service_route_anchor",
+                        "source": "route_guide",
+                        "routeId": "woodcutting_area_to_bank",
+                    },
+                    guide_progress,
+                    action="navigate_to_service",
+                )
+                return _proposal(
+                    "navigate_to_service",
+                    target_kind="path_tile",
+                    target=target,
+                    reason="route_guide_progress_without_live_route_context",
+                    confidence=0.7,
+                    warnings=["live route/pathing context was missing; using demonstrated route guide from current player position"],
+                    required_context=["inventory", "route_guide", "player_world_position"],
+                    source_tick=source_tick,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                )
+            missing = []
+            if not service_route:
+                missing.append("service_route.route_to_bank")
+            if not pathing or _bool(pathing.get("pathingNeeded")) is not True:
+                missing.append("pathing.route_to_bank")
+            return _proposal(
+                "wait_for_context",
+                target_kind="none",
+                reason="inventory_full_route_context_missing",
+                confidence=0.45,
+                warnings=["inventory is full, but no route-to-bank service route or pathing context is actionable"],
+                missing=missing or ["service_route.route_to_bank"],
+                required_context=["inventory", "service_route", "pathing"],
+                source_tick=source_tick,
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
+                status=status,
+                brain=brain,
+            )
 
     resource_proposal = _resource_selection_proposal(
         status=status,

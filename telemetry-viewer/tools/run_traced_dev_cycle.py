@@ -169,6 +169,7 @@ def apply_cli_overrides(config: DevCycleConfig, args: argparse.Namespace) -> Dev
 
 
 def default_runelite_launch_command() -> str | None:
+    # Dev-cycle default only. Canonical Start Game resolution lives in start_game_command.py.
     gradlew = PROJECT_ROOT / "gradlew.bat"
     if gradlew.exists():
         return ".\\gradlew.bat run"

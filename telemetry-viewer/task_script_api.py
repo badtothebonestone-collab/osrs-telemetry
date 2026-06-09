@@ -6,7 +6,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import banking_lifecycle
+import human_click_profile
+import interruption_lifecycle
+import combat_damage_summary
+import route_demonstration
+import route_monitor
+import woodcutting_loop_lifecycle
+import woodcutting_lifecycle
 import task_policy
+from input_control import click_planner
 
 
 TASK_SCRIPT_SCHEMA = "task_script.v1"
@@ -90,6 +99,51 @@ RUNTIME_EVIDENCE_VARIABLES: dict[str, dict[str, Any]] = {
         "liveSources": ["brain.bankUiContext.bankOpen", "status.bankOpen", "genericTaskState.bankOpen"],
         "proves": ["service opened", "bank closed"],
     },
+    "bankState": {
+        "description": "Compact active bank/deposit-box interface state.",
+        "liveSources": ["context_service needs=bank_state", "brain.bankUiContext", "banking_lifecycle.bank"],
+        "proves": ["bank-like interface open", "bank container availability", "direct banking UI evidence"],
+    },
+    "bankingLifecycle": {
+        "description": "Compact banking lifecycle status, confidence, and warnings.",
+        "liveSources": ["context_service needs=banking_lifecycle", "banking_lifecycle.json"],
+        "proves": ["banking phase", "direct vs inferred banking confidence"],
+    },
+    "inventoryDelta": {
+        "description": "Inventory before/after item and free-slot changes.",
+        "liveSources": ["context_service needs=inventory_delta", "banking_lifecycle.inventory"],
+        "proves": ["items deposited or withdrawn from inventory perspective"],
+    },
+    "depositResult": {
+        "description": "Script-friendly deposit completion summary.",
+        "liveSources": ["context_service needs=deposit_result", "banking_lifecycle.deposit"],
+        "proves": ["deposit completion", "deposited item ids and quantities", "confirmation level"],
+    },
+    "combatState": {
+        "description": "Compact combat state, hostile targeting, hitsplat, and health evidence.",
+        "liveSources": ["context_service needs=combat_state", "combat_state live cache", "interruption_lifecycle.combat"],
+        "proves": ["combat started", "NPC targeted player", "hitsplats/health events were observed"],
+    },
+    "interruptionLifecycle": {
+        "description": "Compact task interruption status, cause, resume, and missing capability evidence.",
+        "liveSources": ["context_service needs=interruption_lifecycle", "interruption_lifecycle.json"],
+        "proves": ["task stopped/resumed", "combat/message/stat cause classification", "unknown cause with explicit missing data"],
+    },
+    "combatDamageSummary": {
+        "description": "Compact damage taken/dealt, primary opponent, HP, hitsplat, actor-death, and task-resume evidence.",
+        "liveSources": ["context_service needs=combat_damage_summary", "combat_damage_summary.json", "interruption_lifecycle.combatDamageSummary"],
+        "proves": ["damage amount totals", "primary opponent", "HP changed", "hostile actor death", "task resumed after combat"],
+    },
+    "woodcuttingLoopLifecycle": {
+        "description": "Compact woodcutting task-loop phase and next expected phase.",
+        "liveSources": ["context_service needs=woodcutting_loop", "woodcutting_loop_lifecycle.json"],
+        "proves": ["current task phase", "next phase choice", "woodcutting/banking/route/interruption loop progress"],
+    },
+    "routeDemonstrationGuide": {
+        "description": "Demonstrated route guide extracted from successful Record Everything route recordings.",
+        "liveSources": ["route_guides/*.route_guide.json", "route_demonstration.py"],
+        "proves": ["recorded path order", "reached/skipped guide points", "expected stair/service interaction steps", "camera hints before route interactions"],
+    },
     "menuOptionClicked": {
         "description": "Client-accepted click action after a live input.",
         "liveSources": ["clientTickHot.lastMenuOptionClicked", "action_trace.clientTick.lastMenuOptionClickedAfter"],
@@ -110,10 +164,20 @@ RUNTIME_EVIDENCE_VARIABLES: dict[str, dict[str, Any]] = {
         "liveSources": ["brain.serviceRouteContext", "brain.pathingContext", "status.serviceRouteStepStatus"],
         "proves": ["route advance", "route transition", "waypoint progress"],
     },
+    "routeMonitor": {
+        "description": "Compact route monitor/readiness state.",
+        "liveSources": ["context_service needs=route_monitor", "route_monitor_status.json", "route_history_summary.json"],
+        "proves": ["route state", "current/next route segment", "off-route state", "remaining route progress"],
+    },
     "phaseIntent": {
         "description": "Current task phase, cycle stage, active intent, and proposed action.",
         "liveSources": ["brain.genericTaskState", "readiness.actionNeed", "action_proposal"],
         "proves": ["cycle stage transitions", "one-action-then-wait lifecycle"],
+    },
+    "humanClickProfile": {
+        "description": "Compact human click/camera profile for target-relative click planning guidance.",
+        "liveSources": ["knowledge_base/human_click_profile.json", "context_service needs=human_click_profile"],
+        "proves": ["expected click landing variance", "menu-row usage", "camera-before-click frequency"],
     },
     "loadedScene": {
         "description": "Loaded-scene liveness proof.",
@@ -154,8 +218,12 @@ PRIMITIVE_RUNTIME_EXPECTATIONS: dict[str, list[dict[str, str]]] = {
     ],
     "deposit": [
         {"variable": "bankOpen", "expectedChange": "bank is open before deposit and may stay open after deposit"},
+        {"variable": "bankState", "expectedChange": "bank-like UI is directly observed and container availability is known"},
         {"variable": "menuOptionClicked", "expectedChange": "accepted menu action or UI command matches deposit inventory"},
         {"variable": "inventory", "expectedChange": "resource slots clear"},
+        {"variable": "inventoryDelta", "expectedChange": "deposited item quantities decrease from inventory"},
+        {"variable": "depositResult", "expectedChange": "depositComplete true with deposited item ids/quantities"},
+        {"variable": "bankingLifecycle", "expectedChange": "banking lifecycle reaches complete with usable confidence"},
         {"variable": "resourceCount", "expectedChange": "held resource count drops to zero"},
         {"variable": "phaseIntent", "expectedChange": "bankingComplete becomes true or close_bank becomes needed"},
     ],
@@ -306,6 +374,790 @@ def utc_now() -> str:
 
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _load_banking_lifecycle(source: Any) -> dict[str, Any]:
+    if isinstance(source, dict):
+        if source.get("schema") == banking_lifecycle.SCHEMA_VERSION:
+            return source
+        lifecycle = source.get("banking_lifecycle") or source.get("bankingLifecycle")
+        if isinstance(lifecycle, dict):
+            return lifecycle
+        if any(key in source for key in ("baseline", "status", "activity", "bank_ui", "bankUi", "bank")):
+            return banking_lifecycle.analyze_context(source)
+        return {}
+    if source is None:
+        return {}
+    path = Path(str(source)).expanduser()
+    if path.is_dir():
+        lifecycle = _read_json(path / "banking_lifecycle.json")
+        if lifecycle:
+            return lifecycle
+        summary = _read_json(path / "summary.json")
+        if isinstance(summary.get("banking_lifecycle"), dict):
+            return summary["banking_lifecycle"]
+        return banking_lifecycle.analyze_recording(path)
+    if path.name == "banking_lifecycle.json":
+        return _read_json(path)
+    value = _read_json(path)
+    if isinstance(value.get("banking_lifecycle"), dict):
+        return value["banking_lifecycle"]
+    if value.get("schema") == banking_lifecycle.SCHEMA_VERSION:
+        return value
+    return {}
+
+
+def get_banking_lifecycle(source: Any) -> dict[str, Any]:
+    """Return compact script-facing banking lifecycle data from a recording, summary, context, or lifecycle dict."""
+    lifecycle = _load_banking_lifecycle(source)
+    return banking_lifecycle.compact_lifecycle(lifecycle) if lifecycle else {
+        "schema": banking_lifecycle.SCHEMA_VERSION,
+        "status": "FAIL",
+        "phase": "unknown",
+        "confidence": 0.0,
+        "missingCapabilities": ["banking.lifecycle"],
+        "warnings": ["banking lifecycle source was not available"],
+    }
+
+
+def get_bank_state(source: Any) -> dict[str, Any]:
+    lifecycle = get_banking_lifecycle(source)
+    return {
+        "bankOpen": lifecycle.get("bankOpenSeen"),
+        "depositBoxOpen": lifecycle.get("depositBoxOpenSeen"),
+        "activeBankLikeInterface": lifecycle.get("bankLikeInterface"),
+        "bankWidgetRootSeen": lifecycle.get("bankWidgetRootSeen"),
+        "bankContainerAvailable": lifecycle.get("bankContainerAvailable"),
+        "bankContainerDeltaAvailable": lifecycle.get("bankContainerDeltaAvailable"),
+        "bankUiPresent": lifecycle.get("bankUiPresent"),
+        "bankUiSnapshotCount": lifecycle.get("bankUiSnapshotCount"),
+        "bankUiFreshness": lifecycle.get("bankUiFreshness"),
+        "confidence": lifecycle.get("confidence"),
+        "missingCapabilities": lifecycle.get("missingCapabilities") or [],
+        "warnings": lifecycle.get("warnings") or [],
+    }
+
+
+def is_bank_open(source: Any) -> bool | None:
+    return get_bank_state(source).get("bankOpen")
+
+
+def is_deposit_box_open(source: Any) -> bool | None:
+    return get_bank_state(source).get("depositBoxOpen")
+
+
+def get_active_bank_like_interface(source: Any) -> str | None:
+    return get_bank_state(source).get("activeBankLikeInterface")
+
+
+def get_inventory_delta(source: Any) -> dict[str, Any]:
+    lifecycle = get_banking_lifecycle(source)
+    return {
+        "freeSlotsBefore": lifecycle.get("freeSlotsBefore"),
+        "freeSlotsAfter": lifecycle.get("freeSlotsAfter"),
+        "freeSlotDelta": lifecycle.get("freeSlotDelta"),
+        "normalLogsBefore": lifecycle.get("normalLogsBefore"),
+        "normalLogsAfter": lifecycle.get("normalLogsAfter"),
+        "depositedItems": lifecycle.get("depositedItems") or [],
+        "withdrawnItems": lifecycle.get("withdrawnItems") or [],
+    }
+
+
+def get_deposit_result(source: Any) -> dict[str, Any]:
+    lifecycle = get_banking_lifecycle(source)
+    items = lifecycle.get("depositedItems") or []
+    return {
+        "depositComplete": bool(lifecycle.get("depositDetected")),
+        "depositedItems": items,
+        "totalDepositedCount": lifecycle.get("depositedItemCount") or 0,
+        "depositConfirmationLevel": lifecycle.get("depositConfirmationLevel"),
+        "bankContainerDeltaAvailable": lifecycle.get("bankContainerDeltaAvailable"),
+        "inventoryFreeSlotsAfter": lifecycle.get("freeSlotsAfter"),
+        "confidence": lifecycle.get("confidence"),
+        "missingCapabilities": lifecycle.get("missingCapabilities") or [],
+        "warnings": lifecycle.get("warnings") or [],
+    }
+
+
+def get_deposited_items(source: Any) -> list[dict[str, Any]]:
+    return list(get_deposit_result(source).get("depositedItems") or [])
+
+
+def did_deposit_item(source: Any, item_id: int) -> bool:
+    return any(_dict(item).get("id") == item_id and (_dict(item).get("quantity") or 0) > 0 for item in get_deposited_items(source))
+
+
+def get_banking_missing_capabilities(source: Any) -> list[str]:
+    return list(get_banking_lifecycle(source).get("missingCapabilities") or [])
+
+
+def _load_woodcutting_lifecycle(source: Any) -> dict[str, Any]:
+    if isinstance(source, dict):
+        if source.get("schema") == woodcutting_lifecycle.SCHEMA_VERSION:
+            return source
+        lifecycle = source.get("woodcutting_lifecycle") or source.get("woodcuttingLifecycle")
+        if isinstance(lifecycle, dict):
+            return lifecycle
+        return {}
+    if source is None:
+        return {}
+    path = Path(str(source)).expanduser()
+    if path.is_dir():
+        lifecycle = _read_json(path / "woodcutting_lifecycle.json")
+        if lifecycle:
+            return lifecycle
+        summary = _read_json(path / "summary.json")
+        if isinstance(summary.get("woodcutting_lifecycle"), dict):
+            return summary["woodcutting_lifecycle"]
+        return woodcutting_lifecycle.analyze_recording(path)
+    if path.name == "woodcutting_lifecycle.json":
+        return _read_json(path)
+    value = _read_json(path)
+    if isinstance(value.get("woodcutting_lifecycle"), dict):
+        return value["woodcutting_lifecycle"]
+    if value.get("schema") == woodcutting_lifecycle.SCHEMA_VERSION:
+        return value
+    return {}
+
+
+def get_woodcutting_lifecycle(source: Any) -> dict[str, Any]:
+    lifecycle = _load_woodcutting_lifecycle(source)
+    return woodcutting_lifecycle.compact_lifecycle(lifecycle) if lifecycle else {
+        "schema": woodcutting_lifecycle.SCHEMA_VERSION,
+        "status": "FAIL",
+        "phase": "unknown",
+        "confidence": 0.0,
+        "warnings": ["woodcutting lifecycle source was not available"],
+        "missingCapabilities": ["woodcutting.lifecycle"],
+    }
+
+
+def _load_route_monitor_status(source: Any) -> dict[str, Any]:
+    if isinstance(source, dict):
+        monitor = source.get("route_monitor") or source.get("routeMonitor") or source.get("route_monitor_status") or source.get("routeMonitorStatus")
+        if isinstance(monitor, dict):
+            return monitor
+        history = source.get("route_history") or source.get("routeHistory") or source.get("route_history_summary") or source.get("routeHistorySummary")
+        if isinstance(history, dict):
+            return _route_status_from_history(history)
+        if source.get("schema") == route_monitor.SCHEMA_VERSION or source.get("routeState") is not None:
+            return source
+        return {}
+    if source is None:
+        return {}
+    path = Path(str(source)).expanduser()
+    if path.is_dir():
+        for name in ("route_monitor_status.json", "route_session_state.json"):
+            monitor = _read_json(path / name)
+            if monitor:
+                return monitor
+        history = _read_json(path / "route_history_summary.json")
+        if history:
+            return _route_status_from_history(history)
+        summary = _read_json(path / "summary.json")
+        if isinstance(summary.get("route_monitor"), dict):
+            return summary["route_monitor"]
+        if isinstance(summary.get("routeMonitorStatus"), dict):
+            return summary["routeMonitorStatus"]
+        if isinstance(summary.get("route_history"), dict):
+            return _route_status_from_history(summary["route_history"])
+        return {}
+    value = _read_json(path)
+    if value.get("schema") == route_monitor.SCHEMA_VERSION or value.get("routeState") is not None:
+        return value
+    if isinstance(value.get("route_monitor"), dict):
+        return value["route_monitor"]
+    if isinstance(value.get("routeMonitorStatus"), dict):
+        return value["routeMonitorStatus"]
+    return {}
+
+
+def _route_status_from_history(history: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": route_monitor.SCHEMA_VERSION,
+        "status": history.get("status"),
+        "routeName": history.get("routeName"),
+        "templateRevision": history.get("templateRevision"),
+        "routeState": history.get("routeState"),
+        "currentArea": history.get("currentArea"),
+        "currentSegmentIndex": history.get("currentSegmentIndex"),
+        "currentSegmentLabel": history.get("currentSegmentLabel"),
+        "nextExpectedSegment": history.get("nextExpectedSegment"),
+        "completedSegmentCount": history.get("completedSegmentCount"),
+        "remainingSegmentCount": history.get("remainingSegmentCount"),
+        "offRoute": history.get("offRoute"),
+        "freshness": history.get("freshness"),
+        "warnings": history.get("warnings") or [],
+        "missingCapabilities": history.get("missingCapabilities") or [],
+    }
+
+
+def get_route_monitor_status(source: Any) -> dict[str, Any]:
+    status = _load_route_monitor_status(source)
+    if not status:
+        return {
+            "schema": route_monitor.SCHEMA_VERSION,
+            "status": "FAIL",
+            "routeState": "unknown",
+            "offRoute": None,
+            "warnings": ["route monitor status source was not available"],
+            "missingCapabilities": ["route_monitor"],
+        }
+    return route_monitor.compact_status(status)
+
+
+def get_route_state(source: Any) -> str | None:
+    return get_route_monitor_status(source).get("routeState")
+
+
+def get_current_route_segment(source: Any) -> dict[str, Any]:
+    return _dict(get_route_monitor_status(source).get("currentSegment"))
+
+
+def get_next_route_segment(source: Any) -> dict[str, Any]:
+    return _dict(get_route_monitor_status(source).get("nextExpectedSegment"))
+
+
+def is_off_route(source: Any) -> bool | None:
+    return get_route_monitor_status(source).get("offRoute")
+
+
+def _compact_route_interaction(step: dict[str, Any]) -> dict[str, Any]:
+    target = _dict(step.get("target"))
+    postcondition = _dict(step.get("postcondition"))
+    return {
+        "orderIndex": step.get("orderIndex"),
+        "segmentIndex": step.get("segmentIndex"),
+        "action": step.get("action"),
+        "targetName": target.get("name") or step.get("targetName"),
+        "targetId": target.get("id") or target.get("targetId"),
+        "world": _dict(step.get("world")),
+        "planeBefore": step.get("planeBefore"),
+        "planeAfter": step.get("planeAfter"),
+        "targetQuality": step.get("targetQuality"),
+        "postcondition": {
+            "type": postcondition.get("type"),
+            "planeChanged": postcondition.get("planeChanged"),
+            "positionChanged": postcondition.get("positionChanged"),
+            "afterWorld": postcondition.get("afterWorld"),
+        },
+        "cameraHintCount": len(step.get("cameraHints") or []),
+        "sourceRecording": step.get("sourceRecording"),
+    }
+
+
+def get_route_demonstration_guide(route_name: str, guide_dir: str | Path | None = None) -> dict[str, Any]:
+    """Return compact demonstrated route-guide data for script/bot decisions."""
+    guide = route_demonstration.load_route_guide(route_name, root=guide_dir)
+    if not guide:
+        return {
+            "schema": "route_demonstration_guide_compact.v1",
+            "status": "FAIL",
+            "routeName": route_name,
+            "routeGuideLoaded": False,
+            "warnings": [f"route guide was not available: {route_name}"],
+            "missingCapabilities": ["route_demonstration_guide"],
+        }
+    path_points = [item for item in guide.get("pathPoints") or [] if isinstance(item, dict)]
+    interactions = [item for item in guide.get("interactionSteps") or [] if isinstance(item, dict)]
+    plane_changes = [item for item in guide.get("planeChanges") or [] if isinstance(item, dict)]
+    return {
+        "schema": "route_demonstration_guide_compact.v1",
+        "status": guide.get("status") or "WARN",
+        "routeGuideLoaded": True,
+        "routeName": guide.get("routeName") or route_name,
+        "sourceRecordings": guide.get("sourceRecordings") or [],
+        "startArea": guide.get("startArea"),
+        "endArea": guide.get("endArea"),
+        "pathPointCount": len(path_points),
+        "interactionStepCount": len(interactions),
+        "planeChangeCount": len(plane_changes),
+        "firstPoint": _dict(path_points[0]).get("world") if path_points else None,
+        "lastPoint": _dict(path_points[-1]).get("world") if path_points else None,
+        "interactionSteps": [_compact_route_interaction(step) for step in interactions[:12]],
+        "cameraHintCount": len(guide.get("cameraHints") or []),
+        "warnings": guide.get("warnings") or [],
+        "missingCapabilities": [],
+    }
+
+
+def get_route_guide_progress(
+    route_name: str,
+    current_world: dict[str, Any],
+    guide_dir: str | Path | None = None,
+    *,
+    reached_tolerance_tiles: int = 2,
+) -> dict[str, Any]:
+    """Resolve current player position against the demonstrated route guide."""
+    guide = route_demonstration.load_route_guide(route_name, root=guide_dir)
+    if not guide:
+        return {
+            "schema": "route_guide_progress.v1",
+            "status": "FAIL",
+            "routeGuideLoaded": False,
+            "routeGuideName": route_name,
+            "currentWorld": _dict(current_world),
+            "blocker": "route_guide_missing",
+            "warnings": [f"route guide was not available: {route_name}"],
+            "missingCapabilities": ["route_demonstration_guide"],
+        }
+    progress = route_demonstration.resolve_progress(
+        guide,
+        current_world,
+        reached_tolerance_tiles=reached_tolerance_tiles,
+    )
+    if progress.get("routeGuideLoaded") is not True:
+        progress.setdefault("missingCapabilities", []).append("playerWorldPosition")
+    return progress
+
+
+def _load_interruption_lifecycle(source: Any) -> dict[str, Any]:
+    if isinstance(source, dict):
+        if source.get("schema") == interruption_lifecycle.SCHEMA_VERSION:
+            return source
+        lifecycle = source.get("interruption_lifecycle") or source.get("interruptionLifecycle")
+        if isinstance(lifecycle, dict):
+            return lifecycle
+        if any(key in source for key in ("combat_state", "combatState", "combat", "woodcutting_lifecycle", "woodcuttingLifecycle")):
+            return interruption_lifecycle.analyze_context(source)
+        return {}
+    if source is None:
+        return {}
+    path = Path(str(source)).expanduser()
+    if path.is_dir():
+        lifecycle = _read_json(path / "interruption_lifecycle.json")
+        if lifecycle:
+            return lifecycle
+        summary = _read_json(path / "summary.json")
+        if isinstance(summary.get("interruption_lifecycle"), dict):
+            return summary["interruption_lifecycle"]
+        return interruption_lifecycle.analyze_recording(path)
+    if path.name == "interruption_lifecycle.json":
+        return _read_json(path)
+    value = _read_json(path)
+    if isinstance(value.get("interruption_lifecycle"), dict):
+        return value["interruption_lifecycle"]
+    if value.get("schema") == interruption_lifecycle.SCHEMA_VERSION:
+        return value
+    return {}
+
+
+def get_interruption_lifecycle(source: Any) -> dict[str, Any]:
+    lifecycle = _load_interruption_lifecycle(source)
+    return interruption_lifecycle.compact_lifecycle(lifecycle) if lifecycle else {
+        "schema": "interruption_lifecycle_compact.v1",
+        "status": "FAIL",
+        "interruptionDetected": False,
+        "interruptionType": "unknown",
+        "primaryCause": "unknown",
+        "confidence": 0.0,
+        "missingCapabilities": ["interruption.lifecycle"],
+        "warnings": ["interruption lifecycle source was not available"],
+    }
+
+
+def get_combat_state(source: Any) -> dict[str, Any]:
+    lifecycle = _load_interruption_lifecycle(source)
+    combat = _dict(lifecycle.get("combat"))
+    return {
+        "inCombat": bool(combat.get("combatObserved")),
+        "combatObserved": bool(combat.get("combatObserved")),
+        "npcTargetedPlayer": bool(combat.get("npcTargetedPlayer")),
+        "playerTargetedNpc": bool(combat.get("playerTargetedNpc")),
+        "hitsplatsSeen": combat.get("hitsplatsSeen") or 0,
+        "playerHealthChanged": bool(combat.get("playerHealthChanged")),
+        "hostileNpcs": combat.get("hostileNpcs") or [],
+        "actorsInteractingWithPlayer": combat.get("actorsInteractingWithPlayer") or [],
+        "playerTargets": combat.get("playerTargets") or [],
+        "missingCapabilities": lifecycle.get("missingCapabilities") or ["combat_state"],
+        "warnings": lifecycle.get("warnings") or [],
+    }
+
+
+def is_in_combat(source: Any) -> bool:
+    return bool(get_combat_state(source).get("combatObserved"))
+
+
+def was_task_interrupted(source: Any) -> bool:
+    return bool(get_interruption_lifecycle(source).get("interruptionDetected"))
+
+
+def get_interruption_cause(source: Any) -> str | None:
+    return get_interruption_lifecycle(source).get("primaryCause")
+
+
+def get_recent_hitsplats(source: Any) -> list[dict[str, Any]]:
+    return list(_load_interruption_lifecycle(source).get("combat", {}).get("recentHitsplats") or [])
+
+
+def get_recent_stat_changes(source: Any) -> list[dict[str, Any]]:
+    return list(_load_interruption_lifecycle(source).get("statChanges") or [])
+
+
+def get_recent_game_messages(source: Any) -> list[dict[str, Any]]:
+    return list(_load_interruption_lifecycle(source).get("messages") or [])
+
+
+def _load_combat_damage_summary(source: Any) -> dict[str, Any]:
+    if isinstance(source, dict):
+        if source.get("schema") in {combat_damage_summary.SCHEMA_VERSION, combat_damage_summary.COMPACT_SCHEMA_VERSION}:
+            return source
+        damage = source.get("combat_damage_summary") or source.get("combatDamageSummary")
+        if isinstance(damage, dict):
+            return damage
+        if any(key in source for key in ("combat_state", "combatState", "combat", "interruption_lifecycle", "interruptionLifecycle")):
+            return combat_damage_summary.analyze_context(source)
+        return {}
+    if source is None:
+        return {}
+    path = Path(str(source)).expanduser()
+    if path.is_dir():
+        damage = _read_json(path / "combat_damage_summary.json")
+        if damage:
+            return damage
+        summary = _read_json(path / "summary.json")
+        if isinstance(summary.get("combat_damage_summary"), dict):
+            return summary["combat_damage_summary"]
+        interruption = _load_interruption_lifecycle(path)
+        return combat_damage_summary.analyze_recording(path) if interruption else {}
+    if path.name == "combat_damage_summary.json":
+        return _read_json(path)
+    value = _read_json(path)
+    if value.get("schema") in {combat_damage_summary.SCHEMA_VERSION, combat_damage_summary.COMPACT_SCHEMA_VERSION}:
+        return value
+    if isinstance(value.get("combat_damage_summary"), dict):
+        return value["combat_damage_summary"]
+    return {}
+
+
+def get_combat_damage_summary(source: Any) -> dict[str, Any]:
+    damage = _load_combat_damage_summary(source)
+    if not damage:
+        return {
+            "schema": combat_damage_summary.COMPACT_SCHEMA_VERSION,
+            "status": "FAIL",
+            "combatObserved": False,
+            "primaryOpponent": {},
+            "damageTakenTotal": None,
+            "damageDealtTotal": None,
+            "hitsplatCount": 0,
+            "missingCapabilities": ["combat.damageSummary"],
+            "warnings": ["combat damage summary source was not available"],
+        }
+    if damage.get("schema") == combat_damage_summary.COMPACT_SCHEMA_VERSION:
+        return damage
+    return combat_damage_summary.compact_summary(damage)
+
+
+def get_damage_taken(source: Any) -> dict[str, Any]:
+    compact = get_combat_damage_summary(source)
+    return {
+        "total": compact.get("damageTakenTotal"),
+        "hitsplats": compact.get("damageTakenHitsplats") or 0,
+        "hpChanged": bool(compact.get("hpChanged")),
+        "hpBefore": compact.get("hpBefore"),
+        "hpAfter": compact.get("hpAfter"),
+        "warnings": compact.get("warnings") or [],
+    }
+
+
+def get_damage_dealt(source: Any) -> dict[str, Any]:
+    compact = get_combat_damage_summary(source)
+    full = _load_combat_damage_summary(source)
+    return {
+        "total": compact.get("damageDealtTotal"),
+        "hitsplats": compact.get("damageDealtHitsplats") or 0,
+        "targets": _dict(full.get("damageDealt")).get("targets") or [],
+        "warnings": compact.get("warnings") or [],
+    }
+
+
+def get_primary_opponent(source: Any) -> dict[str, Any]:
+    return _dict(get_combat_damage_summary(source).get("primaryOpponent"))
+
+
+def did_take_damage(source: Any) -> bool:
+    taken = get_damage_taken(source)
+    total = taken.get("total")
+    return bool((isinstance(total, (int, float)) and total > 0) or taken.get("hpChanged") or taken.get("hitsplats"))
+
+
+def did_deal_damage(source: Any) -> bool:
+    dealt = get_damage_dealt(source)
+    total = dealt.get("total")
+    return bool((isinstance(total, (int, float)) and total > 0) or dealt.get("hitsplats"))
+
+
+def get_recent_combat_window(source: Any) -> dict[str, Any]:
+    return _dict(get_combat_damage_summary(source).get("combatWindow"))
+
+
+def _load_woodcutting_loop_lifecycle(source: Any) -> dict[str, Any]:
+    if isinstance(source, dict):
+        if source.get("schema") in {woodcutting_loop_lifecycle.SCHEMA_VERSION, woodcutting_loop_lifecycle.COMPACT_SCHEMA_VERSION}:
+            return source
+        lifecycle = source.get("woodcutting_loop_lifecycle") or source.get("woodcuttingLoopLifecycle") or source.get("woodcuttingLoop")
+        if isinstance(lifecycle, dict):
+            return lifecycle
+        if any(
+            key in source
+            for key in (
+                "woodcutting_lifecycle",
+                "woodcuttingLifecycle",
+                "banking_lifecycle",
+                "bankingLifecycle",
+                "traversal_lifecycle",
+                "traversalLifecycle",
+                "interruption_lifecycle",
+                "interruptionLifecycle",
+            )
+        ):
+            return woodcutting_loop_lifecycle.analyze_context(source)
+        return {}
+    if source is None:
+        return {}
+    path = Path(str(source)).expanduser()
+    if path.is_dir():
+        lifecycle = _read_json(path / "woodcutting_loop_lifecycle.json")
+        if lifecycle:
+            return lifecycle
+        summary = _read_json(path / "summary.json")
+        if isinstance(summary.get("woodcutting_loop_lifecycle"), dict):
+            return summary["woodcutting_loop_lifecycle"]
+        return woodcutting_loop_lifecycle.analyze_recording(path)
+    if path.name == "woodcutting_loop_lifecycle.json":
+        return _read_json(path)
+    value = _read_json(path)
+    if value.get("schema") in {woodcutting_loop_lifecycle.SCHEMA_VERSION, woodcutting_loop_lifecycle.COMPACT_SCHEMA_VERSION}:
+        return value
+    if isinstance(value.get("woodcutting_loop_lifecycle"), dict):
+        return value["woodcutting_loop_lifecycle"]
+    return {}
+
+
+def get_woodcutting_loop_lifecycle(source: Any) -> dict[str, Any]:
+    lifecycle = _load_woodcutting_loop_lifecycle(source)
+    if not lifecycle:
+        return {
+            "schema": woodcutting_loop_lifecycle.COMPACT_SCHEMA_VERSION,
+            "status": "FAIL",
+            "loopState": "unknown",
+            "currentPhase": "unknown",
+            "nextExpectedPhase": "unknown",
+            "confidence": 0.0,
+            "missingCapabilities": ["woodcutting_loop_lifecycle"],
+            "warnings": ["woodcutting loop lifecycle source was not available"],
+        }
+    if lifecycle.get("schema") == woodcutting_loop_lifecycle.COMPACT_SCHEMA_VERSION:
+        return lifecycle
+    return woodcutting_loop_lifecycle.compact_lifecycle(lifecycle)
+
+
+def get_current_task_phase(source: Any) -> str | None:
+    return get_woodcutting_loop_lifecycle(source).get("currentPhase")
+
+
+def get_next_expected_phase(source: Any) -> str | None:
+    return get_woodcutting_loop_lifecycle(source).get("nextExpectedPhase")
+
+
+def is_inventory_full_for_woodcutting(source: Any) -> bool:
+    lifecycle = get_woodcutting_loop_lifecycle(source)
+    return bool(lifecycle.get("inventoryFull"))
+
+
+def did_deposit_logs(source: Any) -> bool:
+    lifecycle = get_woodcutting_loop_lifecycle(source)
+    if lifecycle.get("depositedLogs") is True:
+        return True
+    for item in lifecycle.get("depositedItems") or []:
+        record = _dict(item)
+        item_id = record.get("id") or record.get("itemId")
+        try:
+            item_id_int = int(item_id)
+        except (TypeError, ValueError):
+            item_id_int = None
+        name = _norm(record.get("name"))
+        qty = record.get("quantity") or record.get("count") or 0
+        if (item_id_int in {1511, 1521} or "logs" in name) and qty:
+            return True
+    return False
+
+
+def should_route_to_bank(source: Any) -> bool:
+    return get_next_expected_phase(source) == "route_to_bank"
+
+
+def should_route_to_trees(source: Any) -> bool:
+    return get_next_expected_phase(source) == "route_to_woodcutting_area"
+
+
+def was_interrupted(source: Any) -> bool:
+    return bool(get_woodcutting_loop_lifecycle(source).get("interruptionDetected")) or was_task_interrupted(source)
+
+
+def did_resume_after_interruption(source: Any) -> bool:
+    return bool(get_woodcutting_loop_lifecycle(source).get("taskResumed") or get_interruption_lifecycle(source).get("taskResumed"))
+
+
+def did_task_resume(source: Any) -> bool:
+    return did_resume_after_interruption(source)
+
+
+def get_human_click_profile(source: Any = None) -> dict[str, Any]:
+    profile = human_click_profile.load_profile(source)
+    if not profile:
+        return {
+            "schema": "human_click_profile_compact.v1",
+            "status": "FAIL",
+            "recordingCount": 0,
+            "warnings": ["human click profile source was not available"],
+            "missingCapabilities": ["human_click_profile"],
+        }
+    return human_click_profile.compact_profile(profile)
+
+
+def get_task_click_profile(activity: str, source: Any = None) -> dict[str, Any]:
+    profile = human_click_profile.load_profile(source)
+    if not profile:
+        return {
+            "schema": "human_click_profile_task_bucket.v1",
+            "status": "FAIL",
+            "activity": activity,
+            "warnings": ["human click profile source was not available"],
+            "missingCapabilities": ["human_click_profile"],
+        }
+    return human_click_profile.compact_profile(profile, activity=activity).get("taskProfile") or {
+        "schema": "human_click_profile_task_bucket.v1",
+        "activity": activity,
+        "recordingCount": 0,
+        "warnings": [f"activity bucket not found: {activity}"],
+    }
+
+
+def get_click_landing_profile(activity: str | None = None, source: Any = None) -> dict[str, Any]:
+    profile = human_click_profile.load_profile(source)
+    compact = human_click_profile.compact_profile(profile, activity=activity) if profile else {}
+    return _dict(compact.get("landing"))
+
+
+def get_camera_action_profile(activity: str | None = None, source: Any = None) -> dict[str, Any]:
+    profile = human_click_profile.load_profile(source)
+    compact = human_click_profile.compact_profile(profile, activity=activity) if profile else {}
+    return _dict(compact.get("camera"))
+
+
+def _runtime_variable_from_source(source: dict[str, Any], name: str) -> Any:
+    runtime = _dict(source.get("taskScriptRuntimeEvidence") or source.get("runtimeEvidence"))
+    data = _dict(runtime.get("data"))
+    variables = _dict(data.get("runtimeVariables") or source.get("runtimeVariables"))
+    variable = _dict(variables.get(name))
+    if "value" in variable:
+        return variable.get("value")
+    return source.get(name)
+
+
+def get_click_planning_context(activity: str | None = None, source: Any = None) -> dict[str, Any]:
+    source_dict = _dict(source)
+    action_visibility = _dict(
+        source_dict.get("actionInputVisibility")
+        or source_dict.get("actionInputVisibilitySummary")
+        or _dict(_dict(source_dict.get("action_input_visibility")).get("data"))
+    )
+    target = _dict(source_dict.get("target") or action_visibility.get("plannedTarget"))
+    action = _first_present(source_dict.get("action"), action_visibility.get("plannedAction"))
+    route_status = _dict(source_dict.get("routeMonitor") or _runtime_variable_from_source(source_dict, "routeMonitor"))
+    if not route_status and source is not None:
+        route_status = get_route_monitor_status(source)
+    loop = _dict(source_dict.get("woodcuttingLoopLifecycle") or _runtime_variable_from_source(source_dict, "woodcuttingLoopLifecycle"))
+    if not loop and source is not None:
+        loop = get_woodcutting_loop_lifecycle(source)
+    deposit = _dict(source_dict.get("depositResult") or _runtime_variable_from_source(source_dict, "depositResult"))
+    if not deposit and source is not None:
+        deposit = get_deposit_result(source)
+    bank_state = _dict(source_dict.get("bankState") or _runtime_variable_from_source(source_dict, "bankState"))
+    if not bank_state and source is not None:
+        bank_state = get_bank_state(source)
+    profile = _dict(source_dict.get("humanClickProfile") or _runtime_variable_from_source(source_dict, "humanClickProfile"))
+    if not profile:
+        profile = get_human_click_profile()
+    activity_bucket = click_planner.normalize_activity(activity, {
+        "woodcuttingLoopLifecycle": loop,
+        "bankState": bank_state,
+        "depositResult": deposit,
+        "routeMonitor": route_status,
+    })
+    warnings = []
+    missing = []
+    if not target:
+        missing.append("target")
+        warnings.append("live target/readiness evidence is not available")
+    if not profile or profile.get("status") == "FAIL":
+        missing.append("human_click_profile")
+        warnings.append("human click profile is not available")
+    return {
+        "schema": click_planner.CONTEXT_SCHEMA,
+        "status": "WARN" if missing else "PASS",
+        "activity": activity_bucket,
+        "action": action,
+        "target": target,
+        "actionInputVisibility": action_visibility,
+        "routeMonitor": route_status,
+        "woodcuttingLoopLifecycle": loop,
+        "depositResult": deposit,
+        "bankState": bank_state,
+        "humanClickProfile": profile,
+        "warnings": warnings,
+        "missingCapabilities": missing,
+    }
+
+
+def get_human_click_plan(target: Any = None, action: str | None = None, activity: str | None = None, source: Any = None) -> dict[str, Any]:
+    context = get_click_planning_context(activity=activity, source=source)
+    if isinstance(target, dict):
+        context["target"] = target
+    if action:
+        context["action"] = action
+    return click_planner.build_click_plan(
+        context,
+        target=_dict(context.get("target")),
+        action=context.get("action"),
+        activity=context.get("activity"),
+        human_profile=_dict(context.get("humanClickProfile")),
+    )
+
+
+def get_next_click_plan(source: Any = None) -> dict[str, Any]:
+    context = get_click_planning_context(source=source)
+    action = context.get("action")
+    loop_next_raw = _dict(context.get("woodcuttingLoopLifecycle")).get("nextExpectedPhase")
+    loop_next = _dict(loop_next_raw).get("phase") if isinstance(loop_next_raw, dict) else loop_next_raw
+    if not action:
+        if loop_next == "route_to_bank":
+            action = "route_to_bank"
+        elif loop_next == "banking_deposit":
+            action = "Deposit"
+        elif loop_next == "route_to_woodcutting_area":
+            action = "route_to_woodcutting_area"
+        elif loop_next in {"resume_cutting", "continue_cutting", "continue_current_phase"}:
+            action = "Chop down"
+        else:
+            action = "unknown"
+        context["action"] = action
+    return get_human_click_plan(
+        target=_dict(context.get("target")),
+        action=str(action),
+        activity=context.get("activity"),
+        source=context,
+    )
 
 
 def _list(value: Any) -> list[Any]:
@@ -1448,6 +2300,8 @@ def _navigation_trace_evidence(navigation_decision_trace: dict[str, Any] | None)
         "schema": payload.get("schema"),
         "status": payload.get("status"),
         "source": _first_present(data.get("source"), payload.get("source")),
+        "diagnosticOnly": data.get("diagnosticOnly"),
+        "blockingEligible": data.get("blockingEligible"),
         "warnings": _list(payload.get("warnings")),
         "tracePresent": trace_present,
         "traceMissingReason": trace_missing_reason,
@@ -1553,11 +2407,25 @@ def _infer_next_task_primitive(runtime_evidence: dict[str, Any] | None, action_i
     inventory = _dict(_runtime_variable_value(variables, "inventory"))
     phase_intent = _dict(_runtime_variable_value(variables, "phaseIntent"))
     route_progress = _dict(_runtime_variable_value(variables, "routeProgress"))
+    route_monitor_value = _dict(_runtime_variable_value(variables, "routeMonitor"))
+    woodcutting_loop_value = _dict(_runtime_variable_value(variables, "woodcuttingLoopLifecycle"))
+    interruption_value = _dict(_runtime_variable_value(variables, "interruptionLifecycle"))
+    deposit_result = _dict(_runtime_variable_value(variables, "depositResult"))
     loaded_scene = _dict(_runtime_variable_value(variables, "loadedScene"))
     resource_count = _numeric(_runtime_variable_value(variables, "resourceCount"))
     bank_open = _boolish(_runtime_variable_value(variables, "bankOpen"))
     free_slots = _numeric(inventory.get("freeSlots"))
     inventory_full = _boolish(inventory.get("inventoryFull"))
+    loop_next_raw = woodcutting_loop_value.get("nextExpectedPhase")
+    loop_next = _norm(_dict(loop_next_raw).get("phase") if isinstance(loop_next_raw, dict) else loop_next_raw)
+    loop_current_raw = woodcutting_loop_value.get("currentPhase")
+    loop_current = _norm(_dict(loop_current_raw).get("phase") if isinstance(loop_current_raw, dict) else loop_current_raw)
+    loop_state = _norm(woodcutting_loop_value.get("loopState"))
+    off_route = _boolish(route_monitor_value.get("offRoute"))
+    route_state = _norm(route_monitor_value.get("routeState"))
+    interrupted = _boolish(interruption_value.get("interruptionDetected"))
+    task_resumed = _boolish(interruption_value.get("taskResumed"))
+    deposit_complete = _boolish(deposit_result.get("depositComplete"))
     manual_login = bool(
         readiness_summary.get("manualLoginRequired") is True
         or visibility_readiness.get("manualLoginRequired") is True
@@ -1578,6 +2446,34 @@ def _infer_next_task_primitive(runtime_evidence: dict[str, Any] | None, action_i
     if manual_login or loaded_scene_verified is not True:
         primitive = "recover_loaded_scene"
         reason = "manual_login_or_loaded_scene_not_verified"
+        confidence = "high"
+    elif off_route is True or route_state == "off_route":
+        primitive = "wait_for_evidence"
+        reason = "route_monitor_reports_off_route"
+        confidence = "high"
+    elif interrupted is True and task_resumed is not True:
+        primitive = "wait_for_evidence"
+        reason = "task_interrupted_without_resume_evidence"
+        confidence = "high"
+    elif loop_next == "route_to_bank":
+        primitive = "bank"
+        reason = "woodcutting_loop_next_expected_phase_route_to_bank"
+        confidence = "high"
+    elif loop_next == "banking_deposit":
+        primitive = "deposit" if bank_open is True else "bank"
+        reason = "woodcutting_loop_next_expected_phase_banking_deposit"
+        confidence = "high"
+    elif loop_next == "route_to_woodcutting_area":
+        primitive = "return_to_resource"
+        reason = "woodcutting_loop_next_expected_phase_route_to_woodcutting_area"
+        confidence = "high"
+    elif loop_next in {"resume_cutting", "continue_cutting", "continue_current_phase"}:
+        primitive = "collect"
+        reason = "woodcutting_loop_next_expected_phase_collect_or_continue"
+        confidence = "high"
+    elif deposit_complete is True:
+        primitive = "return_to_resource"
+        reason = "deposit_result_complete_route_back_to_resource"
         confidence = "high"
     elif bank_open is True and (resource_count is None or resource_count > 0):
         primitive = "deposit"
@@ -1610,6 +2506,14 @@ def _infer_next_task_primitive(runtime_evidence: dict[str, Any] | None, action_i
             "resourceCount": resource_count,
             "inventoryFull": inventory_full,
             "freeSlots": free_slots,
+            "woodcuttingLoopState": loop_state or None,
+            "woodcuttingLoopCurrentPhase": loop_current or None,
+            "woodcuttingLoopNextExpectedPhase": loop_next or None,
+            "routeMonitorState": route_state or None,
+            "offRoute": off_route,
+            "interruptionDetected": interrupted,
+            "taskResumed": task_resumed,
+            "depositComplete": deposit_complete,
             "currentIntent": current_intent or None,
             "phase": phase_text or None,
             "plannedAction": planned_action or None,
@@ -1786,6 +2690,7 @@ def assess_task_step_readiness(
     missing_now = [str(item) for item in _list(runtime_data.get("coveredVariablesMissingNow"))]
     missing_expected = [name for name in expected_variables if name in missing_now]
     nav_suspicious = _dict(nav_data.get("firstSuspiciousDecision"))
+    nav_blocking_eligible = nav_data.get("blockingEligible") is not False
     blockers: list[str] = []
     warnings: list[str] = []
     if manual_login:
@@ -1802,8 +2707,10 @@ def assess_task_step_readiness(
         blockers.append("manual_login_blocks_liveness_recovery")
     if primitive_name == "recover_loaded_scene" and loaded_scene is True:
         warnings.append("loaded_scene_already_verified")
-    if primitive_name in {"walk_to", "return_to_resource"} and nav_suspicious:
+    if primitive_name in {"walk_to", "return_to_resource"} and nav_suspicious and nav_blocking_eligible:
         blockers.append("suspicious_navigation_decision_trace")
+    elif primitive_name in {"walk_to", "return_to_resource"} and nav_suspicious:
+        warnings.append("diagnostic_navigation_decision_trace_not_blocking")
     warnings.extend(f"missing_runtime_variable:{name}" for name in missing_expected)
     warnings.extend(f"expected_runtime_variable_not_proof_eligible:{name}" for name in proof_blocked_expected)
     warnings.extend(str(item) for item in readiness_warnings)
@@ -1964,7 +2871,11 @@ def assess_task_run_readiness(
                 "resourceCount": _runtime_variable_value(variables, "resourceCount"),
                 "bankOpen": _runtime_variable_value(variables, "bankOpen"),
                 "routeProgress": _runtime_variable_value(variables, "routeProgress"),
+                "routeMonitor": _runtime_variable_value(variables, "routeMonitor"),
                 "phaseIntent": _runtime_variable_value(variables, "phaseIntent"),
+                "woodcuttingLoopLifecycle": _runtime_variable_value(variables, "woodcuttingLoopLifecycle"),
+                "interruptionLifecycle": _runtime_variable_value(variables, "interruptionLifecycle"),
+                "depositResult": _runtime_variable_value(variables, "depositResult"),
             },
             "nextStepReadiness": next_readiness,
             "requestAllowedNow": request_allowed,
@@ -2162,5 +3073,57 @@ def script_api_spec() -> dict[str, Any]:
         "phaseAwareInputIntegrityPolicy": PHASE_AWARE_INPUT_POLICY,
         "externalKnowledgePolicy": EXTERNAL_KNOWLEDGE_POLICY,
         "failureClassifications": FAILURE_CLASSIFICATIONS,
+        "scriptFacingHelpers": [
+            "get_bank_state",
+            "get_banking_lifecycle",
+            "is_bank_open",
+            "is_deposit_box_open",
+            "get_active_bank_like_interface",
+            "get_inventory_delta",
+            "get_deposit_result",
+            "get_deposited_items",
+            "did_deposit_item",
+            "get_banking_missing_capabilities",
+            "get_woodcutting_lifecycle",
+            "get_route_monitor_status",
+            "get_route_state",
+            "get_current_route_segment",
+            "get_next_route_segment",
+            "is_off_route",
+            "get_route_demonstration_guide",
+            "get_route_guide_progress",
+            "get_human_click_profile",
+            "get_task_click_profile",
+            "get_click_landing_profile",
+            "get_camera_action_profile",
+            "get_click_planning_context",
+            "get_human_click_plan",
+            "get_next_click_plan",
+            "get_combat_state",
+            "is_in_combat",
+            "get_interruption_lifecycle",
+            "was_task_interrupted",
+            "get_interruption_cause",
+            "get_combat_damage_summary",
+            "get_damage_taken",
+            "get_damage_dealt",
+            "get_primary_opponent",
+            "did_take_damage",
+            "did_deal_damage",
+            "get_recent_combat_window",
+            "get_recent_hitsplats",
+            "get_recent_stat_changes",
+            "get_recent_game_messages",
+            "get_woodcutting_loop_lifecycle",
+            "get_current_task_phase",
+            "get_next_expected_phase",
+            "is_inventory_full_for_woodcutting",
+            "did_deposit_logs",
+            "should_route_to_bank",
+            "should_route_to_trees",
+            "was_interrupted",
+            "did_resume_after_interruption",
+            "did_task_resume",
+        ],
         "example": woodcut_bank_template(),
     }
