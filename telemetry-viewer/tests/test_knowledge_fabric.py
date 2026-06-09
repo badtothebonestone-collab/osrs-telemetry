@@ -923,11 +923,19 @@ def test_route_demonstration_guide_queries_expose_progress():
             {"worldX": 3203, "worldY": 3238, "plane": 0},
             guide_dir=tmp,
         )
+        reentry = fabric.route_guide_reentry(
+            "woodcutting_area_to_bank",
+            {"worldX": 3203, "worldY": 3238, "plane": 1},
+            guide_dir=tmp,
+        )
 
     assert guide["data"]["routeGuideLoaded"] is True
     assert guide["data"]["pathPointCount"] == 2
     assert progress["data"]["status"] == "PASS"
     assert progress["data"]["nextGuidePoint"]["world"] == {"worldX": 3208, "worldY": 3212, "plane": 0}
+    assert reentry["data"]["status"] == "WARN"
+    assert reentry["data"]["blocker"] == "route_guide_no_same_plane_reentry"
+    assert reentry["data"]["routeGuideReentryAttempted"] is True
 
 
 def test_view_quality_query_includes_camera_recommendation_fields():

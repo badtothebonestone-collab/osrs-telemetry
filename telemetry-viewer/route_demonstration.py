@@ -473,6 +473,151 @@ def nearest_guide_point(guide: dict[str, Any], current_world: dict[str, Any], *,
     return {"point": best[1], "distanceTiles": round(best[0], 3)}
 
 
+def _xy_distance(a: Any, b: Any) -> float | None:
+    first = _tile(a)
+    second = _tile(b)
+    if not first or not second:
+        return None
+    return math.hypot(float(first["worldX"] - second["worldX"]), float(first["worldY"] - second["worldY"]))
+
+
+def _nearest_same_plane_item(
+    items: list[Any],
+    current: dict[str, Any],
+    *,
+    world_key: str = "world",
+    max_distance: float | None = None,
+) -> dict[str, Any]:
+    best: tuple[float, dict[str, Any]] | None = None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        world = _tile(item.get(world_key))
+        distance = tile_distance(current, world)
+        if distance is None:
+            continue
+        if max_distance is not None and distance > max_distance:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, item)
+    if best is None:
+        return {}
+    return {"item": best[1], "distanceTiles": round(best[0], 3)}
+
+
+def _nearest_cross_plane_item(items: list[Any], current: dict[str, Any], *, world_key: str = "world") -> dict[str, Any]:
+    best: tuple[float, dict[str, Any]] | None = None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        world = _tile(item.get(world_key))
+        distance = _xy_distance(current, world)
+        if distance is None:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, item)
+    if best is None:
+        return {}
+    return {"item": best[1], "xyDistanceTiles": round(best[0], 3)}
+
+
+def _reentry_subsegment(guide: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    current_plane = current.get("plane")
+    for leg in _list(guide.get("routeLegs")):
+        if not isinstance(leg, dict):
+            continue
+        start = _tile(leg.get("startWorld"))
+        end = _tile(leg.get("endWorld"))
+        if not start or not end:
+            continue
+        start_plane = start.get("plane")
+        end_plane = end.get("plane")
+        if start_plane == current_plane or end_plane == current_plane:
+            return {
+                "classification": "same_plane_route_leg",
+                "segmentIndex": leg.get("segmentIndex"),
+                "segmentType": leg.get("segmentType"),
+                "label": leg.get("label"),
+            }
+        if start_plane is not None and end_plane is not None:
+            low = min(start_plane, end_plane)
+            high = max(start_plane, end_plane)
+            if low < current_plane < high:
+                return {
+                    "classification": "intermediate_floor_between_route_transitions",
+                    "segmentIndex": leg.get("segmentIndex"),
+                    "segmentType": leg.get("segmentType"),
+                    "label": leg.get("label"),
+                    "startWorld": start,
+                    "endWorld": end,
+                }
+    return {"classification": "off_demonstrated_route_plane"}
+
+
+def resolve_reentry(
+    guide: dict[str, Any],
+    current_world: dict[str, Any],
+    *,
+    max_same_plane_distance: float | None = None,
+    reached_tolerance_tiles: int = 2,
+) -> dict[str, Any]:
+    current = _tile(current_world)
+    if not guide or not current:
+        return {
+            "schema": "route_guide_reentry.v1",
+            "status": "WARN",
+            "routeGuideLoaded": bool(guide),
+            "routeGuideReentryAttempted": True,
+            "blocker": "route_guide_or_position_missing",
+        }
+
+    points = _list(guide.get("pathPoints"))
+    interactions = _list(guide.get("interactionSteps"))
+    nearest_point = _nearest_same_plane_item(points, current, max_distance=max_same_plane_distance)
+    nearest_interaction = _nearest_same_plane_item(interactions, current, max_distance=max_same_plane_distance)
+    progress = resolve_progress(guide, current, reached_tolerance_tiles=reached_tolerance_tiles) if (nearest_point or nearest_interaction) else {}
+    next_point = _dict(progress.get("nextGuidePoint"))
+    next_interaction = _dict(progress.get("nextGuideInteraction"))
+
+    recovery_type = None
+    next_step: dict[str, Any] | None = None
+    if next_interaction:
+        recovery_type = "route_guide_interaction"
+        next_step = next_interaction
+    elif next_point:
+        recovery_type = "route_guide_path_point"
+        next_step = next_point
+    elif nearest_interaction:
+        recovery_type = "route_guide_reentry_interaction"
+        next_step = _dict(nearest_interaction.get("item"))
+    elif nearest_point:
+        recovery_type = "route_guide_reentry_point"
+        next_step = _dict(nearest_point.get("item"))
+
+    status = "PASS" if next_step else "WARN"
+    blocker = None if next_step else "route_guide_no_same_plane_reentry"
+    nearest_cross_point = _nearest_cross_plane_item(points, current)
+    nearest_cross_interaction = _nearest_cross_plane_item(interactions, current)
+    return {
+        "schema": "route_guide_reentry.v1",
+        "status": status,
+        "routeGuideLoaded": True,
+        "routeGuideName": guide.get("routeName"),
+        "routeGuideReentryAttempted": True,
+        "currentWorld": current,
+        "currentPlane": current.get("plane"),
+        "nearestSamePlaneGuidePoint": nearest_point,
+        "nearestSamePlaneInteraction": nearest_interaction,
+        "nearestCrossPlaneGuidePoint": nearest_cross_point,
+        "nearestCrossPlaneInteraction": nearest_cross_interaction,
+        "inferredSubsegment": _reentry_subsegment(guide, current),
+        "nextRecoveryStep": next_step,
+        "recoveryCandidateType": recovery_type,
+        "routeGuideProgress": progress,
+        "blocker": blocker,
+    }
+
+
 def resolve_progress(
     guide: dict[str, Any],
     current_world: dict[str, Any],

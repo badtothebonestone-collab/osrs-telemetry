@@ -6079,6 +6079,20 @@ def _blocked_by_no_executable_result(
     return result
 
 
+def _proposal_specific_blocker(proposal: ActionProposal, default: str = "no_executable_action") -> str:
+    target_explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    fallback = target_explanation.get("contextActionFallback")
+    if isinstance(fallback, dict):
+        original = str(fallback.get("originalReason") or "").strip()
+        if original and original not in {"none", "wait_for_context", "no_executable_action"}:
+            return original
+    blocker = str(target_explanation.get("blocker") or "").strip()
+    if blocker:
+        return blocker
+    reason = str(proposal.reason or "").strip()
+    return reason or default
+
+
 def _readiness_gate_required(options: Any, proposal: ActionProposal) -> bool:
     if getattr(options, "require_live_readiness", None) is False:
         return False
@@ -12063,20 +12077,21 @@ def execute_action_loop(
             max_rounds = max(0, _max_navigation_reacquire_rounds(options))
             attempts = int(loop_summary.get("contextWaitReacquireAttempts") or 0)
             loop_summary["contextWaitReacquireLimit"] = max_rounds
+            specific_blocker = _proposal_specific_blocker(proposal, "wait_for_context")
             if attempts < max_rounds:
                 loop_summary["contextWaitReacquireAttempts"] = attempts + 1
                 loop_summary["reacquireAttempted"] = True
                 loop_summary["reacquireResult"] = "waiting_for_context"
-                loop_summary["reasonIfNoFreshTarget"] = proposal.reason or "wait_for_context"
+                loop_summary["reasonIfNoFreshTarget"] = specific_blocker
                 _record_navigation_trace(
                     options=options,
                     loop_summary=loop_summary,
                     decision="wait",
-                    reason=proposal.reason or "wait_for_context",
+                    reason=specific_blocker,
                     status=before_status,
                     proposal=proposal,
                     observed={
-                        "observedResult": proposal.reason or "wait_for_context",
+                        "observedResult": specific_blocker,
                         "resultOutcome": "still_waiting",
                         "resultComplete": False,
                         "nextActionAllowed": False,
@@ -12087,11 +12102,12 @@ def execute_action_loop(
                 _record_reacquire_wait(options, loop_summary, sleep_func, reason="wait_for_context")
                 continue
         if proposal.proposed_action in {"none", "wait_for_context"} or not proposal.executable:
+            specific_blocker = _proposal_specific_blocker(proposal)
             action_result = _blocked_by_no_executable_result(
                 proposal,
                 status=before_status,
                 options=options,
-                reason=proposal.reason or "no_executable_action",
+                reason=specific_blocker,
             )
             results.append(action_result)
             _refresh_loop_summary(loop_summary, results)
@@ -12103,22 +12119,22 @@ def execute_action_loop(
                 observed_result=action_result.observed_result,
                 attempts=len(results),
                 max_attempts=max_actions,
-                reason=proposal.reason or "no_executable_action",
+                reason=specific_blocker,
                 warnings=list(action_result.warnings),
             )
             _apply_lifecycle(action_result, lifecycle)
             status_value = "FAIL"
-            reason = proposal.reason or "no_executable_action"
+            reason = specific_blocker
             if proposal.proposed_action in NAVIGATION_ACTIONS or proposal.target_kind == "path_tile" or _status_has_navigation_context(before_status):
                 _record_navigation_trace(
                     options=options,
                     loop_summary=loop_summary,
                     decision="wait" if proposal.proposed_action in {"none", "wait_for_context"} else "fail",
-                    reason=proposal.reason or "navigation_context_unavailable",
+                    reason=specific_blocker or "navigation_context_unavailable",
                     status=before_status,
                     proposal=proposal,
                     observed={
-                        "observedResult": proposal.reason or "navigation_context_unavailable",
+                        "observedResult": specific_blocker or "navigation_context_unavailable",
                         "resultOutcome": "still_waiting" if proposal.proposed_action in {"none", "wait_for_context"} else "skipped",
                         "resultComplete": proposal.proposed_action not in {"none", "wait_for_context"},
                         "nextActionAllowed": False,

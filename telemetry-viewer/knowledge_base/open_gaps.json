@@ -1,6 +1,6 @@
 {
   "schema": "project_open_gaps.v1",
-  "updatedAtUtc": "2026-06-09T19:47:00.741332Z",
+  "updatedAtUtc": "2026-06-09T20:44:19.273678Z",
   "gaps": [
     {
       "id": "deposit_all_region_classification",
@@ -69,18 +69,6 @@
       "suggestedNextTask": "Restore or attach RuneLite plus context/snapshot endpoints, then rerun --check-input-geometry and allow live actions only after input_geometry_pass."
     },
     {
-      "id": "live_route_wrong_floor_recovery",
-      "title": "Live loop can be left on the wrong floor after a stale return-route Staircase proposal",
-      "severity": "high",
-      "requiredLayer": "route/context/action_proposal",
-      "status": "open",
-      "evidence": [
-        "20260609_143211_live_woodcutting_loop clicked Climb-down correctly, then stale route state accepted a different Climb-up Staircase before the guard fix.",
-        "20260609_144521_live_woodcutting_loop failed closed with no_executable_action at 3206,3229,1 and sent zero gameplay clicks."
-      ],
-      "suggestedNextTask": "From 3206,3229,1, rebuild route/resource context so the bot can get back to a valid woodcutting loop state without loosening route-object matching."
-    },
-    {
       "id": "clickbox_geometry_incomplete_for_profile",
       "title": "Tree clickbox/hull geometry is still missing after Tree aim recovery",
       "severity": "medium",
@@ -136,6 +124,20 @@
       "suggestedNextTask": "Compare dry-run planned aim points against successful human clicks in future Record Everything fixtures before changing live click generation."
     },
     {
+      "id": "live_route_wrong_floor_recovery",
+      "title": "Live loop needs a demonstrated same-plane plane-1 route re-entry step",
+      "severity": "high",
+      "requiredLayer": "route/context/action_proposal",
+      "status": "open",
+      "evidence": [
+        "20260609_143211_live_woodcutting_loop clicked Climb-down correctly, then stale route state accepted a different Climb-up Staircase before the guard fix.",
+        "20260609_144521_live_woodcutting_loop failed closed at 3206,3229,1 and sent zero gameplay clicks.",
+        "route_demonstration.resolve_reentry reports route_guide_no_same_plane_reentry because Bank_to_Woodcutting_area has no same-plane guide point or interaction for plane 1.",
+        "20260609_154147_live_woodcutting_loop passed input geometry and loaded-scene recovery, sent zero gameplay actions, and stopped with route_guide_no_same_plane_reentry."
+      ],
+      "suggestedNextTask": "Record or extract a demonstrated plane-1 route re-entry step for 3206,3229,1 before allowing a live route click from that wrong-floor state."
+    },
+    {
       "id": "knowledge_manual_curation",
       "title": "Project knowledge is generated plus manual notes, not a substitute for curated decisions",
       "severity": "low",
@@ -149,16 +151,16 @@
   ],
   "nextTasks": [
     {
-      "id": "recover_wrong_floor_route_context",
+      "id": "record_or_extract_plane1_route_reentry",
       "priority": 1,
-      "task": "Recover the live loop from 3206,3229,1 without loosening route-object matching.",
+      "task": "Add a demonstrated same-plane route-guide recovery step for 3206,3229,1 without loosening route-object matching.",
       "successCriteria": [
-        "Real live loop obtains a valid route/resource context from the wrong-floor state, sends only expected route actions, and reaches woodcutting area or a precise route-context blocker."
+        "The live loop can move from wrong/intermediate floor using a proven same-plane guide point or interaction, or keeps failing closed as route_guide_no_same_plane_reentry."
       ]
     },
     {
       "id": "fix_deposit_region_label",
-      "priority": 1,
+      "priority": 2,
       "task": "Clean up Deposit-All menu-context region classification.",
       "successCriteria": [
         "Deposit-All bank UI clicks no longer appear as minimap_click when menu context proves bank UI."

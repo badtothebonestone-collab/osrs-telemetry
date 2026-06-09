@@ -63,6 +63,8 @@ from input_control.executor import (
     _executed_navigation_waypoint_key,
     _menu_row_canvas_point,
     _maybe_context_action_proposal,
+    _blocked_by_no_executable_result,
+    _proposal_specific_blocker,
     camera_exposure_score,
     next_camera_direction_from_exposure,
     classify_last_menu_option_clicked,
@@ -443,6 +445,34 @@ class IncrementingClock:
 
 
 class InputControlExecutorTest(unittest.TestCase):
+    def test_context_fallback_original_reason_becomes_blocked_result_reason(self):
+        proposal = ActionProposal(
+            proposed_action="wait_for_context",
+            target_kind="route_reentry",
+            reason="no_executable_action",
+            target_explanation={
+                "contextActionFallback": {
+                    "schema": "context_action_fallback.v1",
+                    "status": "WARN",
+                    "originalAction": "wait_for_context",
+                    "originalReason": "route_guide_no_same_plane_reentry",
+                    "reason": "context_action_proposal_not_executable",
+                }
+            },
+        )
+        blocker = _proposal_specific_blocker(proposal)
+
+        result = _blocked_by_no_executable_result(
+            proposal,
+            status={"latestTick": 9561},
+            options=Namespace(execute=True, backend="arduino", movement_profile="instant_test", max_actions=1),
+            reason=blocker,
+        )
+
+        self.assertEqual(blocker, "route_guide_no_same_plane_reentry")
+        self.assertEqual(result.observed_result["observedResult"], "route_guide_no_same_plane_reentry")
+        self.assertEqual(result.lifecycle_state["reason"], "route_guide_no_same_plane_reentry")
+
     def test_status_fetch_falls_back_to_compact_action_context(self):
         context_response = {
             "schema": "context_response.v1",

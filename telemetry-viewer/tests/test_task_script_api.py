@@ -1104,6 +1104,11 @@ class TaskScriptApiTest(unittest.TestCase):
                 {"worldX": 3203, "worldY": 3238, "plane": 0},
                 guide_dir=tmp,
             )
+            reentry = task_script_api.get_route_guide_reentry(
+                "woodcutting_area_to_bank",
+                {"worldX": 3203, "worldY": 3238, "plane": 1},
+                guide_dir=tmp,
+            )
 
         self.assertTrue(guide["routeGuideLoaded"])
         self.assertEqual(guide["pathPointCount"], 2)
@@ -1111,6 +1116,9 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(progress["status"], "PASS")
         self.assertEqual(progress["nextGuidePoint"]["world"], {"worldX": 3208, "worldY": 3212, "plane": 0})
         self.assertIn(0, progress["skippedReachedGuidePoints"])
+        self.assertEqual(reentry["status"], "WARN")
+        self.assertEqual(reentry["blocker"], "route_guide_no_same_plane_reentry")
+        self.assertTrue(reentry["routeGuideReentryAttempted"])
 
     def test_click_planning_helpers_return_warn_without_target_and_plan_with_target(self):
         missing = task_script_api.get_next_click_plan({"humanClickProfile": {"status": "PASS", "landing": {"medianAimDistancePx": 20}}})

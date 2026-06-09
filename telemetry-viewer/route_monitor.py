@@ -466,6 +466,31 @@ def _in_route_corridor(world: dict[str, Any] | None, template: dict[str, Any], *
     return plane is None or not known_planes or plane in known_planes
 
 
+def _in_route_xy_corridor(world: dict[str, Any] | None, template: dict[str, Any], *, tolerance: int = DEFAULT_CORRIDOR_TOLERANCE_TILES) -> bool:
+    if not world:
+        return False
+    start = _world(_dict(template.get("start")).get("world"))
+    end = _world(_dict(template.get("end")).get("world"))
+    if not start or not end:
+        return False
+    x = int(world.get("worldX"))
+    y = int(world.get("worldY"))
+    min_x = min(start["worldX"], end["worldX"]) - tolerance
+    max_x = max(start["worldX"], end["worldX"]) + tolerance
+    min_y = min(start["worldY"], end["worldY"]) - tolerance
+    max_y = max(start["worldY"], end["worldY"]) + tolerance
+    return min_x <= x <= max_x and min_y <= y <= max_y
+
+
+def _intermediate_route_state(template: dict[str, Any]) -> str:
+    route_name = str(template.get("routeName") or "")
+    if route_name == "Bank_to_Woodcutting_area":
+        return "routing_to_trees_intermediate_floor"
+    if route_name == "woodcutting_area_to_bank":
+        return "routing_to_bank_intermediate_floor"
+    return "route_reentry_needed"
+
+
 def _completed_for_live(template: dict[str, Any], *, route_state: str, world: dict[str, Any] | None) -> list[dict[str, Any]]:
     segments = _required_segments(template)
     if route_state == "arrived":
@@ -521,7 +546,7 @@ def _base_status(
         status = "WARN"
     elif route_state == "off_route" or off_route:
         status = "FAIL"
-    elif route_state in {"unknown", "blocked"}:
+    elif route_state in {"unknown", "blocked", "route_reentry_needed", "route_transition_pending", "routing_to_trees_intermediate_floor", "routing_to_bank_intermediate_floor"}:
         status = "WARN"
     else:
         status = "PASS"
@@ -614,6 +639,10 @@ def monitor_live_context(
     elif _in_route_corridor(world, template_payload):
         route_state = "in_progress"
         evidence.append("player world is inside the simple route corridor")
+    elif _in_route_xy_corridor(world, template_payload):
+        route_state = "route_reentry_needed"
+        evidence.append("player world is inside the route XY corridor on an intermediate/untemplated plane")
+        warnings.append("current plane is not represented by the route template start/end planes; route-guide re-entry evidence is required")
     else:
         route_state = "off_route"
         warnings.append("player is outside the simple route corridor")
@@ -644,6 +673,9 @@ def monitor_live_context(
     payload["arrivalGateRequiresEndCluster"] = bool(requires_end_cluster)
     payload["nearEndCluster"] = bool(near_end_cluster)
     payload["arrivalGateWarnings"] = ["waiting for end-cluster proximity"] if arrival_gate_status == "waiting" else []
+    if route_state == "route_reentry_needed":
+        payload["intermediateRouteState"] = _intermediate_route_state(template_payload)
+        payload["routeGuideReentryNeeded"] = True
     if "selection" in locals():
         payload["routeTemplateAutoSelection"] = {key: value for key, value in selection.items() if key != "template"}
     return payload

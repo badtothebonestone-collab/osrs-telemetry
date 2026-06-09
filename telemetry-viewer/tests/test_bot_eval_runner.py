@@ -195,6 +195,41 @@ def fake_poster(payload: dict | None = None):
     return post
 
 
+def focused_runelite_window_status() -> dict:
+    return {
+        "schema": "runelite_window_status.v1",
+        "status": "PASS",
+        "available": True,
+        "runeliteWindowMatched": True,
+        "foregroundWindowTitle": "RuneLite - Unit Test",
+        "foregroundHwnd": 1001,
+        "matchedWindow": {
+            "hwnd": 1001,
+            "title": "RuneLite - Unit Test",
+            "visible": True,
+            "minimized": False,
+            "foreground": True,
+            "windowRect": {"x": 90, "y": 180, "width": 840, "height": 650, "left": 90, "top": 180, "right": 930, "bottom": 830},
+            "clientRect": {"x": 100, "y": 200, "width": 800, "height": 600, "left": 100, "top": 200, "right": 900, "bottom": 800},
+            "screenToClientAvailable": True,
+            "clientToScreenAvailable": True,
+            "screenClientRoundTrip": {
+                "clientPoint": {"x": 10, "y": 10},
+                "screenPoint": {"x": 110, "y": 210},
+                "roundTripClientPoint": {"x": 10, "y": 10},
+            },
+            "dpi": 96,
+            "dpiScale": 1.0,
+        },
+        "matchedWindowCount": 1,
+        "warnings": [],
+    }
+
+
+def focused_runelite_window_patch():
+    return patch("input_control.input_geometry.find_runelite_window", return_value=focused_runelite_window_status())
+
+
 class BotEvalRunnerTest(unittest.TestCase):
     def test_replay_full_loop_writes_decision_action_and_postcondition_traces(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -273,7 +308,8 @@ class BotEvalRunnerTest(unittest.TestCase):
                     "http://127.0.0.1:8893/health": {"schema": "snapshot_health.v1", "status": "PASS"},
                 }
             )
-            readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root)
+            with focused_runelite_window_patch():
+                readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root)
 
             self.assertEqual(readiness["status"], "WARN")
             self.assertTrue(readiness["contextServiceReachable"])
@@ -289,7 +325,8 @@ class BotEvalRunnerTest(unittest.TestCase):
                     "http://127.0.0.1:8893/health": {"schema": "snapshot_health.v1", "status": "PASS"},
                 }
             )
-            readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root)
+            with focused_runelite_window_patch():
+                readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root)
 
             self.assertEqual(readiness["status"], "PASS")
             self.assertTrue(readiness["telemetryFresh"])
@@ -343,7 +380,8 @@ class BotEvalRunnerTest(unittest.TestCase):
                 }
             )
 
-            readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root, timeout=0.25)
+            with focused_runelite_window_patch():
+                readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root, timeout=0.25)
 
             status_call = next(call for call in fetch.calls if call[0].endswith("/status"))
             self.assertGreaterEqual(status_call[1], bot_eval_runner.DEFAULT_STATUS_DIAGNOSTIC_TIMEOUT_SECONDS)
@@ -592,7 +630,8 @@ class BotEvalRunnerTest(unittest.TestCase):
                 }
             )
 
-            readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root)
+            with focused_runelite_window_patch():
+                readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root)
 
             self.assertEqual(readiness["status"], "PASS")
             self.assertTrue(readiness["telemetryFresh"])
@@ -617,7 +656,8 @@ class BotEvalRunnerTest(unittest.TestCase):
                 }
             )
 
-            readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root, no_input=False)
+            with focused_runelite_window_patch():
+                readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root, no_input=False)
 
             self.assertEqual(readiness["status"], "PASS")
             self.assertFalse(readiness["contextServiceReachable"])
@@ -654,7 +694,8 @@ class BotEvalRunnerTest(unittest.TestCase):
                 }
             )
 
-            readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root)
+            with focused_runelite_window_patch():
+                readiness = bot_eval_runner.check_live_readiness(fetcher=fetch, sessions_root=sessions_root)
 
             self.assertEqual(readiness["status"], "FAIL")
             self.assertEqual(readiness["rootCause"], "loaded_scene_not_ready")
@@ -775,13 +816,14 @@ class BotEvalRunnerTest(unittest.TestCase):
                 }
             )
 
-            summary = bot_eval_runner.wait_for_manual_loaded_scene_ready(
-                root / "bot_runs" / "manual_wait",
-                timeout_seconds=0,
-                sessions_root=sessions_root,
-                fetcher=fetch,
-                sleep_func=lambda _seconds: None,
-            )
+            with focused_runelite_window_patch():
+                summary = bot_eval_runner.wait_for_manual_loaded_scene_ready(
+                    root / "bot_runs" / "manual_wait",
+                    timeout_seconds=0,
+                    sessions_root=sessions_root,
+                    fetcher=fetch,
+                    sleep_func=lambda _seconds: None,
+                )
 
             self.assertEqual(summary["status"], "PASS")
             self.assertEqual(summary["reason"], "manual_loaded_scene_detected")
@@ -1052,17 +1094,18 @@ class BotEvalRunnerTest(unittest.TestCase):
                 stdout.write(json.dumps(payload))
                 return subprocess.CompletedProcess(command, 0)
 
-            summary = bot_eval_runner.run_live_action(
-                output_root=root / "bot_runs",
-                duration=1,
-                max_actions=1,
-                record_everything=False,
-                analyze_after=False,
-                sessions_root=sessions_root,
-                fetcher=fetch,
-                command_runner=fake_runner,
-                runtime_control_poster=fake_poster(),
-            )
+            with focused_runelite_window_patch():
+                summary = bot_eval_runner.run_live_action(
+                    output_root=root / "bot_runs",
+                    duration=1,
+                    max_actions=1,
+                    record_everything=False,
+                    analyze_after=False,
+                    sessions_root=sessions_root,
+                    fetcher=fetch,
+                    command_runner=fake_runner,
+                    runtime_control_poster=fake_poster(),
+                )
 
             self.assertEqual(summary["mode"], "live_action")
             self.assertEqual(summary["status"], "PASS")
@@ -1110,17 +1153,18 @@ class BotEvalRunnerTest(unittest.TestCase):
                 stdout.write(json.dumps(payload))
                 return subprocess.CompletedProcess(command, 0)
 
-            summary = bot_eval_runner.run_live_action(
-                output_root=root / "bot_runs",
-                duration=1,
-                max_actions=1,
-                record_everything=False,
-                analyze_after=False,
-                sessions_root=sessions_root,
-                fetcher=fetch,
-                command_runner=fake_runner,
-                runtime_control_poster=fake_poster(),
-            )
+            with focused_runelite_window_patch():
+                summary = bot_eval_runner.run_live_action(
+                    output_root=root / "bot_runs",
+                    duration=1,
+                    max_actions=1,
+                    record_everything=False,
+                    analyze_after=False,
+                    sessions_root=sessions_root,
+                    fetcher=fetch,
+                    command_runner=fake_runner,
+                    runtime_control_poster=fake_poster(),
+                )
 
             self.assertEqual(summary["status"], "FAIL")
             self.assertFalse(summary["liveInputExecuted"])
@@ -1152,6 +1196,93 @@ class BotEvalRunnerTest(unittest.TestCase):
             self.assertFalse(candidates[0]["executable"])
             self.assertFalse(actions[0]["executed"])
             self.assertEqual(postconditions[0]["status"], "FAIL")
+
+    def test_live_action_preserves_route_reentry_blocker_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sessions_root = make_live_session(root)
+            fetch = fake_fetcher(
+                {
+                    "http://127.0.0.1:8890/health": {"schema": "context_health.v1", "status": "ok", "sourceAgeMs": 100, "latestTick": 123},
+                    "http://127.0.0.1:8893/health": {"schema": "snapshot_health.v1", "status": "PASS"},
+                }
+            )
+
+            def fake_runner(command, *, cwd, stdout, stderr, text, timeout):
+                payload = {
+                    "schema": "input_control_execution_loop_result.v1",
+                    "status": "FAIL",
+                    "reason": "route_guide_no_same_plane_reentry",
+                    "executedActionCount": 0,
+                    "actionResults": [
+                        {
+                            "schema": "input_control_execution_result.v1",
+                            "status": "FAIL",
+                            "proposedAction": "wait_for_context",
+                            "executed": False,
+                            "proposal": {
+                                "reason": "no_executable_action",
+                                "targetExplanation": {
+                                    "contextActionFallback": {
+                                        "schema": "context_action_fallback.v1",
+                                        "status": "WARN",
+                                        "originalAction": "wait_for_context",
+                                        "originalReason": "route_guide_no_same_plane_reentry",
+                                        "reason": "context_action_proposal_not_executable",
+                                    }
+                                },
+                            },
+                            "observedResult": {
+                                "schema": "action_observation.v1",
+                                "observedResult": "route_guide_no_same_plane_reentry",
+                                "resultOutcome": "blocked",
+                                "verificationStatus": "BLOCKED",
+                            },
+                            "warnings": ["current player floor is not represented by a demonstrated same-plane route guide step"],
+                        }
+                    ],
+                    "lifecycleState": {
+                        "currentState": "blocked",
+                        "lastAction": "wait_for_context",
+                        "lastActionTick": 640,
+                        "reason": "route_guide_no_same_plane_reentry",
+                    },
+                    "loopSummary": {
+                        "candidatesEvaluated": 1,
+                        "proposedActions": 1,
+                        "actionsAttempted": 0,
+                        "actionsExecuted": 0,
+                        "lastLifecycleSampleTick": 640,
+                        "stopReason": "route_guide_no_same_plane_reentry",
+                    },
+                    "warnings": ["current player floor is not represented by a demonstrated same-plane route guide step"],
+                }
+                stdout.write(json.dumps(payload))
+                return subprocess.CompletedProcess(command, 0)
+
+            with focused_runelite_window_patch():
+                summary = bot_eval_runner.run_live_action(
+                    output_root=root / "bot_runs",
+                    duration=1,
+                    max_actions=1,
+                    record_everything=False,
+                    analyze_after=False,
+                    sessions_root=sessions_root,
+                    fetcher=fetch,
+                    command_runner=fake_runner,
+                    runtime_control_poster=fake_poster(),
+                )
+
+            self.assertEqual(summary["status"], "FAIL")
+            self.assertFalse(summary["liveInputExecuted"])
+            self.assertEqual(summary["executorBlocker"]["blocker"], "route_guide_no_same_plane_reentry")
+            self.assertIn("executor_blocker=route_guide_no_same_plane_reentry", summary["errors"])
+            candidates = [
+                json.loads(line)
+                for line in Path(summary["artifacts"]["candidates"]).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(candidates[0]["blocker"], "route_guide_no_same_plane_reentry")
 
 
 if __name__ == "__main__":

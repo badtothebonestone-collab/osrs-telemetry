@@ -2457,6 +2457,28 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.reason, "service_complete_waiting_for_return_context")
         self.assertIsNone(proposal.suggested_click_point)
 
+    def test_wrong_floor_after_bank_uses_route_guide_reentry_blocker_not_generic_wait(self):
+        status = status_for(
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+            active_target=None,
+            bank_ui={"bankOpen": False, "bankReadable": False},
+            bank_operation={"operationNeeded": False, "bankingComplete": True, "resourceItemsHeld": 0},
+            overlay={"selectedMarker": None},
+        )
+        status["playerWorldPosition"] = {"worldX": 3206, "worldY": 3229, "plane": 1}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.reason, "route_guide_no_same_plane_reentry")
+        self.assertEqual(proposal.target_kind, "route_reentry")
+        self.assertEqual(proposal.target_explanation["routeGuideName"], "Bank_to_Woodcutting_area")
+        self.assertTrue(proposal.target_explanation["routeGuideReentryAttempted"])
+        self.assertEqual(proposal.target_explanation["currentWorld"], {"worldX": 3206, "worldY": 3229, "plane": 1})
+        self.assertEqual(proposal.target_explanation["intermediateRouteState"], "routing_to_trees_intermediate_floor")
+        self.assertIn("route_guide.same_plane_reentry", proposal.missing_capabilities)
+
     def test_valid_return_destination_proposes_return_to_resource_area(self):
         proposal = build_action_proposal(
             status_for(

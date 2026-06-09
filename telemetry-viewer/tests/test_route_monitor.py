@@ -394,6 +394,15 @@ class RouteMonitorTest(unittest.TestCase):
         self.assertEqual(status["routeState"], "off_route")
         self.assertTrue(status["offRoute"])
 
+    def test_wrong_floor_inside_corridor_reports_route_reentry_needed(self):
+        status = route_monitor.monitor_live_context(template(), live_context(world(3206, 3229, 1)))
+        self.assertEqual(status["status"], "WARN")
+        self.assertEqual(status["routeState"], "route_reentry_needed")
+        self.assertFalse(status["offRoute"])
+        self.assertEqual(status["currentArea"], "plane_1")
+        self.assertEqual(status["intermediateRouteState"], "routing_to_trees_intermediate_floor")
+        self.assertTrue(status["routeGuideReentryNeeded"])
+
     def test_recording_with_pass_template_comparison_arrived(self):
         with tempfile.TemporaryDirectory() as tmp:
             recording = Path(tmp) / "recording"

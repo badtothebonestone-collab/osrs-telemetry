@@ -4430,6 +4430,24 @@ class KnowledgeFabric:
             status=progress.get("status") or "WARN",
         )
 
+    def route_guide_reentry(
+        self,
+        route_name: str,
+        current_world: dict[str, Any],
+        guide_dir: str | Path | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        reentry = task_script_api.get_route_guide_reentry(route_name, current_world, guide_dir=guide_dir)
+        return _query_response(
+            "knowledge_fabric_route_guide_reentry.v1",
+            reentry,
+            started=started,
+            source="task_script_api+route_demonstration",
+            freshness=self.freshness(),
+            warnings=reentry.get("warnings") or [],
+            status=reentry.get("status") or "WARN",
+        )
+
     def validate_task_script(self, script: dict[str, Any] | str | Path) -> dict[str, Any]:
         return task_script_api.validate_task_script(script)
 

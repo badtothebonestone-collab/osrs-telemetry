@@ -353,3 +353,191 @@ Final blocker: no_executable_action
 ```
 
 The second run failed closed before gameplay input because the previous bad run left the character on the wrong floor. The code now prevents accepting the wrong `Climb-up` object/action and prevents clicking a route target on the wrong plane. The remaining recovery task is to get the live state back to a valid route/resource context from `3206,3229,1`, then rerun the same real command.
+
+## 16. Wrong-Floor Route Recovery Diagnosis
+
+Updated: 2026-06-09.
+
+Current wrong-floor state:
+
+```text
+current world/plane: 3206,3229,1
+current phase: needs_more_context / return_to_resource recovery
+expected loop phase: routing back to the woodcutting area after deposit
+route leg believed active: Bank_to_Woodcutting_area return leg
+```
+
+The route guide evidence does not currently contain a demonstrated same-plane recovery step for plane `1`:
+
+```text
+nearest same-plane guide point: none
+nearest same-plane interaction: none
+inferred subsegment: intermediate_floor_between_route_transitions
+nearest cross-plane guide point: 3204,3229,0
+nearest cross-plane interaction: Staircase 56231 at 3205,3208,2, Climb-down
+```
+
+The no-action failure was produced because the planner fell through to the generic context fallback after banking completed and route/resource state was stale. The responsible gate was the route/context branch in:
+
+```text
+telemetry-viewer\input_control\action_proposal.py
+```
+
+Fix behavior:
+
+- `route_demonstration.resolve_reentry` now reports route-guide re-entry evidence for the current world tile.
+- `task_script_api.get_route_guide_reentry` and `KnowledgeFabric.route_guide_reentry` expose that evidence to scripts and diagnostics.
+- `action_proposal` now recognizes wrong/intermediate route floors and returns `routing_to_trees_intermediate_floor` context with a specific route-guide re-entry candidate/blocker.
+- If no same-plane demonstrated route step exists, the candidate is non-executable with `route_guide_no_same_plane_reentry` instead of generic `no_executable_action`.
+- Strict route-object guards remain unchanged: directional action, object id, and plane still must match before any Staircase click can execute.
+
+Current guide/template gap:
+
+```text
+route guide lacks demonstrated plane-1 recovery point: yes
+route template lacks explicit intermediate-floor segment: yes
+live object evidence missing for a safe same-plane route target: yes
+current route state stale/wrong after previous run: yes
+```
+
+## 17. Wrong-Floor Route Re-Entry Fix And Rerun
+
+Updated: 2026-06-09.
+
+Changed behavior:
+
+- `route_demonstration.resolve_reentry` identifies wrong/intermediate route floors and reports same-plane guide point/interaction evidence.
+- `action_proposal` now emits route re-entry evidence for `3206,3229,1` instead of falling through to generic `no_executable_action`.
+- `route_monitor` classifies a route-corridor tile on an untemplated plane as `route_reentry_needed` with `routing_to_trees_intermediate_floor`.
+- `input_control.executor` preserves `route_guide_no_same_plane_reentry` when a non-executable context fallback is the reason for stopping.
+- `bot_eval_runner` preserves named fail-closed executor blockers in summary/trace extraction.
+
+Route guide enrichment:
+
+```text
+enriched route guide: no
+reason: no recording/artifact proved a same-plane plane-1 recovery point or interaction for 3206,3229,1
+safe blocker: route_guide_no_same_plane_reentry
+```
+
+Geometry check:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+```
+
+Result:
+
+```text
+status: PASS
+inputGeometryPass: true
+loadedSceneVerified: true
+foregroundWindowTitle: RuneLite - KCLBolus
+canvas: 148,57 1229x868
+```
+
+Real command rerun:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```
+
+Latest run:
+
+```text
+Run folder: C:\Users\badto\osrs-telemetry\bot_runs\20260609_154147_live_woodcutting_loop
+Linked recording: C:\Users\badto\osrs-telemetry\recordings\20260609_154300_live_woodcutting_loop_20260609_154259
+Status: FAIL
+Loaded-scene recovery: recovered_loaded_scene, finalLoadedSceneVerified=true
+Input geometry before run: PASS
+Bot actions sent: 0
+Live input executed: no
+Loop completed: no
+Final location: 3206,3229,1
+Final phase: needs_more_context
+Exact blocker: route_guide_no_same_plane_reentry
+Candidate count: 1 non-executable wait_for_context candidate
+Action trace: executed=false, observedResult=route_guide_no_same_plane_reentry
+```
+
+Outcome:
+
+```text
+Recovered from 3206,3229,1: no
+Route back reached woodcutting area: no
+Loop completed: no
+Reason: the current Bank_to_Woodcutting_area guide lacks a demonstrated same-plane plane-1 re-entry step.
+```
+
+This is an acceptable fail-closed outcome. The bot did not click a wrong-plane route target, did not repeat the old bad Staircase point, did not substitute dry-run, and did not run max-runtime with an unexplained empty candidate trace.
+
+## 18. Final Wrong-Floor Recovery Pass Report
+
+Git state:
+
+```text
+branch: stabilization/live-loop-recovery-20260609
+status before: clean
+status after: source/docs/tests/knowledge changes pending commit at report write
+```
+
+Changed file groups:
+
+```text
+Route re-entry resolver/API: route_demonstration.py, task_script_api.py, knowledge_fabric.py
+Planner/trace/executor: action_proposal.py, candidate_core.py, input_control/executor.py, bot_eval_runner.py
+Route monitor: route_monitor.py
+Tests: test_route_demonstration.py, test_action_proposal.py, test_bot_eval_runner.py, test_input_control_executor.py, test_knowledge_fabric.py, test_route_monitor.py, test_task_script_api.py
+Docs/knowledge: live_loop_execution_fix_report.md, bot_eval_live_woodcutting_loop_run.md, ENTRYPOINTS.md, SCRIPT_API_MAP.md, OPEN_GAPS.md, NEXT_TASKS.md, knowledge_base JSON indexes
+```
+
+Root cause:
+
+```text
+The bot was stranded at 3206,3229,1 after an earlier stale route transition. Strict Staircase guards correctly prevent wrong-plane/wrong-id clicks, but the Bank_to_Woodcutting_area route guide has no demonstrated same-plane plane-1 recovery point or interaction. Without this patch the planner collapsed that state into generic no_executable_action.
+```
+
+Verification run:
+
+```text
+Input geometry: PASS
+Real live command: ran with --live --execute-actions
+Live run folder: C:\Users\badto\osrs-telemetry\bot_runs\20260609_154147_live_woodcutting_loop
+Linked recording folder: C:\Users\badto\osrs-telemetry\recordings\20260609_154300_live_woodcutting_loop_20260609_154259
+Bot actions sent: 0
+Live input executed: no
+Recovered from 3206,3229,1: no
+Route back reached woodcutting area: no
+Loop completed: no
+Exact blocker: route_guide_no_same_plane_reentry
+```
+
+Checks run:
+
+```powershell
+python -m py_compile telemetry-viewer\route_demonstration.py telemetry-viewer\candidate_core.py telemetry-viewer\input_control\action_proposal.py telemetry-viewer\input_control\executor.py telemetry-viewer\bot_eval_runner.py telemetry-viewer\task_script_api.py telemetry-viewer\knowledge_fabric.py telemetry-viewer\route_monitor.py
+python telemetry-viewer\tests\test_route_demonstration.py
+python telemetry-viewer\tests\test_action_proposal.py
+python telemetry-viewer\tests\test_bot_eval_runner.py
+python telemetry-viewer\tests\test_route_monitor.py
+python telemetry-viewer\tests\test_task_script_api.py
+python telemetry-viewer\tests\test_knowledge_fabric.py
+python telemetry-viewer\tests\test_project_knowledge.py
+python telemetry-viewer\tests\test_input_control_executor.py InputControlExecutorTest.test_context_fallback_original_reason_becomes_blocked_result_reason
+python telemetry-viewer\telemetry_ui.py --check
+python telemetry-viewer\update_project_knowledge.py --check
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```
+
+Failure/limitation:
+
+```text
+python telemetry-viewer\tests\test_input_control_executor.py timed out after about 244 seconds. The focused executor regression for the touched route-blocker reporting path passed.
+```
+
+Next recommended task:
+
+```text
+Record or extract a demonstrated same-plane plane-1 route re-entry step for 3206,3229,1, then add it to the route guide/template evidence. Do not loosen the strict Staircase object id/action/plane guards.
+```

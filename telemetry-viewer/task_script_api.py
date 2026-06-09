@@ -719,6 +719,39 @@ def get_route_guide_progress(
     return progress
 
 
+def get_route_guide_reentry(
+    route_name: str,
+    current_world: dict[str, Any],
+    guide_dir: str | Path | None = None,
+    *,
+    max_same_plane_distance: float | None = None,
+    reached_tolerance_tiles: int = 2,
+) -> dict[str, Any]:
+    """Resolve route-guide re-entry evidence for intermediate or wrong-floor states."""
+    guide = route_demonstration.load_route_guide(route_name, root=guide_dir)
+    if not guide:
+        return {
+            "schema": "route_guide_reentry.v1",
+            "status": "FAIL",
+            "routeGuideLoaded": False,
+            "routeGuideName": route_name,
+            "routeGuideReentryAttempted": True,
+            "currentWorld": _dict(current_world),
+            "blocker": "route_guide_missing",
+            "warnings": [f"route guide was not available: {route_name}"],
+            "missingCapabilities": ["route_demonstration_guide"],
+        }
+    reentry = route_demonstration.resolve_reentry(
+        guide,
+        current_world,
+        max_same_plane_distance=max_same_plane_distance,
+        reached_tolerance_tiles=reached_tolerance_tiles,
+    )
+    if reentry.get("routeGuideLoaded") is not True:
+        reentry.setdefault("missingCapabilities", []).append("playerWorldPosition")
+    return reentry
+
+
 def _load_interruption_lifecycle(source: Any) -> dict[str, Any]:
     if isinstance(source, dict):
         if source.get("schema") == interruption_lifecycle.SCHEMA_VERSION:
@@ -3092,6 +3125,7 @@ def script_api_spec() -> dict[str, Any]:
             "is_off_route",
             "get_route_demonstration_guide",
             "get_route_guide_progress",
+            "get_route_guide_reentry",
             "get_human_click_profile",
             "get_task_click_profile",
             "get_click_landing_profile",

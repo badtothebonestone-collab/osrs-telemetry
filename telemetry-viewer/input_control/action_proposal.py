@@ -3158,6 +3158,7 @@ def _guide_interaction_target(progress: dict[str, Any]) -> dict[str, Any]:
         "targetType": "sceneObject",
         "classId": "service_route_transition",
         "id": interaction.get("targetId"),
+        "objectId": interaction.get("targetId"),
         "worldX": world["worldX"],
         "worldY": world["worldY"],
         "plane": world["plane"],
@@ -3165,6 +3166,7 @@ def _guide_interaction_target(progress: dict[str, Any]) -> dict[str, Any]:
         "actions": [action],
         "expectedOptions": [action],
         "expectedTargets": expected_targets,
+        "expectedObjectIds": [interaction.get("targetId")] if interaction.get("targetId") is not None else [],
         "expectedPlaneChange": interaction.get("expectedPlaneChange"),
         "routeId": progress.get("routeGuideName"),
         "routeGuideLoaded": True,
@@ -3199,6 +3201,259 @@ def _guide_interaction_target(progress: dict[str, Any]) -> dict[str, Any]:
         },
         "postcondition": interaction.get("postcondition"),
     }
+
+
+def _route_reentry_action_for_route(route_name: str | None) -> str:
+    return "return_to_resource_area" if str(route_name or "") == "Bank_to_Woodcutting_area" else "navigate_to_service"
+
+
+def _route_reentry_path_target(reentry: dict[str, Any]) -> dict[str, Any]:
+    step = _dict(reentry.get("nextRecoveryStep"))
+    point = _normalise_tile(step.get("world"))
+    if not point:
+        return {}
+    route_name = str(reentry.get("routeGuideName") or "")
+    return {
+        "targetName": "Route guide re-entry point",
+        "targetType": "route_reentry",
+        "classId": "route_reentry_needed",
+        "targetTile": dict(point),
+        "suggestedWorldTile": dict(point),
+        "pathTargetTile": dict(point),
+        "destinationTile": dict(point),
+        "source": "route_guide_reentry",
+        "actionTargetSource": "local_frontier_waypoint",
+        "actionability": "needs_live_projection",
+        "routeGuideLoaded": True,
+        "routeGuideName": route_name,
+        "routeGuideReentry": dict(reentry),
+        "routeGuideReentryAttempted": True,
+        "currentWorld": reentry.get("currentWorld"),
+        "currentPlane": reentry.get("currentPlane"),
+        "nearestSamePlaneGuidePoint": reentry.get("nearestSamePlaneGuidePoint"),
+        "nearestSamePlaneInteraction": reentry.get("nearestSamePlaneInteraction"),
+        "inferredSubsegment": reentry.get("inferredSubsegment"),
+        "nextRecoveryStep": step,
+        "recoveryCandidateType": reentry.get("recoveryCandidateType"),
+        "intermediateRouteState": "routing_to_trees_intermediate_floor" if route_name == "Bank_to_Woodcutting_area" else "routing_to_bank_intermediate_floor",
+        "routeCandidateValidation": {
+            "schema": "route_candidate_validation.v1",
+            "status": "PASS",
+            "classification": "route_guide_same_plane_reentry_point",
+            "routeCorridorMatch": True,
+            "routeProgressScore": 0.78,
+            "rejectionReasons": [],
+        },
+    }
+
+
+def _route_reentry_interaction_target(reentry: dict[str, Any]) -> dict[str, Any]:
+    step = _dict(reentry.get("nextRecoveryStep"))
+    if not step:
+        return {}
+    progress = {
+        "routeGuideName": reentry.get("routeGuideName"),
+        "currentWorld": reentry.get("currentWorld"),
+        "nextGuideInteraction": step,
+        "routeGuideReentry": dict(reentry),
+    }
+    target = _guide_interaction_target(progress)
+    if not target:
+        return {}
+    route_name = str(reentry.get("routeGuideName") or "")
+    target["routeGuideReentry"] = dict(reentry)
+    target["routeGuideReentryAttempted"] = True
+    target["currentWorld"] = reentry.get("currentWorld")
+    target["currentPlane"] = reentry.get("currentPlane")
+    target["nearestSamePlaneGuidePoint"] = reentry.get("nearestSamePlaneGuidePoint")
+    target["nearestSamePlaneInteraction"] = reentry.get("nearestSamePlaneInteraction")
+    target["inferredSubsegment"] = reentry.get("inferredSubsegment")
+    target["nextRecoveryStep"] = step
+    target["recoveryCandidateType"] = reentry.get("recoveryCandidateType")
+    target["intermediateRouteState"] = "routing_to_trees_intermediate_floor" if route_name == "Bank_to_Woodcutting_area" else "routing_to_bank_intermediate_floor"
+    target["actionability"] = "blocked_route_interaction_live_target_missing"
+    target["routeCandidateValidation"] = {
+        **_dict(target.get("routeCandidateValidation")),
+        "status": "WARN",
+        "classification": "route_interaction_live_target_missing",
+    }
+    return target
+
+
+def _route_reentry_blocker_target(reentry: dict[str, Any], route_name: str | None) -> dict[str, Any]:
+    blocker = str(reentry.get("blocker") or "route_guide_no_same_plane_reentry")
+    return {
+        "targetName": "Route guide re-entry",
+        "targetType": "route_reentry",
+        "classId": "route_reentry_needed",
+        "source": "route_guide_reentry",
+        "routeGuideLoaded": True,
+        "routeGuideName": route_name,
+        "routeGuideReentry": dict(reentry),
+        "routeGuideReentryAttempted": True,
+        "currentWorld": reentry.get("currentWorld"),
+        "currentPlane": reentry.get("currentPlane"),
+        "nearestSamePlaneGuidePoint": reentry.get("nearestSamePlaneGuidePoint"),
+        "nearestSamePlaneInteraction": reentry.get("nearestSamePlaneInteraction"),
+        "nearestCrossPlaneGuidePoint": reentry.get("nearestCrossPlaneGuidePoint"),
+        "nearestCrossPlaneInteraction": reentry.get("nearestCrossPlaneInteraction"),
+        "inferredSubsegment": reentry.get("inferredSubsegment"),
+        "nextRecoveryStep": reentry.get("nextRecoveryStep"),
+        "recoveryCandidateType": reentry.get("recoveryCandidateType"),
+        "blocker": blocker,
+        "intermediateRouteState": "routing_to_trees_intermediate_floor" if route_name == "Bank_to_Woodcutting_area" else "routing_to_bank_intermediate_floor",
+        "actionability": f"blocked_{blocker}",
+        "routeCandidateValidation": {
+            "schema": "route_candidate_validation.v1",
+            "status": "FAIL",
+            "classification": blocker,
+            "routeCorridorMatch": False,
+            "routeProgressScore": 0.0,
+            "rejectionReasons": [blocker],
+            "warnings": ["no demonstrated same-plane guide point or interaction exists for the current route floor"],
+            "missingCapabilities": ["route_guide.same_plane_reentry"],
+        },
+    }
+
+
+def _route_reentry_candidate_route_names(
+    *,
+    service_required: bool,
+    banking_complete: bool,
+    returning_to_resource_intent: bool,
+    service_route: dict[str, Any],
+    return_route: dict[str, Any],
+) -> list[str]:
+    names: list[str] = []
+    for context in (return_route, service_route):
+        name = str(context.get("routeName") or "").strip()
+        if name in {"Bank_to_Woodcutting_area", "woodcutting_area_to_bank"}:
+            names.append(name)
+    if returning_to_resource_intent or banking_complete:
+        names.append("Bank_to_Woodcutting_area")
+    if service_required:
+        names.append("woodcutting_area_to_bank")
+    names.extend(["Bank_to_Woodcutting_area", "woodcutting_area_to_bank"])
+    return list(dict.fromkeys(names))
+
+
+def _reentry_sort_distance(reentry: dict[str, Any]) -> float:
+    for key in ("nearestSamePlaneGuidePoint", "nearestSamePlaneInteraction", "nearestCrossPlaneGuidePoint", "nearestCrossPlaneInteraction"):
+        item = _dict(reentry.get(key))
+        for distance_key in ("distanceTiles", "xyDistanceTiles"):
+            value = item.get(distance_key)
+            if isinstance(value, (int, float)):
+                return float(value)
+    return 9999.0
+
+
+def _wrong_floor_route_reentry_proposal(
+    *,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+    player_tile: dict[str, Any] | None,
+    phase: str,
+    active_intent: str,
+    service_required: bool,
+    banking_complete: bool,
+    returning_to_resource_intent: bool,
+    service_route: dict[str, Any],
+    return_route: dict[str, Any],
+    input_geometry: dict[str, Any] | None,
+    source_canvas_size: dict[str, Any] | None,
+    source_tick: int | None,
+) -> ActionProposal | None:
+    if route_demonstration is None or not player_tile:
+        return None
+    plane = _int(player_tile.get("plane"), 0)
+    routeish = (
+        returning_to_resource_intent
+        or service_required
+        or banking_complete
+        or phase in {"needs_more_context", "route_reentry_needed", "route_transition_pending"}
+        or active_intent in {"observe", "return_to_resource_area", "navigate_to_resource_area", "route_to_service", "needs_service"}
+    )
+    if not routeish or plane in {0, 2}:
+        return None
+
+    attempts: list[dict[str, Any]] = []
+    for route_name in _route_reentry_candidate_route_names(
+        service_required=service_required,
+        banking_complete=banking_complete,
+        returning_to_resource_intent=returning_to_resource_intent,
+        service_route=service_route,
+        return_route=return_route,
+    ):
+        try:
+            guide = route_demonstration.load_route_guide(route_name)
+            reentry = route_demonstration.resolve_reentry(guide, player_tile)
+        except Exception:
+            continue
+        if reentry:
+            reentry["routeGuideName"] = route_name
+            attempts.append(reentry)
+
+    if not attempts:
+        return None
+    pass_attempts = [item for item in attempts if item.get("status") == "PASS"]
+    selected = min(pass_attempts or attempts, key=_reentry_sort_distance)
+    route_name = str(selected.get("routeGuideName") or "")
+    recovery_type = str(selected.get("recoveryCandidateType") or "")
+    if selected.get("status") == "PASS" and "interaction" in recovery_type:
+        target = _route_reentry_interaction_target(selected)
+        if target:
+            return _proposal(
+                "wait_for_context",
+                target_kind="service_route_object",
+                target=target,
+                reason="route_interaction_live_target_missing",
+                confidence=0.58,
+                warnings=["same-plane route guide interaction exists, but live target geometry must be reacquired before clicking"],
+                missing=["route.interaction.liveTarget"],
+                required_context=["route_guide", "client_tick", "route_object"],
+                source_tick=source_tick,
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
+                status=status,
+                brain=brain,
+                suppress_click_point=True,
+            )
+    if selected.get("status") == "PASS":
+        target = _route_reentry_path_target(selected)
+        if target:
+            return _proposal(
+                _route_reentry_action_for_route(route_name),
+                target_kind="path_tile",
+                target=target,
+                reason="route_guide_same_plane_reentry",
+                confidence=0.7,
+                warnings=["route context was missing on an intermediate floor; using demonstrated same-plane guide re-entry"],
+                required_context=["route_guide", "player_world_position"],
+                source_tick=source_tick,
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
+                status=status,
+                brain=brain,
+            )
+
+    blocker = str(selected.get("blocker") or "route_guide_no_same_plane_reentry")
+    target = _route_reentry_blocker_target(selected, route_name)
+    return _proposal(
+        "wait_for_context",
+        target_kind="route_reentry",
+        target=target,
+        reason=blocker,
+        confidence=0.52,
+        warnings=["current player floor is not represented by a demonstrated same-plane route guide step"],
+        missing=["route_guide.same_plane_reentry"],
+        required_context=["route_guide", "player_world_position"],
+        source_tick=source_tick,
+        input_geometry=input_geometry,
+        source_canvas_size=source_canvas_size,
+        status=status,
+        brain=brain,
+        suppress_click_point=True,
+    )
 
 
 def _guide_interaction_should_win(progress: dict[str, Any], point_tile: dict[str, Any] | None) -> bool:
@@ -4072,6 +4327,24 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 brain=brain,
             )
 
+    wrong_floor_reentry = _wrong_floor_route_reentry_proposal(
+        status=status,
+        brain=brain,
+        player_tile=player_tile,
+        phase=phase,
+        active_intent=active_intent,
+        service_required=service_required,
+        banking_complete=banking_complete,
+        returning_to_resource_intent=returning_to_resource_intent,
+        service_route=service_route,
+        return_route=return_route,
+        input_geometry=input_geometry,
+        source_canvas_size=source_canvas_size,
+        source_tick=source_tick,
+    )
+    if wrong_floor_reentry is not None:
+        return wrong_floor_reentry
+
     service_ready = _bool(_first_present(service.get("serviceReady"), pathing.get("serviceReady"))) is True
     if service_ready and _bool(bank_ui.get("bankOpen")) is not True and banking_complete:
         return _proposal(
@@ -4423,6 +4696,23 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 missing.append("service_route.route_to_bank")
             if not pathing or _bool(pathing.get("pathingNeeded")) is not True:
                 missing.append("pathing.route_to_bank")
+            wrong_floor_reentry = _wrong_floor_route_reentry_proposal(
+                status=status,
+                brain=brain,
+                player_tile=player_tile,
+                phase=phase,
+                active_intent=active_intent,
+                service_required=service_required,
+                banking_complete=banking_complete,
+                returning_to_resource_intent=returning_to_resource_intent,
+                service_route=service_route,
+                return_route=return_route,
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
+                source_tick=source_tick,
+            )
+            if wrong_floor_reentry is not None:
+                return wrong_floor_reentry
             return _proposal(
                 "wait_for_context",
                 target_kind="none",
@@ -4437,6 +4727,24 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                 status=status,
                 brain=brain,
             )
+
+    wrong_floor_reentry = _wrong_floor_route_reentry_proposal(
+        status=status,
+        brain=brain,
+        player_tile=player_tile,
+        phase=phase,
+        active_intent=active_intent,
+        service_required=service_required,
+        banking_complete=banking_complete,
+        returning_to_resource_intent=returning_to_resource_intent,
+        service_route=service_route,
+        return_route=return_route,
+        input_geometry=input_geometry,
+        source_canvas_size=source_canvas_size,
+        source_tick=source_tick,
+    )
+    if wrong_floor_reentry is not None:
+        return wrong_floor_reentry
 
     resource_proposal = _resource_selection_proposal(
         status=status,

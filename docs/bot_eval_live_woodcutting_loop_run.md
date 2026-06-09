@@ -539,3 +539,38 @@ Current next task:
 ```text
 Recover or route from wrong-floor state 3206,3229,1 back to a valid resource/return-route context, then rerun the same real command. Do not loosen route-object matching.
 ```
+
+## 2026-06-09 Update: Wrong-Floor Route Recovery Diagnosis
+
+The latest wrong-floor state is now diagnosed as a route-guide re-entry gap, not an input, banking, or click-planning issue.
+
+| Field | Result |
+| --- | --- |
+| current world | `3206,3229,1` |
+| expected loop phase | return route to woodcutting area |
+| route leg believed active | `Bank_to_Woodcutting_area` |
+| nearest same-plane guide point | none |
+| nearest same-plane interaction | none |
+| inferred subsegment | `intermediate_floor_between_route_transitions` |
+| nearest cross-plane point | `3204,3229,0` |
+| next safe action | no demonstrated same-plane route step available |
+| precise blocker | `route_guide_no_same_plane_reentry` |
+
+The route guide resolver now exposes this as `route_guide_reentry.v1`, and the planner returns a non-executable route re-entry candidate instead of generic `no_executable_action`. Strict Staircase guards remain in force: directional action, expected object id, and expected plane must match before a route object can be clicked.
+
+Latest rerun after wrong-floor re-entry/reporting fix:
+
+| Field | Result |
+| --- | --- |
+| run folder | `C:\Users\badto\osrs-telemetry\bot_runs\20260609_154147_live_woodcutting_loop` |
+| linked recording | `C:\Users\badto\osrs-telemetry\recordings\20260609_154300_live_woodcutting_loop_20260609_154259` |
+| command | real live action command |
+| dry-run/no-input | no |
+| geometry before run | PASS |
+| loaded-scene recovery | recovered loaded scene |
+| actions sent | 0 |
+| live input executed | no |
+| final location | `3206,3229,1` |
+| final blocker | `route_guide_no_same_plane_reentry` |
+
+This is the intended fail-closed behavior until a demonstrated same-plane plane-1 route re-entry step is available.

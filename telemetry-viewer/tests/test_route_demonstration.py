@@ -134,6 +134,46 @@ class RouteDemonstrationTest(unittest.TestCase):
         self.assertEqual(progress["nextGuidePoint"]["world"], {"worldX": 3209, "worldY": 3216, "plane": 0})
         self.assertNotEqual(progress["blocker"], "route_guide_next_step_missing")
 
+    def test_wrong_floor_without_same_plane_step_reports_reentry_gap(self):
+        guide = route_demonstration.load_route_guide("Bank_to_Woodcutting_area")
+
+        reentry = route_demonstration.resolve_reentry(guide, {"worldX": 3206, "worldY": 3229, "plane": 1})
+
+        self.assertEqual(reentry["status"], "WARN")
+        self.assertTrue(reentry["routeGuideReentryAttempted"])
+        self.assertEqual(reentry["blocker"], "route_guide_no_same_plane_reentry")
+        self.assertEqual(reentry["currentPlane"], 1)
+        self.assertEqual(reentry["inferredSubsegment"]["classification"], "intermediate_floor_between_route_transitions")
+        self.assertFalse(reentry["nearestSamePlaneGuidePoint"])
+
+    def test_same_plane_reentry_finds_nearest_guide_step(self):
+        guide = {
+            "schema": route_demonstration.SCHEMA,
+            "routeName": "Bank_to_Woodcutting_area",
+            "pathPoints": [
+                {"orderIndex": 0, "world": {"worldX": 3206, "worldY": 3229, "plane": 1}, "reachedToleranceTiles": 2},
+                {"orderIndex": 1, "world": {"worldX": 3204, "worldY": 3229, "plane": 1}, "reachedToleranceTiles": 2},
+            ],
+            "interactionSteps": [
+                {
+                    "orderIndex": 0,
+                    "segmentIndex": 2,
+                    "action": "Climb-down",
+                    "targetName": "Staircase",
+                    "targetId": 16672,
+                    "world": {"worldX": 3204, "worldY": 3229, "plane": 1},
+                    "expectedPlaneChange": -1,
+                }
+            ],
+            "routeLegs": [],
+        }
+
+        reentry = route_demonstration.resolve_reentry(guide, {"worldX": 3206, "worldY": 3229, "plane": 1})
+
+        self.assertEqual(reentry["status"], "PASS")
+        self.assertEqual(reentry["recoveryCandidateType"], "route_guide_interaction")
+        self.assertEqual(reentry["nextRecoveryStep"]["targetId"], 16672)
+
     def test_camera_hint_attaches_to_nearby_interaction_step(self):
         with tempfile.TemporaryDirectory() as tmp:
             recording = Path(tmp) / "rec"

@@ -1895,9 +1895,50 @@ def _executor_blocker_from_payload(payload: dict[str, Any]) -> dict[str, Any] | 
     executed_count = int(payload.get("executedActionCount") or 0)
     reason = str(payload.get("reason") or "")
     lifecycle_reason = str(lifecycle.get("reason") or "")
+    blocker_reason = lifecycle_reason or reason
     candidates = int(loop_summary.get("candidatesEvaluated") or 0)
     proposed = int(loop_summary.get("proposedActions") or 0)
     attempted = int(loop_summary.get("actionsAttempted") or 0)
+    known_fail_closed_blockers = {
+        "route_guide_no_same_plane_reentry",
+        "route_guide_missing_demonstrated_plane1_recovery_step",
+        "route_interaction_live_target_missing",
+        "route_context_mismatch_with_recovery_hint",
+    }
+    for item in action_results:
+        record = _dict(item)
+        observed = _dict(record.get("observedResult"))
+        observed_reason = str(observed.get("observedResult") or record.get("verificationStatus") or "").strip()
+        if record.get("executed") is False and observed_reason in known_fail_closed_blockers:
+            return {
+                "schema": "bot_executor_blocker.v1",
+                "blocker": observed_reason,
+                "reason": observed_reason,
+                "executorReason": reason or None,
+                "lifecycleState": lifecycle.get("currentState"),
+                "lastAction": lifecycle.get("lastAction") or record.get("proposedAction"),
+                "lastActionTick": lifecycle.get("lastActionTick"),
+                "candidatesEvaluated": candidates,
+                "proposedActions": proposed,
+                "actionsAttempted": attempted,
+                "lastLifecycleSampleTick": loop_summary.get("lastLifecycleSampleTick"),
+                "warnings": lifecycle.get("warnings") or record.get("warnings") or payload.get("warnings") or [],
+            }
+    if executed_count == 0 and not action_results and blocker_reason in known_fail_closed_blockers:
+        return {
+            "schema": "bot_executor_blocker.v1",
+            "blocker": blocker_reason,
+            "reason": blocker_reason,
+            "executorReason": reason or None,
+            "lifecycleState": lifecycle.get("currentState"),
+            "lastAction": lifecycle.get("lastAction"),
+            "lastActionTick": lifecycle.get("lastActionTick"),
+            "candidatesEvaluated": candidates,
+            "proposedActions": proposed,
+            "actionsAttempted": attempted,
+            "lastLifecycleSampleTick": loop_summary.get("lastLifecycleSampleTick"),
+            "warnings": lifecycle.get("warnings") or payload.get("warnings") or [],
+        }
     if (
         executed_count == 0
         and not action_results
