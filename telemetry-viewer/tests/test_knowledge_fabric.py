@@ -910,6 +910,17 @@ def test_route_demonstration_guide_queries_expose_progress():
                     ],
                     "interactionSteps": [],
                     "planeChanges": [],
+                    "directPlaneSkips": [
+                        {
+                            "sourcePlane": 0,
+                            "destinationPlane": 2,
+                            "skippedPlanes": [1],
+                            "option": "Climb-down",
+                            "target": "Trapdoor",
+                            "world": {"worldX": 3209, "worldY": 3216, "plane": 0},
+                            "evidence": {"directMultiPlaneTransitionObserved": True},
+                        }
+                    ],
                     "cameraHints": [],
                     "warnings": [],
                 }
@@ -936,6 +947,7 @@ def test_route_demonstration_guide_queries_expose_progress():
     assert reentry["data"]["status"] == "WARN"
     assert reentry["data"]["blocker"] == "route_guide_no_same_plane_reentry"
     assert reentry["data"]["routeGuideReentryAttempted"] is True
+    assert "plane-1 recovery is not demonstrated" in reentry["data"]["likelyReason"]
 
 
 def test_view_quality_query_includes_camera_recommendation_fields():

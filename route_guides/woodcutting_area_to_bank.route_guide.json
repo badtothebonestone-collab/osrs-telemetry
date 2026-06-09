@@ -122,19 +122,28 @@
   "interactionSteps": [
     {
       "schema": "route_demonstration_interaction_step.v1",
+      "interactionType": "route_object",
       "orderIndex": 0,
       "routeName": "woodcutting_area_to_bank",
       "segmentIndex": 2,
       "sourceStepId": "route_step_002",
       "action": "Climb-down",
+      "option": "Climb-down",
       "targetName": "Trapdoor",
+      "target": "Trapdoor",
       "targetId": 14880,
+      "objectId": 14880,
       "targetKind": "object",
       "world": {
         "worldX": 3209,
         "worldY": 3216,
         "plane": 0
       },
+      "sourcePlane": 0,
+      "destinationPlane": 2,
+      "allowedSourcePlanes": [
+        0
+      ],
       "planeBefore": 0,
       "planeAfter": 2,
       "expectedPlaneChange": 2,
@@ -185,7 +194,59 @@
           "timeBeforeStepSeconds": 5.937
         }
       ],
-      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_104613_Woodcutting_area_to_bank"
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_104613_Woodcutting_area_to_bank",
+      "sourceRecordingLabel": "Woodcutting area to bank.",
+      "evidence": {
+        "floorSelectionOptionCaptured": false,
+        "recordingLabelMentionsFloorSelection": false,
+        "menuSelection": {},
+        "targetQuality": {}
+      }
+    }
+  ],
+  "floorSelectionInteractions": [],
+  "directPlaneSkips": [
+    {
+      "schema": "route_demonstration_direct_plane_skip.v1",
+      "interactionType": "direct_plane_skip",
+      "routeName": "woodcutting_area_to_bank",
+      "sourcePlane": 0,
+      "destinationPlane": 2,
+      "skippedPlanes": [
+        1
+      ],
+      "option": "Climb-down",
+      "target": "Trapdoor",
+      "objectId": 14880,
+      "world": {
+        "worldX": 3209,
+        "worldY": 3216,
+        "plane": 0
+      },
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success",
+        "planeChanged": true,
+        "positionChanged": true,
+        "beforeWorld": {
+          "worldX": 3208,
+          "worldY": 3212,
+          "plane": 0
+        },
+        "afterWorld": {
+          "worldX": 3205,
+          "worldY": 3209,
+          "plane": 2
+        }
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_104613_Woodcutting_area_to_bank",
+      "sourceRecordingLabel": "Woodcutting area to bank.",
+      "evidence": {
+        "floorSelectionOptionCaptured": false,
+        "recordingLabelMentionsFloorSelection": false,
+        "directMultiPlaneTransitionObserved": true,
+        "floorSelectionLikely": false
+      }
     }
   ],
   "routeLegs": [

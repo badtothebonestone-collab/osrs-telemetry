@@ -394,19 +394,28 @@
   "interactionSteps": [
     {
       "schema": "route_demonstration_interaction_step.v1",
+      "interactionType": "route_object",
       "orderIndex": 0,
       "routeName": "Bank_to_Woodcutting_area",
       "segmentIndex": 2,
       "sourceStepId": "route_step_002",
       "action": "Climb-down",
+      "option": "Climb-down",
       "targetName": "Staircase",
+      "target": "Staircase",
       "targetId": 56231,
+      "objectId": 56231,
       "targetKind": "object",
       "world": {
         "worldX": 3205,
         "worldY": 3208,
         "plane": 2
       },
+      "sourcePlane": 2,
+      "destinationPlane": 0,
+      "allowedSourcePlanes": [
+        2
+      ],
       "planeBefore": 2,
       "planeAfter": 0,
       "expectedPlaneChange": -2,
@@ -457,23 +466,39 @@
           "timeBeforeStepSeconds": 7.531
         }
       ],
-      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2"
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+      "sourceRecordingLabel": "manual_route-bank_to_woodcutting_area_v2",
+      "evidence": {
+        "floorSelectionOptionCaptured": false,
+        "recordingLabelMentionsFloorSelection": false,
+        "menuSelection": {},
+        "targetQuality": {}
+      }
     },
     {
       "schema": "route_demonstration_interaction_step.v1",
+      "interactionType": "route_object",
       "orderIndex": 1,
       "routeName": "Bank_to_Woodcutting_area",
       "segmentIndex": 3,
       "sourceStepId": "route_step_003",
       "action": "Climb-down",
+      "option": "Climb-down",
       "targetName": "Staircase",
+      "target": "Staircase",
       "targetId": 56231,
+      "objectId": 56231,
       "targetKind": "object",
       "world": {
         "worldX": 3205,
         "worldY": 3208,
         "plane": 2
       },
+      "sourcePlane": 2,
+      "destinationPlane": 0,
+      "allowedSourcePlanes": [
+        2
+      ],
       "planeBefore": 2,
       "planeAfter": 0,
       "expectedPlaneChange": -2,
@@ -524,23 +549,39 @@
           "timeBeforeStepSeconds": 4.078
         }
       ],
-      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC"
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC",
+      "sourceRecordingLabel": "bank to WC",
+      "evidence": {
+        "floorSelectionOptionCaptured": false,
+        "recordingLabelMentionsFloorSelection": false,
+        "menuSelection": {},
+        "targetQuality": {}
+      }
     },
     {
       "schema": "route_demonstration_interaction_step.v1",
+      "interactionType": "route_object",
       "orderIndex": 2,
       "routeName": "Bank_to_Woodcutting_area",
       "segmentIndex": 3,
       "sourceStepId": "route_step_003",
       "action": "Climb-down",
+      "option": "Climb-down",
       "targetName": "Staircase",
+      "target": "Staircase",
       "targetId": 56231,
+      "objectId": 56231,
       "targetKind": "object",
       "world": {
         "worldX": 3205,
         "worldY": 3208,
         "plane": 2
       },
+      "sourcePlane": 2,
+      "destinationPlane": 0,
+      "allowedSourcePlanes": [
+        2
+      ],
       "planeBefore": 2,
       "planeAfter": 0,
       "expectedPlaneChange": -2,
@@ -577,7 +618,167 @@
         }
       },
       "cameraHints": [],
-      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area"
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area",
+      "sourceRecordingLabel": "Bank to tree area",
+      "evidence": {
+        "floorSelectionOptionCaptured": false,
+        "recordingLabelMentionsFloorSelection": false,
+        "menuSelection": {
+          "present": true,
+          "selectedRowIndex": 0,
+          "option": "Climb-down",
+          "target": "Staircase",
+          "rowBoundsPresent": false,
+          "insideRowBounds": null,
+          "rowGeometrySource": "option_target_match",
+          "selectedSnapshotId": "menu_snapshot_0003"
+        },
+        "targetQuality": {
+          "quality": "strong",
+          "score": 1.0,
+          "warnings": [
+            "menu_row_geometry_missing"
+          ],
+          "evidence": {
+            "hoverConfirmed": false,
+            "menuConfirmed": false,
+            "telemetryClickHistoryConfirmed": false,
+            "objectIdentityConfirmed": true,
+            "actionConfirmed": true,
+            "freshSnapshot": true,
+            "postClickResultConfirmed": true
+          }
+        }
+      }
+    }
+  ],
+  "floorSelectionInteractions": [],
+  "directPlaneSkips": [
+    {
+      "schema": "route_demonstration_direct_plane_skip.v1",
+      "interactionType": "direct_plane_skip",
+      "routeName": "Bank_to_Woodcutting_area",
+      "sourcePlane": 2,
+      "destinationPlane": 0,
+      "skippedPlanes": [
+        1
+      ],
+      "option": "Climb-down",
+      "target": "Staircase",
+      "objectId": 56231,
+      "world": {
+        "worldX": 3205,
+        "worldY": 3208,
+        "plane": 2
+      },
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success",
+        "planeChanged": true,
+        "positionChanged": true,
+        "beforeWorld": {
+          "worldX": 3205,
+          "worldY": 3209,
+          "plane": 2
+        },
+        "afterWorld": {
+          "worldX": 3206,
+          "worldY": 3208,
+          "plane": 0
+        }
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_094608_manual_route-bank_to_woodcutting_area_v2",
+      "sourceRecordingLabel": "manual_route-bank_to_woodcutting_area_v2",
+      "evidence": {
+        "floorSelectionOptionCaptured": false,
+        "recordingLabelMentionsFloorSelection": false,
+        "directMultiPlaneTransitionObserved": true,
+        "floorSelectionLikely": false
+      }
+    },
+    {
+      "schema": "route_demonstration_direct_plane_skip.v1",
+      "interactionType": "direct_plane_skip",
+      "routeName": "Bank_to_Woodcutting_area",
+      "sourcePlane": 2,
+      "destinationPlane": 0,
+      "skippedPlanes": [
+        1
+      ],
+      "option": "Climb-down",
+      "target": "Staircase",
+      "objectId": 56231,
+      "world": {
+        "worldX": 3205,
+        "worldY": 3208,
+        "plane": 2
+      },
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success",
+        "planeChanged": true,
+        "positionChanged": true,
+        "beforeWorld": {
+          "worldX": 3205,
+          "worldY": 3209,
+          "plane": 2
+        },
+        "afterWorld": {
+          "worldX": 3206,
+          "worldY": 3208,
+          "plane": 0
+        }
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_121630_bank_to_WC",
+      "sourceRecordingLabel": "bank to WC",
+      "evidence": {
+        "floorSelectionOptionCaptured": false,
+        "recordingLabelMentionsFloorSelection": false,
+        "directMultiPlaneTransitionObserved": true,
+        "floorSelectionLikely": false
+      }
+    },
+    {
+      "schema": "route_demonstration_direct_plane_skip.v1",
+      "interactionType": "direct_plane_skip",
+      "routeName": "Bank_to_Woodcutting_area",
+      "sourcePlane": 2,
+      "destinationPlane": 0,
+      "skippedPlanes": [
+        1
+      ],
+      "option": "Climb-down",
+      "target": "Staircase",
+      "objectId": 56231,
+      "world": {
+        "worldX": 3205,
+        "worldY": 3208,
+        "plane": 2
+      },
+      "postcondition": {
+        "type": "plane_change",
+        "result": "success",
+        "planeChanged": true,
+        "positionChanged": true,
+        "beforeWorld": {
+          "worldX": 3205,
+          "worldY": 3209,
+          "plane": 2
+        },
+        "afterWorld": {
+          "worldX": 3206,
+          "worldY": 3208,
+          "plane": 0
+        }
+      },
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260606_201613_Bank_to_tree_area",
+      "sourceRecordingLabel": "Bank to tree area",
+      "evidence": {
+        "floorSelectionOptionCaptured": false,
+        "recordingLabelMentionsFloorSelection": false,
+        "directMultiPlaneTransitionObserved": true,
+        "floorSelectionLikely": false
+      }
     }
   ],
   "routeLegs": [

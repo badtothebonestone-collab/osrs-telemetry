@@ -10,6 +10,11 @@ from typing import Any
 SCHEMA = "route_demonstration_guide.v1"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GUIDE_DIR = REPO_ROOT / "route_guides"
+FLOOR_SELECTION_OPTIONS = {
+    "bottom floor": "Bottom floor",
+    "middle floor": "Middle floor",
+    "top floor": "Top floor",
+}
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -50,6 +55,40 @@ def _float(value: Any, default: float | None = None) -> float | None:
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def _text_key(value: Any) -> str:
+    return " ".join(_text(value).lower().split())
+
+
+def _floor_selection_option(value: Any) -> str | None:
+    key = _text_key(value)
+    return FLOOR_SELECTION_OPTIONS.get(key)
+
+
+def _floor_destination_plane(option: Any) -> int | None:
+    key = _text_key(option)
+    if key == "bottom floor":
+        return 0
+    if key == "middle floor":
+        return 1
+    if key == "top floor":
+        return 2
+    return None
+
+
+def _skipped_planes(source_plane: Any, destination_plane: Any) -> list[int]:
+    source = _int(source_plane, None)
+    destination = _int(destination_plane, None)
+    if source is None or destination is None or abs(source - destination) <= 1:
+        return []
+    step = 1 if destination > source else -1
+    return list(range(source + step, destination, step))
+
+
+def _label_mentions_floor_selection(label: Any) -> bool:
+    text = _text_key(label)
+    return any(option in text for option in FLOOR_SELECTION_OPTIONS)
 
 
 def _tile(value: Any) -> dict[str, int] | None:
@@ -104,6 +143,16 @@ def _load_json(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _recording_label(root: Path) -> str | None:
+    for filename in ("summary.json", "manifest.json", "ui_recording_session_manifest.json"):
+        payload = _load_json(root / filename)
+        for key in ("label", "recordingLabel"):
+            label = _text(payload.get(key))
+            if label:
+                return label
+    return None
 
 
 def _load_jsonl(path: Path, limit: int | None = None) -> list[dict[str, Any]]:
@@ -220,6 +269,7 @@ def _interaction_from_step(
     step: dict[str, Any],
     *,
     source_recording: str,
+    source_label: str | None,
     route_name: str,
     camera_summary: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -230,6 +280,8 @@ def _interaction_from_step(
     post = _dict(step.get("postcondition"))
     plane_changed = bool(post.get("planeChanged"))
     action_text = action.lower()
+    menu_selection = _dict(step.get("menuSelection"))
+    floor_option = _floor_selection_option(menu_selection.get("option")) or _floor_selection_option(action)
     if action_text == "cancel":
         return None
     target_text = target_name.lower()
@@ -250,22 +302,36 @@ def _interaction_from_step(
         return None
     plane_before = before.get("plane") if before else step.get("startPlane")
     plane_after = after.get("plane") if after else step.get("endPlane")
+    target_id = step.get("targetId") or target.get("rawId") or target.get("effectiveId") or target.get("id")
+    floor_destination = _floor_destination_plane(floor_option)
+    if floor_option and plane_after is None and floor_destination is not None:
+        plane_after = floor_destination
+    interaction_type = "floor_selection" if floor_option else "route_object"
     return {
-        "schema": "route_demonstration_interaction_step.v1",
+        "schema": "route_demonstration_floor_selection_interaction.v1"
+        if floor_option
+        else "route_demonstration_interaction_step.v1",
+        "interactionType": interaction_type,
         "orderIndex": None,
         "routeName": route_name,
         "segmentIndex": step.get("stepIndex"),
         "sourceStepId": step.get("stepId") or step.get("rawStepId"),
-        "action": action or None,
+        "action": floor_option or action or None,
+        "option": floor_option or action or None,
         "targetName": target_name or None,
-        "targetId": step.get("targetId") or target.get("rawId") or target.get("effectiveId") or target.get("id"),
+        "target": target_name or None,
+        "targetId": target_id,
+        "objectId": target_id,
         "targetKind": step.get("targetKind") or target.get("kind") or "object",
         "world": world,
+        "sourcePlane": plane_before,
+        "destinationPlane": plane_after,
+        "allowedSourcePlanes": [plane_before] if isinstance(plane_before, int) else [],
         "planeBefore": plane_before,
         "planeAfter": plane_after,
         "expectedPlaneChange": (int(plane_after) - int(plane_before)) if isinstance(plane_before, int) and isinstance(plane_after, int) else None,
         "targetQuality": _dict(step.get("targetQuality")).get("quality"),
-        "menuSelection": _dict(step.get("menuSelection")),
+        "menuSelection": menu_selection,
         "hoverOrMenuEvidence": {
             "menuConfirmed": bool(_dict(_dict(step.get("targetQuality")).get("evidence")).get("menuConfirmed")),
             "hoverConfirmed": bool(_dict(_dict(step.get("targetQuality")).get("evidence")).get("hoverConfirmed")),
@@ -274,6 +340,13 @@ def _interaction_from_step(
         "postcondition": _postcondition_for_step(step),
         "cameraHints": _camera_hints_for_step(step, camera_summary),
         "sourceRecording": source_recording,
+        "sourceRecordingLabel": source_label,
+        "evidence": {
+            "floorSelectionOptionCaptured": bool(floor_option),
+            "recordingLabelMentionsFloorSelection": _label_mentions_floor_selection(source_label),
+            "menuSelection": menu_selection,
+            "targetQuality": _dict(step.get("targetQuality")),
+        },
     }
 
 
@@ -293,9 +366,69 @@ def _template_variants(route_name: str) -> list[dict[str, Any]]:
     return variants
 
 
+def _direct_plane_skips_from_interactions(interactions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    skips: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any, Any, Any, Any]] = set()
+    for interaction in interactions:
+        if not isinstance(interaction, dict):
+            continue
+        source_plane = _int(interaction.get("sourcePlane") if interaction.get("sourcePlane") is not None else interaction.get("planeBefore"), None)
+        destination_plane = _int(
+            interaction.get("destinationPlane") if interaction.get("destinationPlane") is not None else interaction.get("planeAfter"),
+            None,
+        )
+        skipped = _skipped_planes(source_plane, destination_plane)
+        if not skipped:
+            continue
+        world = _tile(interaction.get("world"))
+        target_name = _text(interaction.get("targetName") or interaction.get("target"))
+        target_key = target_name.lower()
+        if target_key and not any(word in target_key for word in ("stair", "stairs", "staircase", "trapdoor", "ladder")):
+            continue
+        key = (
+            interaction.get("sourceRecording"),
+            source_plane,
+            destination_plane,
+            interaction.get("targetId") or interaction.get("objectId"),
+            world.get("worldX") if world else None,
+            world.get("worldY") if world else None,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        evidence = _dict(interaction.get("evidence"))
+        floor_captured = bool(evidence.get("floorSelectionOptionCaptured") or interaction.get("interactionType") == "floor_selection")
+        label_mentions = bool(evidence.get("recordingLabelMentionsFloorSelection"))
+        skips.append(
+            {
+                "schema": "route_demonstration_direct_plane_skip.v1",
+                "interactionType": "direct_plane_skip",
+                "routeName": interaction.get("routeName"),
+                "sourcePlane": source_plane,
+                "destinationPlane": destination_plane,
+                "skippedPlanes": skipped,
+                "option": interaction.get("option") or interaction.get("action"),
+                "target": target_name or None,
+                "objectId": interaction.get("objectId") or interaction.get("targetId"),
+                "world": world,
+                "postcondition": interaction.get("postcondition"),
+                "sourceRecording": interaction.get("sourceRecording"),
+                "sourceRecordingLabel": interaction.get("sourceRecordingLabel"),
+                "evidence": {
+                    "floorSelectionOptionCaptured": floor_captured,
+                    "recordingLabelMentionsFloorSelection": label_mentions,
+                    "directMultiPlaneTransitionObserved": True,
+                    "floorSelectionLikely": bool(floor_captured or label_mentions),
+                },
+            }
+        )
+    return skips
+
+
 def build_route_guide(recording_paths: list[str | Path], *, route_name: str | None = None) -> dict[str, Any]:
     path_points: list[dict[str, Any]] = []
     interactions: list[dict[str, Any]] = []
+    floor_selection_interactions: list[dict[str, Any]] = []
     route_legs: list[dict[str, Any]] = []
     plane_changes: list[dict[str, Any]] = []
     camera_hints: list[dict[str, Any]] = []
@@ -320,6 +453,7 @@ def build_route_guide(recording_paths: list[str | Path], *, route_name: str | No
         if not guide_route_name or detected_route != guide_route_name:
             continue
         source_recordings.append(str(root))
+        source_label = _recording_label(root)
         camera_summary = _load_json(root / "camera_behavior_summary.json")
         if start_area is None:
             start_area = _dict(traversal.get("start")).get("areaLabel")
@@ -397,12 +531,17 @@ def build_route_guide(recording_paths: list[str | Path], *, route_name: str | No
             interaction = _interaction_from_step(
                 step,
                 source_recording=str(root),
+                source_label=source_label,
                 route_name=guide_route_name,
                 camera_summary=camera_summary,
             )
             if interaction:
-                interaction["orderIndex"] = len(interactions)
-                interactions.append(interaction)
+                if interaction.get("interactionType") == "floor_selection":
+                    interaction["orderIndex"] = len(floor_selection_interactions)
+                    floor_selection_interactions.append(interaction)
+                else:
+                    interaction["orderIndex"] = len(interactions)
+                    interactions.append(interaction)
 
         for segment in _list(camera_summary.get("segments")):
             if isinstance(segment, dict):
@@ -427,6 +566,7 @@ def build_route_guide(recording_paths: list[str | Path], *, route_name: str | No
         warnings.append("no path points extracted")
     if not interactions:
         warnings.append("no interaction steps extracted")
+    direct_plane_skips = _direct_plane_skips_from_interactions(interactions + floor_selection_interactions)
     return {
         "schema": SCHEMA,
         "status": status,
@@ -437,6 +577,8 @@ def build_route_guide(recording_paths: list[str | Path], *, route_name: str | No
         "pathPoints": path_points,
         "planeChanges": plane_changes,
         "interactionSteps": interactions,
+        "floorSelectionInteractions": floor_selection_interactions,
+        "directPlaneSkips": direct_plane_skips,
         "routeLegs": route_legs,
         "cameraHints": camera_hints[:20],
         "postconditions": [
@@ -521,6 +663,72 @@ def _nearest_cross_plane_item(items: list[Any], current: dict[str, Any], *, worl
     return {"item": best[1], "xyDistanceTiles": round(best[0], 3)}
 
 
+def _nearest_floor_selection_for_plane(
+    items: list[Any],
+    current: dict[str, Any],
+    *,
+    max_distance: float | None = None,
+) -> dict[str, Any]:
+    current_plane = _int(current.get("plane"), None)
+    best: tuple[float, dict[str, Any]] | None = None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        allowed = [_int(value, None) for value in _list(item.get("allowedSourcePlanes"))]
+        source_plane = _int(item.get("sourcePlane"), None)
+        if source_plane is not None and source_plane not in allowed:
+            allowed.append(source_plane)
+        allowed = [value for value in allowed if value is not None]
+        if current_plane is None or current_plane not in allowed:
+            continue
+        world = _tile(item.get("world"))
+        distance = _xy_distance(current, world)
+        if distance is None:
+            continue
+        if max_distance is not None and distance > max_distance:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, item)
+    if best is None:
+        return {}
+    return {"item": best[1], "distanceTiles": round(best[0], 3)}
+
+
+def _direct_plane_skip_crossing_current(guide: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    current_plane = _int(current.get("plane"), None)
+    if current_plane is None:
+        return {}
+    best: tuple[float, dict[str, Any]] | None = None
+    for item in _list(guide.get("directPlaneSkips")):
+        if not isinstance(item, dict):
+            continue
+        skipped_planes = [_int(value, None) for value in _list(item.get("skippedPlanes"))]
+        if current_plane not in skipped_planes:
+            continue
+        world = _tile(item.get("world"))
+        distance = _xy_distance(current, world)
+        if distance is None:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, item)
+    if best is None:
+        return {}
+    return {"item": best[1], "xyDistanceTiles": round(best[0], 3)}
+
+
+def _reentry_likely_reason(direct_skip: dict[str, Any]) -> str | None:
+    item = _dict(direct_skip.get("item"))
+    if not item:
+        return None
+    evidence = _dict(item.get("evidence"))
+    option = _text(item.get("option"))
+    if _floor_selection_option(option):
+        return "successful guide used a captured floor-selection option; plane-1 recovery is not demonstrated"
+    if evidence.get("recordingLabelMentionsFloorSelection"):
+        return "successful recording label indicates a Bottom floor direct transition; plane-1 recovery is not demonstrated"
+    return "successful guide used a direct multi-plane stair transition; plane-1 recovery is not demonstrated"
+
+
 def _reentry_subsegment(guide: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     current_plane = current.get("plane")
     for leg in _list(guide.get("routeLegs")):
@@ -573,8 +781,10 @@ def resolve_reentry(
 
     points = _list(guide.get("pathPoints"))
     interactions = _list(guide.get("interactionSteps"))
+    floor_interactions = _list(guide.get("floorSelectionInteractions"))
     nearest_point = _nearest_same_plane_item(points, current, max_distance=max_same_plane_distance)
     nearest_interaction = _nearest_same_plane_item(interactions, current, max_distance=max_same_plane_distance)
+    nearest_floor_selection = _nearest_floor_selection_for_plane(floor_interactions, current, max_distance=max_same_plane_distance)
     progress = resolve_progress(guide, current, reached_tolerance_tiles=reached_tolerance_tiles) if (nearest_point or nearest_interaction) else {}
     next_point = _dict(progress.get("nextGuidePoint"))
     next_interaction = _dict(progress.get("nextGuideInteraction"))
@@ -584,6 +794,9 @@ def resolve_reentry(
     if next_interaction:
         recovery_type = "route_guide_interaction"
         next_step = next_interaction
+    elif nearest_floor_selection:
+        recovery_type = "floor_selection_interaction"
+        next_step = _dict(nearest_floor_selection.get("item"))
     elif next_point:
         recovery_type = "route_guide_path_point"
         next_step = next_point
@@ -598,6 +811,8 @@ def resolve_reentry(
     blocker = None if next_step else "route_guide_no_same_plane_reentry"
     nearest_cross_point = _nearest_cross_plane_item(points, current)
     nearest_cross_interaction = _nearest_cross_plane_item(interactions, current)
+    direct_skip = _direct_plane_skip_crossing_current(guide, current)
+    likely_reason = _reentry_likely_reason(direct_skip) if blocker else None
     return {
         "schema": "route_guide_reentry.v1",
         "status": status,
@@ -608,13 +823,21 @@ def resolve_reentry(
         "currentPlane": current.get("plane"),
         "nearestSamePlaneGuidePoint": nearest_point,
         "nearestSamePlaneInteraction": nearest_interaction,
+        "nearestFloorSelectionInteraction": nearest_floor_selection,
         "nearestCrossPlaneGuidePoint": nearest_cross_point,
         "nearestCrossPlaneInteraction": nearest_cross_interaction,
+        "directPlaneSkipEvidence": direct_skip,
         "inferredSubsegment": _reentry_subsegment(guide, current),
         "nextRecoveryStep": next_step,
         "recoveryCandidateType": recovery_type,
         "routeGuideProgress": progress,
         "blocker": blocker,
+        "likelyReason": likely_reason,
+        "suggestedFixture": "record a short plane-1 Staircase recovery from 3206,3229,1"
+        if blocker
+        else None,
+        "safeState": "no click sent because route guide lacks same-plane proof" if blocker else None,
+        "missingCapabilities": ["route_guide.same_plane_reentry"] if blocker else [],
     }
 
 

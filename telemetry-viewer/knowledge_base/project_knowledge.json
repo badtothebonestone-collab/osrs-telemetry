@@ -1,6 +1,6 @@
 {
   "schema": "project_knowledge.v1",
-  "updatedAtUtc": "2026-06-09T20:44:19.273678Z",
+  "updatedAtUtc": "2026-06-09T21:22:16.343733Z",
   "repoRoot": "C:\\Users\\badto\\osrs-telemetry",
   "sourceReports": [
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_bank_to_woodcutting_latest.md",
@@ -48,6 +48,7 @@
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_route_template_third_fresh_run.md",
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_route_variant_support.md",
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_simple_console_smoke.md",
+    "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_staircase_floor_selection_route.md",
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_target_association_tree_vs_gate.md",
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_target_match_quality_bank_to_woodcutting_area.md",
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_traversal_bank_to_woodcutting_area.md",
@@ -3928,6 +3929,12 @@
       "status": "implemented"
     },
     {
+      "function": "get_route_guide_reentry(route_name, current_world, guide_dir=None)",
+      "purpose": "Wrong/intermediate-floor route-guide re-entry evidence, nearest same-plane guide point/interaction, floor-selection/direct-plane-skip evidence, inferred subsegment, and precise blocker.",
+      "underlyingTelemetry": "route_demonstration.route_guide.json + current WorldPoint",
+      "status": "implemented"
+    },
+    {
       "function": "get_human_click_plan(target, action, activity, source)",
       "purpose": "Human-profile-informed advisory click plan with blockers, confidence, and center-vs-profile aim.",
       "underlyingTelemetry": "input_control.click_planner",
@@ -4556,6 +4563,19 @@
       "suggestedNextTask": "Compare dry-run planned aim points against successful human clicks in future Record Everything fixtures before changing live click generation."
     },
     {
+      "id": "live_route_wrong_floor_recovery",
+      "title": "Live loop needs a demonstrated same-plane plane-1 route re-entry step",
+      "severity": "high",
+      "requiredLayer": "route/context/action_proposal",
+      "status": "open",
+      "evidence": [
+        "20260609_154147_live_woodcutting_loop passed input geometry and loaded-scene recovery, sent zero gameplay actions, and stopped with route_guide_no_same_plane_reentry.",
+        "Staircase floor-selection audit found Bottom floor only in recording labels, not as a captured menu row.",
+        "Bank_to_Woodcutting_area route guide records directPlaneSkips for the plane-2 to plane-0 Staircase transition but no plane-1 path point or interaction."
+      ],
+      "suggestedNextTask": "Record or extract a short plane-1 Staircase recovery fixture from 3206,3229,1 before allowing a live route click from that wrong-floor state."
+    },
+    {
       "id": "knowledge_manual_curation",
       "title": "Project knowledge is generated plus manual notes, not a substitute for curated decisions",
       "severity": "low",
@@ -4620,6 +4640,14 @@
     }
   ],
   "nextTasks": [
+    {
+      "id": "record_plane1_staircase_recovery_fixture",
+      "priority": 1,
+      "task": "Record or extract a short plane-1 Staircase recovery sample from 3206,3229,1 without loosening route-object matching.",
+      "successCriteria": [
+        "The guide proves a same-plane plane-1 waypoint, strict Climb-down, or captured Bottom floor option from plane 1; otherwise the bot keeps failing closed as route_guide_no_same_plane_reentry."
+      ]
+    },
     {
       "id": "fix_deposit_region_label",
       "priority": 1,

@@ -42,7 +42,7 @@
 | should_route_to_trees(source) | True when the loop next phase is route_to_woodcutting_area. | woodcutting_loop_lifecycle.nextExpectedPhase | implemented |
 | was_interrupted(source) | Boolean interruption flag from loop/interruption lifecycle. | woodcutting_loop_lifecycle.interruptions | implemented |
 | did_resume_after_interruption(source) | Boolean task-resumed proof from loop/interruption lifecycle. | woodcutting_loop_lifecycle.interruptions | implemented |
-| get_route_guide_reentry(route_name, current_world, guide_dir=None) | Wrong/intermediate-floor route-guide re-entry evidence, nearest same-plane guide point/interaction, inferred subsegment, and precise blocker. | route_demonstration.route_guide.json + current WorldPoint | implemented |
+| get_route_guide_reentry(route_name, current_world, guide_dir=None) | Wrong/intermediate-floor route-guide re-entry evidence, nearest same-plane guide point/interaction, floor-selection/direct-plane-skip evidence, inferred subsegment, and precise blocker. | route_demonstration.route_guide.json + current WorldPoint | implemented |
 | build_task_script_evidence_plan(script) | Variables a script must prove before/after primitives. | task_script_api runtime evidence catalog | implemented |
 | compare_task_runtime_evidence_snapshots(before, after) | State-delta proof for script steps. | task runtime evidence snapshots | implemented |
 

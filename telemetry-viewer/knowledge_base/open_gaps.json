@@ -1,6 +1,6 @@
 {
   "schema": "project_open_gaps.v1",
-  "updatedAtUtc": "2026-06-09T20:44:19.273678Z",
+  "updatedAtUtc": "2026-06-09T21:22:16.343733Z",
   "gaps": [
     {
       "id": "deposit_all_region_classification",
@@ -130,12 +130,11 @@
       "requiredLayer": "route/context/action_proposal",
       "status": "open",
       "evidence": [
-        "20260609_143211_live_woodcutting_loop clicked Climb-down correctly, then stale route state accepted a different Climb-up Staircase before the guard fix.",
-        "20260609_144521_live_woodcutting_loop failed closed at 3206,3229,1 and sent zero gameplay clicks.",
-        "route_demonstration.resolve_reentry reports route_guide_no_same_plane_reentry because Bank_to_Woodcutting_area has no same-plane guide point or interaction for plane 1.",
-        "20260609_154147_live_woodcutting_loop passed input geometry and loaded-scene recovery, sent zero gameplay actions, and stopped with route_guide_no_same_plane_reentry."
+        "20260609_154147_live_woodcutting_loop passed input geometry and loaded-scene recovery, sent zero gameplay actions, and stopped with route_guide_no_same_plane_reentry.",
+        "Staircase floor-selection audit found Bottom floor only in recording labels, not as a captured menu row.",
+        "Bank_to_Woodcutting_area route guide records directPlaneSkips for the plane-2 to plane-0 Staircase transition but no plane-1 path point or interaction."
       ],
-      "suggestedNextTask": "Record or extract a demonstrated plane-1 route re-entry step for 3206,3229,1 before allowing a live route click from that wrong-floor state."
+      "suggestedNextTask": "Record or extract a short plane-1 Staircase recovery fixture from 3206,3229,1 before allowing a live route click from that wrong-floor state."
     },
     {
       "id": "knowledge_manual_curation",
@@ -151,16 +150,16 @@
   ],
   "nextTasks": [
     {
-      "id": "record_or_extract_plane1_route_reentry",
+      "id": "record_plane1_staircase_recovery_fixture",
       "priority": 1,
-      "task": "Add a demonstrated same-plane route-guide recovery step for 3206,3229,1 without loosening route-object matching.",
+      "task": "Record or extract a short plane-1 Staircase recovery sample from 3206,3229,1 without loosening route-object matching.",
       "successCriteria": [
-        "The live loop can move from wrong/intermediate floor using a proven same-plane guide point or interaction, or keeps failing closed as route_guide_no_same_plane_reentry."
+        "The guide proves a same-plane plane-1 waypoint, strict Climb-down, or captured Bottom floor option from plane 1; otherwise the bot keeps failing closed as route_guide_no_same_plane_reentry."
       ]
     },
     {
       "id": "fix_deposit_region_label",
-      "priority": 2,
+      "priority": 1,
       "task": "Clean up Deposit-All menu-context region classification.",
       "successCriteria": [
         "Deposit-All bank UI clicks no longer appear as minimap_click when menu context proves bank UI."

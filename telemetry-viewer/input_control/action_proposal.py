@@ -3147,12 +3147,15 @@ def _guide_point_tile(progress: dict[str, Any]) -> dict[str, Any] | None:
 
 def _guide_interaction_target(progress: dict[str, Any]) -> dict[str, Any]:
     interaction = _dict(progress.get("nextGuideInteraction"))
+    if not interaction:
+        interaction = _dict(progress.get("nextRecoveryStep")) if str(progress.get("recoveryCandidateType") or "") == "floor_selection_interaction" else {}
     world = _normalise_tile(interaction.get("world"))
     action = str(interaction.get("action") or "").strip()
     target_name = str(interaction.get("targetName") or "Route interaction").strip()
     if not interaction or not world or not action:
         return {}
     expected_targets = [target_name] if target_name else []
+    is_floor_selection = str(interaction.get("interactionType") or "") == "floor_selection"
     return {
         "targetName": target_name,
         "targetType": "sceneObject",
@@ -3174,16 +3177,21 @@ def _guide_interaction_target(progress: dict[str, Any]) -> dict[str, Any]:
         "routeGuideProgress": dict(progress),
         "routeGuideSource": "demonstrated_interaction",
         "routeStepIndex": interaction.get("segmentIndex"),
-        "routeStepType": "interact_object",
+        "routeStepType": "floor_selection_interaction" if is_floor_selection else "interact_object",
+        "interactionType": interaction.get("interactionType"),
+        "floorSelectionOption": action if is_floor_selection else None,
+        "sourcePlane": interaction.get("sourcePlane"),
+        "destinationPlane": interaction.get("destinationPlane"),
+        "allowedSourcePlanes": interaction.get("allowedSourcePlanes"),
         "routeStepLabel": f"{action} {target_name}".strip(),
         "source": "route_guide",
-        "actionTargetSource": "route_guide_interaction",
+        "actionTargetSource": "floor_selection_interaction" if is_floor_selection else "route_guide_interaction",
         "routeCorridorMatch": True,
         "routeProgressScore": 0.95,
         "routeCandidateValidation": {
             "schema": "route_candidate_validation.v1",
             "status": "PASS",
-            "classification": "route_guide_interaction_match",
+            "classification": "floor_selection_interaction_match" if is_floor_selection else "route_guide_interaction_match",
             "routeCorridorMatch": True,
             "routeProgressScore": 0.95,
             "expectedTargets": expected_targets,
@@ -3267,6 +3275,8 @@ def _route_reentry_interaction_target(reentry: dict[str, Any]) -> dict[str, Any]
     target["currentPlane"] = reentry.get("currentPlane")
     target["nearestSamePlaneGuidePoint"] = reentry.get("nearestSamePlaneGuidePoint")
     target["nearestSamePlaneInteraction"] = reentry.get("nearestSamePlaneInteraction")
+    target["nearestFloorSelectionInteraction"] = reentry.get("nearestFloorSelectionInteraction")
+    target["directPlaneSkipEvidence"] = reentry.get("directPlaneSkipEvidence")
     target["inferredSubsegment"] = reentry.get("inferredSubsegment")
     target["nextRecoveryStep"] = step
     target["recoveryCandidateType"] = reentry.get("recoveryCandidateType")
@@ -3282,6 +3292,13 @@ def _route_reentry_interaction_target(reentry: dict[str, Any]) -> dict[str, Any]
 
 def _route_reentry_blocker_target(reentry: dict[str, Any], route_name: str | None) -> dict[str, Any]:
     blocker = str(reentry.get("blocker") or "route_guide_no_same_plane_reentry")
+    likely_reason = str(reentry.get("likelyReason") or "").strip()
+    suggested_fixture = str(reentry.get("suggestedFixture") or "").strip()
+    safe_state = str(reentry.get("safeState") or "").strip()
+    missing_capabilities = _list(reentry.get("missingCapabilities")) or ["route_guide.same_plane_reentry"]
+    validation_warnings = ["no demonstrated same-plane guide point or interaction exists for the current route floor"]
+    if likely_reason:
+        validation_warnings.append(likely_reason)
     return {
         "targetName": "Route guide re-entry",
         "targetType": "route_reentry",
@@ -3297,10 +3314,15 @@ def _route_reentry_blocker_target(reentry: dict[str, Any], route_name: str | Non
         "nearestSamePlaneInteraction": reentry.get("nearestSamePlaneInteraction"),
         "nearestCrossPlaneGuidePoint": reentry.get("nearestCrossPlaneGuidePoint"),
         "nearestCrossPlaneInteraction": reentry.get("nearestCrossPlaneInteraction"),
+        "nearestFloorSelectionInteraction": reentry.get("nearestFloorSelectionInteraction"),
+        "directPlaneSkipEvidence": reentry.get("directPlaneSkipEvidence"),
         "inferredSubsegment": reentry.get("inferredSubsegment"),
         "nextRecoveryStep": reentry.get("nextRecoveryStep"),
         "recoveryCandidateType": reentry.get("recoveryCandidateType"),
         "blocker": blocker,
+        "likelyReason": likely_reason or None,
+        "suggestedFixture": suggested_fixture or None,
+        "safeState": safe_state or None,
         "intermediateRouteState": "routing_to_trees_intermediate_floor" if route_name == "Bank_to_Woodcutting_area" else "routing_to_bank_intermediate_floor",
         "actionability": f"blocked_{blocker}",
         "routeCandidateValidation": {
@@ -3310,8 +3332,8 @@ def _route_reentry_blocker_target(reentry: dict[str, Any], route_name: str | Non
             "routeCorridorMatch": False,
             "routeProgressScore": 0.0,
             "rejectionReasons": [blocker],
-            "warnings": ["no demonstrated same-plane guide point or interaction exists for the current route floor"],
-            "missingCapabilities": ["route_guide.same_plane_reentry"],
+            "warnings": validation_warnings,
+            "missingCapabilities": missing_capabilities,
         },
     }
 
@@ -3438,14 +3460,17 @@ def _wrong_floor_route_reentry_proposal(
 
     blocker = str(selected.get("blocker") or "route_guide_no_same_plane_reentry")
     target = _route_reentry_blocker_target(selected, route_name)
+    warnings = ["current player floor is not represented by a demonstrated same-plane route guide step"]
+    if selected.get("likelyReason"):
+        warnings.append(str(selected.get("likelyReason")))
     return _proposal(
         "wait_for_context",
         target_kind="route_reentry",
         target=target,
         reason=blocker,
         confidence=0.52,
-        warnings=["current player floor is not represented by a demonstrated same-plane route guide step"],
-        missing=["route_guide.same_plane_reentry"],
+        warnings=warnings,
+        missing=_list(selected.get("missingCapabilities")) or ["route_guide.same_plane_reentry"],
         required_context=["route_guide", "player_world_position"],
         source_tick=source_tick,
         input_geometry=input_geometry,

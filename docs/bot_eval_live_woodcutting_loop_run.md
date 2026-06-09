@@ -574,3 +574,21 @@ Latest rerun after wrong-floor re-entry/reporting fix:
 | final blocker | `route_guide_no_same_plane_reentry` |
 
 This is the intended fail-closed behavior until a demonstrated same-plane plane-1 route re-entry step is available.
+
+## 2026-06-09 Update: Staircase Floor-Selection Audit
+
+The successful route recordings were audited for `Bottom floor`, `Middle floor`, and `Top floor` evidence.
+
+Result:
+
+| Field | Result |
+| --- | --- |
+| `Bottom floor` found | Recording labels only |
+| Captured `Bottom floor` menu row | no |
+| Captured `Middle floor` / `Top floor` rows | no |
+| Direct plane skip | yes, bank-to-trees Staircase goes plane `2` to plane `0` |
+| Plane 1 skipped in successful route | yes |
+| Plane 1 recovery demonstrated | no |
+| Current safe blocker | `route_guide_no_same_plane_reentry` |
+
+The route guide now carries non-clicking `directPlaneSkips` evidence and supports future explicit `floorSelectionInteractions` when a recording captures the menu option. The current guide still has no plane-1 path point or interaction, so the live loop should not be rerun from `3206,3229,1` until a short plane-1 recovery fixture is recorded or extracted.

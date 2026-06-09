@@ -1748,6 +1748,11 @@ def _trace_records_from_executor_payload(payload: dict[str, Any]) -> tuple[list[
                 "status": item.get("status"),
                 "verificationStatus": item.get("verificationStatus"),
                 "targetExplanation": target_explanation,
+                "likelyReason": target_explanation.get("likelyReason"),
+                "suggestedFixture": target_explanation.get("suggestedFixture"),
+                "safeState": target_explanation.get("safeState"),
+                "directPlaneSkipEvidence": target_explanation.get("directPlaneSkipEvidence"),
+                "nearestFloorSelectionInteraction": target_explanation.get("nearestFloorSelectionInteraction"),
                 "warnings": item.get("warnings") or [],
                 "missingCapabilities": item.get("missingCapabilities") or [],
             }

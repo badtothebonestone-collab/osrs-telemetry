@@ -541,3 +541,155 @@ Next recommended task:
 ```text
 Record or extract a demonstrated same-plane plane-1 route re-entry step for 3206,3229,1, then add it to the route guide/template evidence. Do not loosen the strict Staircase object id/action/plane guards.
 ```
+
+## 19. Floor-Selection Route Audit
+
+Updated: 2026-06-09.
+
+Audit report:
+
+```text
+docs\recording_analysis_staircase_floor_selection_route.md
+```
+
+Evidence inspected:
+
+```text
+recordings\20260606_094608_manual_route-bank_to_woodcutting_area_v2
+recordings\20260606_121630_bank_to_WC
+recordings\20260607_104613_Woodcutting_area_to_bank
+recordings\20260606_201613_Bank_to_tree_area
+recordings\20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor
+recordings\20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area
+```
+
+Finding:
+
+```text
+Bottom floor text found: recording labels only
+Bottom floor captured as menu row: no
+Middle floor / Top floor captured: no
+Direct plane skip proven: yes, plane 2 -> 0
+Plane 1 recovery demonstrated: no
+```
+
+The route guide now models this distinction:
+
+```text
+floorSelectionInteractions: []
+directPlaneSkips: plane 2 -> 0 Staircase object 56231, skipped plane 1
+```
+
+The live blocker remains intentionally fail-closed:
+
+```text
+blocker: route_guide_no_same_plane_reentry
+likelyReason: successful guide used a direct multi-plane stair transition; plane-1 recovery is not demonstrated
+suggestedFixture: record a short plane-1 Staircase recovery from 3206,3229,1
+safeState: no click sent because route guide lacks same-plane proof
+```
+
+No live rerun was performed for this audit because existing evidence still does not prove a safe plane-1 route interaction or waypoint. The next live-safe task is to record or extract that short plane-1 recovery fixture.
+
+## 20. Final Floor-Selection Audit Pass Report
+
+Git status:
+
+```text
+before: clean on stabilization/live-loop-recovery-20260609
+after validation: scoped source/docs/tests/route-guide/knowledge changes pending commit
+```
+
+Changed areas:
+
+```text
+docs\recording_analysis_staircase_floor_selection_route.md
+docs\live_loop_execution_fix_report.md
+docs\bot_eval_live_woodcutting_loop_run.md
+docs\knowledge\ENTRYPOINTS.md
+docs\knowledge\OPEN_GAPS.md
+docs\knowledge\NEXT_TASKS.md
+docs\knowledge\SCRIPT_API_MAP.md
+docs\knowledge\PROJECT_STATE.md
+docs\knowledge\RECORDING_INDEX.md
+route_guides\Bank_to_Woodcutting_area.route_guide.json
+route_guides\woodcutting_area_to_bank.route_guide.json
+telemetry-viewer\route_demonstration.py
+telemetry-viewer\input_control\action_proposal.py
+telemetry-viewer\candidate_core.py
+telemetry-viewer\bot_eval_runner.py
+telemetry-viewer\tests\test_route_demonstration.py
+telemetry-viewer\tests\test_action_proposal.py
+telemetry-viewer\tests\test_bot_eval_runner.py
+telemetry-viewer\tests\test_task_script_api.py
+telemetry-viewer\tests\test_knowledge_fabric.py
+telemetry-viewer\knowledge_base\*.json
+```
+
+Commit note:
+
+```text
+The commit hash is reported in the final chat response after the commit is created.
+```
+
+Bottom floor finding:
+
+```text
+Bottom floor found in existing recordings: yes, recording labels only
+Bottom floor captured as menu row: no
+source labels:
+  recordings\20260607_130931_Bank_to_wood_cutting_area_stair_option_select_bottom_floor
+  recordings\20260607_143917_Bank_stairs_Bottom_floor_option_Woodcutting_area
+machine route evidence: direct plane-2 to plane-0 Staircase transition
+```
+
+Route guide changes:
+
+```text
+floorSelectionInteractions schema supported
+directPlaneSkips generated for existing direct multi-plane transitions
+Bank_to_Woodcutting_area directPlaneSkips: plane 2 -> 0, skipped plane 1, Staircase object 56231
+plane-1 path points/interactions added: none
+```
+
+Plane-1 recovery behavior:
+
+```text
+If a future guide proves allowedSourcePlanes includes plane 1 for a floor-selection interaction, action proposal can surface a non-clicking floor_selection_interaction candidate pending live target reacquisition.
+With current evidence, 3206,3229,1 still fails closed as route_guide_no_same_plane_reentry.
+```
+
+Rerun decision:
+
+```text
+real live rerun safe: no
+reason: existing evidence does not prove a plane-1 waypoint, strict Climb-down target, or captured Bottom floor option from plane 1
+live command run: no
+```
+
+Checks run:
+
+```powershell
+python -m py_compile telemetry-viewer\route_demonstration.py telemetry-viewer\input_control\action_proposal.py telemetry-viewer\candidate_core.py telemetry-viewer\bot_eval_runner.py telemetry-viewer\task_script_api.py telemetry-viewer\knowledge_fabric.py
+python telemetry-viewer\tests\test_route_demonstration.py
+python telemetry-viewer\tests\test_action_proposal.py
+python telemetry-viewer\tests\test_bot_eval_runner.py
+python telemetry-viewer\tests\test_route_monitor.py
+python telemetry-viewer\tests\test_task_script_api.py
+python telemetry-viewer\tests\test_knowledge_fabric.py
+python telemetry-viewer\tests\test_project_knowledge.py
+python telemetry-viewer\telemetry_ui.py --check
+python telemetry-viewer\update_project_knowledge.py --check
+```
+
+Failures:
+
+```text
+One attempted combined PowerShell test command failed because this shell does not accept && as a separator. The same tests were rerun as separate commands and passed.
+```
+
+Remaining need:
+
+```text
+Record or extract a short plane-1 Staircase recovery sample from 3206,3229,1. The useful proof is one of: same-plane waypoint, strict Climb-down target, or captured Bottom floor option from plane 1.
+```

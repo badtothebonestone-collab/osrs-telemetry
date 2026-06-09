@@ -13,8 +13,8 @@
 | pure_normal_logs_woodcutting_fixture | low | recording | open | Record one tree-area sample that fills inventory with only normal Logs if a task needs item-specific timing. |
 | combat_damage_source_attribution_multi_actor | low | recording | open | If combat routing matters later, collect a multi-NPC interruption fixture to validate source attribution under ambiguity. |
 | validate_human_click_plans_against_recordings | medium | recording/input_control | open | Compare dry-run planned aim points against successful human clicks in future Record Everything fixtures before changing live click generation. |
+| live_route_wrong_floor_recovery | high | route/context/action_proposal | open | Route re-entry now explains the direct plane-2 to plane-0 stair skip, but `Bottom floor` is only label evidence and plane-1 recovery remains unproven. Record a short plane-1 recovery fixture before allowing a live route click from `3206,3229,1`. |
 | knowledge_manual_curation | low | docs | open | After each milestone, add one concise manual note when generated summaries miss intent. |
-| live_route_wrong_floor_recovery | high | route/context/action_proposal | open | Route re-entry now fails closed with `route_guide_no_same_plane_reentry`; add or record a demonstrated plane-1 recovery step before allowing a live route click from `3206,3229,1`. |
 
 ## Manual Notes
 
@@ -22,4 +22,5 @@
 - 2026-06-09: `return_route_staircase_hover_menu` was guarded in `client_tick_core.py` and `input_control/executor.py`. Generic `Climb` no longer matches `Climb-up`/`Climb-down` by substring, expected object ids must match when present, and wrong-plane route targets are blocked before click. Latest live state is now wrong-floor/no-executable-context at `3206,3229,1`.
 - 2026-06-09: Wrong-floor re-entry now uses `route_demonstration.resolve_reentry`, `task_script_api.get_route_guide_reentry`, and `KnowledgeFabric.route_guide_reentry`. The current `Bank_to_Woodcutting_area` guide has no same-plane point or interaction for `3206,3229,1`, so the safe blocker is `route_guide_no_same_plane_reentry`, not generic `no_executable_action`.
 - 2026-06-09: Latest real live rerun `20260609_154147_live_woodcutting_loop` passed geometry and loaded-scene recovery, sent zero gameplay actions, and stopped with `route_guide_no_same_plane_reentry`. Next step is a demonstrated plane-1 re-entry recording/extraction, not guard loosening.
+- 2026-06-09: Floor-selection audit found `Bottom floor` only in recording labels, not as a captured menu row. The guide now records direct plane-skip evidence for the successful plane-2 to plane-0 Staircase route, but still has no plane-1 recovery proof.
 <!-- END MANUAL NOTES -->

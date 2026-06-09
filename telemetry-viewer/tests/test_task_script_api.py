@@ -1091,6 +1091,17 @@ class TaskScriptApiTest(unittest.TestCase):
                             }
                         ],
                         "planeChanges": [{"startPlane": 0, "endPlane": 2}],
+                        "directPlaneSkips": [
+                            {
+                                "sourcePlane": 0,
+                                "destinationPlane": 2,
+                                "skippedPlanes": [1],
+                                "option": "Climb-down",
+                                "target": "Trapdoor",
+                                "world": {"worldX": 3209, "worldY": 3216, "plane": 0},
+                                "evidence": {"directMultiPlaneTransitionObserved": True},
+                            }
+                        ],
                         "cameraHints": [{"segmentId": "cam_001"}],
                         "warnings": [],
                     }
@@ -1119,6 +1130,8 @@ class TaskScriptApiTest(unittest.TestCase):
         self.assertEqual(reentry["status"], "WARN")
         self.assertEqual(reentry["blocker"], "route_guide_no_same_plane_reentry")
         self.assertTrue(reentry["routeGuideReentryAttempted"])
+        self.assertIn("plane-1 recovery is not demonstrated", reentry["likelyReason"])
+        self.assertEqual(reentry["suggestedFixture"], "record a short plane-1 Staircase recovery from 3206,3229,1")
 
     def test_click_planning_helpers_return_warn_without_target_and_plan_with_target(self):
         missing = task_script_api.get_next_click_plan({"humanClickProfile": {"status": "PASS", "landing": {"medianAimDistancePx": 20}}})

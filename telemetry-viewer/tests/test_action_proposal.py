@@ -1,11 +1,13 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 VIEWER_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(VIEWER_DIR))
 
+import input_control.action_proposal as action_proposal_module
 from input_control.action_proposal import build_action_proposal
 
 
@@ -2478,6 +2480,57 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_explanation["currentWorld"], {"worldX": 3206, "worldY": 3229, "plane": 1})
         self.assertEqual(proposal.target_explanation["intermediateRouteState"], "routing_to_trees_intermediate_floor")
         self.assertIn("route_guide.same_plane_reentry", proposal.missing_capabilities)
+        self.assertEqual(
+            proposal.target_explanation["safeState"],
+            "no click sent because route guide lacks same-plane proof",
+        )
+        self.assertEqual(
+            proposal.target_explanation["suggestedFixture"],
+            "record a short plane-1 Staircase recovery from 3206,3229,1",
+        )
+        self.assertIn("plane-1 recovery is not demonstrated", proposal.target_explanation["likelyReason"])
+
+    def test_wrong_floor_floor_selection_candidate_requires_explicit_plane1_evidence(self):
+        status = status_for(
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+            active_target=None,
+            bank_ui={"bankOpen": False, "bankReadable": False},
+            bank_operation={"operationNeeded": False, "bankingComplete": True, "resourceItemsHeld": 0},
+            overlay={"selectedMarker": None},
+        )
+        status["playerWorldPosition"] = {"worldX": 3205, "worldY": 3208, "plane": 1}
+        guide = {
+            "schema": "route_demonstration_guide.v1",
+            "routeName": "Bank_to_Woodcutting_area",
+            "pathPoints": [],
+            "interactionSteps": [],
+            "floorSelectionInteractions": [
+                {
+                    "interactionType": "floor_selection",
+                    "action": "Bottom floor",
+                    "option": "Bottom floor",
+                    "targetName": "Staircase",
+                    "targetId": 56231,
+                    "world": {"worldX": 3205, "worldY": 3208, "plane": 2},
+                    "sourcePlane": 2,
+                    "destinationPlane": 0,
+                    "allowedSourcePlanes": [1, 2],
+                    "expectedPlaneChange": -1,
+                }
+            ],
+            "routeLegs": [],
+        }
+
+        with patch.object(action_proposal_module.route_demonstration, "load_route_guide", return_value=guide):
+            proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.reason, "route_interaction_live_target_missing")
+        self.assertEqual(proposal.target_explanation["actionTargetSource"], "floor_selection_interaction")
+        self.assertEqual(proposal.target_explanation["floorSelectionOption"], "Bottom floor")
+        self.assertEqual(proposal.target_explanation["allowedSourcePlanes"], [1, 2])
+        self.assertIsNone(proposal.suggested_click_point)
 
     def test_valid_return_destination_proposes_return_to_resource_area(self):
         proposal = build_action_proposal(

@@ -101,6 +101,95 @@ class RouteDemonstrationTest(unittest.TestCase):
             self.assertEqual(step["targetName"], "Staircase")
             self.assertEqual(step["expectedPlaneChange"], 2)
 
+    def test_bottom_floor_menu_interaction_is_extracted_as_floor_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recording = Path(tmp) / "rec"
+            recording.mkdir()
+            write_json(recording / "summary.json", {"label": "Bank stairs Bottom floor option Woodcutting area."})
+            write_json(
+                recording / "traversal_lifecycle.json",
+                {
+                    "schema": "traversal_lifecycle.v1",
+                    "status": "PASS",
+                    "routeName": "Bank_to_Woodcutting_area",
+                    "start": {"areaLabel": "bank_area"},
+                    "end": {"areaLabel": "woodcutting_area"},
+                    "routeSegments": [],
+                    "steps": [
+                        {
+                            "stepIndex": 1,
+                            "stepId": "route_step_001",
+                            "type": "menu_selection",
+                            "action": "Bottom floor",
+                            "targetName": "Staircase",
+                            "targetId": 56231,
+                            "world": {"worldX": 3205, "worldY": 3208, "plane": 2},
+                            "menuSelection": {
+                                "present": True,
+                                "selectedRowIndex": 2,
+                                "option": "Bottom floor",
+                                "target": "Staircase",
+                            },
+                            "postcondition": {
+                                "planeChanged": True,
+                                "positionChanged": True,
+                                "beforeSnapshot": {"world": {"worldX": 3205, "worldY": 3209, "plane": 2}},
+                                "afterSnapshot": {"world": {"worldX": 3206, "worldY": 3208, "plane": 0}},
+                            },
+                            "result": "success",
+                        }
+                    ],
+                },
+            )
+            write_json(recording / "camera_behavior_summary.json", {"segments": []})
+
+            guide = route_demonstration.build_route_guide([recording], route_name="Bank_to_Woodcutting_area")
+
+            self.assertEqual(len(guide["floorSelectionInteractions"]), 1)
+            step = guide["floorSelectionInteractions"][0]
+            self.assertEqual(step["interactionType"], "floor_selection")
+            self.assertEqual(step["option"], "Bottom floor")
+            self.assertEqual(step["sourcePlane"], 2)
+            self.assertEqual(step["destinationPlane"], 0)
+            self.assertEqual(step["allowedSourcePlanes"], [2])
+            self.assertEqual(step["objectId"], 56231)
+            self.assertEqual(guide["directPlaneSkips"][0]["skippedPlanes"], [1])
+            self.assertTrue(guide["directPlaneSkips"][0]["evidence"]["floorSelectionOptionCaptured"])
+
+    def test_plane1_floor_selection_reentry_requires_allowed_source_plane(self):
+        guide = {
+            "schema": route_demonstration.SCHEMA,
+            "routeName": "Bank_to_Woodcutting_area",
+            "pathPoints": [],
+            "interactionSteps": [],
+            "floorSelectionInteractions": [
+                {
+                    "interactionType": "floor_selection",
+                    "action": "Bottom floor",
+                    "option": "Bottom floor",
+                    "targetName": "Staircase",
+                    "targetId": 56231,
+                    "world": {"worldX": 3205, "worldY": 3208, "plane": 2},
+                    "sourcePlane": 2,
+                    "destinationPlane": 0,
+                    "allowedSourcePlanes": [2],
+                }
+            ],
+            "routeLegs": [],
+        }
+
+        reentry = route_demonstration.resolve_reentry(guide, {"worldX": 3205, "worldY": 3208, "plane": 1})
+
+        self.assertEqual(reentry["status"], "WARN")
+        self.assertEqual(reentry["blocker"], "route_guide_no_same_plane_reentry")
+
+        guide["floorSelectionInteractions"][0]["allowedSourcePlanes"] = [1, 2]
+        reentry = route_demonstration.resolve_reentry(guide, {"worldX": 3205, "worldY": 3208, "plane": 1})
+
+        self.assertEqual(reentry["status"], "PASS")
+        self.assertEqual(reentry["recoveryCandidateType"], "floor_selection_interaction")
+        self.assertEqual(reentry["nextRecoveryStep"]["option"], "Bottom floor")
+
     def test_current_position_maps_to_nearest_and_next_point(self):
         guide = {
             "schema": route_demonstration.SCHEMA,
@@ -145,6 +234,8 @@ class RouteDemonstrationTest(unittest.TestCase):
         self.assertEqual(reentry["currentPlane"], 1)
         self.assertEqual(reentry["inferredSubsegment"]["classification"], "intermediate_floor_between_route_transitions")
         self.assertFalse(reentry["nearestSamePlaneGuidePoint"])
+        self.assertEqual(reentry["suggestedFixture"], "record a short plane-1 Staircase recovery from 3206,3229,1")
+        self.assertEqual(reentry["safeState"], "no click sent because route guide lacks same-plane proof")
 
     def test_same_plane_reentry_finds_nearest_guide_step(self):
         guide = {

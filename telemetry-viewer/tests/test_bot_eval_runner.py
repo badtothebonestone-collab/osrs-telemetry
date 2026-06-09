@@ -1223,6 +1223,9 @@ class BotEvalRunnerTest(unittest.TestCase):
                             "proposal": {
                                 "reason": "no_executable_action",
                                 "targetExplanation": {
+                                    "likelyReason": "successful guide used a direct multi-plane stair transition; plane-1 recovery is not demonstrated",
+                                    "suggestedFixture": "record a short plane-1 Staircase recovery from 3206,3229,1",
+                                    "safeState": "no click sent because route guide lacks same-plane proof",
                                     "contextActionFallback": {
                                         "schema": "context_action_fallback.v1",
                                         "status": "WARN",
@@ -1283,6 +1286,10 @@ class BotEvalRunnerTest(unittest.TestCase):
                 if line.strip()
             ]
             self.assertEqual(candidates[0]["blocker"], "route_guide_no_same_plane_reentry")
+            self.assertEqual(
+                candidates[0]["likelyReason"],
+                "successful guide used a direct multi-plane stair transition; plane-1 recovery is not demonstrated",
+            )
 
 
 if __name__ == "__main__":
