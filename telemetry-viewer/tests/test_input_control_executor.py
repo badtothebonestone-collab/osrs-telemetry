@@ -59,6 +59,7 @@ from input_control.executor import (
     _try_navigation_alternate_hover,
     _route_stability_issue,
     _route_transition_reverse_issue,
+    _route_transition_plane_mismatch_issue,
     _executed_navigation_waypoint_key,
     _menu_row_canvas_point,
     _maybe_context_action_proposal,
@@ -6242,6 +6243,68 @@ class InputControlExecutorTest(unittest.TestCase):
             "clicked_expected_action",
         )
 
+    def test_route_transition_rejects_opposite_climb_action_and_wrong_object_id(self):
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Staircase",
+            target_explanation={
+                "name": "Staircase",
+                "objectId": 16672,
+                "profile": "woodcutting",
+                "expectedOptions": ["Climb-down", "Climb down"],
+                "dialogueOpenerOptions": ["Climb"],
+                "expectedTargets": ["Staircase"],
+            },
+        )
+        sample = {
+            "wallTimeMillis": 2000,
+            "mouseCanvasX": 241,
+            "mouseCanvasY": 168,
+            "menuOpen": False,
+            "topOption": "Climb-up",
+            "topTarget": "<col=ffff>Staircase",
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "topIdentifier": 56230,
+            "entries": [
+                {"option": "Climb-up", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 56230},
+                {"option": "Top-floor", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_SECOND_OPTION", "identifier": 56230},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+            ],
+        }
+
+        hover = hover_menu_matches_target(sample, proposal, {"x": 241, "y": 168}, tolerance_px=3)
+
+        self.assertFalse(hover.confirmed)
+        self.assertEqual(hover.reason, "top_option_not_expected")
+        self.assertNotEqual(
+            classify_last_menu_option_clicked(None, {"option": "Climb-up", "target": "Staircase", "identifier": 56230}, proposal),
+            "clicked_expected_action",
+        )
+
+    def test_route_transition_plane_mismatch_blocks_stale_target_before_click(self):
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Staircase",
+            target_explanation={
+                "name": "Staircase",
+                "objectId": 16672,
+                "routeId": "lumbridge_west_trees_to_lumbridge_castle_bank_return",
+                "routeStepIndex": 1,
+                "worldLocation": {"worldX": 3204, "worldY": 3229, "plane": 1},
+                "expectedOptions": ["Climb-down"],
+            },
+        )
+        status = route_transition_status_payload(tick=8384, x=3205, y=3228, plane=0, route_step_index=1)
+
+        issue = _route_transition_plane_mismatch_issue(proposal, current_status=status)
+
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["classification"], "route_transition_target_plane_mismatch")
+        self.assertEqual(issue["proposedTransition"]["worldLocation"]["plane"], 1)
+        self.assertEqual(issue["playerWorldPosition"]["plane"], 0)
+
     def test_route_transition_menu_row_uses_observed_full_option_band(self):
         sample = {
             "menuBounds": {"x": 145, "y": 154, "width": 150, "height": 112},
@@ -6310,7 +6373,7 @@ class InputControlExecutorTest(unittest.TestCase):
             resolved_screen_click_point={"x": 1100, "y": 2100},
             input_geometry={
                 "inputGeometryAvailable": True,
-                "canvasScreenOrigin": {"x": 3932, "y": 107},
+                "canvasScreenOrigin": {"x": 1000, "y": 2000},
                 "canvasSize": {"width": 1834, "height": 1205},
                 "sourceCanvasSize": {"width": 765, "height": 503},
                 "displayScale": {"x": 1.0, "y": 1.0},
@@ -6476,7 +6539,7 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertIn(("mouse_down", "left"), backend.calls)
         self.assertIn(("mouse_up", "left"), backend.calls)
 
-    def test_route_transition_falls_back_to_generic_opener_when_right_click_menu_fails(self):
+    def test_route_transition_blocks_when_right_click_menu_does_not_open(self):
         backend = FakeBackend()
         hover_sample = {
             "clientTick": 20,
@@ -6520,7 +6583,7 @@ class InputControlExecutorTest(unittest.TestCase):
             resolved_screen_click_point={"x": 1100, "y": 2100},
             input_geometry={
                 "inputGeometryAvailable": True,
-                "canvasScreenOrigin": {"x": 3932, "y": 107},
+                "canvasScreenOrigin": {"x": 1000, "y": 2000},
                 "canvasSize": {"width": 1834, "height": 1205},
                 "sourceCanvasSize": {"width": 765, "height": 503},
                 "displayScale": {"x": 1.0, "y": 1.0},
@@ -6553,10 +6616,96 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(result.hover_confirmation["rightClickMenuSelection"]["reason"], "menu_open_not_observed")
         self.assertNotIn("rightClickMenuSelectionFallback", result.hover_confirmation)
         self.assertNotIn("clickClassification", result.hover_confirmation)
-        self.assertEqual(result.action_trace["finalClassification"], "right_click_menu_select_failed")
+        self.assertEqual(result.observed_result["observedResult"], "route_target_hover_not_confirmed")
+        self.assertTrue(result.observed_result["routeTargetHoverFailure"])
+        self.assertEqual(result.lifecycle_state["reason"], "route_target_hover_not_confirmed")
+        self.assertEqual(result.action_trace["finalClassification"], "route_target_hover_not_confirmed")
+        self.assertEqual(_hover_failure_category(result), "route_target_hover_not_confirmed")
         self.assertIn(("mouse_down", "right"), backend.calls)
         self.assertNotIn(("mouse_down", "left"), backend.calls)
         self.assertNotIn(("mouse_up", "left"), backend.calls)
+
+    def test_route_transition_menu_open_failure_suppresses_after_two_attempts(self):
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Staircase",
+            suggested_click_point={"x": 535, "y": 347},
+            click_point_space="screen",
+            resolved_screen_click_point={"x": 535, "y": 347},
+            target_explanation={
+                "name": "Staircase",
+                "objectId": 16672,
+                "classId": "route_transition",
+                "worldLocation": {"worldX": 3204, "worldY": 3229, "plane": 1},
+                "expectedOptions": ["Climb-down", "Climb down"],
+                "expectedTargets": ["Staircase"],
+                "dialogueOpenerOptions": ["Climb"],
+            },
+        )
+        menu_sample = {
+            "sourceEvent": "PostMenuSort",
+            "clientTick": 20,
+            "wallTimeMillis": 500,
+            "mouseCanvasX": 241,
+            "mouseCanvasY": 168,
+            "menuOpen": False,
+            "topOption": "Climb",
+            "topTarget": "<col=ffff>Staircase",
+            "topIdentifier": 16672,
+            "entries": [
+                {"option": "Climb", "target": "<col=ffff>Staircase", "identifier": 16672, "entryIndex": 0},
+                {"option": "Climb-up", "target": "<col=ffff>Staircase", "identifier": 16672, "entryIndex": 1},
+                {"option": "Climb-down", "target": "<col=ffff>Staircase", "identifier": 16672, "entryIndex": 2},
+                {"option": "Walk here", "target": "", "identifier": 0, "entryIndex": 3},
+            ],
+        }
+        result = ExecutionResult(
+            status="FAIL",
+            dry_run=False,
+            proposed_action="interact_service_route_object",
+            executed=False,
+            proposal=proposal.to_dict(),
+            movement_plan={"clickPoint": {"x": 535, "y": 347}},
+            lifecycle_state={"reason": "route_target_hover_not_confirmed"},
+            hover_confirmation={
+                "rightClickMenuSelection": {
+                    "status": "FAIL",
+                    "reason": "menu_open_not_observed",
+                    "menuOpenSample": menu_sample,
+                }
+            },
+            action_trace={"finalClassification": "route_target_hover_not_confirmed"},
+            observed_result={"observedResult": "route_target_hover_not_confirmed"},
+        )
+        cache = {}
+        summary = _new_loop_summary()
+
+        first = _record_target_hover_failure(
+            options=Namespace(target_hover_failure_limit=5, target_suppression_ms=2500),
+            cache=cache,
+            summary=summary,
+            result=result,
+            now_ms=1000,
+        )
+        second = _record_target_hover_failure(
+            options=Namespace(target_hover_failure_limit=5, target_suppression_ms=2500),
+            cache=cache,
+            summary=summary,
+            result=result,
+            now_ms=1100,
+        )
+
+        self.assertEqual(first["reason"], "route_target_hover_not_confirmed")
+        self.assertFalse(first["suppressed"])
+        self.assertEqual(second["failureLimit"], 2)
+        self.assertTrue(second["suppressed"])
+        self.assertEqual(summary["targetsSuppressed"], 1)
+        self.assertEqual(summary["suppressedTargets"][0]["reason"], "route_target_hover_not_confirmed")
+        self.assertEqual(second["attemptedPoints"], [{"x": 535, "y": 347}])
+        self.assertEqual(second["observedMenus"][-1]["entries"][2]["option"], "Climb-down")
+        counts = _loop_counts([result])
+        self.assertEqual(counts["routeTargetHoverFailures"], 1)
 
     def test_route_transition_uses_structured_alternate_aimpoint_after_cancel_hover(self):
         backend = FakeBackend()
@@ -6793,7 +6942,7 @@ class InputControlExecutorTest(unittest.TestCase):
             resolved_screen_click_point={"x": 1100, "y": 2100},
             input_geometry={
                 "inputGeometryAvailable": True,
-                "canvasScreenOrigin": {"x": 3932, "y": 107},
+                "canvasScreenOrigin": {"x": 1000, "y": 2000},
                 "canvasSize": {"width": 1834, "height": 1205},
                 "sourceCanvasSize": {"width": 765, "height": 503},
                 "displayScale": {"x": 1.0, "y": 1.0},
@@ -6884,7 +7033,7 @@ class InputControlExecutorTest(unittest.TestCase):
             resolved_screen_click_point={"x": 1100, "y": 2100},
             input_geometry={
                 "inputGeometryAvailable": True,
-                "canvasScreenOrigin": {"x": 3932, "y": 107},
+                "canvasScreenOrigin": {"x": 1000, "y": 2000},
                 "canvasSize": {"width": 1834, "height": 1205},
                 "sourceCanvasSize": {"width": 765, "height": 503},
                 "displayScale": {"x": 1.0, "y": 1.0},

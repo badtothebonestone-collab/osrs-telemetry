@@ -1,6 +1,6 @@
 {
   "schema": "project_knowledge.v1",
-  "updatedAtUtc": "2026-06-09T19:00:40.703668Z",
+  "updatedAtUtc": "2026-06-09T19:47:00.741332Z",
   "repoRoot": "C:\\Users\\badto\\osrs-telemetry",
   "sourceReports": [
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_bank_to_woodcutting_latest.md",
@@ -3288,6 +3288,75 @@
       "goodFixture": false,
       "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_135443_live_woodcutting_loop_20260609_135443\\summary.json",
       "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_135443_live_woodcutting_loop_20260609_135443\\schema_gap_report.md"
+    },
+    {
+      "recordingId": "20260609_143310_live_woodcutting_loop_20260609_143310",
+      "folder": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_143310_live_woodcutting_loop_20260609_143310",
+      "label": "live_woodcutting_loop_20260609_143310",
+      "activityType": "Woodcutting Loop",
+      "verdict": "WARN",
+      "durationSeconds": 279.281,
+      "tickRange": {
+        "first": 766,
+        "last": 766,
+        "count": 35
+      },
+      "usefulEvidence": [
+        "loop state interrupted",
+        "next phase recover_or_resume_task",
+        "phases cutting, inventory_full, interrupted",
+        "woodcutting lifecycle signals indicate cutting",
+        "woodcutting inventory is full",
+        "interruption lifecycle evidence present",
+        "human click/camera profile available"
+      ],
+      "missingData": [
+        "banking.bankContainer.delta",
+        "banking.bankContainer.items",
+        "banking.bankOpen_or_depositBoxOpen",
+        "banking.bankWidgetRoot",
+        "combat.recentHitsplats",
+        "warning: No camera yaw/pitch changes were found, or source snapshots lack camera fields.",
+        "warning: arduino_events.jsonl is missing or empty"
+      ],
+      "goodFixture": false,
+      "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_143310_live_woodcutting_loop_20260609_143310\\summary.json",
+      "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_143310_live_woodcutting_loop_20260609_143310\\schema_gap_report.md"
+    },
+    {
+      "recordingId": "20260609_144618_live_woodcutting_loop_20260609_144618",
+      "folder": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_144618_live_woodcutting_loop_20260609_144618",
+      "label": "live_woodcutting_loop_20260609_144618",
+      "activityType": "Woodcutting Loop",
+      "verdict": "WARN",
+      "durationSeconds": 32.391,
+      "tickRange": {
+        "first": 766,
+        "last": 766,
+        "count": 7
+      },
+      "usefulEvidence": [
+        "loop state interrupted",
+        "next phase recover_or_resume_task",
+        "phases cutting, inventory_full, interrupted",
+        "woodcutting lifecycle signals indicate cutting",
+        "woodcutting inventory is full",
+        "interruption lifecycle evidence present",
+        "human click/camera profile available"
+      ],
+      "missingData": [
+        "banking.bankContainer.delta",
+        "banking.bankContainer.items",
+        "banking.bankOpen_or_depositBoxOpen",
+        "banking.bankWidgetRoot",
+        "combat.recentHitsplats",
+        "warning: Input capture started but captured no real mouse/keyboard activity.",
+        "warning: No camera yaw/pitch changes were found, or source snapshots lack camera fields.",
+        "warning: arduino_events.jsonl is missing or empty"
+      ],
+      "goodFixture": false,
+      "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_144618_live_woodcutting_loop_20260609_144618\\summary.json",
+      "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_144618_live_woodcutting_loop_20260609_144618\\schema_gap_report.md"
     }
   ],
   "activityKnowledge": [

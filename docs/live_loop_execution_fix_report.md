@@ -265,3 +265,91 @@ After that focused patch, rerun:
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
 ```
+
+## 14. Plane-1 Staircase Hover/Menu Targeting Diagnosis
+
+Updated: 2026-06-09.
+
+Source run:
+
+```text
+C:\Users\badto\osrs-telemetry\bot_runs\20260609_135357_live_woodcutting_loop
+```
+
+The expected return-route segment was the plane-1 Lumbridge castle Staircase:
+
+```text
+target: Staircase
+object id: 16672
+world: 3204,3229,1
+expected action: Climb-down
+planned screen point: about 535,347
+candidate geometry source: canvasLocation / safeAimPoint sampled around canvas 241,168
+```
+
+The first return-route staircase transition succeeded. The later plane-1 target failed because hover/menu confirmation was too permissive and then too repetitive:
+
+- A generic `Climb` hover at the target could expose `Climb-down` only as a lower menu row.
+- If right-click menu open was not observed, the loop classified this as a generic right-click failure and kept retrying.
+- In a follow-up run, the same stale plane-1 target was proposed after the player had already moved to plane 0; the visible object was a different Staircase (`56230`) with top action `Climb-up`, and the matcher accepted it because generic `Climb` matched directional `Climb-up` by substring and target text alone could satisfy a different object id.
+
+Responsible gates/functions:
+
+```text
+client_tick_core._option_matches
+client_tick_core._target_matches
+input_control.executor._entry_matches_route_transition_dialogue_opener
+input_control.executor._route_transition_plane_mismatch_issue
+input_control.executor._record_target_hover_failure
+```
+
+Fix behavior:
+
+- Generic `Climb` no longer confirms directional `Climb-up` or `Climb-down` by substring.
+- If a proposal names an expected object id and the hover/menu sample also has an id, the id must match.
+- Route transition dialogue opener matching treats generic `Climb` as exact, not as a substring of `Climb-up`.
+- A route interaction target whose plane differs from the current player plane is blocked before hover/click as `route_transition_target_plane_mismatch`.
+- Repeated route target menu-open failures now stop quickly as `repeated_route_target_hover_failure` and record attempted points plus observed menu rows.
+
+## 15. Rerun Results After Staircase Guard Fix
+
+Geometry check:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+```
+
+Result: PASS, `inputGeometryPass=true`, foreground RuneLite, canvas `148,57 1229x868`.
+
+Real command:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```
+
+First post-fix run:
+
+```text
+Run folder: C:\Users\badto\osrs-telemetry\bot_runs\20260609_143211_live_woodcutting_loop
+Status: FAIL
+Live input executed: yes
+Actions executed: 2
+Climb-down Staircase succeeded: yes
+Wrong Climb-up regression observed before the final guard patch: yes
+Final blocker: candidate_data_stale after stale return/resource context
+```
+
+Second post-fix run:
+
+```text
+Run folder: C:\Users\badto\osrs-telemetry\bot_runs\20260609_144521_live_woodcutting_loop
+Linked recording: C:\Users\badto\osrs-telemetry\recordings\20260609_144618_live_woodcutting_loop_20260609_144618
+Status: FAIL
+Live input executed: no
+Actions executed: 0
+Final location: 3206,3229,1
+Final phase: needs_more_context
+Final blocker: no_executable_action
+```
+
+The second run failed closed before gameplay input because the previous bad run left the character on the wrong floor. The code now prevents accepting the wrong `Climb-up` object/action and prevents clicking a route target on the wrong plane. The remaining recovery task is to get the live state back to a valid route/resource context from `3206,3229,1`, then rerun the same real command.

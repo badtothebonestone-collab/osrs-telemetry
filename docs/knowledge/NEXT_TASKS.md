@@ -2,6 +2,7 @@
 
 | Priority | ID | Task | Success criteria |
 | --- | --- | --- | --- |
+| 1 | recover_wrong_floor_route_context | Recover the live loop from `3206,3229,1` without loosening route-object matching. | Real live loop obtains a valid route/resource context from the wrong-floor state, sends only expected route actions, and reaches woodcutting area or a precise route-context blocker. |
 | 1 | fix_deposit_region_label | Clean up Deposit-All menu-context region classification. | Deposit-All bank UI clicks no longer appear as minimap_click when menu context proves bank UI. |
 | 2 | record_second_bank_direct_sample | Record another bank open/deposit/close sample with bankContainerDelta explicit plugin field. | bankContainerDeltaSource is explicit plugin delta or recorded diff, lifecycle PASS. |
 | 3 | extract_more_route_templates | Extract templates for new route directions after repeated PASS recordings. | Two clean route recordings compare PASS against the new template. |
@@ -10,4 +11,5 @@
 ## Manual Notes
 
 <!-- BEGIN MANUAL NOTES -->
+- 2026-06-09: Next live task should start from the current wrong-floor/no-executable context, not from input geometry or banking. Keep the new route-object guards; fix route/context recovery so a stale plane-1 Staircase proposal cannot become a wrong `Climb-up` click.
 <!-- END MANUAL NOTES -->

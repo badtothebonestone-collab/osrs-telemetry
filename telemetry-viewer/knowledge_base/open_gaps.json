@@ -1,6 +1,6 @@
 {
   "schema": "project_open_gaps.v1",
-  "updatedAtUtc": "2026-06-09T19:00:40.703668Z",
+  "updatedAtUtc": "2026-06-09T19:47:00.741332Z",
   "gaps": [
     {
       "id": "deposit_all_region_classification",
@@ -67,6 +67,18 @@
         "2026-06-09 check-input-geometry saw refused telemetry endpoints, no RuneLite window match, and only stale file-session geometry."
       ],
       "suggestedNextTask": "Restore or attach RuneLite plus context/snapshot endpoints, then rerun --check-input-geometry and allow live actions only after input_geometry_pass."
+    },
+    {
+      "id": "live_route_wrong_floor_recovery",
+      "title": "Live loop can be left on the wrong floor after a stale return-route Staircase proposal",
+      "severity": "high",
+      "requiredLayer": "route/context/action_proposal",
+      "status": "open",
+      "evidence": [
+        "20260609_143211_live_woodcutting_loop clicked Climb-down correctly, then stale route state accepted a different Climb-up Staircase before the guard fix.",
+        "20260609_144521_live_woodcutting_loop failed closed with no_executable_action at 3206,3229,1 and sent zero gameplay clicks."
+      ],
+      "suggestedNextTask": "From 3206,3229,1, rebuild route/resource context so the bot can get back to a valid woodcutting loop state without loosening route-object matching."
     },
     {
       "id": "clickbox_geometry_incomplete_for_profile",
@@ -136,6 +148,14 @@
     }
   ],
   "nextTasks": [
+    {
+      "id": "recover_wrong_floor_route_context",
+      "priority": 1,
+      "task": "Recover the live loop from 3206,3229,1 without loosening route-object matching.",
+      "successCriteria": [
+        "Real live loop obtains a valid route/resource context from the wrong-floor state, sends only expected route actions, and reaches woodcutting area or a precise route-context blocker."
+      ]
+    },
     {
       "id": "fix_deposit_region_label",
       "priority": 1,

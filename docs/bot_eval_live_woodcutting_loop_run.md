@@ -494,3 +494,48 @@ Then, only if that returns `inputGeometryPass=true`:
 ```powershell
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
 ```
+
+## 2026-06-09 Update: Return Staircase Hover/Menu Guard
+
+The plane-1 return-route Staircase blocker is now diagnosed and guarded in code.
+
+Evidence source:
+
+```text
+C:\Users\badto\osrs-telemetry\bot_runs\20260609_135357_live_woodcutting_loop
+```
+
+Diagnosis:
+
+- Expected target was `Staircase` object `16672` at `3204,3229,1`, expected action `Climb-down`.
+- The planned point was around screen `535,347`, canvas `241,168`.
+- The correct route object was live and on-screen, but `Climb-down` could be a lower menu row under generic `Climb`.
+- When the menu-open fallback failed, retries stayed on the same point instead of failing quickly with route-target evidence.
+- A follow-up run showed a worse variant: stale plane-1 route state was still proposed after the player was on plane 0, and a different Staircase (`56230`) with top action `Climb-up` was accepted too loosely.
+
+Fix:
+
+- Route hover matching now requires the expected directional action, not a substring match from generic `Climb`.
+- When an expected object id is known, hover/menu samples with a different object id are rejected.
+- Generic route dialogue opener matching treats `Climb` as exact.
+- Route transition proposals with target plane different from current player plane now fail closed before hover/click.
+- Repeated route target hover/menu failures now record attempted points and observed menu rows, then stop as `repeated_route_target_hover_failure`.
+
+Latest reruns:
+
+| Field | `20260609_143211_live_woodcutting_loop` | `20260609_144521_live_woodcutting_loop` |
+| --- | --- | --- |
+| command | real live action | real live action |
+| dry-run/no-input | no | no |
+| geometry | PASS | PASS before run |
+| actions executed | 2 | 0 |
+| Climb-down object 16672 | succeeded | not attempted |
+| live input executed | yes | no gameplay input |
+| final blocker | `candidate_data_stale` after stale route/resource context | `no_executable_action` from wrong-floor state |
+| final location | `3206,3229,1` | `3206,3229,1` |
+
+Current next task:
+
+```text
+Recover or route from wrong-floor state 3206,3229,1 back to a valid resource/return-route context, then rerun the same real command. Do not loosen route-object matching.
+```

@@ -14,8 +14,10 @@
 | combat_damage_source_attribution_multi_actor | low | recording | open | If combat routing matters later, collect a multi-NPC interruption fixture to validate source attribution under ambiguity. |
 | validate_human_click_plans_against_recordings | medium | recording/input_control | open | Compare dry-run planned aim points against successful human clicks in future Record Everything fixtures before changing live click generation. |
 | knowledge_manual_curation | low | docs | open | After each milestone, add one concise manual note when generated summaries miss intent. |
+| live_route_wrong_floor_recovery | high | route/context/action_proposal | open | From `3206,3229,1`, rebuild route/resource context so the bot can get back to a valid woodcutting loop state without loosening route-object matching. |
 
 ## Manual Notes
 
 <!-- BEGIN MANUAL NOTES -->
+- 2026-06-09: `return_route_staircase_hover_menu` was guarded in `client_tick_core.py` and `input_control/executor.py`. Generic `Climb` no longer matches `Climb-up`/`Climb-down` by substring, expected object ids must match when present, and wrong-plane route targets are blocked before click. Latest live state is now wrong-floor/no-executable-context at `3206,3229,1`.
 <!-- END MANUAL NOTES -->

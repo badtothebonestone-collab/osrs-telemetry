@@ -471,7 +471,20 @@ def classify_menu_action(sample: dict[str, Any] | None) -> str:
 def _option_matches(option: str, expected: tuple[str, ...]) -> bool:
     if not expected:
         return True
-    return any(_lower_menu_text(item) in option for item in expected if _lower_menu_text(item))
+    option_key = " ".join(_lower_menu_text(option).replace("-", " ").split())
+    for item in expected:
+        expected_key = " ".join(_lower_menu_text(item).replace("-", " ").split())
+        if not expected_key:
+            continue
+        if option_key == expected_key:
+            return True
+        # Generic "Climb" opens the staircase dialogue. It must not confirm
+        # a directional route action such as Climb-up or Climb-down.
+        if expected_key == "climb":
+            continue
+        if expected_key in option_key:
+            return True
+    return False
 
 
 def _option_rejected(option: str, rejected: tuple[str, ...]) -> bool:
@@ -503,8 +516,8 @@ def _target_text_matches_expected(target: str, expected: str) -> bool:
 
 def _target_matches(sample: dict[str, Any], intent: ActionIntent, *, top_prefix: bool = True) -> bool:
     identifier = _sample_int(sample, "topIdentifier" if top_prefix else "identifier", "identifier")
-    if identifier is not None and identifier in intent.expected_object_ids:
-        return True
+    if intent.expected_object_ids and identifier is not None:
+        return identifier in intent.expected_object_ids
     target = _lower_menu_text(sample.get("topTarget" if top_prefix else "target") or sample.get("target"))
     if not intent.expected_targets and not intent.expected_object_ids:
         return True

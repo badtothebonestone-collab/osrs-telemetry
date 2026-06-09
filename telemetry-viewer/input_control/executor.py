@@ -1126,7 +1126,19 @@ def _entry_matches_route_transition_dialogue_opener(entry: dict[str, Any], propo
         return False
     explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
     opener_options = [_menu_text_key(value) for value in explanation.get("dialogueOpenerOptions") or []]
-    if not any(opener and (option_key == opener or opener in option_key) for opener in opener_options):
+    opener_matches = False
+    for opener in opener_options:
+        if not opener:
+            continue
+        if option_key == opener:
+            opener_matches = True
+            break
+        if opener == "climb":
+            continue
+        if opener in option_key:
+            opener_matches = True
+            break
+    if not opener_matches:
         return False
     expected_id = _proposal_target_id(proposal)
     entry_id = _int_or_none(entry.get("identifier"))
@@ -2775,6 +2787,8 @@ def _new_loop_summary() -> dict[str, Any]:
         "routeTransitionPending": 0,
         "routeTransitionRetryRequired": 0,
         "routeTransitionRetrySuccesses": 0,
+        "routeTargetHoverFailures": 0,
+        "repeatedRouteTargetHoverFailures": 0,
         "routeTransitionTrueTimeouts": 0,
         "routeTransitionReconciledSuccesses": 0,
         "prematureTransitionRetriesPrevented": 0,
@@ -3055,6 +3069,8 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
     route_transition_pending = 0
     route_transition_retry_required = 0
     route_transition_retry_successes = 0
+    route_target_hover_failures = 0
+    repeated_route_target_hover_failures = 0
     route_transition_true_timeouts = 0
     route_transition_reconciled_successes = 0
     premature_transition_retries_prevented = 0
@@ -3174,6 +3190,14 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
                 }
             ):
                 route_transition_first_try_successes += 1
+        if result.proposed_action in ROUTE_TRANSITION_ACTIONS:
+            final_classification = str(trace_for_counts.get("finalClassification") or "")
+            observed_name = str(observed.get("observedResult") or "")
+            if observed_name == "route_target_hover_not_confirmed" or final_classification == "route_target_hover_not_confirmed":
+                route_target_hover_failures += 1
+            if observed_name == "repeated_route_target_hover_failure" or final_classification == "repeated_route_target_hover_failure":
+                route_target_hover_failures += 1
+                repeated_route_target_hover_failures += 1
         resource_progress_classification = str(observed.get("resourceProgressClassification") or "")
         if observed.get("delayedProgressReconciliation") is True:
             delayed_progress_reconciliations += 1
@@ -3365,6 +3389,8 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
         "routeTransitionPending": route_transition_pending,
         "routeTransitionRetryRequired": route_transition_retry_required,
         "routeTransitionRetrySuccesses": route_transition_retry_successes,
+        "routeTargetHoverFailures": route_target_hover_failures,
+        "repeatedRouteTargetHoverFailures": repeated_route_target_hover_failures,
         "routeTransitionTrueTimeouts": route_transition_true_timeouts,
         "routeTransitionReconciledSuccesses": route_transition_reconciled_successes,
         "prematureTransitionRetriesPrevented": premature_transition_retries_prevented,
@@ -5159,6 +5185,35 @@ def _route_transition_reverse_issue(
     }
 
 
+def _route_transition_plane_mismatch_issue(
+    proposal: ActionProposal,
+    current_status: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if proposal.proposed_action not in ROUTE_TRANSITION_ACTIONS:
+        return None
+    player_tile = _status_player_tile(current_status)
+    player_plane = _int_or_none(player_tile.get("plane")) if isinstance(player_tile, dict) else None
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    target_world = explanation.get("worldLocation") if isinstance(explanation.get("worldLocation"), dict) else proposal.target_tile
+    target_plane = _int_or_none(target_world.get("plane")) if isinstance(target_world, dict) else None
+    if player_plane is None or target_plane is None or player_plane == target_plane:
+        return None
+    return {
+        "classification": "route_transition_target_plane_mismatch",
+        "staleRouteTargetDetected": True,
+        "reason": "proposed route transition target is on a different plane than the current player",
+        "proposedTransition": {
+            "expectedAction": _proposal_transition_option(proposal),
+            "objectName": explanation.get("name") or proposal.target_name,
+            "objectId": _proposal_target_id(proposal),
+            "worldLocation": dict(target_world),
+            "routeId": explanation.get("routeId"),
+            "routeStepIndex": explanation.get("routeStepIndex"),
+        },
+        "playerWorldPosition": dict(player_tile),
+    }
+
+
 def _executed_navigation_waypoint_key(proposal: ActionProposal, result: ExecutionResult) -> tuple[int, int, int] | None:
     if proposal.proposed_action not in NAVIGATION_ACTIONS:
         return None
@@ -5278,6 +5333,13 @@ def _hover_failure_category(result: ExecutionResult) -> str | None:
         missing = {str(item) for item in (result.missing_capabilities or [])}
         lifecycle = result.lifecycle_state if isinstance(result.lifecycle_state, dict) else {}
         reason = str(lifecycle.get("reason") or "")
+        right_click_selection = hover.get("rightClickMenuSelection") if isinstance(hover.get("rightClickMenuSelection"), dict) else {}
+        if (
+            result.proposed_action in ROUTE_TRANSITION_ACTIONS
+            and reason in {"right_click_menu_select_failed", "route_target_hover_not_confirmed"}
+            and str(right_click_selection.get("reason") or "") == "menu_open_not_observed"
+        ):
+            return "route_target_hover_not_confirmed"
         if reason in FATAL_NO_CLICK_BLOCK_REASONS:
             if _resource_target_movement_safety_reacquirable(result, reason):
                 return "unsafe_geometry"
@@ -5380,6 +5442,8 @@ def _record_target_hover_failure(
     limit = max(1, int(getattr(options, "target_hover_failure_limit", 0) or 1))
     if category == "walk_here_hover" and budget_type == "resource":
         limit = 1
+    if category == "route_target_hover_not_confirmed" and budget_type == "route_transition":
+        limit = min(limit, 2)
     window_ms = max(1, int(getattr(options, "target_suppression_ms", 0) or 1))
     record = cache.setdefault(
         target_key,
@@ -5415,8 +5479,20 @@ def _record_target_hover_failure(
         record["volatileHoverFailures"] = int(record.get("volatileHoverFailures") or 0) + 1
     elif category == "unsafe_geometry":
         record["unsafeGeometryFailures"] = int(record.get("unsafeGeometryFailures") or 0) + 1
+    elif category == "route_target_hover_not_confirmed":
+        record["routeTargetHoverFailures"] = int(record.get("routeTargetHoverFailures") or 0) + 1
     record["lastFailureReason"] = "walk_here_hover_for_resource" if category == "walk_here_hover" and budget_type == "resource" else category
     record["lastFailureTime"] = now_ms
+    attempted_point = _result_attempted_screen_point(result)
+    if attempted_point is not None:
+        attempted_points = record.setdefault("attemptedPoints", [])
+        if not any(isinstance(item, dict) and item.get("x") == attempted_point.get("x") and item.get("y") == attempted_point.get("y") for item in attempted_points):
+            attempted_points.append(dict(attempted_point))
+    hover_menu = _hover_menu_summary_for_failure(result)
+    if hover_menu is not None:
+        observed_menus = record.setdefault("observedMenus", [])
+        observed_menus.append(hover_menu)
+        del observed_menus[:-5]
     suppressed = int(record.get("hoverConfirmFailures") or 0) >= limit
     if suppressed:
         record["suppressionUntil"] = now_ms + window_ms
@@ -5433,6 +5509,8 @@ def _record_target_hover_failure(
                     "failureCount": record.get("hoverConfirmFailures"),
                     "suppressionUntil": record.get("suppressionUntil"),
                     "reacquireBudgetType": budget_type,
+                    "attemptedPoints": list(record.get("attemptedPoints") or []),
+                    "observedMenus": list(record.get("observedMenus") or []),
                 }
             )
     event = {
@@ -5443,10 +5521,63 @@ def _record_target_hover_failure(
         "suppressed": bool(suppressed),
         "suppressionUntil": record.get("suppressionUntil") if suppressed else None,
         "reacquireBudgetType": budget_type,
+        "attemptedPoints": list(record.get("attemptedPoints") or []),
+        "observedMenus": list(record.get("observedMenus") or []),
     }
     if isinstance(result.action_trace, dict):
         result.action_trace["targetSuppression"] = event
     return event
+
+
+def _result_attempted_screen_point(result: ExecutionResult) -> dict[str, int] | None:
+    movement = result.movement_plan if isinstance(result.movement_plan, dict) else {}
+    for key in ("clickPoint", "target"):
+        point = movement.get(key)
+        if isinstance(point, dict):
+            x = _int_or_none(point.get("x"))
+            y = _int_or_none(point.get("y"))
+            if x is not None and y is not None:
+                return {"x": x, "y": y}
+    commands = result.commands if isinstance(result.commands, list) else []
+    for command in commands:
+        if not isinstance(command, dict):
+            continue
+        point = command.get("clickPoint")
+        if isinstance(point, dict):
+            x = _int_or_none(point.get("x"))
+            y = _int_or_none(point.get("y"))
+            if x is not None and y is not None:
+                return {"x": x, "y": y}
+    return None
+
+
+def _hover_menu_summary_for_failure(result: ExecutionResult) -> dict[str, Any] | None:
+    hover = result.hover_confirmation if isinstance(result.hover_confirmation, dict) else {}
+    selection = hover.get("rightClickMenuSelection") if isinstance(hover.get("rightClickMenuSelection"), dict) else {}
+    sample = selection.get("menuOpenSample") if isinstance(selection.get("menuOpenSample"), dict) else hover.get("sample")
+    if not isinstance(sample, dict):
+        sample = _confirmation_hover_sample(hover)
+    if not isinstance(sample, dict):
+        return None
+    entries = _menu_entries_display_order(sample)
+    return {
+        "sourceEvent": sample.get("sourceEvent") or sample.get("sampleSource"),
+        "menuOpen": sample.get("menuOpen"),
+        "topOption": sample.get("topOption"),
+        "topTarget": sample.get("topTarget"),
+        "topIdentifier": sample.get("topIdentifier"),
+        "mouseCanvasX": sample.get("mouseCanvasX"),
+        "mouseCanvasY": sample.get("mouseCanvasY"),
+        "entries": [
+            {
+                "option": entry.get("option"),
+                "target": entry.get("target"),
+                "identifier": entry.get("identifier"),
+                "entryIndex": entry.get("entryIndex"),
+            }
+            for entry in entries[:6]
+        ],
+    }
 
 
 def _resource_no_progress_failure_category(result: ExecutionResult) -> str | None:
@@ -10773,11 +10904,40 @@ def execute_action(
                             result.action_trace["rightClickMenuSelectionFallback"] = "left_click_dialogue_opener"
                     else:
                         result.status = "FAIL"
+                        observed = result.observed_result if isinstance(result.observed_result, dict) else {}
+                        observed.update(
+                            {
+                                "observedResult": "route_target_hover_not_confirmed"
+                                if direct_selection_reason == "menu_open_not_observed"
+                                else "right_click_menu_select_failed",
+                                "resultOutcome": "blocked",
+                                "resultComplete": True,
+                                "nextActionAllowed": True,
+                                "verificationStatus": "FAIL",
+                                "routeTargetHoverFailure": direct_selection_reason == "menu_open_not_observed",
+                                "rightClickMenuSelection": direct_selection if isinstance(direct_selection, dict) else {},
+                            }
+                        )
+                        result.observed_result = observed
+                        result.verification_status = "FAIL"
                         lifecycle = lifecycle_state_for_proposal(proposal)
                         lifecycle.current_state = "blocked"
-                        lifecycle.reason = "right_click_menu_select_failed"
+                        lifecycle.reason = (
+                            "route_target_hover_not_confirmed"
+                            if direct_selection_reason == "menu_open_not_observed"
+                            else "right_click_menu_select_failed"
+                        )
+                        lifecycle.observed_result = observed
+                        lifecycle.result_complete = True
+                        lifecycle.result_outcome = "blocked"
+                        lifecycle.next_action_allowed = True
                         _apply_lifecycle(result, lifecycle)
-                        _set_trace_final(result, "right_click_menu_select_failed")
+                        _set_trace_final(
+                            result,
+                            "route_target_hover_not_confirmed"
+                            if direct_selection_reason == "menu_open_not_observed"
+                            else "right_click_menu_select_failed",
+                        )
                         _attach_human_input_trace(result, input_controller)
                         return result
                 lifecycle = lifecycle_after_execution(proposal, executed=result.executed, dry_run=dry_run)
@@ -11995,7 +12155,10 @@ def execute_action_loop(
                 _apply_lifecycle(action_result, lifecycle)
                 reason = "pre_action_readiness_failed"
                 break
-        route_transition_reverse_issue = _route_transition_reverse_issue(
+        route_transition_reverse_issue = _route_transition_plane_mismatch_issue(
+            proposal,
+            current_status=before_status,
+        ) or _route_transition_reverse_issue(
             proposal,
             last_successful_route_transition,
             current_status=before_status,
@@ -12176,11 +12339,48 @@ def execute_action_loop(
         )
         if suppression_event and not action_result.executed:
             action_result.status = "WARN"
-            skip_label = "unsafe geometry" if suppression_event.get("reason") == "unsafe_geometry" else "hover mismatch"
+            if suppression_event.get("reason") == "unsafe_geometry":
+                skip_label = "unsafe geometry"
+            elif suppression_event.get("reason") == "route_target_hover_not_confirmed":
+                skip_label = "route target hover/menu confirmation"
+            else:
+                skip_label = "hover mismatch"
             action_result.warnings.append(
                 f"{skip_label} skipped without click"
                 + ("; target suppressed for reacquisition" if suppression_event.get("suppressed") else "")
             )
+            if (
+                suppression_event.get("suppressed") is True
+                and suppression_event.get("reacquireBudgetType") == "route_transition"
+                and suppression_event.get("reason") == "route_target_hover_not_confirmed"
+            ):
+                observed = action_result.observed_result if isinstance(action_result.observed_result, dict) else {}
+                observed.update(
+                    {
+                        "observedResult": "repeated_route_target_hover_failure",
+                        "resultOutcome": "blocked",
+                        "resultComplete": True,
+                        "nextActionAllowed": False,
+                        "verificationStatus": "FAIL",
+                        "skipReason": "repeated_route_target_hover_failure",
+                        "targetSuppression": dict(suppression_event),
+                        "attemptedPoints": list(suppression_event.get("attemptedPoints") or []),
+                        "observedMenus": list(suppression_event.get("observedMenus") or []),
+                    }
+                )
+                action_result.status = "FAIL"
+                action_result.observed_result = observed
+                action_result.verification_status = "FAIL"
+                lifecycle = lifecycle_state_for_proposal(proposal)
+                lifecycle.current_state = "blocked"
+                lifecycle.reason = "repeated_route_target_hover_failure"
+                lifecycle.observed_result = observed
+                lifecycle.result_complete = True
+                lifecycle.result_outcome = "blocked"
+                lifecycle.next_action_allowed = False
+                lifecycle.warnings = list(action_result.warnings)
+                _apply_lifecycle(action_result, lifecycle)
+                _set_trace_final(action_result, "repeated_route_target_hover_failure")
         safety_skip = _no_click_safety_skip_observed(action_result)
         fatal_safety_block = False
         if safety_skip is not None:
@@ -12202,6 +12402,24 @@ def execute_action_loop(
         if fatal_safety_block:
             status_value = "FAIL"
             reason = str(safety_skip.get("skipReason") or safety_skip.get("observedResult") or "no_click_safety_block")
+            break
+        if (
+            action_result.status == "FAIL"
+            and isinstance(action_result.observed_result, dict)
+            and action_result.observed_result.get("observedResult") == "repeated_route_target_hover_failure"
+        ):
+            status_value = "FAIL"
+            reason = "repeated_route_target_hover_failure"
+            _capture_debug_bundle(
+                debug_bundles,
+                loop_summary,
+                "repeated_route_target_hover_failure",
+                daemon_status=before_status,
+                proposal=proposal,
+                result=action_result,
+                readiness=readiness,
+                classification="repeated_route_target_hover_failure",
+            )
             break
         if _route_edge_reject_result(action_result):
             _capture_debug_bundle(
