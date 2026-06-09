@@ -17,7 +17,10 @@ git status --short
 <clean>
 ```
 
-After edits and before commit:
+After the fix commit and push, the only remaining change is this report
+finalization update.
+
+After edits and before the fix commit:
 
 ```text
 M docs\codex_questions.md
@@ -238,11 +241,25 @@ timeout for the full suite.
 
 ## 16. Commit Hash
 
-Pending until commit.
+Fix commit:
+
+```text
+73b41ced1357b5c482d9c4209b7fee6b8d43b7c8
+```
+
+Commit message:
+
+```text
+fix live woodcutting loop blocker from stabilized branch
+```
 
 ## 17. Push Result
 
-Pending until commit/push.
+Push succeeded to:
+
+```text
+origin/stabilization/live-loop-recovery-20260609
+```
 
 ## 18. Exact Next Action
 
