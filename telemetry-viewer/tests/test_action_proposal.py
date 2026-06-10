@@ -2459,7 +2459,7 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.reason, "service_complete_waiting_for_return_context")
         self.assertIsNone(proposal.suggested_click_point)
 
-    def test_wrong_floor_after_bank_uses_route_guide_reentry_blocker_not_generic_wait(self):
+    def test_wrong_floor_after_bank_uses_proven_plane1_recovery_interaction(self):
         status = status_for(
             phase="return_to_resource",
             active_intent="return_to_resource_area",
@@ -2469,25 +2469,101 @@ class ActionProposalTest(unittest.TestCase):
             overlay={"selectedMarker": None},
         )
         status["playerWorldPosition"] = {"worldX": 3206, "worldY": 3229, "plane": 1}
+        status["serviceRouteObjectCensus"] = {
+            "topRouteObjects": [
+                {
+                    "name": "Staircase",
+                    "objectId": 16672,
+                    "worldLocation": {"worldX": 3204, "worldY": 3229, "plane": 1},
+                    "source": "serviceRouteObjectCensus",
+                    "projectionStatus": {
+                        "canvasPoint": {"canvasX": 191, "canvasY": 146},
+                        "visible": True,
+                        "inCanvas": True,
+                        "actionableByCanvas": True,
+                    },
+                    "candidate": {
+                        "targetType": "sceneObject",
+                        "classId": "route_transition",
+                        "name": "Staircase",
+                        "id": 16672,
+                        "rawId": 16672,
+                        "worldX": 3204,
+                        "worldY": 3229,
+                        "plane": 1,
+                        "aimPoint": {"x": 191, "y": 146},
+                        "geometryAvailable": True,
+                    },
+                }
+            ]
+        }
 
         proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "interact_service_route_object")
+        self.assertEqual(proposal.reason, "route_guide_plane1_recovery_interaction")
+        self.assertEqual(proposal.target_kind, "service_route_object")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.target_explanation["routeGuideName"], "Bank_to_Woodcutting_area")
+        self.assertTrue(proposal.target_explanation["routeGuideReentryAttempted"])
+        self.assertEqual(proposal.target_explanation["currentWorld"], {"worldX": 3206, "worldY": 3229, "plane": 1})
+        self.assertEqual(proposal.target_explanation["intermediateRouteState"], "routing_to_trees_intermediate_floor")
+        self.assertEqual(proposal.target_explanation["recoveryCandidateType"], "plane1_recovery_interaction")
+        self.assertEqual(proposal.target_explanation["interactionType"], "plane1_recovery")
+        self.assertEqual(proposal.target_explanation["expectedOptions"], ["Climb-down"])
+        self.assertEqual(proposal.target_explanation["expectedObjectIds"], [16672])
+        self.assertEqual(proposal.target_explanation["world"], {"worldX": 3204, "worldY": 3229, "plane": 1})
+        self.assertEqual(proposal.actionability, "ready")
+        self.assertIsNotNone(proposal.suggested_click_point)
+
+    def test_wrong_floor_without_plane1_recovery_still_reports_reentry_blocker(self):
+        status = status_for(
+            phase="return_to_resource",
+            active_intent="return_to_resource_area",
+            active_target=None,
+            bank_ui={"bankOpen": False, "bankReadable": False},
+            bank_operation={"operationNeeded": False, "bankingComplete": True, "resourceItemsHeld": 0},
+            overlay={"selectedMarker": None},
+        )
+        status["playerWorldPosition"] = {"worldX": 3206, "worldY": 3229, "plane": 1}
+        guide = {
+            "schema": "route_demonstration_guide.v1",
+            "routeName": "Bank_to_Woodcutting_area",
+            "pathPoints": [],
+            "interactionSteps": [],
+            "floorSelectionInteractions": [
+                {
+                    "interactionType": "floor_selection",
+                    "action": "Bottom floor",
+                    "option": "Bottom floor",
+                    "targetName": "Staircase",
+                    "targetId": 56231,
+                    "world": {"worldX": 3205, "worldY": 3229, "plane": 2},
+                    "sourcePlane": 2,
+                    "destinationPlane": 0,
+                    "allowedSourcePlanes": [2],
+                    "expectedPlaneChange": -2,
+                }
+            ],
+            "routeLegs": [
+                {
+                    "segmentIndex": 1,
+                    "segmentType": "plane_transition",
+                    "startWorld": {"worldX": 3205, "worldY": 3229, "plane": 2},
+                    "endWorld": {"worldX": 3205, "worldY": 3229, "plane": 0},
+                }
+            ],
+        }
+
+        with patch.object(action_proposal_module.route_demonstration, "load_route_guide", return_value=guide):
+            proposal = build_action_proposal(status)
 
         self.assertEqual(proposal.proposed_action, "wait_for_context")
         self.assertEqual(proposal.reason, "route_guide_no_same_plane_reentry")
         self.assertEqual(proposal.target_kind, "route_reentry")
         self.assertEqual(proposal.target_explanation["routeGuideName"], "Bank_to_Woodcutting_area")
-        self.assertTrue(proposal.target_explanation["routeGuideReentryAttempted"])
-        self.assertEqual(proposal.target_explanation["currentWorld"], {"worldX": 3206, "worldY": 3229, "plane": 1})
-        self.assertEqual(proposal.target_explanation["intermediateRouteState"], "routing_to_trees_intermediate_floor")
         self.assertIn("route_guide.same_plane_reentry", proposal.missing_capabilities)
-        self.assertEqual(
-            proposal.target_explanation["safeState"],
-            "no click sent because route guide lacks same-plane proof",
-        )
-        self.assertEqual(
-            proposal.target_explanation["suggestedFixture"],
-            "record a short plane-1 Staircase recovery from 3206,3229,1",
-        )
+        self.assertEqual(proposal.target_explanation["safeState"], "no click sent because route guide lacks same-plane proof")
         self.assertIn("plane-1 recovery is not demonstrated", proposal.target_explanation["likelyReason"])
 
     def test_wrong_floor_floor_selection_candidate_requires_explicit_plane1_evidence(self):

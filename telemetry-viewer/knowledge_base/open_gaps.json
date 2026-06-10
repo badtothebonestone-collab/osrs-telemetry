@@ -125,18 +125,20 @@
     },
     {
       "id": "live_route_wrong_floor_recovery",
-      "title": "Live loop needs top-floor Bottom floor verification before rerun and separate plane-1 recovery evidence if stranded",
+      "title": "Live loop needs plane-1 Staircase recovery postcondition verification",
       "severity": "high",
       "requiredLayer": "route/context/action_proposal",
       "status": "open",
       "evidence": [
         "20260609_154147_live_woodcutting_loop passed input geometry and loaded-scene recovery, sent zero gameplay actions, and stopped with route_guide_no_same_plane_reentry.",
         "Staircase floor-selection audit found Bottom floor only in recording labels, but live trace bot_runs/20260609_135357_live_woodcutting_loop/bot_action_trace.jsonl captured Bottom-floor / Staircase for object 56231 at 3205,3229,2.",
-        "Bank_to_Woodcutting_area route guide now records a strict floor_selection_interaction for top-floor Bottom floor; it still has no plane-1 path point or interaction.",
+        "Bank_to_Woodcutting_area route guide records a strict floor_selection_interaction for top-floor Bottom floor.",
         "20260609_171349_plane1_staircase_recovery_probe found stale Staircase object context for object 16672 at 3204,3229,1, but menu evidence was stale Cancel rows and RuneLite was disconnected.",
-        "20260609_181650_staircase_floor_selection_probe could not validate top-floor Bottom floor because the player was already at 3206,3229,1 and only plane-1 object 16672 was visible."
+        "20260609_181650_staircase_floor_selection_probe could not validate top-floor Bottom floor because the player was already at 3206,3229,1 and only plane-1 object 16672 was visible.",
+        "20260609_185122_plane1_staircase_recovery_probe captured fresh Climb-down / Staircase and Climb-up / Staircase rows for object 16672 at 3204,3229,1; Bottom floor was not present on plane 1.",
+        "Bank_to_Woodcutting_area route guide now records a strict plane1_recovery_interaction for Climb-down / Staircase on source plane 1."
       ],
-      "suggestedNextTask": "Either return to the top-floor bank Staircase state and run staircase_floor_selection_probe.py --json, or gather a fresh plane-1 recovery fixture. Do not rerun the full loop from 3206,3229,1 without one of those proofs."
+      "suggestedNextTask": "Run one guarded live-loop continuation from the current plane-1 state and verify that strict Climb-down / Staircase object 16672 changes plane 1 -> 0 without loosening route guards."
     },
     {
       "id": "knowledge_manual_curation",
@@ -152,19 +154,19 @@
   ],
   "nextTasks": [
     {
-      "id": "verify_top_floor_bottom_floor_probe",
+      "id": "verify_plane1_recovery_live_postcondition",
       "priority": 1,
-      "task": "Reconnect RuneLite, stand at the top-floor bank Staircase route state, then run staircase_floor_selection_probe.py --json before any full loop rerun.",
+      "task": "From the current plane-1 state, run one guarded live-loop continuation and verify strict Climb-down / Staircase object 16672 at 3204,3229,1 changes plane 1 -> 0.",
       "successCriteria": [
-        "Current live menu evidence confirms strict object 56231 at 3205,3229,2 exposes Bottom floor; if not, the runner fails closed with floor_selection_option_missing and does not click Climb-down."
+        "The action selects the proven plane-1 route target, sends no wrong-plane/name-only click, observes the plane-change postcondition, and continues the return route."
       ]
     },
     {
-      "id": "record_plane1_staircase_recovery_fixture",
+      "id": "verify_top_floor_bottom_floor_probe",
       "priority": 2,
-      "task": "Only if already stranded on plane 1 near 3206,3229,1, rerun the focused plane-1 Staircase recovery probe without loosening route-object matching.",
+      "task": "When back at the top-floor bank Staircase route state, run staircase_floor_selection_probe.py --json before relying on the top-floor direct skip again.",
       "successCriteria": [
-        "The guide proves a same-plane plane-1 waypoint, strict Climb-down, or captured Bottom floor option from plane 1; stale daemon context or label-only evidence is rejected and the bot keeps failing closed as route_guide_no_same_plane_reentry."
+        "Current live menu evidence confirms strict object 56231 at 3205,3229,2 exposes Bottom floor; if not, the runner fails closed with floor_selection_option_missing and does not click Climb-down."
       ]
     },
     {

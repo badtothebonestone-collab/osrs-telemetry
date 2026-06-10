@@ -852,3 +852,104 @@ initial input geometry check: FAIL input_geometry_focus_needed while Chrome was 
 after Computer activation of RuneLite: input geometry PASS
 staircase_floor_selection_probe.py --json: FAIL because current player is 3206,3229,1, not top-floor route state
 ```
+
+## 23. Fresh Plane-1 Recovery Evidence Probe
+
+Committed checkpoint:
+
+```text
+commit: fa285e8 add focused staircase floor selection probe and evidence reporting
+push: stabilization/live-loop-recovery-20260609 pushed to origin
+```
+
+Environment repair before probe:
+
+```text
+initial geometry check: WARN because 8893 refused connection and foreground was Chrome
+canonical recovery command: context_service.py --ensure-loaded-scene
+recovery result: recovered_loaded_scene
+snapshot endpoint: PASS on 8893
+RuneLite foreground: RuneLite - KCLBolus
+loadedSceneVerified: true
+inputGeometryPass: true
+current world: 3206,3229,1
+```
+
+Focused probe:
+
+```text
+probe type: plane1_staircase_recovery_probe
+probe folder: recordings\20260609_185122_plane1_staircase_recovery_probe
+target object: Staircase
+object id: 16672
+object world: 3204,3229,1
+top menu: Climb / Staircase
+captured rows: Climb, Climb-up, Climb-down, Walk here, Examine
+Bottom floor captured: no
+Climb-down captured: yes
+Climb-up captured: yes
+menu stale: no
+row bounds captured: no
+route transition click sent: no
+```
+
+Guide/model update:
+
+```text
+route guide updated: yes
+new entry: Bank_to_Woodcutting_area.plane1RecoveryInteractions[0]
+action: Climb-down / Staircase
+strict match: object 16672 at 3204,3229,1, allowed source plane 1
+top-floor Bottom floor guard: unchanged
+name-only Staircase matching: still rejected
+generic Climb matching: still rejected
+```
+
+Rerun decision:
+
+```text
+full woodcutting loop run: no
+reason: this task was evidence capture and guide modeling only
+next command after checks: python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+first thing to verify in that run: plane-1 Climb-down changes plane 1 -> 0 and the return route resumes
+```
+
+Focused route-candidate check:
+
+```text
+proposedAction: interact_service_route_object
+reason: route_guide_plane1_recovery_interaction
+target: Staircase
+object id: 16672
+world: 3204,3229,1
+expected option: Climb-down
+executable: true
+suggested click point: 191,146 canvas
+missing capabilities: none
+```
+
+Checks run:
+
+```powershell
+python -m py_compile telemetry-viewer\staircase_floor_selection_probe.py telemetry-viewer\plane1_staircase_recovery_probe.py telemetry-viewer\route_demonstration.py telemetry-viewer\input_control\action_proposal.py telemetry-viewer\input_control\executor.py
+python telemetry-viewer\tests\test_route_demonstration.py
+python telemetry-viewer\tests\test_action_proposal.py
+python telemetry-viewer\tests\test_bot_eval_runner.py
+python telemetry-viewer\tests\test_input_control_executor.py -k floor_selection
+python telemetry-viewer\tests\test_project_knowledge.py
+python telemetry-viewer\telemetry_ui.py --check
+python telemetry-viewer\update_project_knowledge.py --check
+```
+
+Check results:
+
+```text
+py_compile: PASS
+test_route_demonstration.py: PASS, 17 tests
+test_action_proposal.py: PASS, 92 tests
+test_bot_eval_runner.py: PASS, 32 tests
+test_input_control_executor.py -k floor_selection: PASS, 2 tests
+test_project_knowledge.py: PASS, 7 tests
+telemetry_ui.py --check: PASS
+update_project_knowledge.py --check: PASS
+```

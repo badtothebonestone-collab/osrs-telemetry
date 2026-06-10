@@ -67,7 +67,7 @@ def _text(value: Any) -> str:
 
 
 def _norm(value: Any) -> str:
-    return " ".join(_text(value).lower().replace("_", " ").split())
+    return " ".join(_text(value).lower().replace("-", " ").replace("_", " ").split())
 
 
 def _now_utc() -> str:
@@ -481,6 +481,8 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         "nearPlane1RecoveryState": near_plane1_state,
         "nearDistanceTiles": near_distance,
         "targetWorld": target_world,
+        "expectedRouteLeg": "Bank_to_Woodcutting_area",
+        "expectedRecoveryOption": "Climb-down",
         "inputGeometry": input_geometry,
         "sourceCanvasSize": source_canvas_size,
         "staircaseObjects": staircases,

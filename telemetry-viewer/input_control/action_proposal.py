@@ -1946,6 +1946,12 @@ def _route_target_validation_issue(target: dict[str, Any], route_context: dict[s
         and target_validation.get("classification") == "floor_selection_interaction_match"
     ):
         return None
+    if (
+        str(target.get("interactionType") or "") == "plane1_recovery"
+        and target_validation.get("status") == "PASS"
+        and target_validation.get("classification") == "plane1_recovery_interaction_match"
+    ):
+        return None
 
     if plugin_only_route:
         reasons.append("route_object_not_on_expected_segment")
@@ -3156,7 +3162,12 @@ def _guide_point_tile(progress: dict[str, Any]) -> dict[str, Any] | None:
 def _guide_interaction_target(progress: dict[str, Any]) -> dict[str, Any]:
     interaction = _dict(progress.get("nextGuideInteraction"))
     if not interaction:
-        interaction = _dict(progress.get("nextRecoveryStep")) if str(progress.get("recoveryCandidateType") or "") == "floor_selection_interaction" else {}
+        recovery_type = str(progress.get("recoveryCandidateType") or "")
+        interaction = (
+            _dict(progress.get("nextRecoveryStep"))
+            if recovery_type in {"floor_selection_interaction", "plane1_recovery_interaction", "route_guide_reentry_interaction"}
+            else {}
+        )
     world = _normalise_tile(interaction.get("world"))
     action = str(interaction.get("action") or "").strip()
     target_name = str(interaction.get("targetName") or "Route interaction").strip()
@@ -3164,6 +3175,19 @@ def _guide_interaction_target(progress: dict[str, Any]) -> dict[str, Any]:
         return {}
     expected_targets = [target_name] if target_name else []
     is_floor_selection = str(interaction.get("interactionType") or "") == "floor_selection"
+    is_plane1_recovery = str(interaction.get("interactionType") or "") == "plane1_recovery"
+    if is_floor_selection:
+        route_step_type = "floor_selection_interaction"
+        action_target_source = "floor_selection_interaction"
+        validation_classification = "floor_selection_interaction_match"
+    elif is_plane1_recovery:
+        route_step_type = "plane1_recovery_interaction"
+        action_target_source = "plane1_recovery_interaction"
+        validation_classification = "plane1_recovery_interaction_match"
+    else:
+        route_step_type = "interact_object"
+        action_target_source = "route_guide_interaction"
+        validation_classification = "route_guide_interaction_match"
     return {
         "targetName": target_name,
         "targetType": "sceneObject",
@@ -3185,21 +3209,22 @@ def _guide_interaction_target(progress: dict[str, Any]) -> dict[str, Any]:
         "routeGuideProgress": dict(progress),
         "routeGuideSource": "demonstrated_interaction",
         "routeStepIndex": interaction.get("segmentIndex"),
-        "routeStepType": "floor_selection_interaction" if is_floor_selection else "interact_object",
+        "routeStepType": route_step_type,
         "interactionType": interaction.get("interactionType"),
         "floorSelectionOption": action if is_floor_selection else None,
+        "plane1RecoveryOption": action if is_plane1_recovery else None,
         "sourcePlane": interaction.get("sourcePlane"),
         "destinationPlane": interaction.get("destinationPlane"),
         "allowedSourcePlanes": interaction.get("allowedSourcePlanes"),
         "routeStepLabel": f"{action} {target_name}".strip(),
         "source": "route_guide",
-        "actionTargetSource": "floor_selection_interaction" if is_floor_selection else "route_guide_interaction",
+        "actionTargetSource": action_target_source,
         "routeCorridorMatch": True,
         "routeProgressScore": 0.95,
         "routeCandidateValidation": {
             "schema": "route_candidate_validation.v1",
             "status": "PASS",
-            "classification": "floor_selection_interaction_match" if is_floor_selection else "route_guide_interaction_match",
+            "classification": validation_classification,
             "routeCorridorMatch": True,
             "routeProgressScore": 0.95,
             "expectedTargets": expected_targets,
@@ -3297,6 +3322,126 @@ def _floor_selection_target_for_live_route_object(
     return {}
 
 
+def _iter_route_object_census_items(status: dict[str, Any], brain: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    roots = [
+        status,
+        brain,
+        _dict(status.get("serviceRouteContext")),
+        _dict(status.get("returnRouteContext")),
+        _dict(brain.get("serviceRouteContext")),
+        _dict(brain.get("returnRouteContext")),
+    ]
+    for root in roots:
+        for key in ("serviceRouteObjectCensus", "routeObjectCensus"):
+            census = _dict(root.get(key))
+            for list_key in ("topRouteObjects", "routeObjects", "objects", "candidates"):
+                for item in _list(census.get(list_key)):
+                    if isinstance(item, dict):
+                        items.append(item)
+    return items
+
+
+def _live_route_object_for_guide_interaction(
+    status: dict[str, Any],
+    brain: dict[str, Any],
+    interaction: dict[str, Any],
+) -> dict[str, Any]:
+    expected_world = _normalise_tile(interaction.get("world"))
+    expected_id = _int(interaction.get("objectId") or interaction.get("targetId"), None)
+    if expected_world is None or expected_id is None:
+        return {}
+    for item in _iter_route_object_census_items(status, brain):
+        item = _dict(item)
+        candidate = _dict(item.get("candidate"))
+        item_id = _int(
+            _first_present(
+                item.get("objectId"),
+                item.get("targetId"),
+                item.get("id"),
+                item.get("rawId"),
+                candidate.get("objectId"),
+                candidate.get("targetId"),
+                candidate.get("id"),
+                candidate.get("rawId"),
+            ),
+            None,
+        )
+        if item_id != expected_id:
+            continue
+        item_world = (
+            _target_world_tile(item)
+            or _target_world_tile(candidate)
+            or _normalise_tile(item.get("worldLocation"))
+            or _normalise_tile(candidate.get("worldLocation"))
+        )
+        if item_world != expected_world:
+            continue
+        merged = dict(candidate or item)
+        for key, value in item.items():
+            if key not in merged or merged.get(key) in (None, {}, [], ""):
+                merged[key] = value
+        merged.setdefault("targetName", item.get("name") or candidate.get("targetName") or candidate.get("name") or interaction.get("targetName"))
+        merged.setdefault("name", merged.get("targetName"))
+        merged.setdefault("classId", candidate.get("classId") or item.get("classId") or "service_route_transition")
+        merged.setdefault("targetType", candidate.get("targetType") or item.get("targetType") or "sceneObject")
+        projection = _dict(item.get("projectionStatus") or candidate.get("projectionStatus"))
+        if projection:
+            merged["projectionStatus"] = projection
+            point = _dict(projection.get("canvasPoint"))
+            if point and not merged.get("aimPoint"):
+                merged["aimPoint"] = {"x": point.get("canvasX"), "y": point.get("canvasY"), "source": "projectionStatus.canvasPoint"}
+        merged["routeGuideLiveTargetReacquired"] = True
+        merged["routeGuideLiveTargetSource"] = item.get("source") or candidate.get("source") or "route_object_census"
+        return merged
+    return {}
+
+
+def _merge_live_route_object_into_guide_target(guide_target: dict[str, Any], live_target: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(guide_target)
+    for key, value in live_target.items():
+        if key in {"routeRelevance", "routeRelevanceStatus", "routeRelevanceScore", "routeRelevanceRejectionReason"}:
+            continue
+        if key in {"aimPoint", "safeAimPoint", "canvasAimPoint", "rawAimPoint", "projectionStatus", "geometry", "geometrySummary", "bounds", "clickboxBounds"}:
+            merged[key] = value
+        elif key not in merged or merged.get(key) in (None, {}, [], "", "missing"):
+            merged[key] = value
+    for key in (
+        "actions",
+        "expectedOptions",
+        "expectedTargets",
+        "expectedObjectIds",
+        "expectedPlaneChange",
+        "routeId",
+        "routeStepType",
+        "interactionType",
+        "plane1RecoveryOption",
+        "floorSelectionOption",
+        "sourcePlane",
+        "destinationPlane",
+        "allowedSourcePlanes",
+        "routeGuideReentry",
+        "routeGuideReentryAttempted",
+        "routeGuideName",
+        "routeGuideProgress",
+        "nextRecoveryStep",
+        "recoveryCandidateType",
+        "routeCandidateValidation",
+    ):
+        if key in guide_target:
+            merged[key] = guide_target[key]
+    merged["routeGuideLiveTargetReacquired"] = True
+    merged["actionability"] = "ready"
+    merged["routeCandidateValidation"] = {
+        **_dict(guide_target.get("routeCandidateValidation")),
+        "status": "PASS",
+        "classification": "plane1_recovery_interaction_match"
+        if str(guide_target.get("interactionType") or "") == "plane1_recovery"
+        else _dict(guide_target.get("routeCandidateValidation")).get("classification"),
+    }
+    return merged
+
+
 def _route_reentry_action_for_route(route_name: str | None) -> str:
     return "return_to_resource_area" if str(route_name or "") == "Bank_to_Woodcutting_area" else "navigate_to_service"
 
@@ -3362,6 +3507,7 @@ def _route_reentry_interaction_target(reentry: dict[str, Any]) -> dict[str, Any]
     target["nearestSamePlaneGuidePoint"] = reentry.get("nearestSamePlaneGuidePoint")
     target["nearestSamePlaneInteraction"] = reentry.get("nearestSamePlaneInteraction")
     target["nearestFloorSelectionInteraction"] = reentry.get("nearestFloorSelectionInteraction")
+    target["nearestPlane1RecoveryInteraction"] = reentry.get("nearestPlane1RecoveryInteraction")
     target["directPlaneSkipEvidence"] = reentry.get("directPlaneSkipEvidence")
     target["inferredSubsegment"] = reentry.get("inferredSubsegment")
     target["nextRecoveryStep"] = step
@@ -3510,6 +3656,23 @@ def _wrong_floor_route_reentry_proposal(
     if selected.get("status") == "PASS" and "interaction" in recovery_type:
         target = _route_reentry_interaction_target(selected)
         if target:
+            live_target = _live_route_object_for_guide_interaction(status, brain, _dict(selected.get("nextRecoveryStep")))
+            if live_target:
+                target = _merge_live_route_object_into_guide_target(target, live_target)
+                return _proposal(
+                    "interact_service_route_object",
+                    target_kind="service_route_object",
+                    target=target,
+                    reason="route_guide_plane1_recovery_interaction" if recovery_type == "plane1_recovery_interaction" else "route_guide_same_plane_interaction",
+                    confidence=0.76,
+                    warnings=["strict same-plane route guide interaction reacquired from live route-object census"],
+                    required_context=["route_guide", "client_tick", "route_object"],
+                    source_tick=source_tick,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                )
             return _proposal(
                 "wait_for_context",
                 target_kind="service_route_object",

@@ -687,7 +687,7 @@
       },
       "notes": [
         "Live trace proved the top-floor Staircase exposes a Bottom-floor menu row. Prefer this direct floor-selection action over Climb-down, because Climb-down landed on plane 1 in the live return route.",
-        "This does not prove a plane-1 recovery action; route_guide_no_same_plane_reentry remains the safe blocker when already stranded on plane 1."
+        "Plane-1 recovery is modeled separately and must use the strict object/action/plane evidence in plane1RecoveryInteractions."
       ],
       "sourceProbe": "bot_runs\\20260609_135357_live_woodcutting_loop\\bot_action_trace.jsonl",
       "sourceTraceLine": 1,
@@ -707,6 +707,58 @@
         "labelOnlyEvidenceAccepted": false,
         "directMultiPlaneTransitionObservedInRecordings": true,
         "liveTraceMenuEvidenceFresh": true
+      }
+    }
+  ],
+  "plane1RecoveryInteractions": [
+    {
+      "schema": "route_demonstration_plane1_recovery_interaction.v1",
+      "interactionType": "plane1_recovery",
+      "orderIndex": 0,
+      "routeName": "Bank_to_Woodcutting_area",
+      "routeLeg": "bank_area_to_woodcutting_area",
+      "action": "Climb-down",
+      "option": "Climb-down",
+      "targetName": "Staircase",
+      "target": "Staircase",
+      "targetId": 16672,
+      "objectId": 16672,
+      "targetKind": "object",
+      "world": {
+        "worldX": 3204,
+        "worldY": 3229,
+        "plane": 1
+      },
+      "sourcePlane": 1,
+      "destinationPlane": 0,
+      "allowedSourcePlanes": [
+        1
+      ],
+      "planeBefore": 1,
+      "planeAfter": 0,
+      "expectedPlaneChange": -1,
+      "notes": [
+        "Focused live probe captured a fresh Climb-down / Staircase menu row for the exact plane-1 recovery object.",
+        "Bottom floor was not captured from plane 1; do not substitute top-floor floor-selection evidence for this recovery step.",
+        "The probe did not left-click the transition; the next live run must still verify the plane-change postcondition."
+      ],
+      "sourceProbe": "recordings\\20260609_185122_plane1_staircase_recovery_probe\\plane1_staircase_recovery_probe.json",
+      "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_185122_plane1_staircase_recovery_probe",
+      "evidence": {
+        "capturedMenuOption": "Climb-down",
+        "capturedMenuTarget": "<col=ffff>Staircase",
+        "capturedMenuIdentifier": 16672,
+        "capturedMenuType": "GAME_OBJECT_THIRD_OPTION",
+        "capturedMenuParam0": 52,
+        "capturedMenuParam1": 53,
+        "bottomFloorCaptured": false,
+        "climbDownCaptured": true,
+        "climbUpCaptured": true,
+        "menuRowBoundsCaptured": false,
+        "labelOnlyEvidenceAccepted": false,
+        "menuEvidenceFresh": true,
+        "routeTransitionClickSent": false,
+        "safeSamePlaneRecoveryAction": true
       }
     }
   ],

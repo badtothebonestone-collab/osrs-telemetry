@@ -92,3 +92,37 @@ python telemetry-viewer\plane1_staircase_recovery_probe.py --json
 ```
 
 Only update the route guide if the probe captures a fresh route-relevant menu/action row such as `Bottom floor` or `Climb-down` for the strict Staircase object and plane.
+
+## Fresh Probe Result
+
+Probe folder:
+
+```text
+recordings\20260609_185122_plane1_staircase_recovery_probe
+```
+
+This second focused probe ran after canonical loaded-scene recovery restored RuneLite, the plugin snapshot endpoint, and fresh input geometry.
+
+Result:
+
+```text
+status: PASS
+player: 3206,3229,1
+target: Staircase object 16672 at 3204,3229,1
+top menu: Climb / Staircase
+fresh menu rows: Climb, Climb-up, Climb-down, Walk here, Examine
+Bottom floor captured: no
+Climb-down captured: yes
+Climb-up captured: yes
+menu stale: no
+row bounds captured: no
+route transition click sent: no
+```
+
+Decision:
+
+```text
+The guide now has a strict plane1_recovery_interaction for Climb-down / Staircase object 16672 at 3204,3229,1.
+This does not loosen top-floor guards and does not prove Bottom floor from plane 1.
+The next live run must still verify the expected plane-change postcondition after the click.
+```

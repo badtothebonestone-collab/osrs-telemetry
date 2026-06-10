@@ -471,7 +471,13 @@ def plane1_recovery_interaction_from_probe(probe: dict[str, Any]) -> dict[str, A
     target_name = _text(target.get("name") or target.get("targetName") or "Staircase")
     if "stair" not in _text_key(target_name):
         return {}
-    match = None
+    expected_option = _plane1_recovery_option(
+        probe.get("expectedRecoveryOption") or probe.get("expectedRecoveryAction") or probe.get("preferredOption")
+    )
+    preferred_options = [expected_option] if expected_option else []
+    preferred_options.extend(["Climb-down", "Bottom floor", "Middle floor", "Climb-up", "Top floor"])
+    preferred_options = list(dict.fromkeys(item for item in preferred_options if item))
+    matches: list[dict[str, Any]] = []
     for entry in entries:
         option = _plane1_recovery_option(entry.get("option"))
         if not option:
@@ -484,8 +490,16 @@ def plane1_recovery_interaction_from_probe(probe: dict[str, Any]) -> dict[str, A
             continue
         if option not in FLOOR_SELECTION_OPTIONS.values() and identifier is None and "stair" not in target_text:
             continue
-        match = {**entry, "normalizedOption": option}
-        break
+        matches.append({**entry, "normalizedOption": option})
+    match = next(
+        (
+            item
+            for preferred in preferred_options
+            for item in matches
+            if item.get("normalizedOption") == preferred
+        ),
+        matches[0] if matches else None,
+    )
     if not match:
         return {}
     option = _text(match.get("normalizedOption"))
@@ -511,6 +525,8 @@ def plane1_recovery_interaction_from_probe(probe: dict[str, Any]) -> dict[str, A
             "capturedMenuIdentifier": match.get("identifier"),
             "menuRowBoundsCaptured": bool(match.get("rowBounds") or probe.get("menuRowBoundsCaptured")),
             "labelOnlyEvidenceAccepted": False,
+            "menuEvidenceFresh": True,
+            "routeTransitionClickSent": False,
         },
     }
 
@@ -741,6 +757,7 @@ def build_route_guide(recording_paths: list[str | Path], *, route_name: str | No
         "planeChanges": plane_changes,
         "interactionSteps": interactions,
         "floorSelectionInteractions": floor_selection_interactions,
+        "plane1RecoveryInteractions": [],
         "directPlaneSkips": direct_plane_skips,
         "routeLegs": route_legs,
         "cameraHints": camera_hints[:20],
@@ -969,9 +986,11 @@ def resolve_reentry(
     points = _list(guide.get("pathPoints"))
     interactions = _list(guide.get("interactionSteps"))
     floor_interactions = _list(guide.get("floorSelectionInteractions"))
+    plane1_recovery_interactions = _list(guide.get("plane1RecoveryInteractions"))
     nearest_point = _nearest_same_plane_item(points, current, max_distance=max_same_plane_distance)
     nearest_interaction = _nearest_same_plane_item(interactions, current, max_distance=max_same_plane_distance)
     nearest_floor_selection = _nearest_floor_selection_for_plane(floor_interactions, current, max_distance=max_same_plane_distance)
+    nearest_plane1_recovery = _nearest_same_plane_item(plane1_recovery_interactions, current, max_distance=max_same_plane_distance)
     progress = resolve_progress(guide, current, reached_tolerance_tiles=reached_tolerance_tiles) if (nearest_point or nearest_interaction) else {}
     next_point = _dict(progress.get("nextGuidePoint"))
     next_interaction = _dict(progress.get("nextGuideInteraction"))
@@ -984,6 +1003,9 @@ def resolve_reentry(
     elif nearest_floor_selection:
         recovery_type = "floor_selection_interaction"
         next_step = _dict(nearest_floor_selection.get("item"))
+    elif nearest_plane1_recovery:
+        recovery_type = "plane1_recovery_interaction"
+        next_step = _dict(nearest_plane1_recovery.get("item"))
     elif next_point:
         recovery_type = "route_guide_path_point"
         next_step = next_point
@@ -1011,6 +1033,7 @@ def resolve_reentry(
         "nearestSamePlaneGuidePoint": nearest_point,
         "nearestSamePlaneInteraction": nearest_interaction,
         "nearestFloorSelectionInteraction": nearest_floor_selection,
+        "nearestPlane1RecoveryInteraction": nearest_plane1_recovery,
         "nearestCrossPlaneGuidePoint": nearest_cross_point,
         "nearestCrossPlaneInteraction": nearest_cross_interaction,
         "directPlaneSkipEvidence": direct_skip,

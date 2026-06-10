@@ -8,9 +8,9 @@ The successful Bank-to-Woodcutting route recordings prove a direct multi-plane c
 
 The later live action trace `bot_runs\20260609_135357_live_woodcutting_loop\bot_action_trace.jsonl` does capture the missing top-floor menu evidence: the strict Staircase object `56231` at `3205,3229,2` exposed `Bottom-floor / Staircase` while `Climb-down / Staircase` was the top option. The bot clicked `Climb-down`, and the postcondition ledger confirms that landed on plane `1`. The route guide can therefore model `Bottom floor` as the safe direct plane `2 -> 0` floor-selection action for the top-floor state.
 
-The focused probe `recordings\20260609_181650_staircase_floor_selection_probe` could not re-check the top-floor menu because the current live player position was already `3206,3229,1`. It saw plane-1 Staircase object `16672`, not the expected top-floor object `56231`, so it did not update plane-1 recovery evidence and did not justify a full-loop rerun.
+The focused probe `recordings\20260609_181650_staircase_floor_selection_probe` could not re-check the top-floor menu because the current live player position was already `3206,3229,1`. It saw plane-1 Staircase object `16672`, not the expected top-floor object `56231`.
 
-The current live blocker at `3206,3229,1` is therefore still a missing same-plane recovery fixture. It is not safe to invent a plane-1 Staircase click or loosen the strict Staircase guard.
+The follow-up focused plane-1 probe `recordings\20260609_185122_plane1_staircase_recovery_probe` restored live telemetry first, then captured fresh menu rows for the strict plane-1 Staircase object `16672` at `3204,3229,1`: `Climb`, `Climb-up`, `Climb-down`, `Walk here`, and `Examine`. `Bottom floor` was not present on plane 1. The guide can now model a strict plane-1 `Climb-down` recovery interaction without loosening any Staircase guard.
 
 ## Recordings Inspected
 
@@ -34,9 +34,9 @@ The current `route_guides\Bank_to_Woodcutting_area.route_guide.json` is extracte
 It now records:
 
 - `floorSelectionInteractions`: one live-trace-backed `Bottom floor / Staircase` interaction for object `56231` at `3205,3229,2`
+- `plane1RecoveryInteractions`: one fresh-probe-backed `Climb-down / Staircase` interaction for object `16672` at `3204,3229,1`
 - `directPlaneSkips`: three plane-2 to plane-0 Staircase transitions
 - no plane-1 path points
-- no plane-1 route interactions
 
 ## Staircase Evidence
 
@@ -65,23 +65,17 @@ Latest stranded live state:
 
 ## Conclusion
 
-Existing evidence now supports modeling a direct top-floor `Bottom floor` floor-selection transition. It still does not prove a safe plane-1 recovery action from `3206,3229,1`.
+Existing evidence now supports modeling both the direct top-floor `Bottom floor` floor-selection transition and a strict plane-1 `Climb-down` recovery action from `3206,3229,1`.
 
 The correct behavior remains:
 
 - keep strict action/id/plane matching
 - do not use generic `Climb`
 - do not click a name-only Staircase
-- stop safely with `route_guide_no_same_plane_reentry`
-- include `likelyReason`, `suggestedFixture`, and `safeState` in traces
+- stop safely if fresh route/menu evidence is absent
 - from the top-floor state, prefer the strict live-proven `Bottom floor / Staircase` interaction over `Climb-down`
+- from the already-stranded plane-1 state, use only strict object `16672` at `3204,3229,1` with captured `Climb-down / Staircase`
 
 ## Needed Fixture
 
-Record one short recovery sample starting at or near `3206,3229,1` that proves one of:
-
-- the same Staircase exposes a safe `Bottom floor` option from plane 1
-- a strict `Climb-down Staircase` route target with object id/world/plane evidence
-- a same-plane movement waypoint that safely re-enters the demonstrated route
-
-Until that fixture exists, no live route click is safe from the plane-1 blocker. A top-floor rerun is safe only after current geometry/loaded-scene checks pass and the focused floor-selection probe confirms the same `Bottom floor / Staircase` row is present.
+The missing evidence is no longer the plane-1 menu row. The remaining proof is the live postcondition: the next guarded live run should verify that selecting `Climb-down / Staircase` on object `16672` changes plane `1 -> 0` and resumes the return route.

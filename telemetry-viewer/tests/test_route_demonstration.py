@@ -313,17 +313,57 @@ class RouteDemonstrationTest(unittest.TestCase):
         self.assertEqual(progress["nextGuidePoint"]["world"], {"worldX": 3209, "worldY": 3216, "plane": 0})
         self.assertNotEqual(progress["blocker"], "route_guide_next_step_missing")
 
-    def test_wrong_floor_without_same_plane_step_reports_reentry_gap(self):
+    def test_wrong_floor_uses_plane1_recovery_when_probe_evidence_is_modeled(self):
         guide = route_demonstration.load_route_guide("Bank_to_Woodcutting_area")
 
         reentry = route_demonstration.resolve_reentry(guide, {"worldX": 3206, "worldY": 3229, "plane": 1})
 
-        self.assertEqual(reentry["status"], "WARN")
+        self.assertEqual(reentry["status"], "PASS")
         self.assertTrue(reentry["routeGuideReentryAttempted"])
-        self.assertEqual(reentry["blocker"], "route_guide_no_same_plane_reentry")
+        self.assertIsNone(reentry["blocker"])
         self.assertEqual(reentry["currentPlane"], 1)
         self.assertEqual(reentry["inferredSubsegment"]["classification"], "intermediate_floor_between_route_transitions")
-        self.assertFalse(reentry["nearestSamePlaneGuidePoint"])
+        self.assertEqual(reentry["recoveryCandidateType"], "plane1_recovery_interaction")
+        self.assertEqual(reentry["nextRecoveryStep"]["interactionType"], "plane1_recovery")
+        self.assertEqual(reentry["nextRecoveryStep"]["option"], "Climb-down")
+        self.assertEqual(reentry["nextRecoveryStep"]["objectId"], 16672)
+        self.assertEqual(reentry["nextRecoveryStep"]["world"], {"worldX": 3204, "worldY": 3229, "plane": 1})
+        self.assertFalse(reentry["nextRecoveryStep"]["evidence"]["bottomFloorCaptured"])
+
+    def test_wrong_floor_without_same_plane_step_reports_reentry_gap(self):
+        guide = {
+            "schema": route_demonstration.SCHEMA,
+            "routeName": "Bank_to_Woodcutting_area",
+            "pathPoints": [],
+            "interactionSteps": [],
+            "floorSelectionInteractions": [
+                {
+                    "interactionType": "floor_selection",
+                    "action": "Bottom floor",
+                    "option": "Bottom floor",
+                    "targetName": "Staircase",
+                    "targetId": 56231,
+                    "world": {"worldX": 3205, "worldY": 3229, "plane": 2},
+                    "sourcePlane": 2,
+                    "destinationPlane": 0,
+                    "allowedSourcePlanes": [2],
+                    "expectedPlaneChange": -2,
+                }
+            ],
+            "routeLegs": [
+                {
+                    "segmentIndex": 1,
+                    "segmentType": "plane_transition",
+                    "startWorld": {"worldX": 3205, "worldY": 3229, "plane": 2},
+                    "endWorld": {"worldX": 3205, "worldY": 3229, "plane": 0},
+                }
+            ],
+        }
+
+        reentry = route_demonstration.resolve_reentry(guide, {"worldX": 3206, "worldY": 3229, "plane": 1})
+
+        self.assertEqual(reentry["status"], "WARN")
+        self.assertEqual(reentry["blocker"], "route_guide_no_same_plane_reentry")
         self.assertEqual(reentry["suggestedFixture"], "record a short plane-1 Staircase recovery from 3206,3229,1")
         self.assertEqual(reentry["safeState"], "no click sent because route guide lacks same-plane proof")
         self.assertIn("Bottom floor direct transition was missed", reentry["likelyReason"])
@@ -350,6 +390,7 @@ class RouteDemonstrationTest(unittest.TestCase):
                 {"name": "Staircase", "objectId": 16672, "world": {"worldX": 3204, "worldY": 3229, "plane": 1}}
             ],
             "matchingMenuEntries": [
+                {"option": "Climb-up", "target": "Staircase", "identifier": 16672},
                 {"option": "Climb-down", "target": "Staircase", "identifier": 16672, "rowBounds": {"x": 1, "y": 2, "w": 3, "h": 4}}
             ],
         }
