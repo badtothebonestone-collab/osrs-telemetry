@@ -2730,6 +2730,8 @@ def main(argv: list[str] | None = None) -> int:
                 end="",
             )
             return 1
+    calibration_status: dict[str, Any] | None = None
+    movement_safety: dict[str, Any] | None = None
     if (
         args.backend == "arduino"
         and (args.execute or args.hover_only)
@@ -2802,6 +2804,10 @@ def main(argv: list[str] | None = None) -> int:
     run_loop = bool(args.loop or args.max_actions > 1)
     result = execute_action_loop(args.daemon_url, args, backend=backend) if run_loop else execute_next_action(args.daemon_url, args, backend=backend)
     payload = result.to_dict()
+    if calibration_status is not None:
+        payload["pointerCalibration"] = calibration_status
+    if movement_safety is not None:
+        payload["movementSafety"] = movement_safety
     if pre_action_focus is not None:
         payload["preActionFocus"] = pre_action_focus
     if overlay_info is not None:

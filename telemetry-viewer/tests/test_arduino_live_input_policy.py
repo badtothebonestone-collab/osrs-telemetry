@@ -348,6 +348,53 @@ class ArduinoLiveInputPolicyTest(unittest.TestCase):
         self.assertIn("RuneLite - Test", kwargs["allowed_foreground_titles"])
         self.assertTrue(kwargs["enabled"])
 
+    def test_successful_arduino_execute_payload_includes_pointer_calibration(self):
+        class FakeLoopResult:
+            def to_dict(self):
+                return {
+                    "schema": "input_control_execution_loop_result.v1",
+                    "status": "PASS",
+                    "reason": "loop_complete",
+                    "executedActionCount": 1,
+                    "actionResults": [],
+                    "loopSummary": {},
+                    "warnings": [],
+                }
+
+        original_stdout = sys.stdout
+        capture = StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            calibration_path = Path(tmp) / "pointer_calibration.json"
+            calibration_path.write_text(json.dumps(pointer_calibration_record()), encoding="utf-8")
+            try:
+                sys.stdout = capture
+                with patch.object(execute_cli, "backend_from_options", return_value=FakeCalibrationBackend()), patch.object(
+                    execute_cli,
+                    "execute_action_loop",
+                    return_value=FakeLoopResult(),
+                ):
+                    rc = execute_cli.main(
+                        [
+                            "--execute",
+                            "--loop",
+                            "--backend",
+                            "arduino",
+                            "--arduino-port",
+                            "COM9",
+                            "--arduino-pointer-calibration-path",
+                            str(calibration_path),
+                            "--json",
+                        ]
+                    )
+            finally:
+                sys.stdout = original_stdout
+
+        payload = json.loads(capture.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["pointerCalibration"]["status"], "PASS")
+        self.assertEqual(payload["pointerCalibration"]["path"], str(calibration_path))
+        self.assertEqual(payload["movementSafety"]["status"], "PASS")
+
     def test_arduino_live_movement_safety_scales_region_to_current_runelite_window(self):
         record = pointer_calibration_record()
 

@@ -1669,3 +1669,104 @@ Run or repair the canonical Arduino pointer calibration gate, then rerun:
 ```powershell
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
 ```
+
+## Arduino Pointer Calibration Gate
+
+Updated: 2026-06-13.
+
+Audit:
+
+```text
+blocker owner: execute_next_action.py live Arduino movement gate
+previous blocker: arduino_pointer_calibration_required
+previous expected file: interaction_geometry\live\arduino_pointer_calibration_COM6.json
+previous file state: present but stale, written 2026-06-09T22:13:41Z
+canonical refreshed path: .osrs-telemetry\arduino_pointer_calibration.json
+Arduino port: COM6
+RuneLite window: RuneLite - KCLBolus
+RuneLite hwnd: 16189074
+input geometry: PASS
+canvas rect: {x:148,y:57,width:1229,height:868}
+calibration allowed region: {x:217,y:150,width:1122,height:686}
+previous recovery clicks: not accepted as pointer calibration because only arduino_pointer_calibration_record.v1 with PASS/freshness satisfies gameplay movement safety
+```
+
+Calibration command:
+
+```powershell
+python telemetry-viewer\execute_next_action.py --arduino-pointer-calibration-test --allowed-window runelite --arduino-port COM6 --arduino-pointer-calibration-path .osrs-telemetry\arduino_pointer_calibration.json --json
+```
+
+Calibration result:
+
+```text
+status: PASS
+calibration artifact: .osrs-telemetry\arduino_pointer_calibration.json
+writtenAtUtc: 2026-06-13T18:39:27Z
+movement chunks: 135/135 successful
+movementSuccessRate: 1.0
+maxPositionErrorPx: 4
+finalPositionErrorPx: 1
+clickSent: false
+keySent: false
+foreground window before/after: RuneLite - KCLBolus
+input backend: HumanInputController / ArduinoHIDBackend
+```
+
+Wiring fix:
+
+`bot_eval_runner.py` now passes the refreshed canonical calibration path to `execute_next_action.py`, and successful executor payloads include `pointerCalibration` and `movementSafety` so `bot_eval_summary.json` can report `arduinoPointerCalibrationStatus`, `calibrationPath`, `calibrationBlocker`, and `arduinoMovementSafetyStatus`.
+
+Input geometry after calibration:
+
+```text
+command: python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+status: PASS
+loadedSceneVerified: true
+inputGeometryPass: true
+foreground window: RuneLite - KCLBolus
+```
+
+Real live command after calibration:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```
+
+Run result:
+
+```text
+live run folder: bot_runs\20260613_134142_live_woodcutting_loop
+linked recording: recordings\20260613_134150_live_woodcutting_loop_20260613_134150
+status: WARN
+bot actions sent: 0
+live input executed: no
+loop completed: no
+arduinoPointerCalibrationStatus: PASS
+arduinoMovementSafetyStatus: PASS
+plane-1 recovery candidate: reached
+candidate: route_guide_plane1_recovery_interaction
+target: Staircase 16672 at 3204,3229,1
+expected action: Climb-down
+final blocker: plane1_recovery_hover_option_mismatch
+evidence: hover top menu was Climb / Staircase, while Climb-down / Staircase was present as a lower menu entry; executor skipped click safely with no_click_safety_skip.
+```
+
+Next exact task:
+
+Fix strict route-object lower-menu selection for the plane-1 `Climb-down / Staircase` recovery. The next fix should use the captured lower menu entry for object `16672` and preserve strict id/world/plane/action guards.
+
+Checks:
+
+```text
+PASS: python -m py_compile telemetry-viewer\execute_next_action.py telemetry-viewer\bot_eval_runner.py telemetry-viewer\input_control\executor.py telemetry-viewer\input_control\input_geometry.py
+PASS: python telemetry-viewer\tests\test_arduino_live_input_policy.py
+PASS: python telemetry-viewer\tests\test_bot_eval_runner.py
+PASS: python telemetry-viewer\tests\test_live_readiness.py
+PASS: python telemetry-viewer\tests\test_telemetry_ui.py
+PASS: python telemetry-viewer\tests\test_project_knowledge.py
+PASS: python telemetry-viewer\telemetry_ui.py --check
+PASS: python telemetry-viewer\update_project_knowledge.py --check
+TIMEOUT: python telemetry-viewer\tests\test_input_control_executor.py timed out after 124 seconds.
+FAIL: focused executor check InputControlExecutorTest.test_live_movement_safety_blocks_off_region_screen_point_before_move expected screen_click_point_outside_movement_safety_region but current branch returns input_geometry_invalid. The calibration patch did not touch executor safety semantics; this is recorded as a remaining focused executor-test mismatch.
+```

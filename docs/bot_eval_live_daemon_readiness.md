@@ -549,3 +549,29 @@ Validation:
 
 The next blocker is the Arduino pointer calibration gate, not login recovery or
 the woodcutting route logic.
+
+## 2026-06-13 Update: Arduino Calibration Passed, Route Hover Gate Reached
+
+The canonical no-click Arduino pointer calibration passed on COM6 and wrote
+`.osrs-telemetry\arduino_pointer_calibration.json`. `bot_eval_runner.py` now passes
+that calibration path to `execute_next_action.py`, and summaries record the calibration
+and movement-safety status.
+
+Latest real live run:
+
+| Field | Result |
+| --- | --- |
+| run | `bot_runs\20260613_134142_live_woodcutting_loop` |
+| recording | `recordings\20260613_134150_live_woodcutting_loop_20260613_134150` |
+| loaded scene | true |
+| input geometry | PASS |
+| Arduino pointer calibration | PASS |
+| Arduino movement safety | PASS |
+| live gameplay input | not executed |
+| next blocker | `plane1_recovery_hover_option_mismatch` |
+
+The run reached the strict plane-1 recovery candidate for `Staircase` object
+`16672` at `3204,3229,1`. The executor moved/hovered safely, saw top menu
+`Climb`, and refused to click because expected `Climb-down` was only a lower
+menu entry. The next fix belongs to strict route-object menu selection, not
+startup, geometry, or calibration.

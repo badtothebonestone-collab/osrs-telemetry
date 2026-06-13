@@ -35,6 +35,7 @@ DEFAULT_READINESS_TIMEOUT_SECONDS = 0.75
 DEFAULT_STATUS_DIAGNOSTIC_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_TELEMETRY_AGE_MS = 5_000
 DEFAULT_ARDUINO_PORT = "COM6"
+DEFAULT_ARDUINO_POINTER_CALIBRATION_PATH = ".osrs-telemetry\\arduino_pointer_calibration.json"
 DEFAULT_LIVENESS_RECOVERY_SECONDS = 180.0
 DEFAULT_LIVENESS_ATTEMPTS_PER_STATE = 3
 
@@ -1248,6 +1249,7 @@ def build_live_executor_command(
     daemon_url: str = DEFAULT_DAEMON_URL,
     snapshot_url: str = DEFAULT_SNAPSHOT_URL,
     arduino_port: str = DEFAULT_ARDUINO_PORT,
+    arduino_pointer_calibration_path: str = DEFAULT_ARDUINO_POINTER_CALIBRATION_PATH,
     debug_dir: Path | None = None,
 ) -> list[str]:
     duration_seconds = max(1, int(duration or 1200))
@@ -1266,6 +1268,8 @@ def build_live_executor_command(
         "--focus-runelite",
         "--arduino-port",
         str(arduino_port),
+        "--arduino-pointer-calibration-path",
+        str(arduino_pointer_calibration_path),
         "--input-profile",
         "steady",
         "--movement-profile",
@@ -2909,6 +2913,7 @@ def run_live_action(
     timeout: float = DEFAULT_READINESS_TIMEOUT_SECONDS,
     max_telemetry_age_ms: int = DEFAULT_MAX_TELEMETRY_AGE_MS,
     arduino_port: str = DEFAULT_ARDUINO_PORT,
+    arduino_pointer_calibration_path: str = DEFAULT_ARDUINO_POINTER_CALIBRATION_PATH,
     record_everything: bool = True,
     analyze_after: bool = True,
     require_readiness_pass: bool = True,
@@ -3054,6 +3059,7 @@ def run_live_action(
         daemon_url=daemon_url,
         snapshot_url=snapshot_url,
         arduino_port=arduino_port,
+        arduino_pointer_calibration_path=arduino_pointer_calibration_path,
         debug_dir=debug_dir,
     )
     executor_stdout_path = output_dir / "execute_next_action_stdout.json"
@@ -3117,6 +3123,8 @@ def run_live_action(
     loop_complete = bool(lifecycle_cycles >= 1 and post_service_logs >= 1)
     executor_status = _status(executor_payload.get("status"), default="FAIL") if executor_payload else "FAIL"
     executor_blocker = _executor_blocker_from_payload(executor_payload)
+    pointer_calibration = _dict(executor_payload.get("pointerCalibration"))
+    movement_safety = _dict(executor_payload.get("movementSafety"))
     return_code = completed.returncode if completed is not None else 1
     status = "PASS" if loop_complete and executor_status in {"PASS", "WARN"} and return_code == 0 else executor_status
     if executor_blocker and not loop_complete:
@@ -3158,6 +3166,16 @@ def run_live_action(
         "executorStatus": executor_status,
         "executorReason": executor_payload.get("reason"),
         "executorBlocker": executor_blocker,
+        "arduinoPointerCalibrationStatus": pointer_calibration.get("status"),
+        "calibrationPath": pointer_calibration.get("path") or arduino_pointer_calibration_path,
+        "calibrationFreshness": {
+            "writtenAtUtc": pointer_calibration.get("writtenAtUtc"),
+            "maxAgeHours": 8.0,
+        }
+        if pointer_calibration
+        else None,
+        "calibrationBlocker": pointer_calibration.get("blockers") if pointer_calibration else None,
+        "arduinoMovementSafetyStatus": movement_safety.get("status") if movement_safety else None,
         "loopComplete": loop_complete,
         "decisionCount": len(decisions),
         "candidateCount": len(candidates),

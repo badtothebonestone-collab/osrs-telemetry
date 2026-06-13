@@ -1,6 +1,6 @@
 {
   "schema": "project_knowledge.v1",
-  "updatedAtUtc": "2026-06-13T18:29:12.753096Z",
+  "updatedAtUtc": "2026-06-13T18:47:32.486435Z",
   "repoRoot": "C:\\Users\\badto\\osrs-telemetry",
   "sourceReports": [
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_bank_to_woodcutting_latest.md",
@@ -3535,6 +3535,38 @@
       "goodFixture": false,
       "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_132909_live_woodcutting_loop_20260613_132909\\summary.json",
       "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_132909_live_woodcutting_loop_20260613_132909\\schema_gap_report.md"
+    },
+    {
+      "recordingId": "20260613_134150_live_woodcutting_loop_20260613_134150",
+      "folder": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_134150_live_woodcutting_loop_20260613_134150",
+      "label": "live_woodcutting_loop_20260613_134150",
+      "activityType": "Woodcutting Loop",
+      "verdict": "WARN",
+      "durationSeconds": 317.11,
+      "tickRange": {
+        "first": 818,
+        "last": 1344,
+        "count": 35
+      },
+      "usefulEvidence": [
+        "loop state interrupted",
+        "next phase recover_or_resume_task",
+        "phases interrupted",
+        "interruption lifecycle evidence present",
+        "human click/camera profile available"
+      ],
+      "missingData": [
+        "banking.bankContainer.delta",
+        "banking.bankContainer.items",
+        "banking.bankOpen_or_depositBoxOpen",
+        "banking.bankWidgetRoot",
+        "combat.recentHitsplats",
+        "warning: No camera yaw/pitch changes were found, or source snapshots lack camera fields.",
+        "warning: arduino_events.jsonl is missing or empty"
+      ],
+      "goodFixture": false,
+      "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_134150_live_woodcutting_loop_20260613_134150\\summary.json",
+      "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_134150_live_woodcutting_loop_20260613_134150\\schema_gap_report.md"
     }
   ],
   "activityKnowledge": [

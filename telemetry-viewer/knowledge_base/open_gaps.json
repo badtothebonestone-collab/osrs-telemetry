@@ -1,6 +1,6 @@
 {
   "schema": "project_open_gaps.v1",
-  "updatedAtUtc": "2026-06-13T18:29:12.753096Z",
+  "updatedAtUtc": "2026-06-13T18:47:32.486435Z",
   "gaps": [
     {
       "id": "deposit_all_region_classification",
@@ -67,7 +67,7 @@
         "start_game_command.py separates devStartCommand from liveStartCommand.",
         "Jagex Launcher quick launch is discoverable with --launch=osrs_runelite when installed.",
         "dev_gradle_run remains classified as a dev/plugin launch and is not accepted as the live authenticated start path.",
-        "2026-06-13 recovery artifact bot_runs\\20260613_play_now_recovery_after_target_fix clicked play_now and click_here_to_play, then reached loadedSceneVerified=true."
+        "2026-06-13 recovery clicked Play Now and Click here to play, then reached loadedSceneVerified=true."
       ],
       "suggestedNextTask": "Keep using context_service.py --ensure-loaded-scene before live actions."
     },
@@ -76,11 +76,24 @@
       "title": "Arduino pointer calibration is required before live gameplay input",
       "severity": "high",
       "requiredLayer": "input/arduino",
+      "status": "resolved",
+      "evidence": [
+        "2026-06-13 canonical calibration command passed on COM6 and wrote .osrs-telemetry\\arduino_pointer_calibration.json.",
+        "2026-06-13 live run bot_runs\\20260613_134142_live_woodcutting_loop reported arduinoPointerCalibrationStatus=PASS and arduinoMovementSafetyStatus=PASS."
+      ],
+      "suggestedNextTask": "Use the refreshed calibration path in live executor commands."
+    },
+    {
+      "id": "plane1_recovery_hover_option_mismatch",
+      "title": "Plane-1 Staircase recovery requires strict lower-menu Climb-down selection",
+      "severity": "high",
+      "requiredLayer": "route/executor",
       "status": "open",
       "evidence": [
-        "2026-06-13 live run bot_runs\\20260613_132900_live_woodcutting_loop reached loaded scene and input geometry PASS, then executor stopped with arduino_pointer_calibration_required before sending gameplay input."
+        "2026-06-13 live run bot_runs\\20260613_134142_live_woodcutting_loop reached route_guide_plane1_recovery_interaction for Staircase 16672 at 3204,3229,1.",
+        "Hover menu top option was Climb / Staircase while Climb-down / Staircase appeared as a lower menu entry for the same object id and params; executor skipped with no_click_safety_skip."
       ],
-      "suggestedNextTask": "Run or repair the canonical Arduino pointer calibration gate, then rerun the real live woodcutting loop."
+      "suggestedNextTask": "For strict route objects, safely select the captured lower-menu Climb-down entry when id/world/plane/action evidence matches."
     },
     {
       "id": "input_geometry_live_source_stale",

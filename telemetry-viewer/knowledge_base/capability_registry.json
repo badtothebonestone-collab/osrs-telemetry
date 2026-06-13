@@ -1,6 +1,6 @@
 {
   "schema": "project_capability_registry.v1",
-  "updatedAtUtc": "2026-06-13T18:29:12.753096Z",
+  "updatedAtUtc": "2026-06-13T18:47:32.486435Z",
   "capabilities": [
     {
       "id": "record_everything_simple_mode",

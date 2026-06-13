@@ -881,6 +881,8 @@ class BotEvalRunnerTest(unittest.TestCase):
         self.assertIn("--focus-runelite", command)
         self.assertIn("--arduino-port", command)
         self.assertIn("COM6", command)
+        self.assertIn("--arduino-pointer-calibration-path", command)
+        self.assertIn(".osrs-telemetry\\arduino_pointer_calibration.json", command)
         self.assertNotIn("--dry-run", command)
         self.assertNotIn("--no-input", command)
 
@@ -1096,11 +1098,20 @@ class BotEvalRunnerTest(unittest.TestCase):
             )
 
             def fake_runner(command, *, cwd, stdout, stderr, text, timeout):
+                self.assertIn("--arduino-pointer-calibration-path", command)
+                self.assertIn(".osrs-telemetry\\arduino_pointer_calibration.json", command)
                 payload = {
                     "schema": "input_control_execution_loop_result.v1",
                     "status": "PASS",
                     "reason": "stop_after_lifecycle_cycles",
                     "executedActionCount": 1,
+                    "pointerCalibration": {
+                        "status": "PASS",
+                        "path": ".osrs-telemetry\\arduino_pointer_calibration.json",
+                        "writtenAtUtc": "2026-06-13T18:39:27Z",
+                        "blockers": [],
+                    },
+                    "movementSafety": {"status": "PASS", "blockers": []},
                     "actionResults": [
                         {
                             "schema": "input_control_execution_result.v1",
@@ -1138,6 +1149,10 @@ class BotEvalRunnerTest(unittest.TestCase):
             self.assertEqual(summary["status"], "PASS")
             self.assertTrue(summary["liveInputExecuted"])
             self.assertTrue(summary["loopComplete"])
+            self.assertEqual(summary["arduinoPointerCalibrationStatus"], "PASS")
+            self.assertEqual(summary["calibrationPath"], ".osrs-telemetry\\arduino_pointer_calibration.json")
+            self.assertEqual(summary["calibrationBlocker"], [])
+            self.assertEqual(summary["arduinoMovementSafetyStatus"], "PASS")
             artifacts = summary["artifacts"]
             for key in ("manifest", "readiness", "decisions", "candidates", "actions", "observations", "postconditions", "summary", "executorPayload"):
                 self.assertTrue(Path(artifacts[key]).exists(), key)
