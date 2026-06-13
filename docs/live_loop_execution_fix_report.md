@@ -2056,3 +2056,63 @@ Conclusion:
 The post-return resource_target_hover_safety_skip blocker is fixed for the intended Tree case. The bot now sends Arduino-backed Chop down / Tree clicks after route return and gains logs.
 The remaining end condition is not the old resource hover safety gate. The next work should validate the longer collect-until-full/bank cycle after the confirmed tree-click path, and handle interruption/resume policy if Giant spider combat remains active.
 ```
+
+## Collect Until Full / Inventory Full Handoff Diagnosis
+
+Updated: 2026-06-13.
+
+Source runs:
+
+```text
+collect validation source: bot_runs\20260613_155720_live_woodcutting_loop
+collect validation recording: recordings\20260613_155812_live_woodcutting_loop_20260613_155812
+post-fix live rerun: bot_runs\20260613_163853_live_woodcutting_loop
+post-fix linked recording: recordings\20260613_163947_live_woodcutting_loop_20260613_163947
+```
+
+Diagnosis:
+
+```text
+The 20260613_155720 run proved collect worked: logs went 7 -> 28, free slots went 21 -> 0, animation 879 and Tree postconditions were observed, and inventory became full.
+The failure was stale proposal reuse after that point: candidate trace indices 38-41 still proposed select_resource_target / Tree from tick 8131 while the live state had advanced to full inventory by tick 8573.
+The final Tree proposal did not send a gameplay click because readiness failed, but the proposal itself was wrong: full inventory should hand off to route_to_bank immediately.
+The exact gate was the action proposal/executor handoff path, which did not treat live readiness actionNeed.inventoryFull / inventoryFreeSlots=0 and stale contextActionProposal Tree targets as authoritative enough to suppress resource clicks.
+```
+
+Fix behavior:
+
+```text
+input_control.action_proposal now treats inventoryContext and actionNeed inventoryFull/freeSlots=0 as one canonical full-inventory signal.
+Stale contextActionProposal select_resource_target entries are ignored when inventory is full.
+input_control.executor now performs an inventory-full handoff before gameplay execution and again after live readiness, so readiness actionNeed can override an older Tree proposal.
+When inventory is full, resource proposals are rebuilt as route-to-service/route-to-bank proposals or blocked with a specific route-context reason such as inventory_full_route_to_bank_ready.
+The executor also derives collect progress counts from status deltas so final reconciliation and summaries show inventory/log progress even if the last result is a timeout/readiness block.
+Synthetic executor tests no longer merge the live plugin snapshot into injected test status streams unless a caller explicitly supplies a snapshot source.
+```
+
+Live validation after fix:
+
+```text
+geometry gate: PASS
+real command: python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --duration 2400 --max-actions 600 --json
+live run folder: bot_runs\20260613_163853_live_woodcutting_loop
+linked recording folder: recordings\20260613_163947_live_woodcutting_loop_20260613_163947
+status: FAIL
+executor reason: route_object_not_on_expected_segment
+bot actions sent: 9
+live input executed: yes
+inventory free slots: 0 -> 0
+resource/log count: 28 -> 28
+inventory full: true
+collect stop reason: inventory_full_route_to_bank_ready
+next expected phase: route_to_bank
+Tree clicks after full inventory: none observed in the final candidate trace
+route_to_bank evidence: candidate trace proposed pathing_to_service waypoints, then stopped at service_route_object Gate with route_object_not_on_expected_segment
+```
+
+Conclusion:
+
+```text
+The "full inventory but still trying to chop" blocker is fixed. Full inventory now suppresses Tree/resource candidates and hands off to route_to_bank.
+The new live blocker is in route-to-bank context/segment matching after a full inventory handoff: route_object_not_on_expected_segment for a Gate service route object. That should be handled as a route/context task, not as woodcutting collection or click-safety work.
+```

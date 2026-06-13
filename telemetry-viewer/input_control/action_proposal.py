@@ -266,6 +266,28 @@ def _context_action_proposal(status: dict[str, Any], brain: dict[str, Any]) -> A
     return None
 
 
+def _inventory_full_signal(
+    status: dict[str, Any],
+    brain: dict[str, Any] | None = None,
+    inventory: dict[str, Any] | None = None,
+) -> bool:
+    brain = _dict(brain)
+    sources = [
+        _dict(inventory),
+        _dict(brain.get("inventoryContext")),
+        _dict(status.get("inventoryContext")),
+        _dict(brain.get("actionNeed")),
+        _dict(status.get("actionNeed")),
+    ]
+    for source in sources:
+        if _bool(source.get("inventoryFull")) is True:
+            return True
+        free_slots = _int(_first_present(source.get("freeSlots"), source.get("inventoryFreeSlots")), None)
+        if free_slots == 0:
+            return True
+    return False
+
+
 def _route_tiles_from_context_proposal(proposal: ActionProposal, status: dict[str, Any], brain: dict[str, Any]) -> list[dict[str, Any]]:
     explanation = _dict(proposal.target_explanation)
     pathing = _dict(brain.get("pathingContext") or status.get("pathingContext"))
@@ -2875,10 +2897,7 @@ def _service_required(
         return True
     if active_intent in {"inventory_full", "needs_service", "route_to_service", "pathing_to_service"}:
         return True
-    if _bool(_first_present(inventory.get("inventoryFull"), status.get("inventoryFull"))) is True:
-        return True
-    free_slots = _int(_first_present(inventory.get("freeSlots"), status.get("inventoryFreeSlots")), -1)
-    if free_slots == 0:
+    if _inventory_full_signal(status, inventory=inventory):
         return True
     if _banking_complete(_dict(bank_operation)):
         return False
@@ -2927,10 +2946,7 @@ def _service_required(
 
 
 def _inventory_full_for_service_route(*, inventory: dict[str, Any], status: dict[str, Any]) -> bool:
-    if _bool(_first_present(inventory.get("inventoryFull"), status.get("inventoryFull"))) is True:
-        return True
-    free_slots = _int(_first_present(inventory.get("freeSlots"), status.get("inventoryFreeSlots")), -1)
-    return free_slots == 0
+    return _inventory_full_signal(status, inventory=inventory)
 
 
 def _candidate_actions(candidate: dict[str, Any]) -> list[str]:
@@ -4146,10 +4162,9 @@ def _resource_selection_proposal(
     reason: str,
     confidence: float,
 ) -> ActionProposal | None:
-    inventory_full = _bool(_first_present(inventory.get("inventoryFull"), status.get("inventoryFull")))
-    free_slots = _int(_first_present(inventory.get("freeSlots"), status.get("inventoryFreeSlots")), -1)
+    inventory_full = _inventory_full_signal(status, brain, inventory)
     target = _resource_target_from_context(status, brain, active_target, overlay_selected, source_canvas_size=source_canvas_size)
-    if inventory_full is True or free_slots == 0 or not _is_resource_target_candidate(target):
+    if inventory_full is True or not _is_resource_target_candidate(target):
         return None
     freshness_issue = target_freshness_issue(status, brain, target, source_tick)
     if freshness_issue:
@@ -4296,13 +4311,19 @@ def _resource_selection_proposal(
 
 def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
     status, brain = _status_context(status_or_context)
+    inventory = _dict(brain.get("inventoryContext"))
     context_proposal = _context_action_proposal(status, brain)
-    if context_proposal is not None:
+    if (
+        context_proposal is not None
+        and not (
+            context_proposal.proposed_action == "select_resource_target"
+            and _inventory_full_signal(status, brain, inventory)
+        )
+    ):
         return context_proposal
     input_geometry = input_geometry_from_status(status)
     source_canvas_size = source_canvas_size_from_status(status)
     generic = _dict(brain.get("genericTaskState"))
-    inventory = _dict(brain.get("inventoryContext"))
     service = _dict(brain.get("serviceContext"))
     pathing = _dict(brain.get("pathingContext"))
     player_tile = _player_world_tile(status, brain) or _current_pathing_player_tile(pathing)

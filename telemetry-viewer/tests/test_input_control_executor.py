@@ -27,6 +27,8 @@ from input_control.executor import (
     _confirm_hover_menu,
     _hover_failure_category,
     _loop_counts,
+    _loop_collect_phase_fields,
+    _loop_collect_stop_reason,
     _loop_stop_reason,
     _new_loop_summary,
     _no_click_safety_skip_observed,
@@ -43,6 +45,7 @@ from input_control.executor import (
     _route_transition_retry_required_observation,
     _goal_reached_with_only_recoverable_failures,
     _fetch_status_or_action_context,
+    _inventory_full_handoff_proposal,
     _service_object_timeout_pending_observation,
     _service_object_timeout_wait_extension_allowed,
     human_click_profile_handoff,
@@ -949,6 +952,34 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(fallback["reason"], "context_action_proposal_rejected_inventory_full")
         self.assertEqual(enriched["brain"]["inventoryContext"]["freeSlots"], 0)
         self.assertTrue(any("inventory is full" in warning for warning in proposal.warnings))
+
+    def test_inventory_full_readiness_handoff_replaces_resource_click(self):
+        resource_proposal = ActionProposal(
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Tree",
+            suggested_click_point={"x": 222, "y": 178},
+            reason="resource_target_visible",
+            confidence=0.9,
+        )
+        status = status_payload_for_loop(free_slots=3, held_count=25, progress_count=25, tick=100)
+        readiness = {
+            "schema": "live_readiness.v2",
+            "readinessPassed": True,
+            "actionNeed": {
+                "inventoryFreeSlots": 0,
+                "inventoryFull": True,
+                "needsService": True,
+            },
+        }
+
+        handoff_status, handoff = _inventory_full_handoff_proposal(status, resource_proposal, readiness)
+
+        self.assertIsNotNone(handoff)
+        self.assertNotEqual(handoff.proposed_action, "select_resource_target")
+        self.assertTrue(handoff_status["brain"]["inventoryContext"]["inventoryFull"])
+        self.assertEqual(handoff_status["brain"]["inventoryContext"]["freeSlots"], 0)
+        self.assertIn(handoff.reason, {"inventory_full_route_context_missing", "route_guide_progress_without_live_route_context", "inventory_full_route_to_bank_ready"})
 
     def test_context_action_fallback_rejects_stale_navigation_when_fresh_route_guide_available(self):
         current = ActionProposal(
@@ -2619,6 +2650,74 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(counts["timeoutActionTypes"]["select_resource_target"], 1)
         self.assertEqual(counts["timeoutRecoveredBy"]["delayed_progress_reconciliation"], 1)
         self.assertEqual(counts["evidenceAfterTimeout"], ["delayed_progress_reconciliation"])
+
+    def test_collect_progress_timeout_gets_phase_specific_stop_reason(self):
+        summary = _new_loop_summary()
+        summary.update(
+            {
+                "inventoryFreeSlotsStart": 27,
+                "inventoryFreeSlotsEnd": 21,
+                "resourceCountStart": 1,
+                "resourceCountEnd": 7,
+                "finalPhase": "target_selected",
+                "finalActiveIntent": "select_target",
+                "lastLifecycleSampleTick": 4660,
+                "lastObservedSignals": ["woodcutting_animation_879"],
+                "resourceProgressSuccesses": 6,
+            }
+        )
+
+        self.assertEqual(_loop_collect_stop_reason(summary, "max_runtime_reached"), "collect_phase_in_progress_timeout")
+        fields = _loop_collect_phase_fields(summary, "max_runtime_reached")
+
+        self.assertTrue(fields["collectPhaseActive"])
+        self.assertTrue(fields["collectProgressObserved"])
+        self.assertEqual(fields["logsBefore"], 1)
+        self.assertEqual(fields["logsAfter"], 7)
+        self.assertEqual(fields["freeSlotsBefore"], 27)
+        self.assertEqual(fields["freeSlotsAfter"], 21)
+        self.assertFalse(fields["inventoryFull"])
+        self.assertEqual(fields["collectStopReason"], "collect_phase_in_progress_timeout")
+        self.assertEqual(fields["nextExpectedPhase"], "continue_collect_until_full")
+
+    def test_collect_timeout_without_progress_gets_no_progress_reason(self):
+        summary = _new_loop_summary()
+        summary.update(
+            {
+                "inventoryFreeSlotsStart": 27,
+                "inventoryFreeSlotsEnd": 27,
+                "resourceCountStart": 1,
+                "resourceCountEnd": 1,
+                "finalPhase": "target_selected",
+                "finalActiveIntent": "select_target",
+            }
+        )
+
+        fields = _loop_collect_phase_fields(summary, "max_runtime_reached")
+
+        self.assertTrue(fields["collectPhaseActive"])
+        self.assertFalse(fields["collectProgressObserved"])
+        self.assertEqual(fields["collectStopReason"], "collect_phase_no_progress_timeout")
+        self.assertEqual(fields["nextExpectedPhase"], "recover_resource_progress_or_retarget")
+
+    def test_collect_full_inventory_routes_to_bank_ready(self):
+        summary = _new_loop_summary()
+        summary.update(
+            {
+                "inventoryFreeSlotsStart": 1,
+                "inventoryFreeSlotsEnd": 0,
+                "resourceCountStart": 27,
+                "resourceCountEnd": 28,
+                "finalPhase": "target_selected",
+                "finalActiveIntent": "select_target",
+            }
+        )
+
+        fields = _loop_collect_phase_fields(summary, "max_runtime_reached")
+
+        self.assertTrue(fields["inventoryFull"])
+        self.assertEqual(fields["collectStopReason"], "inventory_full_route_to_bank_ready")
+        self.assertEqual(fields["nextExpectedPhase"], "route_to_bank")
 
     def test_loop_counts_reports_edge_rejects_and_edge_camera_reacquire(self):
         edge_reject = ExecutionResult(

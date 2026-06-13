@@ -150,6 +150,30 @@ class ActionProposalTest(unittest.TestCase):
         self.assertIn("service_route.route_to_bank", proposal.missing_capabilities)
         self.assertIn("pathing.route_to_bank", proposal.missing_capabilities)
 
+    def test_inventory_full_rejects_stale_context_resource_proposal(self):
+        status = status_for(
+            inventory_full=True,
+            free_slots=0,
+            service={"serviceNeeded": True, "serviceRequired": True, "serviceReady": False},
+        )
+        status["brain"]["contextActionProposal"] = {
+            "schema": "action_proposal.v1",
+            "status": "PASS",
+            "proposedAction": "select_resource_target",
+            "targetKind": "resource",
+            "targetName": "Tree",
+            "suggestedClickPoint": {"x": 110, "y": 130},
+            "reason": "resource_target_visible",
+            "confidence": 0.9,
+        }
+        status["actionNeed"] = {"inventoryFreeSlots": 0, "needsService": True}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.reason, "inventory_full_route_context_missing")
+        self.assertIn("service_route.route_to_bank", proposal.missing_capabilities)
+
     def test_inventory_full_sparse_route_guide_position_proposes_next_bank_point(self):
         status = status_for(
             phase="needs_service",

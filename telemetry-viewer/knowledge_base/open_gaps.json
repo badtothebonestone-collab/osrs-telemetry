@@ -1,6 +1,6 @@
 {
   "schema": "project_open_gaps.v1",
-  "updatedAtUtc": "2026-06-13T20:31:14.307070Z",
+  "updatedAtUtc": "2026-06-13T21:51:01.165759Z",
   "gaps": [
     {
       "id": "deposit_all_region_classification",
@@ -116,22 +116,23 @@
       "evidence": [
         "bot_runs\\20260613_145500_live_woodcutting_loop reached 3198,3235,0 after Staircase recovery.",
         "Repeated select_resource_target proposals saw Chop down / Tree but returned no_click_safety_skip.",
-        "bot_runs\\20260613_152350_live_woodcutting_loop sent six Chop down / Tree actions after the fix, inventory free slots changed 27 -> 21, resource count changed 1 -> 7, and animation 879 was observed."
+        "bot_runs\\20260613_152350_live_woodcutting_loop sent six Chop down / Tree actions and observed animation 879.",
+        "bot_runs\\20260613_155720_live_woodcutting_loop collected to 28 logs/full inventory."
       ],
-      "suggestedNextTask": "Keep Tree/Dead tree semantic hover proof and specific resource blockers; continue from the longer collect/interruption validation."
+      "suggestedNextTask": "Keep Tree/Dead tree semantic hover proof and specific resource blockers; continue from the route-to-bank segment blocker."
     },
     {
-      "id": "live_loop_collect_runtime_or_interruption",
-      "title": "Confirmed Tree clicks did not run long enough to complete the collect/bank cycle",
-      "severity": "medium",
-      "requiredLayer": "bot_eval/interruption",
+      "id": "inventory_full_route_to_bank_segment_mismatch",
+      "title": "Full inventory handoff reaches route-to-bank but selects a wrong-segment route object",
+      "severity": "high",
+      "requiredLayer": "route/action_proposal",
       "status": "open",
       "evidence": [
-        "bot_runs\\20260613_152350_live_woodcutting_loop executed six Chop down / Tree actions and gained logs.",
-        "The run ended with executorReason=max_runtime_reached while finalPhase=target_selected.",
-        "The linked analyzer reported Giant spider combat/interruption evidence without recorded task resume before runtime ended."
+        "bot_runs\\20260613_163853_live_woodcutting_loop suppressed Tree/resource candidates after full inventory.",
+        "collectStopReason was inventory_full_route_to_bank_ready with nextExpectedPhase route_to_bank.",
+        "Final blocker was route_object_not_on_expected_segment for a Gate service-route object."
       ],
-      "suggestedNextTask": "Run or adjust live validation to reach inventory full and banking after confirmed Tree clicks, or add explicit interruption/resume handling if combat remains active."
+      "suggestedNextTask": "Fix route-to-bank context/segment matching after full inventory handoff; do not revisit collect/tree click logic unless it regresses."
     },
     {
       "id": "input_geometry_live_source_stale",
@@ -230,11 +231,11 @@
       ]
     },
     {
-      "id": "validate_collect_until_full_after_tree_click",
+      "id": "fix_inventory_full_route_to_bank_segment_mismatch",
       "priority": 1,
-      "task": "Continue validation after confirmed post-return Tree clicks until inventory full and banking is reached again.",
+      "task": "Fix route-to-bank context/segment matching after full inventory handoff.",
       "successCriteria": [
-        "Live run keeps Chop down / Tree executing, reaches inventory full or near full, then proposes route_to_bank; if combat interruption prevents progress it reports interruption_active_no_recovery_policy or a specific resume blocker."
+        "With full inventory, the bot keeps Tree/resource candidates suppressed, proposes the correct woodcutting_area_to_bank route segment, avoids wrong-segment Gate/Object candidates, and reaches bank/deposit readiness or reports a specific route blocker."
       ]
     },
     {

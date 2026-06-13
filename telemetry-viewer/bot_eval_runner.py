@@ -198,6 +198,30 @@ def _health_url_from_snapshot(snapshot_url: str) -> str:
     return text + "/health"
 
 
+def _snapshot_probe_url(snapshot_url: str) -> str:
+    text = str(snapshot_url or "http://127.0.0.1:8893/snapshot").rstrip("/")
+    return text if text.endswith("/snapshot") else text + "/snapshot"
+
+
+def _snapshot_probe_request() -> dict[str, Any]:
+    return {
+        "schema": "plugin_snapshot_request.v1",
+        "needs": ["client_tick_hot", "world_model_summary"],
+        "maxAgeTicks": 5,
+        "responseMode": "compact",
+        "worldModel": {
+            "maxObjects": 160,
+            "radiusTiles": 48,
+            "includeProjection": False,
+            "includeCollision": False,
+        },
+    }
+
+
+def _plugin_snapshot_probe(snapshot_url: str, timeout: float) -> dict[str, Any]:
+    return post_json_with_timing(_snapshot_probe_url(snapshot_url), _snapshot_probe_request(), timeout)
+
+
 def _generated_age_ms(payload: dict[str, Any], *, now: float | None = None) -> int | None:
     generated = payload.get("generatedAtUtc") or payload.get("updatedAtUtc") or payload.get("timestampUtc")
     if not generated:
@@ -454,6 +478,12 @@ def _payload_has_fresh_live_scene_context(payload: dict[str, Any]) -> bool:
             context.get("resourceTargetAvailable"),
         ) is not None:
             return True
+    quality = _dict(payload.get("worldModelQuality") or _dict(payload.get("worldModel")).get("quality"))
+    if quality.get("worldModelAvailable") is True:
+        source_tick = _first_present(quality.get("sourceTick"), quality.get("latestTick"), quality.get("gameTickAtSample"))
+        if source_tick is None or _tick_matches_payload_latest(payload, source_tick):
+            if quality.get("loadedSceneOnly") is True or quality.get("fullWorldLoaded") is True:
+                return True
     return False
 
 
@@ -591,6 +621,7 @@ def check_live_readiness(
     fetcher: Callable[[str, float], dict[str, Any]] | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
+    using_custom_fetcher = fetcher is not None
     fetch = fetcher or fetch_json_with_timing
     daemon_url = str(daemon_url).rstrip("/")
     health_result = fetch(daemon_url + "/health", timeout)
@@ -604,7 +635,19 @@ def check_live_readiness(
     }
     snapshot_health_result = fetch(_health_url_from_snapshot(snapshot_url), timeout)
     status_payload = _dict(health_result.get("payload"))
-    snapshot_payload = _dict(snapshot_health_result.get("payload"))
+    snapshot_probe_result = (
+        {
+            "ok": None,
+            "url": _snapshot_probe_url(snapshot_url),
+            "statusCode": None,
+            "elapsedMs": 0.0,
+            "payload": {},
+            "error": "skipped: custom fetcher supplied",
+        }
+        if using_custom_fetcher
+        else _plugin_snapshot_probe(snapshot_url, max(float(timeout or 0.0), 5.0))
+    )
+    snapshot_payload = _dict(snapshot_probe_result.get("payload")) or _dict(snapshot_health_result.get("payload"))
     latest_session = latest_live_session_dir(sessions_root)
     disk_snapshot = _disk_live_snapshot(latest_session, now=now)
     disk_status = _dict(disk_snapshot.get("status"))
@@ -792,6 +835,7 @@ def check_live_readiness(
             "daemonStatus": {key: value for key, value in status_result.items() if key != "payload"},
             "contextHealth": {key: value for key, value in health_result.items() if key != "payload"},
             "snapshotHealth": {key: value for key, value in snapshot_health_result.items() if key != "payload"},
+            "snapshotProbe": {key: value for key, value in snapshot_probe_result.items() if key != "payload"},
         },
         "taskProbe": task_probe,
         "warnings": list(dict.fromkeys(warnings)),
@@ -810,6 +854,7 @@ def run_input_geometry_check(
     fetcher: Callable[[str, float], dict[str, Any]] | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
+    using_custom_fetcher = fetcher is not None
     fetch = fetcher or fetch_json_with_timing
     daemon_url = str(daemon_url).rstrip("/")
     latest_session = latest_live_session_dir(sessions_root)
@@ -821,7 +866,19 @@ def run_input_geometry_check(
     status_result = fetch(daemon_url + "/status", status_timeout)
     snapshot_health_result = fetch(_health_url_from_snapshot(snapshot_url), bounded_timeout)
     status_payload = _dict(status_result.get("payload"))
-    snapshot_payload = _dict(snapshot_health_result.get("payload"))
+    snapshot_probe_result = (
+        {
+            "ok": None,
+            "url": _snapshot_probe_url(snapshot_url),
+            "statusCode": None,
+            "elapsedMs": 0.0,
+            "payload": {},
+            "error": "skipped: custom fetcher supplied",
+        }
+        if using_custom_fetcher
+        else _plugin_snapshot_probe(snapshot_url, bounded_timeout)
+    )
+    snapshot_payload = _dict(snapshot_probe_result.get("payload")) or _dict(snapshot_health_result.get("payload"))
     from input_control.input_geometry import resolve_input_geometry_status
 
     input_geometry = resolve_input_geometry_status(
@@ -888,6 +945,8 @@ def run_input_geometry_check(
         warnings.append(f"context_status_unreachable: {status_result.get('error')}")
     if not snapshot_health_result.get("ok"):
         warnings.append(f"snapshot_health_unreachable: {snapshot_health_result.get('error')}")
+    if snapshot_probe_result.get("ok") is False:
+        warnings.append(f"snapshot_probe_unreachable: {snapshot_probe_result.get('error')}")
     warnings.extend(str(item) for item in input_geometry.get("warnings") or [])
     errors: list[str] = []
     if not loaded_scene_verified:
@@ -910,6 +969,7 @@ def run_input_geometry_check(
             "contextHealth": {key: value for key, value in health_result.items() if key != "payload"},
             "contextStatus": {key: value for key, value in status_result.items() if key != "payload"},
             "snapshotHealth": {key: value for key, value in snapshot_health_result.items() if key != "payload"},
+            "snapshotProbe": {key: value for key, value in snapshot_probe_result.items() if key != "payload"},
         },
         "statusDiagnosticTimeoutSeconds": status_timeout,
         "warnings": list(dict.fromkeys(warnings)),
@@ -1746,6 +1806,136 @@ def _analyze_recording(recording: Path, output_dir: Path) -> dict[str, Any]:
         "summaryPath": str(recording / "summary.json"),
         "reportPath": str(recording / "manual_recording_report.md") if (recording / "manual_recording_report.md").exists() else None,
     }
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _summary_int(loop_summary: dict[str, Any], *keys: str) -> int | None:
+    return _int_or_none(_first_present(*(loop_summary.get(key) for key in keys)))
+
+
+def _live_collect_progress_seen(loop_summary: dict[str, Any]) -> bool:
+    free_start = _summary_int(loop_summary, "inventoryFreeSlotsStart", "freeSlotsBefore")
+    free_end = _summary_int(loop_summary, "inventoryFreeSlotsEnd", "freeSlotsAfter")
+    logs_start = _summary_int(loop_summary, "resourceCountStart", "logsBefore")
+    logs_end = _summary_int(loop_summary, "resourceCountEnd", "logsAfter")
+    progress_start = _summary_int(loop_summary, "progressStart")
+    progress_end = _summary_int(loop_summary, "progressEnd")
+    signals = {str(item) for item in (loop_summary.get("lastObservedSignals") or [])}
+    return bool(
+        loop_summary.get("collectProgressObserved") is True
+        or (free_start is not None and free_end is not None and free_end < free_start)
+        or (logs_start is not None and logs_end is not None and logs_end > logs_start)
+        or (progress_start is not None and progress_end is not None and progress_end > progress_start)
+        or int(loop_summary.get("resourceProgressSuccesses") or 0) > 0
+        or int(loop_summary.get("inventoryChanges") or 0) > 0
+        or "woodcutting_animation_879" in signals
+    )
+
+
+def _live_inventory_full(loop_summary: dict[str, Any]) -> bool:
+    if loop_summary.get("inventoryFullEnd") is True or loop_summary.get("inventoryFull") is True:
+        return True
+    free_end = _summary_int(loop_summary, "inventoryFreeSlotsEnd", "freeSlotsAfter")
+    return free_end == 0 if free_end is not None else False
+
+
+def _recording_artifact(recording: Path | None, name: str) -> dict[str, Any]:
+    if recording is None:
+        return {}
+    return _parse_json_file(recording / name)
+
+
+def _collect_phase_result(
+    loop_summary: dict[str, Any],
+    *,
+    linked_recording: Path | None,
+    executor_reason: str | None,
+) -> dict[str, Any]:
+    interruption = _recording_artifact(linked_recording, "interruption_lifecycle.json")
+    combat = _recording_artifact(linked_recording, "combat_damage_summary.json")
+    loop_lifecycle = _recording_artifact(linked_recording, "woodcutting_loop_lifecycle.json")
+    interruptions = _dict(loop_lifecycle.get("interruptions"))
+    if not interruption and interruptions:
+        interruption = interruptions
+    combat_from_interruption = _dict(interruption.get("combatDamageSummary") or interruption.get("combat"))
+    if not combat and combat_from_interruption:
+        combat = combat_from_interruption
+    progress = _live_collect_progress_seen(loop_summary)
+    inventory_full = _live_inventory_full(loop_summary)
+    final_phase = str(loop_summary.get("finalPhase") or "")
+    final_intent = str(loop_summary.get("finalActiveIntent") or "")
+    active = bool(
+        loop_summary.get("collectPhaseActive") is True
+        or progress
+        or final_phase in {"target_selected", "select_target", "collecting_resources"}
+        or final_intent in {"select_target", "select_resource_target", "collect", "continue_cutting"}
+    )
+    interruption_detected = bool(interruption.get("interruptionDetected") or combat.get("combatObserved"))
+    interruption_type = str(interruption.get("interruptionType") or ("combat" if combat.get("combatObserved") else "") or "")
+    task_resumed = interruption.get("taskResumed")
+    if task_resumed is None:
+        task_resumed = _dict(combat.get("taskResume")).get("taskResumed")
+    primary_opponent = _dict(combat.get("primaryOpponent"))
+    collect_stop_reason = str(loop_summary.get("collectStopReason") or "")
+    if inventory_full:
+        collect_stop_reason = "inventory_full_route_to_bank_ready"
+    elif active and interruption_detected and task_resumed is False and interruption_type == "combat":
+        collect_stop_reason = "combat_interruption_blocked_collect"
+    elif active and interruption_detected and task_resumed is False:
+        collect_stop_reason = "interruption_active_no_resume"
+    elif active and progress and executor_reason in {"max_runtime_reached", "collect_phase_in_progress_timeout", "max_actions_reached", "max_total_actions_reached"}:
+        collect_stop_reason = "collect_phase_in_progress_timeout"
+    elif active and not progress and executor_reason in {"max_runtime_reached", "collect_phase_no_progress_timeout", "max_actions_reached", "max_total_actions_reached"}:
+        collect_stop_reason = "collect_phase_no_progress_timeout"
+    next_expected_phase = loop_summary.get("nextExpectedPhase")
+    if collect_stop_reason == "inventory_full_route_to_bank_ready":
+        next_expected_phase = "route_to_bank"
+    elif collect_stop_reason in {"combat_interruption_blocked_collect", "interruption_active_no_resume"}:
+        next_expected_phase = "recover_or_resume_task"
+    elif collect_stop_reason == "collect_phase_in_progress_timeout":
+        next_expected_phase = "continue_collect_until_full"
+    elif collect_stop_reason == "collect_phase_no_progress_timeout":
+        next_expected_phase = "retarget_or_recover_resource_progress"
+    result = {
+        "schema": "bot_collect_phase_result.v1",
+        "collectPhaseActive": active,
+        "collectProgressObserved": progress,
+        "logsBefore": _summary_int(loop_summary, "resourceCountStart", "logsBefore"),
+        "logsAfter": _summary_int(loop_summary, "resourceCountEnd", "logsAfter"),
+        "freeSlotsBefore": _summary_int(loop_summary, "inventoryFreeSlotsStart", "freeSlotsBefore"),
+        "freeSlotsAfter": _summary_int(loop_summary, "inventoryFreeSlotsEnd", "freeSlotsAfter"),
+        "inventoryFull": inventory_full,
+        "woodcuttingCycles": int(loop_summary.get("woodcuttingCycles") or loop_summary.get("resourceProgressSuccesses") or 0),
+        "lastProgressTick": loop_summary.get("lastProgressTick") or (loop_summary.get("lastLifecycleSampleTick") if progress else None),
+        "noProgressDurationMs": None if progress else loop_summary.get("noProgressDurationMs"),
+        "interruptionDetected": interruption_detected,
+        "interruptionType": interruption_type or None,
+        "primaryOpponent": primary_opponent or None,
+        "taskResumed": task_resumed,
+        "collectStopReason": collect_stop_reason or None,
+        "nextExpectedPhase": next_expected_phase,
+        "partialCollect": collect_stop_reason in {
+            "collect_phase_in_progress_timeout",
+            "combat_interruption_blocked_collect",
+            "interruption_active_no_resume",
+        },
+        "recordingPath": str(linked_recording) if linked_recording is not None else None,
+    }
+    return result
 
 
 def _trace_records_from_executor_payload(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -3117,6 +3307,36 @@ def run_live_action(
         analysis_result = _analyze_recording(linked_recording, output_dir)
 
     loop_summary = _dict(executor_payload.get("loopSummary"))
+    executor_reason = str(executor_payload.get("reason") or "") if executor_payload else ""
+    collect_phase = _collect_phase_result(
+        loop_summary,
+        linked_recording=linked_recording,
+        executor_reason=executor_reason,
+    )
+    if collect_phase.get("collectStopReason"):
+        loop_summary.update(
+            {
+                "collectPhaseActive": collect_phase.get("collectPhaseActive"),
+                "collectProgressObserved": collect_phase.get("collectProgressObserved"),
+                "logsBefore": collect_phase.get("logsBefore"),
+                "logsAfter": collect_phase.get("logsAfter"),
+                "freeSlotsBefore": collect_phase.get("freeSlotsBefore"),
+                "freeSlotsAfter": collect_phase.get("freeSlotsAfter"),
+                "inventoryFull": collect_phase.get("inventoryFull"),
+                "woodcuttingCycles": collect_phase.get("woodcuttingCycles"),
+                "lastProgressTick": collect_phase.get("lastProgressTick"),
+                "noProgressDurationMs": collect_phase.get("noProgressDurationMs"),
+                "interruptionDetected": collect_phase.get("interruptionDetected"),
+                "interruptionType": collect_phase.get("interruptionType"),
+                "taskResumed": collect_phase.get("taskResumed"),
+                "collectStopReason": collect_phase.get("collectStopReason"),
+                "nextExpectedPhase": collect_phase.get("nextExpectedPhase"),
+                "collectPhase": collect_phase,
+            }
+        )
+        if executor_reason in {"max_runtime_reached", "collect_phase_in_progress_timeout", "max_actions_reached", "max_total_actions_reached"}:
+            executor_reason = str(collect_phase.get("collectStopReason") or executor_reason)
+            loop_summary["stopReason"] = executor_reason
     executed_count = int(executor_payload.get("executedActionCount") or 0)
     lifecycle_cycles = int(loop_summary.get("lifecycleCyclesCompleted") or 0)
     post_service_logs = int(loop_summary.get("postServiceLogsCollected") or 0)
@@ -3131,6 +3351,8 @@ def run_live_action(
         status = "FAIL"
     if return_code != 0 and not loop_complete:
         status = "FAIL"
+    if collect_phase.get("partialCollect") and not loop_complete:
+        status = "WARN"
     manifest = {
         "schema": BOT_EVAL_MANIFEST_SCHEMA,
         "generatedAtUtc": utc_now(),
@@ -3164,7 +3386,7 @@ def run_live_action(
         "readiness": readiness,
         "executorReturnCode": return_code,
         "executorStatus": executor_status,
-        "executorReason": executor_payload.get("reason"),
+        "executorReason": executor_reason or executor_payload.get("reason"),
         "executorBlocker": executor_blocker,
         "arduinoPointerCalibrationStatus": pointer_calibration.get("status"),
         "calibrationPath": pointer_calibration.get("path") or arduino_pointer_calibration_path,
@@ -3186,6 +3408,7 @@ def run_live_action(
         "recordEverythingStarted": bool(record_everything),
         "linkedRecordingFolder": str(linked_recording) if linked_recording is not None else None,
         "analysis": analysis_result,
+        "collectPhase": collect_phase,
         "phaseResults": {
             "lifecycleCyclesCompleted": lifecycle_cycles,
             "postServiceLogsCollected": post_service_logs,
@@ -3221,6 +3444,7 @@ def run_live_action(
             dict.fromkeys(
                 _list(executor_payload.get("warnings"))
                 + _list(_dict(executor_blocker).get("warnings"))
+                + ([f"collect_stop_reason={collect_phase.get('collectStopReason')}"] if collect_phase.get("collectStopReason") else [])
                 + ([] if linked_recording else ["linked recording folder was not resolved"])
             )
         ),

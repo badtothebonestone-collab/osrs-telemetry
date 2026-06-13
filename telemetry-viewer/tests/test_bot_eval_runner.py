@@ -88,6 +88,87 @@ def make_full_loop_recording(root: Path) -> Path:
     return recording
 
 
+class CollectPhaseResultTest(unittest.TestCase):
+    def test_collect_progress_timeout_with_combat_no_resume_is_specific_partial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recording = Path(tmp) / "recording"
+            write_json(
+                recording / "interruption_lifecycle.json",
+                {
+                    "schema": "interruption_lifecycle.v1",
+                    "status": "WARN",
+                    "interruptionDetected": True,
+                    "interruptionType": "combat",
+                    "primaryCause": "hostile_npc",
+                    "taskResumed": False,
+                },
+            )
+            write_json(
+                recording / "combat_damage_summary.json",
+                {
+                    "schema": "combat_damage_summary.v1",
+                    "status": "WARN",
+                    "combatObserved": True,
+                    "primaryOpponent": {"name": "Giant spider", "id": 3017, "confidence": 0.964},
+                    "taskResume": {"taskResumed": False, "resumeEvidence": []},
+                },
+            )
+            loop_summary = {
+                "inventoryFreeSlotsStart": 27,
+                "inventoryFreeSlotsEnd": 21,
+                "resourceCountStart": 1,
+                "resourceCountEnd": 7,
+                "progressStart": 1,
+                "progressEnd": 7,
+                "finalPhase": "target_selected",
+                "finalActiveIntent": "select_target",
+                "lastObservedSignals": ["woodcutting_animation_879"],
+                "resourceProgressSuccesses": 6,
+                "lastLifecycleSampleTick": 4660,
+            }
+
+            result = bot_eval_runner._collect_phase_result(
+                loop_summary,
+                linked_recording=recording,
+                executor_reason="max_runtime_reached",
+            )
+
+            self.assertTrue(result["collectPhaseActive"])
+            self.assertTrue(result["collectProgressObserved"])
+            self.assertEqual(result["logsBefore"], 1)
+            self.assertEqual(result["logsAfter"], 7)
+            self.assertEqual(result["freeSlotsBefore"], 27)
+            self.assertEqual(result["freeSlotsAfter"], 21)
+            self.assertFalse(result["inventoryFull"])
+            self.assertTrue(result["interruptionDetected"])
+            self.assertEqual(result["interruptionType"], "combat")
+            self.assertEqual(result["primaryOpponent"]["name"], "Giant spider")
+            self.assertFalse(result["taskResumed"])
+            self.assertEqual(result["collectStopReason"], "combat_interruption_blocked_collect")
+            self.assertEqual(result["nextExpectedPhase"], "recover_or_resume_task")
+            self.assertTrue(result["partialCollect"])
+
+    def test_collect_progress_timeout_without_interruption_is_in_progress_partial(self):
+        loop_summary = {
+            "inventoryFreeSlotsStart": 27,
+            "inventoryFreeSlotsEnd": 21,
+            "resourceCountStart": 1,
+            "resourceCountEnd": 7,
+            "finalPhase": "target_selected",
+            "finalActiveIntent": "select_target",
+        }
+
+        result = bot_eval_runner._collect_phase_result(
+            loop_summary,
+            linked_recording=None,
+            executor_reason="max_runtime_reached",
+        )
+
+        self.assertEqual(result["collectStopReason"], "collect_phase_in_progress_timeout")
+        self.assertEqual(result["nextExpectedPhase"], "continue_collect_until_full")
+        self.assertTrue(result["partialCollect"])
+
+
 def make_live_session(root: Path) -> Path:
     session = root / "sessions" / "20260607_210000"
     live = session / "interaction_geometry" / "live"

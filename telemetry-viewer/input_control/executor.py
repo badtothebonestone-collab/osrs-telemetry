@@ -287,6 +287,22 @@ def fetch_plugin_snapshot(
     return post_json(plugin_snapshot_endpoint_url(snapshot_url), request, timeout=timeout)
 
 
+def _empty_plugin_snapshot(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    return {}
+
+
+def _effective_snapshot_fetch_func(options: Any, fetch_json_func: Any, snapshot_fetch_func: Any) -> Any:
+    if snapshot_fetch_func is not fetch_plugin_snapshot:
+        return snapshot_fetch_func
+    if fetch_json_func is fetch_json:
+        return snapshot_fetch_func
+    if getattr(options, "snapshot_url", None):
+        return snapshot_fetch_func
+    if bool(getattr(options, "allow_live_snapshot_enrichment", False)):
+        return snapshot_fetch_func
+    return _empty_plugin_snapshot
+
+
 def backend_from_name(name: str | None, **kwargs: Any):
     normalized = str(name or "pyautogui").strip().lower()
     if normalized == "arduino":
@@ -2629,7 +2645,6 @@ def _maybe_context_action_proposal(
     if (
         _status_inventory_full(enriched_status) is True
         and context_proposal.proposed_action == "select_resource_target"
-        and str(proposal.reason or "") == "inventory_full_route_context_missing"
     ):
         fallback.update(
             {
@@ -2638,6 +2653,8 @@ def _maybe_context_action_proposal(
                 "contextStatus": context_response.get("status"),
                 "contextProposalAction": context_proposal.proposed_action,
                 "contextProposalExecutable": bool(context_proposal.executable),
+                "localProposalAction": proposal.proposed_action,
+                "localProposalReason": proposal.reason,
             }
         )
         proposal.warnings.append(
@@ -2666,6 +2683,7 @@ def _fetch_status_or_action_context(
     options: Any,
     *,
     fetch_json_func=fetch_json,
+    snapshot_fetch_func=fetch_plugin_snapshot,
     timeout: float = 3.0,
     purpose: str = "status",
 ) -> dict[str, Any]:
@@ -2673,7 +2691,7 @@ def _fetch_status_or_action_context(
         if not isinstance(payload, dict):
             return payload
         try:
-            snapshot = fetch_plugin_snapshot(
+            snapshot = snapshot_fetch_func(
                 str(getattr(options, "snapshot_url", "http://127.0.0.1:8893")),
                 timeout=min(max(timeout, 0.2), 1.0),
                 extra_needs=["baseline", "inventory", "activity", "projection"],
@@ -2729,7 +2747,7 @@ def _fetch_status_or_action_context(
                 task=_context_fallback_task(options),
             )
         except Exception as context_error:  # noqa: BLE001
-            snapshot = fetch_plugin_snapshot(
+            snapshot = snapshot_fetch_func(
                 str(getattr(options, "snapshot_url", "http://127.0.0.1:8893")),
                 timeout=min(max(timeout, 0.2), 1.0),
                 extra_needs=["baseline", "inventory", "activity", "projection"],
@@ -2834,8 +2852,12 @@ def _status_player_location(status: dict[str, Any]) -> tuple[dict[str, Any] | No
 
 def _status_inventory_free_slots(status: dict[str, Any]) -> int | None:
     inventory = _status_context(status, "inventoryContext")
+    action_need = _dict(status.get("actionNeed") or _status_context(status, "actionNeed"))
     for key in ("freeSlots", "inventoryFreeSlots"):
         value = _int_or_none(inventory.get(key))
+        if value is not None:
+            return value
+        value = _int_or_none(action_need.get(key))
         if value is not None:
             return value
         value = _int_or_none(status.get(key))
@@ -2846,10 +2868,14 @@ def _status_inventory_free_slots(status: dict[str, Any]) -> int | None:
 
 def _status_inventory_full(status: dict[str, Any]) -> bool | None:
     inventory = _status_context(status, "inventoryContext")
+    action_need = _dict(status.get("actionNeed") or _status_context(status, "actionNeed"))
     value = _bool_or_none(inventory.get("inventoryFull"))
     free_slots = _status_inventory_free_slots(status)
     if free_slots == 0:
         return True
+    if value is not None:
+        return value
+    value = _bool_or_none(action_need.get("inventoryFull"))
     if value is not None:
         return value
     value = _bool_or_none(status.get("inventoryFull"))
@@ -3218,6 +3244,22 @@ def _new_loop_summary() -> dict[str, Any]:
         "finalPhase": None,
         "finalActiveIntent": None,
         "lastObservedSignals": [],
+        "collectPhaseActive": False,
+        "collectProgressObserved": False,
+        "logsBefore": None,
+        "logsAfter": None,
+        "freeSlotsBefore": None,
+        "freeSlotsAfter": None,
+        "inventoryFull": False,
+        "woodcuttingCycles": 0,
+        "lastProgressTick": None,
+        "noProgressDurationMs": None,
+        "interruptionDetected": False,
+        "interruptionType": None,
+        "taskResumed": None,
+        "collectStopReason": None,
+        "nextExpectedPhase": None,
+        "collectPhase": {},
         "stopReason": "not_applicable",
     }
 
@@ -3287,6 +3329,112 @@ def _loop_resource_progress_seen(summary: dict[str, Any]) -> bool:
         or (isinstance(resource_delta, int) and resource_delta > 0)
         or (isinstance(progress_delta, int) and progress_delta > 0)
     )
+
+
+def _apply_loop_progress_delta_counts(summary: dict[str, Any]) -> None:
+    delta = _loop_resource_progress_delta(summary)
+    free_delta = delta.get("inventoryFreeSlotDelta")
+    resource_delta = delta.get("resourceCountDelta")
+    progress_delta = delta.get("progressDelta")
+    inventory_delta_count = 0
+    if isinstance(free_delta, int) and free_delta < 0:
+        inventory_delta_count = max(inventory_delta_count, abs(free_delta))
+    if isinstance(resource_delta, int) and resource_delta > 0:
+        inventory_delta_count = max(inventory_delta_count, resource_delta)
+    if isinstance(progress_delta, int) and progress_delta > 0:
+        inventory_delta_count = max(inventory_delta_count, progress_delta)
+    if inventory_delta_count <= 0:
+        return
+    summary["inventoryChanges"] = max(int(summary.get("inventoryChanges") or 0), inventory_delta_count)
+    summary["inventoryProgressSuccesses"] = max(int(summary.get("inventoryProgressSuccesses") or 0), inventory_delta_count)
+    summary["resourceProgressSuccesses"] = max(int(summary.get("resourceProgressSuccesses") or 0), inventory_delta_count)
+    summary["woodcuttingCycles"] = max(int(summary.get("woodcuttingCycles") or 0), inventory_delta_count)
+
+
+def _loop_inventory_full(summary: dict[str, Any]) -> bool:
+    if summary.get("inventoryFullEnd") is True:
+        return True
+    free_slots = _int_or_none(summary.get("inventoryFreeSlotsEnd"))
+    return free_slots == 0 if free_slots is not None else False
+
+
+def _loop_collect_progress_seen(summary: dict[str, Any]) -> bool:
+    signals = {str(signal) for signal in (summary.get("lastObservedSignals") or [])}
+    return bool(
+        _loop_resource_progress_seen(summary)
+        or int(summary.get("resourceProgressSuccesses") or 0) > 0
+        or int(summary.get("inventoryChanges") or 0) > 0
+        or "woodcutting_animation_879" in signals
+    )
+
+
+def _loop_collect_phase_active(summary: dict[str, Any]) -> bool:
+    final_phase = str(summary.get("finalPhase") or "").lower()
+    final_intent = str(summary.get("finalActiveIntent") or "").lower()
+    final_stage = str(summary.get("finalCycleStage") or "").lower()
+    collect_markers = {
+        "collect",
+        "collecting",
+        "collecting_resources",
+        "select_target",
+        "target_selected",
+        "select_resource_target",
+        "resume_cutting",
+        "continue_cutting",
+        "continue_current_target",
+    }
+    return bool(
+        _loop_collect_progress_seen(summary)
+        or final_phase in collect_markers
+        or final_intent in collect_markers
+        or final_stage in collect_markers
+    )
+
+
+def _loop_collect_stop_reason(summary: dict[str, Any], reason: str | None) -> str | None:
+    if reason not in {"max_runtime_reached", "max_actions_reached", "max_total_actions_reached", "pre_action_readiness_failed"}:
+        return None
+    if not _loop_collect_phase_active(summary):
+        return None
+    if _loop_inventory_full(summary):
+        return "inventory_full_route_to_bank_ready"
+    if _loop_collect_progress_seen(summary):
+        return "collect_phase_in_progress_timeout"
+    return "collect_phase_no_progress_timeout"
+
+
+def _loop_collect_phase_fields(summary: dict[str, Any], reason: str | None = None) -> dict[str, Any]:
+    delta = _loop_resource_progress_delta(summary)
+    active = _loop_collect_phase_active(summary)
+    progress = _loop_collect_progress_seen(summary)
+    inventory_full = _loop_inventory_full(summary)
+    collect_stop_reason = _loop_collect_stop_reason(summary, reason)
+    next_expected_phase = None
+    if inventory_full:
+        next_expected_phase = "route_to_bank"
+    elif active and progress:
+        next_expected_phase = "continue_collect_until_full"
+    elif active:
+        next_expected_phase = "recover_resource_progress_or_retarget"
+    fields: dict[str, Any] = {
+        "collectPhaseActive": active,
+        "collectProgressObserved": progress,
+        "logsBefore": delta.get("resourceCountStart"),
+        "logsAfter": delta.get("resourceCountEnd"),
+        "freeSlotsBefore": delta.get("inventoryFreeSlotsStart"),
+        "freeSlotsAfter": delta.get("inventoryFreeSlotsEnd"),
+        "inventoryFull": inventory_full,
+        "woodcuttingCycles": int(summary.get("woodcuttingCycles") or summary.get("resourceProgressSuccesses") or 0),
+        "lastProgressTick": summary.get("lastLifecycleSampleTick") if progress else None,
+        "noProgressDurationMs": None if progress else summary.get("noProgressDurationMs"),
+        "interruptionDetected": bool(summary.get("interruptionDetected") or False),
+        "interruptionType": summary.get("interruptionType"),
+        "taskResumed": summary.get("taskResumed"),
+        "collectStopReason": collect_stop_reason,
+        "nextExpectedPhase": next_expected_phase,
+    }
+    fields["collectPhase"] = dict(fields)
+    return fields
 
 
 def _resource_progress_during_view_recovery_observation(
@@ -3395,6 +3543,7 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
     timeouts = 0
     inventory_changes = 0
     resource_progress_successes = 0
+    woodcutting_cycles = 0
     hover_successes = 0
     hover_failures = 0
     hover_checks = 0
@@ -3607,6 +3756,8 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
             inventory_changes += 1
         if "resource_progress_increased" in signals or observed.get("observedResult") == "resource_progress_increased":
             resource_progress_successes += 1
+        if result.proposed_action == "select_resource_target" and outcome in {"success", "progress", "depleted"}:
+            woodcutting_cycles += 1
         trace = result.action_trace if isinstance(result.action_trace, dict) else {}
         route_stability = trace.get("routeStability") if isinstance(trace.get("routeStability"), dict) else {}
         if route_stability.get("oscillationDetected") is True:
@@ -3698,6 +3849,7 @@ def _loop_counts(results: list[ExecutionResult]) -> dict[str, Any]:
         "inventoryChanges": inventory_changes,
         "inventoryProgressSuccesses": inventory_changes,
         "resourceProgressSuccesses": resource_progress_successes,
+        "woodcuttingCycles": woodcutting_cycles,
         "hoverConfirmSuccesses": hover_successes,
         "hoverConfirmFailures": hover_failures,
         "cancelHoverFailures": cancel_hover_failures,
@@ -3799,6 +3951,7 @@ def _refresh_loop_summary(summary: dict[str, Any], results: list[ExecutionResult
     for key, value in preserved_debug.items():
         if value is not None:
             summary[key] = value
+    _apply_loop_progress_delta_counts(summary)
 
 
 def _update_debug_bundle_summary(summary: dict[str, Any], writer: VisualDebugBundleWriter | None) -> None:
@@ -4771,6 +4924,7 @@ def _maybe_final_reconcile(
     before_status: dict[str, Any] | None,
     loop_summary: dict[str, Any],
     fetch_json_func: Any,
+    snapshot_fetch_func: Any,
     sleep_func: Any,
     monotonic_func: Any,
     timeout: float,
@@ -4819,6 +4973,7 @@ def _maybe_final_reconcile(
                 daemon_url,
                 options,
                 fetch_json_func=fetch_json_func,
+                snapshot_fetch_func=snapshot_fetch_func,
                 timeout=timeout,
                 purpose="final_reconcile",
             )
@@ -4872,6 +5027,7 @@ def _verify_action_after_execution(
     proposal: ActionProposal | None,
     before_status: dict[str, Any],
     fetch_json_func: Any,
+    snapshot_fetch_func: Any,
     sleep_func: Any,
     monotonic_func: Any,
     timeout: float,
@@ -4890,6 +5046,7 @@ def _verify_action_after_execution(
                 daemon_url,
                 options,
                 fetch_json_func=fetch_json_func,
+                snapshot_fetch_func=snapshot_fetch_func,
                 timeout=timeout,
                 purpose="post_action_verification",
             )
@@ -4937,6 +5094,7 @@ def _verify_action_after_execution(
             daemon_url,
             options,
             fetch_json_func=fetch_json_func,
+            snapshot_fetch_func=snapshot_fetch_func,
             timeout=timeout,
             purpose="post_action_navigation_verification",
         )
@@ -6328,6 +6486,87 @@ def _readiness_allows_execution(readiness: dict[str, Any]) -> bool:
     return readiness.get("readinessPassed") is True
 
 
+def _readiness_inventory_full(readiness: dict[str, Any] | None) -> bool:
+    if not isinstance(readiness, dict):
+        return False
+    action_readiness = _dict(readiness.get("actionReadiness"))
+    action_need = _dict(readiness.get("actionNeed") or action_readiness.get("actionNeed"))
+    inventory = _dict(readiness.get("inventory") or action_readiness.get("inventory"))
+    for source in (action_need, inventory):
+        if _bool_or_none(source.get("inventoryFull")) is True:
+            return True
+        free_slots = _int_or_none(source.get("freeSlots"))
+        if free_slots is None:
+            free_slots = _int_or_none(source.get("inventoryFreeSlots"))
+        if free_slots == 0:
+            return True
+    return False
+
+
+def _status_with_inventory_full_handoff(status: dict[str, Any], readiness: dict[str, Any] | None = None) -> dict[str, Any]:
+    updated = deepcopy(status if isinstance(status, dict) else {})
+    brain = dict(updated.get("brain")) if isinstance(updated.get("brain"), dict) else {}
+    inventory = dict(brain.get("inventoryContext")) if isinstance(brain.get("inventoryContext"), dict) else dict(updated.get("inventoryContext") or {})
+    inventory["inventoryFull"] = True
+    inventory["freeSlots"] = 0
+    inventory["source"] = inventory.get("source") or "live_action_need"
+    brain["inventoryContext"] = inventory
+    updated["inventoryContext"] = inventory
+    generic = dict(brain.get("genericTaskState")) if isinstance(brain.get("genericTaskState"), dict) else {}
+    generic["phase"] = "inventory_full"
+    generic["activeIntent"] = "route_to_service"
+    generic.pop("activeIntentTarget", None)
+    brain["genericTaskState"] = generic
+    action_need = dict(updated.get("actionNeed")) if isinstance(updated.get("actionNeed"), dict) else {}
+    readiness_action_need = _dict(readiness.get("actionNeed")) if isinstance(readiness, dict) else {}
+    action_need.update({key: value for key, value in readiness_action_need.items() if value is not None})
+    action_need["inventoryFreeSlots"] = 0
+    action_need["inventoryFull"] = True
+    action_need["needsService"] = True
+    updated["actionNeed"] = action_need
+    brain["actionNeed"] = action_need
+    brain.pop("contextActionProposal", None)
+    updated.pop("contextActionProposal", None)
+    updated["brain"] = brain
+    return updated
+
+
+def _inventory_full_handoff_proposal(
+    status: dict[str, Any],
+    proposal: ActionProposal,
+    readiness: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], ActionProposal | None]:
+    if not _is_resource_object_proposal(proposal):
+        return status, None
+    if _status_inventory_full(status) is not True and not _readiness_inventory_full(readiness):
+        return status, None
+    handoff_status = _status_with_inventory_full_handoff(status, readiness)
+    handoff_proposal = build_action_proposal(handoff_status)
+    if _is_resource_object_proposal(handoff_proposal):
+        handoff_proposal = ActionProposal(
+            status="WARN",
+            proposed_action="wait_for_context",
+            target_kind="none",
+            reason="inventory_full_route_to_bank_ready",
+            confidence=0.8,
+            required_context=["inventory", "service_route", "pathing"],
+            missing_capabilities=["service_route.route_to_bank"],
+            warnings=["inventory is full; refusing resource click until route-to-bank context is actionable"],
+            source_tick=proposal.source_tick or _int_or_none(handoff_status.get("latestTick")),
+            input_geometry=proposal.input_geometry,
+        )
+    else:
+        handoff_proposal.warnings = list(
+            dict.fromkeys(
+                [
+                    *handoff_proposal.warnings,
+                    "inventory is full; switching from resource target to route-to-bank handoff",
+                ]
+            )
+        )
+    return handoff_status, handoff_proposal
+
+
 def _status_with_navigation_option_overrides(status: dict[str, Any], options: Any | None) -> dict[str, Any]:
     if options is None or not isinstance(status, dict):
         return status
@@ -6544,6 +6783,7 @@ def _wait_until_ready(
     status: dict[str, Any],
     proposal: ActionProposal,
     fetch_json_func=fetch_json,
+    snapshot_fetch_func=fetch_plugin_snapshot,
     sleep_func=time.sleep,
     monotonic_func=time.monotonic,
 ) -> tuple[dict[str, Any], ActionProposal, dict[str, Any]]:
@@ -6573,6 +6813,7 @@ def _wait_until_ready(
                 daemon_url,
                 options,
                 fetch_json_func=fetch_json_func,
+                snapshot_fetch_func=snapshot_fetch_func,
                 timeout=timeout,
                 purpose="readiness_wait",
             )
@@ -11652,6 +11893,7 @@ def execute_next_action(
     timeout = float(getattr(options, "timeout", 3.0))
     if backend is None:
         backend = backend_from_options(options)
+    snapshot_fetch_func = _effective_snapshot_fetch_func(options, fetch_json_func, fetch_plugin_snapshot)
     preflight_live_input_status = _live_input_status(options, backend)
     if preflight_live_input_status.get("status") == "FAIL":
         return _live_input_blocked_result(options, backend, preflight_live_input_status)
@@ -11760,6 +12002,9 @@ def execute_next_action(
         proposal,
         timeout=timeout,
     )
+    status, handoff_proposal = _inventory_full_handoff_proposal(status, proposal)
+    if handoff_proposal is not None:
+        proposal = handoff_proposal
     if proposal.proposed_action in {"none", "wait_for_context"} or not proposal.executable:
         return _blocked_by_no_executable_result(
             proposal,
@@ -11775,11 +12020,34 @@ def execute_next_action(
             status=status,
             proposal=proposal,
             fetch_json_func=fetch_json_func,
+            snapshot_fetch_func=snapshot_fetch_func,
             sleep_func=sleep_func,
             monotonic_func=monotonic_func,
         )
         if not _readiness_allows_execution(readiness):
             return _blocked_by_readiness_result(proposal, readiness=readiness, options=options)
+        status, handoff_proposal = _inventory_full_handoff_proposal(status, proposal, readiness)
+        if handoff_proposal is not None:
+            proposal = handoff_proposal
+            if proposal.proposed_action in {"none", "wait_for_context"} or not proposal.executable:
+                return _blocked_by_no_executable_result(
+                    proposal,
+                    status=status,
+                    options=options,
+                    reason=proposal.reason or "inventory_full_route_to_bank_ready",
+                )
+            status, proposal, readiness = _wait_until_ready(
+                daemon_url,
+                options,
+                status=status,
+                proposal=proposal,
+                fetch_json_func=fetch_json_func,
+                snapshot_fetch_func=snapshot_fetch_func,
+                sleep_func=sleep_func,
+                monotonic_func=monotonic_func,
+            )
+            if not _readiness_allows_execution(readiness):
+                return _blocked_by_readiness_result(proposal, readiness=readiness, options=options)
     live_input_status: dict[str, Any] | None = None
     try:
         live_input_status = _start_live_input_session(options, backend)
@@ -11860,6 +12128,7 @@ def execute_next_action(
                 proposal=proposal,
                 before_status=status,
                 fetch_json_func=fetch_json_func,
+                snapshot_fetch_func=snapshot_fetch_func,
                 sleep_func=sleep_func,
                 monotonic_func=monotonic_func,
                 timeout=timeout,
@@ -11950,6 +12219,7 @@ def execute_action_loop(
     timeout = float(getattr(options, "timeout", 3.0))
     dry_run = not bool(getattr(options, "execute", False))
     backend = backend or backend_from_options(options)
+    snapshot_fetch_func = _effective_snapshot_fetch_func(options, fetch_json_func, snapshot_fetch_func)
     recovery: dict[str, Any] | None = None
     if bool(getattr(options, "auto_recover_loaded_scene", False)):
         try:
@@ -12058,6 +12328,7 @@ def execute_action_loop(
                     daemon_url,
                     options,
                     fetch_json_func=fetch_json_func,
+                    snapshot_fetch_func=snapshot_fetch_func,
                     timeout=timeout,
                     purpose="cooldown_poll",
                 )
@@ -12453,6 +12724,7 @@ def execute_action_loop(
                 daemon_url,
                 options,
                 fetch_json_func=fetch_json_func,
+                snapshot_fetch_func=snapshot_fetch_func,
                 timeout=timeout,
                 purpose="action_selection",
             )
@@ -12519,6 +12791,12 @@ def execute_action_loop(
         )
         if context_fallback is not None:
             loop_summary["contextActionFallback"] = context_fallback
+        before_status, handoff_proposal = _inventory_full_handoff_proposal(before_status, proposal)
+        if handoff_proposal is not None:
+            loop_summary["inventoryFullHandoffAttempted"] = True
+            loop_summary["inventoryFullHandoffSource"] = "fresh_status"
+            loop_summary["inventoryFullHandoffAction"] = handoff_proposal.proposed_action
+            proposal = handoff_proposal
         budget_type = _proposal_reacquire_budget_type(proposal)
         loop_summary["reacquireBudgetType"] = budget_type
         fresh_source = _proposal_fresh_executable_source(proposal)
@@ -12722,6 +13000,7 @@ def execute_action_loop(
                 status=before_status,
                 proposal=proposal,
                 fetch_json_func=fetch_json_func,
+                snapshot_fetch_func=snapshot_fetch_func,
                 sleep_func=sleep_func,
                 monotonic_func=monotonic_func,
             )
@@ -12744,6 +13023,44 @@ def execute_action_loop(
                 _apply_lifecycle(action_result, lifecycle)
                 reason = "pre_action_readiness_failed"
                 break
+            before_status, handoff_proposal = _inventory_full_handoff_proposal(before_status, proposal, readiness)
+            if handoff_proposal is not None:
+                _record_loop_status(loop_summary, before_status)
+                loop_summary["inventoryFullHandoffAttempted"] = True
+                loop_summary["inventoryFullHandoffSource"] = "live_readiness_action_need"
+                loop_summary["inventoryFullHandoffAction"] = handoff_proposal.proposed_action
+                proposal = handoff_proposal
+                readiness = None
+                if _readiness_gate_required(options, proposal):
+                    before_status, proposal, readiness = _wait_until_ready(
+                        daemon_url,
+                        options,
+                        status=before_status,
+                        proposal=proposal,
+                        fetch_json_func=fetch_json_func,
+                        snapshot_fetch_func=snapshot_fetch_func,
+                        sleep_func=sleep_func,
+                        monotonic_func=monotonic_func,
+                    )
+                    if not _readiness_allows_execution(readiness):
+                        action_result = _blocked_by_readiness_result(proposal, readiness=readiness, options=options)
+                        results.append(action_result)
+                        _refresh_loop_summary(loop_summary, results)
+                        status_value = "FAIL"
+                        lifecycle = ActionLifecycleState(
+                            current_state="blocked",
+                            last_action=proposal.proposed_action,
+                            last_action_tick=proposal.source_tick,
+                            expected_result=expected_result_for_action(proposal.proposed_action),
+                            observed_result=action_result.observed_result,
+                            attempts=len(results),
+                            max_attempts=max_actions,
+                            reason="pre_action_readiness_failed",
+                            warnings=list(action_result.warnings),
+                        )
+                        _apply_lifecycle(action_result, lifecycle)
+                        reason = "pre_action_readiness_failed"
+                        break
         route_transition_reverse_issue = _route_transition_plane_mismatch_issue(
             proposal,
             current_status=before_status,
@@ -13172,6 +13489,7 @@ def execute_action_loop(
                     proposal=proposal,
                     before_status=before_status,
                     fetch_json_func=fetch_json_func,
+                    snapshot_fetch_func=snapshot_fetch_func,
                     sleep_func=sleep_func,
                     monotonic_func=monotonic_func,
                     timeout=timeout,
@@ -13500,6 +13818,7 @@ def execute_action_loop(
         before_status=wait_before_status,
         loop_summary=loop_summary,
         fetch_json_func=fetch_json_func,
+        snapshot_fetch_func=snapshot_fetch_func,
         sleep_func=sleep_func,
         monotonic_func=monotonic_func,
         timeout=timeout,
@@ -13508,6 +13827,10 @@ def execute_action_loop(
     post_reconcile_stop_reason = _loop_stop_reason(options, loop_summary)
     if post_reconcile_stop_reason and reason in {"action_timeout", "not_applicable", "loop_complete", "max_actions_reached"}:
         reason = post_reconcile_stop_reason
+    loop_summary.update(_loop_collect_phase_fields(loop_summary, reason))
+    collect_stop_reason = loop_summary.get("collectStopReason")
+    if collect_stop_reason and reason in {"max_runtime_reached", "max_actions_reached", "max_total_actions_reached", "pre_action_readiness_failed"}:
+        reason = str(collect_stop_reason)
     if results:
         last_lifecycle = results[-1].lifecycle_state if isinstance(results[-1].lifecycle_state, dict) else {}
         if last_lifecycle.get("currentState") == "verified" and lifecycle.current_state == "timed_out":
@@ -13519,11 +13842,19 @@ def execute_action_loop(
             lifecycle.observed_signals = list(last_lifecycle.get("observedSignals") or lifecycle.observed_signals)
             lifecycle.next_action_allowed = bool(last_lifecycle.get("nextActionAllowed"))
             status_value = "PASS"
+    if reason in GOAL_REACHED_STOP_REASONS and lifecycle.current_state == "idle":
+        lifecycle.current_state = "verified"
+        lifecycle.reason = reason
+        lifecycle.result_complete = True
+        lifecycle.result_outcome = "success"
+        lifecycle.next_action_allowed = False
     loop_summary["stopReason"] = reason
     recoverable_failures_after_goal = _goal_reached_with_only_recoverable_failures(reason, results, loop_summary)
     if recoverable_failures_after_goal:
         loop_summary["recoverableFailuresAfterGoal"] = recoverable_failures_after_goal
         loop_summary["goalReachedWithRecoverableFailures"] = True
+    if reason in {"collect_phase_in_progress_timeout", "inventory_full_route_to_bank_ready"} and status_value == "PASS":
+        status_value = "WARN"
     if lifecycle.current_state == "timed_out":
         status_value = "FAIL"
     elif any(result.status == "FAIL" for result in results) and not recoverable_failures_after_goal:
