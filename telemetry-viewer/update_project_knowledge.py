@@ -719,6 +719,20 @@ def open_gaps(*, full_loop_available: bool = False) -> list[dict[str, Any]]:
             "suggestedNextTask": "Keep normal Record Everything map-only/no-live-click; test live mirror only in isolated validation recordings.",
         },
         {
+            "id": "authenticated_start_game_missing",
+            "title": "Authenticated live Start Game path must be validated before live bot actions",
+            "severity": "high",
+            "requiredLayer": "startup/recovery",
+            "status": "partially_resolved",
+            "evidence": [
+                "start_game_command.py separates devStartCommand from liveStartCommand.",
+                "Jagex Launcher quick launch is discoverable with --launch=osrs_runelite when installed.",
+                "dev_gradle_run remains classified as a dev/plugin launch and is not accepted as the live authenticated start path.",
+                "2026-06-13 Jagex quick-launch recovery started RuneLite but stopped at disconnected_dialog / LOGIN_SCREEN with stale_login_screen_after_relaunch.",
+            ],
+            "suggestedNextTask": "Use the existing safe recovery/launcher session path to clear disconnected/login, then rerun context_service.py --ensure-loaded-scene until loadedSceneVerified=true before live actions.",
+        },
+        {
             "id": "input_geometry_live_source_stale",
             "title": "Live input geometry must come from a current RuneLite/window source before actions",
             "severity": "medium",
@@ -799,11 +813,21 @@ def decisions() -> list[dict[str, Any]]:
         {"id": "human_click_profile_reference", "decision": "Human click/camera behavior is a profile reference, not an execution shortcut.", "reason": "Use it to shape tolerances and recommendations while preserving existing guarded input paths."},
         {"id": "human_click_planning_advisory", "decision": "Human-profile click planning is dry-run/advisory until replay validation proves it.", "reason": "Target readiness, hover/menu proof, and task state gates must remain stronger than a profile offset."},
         {"id": "knowledge_repo_owned", "decision": "Project state belongs in docs/knowledge and telemetry-viewer/knowledge_base.", "reason": "Do not rely on chat memory alone."},
+        {"id": "live_start_separate_from_dev_start", "decision": "Live bot recovery uses liveStartCommand or discovered Jagex quick launch, not devStartCommand.", "reason": "Gradle launches are useful for plugin development but do not prove launcher-authenticated loaded-scene access."},
     ]
 
 
 def next_tasks(*, full_loop_available: bool = False) -> list[dict[str, Any]]:
     tasks = [
+        {
+            "id": "validate_authenticated_live_start",
+            "priority": 1,
+            "task": "Validate the discovered Jagex Launcher RuneLite quick-launch path and loaded-scene recovery.",
+            "successCriteria": [
+                "start_game_command.py --validate-live reports jagex_launcher_runelite_quick_launch.",
+                "context_service.py --ensure-loaded-scene reaches loadedSceneVerified=true without dev_launch_not_loaded.",
+            ],
+        },
         {
             "id": "fix_deposit_region_label",
             "priority": 1,
@@ -1170,7 +1194,7 @@ python telemetry-viewer\\tests\\test_project_knowledge.py
 
 def render_entrypoints(_model: dict[str, Any]) -> str:
     rows = [
-        ["Start Game", "`telemetry-viewer\\start_game_command.py` (`resolve_start_game_command`, `launch_start_game`)", "`telemetry_ui.py`, `bot_eval_runner.py`, recovery scripts", "UI, recovery, and bot eval should share launch classification/artifacts."],
+        ["Start Game", "`telemetry-viewer\\start_game_command.py` (`resolve_start_game_command`, `launch_start_game`)", "`telemetry_ui.py`, `bot_eval_runner.py`, recovery scripts", "UI, recovery, and bot eval share launch classification. `devStartCommand` is for Gradle/plugin testing; live recovery must use `liveStartCommand`, discovered Jagex quick launch, or an already-loaded client."],
         ["Loaded-scene recovery", "`liveness_recovery_core.py`; `context_service.py --ensure-loaded-scene`", "Bot runners, UI, executor ad hoc relaunch code", "`execute_next_action.py --auto-recover-loaded-scene` and `bot_eval_runner.py --auto-recover-loaded-scene` may call this path."],
         ["Live readiness", "`live_readiness_core.py`; bot preflight/readiness wrappers", "Bot eval one-off checks, UI-only checks", "Use shared readiness logic or context-service equivalent."],
         ["Input geometry", "`input_control\\input_geometry.py` (`resolve_input_geometry_status`, `repair_runelite_focus`, `validate_screen_point_inside_geometry`)", "`live_readiness_core.py`, `bot_eval_runner.py`, `input_control\\executor.py`, `telemetry_ui.py` ad hoc geometry checks", "`bot_eval_runner.py --check-input-geometry` and executor pre-click gates must use this resolver."],

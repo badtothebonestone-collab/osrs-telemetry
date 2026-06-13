@@ -559,6 +559,48 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         self.assertTrue(payload["relaunchRequired"])
         self.assertFalse(payload["relaunchAttempted"])
 
+    def test_authenticated_live_start_missing_blocks_relaunch_before_manual_login(self):
+        def run_bootstrap(_args):
+            return {
+                "schema": bootstrap.SCHEMA,
+                "status": "WARN",
+                "loadedSceneVerified": False,
+                "startupStage": "blocked_user_login_required",
+                "clickedCandidates": [],
+                "snapshot": {"gameState": "LOGIN_SCREEN", "loadedSceneVerified": False, "worldModelObjectTotal": 0},
+            }
+
+        payload = recovery.ensure_loaded_scene(
+            fetch_snapshot_func=lambda *_args, **_kwargs: snapshot("LOGIN_SCREEN", object_total=0, hot_age_ms=5000),
+            fetch_daemon_status_func=lambda *_args, **_kwargs: {},
+            window_finder=lambda _filters: window(),
+            button_candidates_func=lambda *_args, **_kwargs: ([], []),
+            run_bootstrap_recovery_func=run_bootstrap,
+            resolve_start_game_command_func=lambda: {
+                "status": "FAIL",
+                "reason": "authenticated_live_start_missing",
+                "command": "",
+                "commandSource": "live_start_missing",
+                "devStartCommand": "cmd /c .\\gradlew.bat --no-daemon run",
+                "devStartCommandSource": "ui_config:game_launch_command",
+                "liveStartCommand": "",
+                "liveStartCommandSource": "none",
+                "launchMode": "unknown",
+                "launchModeWarnings": ["configure Jagex Launcher"],
+                "discoveredCandidates": [],
+            },
+            sleep_func=lambda _seconds: None,
+            use_cache=False,
+        )
+
+        self.assertEqual(payload["status"], "unsafe")
+        self.assertEqual(payload["blocker"], "authenticated_live_start_missing")
+        self.assertTrue(payload["relaunchRequired"])
+        self.assertFalse(payload["relaunchAttempted"])
+        self.assertEqual(payload["devStartCommand"], "cmd /c .\\gradlew.bat --no-daemon run")
+        self.assertEqual(payload["liveStartCommand"], "")
+        self.assertIn("configure Jagex Launcher", payload["launchModeWarnings"])
+
     def test_stale_login_screen_after_relaunch_fails(self):
         times = iter([0.0, 0.0, 0.1, 2.0, 2.0])
 

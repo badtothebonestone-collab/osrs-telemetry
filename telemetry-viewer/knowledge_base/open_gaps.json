@@ -1,6 +1,6 @@
 {
   "schema": "project_open_gaps.v1",
-  "updatedAtUtc": "2026-06-13T16:50:17.366890Z",
+  "updatedAtUtc": "2026-06-13T17:16:21.030341Z",
   "gaps": [
     {
       "id": "deposit_all_region_classification",
@@ -59,16 +59,17 @@
     },
     {
       "id": "authenticated_start_game_missing",
-      "title": "Loaded-scene recovery needs an authenticated Start Game path",
+      "title": "Authenticated live Start Game path must be validated before live bot actions",
       "severity": "high",
       "requiredLayer": "startup/recovery",
-      "status": "open",
+      "status": "partially_resolved",
       "evidence": [
-        "2026-06-13 canonical recovery attempted Click here to play, retried visible Play Now, and escalated through start_game_command.py.",
-        "Configured Start Game command is cmd /c .\\gradlew.bat --no-daemon run, classified as dev_gradle_run.",
-        "Relaunch returned to LOGIN_SCREEN and failed loaded-scene proof with dev_launch_not_loaded."
+        "start_game_command.py separates devStartCommand from liveStartCommand.",
+        "Jagex Launcher quick launch is discoverable with --launch=osrs_runelite when installed.",
+        "dev_gradle_run remains classified as a dev/plugin launch and is not accepted as the live authenticated start path.",
+        "2026-06-13 Jagex quick-launch recovery started RuneLite but stopped at disconnected_dialog / LOGIN_SCREEN with stale_login_screen_after_relaunch."
       ],
-      "suggestedNextTask": "Configure or select an authenticated Start Game command, or restore a logged-in RuneLite session, then rerun context_service.py --ensure-loaded-scene before live actions."
+      "suggestedNextTask": "Use the existing safe recovery/launcher session path to clear disconnected/login, then rerun context_service.py --ensure-loaded-scene until loadedSceneVerified=true before live actions."
     },
     {
       "id": "input_geometry_live_source_stale",
@@ -137,19 +138,6 @@
       "suggestedNextTask": "Compare dry-run planned aim points against successful human clicks in future Record Everything fixtures before changing live click generation."
     },
     {
-      "id": "live_route_wrong_floor_recovery",
-      "title": "Live loop needs plane-1 Staircase recovery postcondition verification",
-      "severity": "high",
-      "requiredLayer": "route/context/action_proposal",
-      "status": "open",
-      "evidence": [
-        "20260609_185122_plane1_staircase_recovery_probe captured fresh Climb-down / Staircase and Climb-up / Staircase rows for object 16672 at 3204,3229,1.",
-        "Bank_to_Woodcutting_area route guide records a strict plane1_recovery_interaction for Climb-down / Staircase on source plane 1.",
-        "Latest 2026-06-13 live attempt did not reach route validation because loaded-scene recovery ended at dev_launch_not_loaded."
-      ],
-      "suggestedNextTask": "After loaded-scene recovery is green, run one guarded live-loop continuation and verify strict Climb-down / Staircase object 16672 changes plane 1 -> 0."
-    },
-    {
       "id": "knowledge_manual_curation",
       "title": "Project knowledge is generated plus manual notes, not a substitute for curated decisions",
       "severity": "low",
@@ -163,28 +151,12 @@
   ],
   "nextTasks": [
     {
-      "id": "configure_authenticated_start_game",
+      "id": "validate_authenticated_live_start",
       "priority": 1,
-      "task": "Configure an authenticated Start Game path or restore a logged-in RuneLite session before live-loop validation.",
+      "task": "Validate the discovered Jagex Launcher RuneLite quick-launch path and loaded-scene recovery.",
       "successCriteria": [
-        "context_service.py --ensure-loaded-scene reports loadedSceneVerified=true.",
-        "Recovery artifacts show safe login/start paths attempted without ending in dev_launch_not_loaded."
-      ]
-    },
-    {
-      "id": "verify_plane1_recovery_live_postcondition",
-      "priority": 1,
-      "task": "From the current plane-1 state, run one guarded live-loop continuation and verify strict Climb-down / Staircase object 16672 at 3204,3229,1 changes plane 1 -> 0.",
-      "successCriteria": [
-        "The action selects the proven plane-1 route target, sends no wrong-plane/name-only click, observes the plane-change postcondition, and continues the return route."
-      ]
-    },
-    {
-      "id": "verify_top_floor_bottom_floor_probe",
-      "priority": 2,
-      "task": "When back at the top-floor bank Staircase route state, run staircase_floor_selection_probe.py --json before relying on the top-floor direct skip again.",
-      "successCriteria": [
-        "Current live menu evidence confirms strict object 56231 at 3205,3229,2 exposes Bottom floor; if not, the runner fails closed with floor_selection_option_missing and does not click Climb-down."
+        "start_game_command.py --validate-live reports jagex_launcher_runelite_quick_launch.",
+        "context_service.py --ensure-loaded-scene reaches loadedSceneVerified=true without dev_launch_not_loaded."
       ]
     },
     {

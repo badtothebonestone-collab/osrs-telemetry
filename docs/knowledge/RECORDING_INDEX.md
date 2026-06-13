@@ -101,6 +101,8 @@
 | 20260609_144618_live_woodcutting_loop_20260609_144618 | Woodcutting Loop | WARN | loop state interrupted; next phase recover_or_resume_task; phases cutting, inventory_full, interrupted; woodcutting lifecycle signals indicate cutting | banking.bankContainer.delta; banking.bankContainer.items; banking.bankOpen_or_depositBoxOpen | no |
 | 20260609_153628_live_woodcutting_loop_20260609_153627 | Woodcutting Loop | WARN | loop state interrupted; next phase recover_or_resume_task; phases cutting, inventory_full, interrupted; woodcutting lifecycle signals indicate cutting | banking.bankContainer.delta; banking.bankContainer.items; banking.bankOpen_or_depositBoxOpen | no |
 | 20260609_154300_live_woodcutting_loop_20260609_154259 | Woodcutting Loop | WARN | loop state interrupted; next phase recover_or_resume_task; phases cutting, inventory_full, interrupted; woodcutting lifecycle signals indicate cutting | banking.bankContainer.delta; banking.bankContainer.items; banking.bankOpen_or_depositBoxOpen | no |
+| 20260609_192428_live_woodcutting_loop_20260609_192428 | Woodcutting Loop | WARN | loop state interrupted; next phase recover_or_resume_task; phases cutting, inventory_full, interrupted; woodcutting lifecycle signals indicate cutting | banking.bankContainer.delta; banking.bankContainer.items; banking.bankOpen_or_depositBoxOpen | no |
+| 20260613_110750_live_woodcutting_loop_20260613_110750 | Woodcutting Loop | PASS | loop state inventory_full; next phase route_to_bank; phases cutting, inventory_full; woodcutting lifecycle signals indicate cutting | banking.bankContainer.delta; banking.bankContainer.items; banking.bankOpen_or_depositBoxOpen | yes |
 
 ## Manual Notes
 

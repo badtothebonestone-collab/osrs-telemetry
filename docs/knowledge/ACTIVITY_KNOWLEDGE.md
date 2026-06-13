@@ -29,7 +29,7 @@
 - Known signals: woodcutting lifecycle, inventory fullness, route to bank, bank deposit, route to trees, interruption resume
 - Useful fields: loopState, currentPhase, nextExpectedPhase, detectedPhases, depositComplete, taskResumed
 - Lifecycle outputs: woodcutting_loop_lifecycle.json
-- Proven recordings: 20260606_201613_Bank_to_tree_area, 20260607_104613_Woodcutting_area_to_bank, 20260607_120446_Bank_opening_deposit, 20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory, 20260607_154606_Wood_cutting_attacked, 20260607_171427_Wood_cutting_attacked, 20260608_135929_live_woodcutting_loop_20260608_135928
+- Proven recordings: 20260606_201613_Bank_to_tree_area, 20260607_104613_Woodcutting_area_to_bank, 20260607_120446_Bank_opening_deposit, 20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory, 20260607_154606_Wood_cutting_attacked, 20260607_171427_Wood_cutting_attacked, 20260608_135929_live_woodcutting_loop_20260608_135928, 20260613_110750_live_woodcutting_loop_20260613_110750
 - Gaps: pure_normal_logs_woodcutting_fixture
 
 ## Combat / Interruption

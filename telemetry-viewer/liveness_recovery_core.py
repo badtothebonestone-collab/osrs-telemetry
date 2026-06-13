@@ -898,6 +898,13 @@ def _result(
         "launchModeWarnings": list(relaunch.get("launchModeWarnings") or []),
         "startGameCommand": relaunch.get("startGameCommand"),
         "startGameCommandSource": relaunch.get("startGameCommandSource"),
+        "devStartCommand": relaunch.get("devStartCommand"),
+        "devStartCommandSource": relaunch.get("devStartCommandSource"),
+        "liveStartCommand": relaunch.get("liveStartCommand"),
+        "liveStartCommandSource": relaunch.get("liveStartCommandSource"),
+        "authenticatedLiveStartConfigured": bool(relaunch.get("authenticatedLiveStartConfigured")),
+        "authenticatedLaunchLikely": bool(relaunch.get("authenticatedLaunchLikely")),
+        "discoveredStartGameCandidates": list(relaunch.get("discoveredStartGameCandidates") or []),
         "relaunchCommand": relaunch.get("relaunchCommand") or relaunch.get("startGameCommand"),
         "relaunchResult": relaunch.get("relaunchResult"),
         "relaunchSucceeded": bool(relaunch.get("relaunchSucceeded")),
@@ -1294,6 +1301,13 @@ def ensure_loaded_scene(
             relaunch_info["launchMode"] = launch_mode
             relaunch_info["launchModeReason"] = command_info.get("launchModeReason")
             relaunch_info["launchModeWarnings"] = list(command_info.get("launchModeWarnings") or [])
+            relaunch_info["devStartCommand"] = command_info.get("devStartCommand")
+            relaunch_info["devStartCommandSource"] = command_info.get("devStartCommandSource")
+            relaunch_info["liveStartCommand"] = command_info.get("liveStartCommand")
+            relaunch_info["liveStartCommandSource"] = command_info.get("liveStartCommandSource")
+            relaunch_info["authenticatedLiveStartConfigured"] = bool(command_info.get("authenticatedLiveStartConfigured"))
+            relaunch_info["authenticatedLaunchLikely"] = bool(command_info.get("authenticatedLaunchLikely"))
+            relaunch_info["discoveredStartGameCandidates"] = list(command_info.get("discoveredCandidates") or [])
             warnings.extend(str(item) for item in relaunch_info["launchModeWarnings"])
             actions.append(
                 {
@@ -1308,11 +1322,17 @@ def ensure_loaded_scene(
                 }
             )
             if command_info.get("status") != "PASS":
+                reason = str(command_info.get("reason") or "relaunch_command_missing")
+                blocker = reason if reason in {"authenticated_live_start_missing", "authenticated_live_start_invalid"} else "relaunch_command_missing"
                 relaunch_info["relaunchResult"] = {
                     "status": "FAIL",
-                    "reason": "relaunch_command_missing",
+                    "reason": reason,
                     "command": command_info.get("command"),
                     "commandSource": command_info.get("commandSource"),
+                    "devStartCommand": command_info.get("devStartCommand"),
+                    "liveStartCommand": command_info.get("liveStartCommand"),
+                    "discoveredCandidates": list(command_info.get("discoveredCandidates") or []),
+                    "nextRecommendation": command_info.get("nextRecommendation"),
                 }
                 return _result(
                     status="unsafe",
@@ -1322,8 +1342,11 @@ def ensure_loaded_scene(
                     started_ms=started_ms,
                     monotonic_func=monotonic_func,
                     attempts=attempts,
-                    blocker="relaunch_command_missing",
-                    next_recommendation="configure the same Start Game command used by Simple Mode",
+                    blocker=blocker,
+                    next_recommendation=(
+                        command_info.get("nextRecommendation")
+                        or "configure an authenticated live Start Game command or attach an already-loaded client"
+                    ),
                     warnings=warnings,
                     relaunch_info=relaunch_info,
                 )

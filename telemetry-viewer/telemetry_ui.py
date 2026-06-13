@@ -289,7 +289,9 @@ def default_config(root: Path | None = None) -> dict[str, Any]:
         "arduino_calibration_profile": "",
         "context_service_port": DEFAULT_PORT,
         "profile": DEFAULT_PROFILE,
+        "dev_start_command": command_text(game_command),
         "game_launch_command": command_text(game_command),
+        "live_start_command": "",
         "authenticated_game_start_command": "",
         "preferred_script_commands": {},
     }
@@ -301,6 +303,14 @@ def merge_config(value: dict[str, Any] | None, root: Path | None = None) -> dict
     if isinstance(value, dict):
         merged.update({key: val for key, val in value.items() if key != "schema_version"})
     merged["schema_version"] = CONFIG_SCHEMA
+    if not str(merged.get("dev_start_command") or "").strip():
+        merged["dev_start_command"] = str(merged.get("game_launch_command") or "").strip()
+    if not str(merged.get("game_launch_command") or "").strip():
+        merged["game_launch_command"] = str(merged.get("dev_start_command") or "").strip()
+    if not str(merged.get("live_start_command") or "").strip():
+        merged["live_start_command"] = str(merged.get("authenticated_game_start_command") or "").strip()
+    if not str(merged.get("authenticated_game_start_command") or "").strip():
+        merged["authenticated_game_start_command"] = str(merged.get("live_start_command") or "").strip()
     merged.setdefault("preferred_script_commands", {})
     migrate_route_template_config(merged, root=root)
     merged["ui_mode"] = UI_MODE_SIMPLE
@@ -1966,17 +1976,25 @@ def build_command_preview(config: dict[str, Any], *, recording_paths: dict[str, 
     bot_preflight = build_bot_eval_preflight_command()
     input_geometry_check = build_input_geometry_check_command()
     human_profile = build_human_click_profile_command(config)
-    game_command = config.get("game_launch_command") or command_text(discover_game_launch_command())
-    authenticated_command = str(config.get("authenticated_game_start_command") or "").strip()
-    launch_mode = start_game_command.classify_launch_mode(game_command, command_source="ui_config")
+    game_command = config.get("dev_start_command") or config.get("game_launch_command") or command_text(discover_game_launch_command())
+    authenticated_command = str(config.get("live_start_command") or config.get("authenticated_game_start_command") or "").strip()
+    dev_launch_mode = start_game_command.classify_launch_mode(game_command, command_source="dev_ui_config")
+    live_resolution = start_game_command.resolve_start_game_command(
+        configured_command=authenticated_command or None,
+        prefer_authenticated=True,
+    )
+    live_command = str(live_resolution.get("command") or authenticated_command or "").strip()
     lines = [
         "Run Game:",
-        f"  {game_command or '(configure a launch command)'}",
-        f"  Launch mode: {launch_mode.get('launchMode')}",
-        f"  Authenticated Game Start: {authenticated_command or '(not configured)'}",
+        f"  Dev Start Command: {game_command or '(configure a dev launch command)'}",
+        f"  Dev launch mode: {dev_launch_mode.get('launchMode')}",
+        f"  Live Start Command: {live_command or '(not configured)'}",
+        f"  Live launch mode: {live_resolution.get('launchMode')}",
     ]
-    for warning in launch_mode.get("warnings") or []:
+    for warning in [*(dev_launch_mode.get("warnings") or []), *(live_resolution.get("launchModeWarnings") or [])]:
         lines.append(f"  WARN: {warning}")
+    if live_resolution.get("status") != "PASS":
+        lines.append("  WARN: Live bot recovery cannot authenticate with dev_gradle_run. Configure Jagex Launcher RuneLite launch or start an already-loaded client.")
     lines.extend([
         "Start Telemetry Stack:",
         f"  live_processor: {command_text(live_processor) if live_processor else '(live_target_processor.py not found)'}",
@@ -2077,9 +2095,15 @@ def check_payload(*, config_path: str | Path | None = None, root: Path | None = 
     latest = latest_recording_dir_for_config(config, root=root)
     template_resolution = resolve_template_from_config(config, root=root)
     route_plan = build_route_session_plan(config.get("route_name") or config.get("route_template_path"), config)
-    game_command = config.get("game_launch_command") or command_text(discover_game_launch_command(root))
-    authenticated_command = str(config.get("authenticated_game_start_command") or "").strip()
-    launch_mode = start_game_command.classify_launch_mode(game_command, command_source="ui_config")
+    game_command = config.get("dev_start_command") or config.get("game_launch_command") or command_text(discover_game_launch_command(root))
+    authenticated_command = str(config.get("live_start_command") or config.get("authenticated_game_start_command") or "").strip()
+    launch_mode = start_game_command.classify_launch_mode(game_command, command_source="dev_ui_config")
+    live_resolution = start_game_command.resolve_start_game_command(
+        root=root,
+        config_path=Path(config_path) if config_path else user_config_path(),
+        configured_command=authenticated_command or None,
+        prefer_authenticated=True,
+    )
     return {
         "schema": CHECK_SCHEMA,
         "status": "PASS" if script_exists("telemetry-viewer\\manual_recorder.py", root) and script_exists("telemetry-viewer\\analyze_manual_recording.py", root) else "FAIL",
@@ -2113,7 +2137,9 @@ def check_payload(*, config_path: str | Path | None = None, root: Path | None = 
             "human_click_profile": script_exists("telemetry-viewer\\human_click_profile.py", root),
         },
         "commands": {
-            "game": command_text(config.get("game_launch_command") or discover_game_launch_command(root)),
+            "game": command_text(config.get("dev_start_command") or config.get("game_launch_command") or discover_game_launch_command(root)),
+            "dev_start": command_text(config.get("dev_start_command") or config.get("game_launch_command") or discover_game_launch_command(root)),
+            "live_start": str(live_resolution.get("command") or authenticated_command or ""),
             "authenticated_game_start": authenticated_command,
             "context_service": command_text(build_context_service_command(config)),
             "live_processor": command_text(build_live_processor_command(config, root=root)),
@@ -2142,11 +2168,19 @@ def check_payload(*, config_path: str | Path | None = None, root: Path | None = 
         },
         "game_launch": {
             "startGameCommand": command_text(game_command),
+            "devStartCommand": command_text(game_command),
+            "liveStartCommand": str(live_resolution.get("command") or authenticated_command or ""),
             "authenticatedGameStartCommand": authenticated_command,
             "launchMode": launch_mode.get("launchMode"),
             "launchModeReason": launch_mode.get("reason"),
             "launchModeWarnings": launch_mode.get("warnings") or [],
+            "liveLaunchMode": live_resolution.get("launchMode"),
+            "liveLaunchModeReason": live_resolution.get("launchModeReason"),
+            "liveLaunchModeWarnings": live_resolution.get("launchModeWarnings") or [],
+            "liveResolutionStatus": live_resolution.get("status"),
+            "liveResolutionReason": live_resolution.get("reason"),
             "authenticatedLaunchConfigured": bool(authenticated_command),
+            "authenticatedLaunchLikely": bool(live_resolution.get("authenticatedLaunchLikely")),
         },
         "route_template_resolution": public_template_resolution(template_resolution),
         "route_session_plan": {
@@ -2289,8 +2323,8 @@ class TelemetryControlApp:
         self.arduino_calibration_var = tk.StringVar(value=str(cfg.get("arduino_calibration_profile") or ""))
         self.port_var = tk.StringVar(value=str(cfg.get("context_service_port") or DEFAULT_PORT))
         self.profile_var = tk.StringVar(value=str(cfg.get("profile") or DEFAULT_PROFILE))
-        self.game_command_var = tk.StringVar(value=str(cfg.get("game_launch_command") or command_text(discover_game_launch_command())))
-        self.authenticated_game_command_var = tk.StringVar(value=str(cfg.get("authenticated_game_start_command") or ""))
+        self.game_command_var = tk.StringVar(value=str(cfg.get("dev_start_command") or cfg.get("game_launch_command") or command_text(discover_game_launch_command())))
+        self.authenticated_game_command_var = tk.StringVar(value=str(cfg.get("live_start_command") or cfg.get("authenticated_game_start_command") or ""))
         for var in (
             self.preset_var,
             self.description_var,
@@ -2590,8 +2624,8 @@ class TelemetryControlApp:
         ttk.Checkbutton(advanced_tab, text="Input path integrity", variable=self.input_path_integrity_var).grid(row=1, column=3, sticky="w", padx=4, pady=4)
         self._entry(advanced_tab, 2, 0, "Context port", self.port_var, width=10)
         self._entry(advanced_tab, 2, 2, "Profile", self.profile_var, width=16)
-        self._entry(advanced_tab, 3, 0, "Game launch command", self.game_command_var, columnspan=4)
-        self._entry(advanced_tab, 4, 0, "Authenticated Game Start", self.authenticated_game_command_var, columnspan=4)
+        self._entry(advanced_tab, 3, 0, "Dev Start Command", self.game_command_var, columnspan=4)
+        self._entry(advanced_tab, 4, 0, "Live Start Command", self.authenticated_game_command_var, columnspan=4)
         ttk.Button(advanced_tab, text="Save settings", command=self.save_settings).grid(row=5, column=0, padx=4, pady=4, sticky="ew")
         self.artifact_var = tk.StringVar(value="schema_gap_report.md")
         ttk.Label(advanced_tab, text="Artifacts").grid(row=5, column=1, sticky="w", padx=4, pady=4)
@@ -2645,8 +2679,8 @@ class TelemetryControlApp:
         self.status_vars["diag_repo_root"].set(str(repo_root()))
         self._entry(paths_tab, 1, 0, "Output folder", self.output_folder_var, columnspan=3)
         ttk.Button(paths_tab, text="Change Output Folder", command=self.change_output_folder).grid(row=1, column=5, sticky="ew", padx=4, pady=4)
-        self._entry(paths_tab, 2, 0, "Game launch command", self.game_command_var, columnspan=4)
-        self._entry(paths_tab, 3, 0, "Authenticated Game Start", self.authenticated_game_command_var, columnspan=4)
+        self._entry(paths_tab, 2, 0, "Dev Start Command", self.game_command_var, columnspan=4)
+        self._entry(paths_tab, 3, 0, "Live Start Command", self.authenticated_game_command_var, columnspan=4)
         ttk.Button(paths_tab, text="Save settings", command=self.save_settings).grid(row=4, column=0, sticky="ew", padx=4, pady=4)
 
         telemetry_tab = self._diagnostics_telemetry
@@ -2935,7 +2969,9 @@ class TelemetryControlApp:
                 "arduino_calibration_profile": self.arduino_calibration_var.get().strip(),
                 "context_service_port": self.port_var.get().strip() or DEFAULT_PORT,
                 "profile": self.profile_var.get().strip() or DEFAULT_PROFILE,
+                "dev_start_command": self.game_command_var.get().strip(),
                 "game_launch_command": self.game_command_var.get().strip(),
+                "live_start_command": self.authenticated_game_command_var.get().strip(),
                 "authenticated_game_start_command": self.authenticated_game_command_var.get().strip(),
                 "preferred_script_commands": self.config.get("preferred_script_commands") or {},
             }
@@ -3194,13 +3230,18 @@ class TelemetryControlApp:
 
     def start_game(self) -> None:
         config = self.config_from_vars()
-        configured_command = str(config.get("authenticated_game_start_command") or config.get("game_launch_command") or "").strip()
-        command_info = start_game_command.resolve_start_game_command(configured_command=configured_command or None)
+        configured_command = str(config.get("live_start_command") or config.get("authenticated_game_start_command") or "").strip()
+        command_info = start_game_command.resolve_start_game_command(
+            configured_command=configured_command or None,
+            prefer_authenticated=True,
+        )
         command = str(command_info.get("command") or "").strip()
         if command_info.get("status") != "PASS" or not command:
-            self.log("game", "No game launch command is configured.")
+            self.log("game", "No authenticated Live Start Command is configured.")
+            for warning in command_info.get("launchModeWarnings") or []:
+                self.log("game", f"WARN: {warning}")
             if "recommendation" in self.status_vars:
-                self.status_vars["recommendation"].set("No game launch command configured")
+                self.status_vars["recommendation"].set("Configure Live Start Command")
             self.open_diagnostics_settings()
             return
         for warning in command_info.get("launchModeWarnings") or []:

@@ -1,6 +1,6 @@
 {
   "schema": "project_knowledge.v1",
-  "updatedAtUtc": "2026-06-09T21:22:16.343733Z",
+  "updatedAtUtc": "2026-06-13T17:16:21.030341Z",
   "repoRoot": "C:\\Users\\badto\\osrs-telemetry",
   "sourceReports": [
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_bank_to_woodcutting_latest.md",
@@ -35,6 +35,7 @@
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_menu_row_validation_v2.md",
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_no_duplicate_menu_row_validation.md",
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_one_action_menu_row_validation.md",
+    "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_plane1_staircase_recovery_probe.md",
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_polling_input_woodcutting_area_to_bank.md",
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_probe_vs_live_mirror.md",
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_reverse_route_template.md",
@@ -3428,6 +3429,79 @@
       "goodFixture": false,
       "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_154300_live_woodcutting_loop_20260609_154259\\summary.json",
       "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_154300_live_woodcutting_loop_20260609_154259\\schema_gap_report.md"
+    },
+    {
+      "recordingId": "20260609_192428_live_woodcutting_loop_20260609_192428",
+      "folder": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_192428_live_woodcutting_loop_20260609_192428",
+      "label": "live_woodcutting_loop_20260609_192428",
+      "activityType": "Woodcutting Loop",
+      "verdict": "WARN",
+      "durationSeconds": 33.453,
+      "tickRange": {
+        "first": 766,
+        "last": 766,
+        "count": 8
+      },
+      "usefulEvidence": [
+        "loop state interrupted",
+        "next phase recover_or_resume_task",
+        "phases cutting, inventory_full, interrupted",
+        "woodcutting lifecycle signals indicate cutting",
+        "woodcutting inventory is full",
+        "interruption lifecycle evidence present",
+        "human click/camera profile available"
+      ],
+      "missingData": [
+        "banking.bankContainer.delta",
+        "banking.bankContainer.items",
+        "banking.bankOpen_or_depositBoxOpen",
+        "banking.bankWidgetRoot",
+        "combat.recentHitsplats",
+        "warning: Input capture started but captured no real mouse/keyboard activity.",
+        "warning: No camera yaw/pitch changes were found, or source snapshots lack camera fields.",
+        "warning: arduino_events.jsonl is missing or empty"
+      ],
+      "goodFixture": false,
+      "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_192428_live_woodcutting_loop_20260609_192428\\summary.json",
+      "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260609_192428_live_woodcutting_loop_20260609_192428\\schema_gap_report.md"
+    },
+    {
+      "recordingId": "20260613_110750_live_woodcutting_loop_20260613_110750",
+      "folder": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_110750_live_woodcutting_loop_20260613_110750",
+      "label": "live_woodcutting_loop_20260613_110750",
+      "activityType": "Woodcutting Loop",
+      "verdict": "PASS",
+      "durationSeconds": 3.844,
+      "tickRange": {
+        "first": 766,
+        "last": 766,
+        "count": 1
+      },
+      "usefulEvidence": [
+        "loop state inventory_full",
+        "next phase route_to_bank",
+        "phases cutting, inventory_full",
+        "woodcutting lifecycle signals indicate cutting",
+        "woodcutting inventory is full",
+        "human click/camera profile available"
+      ],
+      "missingData": [
+        "banking.bankContainer.delta",
+        "banking.bankContainer.items",
+        "banking.bankOpen_or_depositBoxOpen",
+        "banking.bankWidgetRoot",
+        "banking.bank_ui",
+        "combat.recentChatMessages",
+        "combat.recentHitsplats",
+        "combat.recentStatChanges",
+        "combat_state",
+        "warning: Input capture started but captured no real mouse/keyboard activity.",
+        "warning: No camera yaw/pitch changes were found, or source snapshots lack camera fields.",
+        "warning: arduino_events.jsonl is missing or empty"
+      ],
+      "goodFixture": true,
+      "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_110750_live_woodcutting_loop_20260613_110750\\summary.json",
+      "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_110750_live_woodcutting_loop_20260613_110750\\schema_gap_report.md"
     }
   ],
   "activityKnowledge": [
@@ -3559,7 +3633,8 @@
         "20260607_131157_Wood_Cutting_area_no_logs_to_full_inventory",
         "20260607_154606_Wood_cutting_attacked",
         "20260607_171427_Wood_cutting_attacked",
-        "20260608_135929_live_woodcutting_loop_20260608_135928"
+        "20260608_135929_live_woodcutting_loop_20260608_135928",
+        "20260613_110750_live_woodcutting_loop_20260613_110750"
       ],
       "gaps": [
         "pure_normal_logs_woodcutting_fixture"
@@ -3926,12 +4001,6 @@
       "function": "get_click_planning_context(activity, source)",
       "purpose": "Compact task, route, banking, target/readiness, and profile context for advisory planning.",
       "underlyingTelemetry": "task_script_api runtime state + human_click_profile",
-      "status": "implemented"
-    },
-    {
-      "function": "get_route_guide_reentry(route_name, current_world, guide_dir=None)",
-      "purpose": "Wrong/intermediate-floor route-guide re-entry evidence, nearest same-plane guide point/interaction, floor-selection/direct-plane-skip evidence, inferred subsegment, and precise blocker.",
-      "underlyingTelemetry": "route_demonstration.route_guide.json + current WorldPoint",
       "status": "implemented"
     },
     {
@@ -4497,6 +4566,20 @@
       "suggestedNextTask": "Keep normal Record Everything map-only/no-live-click; test live mirror only in isolated validation recordings."
     },
     {
+      "id": "authenticated_start_game_missing",
+      "title": "Authenticated live Start Game path must be validated before live bot actions",
+      "severity": "high",
+      "requiredLayer": "startup/recovery",
+      "status": "partially_resolved",
+      "evidence": [
+        "start_game_command.py separates devStartCommand from liveStartCommand.",
+        "Jagex Launcher quick launch is discoverable with --launch=osrs_runelite when installed.",
+        "dev_gradle_run remains classified as a dev/plugin launch and is not accepted as the live authenticated start path.",
+        "2026-06-13 Jagex quick-launch recovery started RuneLite but stopped at disconnected_dialog / LOGIN_SCREEN with stale_login_screen_after_relaunch."
+      ],
+      "suggestedNextTask": "Use the existing safe recovery/launcher session path to clear disconnected/login, then rerun context_service.py --ensure-loaded-scene until loadedSceneVerified=true before live actions."
+    },
+    {
       "id": "input_geometry_live_source_stale",
       "title": "Live input geometry must come from a current RuneLite/window source before actions",
       "severity": "medium",
@@ -4563,19 +4646,6 @@
       "suggestedNextTask": "Compare dry-run planned aim points against successful human clicks in future Record Everything fixtures before changing live click generation."
     },
     {
-      "id": "live_route_wrong_floor_recovery",
-      "title": "Live loop needs a demonstrated same-plane plane-1 route re-entry step",
-      "severity": "high",
-      "requiredLayer": "route/context/action_proposal",
-      "status": "open",
-      "evidence": [
-        "20260609_154147_live_woodcutting_loop passed input geometry and loaded-scene recovery, sent zero gameplay actions, and stopped with route_guide_no_same_plane_reentry.",
-        "Staircase floor-selection audit found Bottom floor only in recording labels, not as a captured menu row.",
-        "Bank_to_Woodcutting_area route guide records directPlaneSkips for the plane-2 to plane-0 Staircase transition but no plane-1 path point or interaction."
-      ],
-      "suggestedNextTask": "Record or extract a short plane-1 Staircase recovery fixture from 3206,3229,1 before allowing a live route click from that wrong-floor state."
-    },
-    {
       "id": "knowledge_manual_curation",
       "title": "Project knowledge is generated plus manual notes, not a substitute for curated decisions",
       "severity": "low",
@@ -4637,15 +4707,21 @@
       "id": "knowledge_repo_owned",
       "decision": "Project state belongs in docs/knowledge and telemetry-viewer/knowledge_base.",
       "reason": "Do not rely on chat memory alone."
+    },
+    {
+      "id": "live_start_separate_from_dev_start",
+      "decision": "Live bot recovery uses liveStartCommand or discovered Jagex quick launch, not devStartCommand.",
+      "reason": "Gradle launches are useful for plugin development but do not prove launcher-authenticated loaded-scene access."
     }
   ],
   "nextTasks": [
     {
-      "id": "record_plane1_staircase_recovery_fixture",
+      "id": "validate_authenticated_live_start",
       "priority": 1,
-      "task": "Record or extract a short plane-1 Staircase recovery sample from 3206,3229,1 without loosening route-object matching.",
+      "task": "Validate the discovered Jagex Launcher RuneLite quick-launch path and loaded-scene recovery.",
       "successCriteria": [
-        "The guide proves a same-plane plane-1 waypoint, strict Climb-down, or captured Bottom floor option from plane 1; otherwise the bot keeps failing closed as route_guide_no_same_plane_reentry."
+        "start_game_command.py --validate-live reports jagex_launcher_runelite_quick_launch.",
+        "context_service.py --ensure-loaded-scene reaches loadedSceneVerified=true without dev_launch_not_loaded."
       ]
     },
     {

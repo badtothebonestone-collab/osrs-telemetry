@@ -12,6 +12,7 @@
 | human_click_profile_reference | Human click/camera behavior is a profile reference, not an execution shortcut. | Use it to shape tolerances and recommendations while preserving existing guarded input paths. |
 | human_click_planning_advisory | Human-profile click planning is dry-run/advisory until replay validation proves it. | Target readiness, hover/menu proof, and task state gates must remain stronger than a profile offset. |
 | knowledge_repo_owned | Project state belongs in docs/knowledge and telemetry-viewer/knowledge_base. | Do not rely on chat memory alone. |
+| live_start_separate_from_dev_start | Live bot recovery uses liveStartCommand or discovered Jagex quick launch, not devStartCommand. | Gradle launches are useful for plugin development but do not prove launcher-authenticated loaded-scene access. |
 
 ## Manual Notes
 

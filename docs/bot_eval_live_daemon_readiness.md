@@ -379,6 +379,22 @@ The manual wait does not dry-run and does not send gameplay input. It only waits
 for current hot telemetry to show a real loaded scene, then resumes the same live
 action path.
 
+## 2026-06-13 Update: Authenticated Live Start Path
+
+`start_game_command.py` now separates development launch from live launch:
+
+- `devStartCommand`: `cmd /c .\gradlew.bat --no-daemon run`
+- `liveStartCommand`: discovered Jagex Launcher quick launch when no live command is configured
+- resolved live command: `"C:\Program Files (x86)\Jagex Launcher\JagexLauncher.exe" --launch=osrs_runelite`
+- live launch mode: `jagex_launcher_runelite_quick_launch`
+
+Recovery and bot preflight must prefer an already-loaded client or the live
+Jagex quick-launch path. `dev_gradle_run` remains available for plugin/dev
+testing, but it is no longer an acceptable authenticated live bot login path.
+If no live path is available, the blocker is `authenticated_live_start_missing`;
+if a dev Gradle relaunch is explicitly used and still does not load a scene, the
+blocker remains `dev_launch_not_loaded`.
+
 Live validation after the readiness correction:
 
 | Field | Result |

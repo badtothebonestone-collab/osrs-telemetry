@@ -1344,3 +1344,142 @@ python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input
 python telemetry-viewer\execute_next_action.py --arduino-pointer-calibration-test --allowed-window runelite --arduino-port COM6 --arduino-pointer-calibration-path .osrs-telemetry\arduino_pointer_calibration.json --json
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
 ```
+
+## Authenticated Live Start Path Fix
+
+Updated: 2026-06-13.
+
+Branch:
+
+```text
+stabilization/live-loop-recovery-20260609
+```
+
+Start Game / recovery audit:
+
+```text
+canonical owner: telemetry-viewer\start_game_command.py
+recovery caller: liveness_recovery_core.py -> resolve_start_game_command(prefer_authenticated=True)
+UI caller: telemetry_ui.py Start Game and Diagnostics
+bot preflight caller: bot_eval_runner.py run_preflight
+previous blocker: dev_launch_not_loaded
+previous cause: prefer_authenticated still fell back to game_launch_command / Gradle
+```
+
+Authenticated launch discovery:
+
+```text
+Jagex Launcher path found: C:\Program Files (x86)\Jagex Launcher\JagexLauncher.exe
+resolved live command: "C:\Program Files (x86)\Jagex Launcher\JagexLauncher.exe" --launch=osrs_runelite
+launch mode: jagex_launcher_runelite_quick_launch
+standalone RuneLite path found: C:\Users\badto\AppData\Local\RuneLite\RuneLite.exe
+standalone RuneLite status: WARN only; Jagex quick launch is preferred for live authentication
+existing loaded client candidates at inventory check: none
+```
+
+Behavior change:
+
+```text
+devStartCommand: cmd /c .\gradlew.bat --no-daemon run
+dev launch mode: dev_gradle_run
+liveStartCommand: discovered Jagex quick launch when no config value is set
+live launch mode: jagex_launcher_runelite_quick_launch
+dev_gradle_run accepted as primary live login path: no
+missing live command blocker: authenticated_live_start_missing
+manual_login_required remains post-recovery only
+```
+
+Validation commands:
+
+```powershell
+python telemetry-viewer\start_game_command.py --list
+python telemetry-viewer\start_game_command.py --validate-live
+python telemetry-viewer\start_game_command.py --print-live-command
+```
+
+Validation result:
+
+```text
+--validate-live: PASS
+--print-live-command: "C:\Program Files (x86)\Jagex Launcher\JagexLauncher.exe" --launch=osrs_runelite
+bot preflight: PASS
+startGameCommandClassified: PASS / jagex_launcher_runelite_quick_launch
+```
+
+Loaded-scene recovery through the authenticated path:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3 --recovery-artifact-dir bot_runs\20260613_authenticated_start_recovery
+```
+
+Recovery result:
+
+```text
+status: unsafe
+blocker: stale_login_screen_after_relaunch
+initial state: plugin_endpoint_down
+final state: disconnected_dialog
+final hot game state: LOGIN_SCREEN
+loadedSceneVerified: false
+worldModelObjectTotal: 0
+launch mode: jagex_launcher_runelite_quick_launch
+start command: "C:\Program Files (x86)\Jagex Launcher\JagexLauncher.exe" --launch=osrs_runelite
+launch result: PASS, launchedProcessPid=14440
+safe login action tried: disconnected_ok
+clickHereToPlayAttempted: false
+playNowAttempted: false
+launcherRecoveryAttempted: true
+waitForLoadedSceneAttempted: true
+recovery artifacts: bot_runs\20260613_authenticated_start_recovery
+```
+
+Live loop status for this pass:
+
+```text
+full live bot loop run: not yet
+reason: loaded-scene proof did not pass after Jagex quick launch; no gameplay action is allowed while finalHotGameState=LOGIN_SCREEN and loadedSceneVerified=false.
+```
+
+Checks run:
+
+```powershell
+python -m py_compile telemetry-viewer\start_game_command.py telemetry-viewer\liveness_recovery_core.py telemetry-viewer\context_service.py telemetry-viewer\bot_eval_runner.py telemetry-viewer\telemetry_ui.py
+python telemetry-viewer\tests\test_start_game_command.py
+python telemetry-viewer\tests\test_liveness_recovery_core.py
+python telemetry-viewer\tests\test_bot_eval_runner.py
+python telemetry-viewer\tests\test_telemetry_ui.py
+python telemetry-viewer\telemetry_ui.py --check
+python telemetry-viewer\update_project_knowledge.py --check
+python telemetry-viewer\start_game_command.py --list
+python telemetry-viewer\start_game_command.py --validate-live
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --preflight --json
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3 --recovery-artifact-dir bot_runs\20260613_authenticated_start_recovery
+```
+
+Check results:
+
+```text
+py_compile: PASS
+test_start_game_command.py: PASS, 5 tests
+test_liveness_recovery_core.py: PASS, 25 tests
+test_bot_eval_runner.py: PASS, 33 tests
+test_telemetry_ui.py: PASS, 38 tests
+telemetry_ui.py --check: PASS
+update_project_knowledge.py --check: PASS
+start_game_command.py --validate-live: PASS
+bot_eval_runner.py --preflight: PASS
+context_service.py --ensure-loaded-scene: FAIL/unsafe, blocker stale_login_screen_after_relaunch
+```
+
+Next command once the disconnected/login surface is cleared:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3
+```
+
+Only after that returns `loadedSceneVerified=true`, continue with:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```

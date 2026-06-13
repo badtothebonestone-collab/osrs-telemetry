@@ -1,6 +1,6 @@
 {
   "schema": "project_script_api_map.v1",
-  "updatedAtUtc": "2026-06-09T21:22:16.343733Z",
+  "updatedAtUtc": "2026-06-13T17:16:21.030341Z",
   "scriptApis": [
     {
       "function": "get_bank_state(source)",
@@ -174,12 +174,6 @@
       "function": "get_click_planning_context(activity, source)",
       "purpose": "Compact task, route, banking, target/readiness, and profile context for advisory planning.",
       "underlyingTelemetry": "task_script_api runtime state + human_click_profile",
-      "status": "implemented"
-    },
-    {
-      "function": "get_route_guide_reentry(route_name, current_world, guide_dir=None)",
-      "purpose": "Wrong/intermediate-floor route-guide re-entry evidence, nearest same-plane guide point/interaction, floor-selection/direct-plane-skip evidence, inferred subsegment, and precise blocker.",
-      "underlyingTelemetry": "route_demonstration.route_guide.json + current WorldPoint",
       "status": "implemented"
     },
     {

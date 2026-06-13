@@ -223,6 +223,8 @@ class TelemetryUiTest(unittest.TestCase):
     def test_command_preview_includes_run_game(self):
         preview = telemetry_ui.build_command_preview(telemetry_ui.default_config())
         self.assertIn("Run Game:", preview)
+        self.assertIn("Dev Start Command:", preview)
+        self.assertIn("Live Start Command:", preview)
         self.assertIn("Start Telemetry Stack:", preview)
         self.assertIn("Check Route Readiness:", preview)
         self.assertIn("Monitor Latest Route Recording:", preview)
@@ -251,7 +253,13 @@ class TelemetryUiTest(unittest.TestCase):
 
         self.assertEqual(payload["game_launch"]["launchMode"], "dev_gradle_run")
         self.assertTrue(payload["game_launch"]["launchModeWarnings"])
+        self.assertIn("devStartCommand", payload["game_launch"])
+        self.assertIn("liveStartCommand", payload["game_launch"])
+        self.assertIn("liveResolutionStatus", payload["game_launch"])
+        self.assertIn("liveLaunchMode", payload["game_launch"])
         self.assertIn("authenticated_game_start", payload["commands"])
+        self.assertIn("dev_start", payload["commands"])
+        self.assertIn("live_start", payload["commands"])
         self.assertIn("bootstrap_check", payload["commands"])
         self.assertIn("command_registry.py", payload["commands"]["command_registry_check"])
         self.assertIn("bot_eval_runner.py", payload["commands"]["bot_eval_preflight"])
