@@ -1106,6 +1106,60 @@ def _proposal_is_floor_selection(proposal: ActionProposal) -> bool:
     )
 
 
+_STRICT_ROUTE_LOWER_MENU_OPTION_KEYS = {
+    "climb down",
+    "climb up",
+    "bottom floor",
+    "bottomfloor",
+    "middle floor",
+    "middlefloor",
+    "top floor",
+    "topfloor",
+}
+
+
+def _proposal_requires_strict_route_lower_menu(proposal: ActionProposal) -> bool:
+    if proposal.proposed_action != "interact_service_route_object":
+        return False
+    for expected in _route_transition_direct_expected_options(proposal):
+        if _menu_text_key(expected) in _STRICT_ROUTE_LOWER_MENU_OPTION_KEYS:
+            return True
+    return False
+
+
+def _route_lower_menu_trace_key(proposal: ActionProposal) -> str:
+    return "floorSelectionLowerMenuCandidate" if _proposal_is_floor_selection(proposal) else "routeLowerMenuCandidate"
+
+
+def _route_lower_menu_blocked_reason(proposal: ActionProposal, selection_reason: str) -> str:
+    if selection_reason == "clicked_direct_menu_mismatch":
+        return "clicked_direct_menu_mismatch"
+    if _proposal_is_floor_selection(proposal) and selection_reason == "floor_selection_option_missing":
+        return "floor_selection_option_missing"
+    if selection_reason in {"menu_open_not_observed", "route_lower_menu_open_failed"}:
+        return "route_lower_menu_open_failed"
+    if selection_reason in {"expected_menu_row_missing", "route_lower_menu_option_missing"}:
+        return "route_lower_menu_option_missing"
+    if selection_reason in {"menu_row_geometry_unavailable", "route_lower_menu_row_bounds_missing"}:
+        return "route_lower_menu_row_bounds_missing"
+    return "right_click_menu_select_failed"
+
+
+def _route_transition_allows_dialogue_opener_fallback(
+    proposal: ActionProposal,
+    direct_entry: dict[str, Any],
+    selection_reason: str,
+    confirmation: dict[str, Any],
+) -> bool:
+    if _proposal_requires_strict_route_lower_menu(proposal):
+        return False
+    return bool(
+        direct_entry.get("syntheticEntry") is True
+        and selection_reason in {"menu_open_not_observed", "route_lower_menu_open_failed"}
+        and _route_transition_left_click_is_dialogue_opener(proposal, confirmation)
+    )
+
+
 def _entry_matches_route_transition_direct_option(entry: dict[str, Any], proposal: ActionProposal) -> bool:
     option_key = _menu_text_key(entry.get("option"))
     if not option_key:
@@ -1474,11 +1528,22 @@ def _execute_route_transition_direct_menu_selection(
     row_label: str = "route transition menu row",
 ) -> bool:
     matches_entry = entry_matcher or _entry_matches_route_transition_direct_option
+    strict_route_lower_menu = _proposal_requires_strict_route_lower_menu(proposal) and not _proposal_is_floor_selection(proposal)
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
     event: dict[str, Any] = {
         "schema": "right_click_menu_select.v1",
         "expectedEntry": dict(direct_entry),
         "source": event_source,
         "status": "started",
+        "routeLowerMenuAttempted": bool(strict_route_lower_menu),
+        "floorSelectionAttempted": bool(_proposal_is_floor_selection(proposal)),
+        "menuOpenPoint": plan.click_point.to_dict(),
+        "menuOpenScreenPoint": dict(screen_point),
+        "expectedPostcondition": {
+            "expectedPlaneChange": explanation.get("expectedPlaneChange"),
+            "sourcePlane": explanation.get("sourcePlane"),
+            "destinationPlane": explanation.get("destinationPlane"),
+        },
         "clientTickTailRequested": _menu_open_poll_client_tick_tail(hover_options),
         "menuEntryLimitRequested": max(8, hover_options.menu_entry_limit),
     }
@@ -1509,9 +1574,15 @@ def _execute_route_transition_direct_menu_selection(
         menu_sample,
         minimum_wall_time_millis=right_click_started_wall_ms,
     ):
+        source_event = str((menu_sample or {}).get("sourceEvent") or (menu_sample or {}).get("sampleSource") or "") if isinstance(menu_sample, dict) else ""
+        entries = (menu_sample or {}).get("entries") if isinstance(menu_sample, dict) else None
         event["status"] = "FAIL"
-        event["reason"] = "menu_open_not_observed"
-        result.warnings.append("right-click menu selection failed: menu did not open")
+        if strict_route_lower_menu and source_event == "MenuOpened" and isinstance(entries, list) and entries:
+            event["reason"] = "route_lower_menu_row_bounds_missing"
+            result.warnings.append("right-click menu selection failed: menu rows were captured but row bounds were unavailable")
+        else:
+            event["reason"] = "route_lower_menu_open_failed" if strict_route_lower_menu else "menu_open_not_observed"
+            result.warnings.append("right-click menu selection failed: menu did not open")
         result.hover_confirmation["rightClickMenuSelection"] = event
         return False
     selected_entry: dict[str, Any] | None = None
@@ -1521,10 +1592,18 @@ def _execute_route_transition_direct_menu_selection(
             break
     if selected_entry is None:
         event["status"] = "FAIL"
-        event["reason"] = "floor_selection_option_missing" if _proposal_is_floor_selection(proposal) else "expected_menu_row_missing"
+        event["reason"] = (
+            "floor_selection_option_missing"
+            if _proposal_is_floor_selection(proposal)
+            else "route_lower_menu_option_missing"
+            if strict_route_lower_menu
+            else "expected_menu_row_missing"
+        )
         result.warnings.append(
             "right-click menu selection failed: expected floor-selection option not present"
             if _proposal_is_floor_selection(proposal)
+            else "right-click menu selection failed: expected strict route lower-menu option not present"
+            if strict_route_lower_menu
             else "right-click menu selection failed: expected route option not present"
         )
         result.hover_confirmation["rightClickMenuSelection"] = event
@@ -1534,12 +1613,15 @@ def _execute_route_transition_direct_menu_selection(
     canvas_row = dict(row_geometry.get("point")) if isinstance(row_geometry, dict) and isinstance(row_geometry.get("point"), dict) else None
     screen_row = _screen_point_from_canvas_for_proposal(proposal, backend, canvas_row)
     event["selectedEntry"] = dict(selected_entry)
+    event["matchedRow"] = dict(selected_entry)
     event["rowCanvasPoint"] = canvas_row
     event["rowCanvasGeometry"] = row_geometry
+    event["rowBounds"] = dict(row_geometry.get("menuBounds")) if isinstance(row_geometry, dict) and isinstance(row_geometry.get("menuBounds"), dict) else None
     event["rowScreenPoint"] = screen_row
+    event["selectedRowPoint"] = screen_row
     if screen_row is None:
         event["status"] = "FAIL"
-        event["reason"] = "menu_row_geometry_unavailable"
+        event["reason"] = "route_lower_menu_row_bounds_missing" if strict_route_lower_menu else "menu_row_geometry_unavailable"
         result.warnings.append("right-click menu selection failed: menu row geometry unavailable")
         result.hover_confirmation["rightClickMenuSelection"] = event
         return False
@@ -1568,6 +1650,7 @@ def _execute_route_transition_direct_menu_selection(
         }
     )
     input_controller.move_mouse(row_plan, context=_human_context(proposal, "right_click_menu_row"))
+    event["clickCommandSent"] = True
     _click_confirmed_current_position(
         input_controller,
         button="left",
@@ -5423,10 +5506,10 @@ def _hover_failure_category(result: ExecutionResult) -> str | None:
         right_click_selection = hover.get("rightClickMenuSelection") if isinstance(hover.get("rightClickMenuSelection"), dict) else {}
         if (
             result.proposed_action in ROUTE_TRANSITION_ACTIONS
-            and reason in {"right_click_menu_select_failed", "route_target_hover_not_confirmed"}
-            and str(right_click_selection.get("reason") or "") == "menu_open_not_observed"
+            and reason in {"right_click_menu_select_failed", "route_target_hover_not_confirmed", "route_lower_menu_open_failed"}
+            and str(right_click_selection.get("reason") or "") in {"menu_open_not_observed", "route_lower_menu_open_failed"}
         ):
-            return "route_target_hover_not_confirmed"
+            return "route_lower_menu_open_failed" if reason == "route_lower_menu_open_failed" else "route_target_hover_not_confirmed"
         if reason in FATAL_NO_CLICK_BLOCK_REASONS:
             if _resource_target_movement_safety_reacquirable(result, reason):
                 return "unsafe_geometry"
@@ -10711,10 +10794,10 @@ def execute_action(
                                         result.action_trace.setdefault("reacquisition", {})["waypointReacquiredAfterCamera"] = True
                                     _update_trace_from_hover(result, confirmation)
             if confirmation.get("confirmed") is not True:
-                floor_selection_direct_entry = _route_transition_direct_menu_entry(proposal, confirmation) if _proposal_is_floor_selection(proposal) else None
-                if floor_selection_direct_entry is not None:
+                route_direct_entry = _route_transition_direct_menu_entry(proposal, confirmation)
+                if route_direct_entry is not None:
                     if isinstance(result.action_trace, dict):
-                        result.action_trace["floorSelectionLowerMenuCandidate"] = dict(floor_selection_direct_entry)
+                        result.action_trace[_route_lower_menu_trace_key(proposal)] = dict(route_direct_entry)
                 else:
                     result.status = "FAIL"
                     reason = _navigation_hover_failure_reason(proposal, confirmation)
@@ -10729,10 +10812,10 @@ def execute_action(
                     _attach_human_input_trace(result, input_controller)
                     return result
         if confirmation.get("confirmed") is not True:
-            floor_selection_direct_entry = _route_transition_direct_menu_entry(proposal, confirmation) if _proposal_is_floor_selection(proposal) else None
-            if floor_selection_direct_entry is not None:
+            route_direct_entry = _route_transition_direct_menu_entry(proposal, confirmation)
+            if route_direct_entry is not None:
                 if isinstance(result.action_trace, dict):
-                    result.action_trace["floorSelectionLowerMenuCandidate"] = dict(floor_selection_direct_entry)
+                    result.action_trace[_route_lower_menu_trace_key(proposal)] = dict(route_direct_entry)
             else:
                 result.status = "FAIL"
                 result.warnings.append(f"hover confirmation failed: {confirmation.get('reason') or 'unknown'}")
@@ -10779,14 +10862,14 @@ def execute_action(
             if isinstance(result.hover_confirmation, dict):
                 result.hover_confirmation["preClickConfirmation"] = pre_click_confirmation
             if pre_click_confirmation.get("confirmed") is not True:
-                floor_selection_direct_entry = (
-                    _route_transition_direct_menu_entry(proposal, pre_click_confirmation)
-                    if _proposal_is_floor_selection(proposal)
-                    else None
-                )
-                if floor_selection_direct_entry is not None:
+                route_direct_entry = _route_transition_direct_menu_entry(proposal, pre_click_confirmation)
+                if route_direct_entry is not None:
                     if isinstance(result.action_trace, dict):
-                        result.action_trace["floorSelectionPreClickLowerMenuCandidate"] = dict(floor_selection_direct_entry)
+                        result.action_trace[
+                            "floorSelectionPreClickLowerMenuCandidate"
+                            if _proposal_is_floor_selection(proposal)
+                            else "routeLowerMenuPreClickCandidate"
+                        ] = dict(route_direct_entry)
                     _update_trace_from_hover(result, pre_click_confirmation)
                 else:
                     navigation_walk_entry = _navigation_walk_here_menu_entry(proposal, pre_click_confirmation)
@@ -11015,7 +11098,12 @@ def execute_action(
                         _set_trace_final(result, "clicked_direct_menu_mismatch")
                         _attach_human_input_trace(result, input_controller)
                         return result
-                    if direct_menu_entry.get("syntheticEntry") is True and _route_transition_left_click_is_dialogue_opener(proposal, pre_click_confirmation):
+                    if _route_transition_allows_dialogue_opener_fallback(
+                        proposal,
+                        direct_menu_entry,
+                        direct_selection_reason,
+                        pre_click_confirmation,
+                    ):
                         result.commands.append(
                             {
                                 "type": "route_transition_dialogue_opener_fallback",
@@ -11029,13 +11117,7 @@ def execute_action(
                             result.action_trace["rightClickMenuSelectionFallback"] = "left_click_dialogue_opener"
                     else:
                         result.status = "FAIL"
-                        blocked_reason = (
-                            "floor_selection_option_missing"
-                            if direct_selection_reason == "floor_selection_option_missing"
-                            else "route_target_hover_not_confirmed"
-                            if direct_selection_reason == "menu_open_not_observed"
-                            else "right_click_menu_select_failed"
-                        )
+                        blocked_reason = _route_lower_menu_blocked_reason(proposal, direct_selection_reason)
                         observed = result.observed_result if isinstance(result.observed_result, dict) else {}
                         observed.update(
                             {
@@ -11044,7 +11126,8 @@ def execute_action(
                                 "resultComplete": True,
                                 "nextActionAllowed": True,
                                 "verificationStatus": "FAIL",
-                                "routeTargetHoverFailure": direct_selection_reason == "menu_open_not_observed",
+                                "routeTargetHoverFailure": direct_selection_reason in {"menu_open_not_observed", "route_lower_menu_open_failed"},
+                                "routeLowerMenuFailure": blocked_reason.startswith("route_lower_menu_"),
                                 "rightClickMenuSelection": direct_selection if isinstance(direct_selection, dict) else {},
                             }
                         )

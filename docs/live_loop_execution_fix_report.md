@@ -1770,3 +1770,101 @@ PASS: python telemetry-viewer\update_project_knowledge.py --check
 TIMEOUT: python telemetry-viewer\tests\test_input_control_executor.py timed out after 124 seconds.
 FAIL: focused executor check InputControlExecutorTest.test_live_movement_safety_blocks_off_region_screen_point_before_move expected screen_click_point_outside_movement_safety_region but current branch returns input_geometry_invalid. The calibration patch did not touch executor safety semantics; this is recorded as a remaining focused executor-test mismatch.
 ```
+
+## Plane-1 Lower Menu Selection Diagnosis
+
+Updated: 2026-06-13.
+
+Source blocker:
+
+```text
+previous run: bot_runs\20260613_134142_live_woodcutting_loop
+candidate type: interact_service_route_object
+candidate reason: route_guide_plane1_recovery_interaction
+expected option/target: Climb-down / Staircase
+object id/world/plane: 16672 at 3204,3229,1
+hover top menu: Climb / Staircase
+lower menu evidence: Climb-down / Staircase, GAME_OBJECT_THIRD_OPTION, identifier 16672, params 52/53
+blocking gate: input_control.executor pre-click hover confirmation returned hover_option_mismatch and did not enter lower-menu selection for non-floor-selection route interactions
+```
+
+Why top-menu click was unsafe:
+
+```text
+Generic Climb is not Climb-down.
+The guide expects directional action Climb-down and plane 1 -> 0.
+Clicking top Climb could choose the wrong route action or strand the bot on the wrong floor.
+```
+
+Fix behavior:
+
+```text
+Strict directional route interactions now detect lower-menu candidates when top hover is generic.
+The executor right-clicks the verified object point, captures fresh MenuOpened rows, searches for the exact expected option/target/id, and only selects the row when row geometry is usable.
+Generic Climb fallback is disabled for directional route actions such as Climb-down, Climb-up, Bottom floor, Middle floor, and Top floor.
+Trace fields now include routeLowerMenuAttempted, menuOpenPoint, expectedPostcondition, matchedRow, rowBounds, selectedRowPoint, and clickCommandSent when selection is safe.
+```
+
+Tests/checks:
+
+```text
+PASS: python -m py_compile telemetry-viewer\input_control\executor.py telemetry-viewer\input_control\action_lifecycle.py telemetry-viewer\input_control\action_proposal.py telemetry-viewer\candidate_core.py telemetry-viewer\bot_eval_runner.py
+PASS: focused strict lower-menu executor tests for generic top Climb, exact Climb-down/Climb-up row selection, missing option, no menu open, row bounds missing, and wrong clicked row
+PASS: python telemetry-viewer\tests\test_action_proposal.py
+PASS: python telemetry-viewer\tests\test_bot_eval_runner.py
+PASS: python telemetry-viewer\tests\test_route_demonstration.py
+PASS: python telemetry-viewer\tests\test_project_knowledge.py
+PASS: python telemetry-viewer\telemetry_ui.py --check
+PASS: python telemetry-viewer\update_project_knowledge.py --check
+NOTE: python telemetry-viewer\tests\test_action_lifecycle.py -k menu matched zero tests.
+```
+
+Geometry gate:
+
+```text
+command: python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+status: PASS
+loadedSceneVerified: true
+inputGeometryPass: true
+foreground window: RuneLite - KCLBolus
+```
+
+Real live command:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```
+
+Latest run:
+
+```text
+live run folder: bot_runs\20260613_141912_live_woodcutting_loop
+linked recording folder: recordings\20260613_141921_live_woodcutting_loop_20260613_141921
+status: WARN
+bot actions sent: 0
+live input executed: no
+loop completed: no
+plane-1 recovery candidate appeared: yes
+lower-menu Climb-down attempted: yes, routeLowerMenuAttempted=true
+plane 1 -> 0 succeeded: no
+return route continued: no
+final blocker: route_lower_menu_row_bounds_missing
+```
+
+Latest blocker evidence:
+
+```text
+MenuOpened rows were captured for strict object 16672.
+Expected row was present: Climb-down / Staircase, GAME_OBJECT_THIRD_OPTION, params 52/53.
+MenuOpened menuBounds were zero: x=0, y=0, width=0, height=0.
+Because row bounds were unusable, the executor did not send the left-click row selection and did not fall back to generic Climb.
+```
+
+Next exact task:
+
+Export trustworthy RuneLite menu bounds/row geometry for `MenuOpened`, or implement an already-tested safe row-selection fallback for this exact strict menu-row case. Then rerun:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```

@@ -1,6 +1,6 @@
 {
   "schema": "project_open_gaps.v1",
-  "updatedAtUtc": "2026-06-13T18:47:32.486435Z",
+  "updatedAtUtc": "2026-06-13T19:25:27.159147Z",
   "gaps": [
     {
       "id": "deposit_all_region_classification",
@@ -88,12 +88,24 @@
       "title": "Plane-1 Staircase recovery requires strict lower-menu Climb-down selection",
       "severity": "high",
       "requiredLayer": "route/executor",
-      "status": "open",
+      "status": "resolved",
       "evidence": [
         "2026-06-13 live run bot_runs\\20260613_134142_live_woodcutting_loop reached route_guide_plane1_recovery_interaction for Staircase 16672 at 3204,3229,1.",
-        "Hover menu top option was Climb / Staircase while Climb-down / Staircase appeared as a lower menu entry for the same object id and params; executor skipped with no_click_safety_skip."
+        "Executor now attempts strict lower-menu selection instead of accepting generic Climb when expected action is Climb-down."
       ],
-      "suggestedNextTask": "For strict route objects, safely select the captured lower-menu Climb-down entry when id/world/plane/action evidence matches."
+      "suggestedNextTask": "Keep strict route lower-menu matching enabled for directional Staircase actions."
+    },
+    {
+      "id": "route_lower_menu_row_bounds_missing",
+      "title": "Strict route lower-menu selection needs trustworthy menu row bounds",
+      "severity": "high",
+      "requiredLayer": "plugin/executor",
+      "status": "open",
+      "evidence": [
+        "2026-06-13 live run bot_runs\\20260613_141912_live_woodcutting_loop captured Climb-down / Staircase for object 16672 in MenuOpened rows.",
+        "MenuOpened menuBounds were zero, so the executor could not safely select the row and blocked with route_lower_menu_row_bounds_missing."
+      ],
+      "suggestedNextTask": "Export trustworthy RuneLite menu bounds/row geometry for MenuOpened or implement a tested safe row-selection fallback for the strict route row case."
     },
     {
       "id": "input_geometry_live_source_stale",
@@ -181,6 +193,15 @@
       "successCriteria": [
         "start_game_command.py --validate-live reports jagex_launcher_runelite_quick_launch.",
         "context_service.py --ensure-loaded-scene reaches loadedSceneVerified=true without dev_launch_not_loaded."
+      ]
+    },
+    {
+      "id": "fix_route_lower_menu_row_bounds",
+      "priority": 1,
+      "task": "Export or derive trustworthy row bounds for strict route lower-menu selection.",
+      "successCriteria": [
+        "Plane-1 Climb-down / Staircase row for object 16672 has usable row bounds or a tested safe fallback.",
+        "The executor verifies plane 1 -> 0 after selecting the strict row."
       ]
     },
     {
