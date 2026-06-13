@@ -1322,7 +1322,7 @@ Commit / push:
 
 ```text
 commit: 358ced27ab7a0ec51f91f68eaecc55d6675ce063 enforce canonical auto-login recovery before manual login blocker
-push result: pending at report write time
+push result: origin/stabilization/live-loop-recovery-20260609 updated successfully through report commit 232b3f6
 remaining unstaged generated JSON: capability_registry.json, project_knowledge.json, recordings_index.json, script_api_map.json
 ```
 
