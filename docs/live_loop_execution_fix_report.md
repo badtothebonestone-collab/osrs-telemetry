@@ -1537,6 +1537,85 @@ python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
 ```
 
+## Menu Bounds / Row Geometry Diagnosis
+
+Updated: 2026-06-13.
+
+Source blocker:
+
+```text
+previous run: bot_runs\20260613_141912_live_woodcutting_loop
+candidate type: interact_service_route_object
+candidate reason: route_guide_plane1_recovery_interaction
+expected row: Climb-down / Staircase
+object id/world/plane: 16672 at 3204,3229,1
+top menu: Climb / Staircase
+lower menu row: Climb-down / Staircase, GAME_OBJECT_THIRD_OPTION, params 52/53
+blocking gate: input_control.executor right-click lower-row selection
+blocker: route_lower_menu_row_bounds_missing
+```
+
+Diagnosis:
+
+```text
+MenuOpened captured the correct raw menu entries before usable row geometry was available.
+The lower row was present, but the executor refused to guess a row click from missing or zero bounds.
+While fixing this, the next live rerun exposed a second bug: fallback menuBounds were in RuneLite source-canvas coordinates, but the row click was treated as current screen/canvas coordinates. That unscaled click selected Walk here instead of Climb-down.
+```
+
+Fix layer:
+
+```text
+plugin export: TelemetryPlugin now exports menu_geometry.v1 packets with normalized entriesVisual and rows when MenuOpened/MenuGeometry data is available.
+recorder/schema preservation: telemetry_schema and menu_interaction_model now preserve menu_geometry rows, raw/visual indexes, and row bounds.
+executor row-selection logic: strict route lower-menu selection now normalizes visual order, stores exact row bounds, and converts row coordinates through the canonical input geometry resolver before Arduino input.
+```
+
+Live validation:
+
+```text
+geometry command: python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+geometry status: PASS
+loadedSceneVerified: true
+inputGeometryPass: true
+foreground window: RuneLite - KCLBolus
+
+real command: python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+live run folder: bot_runs\20260613_145500_live_woodcutting_loop
+linked recording folder: recordings\20260613_145507_live_woodcutting_loop_20260613_145507
+status: FAIL
+bot actions sent: 2
+live input executed: yes
+loop completed: no
+```
+
+Strict lower-menu result:
+
+```text
+plane-1 recovery candidate appeared: yes
+candidate reason: route_guide_plane1_recovery_interaction
+target: Staircase 16672 at 3204,3229,1
+expected action: Climb-down
+menu bounds: x=122, y=184, width=150, height=112
+matched raw index: 2
+matched visual index: 2
+row bounds: x=122, y=236, width=150, height=15
+row click point: 464,478
+actual clicked menu: Climb-down / Staircase
+postcondition: plane 1 -> 0 succeeded
+route continued: yes, final location was 3198,3235,0 near the resource area
+```
+
+Current remaining blocker:
+
+```text
+blocker: resource_target_hover_safety_skip
+phase: target_selected
+evidence: after route recovery, repeated select_resource_target proposals targeted Dead tree around 3202,3250,0; hover evidence saw Chop down / Tree but click safety skipped with no_click_safety_skip.
+scope: woodcutting resource target hover/click safety, not route-guide Staircase lower-menu selection.
+next task: fix resource target hover confirmation/safety classification for tree targets after route return, preserving current route-object strict guards.
+```
+
 ## Visible Play Button Recovery Fix
 
 Updated: 2026-06-13.

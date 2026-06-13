@@ -7606,6 +7606,128 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(result.lifecycle_state["reason"], "route_lower_menu_row_bounds_missing")
         self.assertNotIn(("mouse_down", "left"), backend.calls)
 
+    def test_route_transition_selects_strict_lower_row_from_menu_geometry(self):
+        backend = FakeBackend()
+        hover_sample = {
+            "clientTick": 20,
+            "wallTimeMillis": 500,
+            "mouseCanvasX": 197,
+            "mouseCanvasY": 184,
+            "menuOpen": False,
+            "topOption": "Climb",
+            "topTarget": "<col=ffff>Staircase",
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "topIdentifier": 16672,
+            "entries": [
+                {"option": "Climb", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 16672},
+                {"option": "Climb-up", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_SECOND_OPTION", "identifier": 16672},
+                {"option": "Climb-down", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_THIRD_OPTION", "identifier": 16672},
+            ],
+        }
+        menu_geometry = {
+            "schema": "menu_geometry.v1",
+            "sourceEvent": "MenuGeometry",
+            "menuOpen": True,
+            "menuBounds": {"x": 124, "y": 148, "width": 150, "height": 112},
+            "entryCount": 5,
+            "entriesVisual": [
+                {"option": "Climb", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 16672, "rawIndex": 4, "visualIndex": 0},
+                {"option": "Climb-up", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_SECOND_OPTION", "identifier": 16672, "rawIndex": 3, "visualIndex": 1},
+                {"option": "Climb-down", "target": "<col=ffff>Staircase", "type": "GAME_OBJECT_THIRD_OPTION", "identifier": 16672, "rawIndex": 2, "visualIndex": 2},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0, "rawIndex": 1, "visualIndex": 3},
+                {"option": "Examine", "target": "<col=ffff>Staircase", "type": "EXAMINE_OBJECT", "identifier": 16672, "rawIndex": 0, "visualIndex": 4},
+            ],
+            "rows": [
+                {"visualIndex": 0, "rawIndex": 4, "option": "Climb", "target": "<col=ffff>Staircase", "identifier": 16672, "x": 124, "y": 166, "width": 150, "height": 18.8, "centerX": 199, "centerY": 175.4, "boundsSource": "client_menu_geometry"},
+                {"visualIndex": 1, "rawIndex": 3, "option": "Climb-up", "target": "<col=ffff>Staircase", "identifier": 16672, "x": 124, "y": 184.8, "width": 150, "height": 18.8, "centerX": 199, "centerY": 194.2, "boundsSource": "client_menu_geometry"},
+                {"visualIndex": 2, "rawIndex": 2, "option": "Climb-down", "target": "<col=ffff>Staircase", "identifier": 16672, "x": 124, "y": 203.6, "width": 150, "height": 18.8, "centerX": 199, "centerY": 213.0, "boundsSource": "client_menu_geometry"},
+            ],
+        }
+        menu_open_sample = {
+            **hover_sample,
+            "clientTick": 21,
+            "wallTimeMillis": 2100,
+            "sourceEvent": "MenuGeometry",
+            "sampleSource": "MenuGeometry",
+            "menuOpen": True,
+            "entryCount": 5,
+            "menuBounds": {"x": 124, "y": 148, "width": 150, "height": 112},
+            "entriesDisplayOrder": "top_to_bottom",
+            "entries": list(menu_geometry["entriesVisual"]),
+            "menuGeometry": menu_geometry,
+        }
+        clicked_sample = {
+            "clientTick": 22,
+            "wallTimeMillis": 2200,
+            "option": "Climb-down",
+            "target": "<col=ffff>Staircase",
+            "type": "GAME_OBJECT_THIRD_OPTION",
+            "identifier": 16672,
+            "param0": 52,
+            "param1": 53,
+        }
+        snapshots = iter(
+            [
+                {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample}},
+                {"clientTickHot": {"hoverMenu": hover_sample, "postMenuSort": hover_sample}},
+                {"clientTickHot": {"hoverMenu": menu_open_sample, "postMenuSort": menu_open_sample}},
+                {"clientTickHot": {"hoverMenu": menu_open_sample, "postMenuSort": menu_open_sample, "lastMenuOptionClicked": clicked_sample}},
+            ]
+        )
+
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Staircase",
+            suggested_click_point={"x": 197, "y": 184},
+            click_point_space="canvas",
+            resolved_screen_click_point={"x": 466, "y": 375},
+            input_geometry={
+                "inputGeometryAvailable": True,
+                "canvasScreenOrigin": {"x": 269, "y": 191},
+                "canvasSize": {"width": 1229, "height": 868},
+                "sourceCanvasSize": {"width": 765, "height": 503},
+                "displayScale": {"x": 1.0, "y": 1.0},
+            },
+            target_explanation={
+                "name": "Staircase",
+                "objectId": 16672,
+                "worldLocation": {"worldX": 3204, "worldY": 3229, "plane": 1},
+                "expectedOptions": ["Climb-down", "Climb down"],
+                "expectedTargets": ["Staircase"],
+                "dialogueOpenerOptions": ["Climb"],
+                "expectedPlaneChange": -1,
+                "sourcePlane": 1,
+                "destinationPlane": 0,
+            },
+        )
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile=MouseMovementProfile(name="instant_test", min_duration_ms=1, max_duration_ms=1, waypoint_count=2),
+            hover_options=HoverConfirmationOptions(enabled=True, timeout_ms=200, poll_ms=1, tolerance_px=3, menu_entry_limit=5),
+            dry_run=False,
+            snapshot_fetch_func=lambda *_args, **_kwargs: next(snapshots),
+            sleep_func=lambda _seconds: None,
+            monotonic_func=IncrementingClock(start=0.0, step=0.05),
+            wall_time_millis_func=lambda: 1000,
+            input_controller=HumanInputController(backend, profile="instant_debug", sleep_func=lambda _seconds: None, monotonic_func=IncrementingClock()),
+        )
+
+        self.assertEqual(result.status, "PASS")
+        selection = result.hover_confirmation["rightClickMenuSelection"]
+        self.assertEqual(selection["menuGeometrySource"], "menu_geometry.v1")
+        self.assertEqual(selection["matchedRow"]["option"], "Climb-down")
+        self.assertEqual(selection["matchedRawIndex"], 2)
+        self.assertEqual(selection["matchedVisualIndex"], 2)
+        self.assertEqual(selection["rowBounds"]["x"], 124)
+        self.assertEqual(selection["rowClickPoint"]["x"], 589)
+        self.assertEqual(selection["rowClickPoint"]["y"], 559)
+        self.assertTrue(selection["directOptionClicked"])
+        self.assertIn(("mouse_down", "right"), backend.calls)
+        self.assertIn(("mouse_down", "left"), backend.calls)
+
     def test_route_transition_uses_menu_opened_sample_when_menu_open_flag_is_false(self):
         backend = FakeBackend()
         hover_sample = {
@@ -7669,7 +7791,7 @@ class InputControlExecutorTest(unittest.TestCase):
             resolved_screen_click_point={"x": 1100, "y": 2100},
             input_geometry={
                 "inputGeometryAvailable": True,
-                "canvasScreenOrigin": {"x": 3932, "y": 107},
+                "canvasScreenOrigin": {"x": 1000, "y": 2000},
                 "canvasSize": {"width": 1834, "height": 1205},
                 "sourceCanvasSize": {"width": 765, "height": 503},
                 "displayScale": {"x": 1.0, "y": 1.0},
@@ -7703,8 +7825,8 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(selection["selectedEntry"]["sourceEntryIndex"], 3)
         self.assertEqual(selection["selectedEntry"]["displayEntryIndex"], 1)
         row_screen = selection["rowScreenPoint"]
-        self.assertGreater(row_screen["y"], 558)
-        self.assertLess(row_screen["y"], 569)
+        self.assertGreater(row_screen["y"], 2458)
+        self.assertLess(row_screen["y"], 2464)
         self.assertEqual(selection["rowCanvasGeometry"]["rowIndex"], 1)
         self.assertIn(("mouse_down", "right"), backend.calls)
         self.assertIn(("mouse_up", "right"), backend.calls)

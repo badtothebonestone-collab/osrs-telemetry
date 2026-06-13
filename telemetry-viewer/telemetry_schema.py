@@ -111,7 +111,7 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec("open_menu_state", ("clientTickHot.hoverMenu.menuOpen", "hoverMenu.menuOpen", "**.menuOpen"), "present"),
     FieldSpec("open_menu_entries", ("menu.entries", "hoverMenu.entries", "postMenuSort.entries", "**.entries"), "present"),
     FieldSpec("open_menu_bounds", ("clientTickHot.hoverMenu.menuBounds", "hoverMenu.menuBounds", "postMenuSort.menuBounds", "**.menuBounds"), "present"),
-    FieldSpec("open_menu_row_geometry", ("**.rowBounds", "**.menuRowBounds", "**.rowsVisualOrder.*.bounds"), "computable_in_sidecar"),
+    FieldSpec("open_menu_row_geometry", ("**.rowBounds", "**.menuRowBounds", "**.menuGeometry.rows.*.rowBounds", "**.rowsVisualOrder.*.bounds"), "computable_in_sidecar"),
     FieldSpec("selected_item_spell_widget_state", ("selectedItem", "selectedSpell", "selectedWidget", "**.selectedItem", "**.selectedSpell", "**.selectedWidget"), "requires_bridge_export"),
     FieldSpec("top_level_interface_widget_state", ("widgets", "widgetState", "topLevelInterface", "**.widgets", "**.widget"), "present"),
     FieldSpec("allowlisted_widgets", ("allowlistedWidgets", "dialogueState", "bankUi", "**.allowlistedWidgets", "**.dialogueState"), "present"),
@@ -183,11 +183,52 @@ def compact_menu_entry(entry: Any) -> Any:
         "widgetId",
         "worldViewId",
         "rowIndex",
+        "rawIndex",
+        "visualIndex",
+        "sourceEntryIndex",
+        "displayEntryIndex",
         "rowBounds",
         "bounds",
         "center",
+        "centerX",
+        "centerY",
+        "boundsSource",
     )
     return {key: compact_value(entry.get(key), limit=4) for key in keep if key in entry}
+
+
+def compact_menu_geometry(value: Any, *, entry_limit: int = 8) -> Any:
+    if not isinstance(value, dict):
+        return compact_value(value, limit=8)
+    keep = (
+        "schema",
+        "tick",
+        "clientTick",
+        "exportSeq",
+        "capturedAtMillis",
+        "timestampUtc",
+        "sourceEvent",
+        "sampleSource",
+        "menuOpen",
+        "menuBounds",
+        "menuX",
+        "menuY",
+        "menuWidth",
+        "menuHeight",
+        "menuScroll",
+        "entryCount",
+        "entriesDisplayOrder",
+        "firstEntry",
+        "warnings",
+    )
+    compact = {key: compact_value(value.get(key), limit=6) for key in keep if key in value}
+    for source_key in ("entriesRaw", "entriesVisual", "entries", "rows"):
+        entries = value.get(source_key)
+        if isinstance(entries, list):
+            compact[source_key] = [compact_menu_entry(entry) for entry in entries[:entry_limit]]
+            if len(entries) > entry_limit:
+                compact[source_key].append({"_truncated_items": len(entries) - entry_limit})
+    return compact
 
 
 def compact_menu_sample(value: Any, *, entry_limit: int = 8) -> Any:
@@ -209,6 +250,7 @@ def compact_menu_sample(value: Any, *, entry_limit: int = 8) -> Any:
         "entryCount",
         "menuEntryCount",
         "entriesDisplayOrder",
+        "entriesDisplayOrderSource",
         "topOption",
         "topTarget",
         "topType",
@@ -226,7 +268,9 @@ def compact_menu_sample(value: Any, *, entry_limit: int = 8) -> Any:
         compact["entries"] = [compact_menu_entry(entry) for entry in entries[:entry_limit]]
         if len(entries) > entry_limit:
             compact["entries"].append({"_truncated_items": len(entries) - entry_limit})
-    unknown = len([key for key in value if key not in set(keep) | {"entries"}])
+    if isinstance(value.get("menuGeometry"), dict):
+        compact["menuGeometry"] = compact_menu_geometry(value.get("menuGeometry"), entry_limit=entry_limit)
+    unknown = len([key for key in value if key not in set(keep) | {"entries", "menuGeometry"}])
     if unknown:
         compact["_truncated_keys"] = unknown
     return compact
@@ -657,8 +701,8 @@ def normalized_telemetry(root: Any, *, max_items: int = 10) -> dict[str, Any]:
     equipment_values, _ = lookup_any(root, ("equipment", "equipmentState", "**.equipment"))
     bank_values, _ = lookup_any(root, ("bank_ui", "bankUi", "bankUI", "bank", "payloads.bank_ui", "**.bankOpen"))
     combat_values, _ = lookup_any(root, ("combat_state", "combatState", "payloads.combat_state", "**.combatState", "**.inCombat"))
-    hover_values, _ = lookup_any(root, ("clientTickHot.hoverMenu", "hoverMenu", "postMenuSort", "**.hoverMenu"))
-    menu_values, _ = lookup_any(root, ("menu", "hoverMenu", "postMenuSort", "**.menuOpen"))
+    hover_values, _ = lookup_any(root, ("clientTickHot.menuGeometry", "clientTickHot.hoverMenu", "hoverMenu", "postMenuSort", "**.hoverMenu"))
+    menu_values, _ = lookup_any(root, ("clientTickHot.menuGeometry", "menu", "hoverMenu", "postMenuSort", "**.menuOpen"))
     widget_values, _ = lookup_any(root, ("widgets", "widgetState", "dialogueState", "bankUi", "**.widgets"))
     camera_yaw_values, _ = lookup_any(root, ("cameraYaw", "camera.yaw", "camera.cameraYaw", "**.cameraYaw"))
     camera_pitch_values, _ = lookup_any(root, ("cameraPitch", "camera.pitch", "camera.cameraPitch", "**.cameraPitch"))

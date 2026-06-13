@@ -166,9 +166,94 @@ def distance(point_a: dict[str, Any] | None, point_b: dict[str, Any] | None) -> 
     return round(math.hypot(a["x"] - b["x"], a["y"] - b["y"]), 3)
 
 
+def menu_geometry_payload(sample: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(sample, dict):
+        return {}
+    if sample.get("schema") == "menu_geometry.v1":
+        return sample
+    for key in ("menuGeometry", "menu_geometry"):
+        value = sample.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _int_value(value: Any, default: int = 0) -> int:
+    number = _number(value)
+    return default if number is None else int(number)
+
+
+def _menu_geometry_bounds(sample: dict[str, Any] | None) -> dict[str, float] | None:
+    geometry = menu_geometry_payload(sample)
+    raw_bounds = geometry.get("menuBounds") or geometry.get("bounds")
+    if raw_bounds is None and isinstance(sample, dict):
+        raw_bounds = sample.get("menuBounds") or sample.get("bounds")
+    return normalize_bounds(raw_bounds)
+
+
+def _row_bounds_from_geometry_row(row: dict[str, Any]) -> dict[str, float] | None:
+    return normalize_bounds(row.get("rowBounds") or row.get("bounds") or row)
+
+
+def _menu_geometry_rows(sample: dict[str, Any] | None) -> list[dict[str, Any]]:
+    geometry = menu_geometry_payload(sample)
+    rows = _list(geometry.get("rows"))
+    if rows:
+        ordered_rows = sorted(
+            [row for row in rows if isinstance(row, dict)],
+            key=lambda row: _int_value(row.get("visualIndex", row.get("displayEntryIndex", row.get("rowIndex", 0))), 0),
+        )
+        entries: list[dict[str, Any]] = []
+        for display_index, row in enumerate(ordered_rows):
+            visual_index = _int_value(row.get("visualIndex", display_index), display_index)
+            source_index = _int_value(row.get("rawIndex", row.get("sourceEntryIndex", visual_index)), visual_index)
+            entry = dict(row)
+            bounds = _row_bounds_from_geometry_row(row)
+            entry["sourceEntryIndex"] = source_index
+            entry["displayEntryIndex"] = visual_index
+            entry["entryIndex"] = visual_index
+            entry["visualIndex"] = visual_index
+            entry["rawIndex"] = source_index
+            entry["entriesDisplayOrder"] = "top_to_bottom"
+            entry["entriesDisplayOrderSource"] = "menu_geometry.v1"
+            if bounds:
+                entry["rowBounds"] = bounds
+                entry["bounds"] = bounds
+                entry["center"] = bounds_center(bounds)
+            entries.append(entry)
+        return entries
+    entries_visual = _list(geometry.get("entriesVisual") or geometry.get("entries"))
+    if entries_visual:
+        entries = []
+        for display_index, raw_entry in enumerate(entries_visual):
+            if not isinstance(raw_entry, dict):
+                continue
+            visual_index = _int_value(raw_entry.get("visualIndex", raw_entry.get("displayEntryIndex", display_index)), display_index)
+            source_index = _int_value(raw_entry.get("rawIndex", raw_entry.get("sourceEntryIndex", visual_index)), visual_index)
+            entry = dict(raw_entry)
+            bounds = _row_bounds_from_geometry_row(entry)
+            entry["sourceEntryIndex"] = source_index
+            entry["displayEntryIndex"] = visual_index
+            entry["entryIndex"] = visual_index
+            entry["visualIndex"] = visual_index
+            entry["rawIndex"] = source_index
+            entry["entriesDisplayOrder"] = "top_to_bottom"
+            entry["entriesDisplayOrderSource"] = "menu_geometry.v1"
+            if bounds:
+                entry["rowBounds"] = bounds
+                entry["bounds"] = bounds
+                entry["center"] = bounds_center(bounds)
+            entries.append(entry)
+        return entries
+    return []
+
+
 def menu_entries_display_order(sample: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(sample, dict):
         return []
+    geometry_entries = _menu_geometry_rows(sample)
+    if geometry_entries:
+        return geometry_entries
     entries = sample.get("entries")
     if not isinstance(entries, list):
         return []
@@ -198,7 +283,12 @@ def menu_entries_display_order(sample: dict[str, Any] | None) -> list[dict[str, 
 
 
 def compute_row_bounds(sample: dict[str, Any], row_index: int, *, row_count: int | None = None) -> dict[str, float] | None:
-    menu_bounds = normalize_bounds(sample.get("menuBounds") or sample.get("bounds"))
+    for entry in _menu_geometry_rows(sample):
+        if _int_value(entry.get("entryIndex", entry.get("displayEntryIndex", -1)), -1) == row_index:
+            row_bounds = normalize_bounds(entry.get("rowBounds") or entry.get("bounds"))
+            if row_bounds:
+                return row_bounds
+    menu_bounds = _menu_geometry_bounds(sample)
     if not menu_bounds:
         return None
     displayed_count = _number(sample.get("entryCount", sample.get("menuEntryCount")))
@@ -228,14 +318,21 @@ def compute_row_bounds(sample: dict[str, Any], row_index: int, *, row_count: int
 def _menu_sample_candidates(value: Any) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     if isinstance(value, dict):
+        hot = _dict(value.get("clientTickHot"))
+        post_menu = _dict(hot.get("postMenuSort"))
+        hover_menu = _dict(hot.get("hoverMenu"))
         for candidate in (
             value,
+            value.get("menuGeometry"),
             value.get("menu"),
             value.get("hover"),
             value.get("hoverMenu"),
             value.get("postMenuSort"),
-            _dict(value.get("clientTickHot")).get("hoverMenu"),
-            _dict(value.get("clientTickHot")).get("postMenuSort"),
+            hot.get("menuGeometry"),
+            hover_menu.get("menuGeometry"),
+            post_menu.get("menuGeometry"),
+            hot.get("hoverMenu"),
+            hot.get("postMenuSort"),
             _dict(_dict(value.get("raw_event")).get("high_value_fields")).get("hover"),
             _dict(_dict(value.get("raw_event")).get("high_value_fields")).get("menu"),
         ):
@@ -249,12 +346,18 @@ def _choose_menu_sample(value: Any) -> dict[str, Any]:
     scored: list[tuple[int, dict[str, Any]]] = []
     for sample in candidates:
         score = 0
+        if sample.get("schema") == "menu_geometry.v1":
+            score += 6
+        if isinstance(sample.get("menuGeometry"), dict):
+            score += 5
         if sample.get("sourceEvent") == "MenuOpened":
             score += 4
         if sample.get("menuOpen") is True:
             score += 3
         if isinstance(sample.get("menuBounds"), dict) or isinstance(sample.get("bounds"), dict):
             score += 3
+        if _menu_geometry_rows(sample):
+            score += 4
         if isinstance(sample.get("entries"), list) and sample.get("entries"):
             score += 3
         if sample.get("topOption") or sample.get("topTarget"):
@@ -367,10 +470,13 @@ def normalize_menu_snapshot(value: Any, *, opened_event: dict[str, Any] | None =
                 sample,
             )
         ]
-    bounds = normalize_bounds(sample.get("menuBounds") or sample.get("bounds"))
+    bounds = _menu_geometry_bounds(sample)
     warnings: list[str] = []
     if not bounds:
+        geometry = menu_geometry_payload(sample)
+        geometry_warnings = _list(geometry.get("warnings"))
         warnings.append("menu_bounds_missing")
+        warnings.extend(str(item) for item in geometry_warnings if str(item) not in warnings)
     if not rows:
         warnings.append("menu_rows_missing")
     open_event = _dict(opened_event)

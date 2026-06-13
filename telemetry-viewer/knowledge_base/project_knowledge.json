@@ -1,6 +1,6 @@
 {
   "schema": "project_knowledge.v1",
-  "updatedAtUtc": "2026-06-13T19:25:27.159147Z",
+  "updatedAtUtc": "2026-06-13T20:04:44.970494Z",
   "repoRoot": "C:\\Users\\badto\\osrs-telemetry",
   "sourceReports": [
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_bank_to_woodcutting_latest.md",
@@ -3631,6 +3631,70 @@
       "goodFixture": false,
       "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_141921_live_woodcutting_loop_20260613_141921\\summary.json",
       "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_141921_live_woodcutting_loop_20260613_141921\\schema_gap_report.md"
+    },
+    {
+      "recordingId": "20260613_145128_live_woodcutting_loop_20260613_145128",
+      "folder": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_145128_live_woodcutting_loop_20260613_145128",
+      "label": "live_woodcutting_loop_20260613_145128",
+      "activityType": "Woodcutting Loop",
+      "verdict": "WARN",
+      "durationSeconds": 63.266,
+      "tickRange": {
+        "first": 3218,
+        "last": 3334,
+        "count": 19
+      },
+      "usefulEvidence": [
+        "loop state interrupted",
+        "next phase recover_or_resume_task",
+        "phases interrupted",
+        "interruption lifecycle evidence present",
+        "human click/camera profile available"
+      ],
+      "missingData": [
+        "banking.bankContainer.delta",
+        "banking.bankContainer.items",
+        "banking.bankOpen_or_depositBoxOpen",
+        "banking.bankWidgetRoot",
+        "combat.recentHitsplats",
+        "warning: No camera yaw/pitch changes were found, or source snapshots lack camera fields.",
+        "warning: arduino_events.jsonl is missing or empty"
+      ],
+      "goodFixture": false,
+      "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_145128_live_woodcutting_loop_20260613_145128\\summary.json",
+      "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_145128_live_woodcutting_loop_20260613_145128\\schema_gap_report.md"
+    },
+    {
+      "recordingId": "20260613_145507_live_woodcutting_loop_20260613_145507",
+      "folder": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_145507_live_woodcutting_loop_20260613_145507",
+      "label": "live_woodcutting_loop_20260613_145507",
+      "activityType": "Woodcutting Loop",
+      "verdict": "WARN",
+      "durationSeconds": 330.875,
+      "tickRange": {
+        "first": 3587,
+        "last": 4096,
+        "count": 22
+      },
+      "usefulEvidence": [
+        "loop state interrupted",
+        "next phase recover_or_resume_task",
+        "phases interrupted",
+        "interruption lifecycle evidence present",
+        "human click/camera profile available"
+      ],
+      "missingData": [
+        "banking.bankContainer.delta",
+        "banking.bankContainer.items",
+        "banking.bankOpen_or_depositBoxOpen",
+        "banking.bankWidgetRoot",
+        "combat.recentHitsplats",
+        "warning: No camera yaw/pitch changes were found, or source snapshots lack camera fields.",
+        "warning: arduino_events.jsonl is missing or empty"
+      ],
+      "goodFixture": false,
+      "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_145507_live_woodcutting_loop_20260613_145507\\summary.json",
+      "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_145507_live_woodcutting_loop_20260613_145507\\schema_gap_report.md"
     }
   ],
   "activityKnowledge": [
@@ -4699,14 +4763,62 @@
       "title": "Authenticated live Start Game path must be validated before live bot actions",
       "severity": "high",
       "requiredLayer": "startup/recovery",
-      "status": "partially_resolved",
+      "status": "resolved",
       "evidence": [
         "start_game_command.py separates devStartCommand from liveStartCommand.",
         "Jagex Launcher quick launch is discoverable with --launch=osrs_runelite when installed.",
         "dev_gradle_run remains classified as a dev/plugin launch and is not accepted as the live authenticated start path.",
-        "2026-06-13 Jagex quick-launch recovery started RuneLite but stopped at disconnected_dialog / LOGIN_SCREEN with stale_login_screen_after_relaunch."
+        "2026-06-13 visible-button recovery through Play Now and Click here to play reached loadedSceneVerified=true."
       ],
-      "suggestedNextTask": "Use the existing safe recovery/launcher session path to clear disconnected/login, then rerun context_service.py --ensure-loaded-scene until loadedSceneVerified=true before live actions."
+      "suggestedNextTask": "Keep using context_service.py --ensure-loaded-scene before live actions."
+    },
+    {
+      "id": "arduino_pointer_calibration_required",
+      "title": "Arduino pointer calibration was required before live gameplay clicks",
+      "severity": "high",
+      "requiredLayer": "input/arduino",
+      "status": "resolved",
+      "evidence": [
+        "Canonical no-click calibration passed on COM6 and wrote .osrs-telemetry\\arduino_pointer_calibration.json.",
+        "bot_eval_runner passes the calibration path into the live executor."
+      ],
+      "suggestedNextTask": "Keep calibration freshness as a pre-gameplay live input gate."
+    },
+    {
+      "id": "plane1_recovery_hover_option_mismatch",
+      "title": "Plane-1 Staircase hover top option was generic Climb instead of Climb-down",
+      "severity": "high",
+      "requiredLayer": "route/executor",
+      "status": "resolved",
+      "evidence": [
+        "Strict Staircase route interactions now use exact lower-menu row selection instead of accepting generic Climb.",
+        "bot_runs\\20260613_145500_live_woodcutting_loop clicked the exact Climb-down row and verified plane 1 -> 0."
+      ],
+      "suggestedNextTask": "Do not loosen strict route-object guards; continue from the resource-target safety blocker."
+    },
+    {
+      "id": "route_lower_menu_row_bounds_missing",
+      "title": "Strict Staircase lower-menu row geometry was missing for plane-1 recovery",
+      "severity": "high",
+      "requiredLayer": "plugin/executor",
+      "status": "resolved",
+      "evidence": [
+        "TelemetryPlugin exports menu_geometry.v1 with normalized entriesVisual and rows.",
+        "bot_runs\\20260613_145500_live_woodcutting_loop clicked Climb-down / Staircase for object 16672 and verified plane 1 -> 0."
+      ],
+      "suggestedNextTask": "Keep route-object strict guards; the remaining live blocker is the later resource-target hover safety skip."
+    },
+    {
+      "id": "resource_target_hover_safety_skip",
+      "title": "Post-return tree target hover is visible but live click safety skips the action",
+      "severity": "high",
+      "requiredLayer": "woodcutting/input_control",
+      "status": "open",
+      "evidence": [
+        "bot_runs\\20260613_145500_live_woodcutting_loop reached 3198,3235,0 after Staircase recovery.",
+        "Repeated select_resource_target proposals saw Chop down / Tree but returned no_click_safety_skip."
+      ],
+      "suggestedNextTask": "Fix tree target hover confirmation/safety classification after route return without changing route-object guards."
     },
     {
       "id": "input_geometry_live_source_stale",
@@ -4859,6 +4971,14 @@
       "task": "Clean up Deposit-All menu-context region classification.",
       "successCriteria": [
         "Deposit-All bank UI clicks no longer appear as minimap_click when menu context proves bank UI."
+      ]
+    },
+    {
+      "id": "fix_resource_target_hover_safety_skip",
+      "priority": 1,
+      "task": "Fix post-return tree target hover/safety classification after route recovery.",
+      "successCriteria": [
+        "After the route reaches the tree area, select_resource_target either safely clicks a confirmed Chop down / Tree target or reports a specific non-click blocker instead of repeated no_click_safety_skip."
       ]
     },
     {

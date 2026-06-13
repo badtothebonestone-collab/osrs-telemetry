@@ -1,6 +1,6 @@
 {
   "schema": "project_open_gaps.v1",
-  "updatedAtUtc": "2026-06-13T19:25:27.159147Z",
+  "updatedAtUtc": "2026-06-13T20:04:44.970494Z",
   "gaps": [
     {
       "id": "deposit_all_region_classification",
@@ -67,45 +67,57 @@
         "start_game_command.py separates devStartCommand from liveStartCommand.",
         "Jagex Launcher quick launch is discoverable with --launch=osrs_runelite when installed.",
         "dev_gradle_run remains classified as a dev/plugin launch and is not accepted as the live authenticated start path.",
-        "2026-06-13 recovery clicked Play Now and Click here to play, then reached loadedSceneVerified=true."
+        "2026-06-13 visible-button recovery through Play Now and Click here to play reached loadedSceneVerified=true."
       ],
       "suggestedNextTask": "Keep using context_service.py --ensure-loaded-scene before live actions."
     },
     {
       "id": "arduino_pointer_calibration_required",
-      "title": "Arduino pointer calibration is required before live gameplay input",
+      "title": "Arduino pointer calibration was required before live gameplay clicks",
       "severity": "high",
       "requiredLayer": "input/arduino",
       "status": "resolved",
       "evidence": [
-        "2026-06-13 canonical calibration command passed on COM6 and wrote .osrs-telemetry\\arduino_pointer_calibration.json.",
-        "2026-06-13 live run bot_runs\\20260613_134142_live_woodcutting_loop reported arduinoPointerCalibrationStatus=PASS and arduinoMovementSafetyStatus=PASS."
+        "Canonical no-click calibration passed on COM6 and wrote .osrs-telemetry\\arduino_pointer_calibration.json.",
+        "bot_eval_runner passes the calibration path into the live executor."
       ],
-      "suggestedNextTask": "Use the refreshed calibration path in live executor commands."
+      "suggestedNextTask": "Keep calibration freshness as a pre-gameplay live input gate."
     },
     {
       "id": "plane1_recovery_hover_option_mismatch",
-      "title": "Plane-1 Staircase recovery requires strict lower-menu Climb-down selection",
+      "title": "Plane-1 Staircase hover top option was generic Climb instead of Climb-down",
       "severity": "high",
       "requiredLayer": "route/executor",
       "status": "resolved",
       "evidence": [
-        "2026-06-13 live run bot_runs\\20260613_134142_live_woodcutting_loop reached route_guide_plane1_recovery_interaction for Staircase 16672 at 3204,3229,1.",
-        "Executor now attempts strict lower-menu selection instead of accepting generic Climb when expected action is Climb-down."
+        "Strict Staircase route interactions now use exact lower-menu row selection instead of accepting generic Climb.",
+        "bot_runs\\20260613_145500_live_woodcutting_loop clicked the exact Climb-down row and verified plane 1 -> 0."
       ],
-      "suggestedNextTask": "Keep strict route lower-menu matching enabled for directional Staircase actions."
+      "suggestedNextTask": "Do not loosen strict route-object guards; continue from the resource-target safety blocker."
     },
     {
       "id": "route_lower_menu_row_bounds_missing",
-      "title": "Strict route lower-menu selection needs trustworthy menu row bounds",
+      "title": "Strict Staircase lower-menu row geometry was missing for plane-1 recovery",
       "severity": "high",
       "requiredLayer": "plugin/executor",
+      "status": "resolved",
+      "evidence": [
+        "TelemetryPlugin exports menu_geometry.v1 with normalized entriesVisual and rows.",
+        "bot_runs\\20260613_145500_live_woodcutting_loop clicked Climb-down / Staircase for object 16672 and verified plane 1 -> 0."
+      ],
+      "suggestedNextTask": "Keep route-object strict guards; the remaining live blocker is the later resource-target hover safety skip."
+    },
+    {
+      "id": "resource_target_hover_safety_skip",
+      "title": "Post-return tree target hover is visible but live click safety skips the action",
+      "severity": "high",
+      "requiredLayer": "woodcutting/input_control",
       "status": "open",
       "evidence": [
-        "2026-06-13 live run bot_runs\\20260613_141912_live_woodcutting_loop captured Climb-down / Staircase for object 16672 in MenuOpened rows.",
-        "MenuOpened menuBounds were zero, so the executor could not safely select the row and blocked with route_lower_menu_row_bounds_missing."
+        "bot_runs\\20260613_145500_live_woodcutting_loop reached 3198,3235,0 after Staircase recovery.",
+        "Repeated select_resource_target proposals saw Chop down / Tree but returned no_click_safety_skip."
       ],
-      "suggestedNextTask": "Export trustworthy RuneLite menu bounds/row geometry for MenuOpened or implement a tested safe row-selection fallback for the strict route row case."
+      "suggestedNextTask": "Fix tree target hover confirmation/safety classification after route return without changing route-object guards."
     },
     {
       "id": "input_geometry_live_source_stale",
@@ -196,20 +208,19 @@
       ]
     },
     {
-      "id": "fix_route_lower_menu_row_bounds",
-      "priority": 1,
-      "task": "Export or derive trustworthy row bounds for strict route lower-menu selection.",
-      "successCriteria": [
-        "Plane-1 Climb-down / Staircase row for object 16672 has usable row bounds or a tested safe fallback.",
-        "The executor verifies plane 1 -> 0 after selecting the strict row."
-      ]
-    },
-    {
       "id": "fix_deposit_region_label",
       "priority": 1,
       "task": "Clean up Deposit-All menu-context region classification.",
       "successCriteria": [
         "Deposit-All bank UI clicks no longer appear as minimap_click when menu context proves bank UI."
+      ]
+    },
+    {
+      "id": "fix_resource_target_hover_safety_skip",
+      "priority": 1,
+      "task": "Fix post-return tree target hover/safety classification after route recovery.",
+      "successCriteria": [
+        "After the route reaches the tree area, select_resource_target either safely clicks a confirmed Chop down / Tree target or reports a specific non-click blocker instead of repeated no_click_safety_skip."
       ]
     },
     {

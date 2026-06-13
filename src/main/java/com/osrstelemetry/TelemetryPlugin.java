@@ -15,6 +15,7 @@ import java.awt.Window;
 import java.awt.geom.PathIterator;
 import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -146,6 +147,8 @@ public class TelemetryPlugin extends Plugin
 	private static final int MAX_RECENT_COMBAT_EVENTS = 20;
 	private static final int MAX_COMBAT_ACTORS = 12;
 	private static final int COMBAT_NPC_RADIUS_TILES = 16;
+	private static final int MENU_DEFAULT_ROW_HEIGHT = 15;
+	private static final int MENU_DEFAULT_HEADER_HEIGHT = 18;
 	private static final int COMPACT_LIVE_GEOMETRY_MAX_REFS_HARD_CAP = 200;
 	private static final int COLLISION_MOVEMENT_MASK = CollisionDataFlag.BLOCK_MOVEMENT_NORTH_WEST
 			| CollisionDataFlag.BLOCK_MOVEMENT_NORTH
@@ -688,11 +691,12 @@ public class TelemetryPlugin extends Plugin
 	@Subscribe
 	public void onMenuOpened(MenuOpened event)
 	{
-		Map<String, Object> payload = hoverMenuPayload();
+		Map<String, Object> payload = menuGeometryHoverPayload("MenuOpened", event.getMenuEntries());
 		payload.put("sampleSource", "MenuOpened");
 		payload.put("sourceEvent", "MenuOpened");
 		payload.put("menuEntryCount", event.getMenuEntries() == null ? 0 : event.getMenuEntries().length);
 		logEvent("MenuOpened", payload);
+		logEvent("MenuGeometry", payload.get("menuGeometry"));
 		clientTickHotState.recordPostMenuSort(payload);
 	}
 
@@ -701,6 +705,13 @@ public class TelemetryPlugin extends Plugin
 	{
 		clientTickId++;
 		clientTickHotState.recordClientTick(clientTickPayload("ClientTick"));
+		if (isMenuOpenSafe())
+		{
+			Map<String, Object> payload = menuGeometryHoverPayload("MenuGeometry", null);
+			latestHoverMenu = payload;
+			logEvent("MenuGeometry", payload.get("menuGeometry"));
+			clientTickHotState.recordPostMenuSort(payload);
+		}
 	}
 
 	@Subscribe
@@ -6872,6 +6883,230 @@ public class TelemetryPlugin extends Plugin
 		return payload;
 	}
 
+	private Map<String, Object> menuGeometryHoverPayload(String sourceEvent, MenuEntry[] eventEntries)
+	{
+		Map<String, Object> payload = hoverMenuPayload();
+		Map<String, Object> geometry = menuGeometryPayload(sourceEvent, eventEntries);
+		Object entriesVisual = geometry.get("entriesVisual");
+		Object firstEntry = geometry.get("firstEntry");
+
+		payload.put("sampleSource", sourceEvent);
+		payload.put("sourceEvent", sourceEvent);
+		payload.put("menuGeometry", geometry);
+		payload.put("menuOpen", geometry.get("menuOpen"));
+		payload.put("menuBounds", geometry.get("menuBounds"));
+		payload.put("menuEntryCount", geometry.get("entryCount"));
+		payload.put("entryCount", geometry.get("entryCount"));
+		payload.put("entriesDisplayOrder", "top_to_bottom");
+		payload.put("entriesDisplayOrderSource", "menu_geometry.v1");
+		if (entriesVisual instanceof List)
+		{
+			payload.put("entries", entriesVisual);
+		}
+		if (firstEntry instanceof Map)
+		{
+			addTopMenuEntryFromMap(payload, (Map<?, ?>) firstEntry);
+		}
+		return payload;
+	}
+
+	private Map<String, Object> menuGeometryPayload(String sourceEvent, MenuEntry[] eventEntries)
+	{
+		Map<String, Object> payload = new LinkedHashMap<>();
+		MenuEntry[] entries = eventEntries == null ? client.getMenuEntries() : eventEntries;
+		int entryCount = entries == null ? 0 : entries.length;
+		Map<String, Object> bounds = menuBoundsPayload();
+		boolean validBounds = validMenuBounds(bounds);
+		List<String> warnings = new ArrayList<>();
+		List<Map<String, Object>> entriesRaw = new ArrayList<>();
+		List<Map<String, Object>> entriesVisual = new ArrayList<>();
+		List<Map<String, Object>> rows = new ArrayList<>();
+
+		if (!validBounds)
+		{
+			warnings.add("menu_bounds_missing_or_zero");
+		}
+
+		if (entries != null)
+		{
+			for (int rawIndex = 0; rawIndex < entries.length; rawIndex++)
+			{
+				MenuEntry entry = entries[rawIndex];
+				if (entry == null)
+				{
+					continue;
+				}
+				Map<String, Object> raw = menuEntryPayload(entry);
+				raw.put("rawIndex", rawIndex);
+				raw.put("entriesDisplayOrder", "raw_client_order");
+				entriesRaw.add(raw);
+			}
+
+			for (int visualIndex = 0; visualIndex < entries.length; visualIndex++)
+			{
+				int rawIndex = entries.length - 1 - visualIndex;
+				MenuEntry entry = entries[rawIndex];
+				if (entry == null)
+				{
+					continue;
+				}
+				Map<String, Object> visual = menuEntryPayload(entry);
+				visual.put("rawIndex", rawIndex);
+				visual.put("visualIndex", visualIndex);
+				visual.put("sourceEntryIndex", rawIndex);
+				visual.put("displayEntryIndex", visualIndex);
+				visual.put("entryIndex", visualIndex);
+				visual.put("entriesDisplayOrder", "top_to_bottom");
+				visual.put("entriesDisplayOrderSource", "menu_geometry.v1");
+				Map<String, Object> rowBounds = validBounds ? menuRowBounds(bounds, visualIndex, entryCount) : null;
+				if (rowBounds != null)
+				{
+					visual.put("rowBounds", rowBounds);
+					visual.put("bounds", rowBounds);
+					visual.put("center", rowCenter(rowBounds));
+					rows.add(menuRowPayload(visual, rowBounds, visualIndex, rawIndex));
+				}
+				entriesVisual.add(visual);
+			}
+		}
+
+		if (entryCount > 0 && rows.isEmpty())
+		{
+			warnings.add("menu_row_bounds_unavailable");
+		}
+
+		payload.put("schema", "menu_geometry.v1");
+		payload.put("tick", tickId);
+		payload.put("clientTick", clientTickId);
+		payload.put("exportSeq", eventSeq);
+		payload.put("capturedAtMillis", System.currentTimeMillis());
+		payload.put("timestampUtc", Instant.now().toString());
+		payload.put("sourceEvent", sourceEvent);
+		payload.put("sampleSource", sourceEvent);
+		payload.put("menuOpen", isMenuOpenSafe());
+		payload.put("menuBounds", bounds);
+		payload.put("menuX", bounds.get("x"));
+		payload.put("menuY", bounds.get("y"));
+		payload.put("menuWidth", bounds.get("width"));
+		payload.put("menuHeight", bounds.get("height"));
+		payload.put("menuScroll", bounds.get("scroll"));
+		payload.put("entryCount", entryCount);
+		payload.put("entriesRaw", entriesRaw);
+		payload.put("entriesVisual", entriesVisual);
+		payload.put("entries", entriesVisual);
+		payload.put("entriesDisplayOrder", "top_to_bottom");
+		payload.put("rows", rows);
+		payload.put("firstEntry", entriesVisual.isEmpty() ? null : entriesVisual.get(0));
+		payload.put("warnings", warnings);
+		return payload;
+	}
+
+	private Map<String, Object> menuBoundsPayload()
+	{
+		Map<String, Object> bounds = new LinkedHashMap<>();
+		try
+		{
+			bounds.put("x", client.getMenuX());
+			bounds.put("y", client.getMenuY());
+			bounds.put("width", client.getMenuWidth());
+			bounds.put("height", client.getMenuHeight());
+			bounds.put("scrollable", client.isMenuScrollable());
+			bounds.put("scroll", client.getMenuScroll());
+			bounds.put("boundsSource", "client_menu");
+		}
+		catch (RuntimeException ex)
+		{
+			bounds.put("x", 0);
+			bounds.put("y", 0);
+			bounds.put("width", 0);
+			bounds.put("height", 0);
+			bounds.put("scrollable", false);
+			bounds.put("scroll", 0);
+			bounds.put("boundsSource", "client_menu_error");
+			bounds.put("warning", exceptionSummary(ex));
+		}
+		return bounds;
+	}
+
+	private boolean validMenuBounds(Map<String, Object> bounds)
+	{
+		if (bounds == null)
+		{
+			return false;
+		}
+		return asInt(bounds.get("width"), 0) > 0 && asInt(bounds.get("height"), 0) > 0;
+	}
+
+	private Map<String, Object> menuRowBounds(Map<String, Object> menuBounds, int visualIndex, int entryCount)
+	{
+		int count = Math.max(1, entryCount);
+		int x = asInt(menuBounds.get("x"), 0);
+		int y = asInt(menuBounds.get("y"), 0);
+		int width = asInt(menuBounds.get("width"), 0);
+		int height = asInt(menuBounds.get("height"), 0);
+		if (width <= 0 || height <= 0 || visualIndex < 0 || visualIndex >= count)
+		{
+			return null;
+		}
+
+		double headerHeight;
+		double rowHeight;
+		if (height > MENU_DEFAULT_ROW_HEIGHT * count)
+		{
+			double naturalHeaderHeight = height - (MENU_DEFAULT_ROW_HEIGHT * count);
+			headerHeight = Math.min(24.0, Math.max(MENU_DEFAULT_HEADER_HEIGHT, naturalHeaderHeight));
+			rowHeight = Math.max(1.0, (height - headerHeight) / count);
+		}
+		else
+		{
+			headerHeight = 0.0;
+			rowHeight = Math.max(1.0, ((double) height) / count);
+		}
+
+		Map<String, Object> row = new LinkedHashMap<>();
+		row.put("x", x);
+		row.put("y", y + headerHeight + visualIndex * rowHeight);
+		row.put("width", width);
+		row.put("height", rowHeight);
+		row.put("centerX", x + width / 2.0);
+		row.put("centerY", y + headerHeight + visualIndex * rowHeight + rowHeight / 2.0);
+		row.put("boundsSource", "client_menu_geometry");
+		row.put("headerHeight", headerHeight);
+		row.put("rowHeight", rowHeight);
+		return row;
+	}
+
+	private Map<String, Object> rowCenter(Map<String, Object> bounds)
+	{
+		Map<String, Object> center = new LinkedHashMap<>();
+		center.put("x", bounds.get("centerX"));
+		center.put("y", bounds.get("centerY"));
+		return center;
+	}
+
+	private Map<String, Object> menuRowPayload(Map<String, Object> entry, Map<String, Object> rowBounds, int visualIndex, int rawIndex)
+	{
+		Map<String, Object> row = new LinkedHashMap<>();
+		row.put("visualIndex", visualIndex);
+		row.put("rawIndex", rawIndex);
+		row.put("option", entry.get("option"));
+		row.put("target", entry.get("target"));
+		row.put("type", entry.get("type"));
+		row.put("identifier", entry.get("identifier"));
+		row.put("param0", entry.get("param0"));
+		row.put("param1", entry.get("param1"));
+		row.put("itemId", entry.get("itemId"));
+		row.put("x", rowBounds.get("x"));
+		row.put("y", rowBounds.get("y"));
+		row.put("width", rowBounds.get("width"));
+		row.put("height", rowBounds.get("height"));
+		row.put("centerX", rowBounds.get("centerX"));
+		row.put("centerY", rowBounds.get("centerY"));
+		row.put("boundsSource", rowBounds.get("boundsSource"));
+		row.put("rowBounds", rowBounds);
+		return row;
+	}
+
 	private Map<String, Object> latestHoverMenuPayload()
 	{
 		return copyHotMenuSample(latestHoverMenu);
@@ -6980,6 +7215,16 @@ public class TelemetryPlugin extends Plugin
 		payload.put("topIdentifier", entry.getIdentifier());
 		payload.put("topParam0", entry.getParam0());
 		payload.put("topParam1", entry.getParam1());
+	}
+
+	private void addTopMenuEntryFromMap(Map<String, Object> payload, Map<?, ?> entry)
+	{
+		payload.put("topOption", safeString(objectToString(entry.get("option"))));
+		payload.put("topTarget", safeString(objectToString(entry.get("target"))));
+		payload.put("topType", safeString(objectToString(entry.get("type"))));
+		payload.put("topIdentifier", asInt(entry.get("identifier"), -1));
+		payload.put("topParam0", asInt(entry.get("param0"), -1));
+		payload.put("topParam1", asInt(entry.get("param1"), -1));
 	}
 
 	private Map<String, Object> menuOptionClickedPayload(MenuOptionClicked event)
@@ -7096,6 +7341,8 @@ public class TelemetryPlugin extends Plugin
 		payload.put("param0", entry.getParam0());
 		payload.put("param1", entry.getParam1());
 		payload.put("worldViewId", entry.getWorldViewId());
+		putOptionalBoolean(payload, "deprioritized", entry, "isDeprioritized");
+		putOptionalBoolean(payload, "forceLeftClick", entry, "isForceLeftClick");
 
 		if (widget != null)
 		{
@@ -7103,6 +7350,48 @@ public class TelemetryPlugin extends Plugin
 		}
 
 		return payload;
+	}
+
+	private void putOptionalBoolean(Map<String, Object> payload, String key, MenuEntry entry, String methodName)
+	{
+		try
+		{
+			Method method = entry.getClass().getMethod(methodName);
+			Object value = method.invoke(entry);
+			if (value instanceof Boolean)
+			{
+				payload.put(key, value);
+			}
+		}
+		catch (ReflectiveOperationException | SecurityException ignored)
+		{
+			// Older RuneLite APIs do not expose every MenuEntry flag.
+		}
+	}
+
+	private String objectToString(Object value)
+	{
+		return value == null ? "" : String.valueOf(value);
+	}
+
+	private int asInt(Object value, int fallback)
+	{
+		if (value instanceof Number)
+		{
+			return ((Number) value).intValue();
+		}
+		if (value instanceof String)
+		{
+			try
+			{
+				return Integer.parseInt(((String) value).trim());
+			}
+			catch (NumberFormatException ignored)
+			{
+				return fallback;
+			}
+		}
+		return fallback;
 	}
 
 	private String safeString(String value)

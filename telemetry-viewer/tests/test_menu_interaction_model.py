@@ -60,6 +60,111 @@ def bounded_staircase_sample():
     return sample
 
 
+def menu_geometry_staircase_sample():
+    return {
+        "schema": "plugin_hover_menu.v1",
+        "sourceEvent": "MenuGeometry",
+        "sampleSource": "MenuGeometry",
+        "menuOpen": True,
+        "menuBounds": {"x": 124, "y": 148, "width": 150, "height": 112},
+        "entryCount": 5,
+        "entriesDisplayOrder": "top_to_bottom",
+        "entries": [
+            {
+                "option": "Climb",
+                "target": "<col=ffff>Staircase",
+                "type": "GAME_OBJECT_FIRST_OPTION",
+                "identifier": 16672,
+                "rawIndex": 4,
+                "visualIndex": 0,
+            },
+            {
+                "option": "Climb-up",
+                "target": "<col=ffff>Staircase",
+                "type": "GAME_OBJECT_SECOND_OPTION",
+                "identifier": 16672,
+                "rawIndex": 3,
+                "visualIndex": 1,
+            },
+            {
+                "option": "Climb-down",
+                "target": "<col=ffff>Staircase",
+                "type": "GAME_OBJECT_THIRD_OPTION",
+                "identifier": 16672,
+                "rawIndex": 2,
+                "visualIndex": 2,
+            },
+            {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0, "rawIndex": 1, "visualIndex": 3},
+            {
+                "option": "Examine",
+                "target": "<col=ffff>Staircase",
+                "type": "EXAMINE_OBJECT",
+                "identifier": 16672,
+                "rawIndex": 0,
+                "visualIndex": 4,
+            },
+        ],
+        "menuGeometry": {
+            "schema": "menu_geometry.v1",
+            "menuOpen": True,
+            "menuBounds": {"x": 124, "y": 148, "width": 150, "height": 112},
+            "entryCount": 5,
+            "entriesRaw": [
+                {"option": "Examine", "target": "<col=ffff>Staircase", "identifier": 16672, "rawIndex": 0},
+                {"option": "Walk here", "target": "", "identifier": 0, "rawIndex": 1},
+                {"option": "Climb-down", "target": "<col=ffff>Staircase", "identifier": 16672, "rawIndex": 2},
+                {"option": "Climb-up", "target": "<col=ffff>Staircase", "identifier": 16672, "rawIndex": 3},
+                {"option": "Climb", "target": "<col=ffff>Staircase", "identifier": 16672, "rawIndex": 4},
+            ],
+            "rows": [
+                {
+                    "visualIndex": 0,
+                    "rawIndex": 4,
+                    "option": "Climb",
+                    "target": "<col=ffff>Staircase",
+                    "identifier": 16672,
+                    "x": 124,
+                    "y": 166,
+                    "width": 150,
+                    "height": 18.8,
+                    "centerX": 199,
+                    "centerY": 175.4,
+                    "boundsSource": "client_menu_geometry",
+                },
+                {
+                    "visualIndex": 1,
+                    "rawIndex": 3,
+                    "option": "Climb-up",
+                    "target": "<col=ffff>Staircase",
+                    "identifier": 16672,
+                    "x": 124,
+                    "y": 184.8,
+                    "width": 150,
+                    "height": 18.8,
+                    "centerX": 199,
+                    "centerY": 194.2,
+                    "boundsSource": "client_menu_geometry",
+                },
+                {
+                    "visualIndex": 2,
+                    "rawIndex": 2,
+                    "option": "Climb-down",
+                    "target": "<col=ffff>Staircase",
+                    "identifier": 16672,
+                    "x": 124,
+                    "y": 203.6,
+                    "width": 150,
+                    "height": 18.8,
+                    "centerX": 199,
+                    "centerY": 213.0,
+                    "boundsSource": "client_menu_geometry",
+                },
+            ],
+            "warnings": [],
+        },
+    }
+
+
 def cancel_only_sample():
     return {
         "schema": "plugin_hover_menu.v1",
@@ -163,6 +268,24 @@ class MenuInteractionModelTest(unittest.TestCase):
         self.assertIsNotNone(row_bounds)
         self.assertEqual(row_bounds["x"], 500.0)
         self.assertGreater(row_bounds["y"], 300.0)
+
+    def test_menu_geometry_rows_prefer_normalized_visual_order(self):
+        normalized = menu_interaction_model.normalize_menu_snapshot({"hover": menu_geometry_staircase_sample()})
+        rows = normalized["rowsVisualOrder"]
+        self.assertEqual(rows[0]["option"], "Climb")
+        self.assertEqual(rows[0]["sourceEntryIndex"], 4)
+        self.assertEqual(rows[2]["option"], "Climb-down")
+        self.assertEqual(rows[2]["sourceEntryIndex"], 2)
+        self.assertEqual(rows[2]["bounds"]["x"], 124.0)
+        self.assertEqual(rows[2]["bounds"]["height"], 18.8)
+
+    def test_menu_geometry_nonzero_bounds_produces_climb_down_row(self):
+        sample = menu_geometry_staircase_sample()
+        row_bounds = menu_interaction_model.compute_row_bounds(sample, 2)
+        self.assertIsNotNone(row_bounds)
+        self.assertEqual(row_bounds["x"], 124.0)
+        self.assertEqual(row_bounds["y"], 203.6)
+        self.assertEqual(row_bounds["width"], 150.0)
 
     def test_maps_click_inside_row_to_selected_row(self):
         normalized = menu_interaction_model.normalize_menu_snapshot({"hover": menu_sample()})
