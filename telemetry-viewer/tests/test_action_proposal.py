@@ -193,6 +193,62 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.target_tile, {"worldX": 3209, "worldY": 3216, "plane": 0})
         self.assertEqual(proposal.target_explanation["routeGuideName"], "woodcutting_area_to_bank")
 
+    def test_inventory_full_rejected_gate_uses_next_bank_route_guide_point(self):
+        gate_target = {
+            "targetName": "Gate",
+            "name": "Gate",
+            "classId": "service_route_transition",
+            "targetType": "sceneObject",
+            "id": 12986,
+            "objectId": 12986,
+            "worldX": 3213,
+            "worldY": 3261,
+            "plane": 0,
+            "aimPoint": aim(391, 81),
+            "actions": ["Open"],
+            "expectedOptions": ["Open"],
+            "expectedTargets": ["Gate"],
+            "routeId": "plugin_snapshot_route_to_service",
+        }
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceRequired": True, "serviceReady": False, "candidateCount": 0},
+            service_route={
+                "schema": "service_route_context.v1",
+                "routeAvailable": True,
+                "routeStepStatus": "plugin_snapshot_route_transition_visible",
+                "actionReady": True,
+                "visibleInteractionTarget": gate_target,
+            },
+            bank_ui={"bankOpen": False},
+        )
+        status["playerWorldPosition"] = {"worldX": 3202, "worldY": 3239, "plane": 0}
+        status["brain"]["genericTaskState"]["activeIntentTarget"] = None
+        status["brain"]["intentOverlayContext"] = {"selectedMarker": None}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "navigate_to_service")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.reason, "route_guide_progress_after_rejected_route_object")
+        self.assertEqual(proposal.target_tile, {"worldX": 3208, "worldY": 3212, "plane": 0})
+        explanation = proposal.target_explanation
+        self.assertEqual(explanation["routeName"], "woodcutting_area_to_bank")
+        self.assertEqual(explanation["routeGuideName"], "woodcutting_area_to_bank")
+        self.assertEqual(explanation["world"], {"worldX": 3208, "worldY": 3212, "plane": 0})
+        self.assertTrue(explanation["localScoutPath"])
+        self.assertEqual(explanation["localScoutPath"][0]["source"], "route_guide_sparse_segment")
+        self.assertEqual(explanation["routeWaypointSelection"]["generatedPathSource"], "route_guide_sparse_segment")
+        self.assertEqual(explanation["proposedObjectClassification"], "unrelated_or_rejected")
+        self.assertEqual(explanation["gateCandidateStatus"], "rejected_not_on_expected_segment")
+        self.assertEqual(explanation["selectedCandidateReason"], "route_guide_next_step_selected_after_rejected_route_object")
+        self.assertIn("route_object_not_on_expected_segment", explanation["rejectedRouteObjectCandidate"]["rejectionReasons"])
+        self.assertEqual(explanation["rejectedRouteObjectCandidate"]["objectId"], 12986)
+
     def test_logs_held_at_actionable_service_target_proposes_open_service_with_free_slots(self):
         service_target = {
             "targetName": "Bank Deposit Box",

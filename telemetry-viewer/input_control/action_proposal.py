@@ -2086,6 +2086,96 @@ def _route_candidate_blocker_proposal(
     )
 
 
+def _route_object_classification_payload(
+    *,
+    target: dict[str, Any],
+    issue: dict[str, Any] | None,
+    route_name: str | None,
+    guide_progress: dict[str, Any] | None,
+) -> dict[str, Any]:
+    issue = _dict(issue)
+    guide_progress = _dict(guide_progress)
+    rejection_reasons = list(dict.fromkeys(_list(issue.get("rejectionReasons")) + _list(target.get("rejectedReasons"))))
+    candidate_name = _text(target.get("targetName") or target.get("name"))
+    candidate_actions = _candidate_expected_options(target)
+    candidate_world = _target_world_tile(target)
+    candidate_id = _route_target_id(target)
+    issue_classification = str(issue.get("classification") or "")
+    if issue.get("status") == "FAIL" or issue_classification:
+        classification = "unrelated_or_rejected"
+        status = "rejected"
+    elif _route_target_has_route_relevance_pass(target):
+        classification = "optional_navigation_support"
+        status = "usable_with_postcondition"
+    else:
+        classification = "review_evidence"
+        status = "not_executable"
+    gate_status = None
+    if _compact_words(candidate_name) == "gate" or "gate" in _compact_words(candidate_name):
+        gate_status = (
+            "rejected_not_on_expected_segment"
+            if "route_object_not_on_expected_segment" in rejection_reasons or classification == "unrelated_or_rejected"
+            else status
+        )
+    return {
+        "schema": "route_object_classification.v1",
+        "classification": classification,
+        "status": status,
+        "routeName": route_name,
+        "routeGuideLoaded": bool(guide_progress),
+        "routeGuideProgressIndex": guide_progress.get("routeGuideProgressIndex"),
+        "nextGuidePoint": guide_progress.get("nextGuidePoint") if isinstance(guide_progress.get("nextGuidePoint"), dict) else None,
+        "nextGuideInteraction": guide_progress.get("nextGuideInteraction") if isinstance(guide_progress.get("nextGuideInteraction"), dict) else None,
+        "objectName": candidate_name or None,
+        "objectId": candidate_id,
+        "objectWorld": candidate_world,
+        "actions": candidate_actions,
+        "routeCandidateValidation": issue or _dict(target.get("routeCandidateValidation")) or None,
+        "rejectionReasons": rejection_reasons,
+        "gateCandidateStatus": gate_status,
+    }
+
+
+def _annotate_guide_target_with_rejected_route_object(
+    target: dict[str, Any],
+    *,
+    rejected_target: dict[str, Any],
+    issue: dict[str, Any],
+    route_name: str,
+    guide_progress: dict[str, Any],
+) -> dict[str, Any]:
+    annotated = dict(target)
+    classification = _route_object_classification_payload(
+        target=rejected_target,
+        issue=issue,
+        route_name=route_name,
+        guide_progress=guide_progress,
+    )
+    annotated["routeName"] = route_name
+    annotated["routeGuideLoaded"] = True
+    annotated["routeGuideName"] = guide_progress.get("routeGuideName") or route_name
+    annotated["routeGuideProgress"] = dict(guide_progress)
+    annotated["routeGuideProgressIndex"] = guide_progress.get("routeGuideProgressIndex")
+    annotated["nextGuidePoint"] = guide_progress.get("nextGuidePoint") if isinstance(guide_progress.get("nextGuidePoint"), dict) else None
+    annotated["nextGuideInteraction"] = guide_progress.get("nextGuideInteraction") if isinstance(guide_progress.get("nextGuideInteraction"), dict) else None
+    annotated["proposedObjectClassification"] = classification.get("classification")
+    annotated["routeObjectClassification"] = classification
+    annotated["gateCandidateStatus"] = classification.get("gateCandidateStatus")
+    annotated["rejectedRouteObjectCandidate"] = classification
+    annotated["selectedCandidateReason"] = "route_guide_next_step_selected_after_rejected_route_object"
+    annotated["rejectionReasons"] = list(dict.fromkeys(_list(annotated.get("rejectionReasons")) + _list(classification.get("rejectionReasons"))))
+    annotated["warnings"] = list(
+        dict.fromkeys(
+            _list(annotated.get("warnings"))
+            + [
+                "rejected unproven route object and selected demonstrated guide waypoint",
+                "unrelated nearby route object was not clicked",
+            ]
+        )
+    )
+    return annotated
+
+
 def _route_census_recovery_target(route_context: dict[str, Any]) -> dict[str, Any]:
     census = _dict(route_context.get("routeObjectCensus"))
     top_objects = _list(census.get("topRouteObjects"))
@@ -3850,6 +3940,42 @@ def _guide_interaction_should_win(progress: dict[str, Any], point_tile: dict[str
     return interaction_distance is not None and interaction_distance <= 8
 
 
+def _route_guide_corridor_tiles(progress: dict[str, Any], point_tile: dict[str, Any] | None, *, limit: int = 32) -> list[dict[str, Any]]:
+    current = _normalise_tile(progress.get("currentWorld"))
+    destination = _normalise_tile(point_tile)
+    if not current or not destination:
+        return []
+    if current.get("plane") != destination.get("plane"):
+        return []
+    try:
+        x = int(current["worldX"])
+        y = int(current["worldY"])
+        dest_x = int(destination["worldX"])
+        dest_y = int(destination["worldY"])
+        plane = int(destination.get("plane") or 0)
+    except (TypeError, ValueError, KeyError):
+        return []
+    tiles: list[dict[str, Any]] = []
+    seen: set[tuple[int, int, int]] = set()
+    while (x, y) != (dest_x, dest_y) and len(tiles) < max(1, int(limit)):
+        dx = 1 if dest_x > x else -1 if dest_x < x else 0
+        dy = 1 if dest_y > y else -1 if dest_y < y else 0
+        if dx and dy:
+            if abs(dest_x - x) >= abs(dest_y - y):
+                x += dx
+            else:
+                y += dy
+        elif dx:
+            x += dx
+        elif dy:
+            y += dy
+        key = (x, y, plane)
+        if key not in seen:
+            seen.add(key)
+            tiles.append({"worldX": x, "worldY": y, "plane": plane, "source": "route_guide_sparse_segment"})
+    return tiles
+
+
 def _apply_route_guide_to_path_target(target: dict[str, Any], progress: dict[str, Any], *, action: str) -> dict[str, Any]:
     if not progress or progress.get("status") != "PASS":
         return target
@@ -3863,6 +3989,11 @@ def _apply_route_guide_to_path_target(target: dict[str, Any], progress: dict[str
         merged["suggestedWorldTile"] = dict(point_tile)
         merged["pathTargetTile"] = dict(point_tile)
         merged["destinationTile"] = dict(point_tile)
+        merged["world"] = dict(point_tile)
+        merged["worldLocation"] = dict(point_tile)
+        merged["worldX"] = point_tile.get("worldX")
+        merged["worldY"] = point_tile.get("worldY")
+        merged["plane"] = point_tile.get("plane", 0)
         merged["actionTargetSource"] = "local_frontier_waypoint"
         merged["actionability"] = "needs_live_projection"
         merged["source"] = "route_guide"
@@ -3870,6 +4001,10 @@ def _apply_route_guide_to_path_target(target: dict[str, Any], progress: dict[str
         merged["routeGuideName"] = progress.get("routeGuideName")
         merged["routeGuideProgress"] = dict(progress)
         merged["routeGuideSource"] = "demonstrated_path_point"
+        corridor_tiles = _route_guide_corridor_tiles(progress, point_tile)
+        if corridor_tiles:
+            merged["localScoutPath"] = list(corridor_tiles)
+            merged["availableWaypointTiles"] = list(corridor_tiles)
         merged["routeWaypointSelection"] = {
             "schema": "route_waypoint_selection.v1",
             "mode": "route_guide",
@@ -3879,6 +4014,8 @@ def _apply_route_guide_to_path_target(target: dict[str, Any], progress: dict[str
             "nearestGuidePoint": progress.get("nearestGuidePoint"),
             "nextGuidePoint": progress.get("nextGuidePoint"),
             "skippedReachedGuidePoints": progress.get("skippedReachedGuidePoints"),
+            "generatedPathSource": "route_guide_sparse_segment" if corridor_tiles else None,
+            "generatedPathTileCount": len(corridor_tiles),
         }
         merged["routeCandidateValidation"] = {
             "schema": "route_candidate_validation.v1",
@@ -5010,17 +5147,8 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
 
         if _inventory_full_for_service_route(inventory=inventory, status=status):
             route_issue = _dict(route_target.get("routeCandidateValidation")) if route_target else {}
-            if route_issue:
-                return _route_candidate_blocker_proposal(
-                    target=route_target,
-                    issue=route_issue,
-                    input_geometry=input_geometry,
-                    source_canvas_size=source_canvas_size,
-                    source_tick=source_tick,
-                    status=status,
-                    brain=brain,
-                    required_context=["service_route", "route_template", "pathing"],
-                )
+            if route_issue.get("status") != "FAIL":
+                route_issue = {}
             guide_progress: dict[str, Any] = {}
             if route_demonstration is not None and player_tile:
                 try:
@@ -5032,6 +5160,41 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                     guide_progress = {}
             guide_tile = _guide_point_tile(guide_progress)
             guide_interaction = _guide_interaction_target(guide_progress)
+            if route_issue and guide_tile and player_tile and _route_tile_distance_same_plane(guide_tile, player_tile) != 0:
+                target = _apply_route_guide_to_path_target(
+                    {
+                        "targetName": "Demonstrated woodcutting-to-bank route waypoint",
+                        "classId": "service_route_anchor",
+                        "targetType": "service_route_anchor",
+                        "source": "route_guide",
+                        "routeId": "woodcutting_area_to_bank",
+                    },
+                    guide_progress,
+                    action="navigate_to_service",
+                )
+                target = _annotate_guide_target_with_rejected_route_object(
+                    target,
+                    rejected_target=route_target,
+                    issue=route_issue,
+                    route_name="woodcutting_area_to_bank",
+                    guide_progress=guide_progress,
+                )
+                return _proposal(
+                    "navigate_to_service",
+                    target_kind="path_tile",
+                    target=target,
+                    reason="route_guide_progress_after_rejected_route_object",
+                    confidence=0.7,
+                    warnings=[
+                        "visible route object was rejected for the active segment; using demonstrated route guide waypoint instead",
+                    ],
+                    required_context=["inventory", "route_guide", "player_world_position"],
+                    source_tick=source_tick,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    status=status,
+                    brain=brain,
+                )
             if guide_interaction and _guide_interaction_should_win(guide_progress, guide_tile):
                 guide_interaction["actionability"] = "blocked_route_guide_interaction_needs_live_target"
                 guide_interaction["routeCandidateValidation"] = {
@@ -5080,6 +5243,17 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                     source_canvas_size=source_canvas_size,
                     status=status,
                     brain=brain,
+                )
+            if route_issue:
+                return _route_candidate_blocker_proposal(
+                    target=route_target,
+                    issue=route_issue,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                    source_tick=source_tick,
+                    status=status,
+                    brain=brain,
+                    required_context=["service_route", "route_template", "pathing"],
                 )
             missing = []
             if not service_route:

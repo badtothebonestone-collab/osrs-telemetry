@@ -2116,3 +2116,84 @@ Conclusion:
 The "full inventory but still trying to chop" blocker is fixed. Full inventory now suppresses Tree/resource candidates and hands off to route_to_bank.
 The new live blocker is in route-to-bank context/segment matching after a full inventory handoff: route_object_not_on_expected_segment for a Gate service route object. That should be handled as a route/context task, not as woodcutting collection or click-safety work.
 ```
+
+## Route-To-Bank Gate Segment Diagnosis
+
+Updated: 2026-06-13.
+
+Source runs:
+
+```text
+original route-to-bank blocker: bot_runs\20260613_163853_live_woodcutting_loop
+linked recording: recordings\20260613_163947_live_woodcutting_loop_20260613_163947
+post-fix route validation: bot_runs\20260613_171727_live_woodcutting_loop
+post-fix linked recording: recordings\20260613_171830_live_woodcutting_loop_20260613_171830
+post-corridor validation attempt: bot_runs\20260613_172652_live_woodcutting_loop
+post-corridor linked recording: recordings\20260613_172704_live_woodcutting_loop_20260613_172704
+```
+
+Diagnosis:
+
+```text
+The route leg was woodcutting_area_to_bank after inventory became full.
+The full-inventory handoff worked: Tree/resource candidates stayed suppressed and nextExpectedPhase was route_to_bank.
+The proposed route object was Gate/Open, object id 12986, at 3213,3261,0 from plugin_snapshot_route_to_service.
+That Gate does not appear in woodcutting_area_to_bank.route_guide.json, woodcutting_area_to_bank.route_template.json, or the successful route evidence used for this guide.
+The demonstrated guide's next route point from the live position around 3202,3239,0 was 3208,3212,0.
+The Gate was therefore not a required_route_interaction or proven optional_navigation_support for this route segment. It was unrelated_or_rejected.
+The exact over-strict failure was in action_proposal's full-inventory route branch: it returned the rejected route-object blocker before falling back to the demonstrated route guide waypoint.
+```
+
+Fix behavior:
+
+```text
+candidate_core now exposes route-object classification and guide progress fields in candidate traces.
+input_control.action_proposal now classifies rejected route objects as unrelated_or_rejected, including Gate-specific rejected_not_on_expected_segment status.
+When a full-inventory service-route object fails routeCandidateValidation but the woodcutting_area_to_bank guide has a next point, the proposal selects that demonstrated guide waypoint instead of clicking or terminally blocking on the unproven object.
+The selected waypoint carries routeName, routeGuideProgressIndex, nextGuidePoint, rejectedRouteObjectCandidate, gateCandidateStatus, and selectedCandidateReason.
+The guide waypoint target also carries world/worldLocation/worldX/worldY/plane and a bounded same-plane route_guide_sparse_segment corridor so the existing executor has nearby guide tiles to project.
+Strict object/action/world/plane guards are unchanged. The Gate is not accepted by name and is not clicked.
+```
+
+Live validation after fix:
+
+```text
+geometry gate: PASS
+real command: python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+post-fix live run folder: bot_runs\20260613_171727_live_woodcutting_loop
+post-fix linked recording: recordings\20260613_171830_live_woodcutting_loop_20260613_171830
+status: WARN
+executor reason: inventory_full_route_to_bank_ready
+bot actions sent: 1
+live input executed: yes
+inventory full routed to bank: yes
+Gate status: rejected/skipped, not clicked
+selected route guide point: 3208,3212,0
+selected candidate reason: route_guide_progress_after_rejected_route_object
+route movement evidence: one pathing_to_service action moved from 3202,3239,0 to 3201,3236,0 and reduced distance to the guide waypoint
+bank reached: no
+deposit happened: no
+remaining route-layer evidence before the corridor patch: several guide waypoint attempts lacked actionable tile projection/click geometry
+```
+
+Post-corridor live validation attempt:
+
+```text
+geometry gate: PASS
+post-corridor live run folder: bot_runs\20260613_172652_live_woodcutting_loop
+post-corridor linked recording: recordings\20260613_172704_live_woodcutting_loop_20260613_172704
+status: WARN
+bot actions sent: 0
+live input executed: no
+route layer reached: no
+blocker before route validation: visible_button_found_not_clicked during loaded-scene recovery
+loadedSceneVerified: false
+final hot state: LOGIN_SCREEN / disconnected_dialog
+```
+
+Conclusion:
+
+```text
+The route_object_not_on_expected_segment Gate blocker is fixed at the action proposal layer. The Gate is now classified as unrelated_or_rejected and skipped, and the demonstrated woodcutting_area_to_bank guide waypoint is selected instead.
+The route-to-bank path still needs one clean loaded-scene rerun to validate the new sparse guide corridor through to bank/deposit. If it reaches the route layer and fails again, the next blocker should be waypoint projection or route_postcondition_failed, not Gate segment matching.
+```
