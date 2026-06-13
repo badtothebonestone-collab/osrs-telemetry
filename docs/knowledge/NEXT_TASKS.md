@@ -2,6 +2,7 @@
 
 | Priority | ID | Task | Success criteria |
 | --- | --- | --- | --- |
+| 1 | configure_authenticated_start_game | Configure an authenticated Start Game path or restore a logged-in RuneLite session before live-loop validation. | `context_service.py --ensure-loaded-scene` reports `loadedSceneVerified=true`; recovery artifacts show safe login/start paths attempted without ending in `dev_launch_not_loaded`. |
 | 1 | verify_plane1_recovery_live_postcondition | From the current plane-1 state, run one guarded live-loop continuation and verify the strict `Climb-down / Staircase` object `16672` at `3204,3229,1` changes plane `1 -> 0`. | The action selects the proven plane-1 route target, sends no wrong-plane/name-only click, observes the plane-change postcondition, and continues the return route. |
 | 2 | verify_top_floor_bottom_floor_probe | When back at the top-floor bank Staircase route state, run `staircase_floor_selection_probe.py --json` before relying on the top-floor direct skip again. | Current live menu evidence confirms strict object `56231` at `3205,3229,2` exposes `Bottom floor`; if not, the runner fails closed with `floor_selection_option_missing` and does not click `Climb-down`. |
 | 1 | fix_deposit_region_label | Clean up Deposit-All menu-context region classification. | Deposit-All bank UI clicks no longer appear as minimap_click when menu context proves bank UI. |
@@ -18,4 +19,5 @@
 - 2026-06-09: Focused probe `20260609_171349_plane1_staircase_recovery_probe` could not prove recovery because RuneLite had disconnected and plugin menu evidence was stale. Next attempt should first restore loaded scene, then rerun only `plane1_staircase_recovery_probe.py` from the plane-1 state.
 - 2026-06-09: Focused top-floor probe `20260609_181650_staircase_floor_selection_probe` found the player still on plane 1 at `3206,3229,1`, so it could not validate the top-floor `Bottom floor` row. Next step is either return to the top-floor state and run `staircase_floor_selection_probe.py --json`, or capture a fresh plane-1 recovery fixture.
 - 2026-06-09: Fresh probe `20260609_185122_plane1_staircase_recovery_probe` captured strict, fresh `Climb-down / Staircase` evidence for object `16672` at `3204,3229,1`; `Bottom floor` was not present on plane 1. Next live run should validate the `1 -> 0` postcondition for that recovery, not retry stale evidence collection.
+- 2026-06-13: Before the next live-loop run, fix startup/authentication: the recovery ladder now attempts Click here, visible Play Now, and Start Game relaunch, but the configured Start Game command is a `dev_gradle_run` and ended at `dev_launch_not_loaded`.
 <!-- END MANUAL NOTES -->

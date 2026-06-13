@@ -1213,6 +1213,119 @@ secondary blocker after geometry check: input_geometry_focus_needed
 why this is external: no authenticated launch command is configured, the dev Gradle path started RuneLite at LOGIN_SCREEN, and the repo recovery path detected no safe saved-account surface to click. Credentials will not be typed or automated.
 ```
 
+## Auto-Login / Loaded-Scene Recovery Audit
+
+Date: 2026-06-13
+
+Existing recovery/autologin functions found:
+
+```text
+start_game_command.py
+- resolve_start_game_command(prefer_authenticated=True)
+- launch_start_game(...)
+- classify_launch_mode(...)
+
+liveness_recovery_core.py
+- ensure_loaded_scene(...)
+- loaded_scene_proof(...)
+- classify_recovery_failure(...)
+- canonical recovery ladder used by context_service.py
+
+context_service.py
+- --ensure-loaded-scene
+- writes recovery_summary.json, recovery_attempts.jsonl, latest_recovery_state.json
+
+execute_next_action.py
+- --auto-recover-loaded-scene calls liveness_recovery_core.ensure_loaded_scene
+
+bot_eval_runner.py
+- --auto-recover-loaded-scene calls context_service.py --ensure-loaded-scene before live actions
+
+run_runelite_bootstrap.py
+- disconnected_ok candidate
+- saved-account Play Now candidate
+- Click here to play candidate
+- launcher/startup bootstrap checks
+```
+
+Existing safe login-surface handlers found:
+
+```text
+disconnected_ok: present in run_runelite_bootstrap.py
+play_now: present in run_runelite_bootstrap.py
+click_here_to_play: present in run_runelite_bootstrap.py
+Start Game resolver: present in start_game_command.py
+credential entry: intentionally not automated
+```
+
+Where `manual_login_required` was emitted:
+
+```text
+liveness_recovery_core.ensure_loaded_scene previously treated login_screen as a manual stop before the safe bootstrap ladder.
+run_runelite_bootstrap.py may still report blocked_user_login_required after bounded safe clicks fail.
+bot_eval_runner.py surfaces the context_service/liveness recovery result in live action artifacts.
+```
+
+Why existing recovery was skipped or did not progress:
+
+```text
+Before this patch, LOGIN_SCREEN could stop before the bootstrap ladder because login_screen was not in RECOVERABLE_STATES and manualLoginRequired short-circuited recovery.
+After enabling recovery, the first live attempt showed Play Now was visible but only Click here to play was clicked.
+The recovery ladder now retries once with Play Now preferred when the first bootstrap attempt proves Play Now was available but untouched.
+After Play Now was attempted, the client still did not reach loaded-scene proof, so the ladder escalated to Start Game relaunch through start_game_command.py.
+The configured Start Game command is dev_gradle_run, not an authenticated launch, so relaunch returned to LOGIN_SCREEN and failed with dev_launch_not_loaded.
+```
+
+Current exact recovery result:
+
+```text
+command: python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3
+status: unsafe
+blocker: dev_launch_not_loaded
+loadedSceneVerified: false
+finalHotGameState: LOGIN_SCREEN
+worldModelObjectTotal: 0
+recoveryAttempted: true
+autologinRecoveryAttempted: true
+savedAccountDetected: true
+playNowAttempted: true
+clickHereToPlayAttempted: true
+launcherRecoveryAttempted: true
+waitForLoadedSceneAttempted: true
+manualLoginRequiredOnlyAfterRecovery: false
+Start Game command: cmd /c .\gradlew.bat --no-daemon run
+Start Game source: ui_config:C:\Users\badto\.osrs-telemetry\telemetry_ui_config.json
+launchMode: dev_gradle_run
+artifact folder: bot_runs\20260613_114916_loaded_scene_recovery
+```
+
+Preflight / geometry after recovery patch:
+
+```text
+preflight: WARN only because Start Game is dev_gradle_run / not authenticated
+input geometry: PASS, RuneLite Shell focused, canvas 800x832 at 7,30
+live command: not run
+reason: canonical loaded-scene recovery still failed loadedSceneVerified=false
+bot actions sent: 0
+```
+
+New recovery-before-manual-login behavior:
+
+```text
+LOGIN_SCREEN is recoverable when --auto-recover-loaded-scene is active.
+manual_login_required is now only valid after bounded safe recovery attempts, unless the screen is a credential-required surface.
+The recovery artifacts record recoveryAttempted, autologinRecoveryAttempted, savedAccountDetected, playNowAttempted, disconnectedOkAttempted, clickHereToPlayAttempted, launcherRecoveryAttempted, waitForLoadedSceneAttempted, and manualLoginRequiredOnlyAfterRecovery.
+If Play Now is visible but not attempted, the result is saved_account_play_now_not_attempted, not manual_login_required.
+```
+
+Commit / push:
+
+```text
+commit: 7a1dbd3 enforce canonical auto-login recovery before manual login blocker
+push result: pending at report write time
+remaining unstaged generated JSON: capability_registry.json, project_knowledge.json, recordings_index.json, script_api_map.json
+```
+
 Checks run:
 
 ```powershell

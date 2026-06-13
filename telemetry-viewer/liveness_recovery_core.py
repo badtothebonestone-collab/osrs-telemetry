@@ -25,6 +25,7 @@ RECOVERABLE_STATES = {
     "disconnected_dialog",
     "saved_account_play_now",
     "click_here_to_play",
+    "login_screen",
     "loading",
     "daemon_down",
     "daemon_stale",
@@ -418,7 +419,9 @@ def _bootstrap_args(
         argv.append("--allow-jagex-launcher-automation")
     else:
         argv.append("--no-jagex-launcher")
-    return bootstrap.parse_args(argv)
+    args = bootstrap.parse_args(argv)
+    setattr(args, "prefer_saved_account_play_now", _state_name(state) == "saved_account_play_now")
+    return args
 
 
 def _run_bootstrap_recovery(args: argparse.Namespace) -> dict[str, Any]:
@@ -493,6 +496,79 @@ def _compact_bootstrap_snapshot(recovery: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bootstrap_action_from_recovery(
+    recovery: dict[str, Any],
+    *,
+    state_name: str,
+    prefer_saved_account_play_now: bool = False,
+    retry_reason: str | None = None,
+) -> dict[str, Any]:
+    clicked_details = [
+        _compact_clicked_candidate(item)
+        for item in _list(recovery.get("clickedCandidates"))
+        if isinstance(item, dict)
+    ]
+    bootstrap_state = _dict(recovery.get("bootstrapState"))
+    action = {
+        "action": "run_bootstrap_recovery",
+        "state": state_name,
+        "status": recovery.get("status"),
+        "loadedSceneVerified": recovery.get("loadedSceneVerified"),
+        "startupStage": recovery.get("startupStage"),
+        "preferSavedAccountPlayNow": bool(prefer_saved_account_play_now),
+        "buttonCandidates": [
+            _compact_clicked_candidate(item)
+            for item in _list(recovery.get("buttonCandidates"))
+            if isinstance(item, dict)
+        ],
+        "clickedCandidates": [item.get("name") for item in clicked_details if item.get("name")],
+        "clickedCandidateDetails": clicked_details,
+        "bootstrapState": {
+            "state": bootstrap_state.get("state"),
+            "confidence": bootstrap_state.get("confidence"),
+            "selectedBootstrapAction": bootstrap_state.get("selectedBootstrapAction"),
+            "verificationResult": bootstrap_state.get("verificationResult"),
+            "nextStep": bootstrap_state.get("nextStep"),
+            "blocker": bootstrap_state.get("blocker"),
+        },
+        "snapshot": _compact_bootstrap_snapshot(recovery),
+        "stages": [
+            {
+                "stage": _dict(stage).get("stage"),
+                "status": _dict(stage).get("status"),
+                "reason": _dict(stage).get("reason"),
+            }
+            for stage in _list(recovery.get("stages"))
+            if isinstance(stage, dict)
+        ],
+        "daemon": recovery.get("daemon"),
+        "failures": recovery.get("failures") or [],
+    }
+    if retry_reason:
+        action["retryReason"] = retry_reason
+    return action
+
+
+def _bootstrap_recovery_has_candidate(recovery: dict[str, Any], name: str) -> bool:
+    wanted = str(name or "").strip()
+    if not wanted:
+        return False
+    for item in _list(recovery.get("buttonCandidates")):
+        if str(_dict(item).get("name") or "") == wanted:
+            return True
+    for item in _list(_dict(recovery.get("bootstrapState")).get("detectedButtons")):
+        if str(_dict(item).get("name") or "") == wanted:
+            return True
+    return False
+
+
+def _bootstrap_recovery_clicked(recovery: dict[str, Any], name: str) -> bool:
+    wanted = str(name or "").strip()
+    if not wanted:
+        return False
+    return any(str(_dict(item).get("name") or "") == wanted for item in _list(recovery.get("clickedCandidates")))
+
+
 def _clicked_candidates_from_actions(actions_taken: list[dict[str, Any]]) -> list[dict[str, Any]]:
     clicked: list[dict[str, Any]] = []
     for action in actions_taken:
@@ -503,6 +579,91 @@ def _clicked_candidates_from_actions(actions_taken: list[dict[str, Any]]) -> lis
         for name in _list(_dict(action).get("clickedCandidates")):
             clicked.append({"name": name})
     return clicked
+
+
+def _detected_button_names_from_state(state: dict[str, Any] | None) -> set[str]:
+    names: set[str] = set()
+    for item in _list(_dict(state).get("detectedButtons")):
+        name = str(_dict(item).get("name") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _button_candidate_names_from_actions(actions_taken: list[dict[str, Any]] | None) -> set[str]:
+    names: set[str] = set()
+    for action in actions_taken or []:
+        for item in _list(_dict(action).get("buttonCandidates")):
+            name = str(_dict(item).get("name") or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _recovery_action_metadata(
+    *,
+    status: str,
+    initial_state: dict[str, Any],
+    final_state: dict[str, Any],
+    actions_taken: list[dict[str, Any]],
+    relaunch_info: dict[str, Any],
+    classification: dict[str, Any],
+) -> dict[str, Any]:
+    clicked_names = [str(item.get("name") or "") for item in _clicked_candidates_from_actions(actions_taken) if item.get("name")]
+    clicked_set = set(clicked_names)
+    detected_names = (
+        _detected_button_names_from_state(initial_state)
+        | _detected_button_names_from_state(final_state)
+        | _button_candidate_names_from_actions(actions_taken)
+    )
+    recovery_actions: list[str] = []
+    for action in actions_taken:
+        item = _dict(action)
+        action_name = str(item.get("action") or "").strip()
+        if action_name:
+            recovery_actions.append(action_name)
+        recovery_actions.extend(str(name) for name in _list(item.get("clickedCandidates")) if name)
+    seen_actions: list[str] = []
+    for action in recovery_actions:
+        if action not in seen_actions:
+            seen_actions.append(action)
+    final_state_name = _state_name(final_state)
+    proof = _dict(final_state.get("loadedSceneProof"))
+    game_state = str(proof.get("gameState") or "").upper()
+    manual_login_status = status == "manual_login_required" or bool(final_state.get("manualLoginRequired"))
+    autologin_attempted = any(str(_dict(action).get("action") or "") == "run_bootstrap_recovery" for action in actions_taken)
+    launcher_attempted = bool(relaunch_info.get("relaunchAttempted")) or any(
+        str(_dict(action).get("action") or "") == "relaunch_client" for action in actions_taken
+    )
+    wait_attempted = any(
+        str(_dict(action).get("action") or "") in {
+            "loaded_scene_stability_check",
+            "wait_for_loaded_scene_after_relaunch",
+        }
+        for action in actions_taken
+    )
+    return {
+        "recoveryAttempted": bool(actions_taken),
+        "autologinRecoveryAttempted": autologin_attempted,
+        "savedAccountDetected": bool("play_now" in detected_names or final_state_name == "saved_account_play_now" or _state_name(initial_state) == "saved_account_play_now"),
+        "playNowAttempted": "play_now" in clicked_set,
+        "disconnectedOkAttempted": "disconnected_ok" in clicked_set,
+        "clickHereToPlayAttempted": "click_here_to_play" in clicked_set,
+        "launcherRecoveryAttempted": launcher_attempted,
+        "waitForLoadedSceneAttempted": wait_attempted,
+        "manualLoginRequiredOnlyAfterRecovery": bool(status == "manual_login_required" and actions_taken),
+        "recoveryActionsTried": seen_actions,
+        "recoveryResult": {
+            "status": status,
+            "failureClass": classification.get("failureClass"),
+            "reason": classification.get("reason"),
+            "clickedCandidates": clicked_names,
+        },
+        "finalLoginSurface": final_state_name if manual_login_status or game_state == "LOGIN_SCREEN" else None,
+        "finalHotGameState": proof.get("gameState"),
+        "finalLoadedSceneVerified": bool(proof.get("loadedSceneVerified")),
+        "finalReason": classification.get("reason"),
+    }
 
 
 def classify_recovery_failure(
@@ -516,6 +677,11 @@ def classify_recovery_failure(
     clicked_names = [str(item.get("name") or "") for item in clicked if item.get("name")]
     initial_name = _state_name(initial_state)
     final_name = _state_name(final_state)
+    detected_names = (
+        _detected_button_names_from_state(initial_state)
+        | _detected_button_names_from_state(final_state)
+        | _button_candidate_names_from_actions(actions)
+    )
     proof = _dict(final_state.get("loadedSceneProof"))
     game_state = str(proof.get("gameState") or "").upper()
     object_total = _int(proof.get("worldModelObjectTotal"))
@@ -535,6 +701,12 @@ def classify_recovery_failure(
     if loaded:
         failure_class = "none"
         reason = "loaded_scene_verified"
+    elif (
+        (initial_name == "saved_account_play_now" or final_name == "saved_account_play_now" or "play_now" in detected_names)
+        and "play_now" not in clicked_names
+    ):
+        failure_class = "saved_account_play_now_not_attempted"
+        reason = "saved-account Play Now was visible but was not attempted by the recovery ladder"
     elif (
         initial_name == "disconnected_dialog"
         and final_name == "disconnected_dialog"
@@ -693,6 +865,14 @@ def _result(
         final_state=final_state,
         actions_taken=actions_taken,
     )
+    recovery_metadata = _recovery_action_metadata(
+        status=status,
+        initial_state=initial_state,
+        final_state=final_state,
+        actions_taken=actions_taken,
+        relaunch_info=relaunch,
+        classification=classification,
+    )
     return {
         "schema": SCHEMA,
         "status": status,
@@ -738,6 +918,7 @@ def _result(
         "rawBlocker": blocker,
         "nextRecommendation": next_recommendation or final_state.get("nextRecommendation"),
         "warnings": list(dict.fromkeys(warnings or [])),
+        **recovery_metadata,
     }
 
 
@@ -911,7 +1092,11 @@ def ensure_loaded_scene(
         _remember_success(snapshot_url, daemon_url, payload, monotonic_func)
         return payload
     state_name = str(initial_state.get("state") or "unknown")
-    if state_name == "credential_required" or (initial_state.get("manualLoginRequired") and not allow_credentials):
+    if state_name == "credential_required" or (
+        initial_state.get("manualLoginRequired")
+        and not allow_credentials
+        and state_name != "login_screen"
+    ):
         return _result(
             status="manual_login_required",
             initial_state=initial_state,
@@ -983,42 +1168,12 @@ def ensure_loaded_scene(
             allow_jagex_launcher=allow_jagex_launcher,
         )
         recovery = run_bootstrap_recovery_func(recovery_args)
-        clicked_details = [
-            _compact_clicked_candidate(item)
-            for item in _list(recovery.get("clickedCandidates"))
-            if isinstance(item, dict)
-        ]
-        bootstrap_state = _dict(recovery.get("bootstrapState"))
         actions.append(
-            {
-                "action": "run_bootstrap_recovery",
-                "state": state_name,
-                "status": recovery.get("status"),
-                "loadedSceneVerified": recovery.get("loadedSceneVerified"),
-                "startupStage": recovery.get("startupStage"),
-                "clickedCandidates": [item.get("name") for item in clicked_details if item.get("name")],
-                "clickedCandidateDetails": clicked_details,
-                "bootstrapState": {
-                    "state": bootstrap_state.get("state"),
-                    "confidence": bootstrap_state.get("confidence"),
-                    "selectedBootstrapAction": bootstrap_state.get("selectedBootstrapAction"),
-                    "verificationResult": bootstrap_state.get("verificationResult"),
-                    "nextStep": bootstrap_state.get("nextStep"),
-                    "blocker": bootstrap_state.get("blocker"),
-                },
-                "snapshot": _compact_bootstrap_snapshot(recovery),
-                "stages": [
-                    {
-                        "stage": _dict(stage).get("stage"),
-                        "status": _dict(stage).get("status"),
-                        "reason": _dict(stage).get("reason"),
-                    }
-                    for stage in _list(recovery.get("stages"))
-                    if isinstance(stage, dict)
-                ],
-                "daemon": recovery.get("daemon"),
-                "failures": recovery.get("failures") or [],
-            }
+            _bootstrap_action_from_recovery(
+                recovery,
+                state_name=state_name,
+                prefer_saved_account_play_now=bool(getattr(recovery_args, "prefer_saved_account_play_now", False)),
+            )
         )
         if "startup input backend failed" in [str(item) for item in _list(recovery.get("failures"))]:
             return _result(
@@ -1033,6 +1188,45 @@ def ensure_loaded_scene(
                 next_recommendation="check Arduino COM port/firmware, then retry",
                 warnings=[*warnings, *[str(item) for item in _list(recovery.get("warnings"))]],
             )
+        if (
+            not bool(recovery.get("loadedSceneVerified"))
+            and _bootstrap_recovery_has_candidate(recovery, "play_now")
+            and not _bootstrap_recovery_clicked(recovery, "play_now")
+        ):
+            attempts["saved_account_play_now_retry"] = attempts.get("saved_account_play_now_retry", 0) + 1
+            recovery_args = _bootstrap_args(
+                state={**initial_state, "state": "saved_account_play_now"},
+                snapshot_url=snapshot_url,
+                daemon_url=daemon_url,
+                backend=backend,
+                arduino_port=arduino_port,
+                max_total_ms=max_total_ms,
+                max_attempts_per_state=1,
+                allow_jagex_launcher=allow_jagex_launcher,
+            )
+            setattr(recovery_args, "prefer_saved_account_play_now", True)
+            recovery = run_bootstrap_recovery_func(recovery_args)
+            actions.append(
+                _bootstrap_action_from_recovery(
+                    recovery,
+                    state_name="saved_account_play_now_retry",
+                    prefer_saved_account_play_now=True,
+                    retry_reason="Play Now candidate was visible but not attempted by the normal recovery order",
+                )
+            )
+            if "startup input backend failed" in [str(item) for item in _list(recovery.get("failures"))]:
+                return _result(
+                    status="arduino_unavailable",
+                    initial_state=initial_state,
+                    final_state=initial_state,
+                    actions_taken=actions,
+                    started_ms=started_ms,
+                    monotonic_func=monotonic_func,
+                    attempts=attempts,
+                    blocker="arduino_unavailable",
+                    next_recommendation="check Arduino COM port/firmware, then retry",
+                    warnings=[*warnings, *[str(item) for item in _list(recovery.get("warnings"))]],
+                )
     final_state, final_warnings = _inspect_state(
         snapshot_url=snapshot_url,
         daemon_url=daemon_url,
@@ -1079,8 +1273,17 @@ def ensure_loaded_scene(
             final_state=final_state,
             actions_taken=actions,
         )
-        if classification.get("failureClass") == "disconnected_loop":
-            relaunch_info["disconnectedLoopDetected"] = True
+        failure_class = str(classification.get("failureClass") or "unknown")
+        relaunchable_failures = {
+            "disconnected_loop",
+            "loading_timeout",
+            "play_now_no_transition",
+            "login_surface_no_saved_account",
+            "logged_in_without_scene",
+            "stale_hot_client",
+        }
+        if failure_class in relaunchable_failures:
+            relaunch_info["disconnectedLoopDetected"] = failure_class == "disconnected_loop"
             relaunch_info["relaunchRequired"] = True
             attempts["relaunch_required"] = attempts.get("relaunch_required", 0) + 1
             command_info = resolve_start_game_command_func()
@@ -1095,7 +1298,7 @@ def ensure_loaded_scene(
             actions.append(
                 {
                     "action": "relaunch_required",
-                    "state": "disconnected_loop",
+                    "state": failure_class,
                     "reason": classification.get("reason"),
                     "startGameCommand": command_info.get("command"),
                     "startGameCommandSource": command_info.get("commandSource"),

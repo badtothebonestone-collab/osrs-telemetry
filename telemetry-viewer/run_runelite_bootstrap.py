@@ -1450,9 +1450,19 @@ def window_looks_like_runelite(window: dict[str, Any] | None) -> bool:
     return "runelite" in window_title_text(window).lower()
 
 
-def preferred_candidate_names(snapshot_reachable: bool, window: dict[str, Any] | None = None, launcher_clicked: bool = False) -> list[str]:
+def preferred_candidate_names(
+    snapshot_reachable: bool,
+    window: dict[str, Any] | None = None,
+    launcher_clicked: bool = False,
+    *,
+    prefer_saved_account_play_now: bool = False,
+) -> list[str]:
     base = ["click_here_to_play", "continue", "play_now"] if snapshot_reachable or launcher_clicked else ["play_now", "continue", "click_here_to_play"]
     if window_looks_like_runelite(window):
+        if prefer_saved_account_play_now and not launcher_clicked:
+            return ["disconnected_ok", "play_now", "click_here_to_play", "continue"]
+        if launcher_clicked:
+            return ["disconnected_ok", "click_here_to_play", "continue", "play_now"]
         return ["disconnected_ok", *base]
     if snapshot_reachable or launcher_clicked:
         return base
@@ -1473,8 +1483,14 @@ def choose_candidate(
     snapshot_reachable: bool,
     window: dict[str, Any] | None = None,
     launcher_clicked: bool = False,
+    prefer_saved_account_play_now: bool = False,
 ) -> StartupButtonCandidate:
-    preference = preferred_candidate_names(snapshot_reachable, window, launcher_clicked)
+    preference = preferred_candidate_names(
+        snapshot_reachable,
+        window,
+        launcher_clicked,
+        prefer_saved_account_play_now=prefer_saved_account_play_now,
+    )
     rank = {name: index for index, name in enumerate(preference)}
     return sorted(candidates, key=lambda item: (rank.get(item.name, 100), -float(item.confidence)))[0]
 
@@ -1888,6 +1904,7 @@ def run_bootstrap(
             snapshot_reachable=snapshot_has_game_context(snapshot_payload),
             window=window,
             launcher_clicked=launcher_clicked,
+            prefer_saved_account_play_now=bool(getattr(args, "prefer_saved_account_play_now", False)),
         )
         last_selected_candidate = candidate
         allowed_titles = ["RuneLite"] if window_looks_like_runelite(window) else ["Jagex Launcher"] if launcher_automation_allowed else None

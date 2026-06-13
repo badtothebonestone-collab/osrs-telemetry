@@ -1,6 +1,6 @@
 {
   "schema": "project_open_gaps.v1",
-  "updatedAtUtc": "2026-06-09T22:30:00.000000Z",
+  "updatedAtUtc": "2026-06-13T16:50:17.366890Z",
   "gaps": [
     {
       "id": "deposit_all_region_classification",
@@ -56,6 +56,19 @@
         "map_only duplicate-click prevention is stable"
       ],
       "suggestedNextTask": "Keep normal Record Everything map-only/no-live-click; test live mirror only in isolated validation recordings."
+    },
+    {
+      "id": "authenticated_start_game_missing",
+      "title": "Loaded-scene recovery needs an authenticated Start Game path",
+      "severity": "high",
+      "requiredLayer": "startup/recovery",
+      "status": "open",
+      "evidence": [
+        "2026-06-13 canonical recovery attempted Click here to play, retried visible Play Now, and escalated through start_game_command.py.",
+        "Configured Start Game command is cmd /c .\\gradlew.bat --no-daemon run, classified as dev_gradle_run.",
+        "Relaunch returned to LOGIN_SCREEN and failed loaded-scene proof with dev_launch_not_loaded."
+      ],
+      "suggestedNextTask": "Configure or select an authenticated Start Game command, or restore a logged-in RuneLite session, then rerun context_service.py --ensure-loaded-scene before live actions."
     },
     {
       "id": "input_geometry_live_source_stale",
@@ -130,15 +143,11 @@
       "requiredLayer": "route/context/action_proposal",
       "status": "open",
       "evidence": [
-        "20260609_154147_live_woodcutting_loop passed input geometry and loaded-scene recovery, sent zero gameplay actions, and stopped with route_guide_no_same_plane_reentry.",
-        "Staircase floor-selection audit found Bottom floor only in recording labels, but live trace bot_runs/20260609_135357_live_woodcutting_loop/bot_action_trace.jsonl captured Bottom-floor / Staircase for object 56231 at 3205,3229,2.",
-        "Bank_to_Woodcutting_area route guide records a strict floor_selection_interaction for top-floor Bottom floor.",
-        "20260609_171349_plane1_staircase_recovery_probe found stale Staircase object context for object 16672 at 3204,3229,1, but menu evidence was stale Cancel rows and RuneLite was disconnected.",
-        "20260609_181650_staircase_floor_selection_probe could not validate top-floor Bottom floor because the player was already at 3206,3229,1 and only plane-1 object 16672 was visible.",
-        "20260609_185122_plane1_staircase_recovery_probe captured fresh Climb-down / Staircase and Climb-up / Staircase rows for object 16672 at 3204,3229,1; Bottom floor was not present on plane 1.",
-        "Bank_to_Woodcutting_area route guide now records a strict plane1_recovery_interaction for Climb-down / Staircase on source plane 1."
+        "20260609_185122_plane1_staircase_recovery_probe captured fresh Climb-down / Staircase and Climb-up / Staircase rows for object 16672 at 3204,3229,1.",
+        "Bank_to_Woodcutting_area route guide records a strict plane1_recovery_interaction for Climb-down / Staircase on source plane 1.",
+        "Latest 2026-06-13 live attempt did not reach route validation because loaded-scene recovery ended at dev_launch_not_loaded."
       ],
-      "suggestedNextTask": "Run one guarded live-loop continuation from the current plane-1 state and verify that strict Climb-down / Staircase object 16672 changes plane 1 -> 0 without loosening route guards."
+      "suggestedNextTask": "After loaded-scene recovery is green, run one guarded live-loop continuation and verify strict Climb-down / Staircase object 16672 changes plane 1 -> 0."
     },
     {
       "id": "knowledge_manual_curation",
@@ -153,6 +162,15 @@
     }
   ],
   "nextTasks": [
+    {
+      "id": "configure_authenticated_start_game",
+      "priority": 1,
+      "task": "Configure an authenticated Start Game path or restore a logged-in RuneLite session before live-loop validation.",
+      "successCriteria": [
+        "context_service.py --ensure-loaded-scene reports loadedSceneVerified=true.",
+        "Recovery artifacts show safe login/start paths attempted without ending in dev_launch_not_loaded."
+      ]
+    },
     {
       "id": "verify_plane1_recovery_live_postcondition",
       "priority": 1,

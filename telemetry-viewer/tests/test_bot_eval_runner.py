@@ -975,6 +975,19 @@ class BotEvalRunnerTest(unittest.TestCase):
                             "relaunchResult": {"status": "PASS", "relaunchSucceeded": True, "launchedProcessPid": 1234},
                             "relaunchSucceeded": True,
                             "loadedSceneAfterRelaunch": False,
+                            "recoveryAttempted": True,
+                            "autologinRecoveryAttempted": True,
+                            "savedAccountDetected": False,
+                            "playNowAttempted": False,
+                            "disconnectedOkAttempted": True,
+                            "clickHereToPlayAttempted": False,
+                            "launcherRecoveryAttempted": True,
+                            "waitForLoadedSceneAttempted": True,
+                            "manualLoginRequiredOnlyAfterRecovery": False,
+                            "recoveryActionsTried": ["run_bootstrap_recovery", "disconnected_ok", "relaunch_client"],
+                            "recoveryResult": {"status": "unsafe", "failureClass": "disconnected_loop", "reason": "loop", "clickedCandidates": ["disconnected_ok"]},
+                            "finalLoginSurface": "disconnected_dialog",
+                            "finalReason": "loop",
                             "initialState": {"state": "disconnected_dialog"},
                             "finalState": {"state": "disconnected_dialog"},
                             "recoveryStateMachine": {
@@ -1044,10 +1057,22 @@ class BotEvalRunnerTest(unittest.TestCase):
             self.assertEqual(summary["recovery"]["launchMode"], "dev_gradle_run")
             self.assertEqual(summary["recovery"]["startGameCommandSource"], "discovered_gradle_wrapper")
             self.assertFalse(summary["recovery"]["loadedSceneAfterRelaunch"])
+            self.assertTrue(summary["recovery"]["recoveryAttempted"])
+            self.assertTrue(summary["recovery"]["autologinRecoveryAttempted"])
+            self.assertTrue(summary["recovery"]["disconnectedOkAttempted"])
+            self.assertTrue(summary["recovery"]["launcherRecoveryAttempted"])
+            self.assertIn("run_bootstrap_recovery", summary["recovery"]["recoveryActionsTried"])
             self.assertEqual(summary["readiness"]["rootCause"], "loaded_scene_not_ready")
             self.assertTrue(Path(summary["artifacts"]["recoveryAttempts"]).exists())
             self.assertTrue(Path(summary["artifacts"]["recoverySummary"]).exists())
             self.assertTrue(Path(summary["artifacts"]["latestRecoveryState"]).exists())
+            recovery_summary = json.loads(Path(summary["artifacts"]["recoverySummary"]).read_text(encoding="utf-8"))
+            latest_state = json.loads(Path(summary["artifacts"]["latestRecoveryState"]).read_text(encoding="utf-8"))
+            self.assertTrue(recovery_summary["recoveryAttempted"])
+            self.assertTrue(recovery_summary["autologinRecoveryAttempted"])
+            self.assertTrue(recovery_summary["disconnectedOkAttempted"])
+            self.assertTrue(latest_state["recoveryAttempted"])
+            self.assertTrue(latest_state["launcherRecoveryAttempted"])
             attempts = [
                 json.loads(line)
                 for line in Path(summary["artifacts"]["recoveryAttempts"]).read_text(encoding="utf-8").splitlines()
@@ -1055,6 +1080,8 @@ class BotEvalRunnerTest(unittest.TestCase):
             ]
             self.assertEqual(attempts[0]["selectedRecoveryAction"], "disconnected_ok")
             self.assertEqual(attempts[0]["recoveryFailureClass"], "disconnected_loop")
+            self.assertTrue(attempts[0]["recoveryAttempted"])
+            self.assertTrue(attempts[0]["autologinRecoveryAttempted"])
             self.assertTrue(any(item.get("selectedRecoveryAction") == "relaunch_client" for item in attempts))
 
     def test_live_action_fake_runner_writes_required_traces(self):

@@ -5,7 +5,7 @@ Future cleanup and live-bot work must reuse these canonical paths.
 | Responsibility | Canonical module/function/command | Do not duplicate in | Notes |
 | --- | --- | --- | --- |
 | Start Game | `telemetry-viewer\start_game_command.py` (`resolve_start_game_command`, `launch_start_game`) | `telemetry_ui.py`, `bot_eval_runner.py`, recovery scripts | UI, recovery, and bot eval should share launch classification/artifacts. |
-| Loaded-scene recovery | `liveness_recovery_core.py`; `context_service.py --ensure-loaded-scene` | Bot runners, UI, executor ad hoc relaunch code | `execute_next_action.py --auto-recover-loaded-scene` and `bot_eval_runner.py --auto-recover-loaded-scene` may call this path. |
+| Loaded-scene recovery | `liveness_recovery_core.py`; `context_service.py --ensure-loaded-scene` | Bot runners, UI, executor ad hoc relaunch code | `execute_next_action.py --auto-recover-loaded-scene` and `bot_eval_runner.py --auto-recover-loaded-scene` may call this path. `manual_login_required` should only be emitted after bounded safe recovery/start paths are attempted, unless a credential-required surface is detected. |
 | Live readiness | `live_readiness_core.py`; bot preflight/readiness wrappers | Bot eval one-off checks, UI-only checks | Use shared readiness logic or context-service equivalent. |
 | Input geometry | `input_control\input_geometry.py` (`resolve_input_geometry_status`, `repair_runelite_focus`, `validate_screen_point_inside_geometry`) | `live_readiness_core.py`, `bot_eval_runner.py`, `input_control\executor.py`, `telemetry_ui.py` ad hoc geometry checks | `bot_eval_runner.py --check-input-geometry` and executor pre-click gates must use this resolver. |
 | Record Everything | `telemetry_ui.py` Simple Mode; `manual_recorder.py`; `analyze_manual_recording.py`; `update_project_knowledge.py` | Per-task recorder forks | Broad capture is the default and analyzer decides what matters. |
@@ -23,4 +23,5 @@ Future cleanup and live-bot work must reuse these canonical paths.
 ## Manual Notes
 
 <!-- BEGIN MANUAL NOTES -->
+- 2026-06-13: Login/startup surfaces belong to `liveness_recovery_core.py` plus `run_runelite_bootstrap.py` and `start_game_command.py`. Live bot code should not report `manual_login_required` before the canonical ladder has tried safe Click here/Play Now/disconnected/Start Game recovery and written recovery artifacts.
 <!-- END MANUAL NOTES -->

@@ -3455,6 +3455,21 @@ def _recovery_click_attempts(payload: dict[str, Any], command: list[str]) -> lis
     machine = _dict(payload.get("recoveryStateMachine"))
     classification = _dict(machine.get("failureClassification"))
     attempts = _list(machine.get("clickAttempts"))
+    metadata = {
+        "recoveryAttempted": bool(payload.get("recoveryAttempted")),
+        "autologinRecoveryAttempted": bool(payload.get("autologinRecoveryAttempted")),
+        "savedAccountDetected": bool(payload.get("savedAccountDetected")),
+        "playNowAttempted": bool(payload.get("playNowAttempted")),
+        "disconnectedOkAttempted": bool(payload.get("disconnectedOkAttempted")),
+        "clickHereToPlayAttempted": bool(payload.get("clickHereToPlayAttempted")),
+        "launcherRecoveryAttempted": bool(payload.get("launcherRecoveryAttempted")),
+        "waitForLoadedSceneAttempted": bool(payload.get("waitForLoadedSceneAttempted")),
+        "manualLoginRequiredOnlyAfterRecovery": bool(payload.get("manualLoginRequiredOnlyAfterRecovery")),
+        "recoveryActionsTried": payload.get("recoveryActionsTried") or [],
+        "recoveryResult": payload.get("recoveryResult") or {},
+        "finalLoginSurface": payload.get("finalLoginSurface"),
+        "finalReason": payload.get("finalReason"),
+    }
     records: list[dict[str, Any]] = []
     for index, attempt in enumerate(attempts):
         item = _dict(attempt)
@@ -3474,6 +3489,7 @@ def _recovery_click_attempts(payload: dict[str, Any], command: list[str]) -> lis
                 "stateAfter": item.get("stateAfter"),
                 "transitionSuccess": bool(item.get("transitionSuccess")),
                 "reason": item.get("reason") or classification.get("reason"),
+                **metadata,
             }
         )
     for index, attempt in enumerate(_list(machine.get("relaunchAttempts")), start=len(records)):
@@ -3497,6 +3513,7 @@ def _recovery_click_attempts(payload: dict[str, Any], command: list[str]) -> lis
                 "stateAfter": item.get("stateAfter"),
                 "transitionSuccess": bool(item.get("transitionSuccess")),
                 "reason": item.get("reason") or classification.get("reason"),
+                **metadata,
             }
         )
     if not records:
@@ -3514,6 +3531,7 @@ def _recovery_click_attempts(payload: dict[str, Any], command: list[str]) -> lis
                 "finalState": _dict(payload.get("finalState")),
                 "actionsTaken": _list(payload.get("actionsTaken")),
                 "warnings": _list(payload.get("warnings")),
+                **metadata,
             }
         )
     return records
@@ -3549,6 +3567,19 @@ def write_loaded_scene_recovery_artifacts(args, payload: dict[str, Any]) -> dict
         "finalWorldObjectCount": payload.get("finalWorldObjectCount"),
         "finalTick": payload.get("finalTick"),
         "finalExportSeq": payload.get("finalExportSeq"),
+        "recoveryAttempted": bool(payload.get("recoveryAttempted")),
+        "autologinRecoveryAttempted": bool(payload.get("autologinRecoveryAttempted")),
+        "savedAccountDetected": bool(payload.get("savedAccountDetected")),
+        "playNowAttempted": bool(payload.get("playNowAttempted")),
+        "disconnectedOkAttempted": bool(payload.get("disconnectedOkAttempted")),
+        "clickHereToPlayAttempted": bool(payload.get("clickHereToPlayAttempted")),
+        "launcherRecoveryAttempted": bool(payload.get("launcherRecoveryAttempted")),
+        "waitForLoadedSceneAttempted": bool(payload.get("waitForLoadedSceneAttempted")),
+        "manualLoginRequiredOnlyAfterRecovery": bool(payload.get("manualLoginRequiredOnlyAfterRecovery")),
+        "recoveryActionsTried": payload.get("recoveryActionsTried") or [],
+        "recoveryResult": payload.get("recoveryResult") or {},
+        "finalLoginSurface": payload.get("finalLoginSurface"),
+        "finalReason": payload.get("finalReason"),
         "initialState": _dict(payload.get("initialState")),
         "finalState": _dict(payload.get("finalState")),
         "recoveryStateMachine": _dict(payload.get("recoveryStateMachine")),
@@ -3580,6 +3611,19 @@ def write_loaded_scene_recovery_artifacts(args, payload: dict[str, Any]) -> dict
         "finalWorldObjectCount": payload.get("finalWorldObjectCount"),
         "finalTick": payload.get("finalTick"),
         "finalExportSeq": payload.get("finalExportSeq"),
+        "recoveryAttempted": bool(payload.get("recoveryAttempted")),
+        "autologinRecoveryAttempted": bool(payload.get("autologinRecoveryAttempted")),
+        "savedAccountDetected": bool(payload.get("savedAccountDetected")),
+        "playNowAttempted": bool(payload.get("playNowAttempted")),
+        "disconnectedOkAttempted": bool(payload.get("disconnectedOkAttempted")),
+        "clickHereToPlayAttempted": bool(payload.get("clickHereToPlayAttempted")),
+        "launcherRecoveryAttempted": bool(payload.get("launcherRecoveryAttempted")),
+        "waitForLoadedSceneAttempted": bool(payload.get("waitForLoadedSceneAttempted")),
+        "manualLoginRequiredOnlyAfterRecovery": bool(payload.get("manualLoginRequiredOnlyAfterRecovery")),
+        "recoveryActionsTried": payload.get("recoveryActionsTried") or [],
+        "recoveryResult": payload.get("recoveryResult") or {},
+        "finalLoginSurface": payload.get("finalLoginSurface"),
+        "finalReason": payload.get("finalReason"),
         "manualActionRequired": payload.get("manualActionRequired"),
         "nextRecommendation": payload.get("nextRecommendation"),
         "command": command,

@@ -163,6 +163,7 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
             button_candidates_func=buttons,
             run_bootstrap_recovery_func=run_bootstrap,
             sleep_func=lambda _seconds: None,
+            allow_relaunch=False,
             use_cache=False,
         )
 
@@ -172,6 +173,134 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         self.assertEqual(payload["actionsTaken"][0]["clickedCandidates"], ["play_now"])
         self.assertEqual(payload["actionsTaken"][-1]["action"], "loaded_scene_stability_check")
         self.assertEqual(payload["actionsTaken"][-1]["status"], "PASS")
+        self.assertTrue(payload["recoveryAttempted"])
+        self.assertTrue(payload["autologinRecoveryAttempted"])
+        self.assertTrue(payload["savedAccountDetected"])
+        self.assertTrue(payload["playNowAttempted"])
+        self.assertFalse(payload["manualLoginRequiredOnlyAfterRecovery"])
+
+    def test_login_screen_runs_bootstrap_ladder_before_manual_login_required(self):
+        bootstrap_calls = []
+
+        def run_bootstrap(args):
+            bootstrap_calls.append(args)
+            return {
+                "schema": bootstrap.SCHEMA,
+                "status": "WARN",
+                "loadedSceneVerified": False,
+                "startupStage": "blocked_user_login_required",
+                "clickedCandidates": [],
+                "stages": [{"stage": "waiting_for_logged_in", "status": "WARN", "reason": "no safe startup button candidates"}],
+                "snapshot": {"gameState": "LOGIN_SCREEN", "loadedSceneVerified": False, "worldModelObjectTotal": 0},
+            }
+
+        payload = recovery.ensure_loaded_scene(
+            fetch_snapshot_func=lambda *_args, **_kwargs: snapshot("LOGIN_SCREEN", object_total=0, hot_age_ms=5000),
+            fetch_daemon_status_func=lambda *_args, **_kwargs: {},
+            window_finder=lambda _filters: window(),
+            button_candidates_func=lambda *_args, **_kwargs: ([], []),
+            run_bootstrap_recovery_func=run_bootstrap,
+            sleep_func=lambda _seconds: None,
+            allow_relaunch=False,
+            use_cache=False,
+        )
+
+        self.assertEqual(len(bootstrap_calls), 1)
+        self.assertEqual(payload["status"], "manual_login_required")
+        self.assertEqual(payload["blocker"], "manual_login_required")
+        self.assertEqual(payload["recoveryFailureClass"], "login_surface_no_saved_account")
+        self.assertTrue(payload["recoveryAttempted"])
+        self.assertTrue(payload["autologinRecoveryAttempted"])
+        self.assertTrue(payload["manualLoginRequiredOnlyAfterRecovery"])
+        self.assertEqual(payload["recoveryActionsTried"], ["run_bootstrap_recovery"])
+        self.assertEqual(payload["recoveryResult"]["failureClass"], "login_surface_no_saved_account")
+        self.assertEqual(payload["finalLoginSurface"], "login_screen")
+        self.assertFalse(payload["savedAccountDetected"])
+        self.assertFalse(payload["playNowAttempted"])
+
+    def test_saved_account_visible_without_play_now_attempt_is_explicit_bug_signal(self):
+        def buttons(_payload, _window, **_kwargs):
+            return [candidate("play_now", "saved_account_play_panel")], []
+
+        def run_bootstrap(_args):
+            return {
+                "schema": bootstrap.SCHEMA,
+                "status": "WARN",
+                "loadedSceneVerified": False,
+                "startupStage": "waiting_for_logged_in",
+                "clickedCandidates": [],
+                "snapshot": {"gameState": "LOGIN_SCREEN", "loadedSceneVerified": False, "worldModelObjectTotal": 0},
+            }
+
+        payload = recovery.ensure_loaded_scene(
+            fetch_snapshot_func=lambda *_args, **_kwargs: snapshot("LOGIN_SCREEN", object_total=0, hot_age_ms=5000),
+            fetch_daemon_status_func=lambda *_args, **_kwargs: {},
+            window_finder=lambda _filters: window(),
+            button_candidates_func=buttons,
+            run_bootstrap_recovery_func=run_bootstrap,
+            sleep_func=lambda _seconds: None,
+            use_cache=False,
+        )
+
+        self.assertEqual(payload["status"], "unsafe")
+        self.assertEqual(payload["blocker"], "saved_account_play_now_not_attempted")
+        self.assertEqual(payload["recoveryFailureClass"], "saved_account_play_now_not_attempted")
+        self.assertTrue(payload["recoveryAttempted"])
+        self.assertTrue(payload["autologinRecoveryAttempted"])
+        self.assertTrue(payload["savedAccountDetected"])
+        self.assertFalse(payload["playNowAttempted"])
+
+    def test_saved_account_candidate_retry_prefers_play_now_after_click_here_failure(self):
+        snapshots = [snapshot("LOGIN_SCREEN", object_total=0, hot_age_ms=5000), loaded_snapshot(), loaded_snapshot()]
+        bootstrap_calls = []
+        button_candidates = [
+            candidate("click_here_to_play", "calibrated_screen").to_dict(),
+            candidate("play_now", "saved_account_play_panel").to_dict(),
+        ]
+
+        def run_bootstrap(args):
+            bootstrap_calls.append(args)
+            if len(bootstrap_calls) == 1:
+                return {
+                    "schema": bootstrap.SCHEMA,
+                    "status": "WARN",
+                    "loadedSceneVerified": False,
+                    "startupStage": "blocked_user_login_required",
+                    "buttonCandidates": button_candidates,
+                    "clickedCandidates": [candidate("click_here_to_play", "calibrated_screen").to_dict()],
+                    "snapshot": {"gameState": "LOGIN_SCREEN", "loadedSceneVerified": False, "worldModelObjectTotal": 0},
+                }
+            return {
+                "schema": bootstrap.SCHEMA,
+                "status": "PASS",
+                "loadedSceneVerified": True,
+                "startupStage": "loaded_scene_ready",
+                "buttonCandidates": button_candidates,
+                "clickedCandidates": [candidate("play_now", "saved_account_play_panel").to_dict()],
+                "snapshot": {"gameState": "LOGGED_IN", "loadedSceneVerified": True, "worldModelObjectTotal": 12},
+            }
+
+        payload = recovery.ensure_loaded_scene(
+            fetch_snapshot_func=lambda *_args, **_kwargs: pop_or_last(snapshots),
+            fetch_daemon_status_func=lambda *_args, **_kwargs: daemon_status(),
+            window_finder=lambda _filters: window(),
+            button_candidates_func=lambda *_args, **_kwargs: (
+                [candidate("click_here_to_play", "calibrated_screen")],
+                [],
+            ),
+            run_bootstrap_recovery_func=run_bootstrap,
+            sleep_func=lambda _seconds: None,
+            use_cache=False,
+        )
+
+        self.assertEqual(payload["status"], "recovered_loaded_scene")
+        self.assertEqual(len(bootstrap_calls), 2)
+        self.assertFalse(getattr(bootstrap_calls[0], "prefer_saved_account_play_now", False))
+        self.assertTrue(getattr(bootstrap_calls[1], "prefer_saved_account_play_now", False))
+        self.assertEqual(payload["actionsTaken"][1]["state"], "saved_account_play_now_retry")
+        self.assertEqual(payload["actionsTaken"][1]["clickedCandidates"], ["play_now"])
+        self.assertTrue(payload["savedAccountDetected"])
+        self.assertTrue(payload["playNowAttempted"])
 
     def test_transient_loaded_scene_must_survive_stability_check(self):
         snapshots = [snapshot("LOGIN_SCREEN"), loaded_snapshot(), snapshot("LOGIN_SCREEN", object_total=0)]
@@ -199,6 +328,7 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
             run_bootstrap_recovery_func=run_bootstrap,
             resolve_start_game_command_func=lambda: {"status": "FAIL", "reason": "relaunch_command_missing", "command": "", "commandSource": "none"},
             sleep_func=lambda _seconds: None,
+            allow_relaunch=False,
             use_cache=False,
         )
 
@@ -493,12 +623,55 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
             button_candidates_func=buttons,
             run_bootstrap_recovery_func=run_bootstrap,
             sleep_func=lambda _seconds: None,
+            allow_relaunch=False,
             use_cache=False,
         )
 
         self.assertEqual(payload["status"], "unsafe")
         self.assertEqual(payload["blocker"], "play_now_no_transition")
         self.assertEqual(payload["recoveryFailureClass"], "play_now_no_transition")
+
+    def test_login_surface_no_saved_account_triggers_start_game_relaunch(self):
+        launched = []
+        times = iter([0.0, 0.0, 2.0])
+
+        def run_bootstrap(_args):
+            return {
+                "schema": bootstrap.SCHEMA,
+                "status": "WARN",
+                "loadedSceneVerified": False,
+                "startupStage": "blocked_user_login_required",
+                "clickedCandidates": [],
+                "snapshot": {"gameState": "LOGIN_SCREEN", "loadedSceneVerified": False, "worldModelObjectTotal": 0},
+            }
+
+        payload = recovery.ensure_loaded_scene(
+            max_total_ms=1000,
+            fetch_snapshot_func=lambda *_args, **_kwargs: snapshot("LOGIN_SCREEN", object_total=0, hot_age_ms=5000),
+            fetch_daemon_status_func=lambda *_args, **_kwargs: {},
+            window_finder=lambda _filters: window(),
+            button_candidates_func=lambda *_args, **_kwargs: ([], []),
+            run_bootstrap_recovery_func=run_bootstrap,
+            resolve_start_game_command_func=lambda: {
+                "status": "PASS",
+                "command": "cmd /c .\\gradlew.bat --no-daemon run",
+                "commandSource": "discovered_gradle_wrapper",
+                "cwd": "C:/repo",
+                "shell": True,
+                "launchMode": "dev_gradle_run",
+            },
+            launch_start_game_func=lambda info: launched.append(info) or {"status": "PASS", "reason": "launched", "relaunchAttempted": True, "relaunchSucceeded": True},
+            sleep_func=lambda _seconds: None,
+            monotonic_func=lambda: next(times, 2.0),
+            use_cache=False,
+        )
+
+        self.assertEqual(payload["status"], "unsafe")
+        self.assertTrue(payload["relaunchRequired"])
+        self.assertTrue(payload["relaunchAttempted"])
+        self.assertEqual(payload["actionsTaken"][1]["action"], "relaunch_required")
+        self.assertEqual(payload["actionsTaken"][1]["state"], "login_surface_no_saved_account")
+        self.assertEqual(len(launched), 1)
 
     def test_credential_screen_stops_for_manual_login(self):
         payload = recovery.ensure_loaded_scene(
@@ -606,6 +779,7 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
             run_bootstrap_recovery_func=lambda _args: {"status": "WARN", "loadedSceneVerified": False, "clickedCandidates": []},
             sleep_func=lambda _seconds: None,
             monotonic_func=lambda: next(ticks),
+            allow_relaunch=False,
             use_cache=False,
         )
 

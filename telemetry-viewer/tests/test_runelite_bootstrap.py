@@ -883,6 +883,64 @@ class RuneLiteBootstrapTest(unittest.TestCase):
         self.assertEqual(payload["clickedCandidates"][0]["name"], "click_here_to_play")
         self.assertTrue(payload["snapshot"]["loggedIn"])
 
+    def test_saved_account_preference_chooses_play_now_on_runelite_login_screen(self):
+        candidates = [
+            bootstrap.StartupButtonCandidate(
+                name="click_here_to_play",
+                source="calibrated_screen",
+                screen_point={"x": 10, "y": 20},
+                canvas_point=None,
+                confidence=0.95,
+                reason="welcome play button",
+            ),
+            bootstrap.StartupButtonCandidate(
+                name="play_now",
+                source="saved_account_play_panel",
+                screen_point={"x": 30, "y": 40},
+                canvas_point=None,
+                confidence=0.90,
+                reason="saved account play panel",
+            ),
+        ]
+
+        chosen = bootstrap.choose_candidate(
+            candidates,
+            snapshot_reachable=True,
+            window={"matchedWindowTitle": "RuneLite"},
+            prefer_saved_account_play_now=True,
+        )
+
+        self.assertEqual(chosen.name, "play_now")
+
+    def test_default_runelite_login_preference_keeps_click_here_first(self):
+        candidates = [
+            bootstrap.StartupButtonCandidate(
+                name="click_here_to_play",
+                source="calibrated_screen",
+                screen_point={"x": 10, "y": 20},
+                canvas_point=None,
+                confidence=0.95,
+                reason="welcome play button",
+            ),
+            bootstrap.StartupButtonCandidate(
+                name="play_now",
+                source="saved_account_play_panel",
+                screen_point={"x": 30, "y": 40},
+                canvas_point=None,
+                confidence=0.90,
+                reason="saved account play panel",
+            ),
+        ]
+
+        chosen = bootstrap.choose_candidate(
+            candidates,
+            snapshot_reachable=True,
+            window={"matchedWindowTitle": "RuneLite"},
+            prefer_saved_account_play_now=False,
+        )
+
+        self.assertEqual(chosen.name, "click_here_to_play")
+
     def test_move_to_secondary_monitor_calls_window_preparer(self):
         placements = []
         backend = FakeBackend()

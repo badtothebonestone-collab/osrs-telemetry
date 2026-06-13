@@ -1437,6 +1437,19 @@ def _recovery_latest_state(payload: dict[str, Any]) -> dict[str, Any]:
         "finalWorldObjectCount": payload.get("finalWorldObjectCount"),
         "finalTick": payload.get("finalTick"),
         "finalExportSeq": payload.get("finalExportSeq"),
+        "recoveryAttempted": bool(payload.get("recoveryAttempted")),
+        "autologinRecoveryAttempted": bool(payload.get("autologinRecoveryAttempted")),
+        "savedAccountDetected": bool(payload.get("savedAccountDetected")),
+        "playNowAttempted": bool(payload.get("playNowAttempted")),
+        "disconnectedOkAttempted": bool(payload.get("disconnectedOkAttempted")),
+        "clickHereToPlayAttempted": bool(payload.get("clickHereToPlayAttempted")),
+        "launcherRecoveryAttempted": bool(payload.get("launcherRecoveryAttempted")),
+        "waitForLoadedSceneAttempted": bool(payload.get("waitForLoadedSceneAttempted")),
+        "manualLoginRequiredOnlyAfterRecovery": bool(payload.get("manualLoginRequiredOnlyAfterRecovery")),
+        "recoveryActionsTried": payload.get("recoveryActionsTried") or [],
+        "recoveryResult": payload.get("recoveryResult") or {},
+        "finalLoginSurface": payload.get("finalLoginSurface"),
+        "finalReason": payload.get("finalReason"),
         "initialState": _dict(payload.get("initialState")),
         "finalState": final_state,
         "recoveryStateMachine": machine,
@@ -1453,6 +1466,21 @@ def _recovery_attempt_records(
     machine = _dict(payload.get("recoveryStateMachine"))
     classification = _dict(machine.get("failureClassification"))
     clicks = _list(machine.get("clickAttempts"))
+    metadata = {
+        "recoveryAttempted": bool(payload.get("recoveryAttempted")),
+        "autologinRecoveryAttempted": bool(payload.get("autologinRecoveryAttempted")),
+        "savedAccountDetected": bool(payload.get("savedAccountDetected")),
+        "playNowAttempted": bool(payload.get("playNowAttempted")),
+        "disconnectedOkAttempted": bool(payload.get("disconnectedOkAttempted")),
+        "clickHereToPlayAttempted": bool(payload.get("clickHereToPlayAttempted")),
+        "launcherRecoveryAttempted": bool(payload.get("launcherRecoveryAttempted")),
+        "waitForLoadedSceneAttempted": bool(payload.get("waitForLoadedSceneAttempted")),
+        "manualLoginRequiredOnlyAfterRecovery": bool(payload.get("manualLoginRequiredOnlyAfterRecovery")),
+        "recoveryActionsTried": payload.get("recoveryActionsTried") or [],
+        "recoveryResult": payload.get("recoveryResult") or {},
+        "finalLoginSurface": payload.get("finalLoginSurface"),
+        "finalReason": payload.get("finalReason"),
+    }
     records: list[dict[str, Any]] = []
     if clicks:
         for index, click in enumerate(clicks):
@@ -1474,6 +1502,7 @@ def _recovery_attempt_records(
                     "stateAfter": item.get("stateAfter"),
                     "transitionSuccess": bool(item.get("transitionSuccess")),
                     "reason": item.get("reason") or classification.get("reason"),
+                    **metadata,
                 }
             )
     for index, attempt in enumerate(_list(machine.get("relaunchAttempts")), start=len(records)):
@@ -1498,6 +1527,7 @@ def _recovery_attempt_records(
                 "stateAfter": item.get("stateAfter"),
                 "transitionSuccess": bool(item.get("transitionSuccess")),
                 "reason": item.get("reason") or classification.get("reason"),
+                **metadata,
             }
         )
     if not records:
@@ -1516,6 +1546,7 @@ def _recovery_attempt_records(
                 "finalState": _dict(payload.get("finalState")),
                 "actionsTaken": _list(payload.get("actionsTaken")),
                 "warnings": _list(payload.get("warnings")),
+                **metadata,
             }
         )
     return records
@@ -1583,6 +1614,19 @@ def run_loaded_scene_recovery(
         "finalWorldObjectCount": payload.get("finalWorldObjectCount"),
         "finalTick": payload.get("finalTick"),
         "finalExportSeq": payload.get("finalExportSeq"),
+        "recoveryAttempted": bool(payload.get("recoveryAttempted")),
+        "autologinRecoveryAttempted": bool(payload.get("autologinRecoveryAttempted")),
+        "savedAccountDetected": bool(payload.get("savedAccountDetected")),
+        "playNowAttempted": bool(payload.get("playNowAttempted")),
+        "disconnectedOkAttempted": bool(payload.get("disconnectedOkAttempted")),
+        "clickHereToPlayAttempted": bool(payload.get("clickHereToPlayAttempted")),
+        "launcherRecoveryAttempted": bool(payload.get("launcherRecoveryAttempted")),
+        "waitForLoadedSceneAttempted": bool(payload.get("waitForLoadedSceneAttempted")),
+        "manualLoginRequiredOnlyAfterRecovery": bool(payload.get("manualLoginRequiredOnlyAfterRecovery")),
+        "recoveryActionsTried": payload.get("recoveryActionsTried") or [],
+        "recoveryResult": payload.get("recoveryResult") or {},
+        "finalLoginSurface": payload.get("finalLoginSurface"),
+        "finalReason": payload.get("finalReason"),
         "manualActionRequired": payload.get("manualActionRequired"),
         "nextRecommendation": payload.get("nextRecommendation"),
         "recoveryCommand": command,
