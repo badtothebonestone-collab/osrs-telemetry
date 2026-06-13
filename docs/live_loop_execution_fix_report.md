@@ -1104,3 +1104,130 @@ Exact next command after those environment gates are true:
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
 First live evidence to verify: candidate trace includes route_guide_plane1_recovery_interaction, Staircase 16672, Climb-down, plane 1, followed by a plane 1 -> 0 postcondition.
 ```
+
+## 25. Live Gate Repair Attempt Before Plane-1 Recovery Validation
+
+Updated: 2026-06-13.
+
+Goal:
+
+```text
+Get telemetry, loaded-scene proof, input geometry, and Arduino pointer calibration green before rerunning the real live woodcutting loop against commit dbea3fb.
+Do not modify route rehydration or plane-1 recovery unless the route candidate is reached and fails.
+```
+
+Git state:
+
+```text
+branch: stabilization/live-loop-recovery-20260609
+HEAD: dbea3fb fix post-recovery route context rehydration
+git status before: generated knowledge JSON files dirty only
+changed files this pass: docs/live_loop_execution_fix_report.md
+generated JSON left unstaged: capability_registry.json, open_gaps.json, project_knowledge.json, recordings_index.json, script_api_map.json
+```
+
+Telemetry repair result:
+
+```text
+8890 context service: listening, health reachable
+8893 snapshot service: listening, health reachable
+RuneLite/Java process: present
+canonical live stack command needed this pass: not restarted because both ports were already up
+snapshot health status: WARN
+snapshot latestTick: -1
+```
+
+Loaded-scene recovery command:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 180 --liveness-max-attempts-per-state 3 --recovery-artifact-dir bot_runs\20260613_gate_recovery
+```
+
+Loaded-scene result:
+
+```text
+status: manual_login_required
+loadedSceneVerified: false
+gameState: LOGIN_SCREEN
+latestTick: -1
+worldModelObjectTotal: 0
+daemonFresh: false
+clientTickHotFresh: false
+blocker: manual_login_required
+failure class: login_surface_no_saved_account
+manual action required: Log in or clear the account/credential prompt manually inside the VM.
+recovery artifacts: bot_runs\20260613_gate_recovery
+```
+
+Start Game/authentication check:
+
+```text
+normal resolver: cmd /c .\gradlew.bat --no-daemon run
+prefer authenticated resolver: cmd /c .\gradlew.bat --no-daemon run
+launchMode: dev_gradle_run
+authenticatedLaunchLikely: false
+authenticated launch configured: no
+```
+
+Input geometry result after recovery failure:
+
+```text
+command: python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+status: FAIL
+blocker: input_geometry_focus_needed
+RuneLite matched: true
+matched window title: RuneLite Shell
+foreground window: Chrome
+focus repair attempted: true
+focus repair succeeded: false
+desktop focus automation: attempted; Computer Use bootstrap was unavailable in this Codex session, so repo focus repair was the active fallback
+canvas geometry: 800x832 at screen origin 7,30
+```
+
+Arduino pointer calibration result:
+
+```text
+not run
+reason: loadedSceneVerified=false and inputGeometryPass=false
+policy: do not run calibration or gameplay actions until loaded scene and geometry gates pass
+```
+
+Real live command result:
+
+```text
+not run in this pass
+reason: live gates did not pass
+no dry-run substitution: yes
+bot actions sent: 0
+live input executed: no
+plane-1 recovery candidate appeared: no, not reached
+Climb-down / Staircase 16672 attempted: no
+plane 1 -> 0 postcondition: not reached
+```
+
+Exact blocker:
+
+```text
+primary blocker: manual_login_required / login_surface_no_saved_account
+secondary blocker after geometry check: input_geometry_focus_needed
+why this is external: no authenticated launch command is configured, the dev Gradle path started RuneLite at LOGIN_SCREEN, and the repo recovery path detected no safe saved-account surface to click. Credentials will not be typed or automated.
+```
+
+Checks run:
+
+```powershell
+git branch --show-current
+git status --short
+git log --oneline -n 5
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 180 --liveness-max-attempts-per-state 3 --recovery-artifact-dir bot_runs\20260613_gate_recovery
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+```
+
+Next recommended task:
+
+```text
+Log in or configure an authenticated Start Game command, then rerun:
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+python telemetry-viewer\execute_next_action.py --arduino-pointer-calibration-test --allowed-window runelite --arduino-port COM6 --arduino-pointer-calibration-path .osrs-telemetry\arduino_pointer_calibration.json --json
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```
