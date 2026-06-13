@@ -1,6 +1,6 @@
 {
   "schema": "project_open_gaps.v1",
-  "updatedAtUtc": "2026-06-13T18:07:14.163454Z",
+  "updatedAtUtc": "2026-06-13T18:29:12.753096Z",
   "gaps": [
     {
       "id": "deposit_all_region_classification",
@@ -62,16 +62,25 @@
       "title": "Authenticated live Start Game path must be validated before live bot actions",
       "severity": "high",
       "requiredLayer": "startup/recovery",
-      "status": "partially_resolved",
+      "status": "resolved",
       "evidence": [
         "start_game_command.py separates devStartCommand from liveStartCommand.",
         "Jagex Launcher quick launch is discoverable with --launch=osrs_runelite when installed.",
         "dev_gradle_run remains classified as a dev/plugin launch and is not accepted as the live authenticated start path.",
-        "2026-06-13 Jagex quick-launch recovery started RuneLite but stopped at disconnected_dialog / LOGIN_SCREEN with stale_login_screen_after_relaunch.",
-        "2026-06-13 visible-button recovery detects disconnected_ok, validates it inside RuneLite, clicks through HumanInputController/ArduinoHIDBackend, and now stops as visible_button_no_transition when the client does not transition.",
-        "2026-06-13 visible recovery click proof now writes recovery_attempt.v2 rows proving RuneLite focus, button target validation, cursor at target, MOUSE_DOWN/MOUSE_UP ACKs, and fullClickSequenceVerified=true; latest artifact is bot_runs\\20260613_visible_click_proof_recovery_v3."
+        "2026-06-13 recovery artifact bot_runs\\20260613_play_now_recovery_after_target_fix clicked play_now and click_here_to_play, then reached loadedSceneVerified=true."
       ],
-      "suggestedNextTask": "Clear the current disconnected/login no-transition surface, then rerun context_service.py --ensure-loaded-scene until loadedSceneVerified=true before live actions."
+      "suggestedNextTask": "Keep using context_service.py --ensure-loaded-scene before live actions."
+    },
+    {
+      "id": "arduino_pointer_calibration_required",
+      "title": "Arduino pointer calibration is required before live gameplay input",
+      "severity": "high",
+      "requiredLayer": "input/arduino",
+      "status": "open",
+      "evidence": [
+        "2026-06-13 live run bot_runs\\20260613_132900_live_woodcutting_loop reached loaded scene and input geometry PASS, then executor stopped with arduino_pointer_calibration_required before sending gameplay input."
+      ],
+      "suggestedNextTask": "Run or repair the canonical Arduino pointer calibration gate, then rerun the real live woodcutting loop."
     },
     {
       "id": "input_geometry_live_source_stale",
@@ -158,7 +167,7 @@
       "task": "Validate the discovered Jagex Launcher RuneLite quick-launch path and loaded-scene recovery.",
       "successCriteria": [
         "start_game_command.py --validate-live reports jagex_launcher_runelite_quick_launch.",
-        "context_service.py --ensure-loaded-scene reaches loadedSceneVerified=true without visible_button_no_transition or dev_launch_not_loaded."
+        "context_service.py --ensure-loaded-scene reaches loadedSceneVerified=true without dev_launch_not_loaded."
       ]
     },
     {

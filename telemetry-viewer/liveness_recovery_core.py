@@ -120,6 +120,9 @@ def _click_proof_blocker(click: dict[str, Any]) -> str | None:
         return "recovery_click_target_invalid"
     if not _click_has_proof_fields(click):
         return None
+    window_match = _click_value(click, "clickedWindowMatchesSelected")
+    if window_match is False:
+        return "clicked_wrong_window_or_instance"
     focused = _click_window_focused(click)
     if focused is False:
         return "recovery_click_window_not_focused"
@@ -505,6 +508,7 @@ def _bootstrap_args(
         "--execute",
         "--recover-loaded-scene",
         "--verify-loaded-scene",
+        "--capture-debug-screenshots",
         "--start-daemon",
         "--timeout-seconds",
         str(max(1.0, float(max_total_ms) / 1000.0)),
@@ -565,6 +569,7 @@ def _compact_click_details(details: dict[str, Any]) -> dict[str, Any]:
         "retryRequiresScreenRecheck": details.get("retryRequiresScreenRecheck"),
         "inputBackend": details.get("inputBackend") or details.get("backend"),
         "inputPathUsed": details.get("inputPathUsed"),
+        "recoveryInputMethod": details.get("recoveryInputMethod"),
         "command": details.get("command") or details.get("commandSent"),
         "arduinoAck": details.get("arduinoAck"),
         "arduinoAcks": details.get("arduinoAcks") or [],
@@ -585,10 +590,17 @@ def _compact_click_details(details: dict[str, Any]) -> dict[str, Any]:
         "mouseUpSent": details.get("mouseUpSent"),
         "clickSent": details.get("clickSent"),
         "fullClickSequenceVerified": details.get("fullClickSequenceVerified"),
+        "beforeScreenshotPath": details.get("beforeScreenshotPath"),
+        "afterMoveScreenshotPath": details.get("afterMoveScreenshotPath"),
+        "afterClickScreenshotPath": details.get("afterClickScreenshotPath"),
+        "afterWaitScreenshotPath": details.get("afterWaitScreenshotPath"),
         "foregroundWindowTitle": details.get("foregroundWindowTitle"),
         "windowFocusVerified": details.get("windowFocusVerified"),
         "runeliteWindowFocused": details.get("runeliteWindowFocused"),
         "targetWindowAtPoint": pre_focus.get("targetWindowAtPoint"),
+        "selectedRuneLiteWindow": details.get("selectedRuneLiteWindow") or pre_focus.get("selectedRuneLiteWindow"),
+        "clickedWindowAtTarget": details.get("clickedWindowAtTarget") or pre_focus.get("clickedWindowAtTarget"),
+        "clickedWindowMatchesSelected": details.get("clickedWindowMatchesSelected") if "clickedWindowMatchesSelected" in details else pre_focus.get("clickedWindowMatchesSelected"),
         "foregroundTitle": pre_focus.get("foregroundTitle"),
         "focusMethod": pre_focus.get("focusMethod"),
     }
@@ -616,6 +628,7 @@ def _compact_clicked_candidate(candidate: Any) -> dict[str, Any]:
         "afterHotGameState": item.get("afterHotGameState"),
         "loadedSceneVerifiedAfter": item.get("loadedSceneVerifiedAfter"),
         "visibleButtonsAfter": item.get("visibleButtonsAfter") or [],
+        "afterWaitScreenshotPath": item.get("afterWaitScreenshotPath"),
         "visualTransitionObserved": item.get("visualTransitionObserved"),
         "hotStateTransitionObserved": item.get("hotStateTransitionObserved"),
         "expectedTransitionSatisfied": item.get("expectedTransitionSatisfied"),
@@ -765,6 +778,35 @@ def _safe_visible_clicked_from_actions(actions_taken: list[dict[str, Any]] | Non
     return [item for item in _clicked_candidates_from_actions(actions_taken or []) if str(item.get("name") or "") in SAFE_VISIBLE_BUTTON_NAMES]
 
 
+def _bounded_no_transition_clicks(clicks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for click in clicks:
+        if str(click.get("name") or "") not in SAFE_VISIBLE_BUTTON_NAMES:
+            continue
+        if _click_proof_blocker(click):
+            continue
+        if click.get("expectedTransitionSatisfied") is True:
+            continue
+        if str(click.get("transitionResult") or "") not in {"", "expected_transition_not_observed"}:
+            continue
+        output.append(click)
+    return output
+
+
+def _looks_like_dead_visible_surface(clicks: list[dict[str, Any]]) -> bool:
+    no_transition = _bounded_no_transition_clicks(clicks)
+    if len(no_transition) < 2:
+        return False
+    names = {str(item.get("name") or "") for item in no_transition}
+    if len(names) != 1:
+        return False
+    methods = {
+        str(_dict(item.get("clickDetails")).get("recoveryInputMethod") or "")
+        for item in no_transition
+    }
+    return bool("direct_click" in methods or len(no_transition) >= 2)
+
+
 def _recovery_action_metadata(
     *,
     status: str,
@@ -900,11 +942,15 @@ def classify_recovery_failure(
                 "incomplete_click_sequence": "visible recovery button click lacked a complete CLICK or MOUSE_DOWN/MOUSE_UP sequence",
                 "recovery_click_window_not_focused": "RuneLite was not proven focused before the recovery click",
                 "recovery_click_target_invalid": "visible recovery button target failed RuneLite/window safety validation",
+                "clicked_wrong_window_or_instance": "visible recovery click target belonged to a different window than the selected RuneLite instance",
             }
             reason = reason_map.get(proof_blocker, proof_blocker)
         elif "play_now" in safe_clicked_names and final_name == "disconnected_dialog":
             failure_class = "disconnected_loop"
             reason = "Play Now was clicked but the client returned to the disconnected dialog"
+        elif _looks_like_dead_visible_surface(safe_clicked):
+            failure_class = "stale_dead_runelite_instance"
+            reason = "the same safe visible recovery button accepted bounded clicks without any visual or client-state transition"
         elif final_name in {"disconnected_dialog", "login_screen", "saved_account_play_now", "click_here_to_play"} or game_state == "LOGIN_SCREEN":
             last_click = safe_clicked[-1]
             transition_ok = bool(last_click.get("expectedTransitionSatisfied"))
@@ -999,8 +1045,13 @@ def build_recovery_state_machine(
                 "clickResult": click.get("clickResult"),
                 "inputPathUsed": click_details.get("inputPathUsed"),
                 "inputBackend": click_details.get("inputBackend"),
+                "recoveryInputMethod": click_details.get("recoveryInputMethod"),
                 "arduinoCommandAck": click_details.get("arduinoAck"),
                 "arduinoAcks": click_details.get("arduinoAcks") or [],
+                "beforeScreenshotPath": click_details.get("beforeScreenshotPath"),
+                "afterMoveScreenshotPath": click_details.get("afterMoveScreenshotPath"),
+                "afterClickScreenshotPath": click_details.get("afterClickScreenshotPath"),
+                "afterWaitScreenshotPath": click_details.get("afterWaitScreenshotPath") or click.get("afterWaitScreenshotPath"),
                 "beforeVisualState": click.get("beforeVisualState"),
                 "afterVisualState": click.get("afterVisualState"),
                 "beforeHotGameState": click.get("beforeHotGameState"),
@@ -1015,6 +1066,9 @@ def build_recovery_state_machine(
                 "windowFocusVerified": click_details.get("windowFocusVerified"),
                 "runeliteWindowFocused": click_details.get("runeliteWindowFocused"),
                 "targetWindowAtPoint": click_details.get("targetWindowAtPoint"),
+                "selectedRuneLiteWindow": click_details.get("selectedRuneLiteWindow"),
+                "clickedWindowAtTarget": click_details.get("clickedWindowAtTarget"),
+                "clickedWindowMatchesSelected": click_details.get("clickedWindowMatchesSelected"),
                 "mouseMoveSent": click_details.get("mouseMoveSent"),
                 "mouseDownSent": click_details.get("mouseDownSent"),
                 "mouseUpSent": click_details.get("mouseUpSent"),
@@ -1544,6 +1598,7 @@ def ensure_loaded_scene(
             "loading_timeout",
             "play_now_no_transition",
             "visible_button_no_transition",
+            "stale_dead_runelite_instance",
             "login_surface_no_saved_account",
             "logged_in_without_scene",
             "stale_hot_client",
@@ -1720,6 +1775,7 @@ def ensure_loaded_scene(
                     )
                     if post_relaunch_classification.get("failureClass") in {
                         "visible_button_no_transition",
+                        "stale_dead_runelite_instance",
                         "visible_button_found_not_clicked",
                         "saved_account_play_now_not_attempted",
                         "disconnected_loop",
@@ -1779,6 +1835,7 @@ def ensure_loaded_scene(
                 if classification_after_relaunch.get("failureClass") in {
                     "visible_button_found_not_clicked",
                     "visible_button_no_transition",
+                    "stale_dead_runelite_instance",
                     "saved_account_play_now_not_attempted",
                     "disconnected_loop",
                     "credentials_required",
@@ -1797,6 +1854,8 @@ def ensure_loaded_scene(
                     warnings.append(
                         "Start Game uses a Gradle/dev launch path; it launched a client but did not produce authenticated loaded-scene proof."
                     )
+                elif blocker_after_relaunch == "stale_dead_runelite_instance":
+                    blocker_after_relaunch = "stale_dead_runelite_instance_restarted"
                 actions.append(
                     {
                         "action": "wait_for_loaded_scene_after_relaunch",

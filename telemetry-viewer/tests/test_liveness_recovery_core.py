@@ -534,6 +534,85 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         self.assertIn("relaunch_client", actions)
         self.assertEqual(payload["recoveryStateMachine"]["relaunchAttempts"][-1]["selectedRecoveryAction"], "wait_for_loaded_scene_after_relaunch")
 
+    def test_stale_dead_visible_button_surface_triggers_start_game_relaunch(self):
+        snapshots = [
+            snapshot("LOGIN_SCREEN", object_total=0, hot_age_ms=5000),
+            snapshot("LOGIN_SCREEN", object_total=0, hot_age_ms=5000),
+            loaded_snapshot(),
+        ]
+        launched = []
+
+        def buttons(_payload, _window, **_kwargs):
+            return [candidate("disconnected_ok", "disconnected_dialog")], []
+
+        def run_bootstrap(_args):
+            return {
+                "schema": bootstrap.SCHEMA,
+                "status": "FAIL",
+                "loadedSceneVerified": False,
+                "startupStage": "stale_dead_runelite_instance",
+                "snapshot": {"gameState": "LOGIN_SCREEN", "loadedSceneVerified": False, "worldModelObjectTotal": 0},
+                "clickedCandidates": [
+                    clicked_candidate(
+                        "disconnected_ok",
+                        before="disconnected_dialog",
+                        after="disconnected_dialog",
+                        proof={"recoveryInputMethod": "move_and_down_up"},
+                    ),
+                    clicked_candidate(
+                        "disconnected_ok",
+                        before="disconnected_dialog",
+                        after="disconnected_dialog",
+                        proof={"recoveryInputMethod": "direct_click", "mouseDownSent": False, "mouseUpSent": False},
+                    ),
+                ],
+                "failures": ["stale_dead_runelite_instance"],
+                "daemon": {"reachable": False, "startedOrReused": "blocked_until_logged_in"},
+            }
+
+        def resolve_command():
+            return {
+                "schema": "start_game_command_resolution.v1",
+                "status": "PASS",
+                "command": '"C:\\Program Files (x86)\\Jagex Launcher\\JagexLauncher.exe" --launch=osrs_runelite',
+                "commandSource": "discovered_jagex_launcher",
+                "cwd": "C:/repo",
+                "shell": False,
+                "launchMode": "jagex_launcher_runelite_quick_launch",
+                "authenticatedLaunchLikely": True,
+            }
+
+        def launch(command_info):
+            launched.append(command_info)
+            return {
+                "schema": "start_game_launch_result.v1",
+                "status": "PASS",
+                "reason": "launched",
+                "relaunchAttempted": True,
+                "relaunchSucceeded": True,
+                "command": command_info["command"],
+                "commandSource": command_info["commandSource"],
+                "launchedProcessPid": 2345,
+            }
+
+        payload = recovery.ensure_loaded_scene(
+            fetch_snapshot_func=lambda *_args, **_kwargs: pop_or_last(snapshots),
+            fetch_daemon_status_func=lambda *_args, **_kwargs: daemon_status(),
+            window_finder=lambda _filters: window(),
+            button_candidates_func=buttons,
+            run_bootstrap_recovery_func=run_bootstrap,
+            resolve_start_game_command_func=resolve_command,
+            launch_start_game_func=launch,
+            sleep_func=lambda _seconds: None,
+            use_cache=False,
+        )
+
+        self.assertEqual(payload["status"], "recovered_loaded_scene")
+        self.assertTrue(payload["relaunchRequired"])
+        self.assertTrue(payload["relaunchAttempted"])
+        self.assertEqual(payload["launchedProcessPid"], 2345)
+        self.assertEqual(len(launched), 1)
+
     def test_gradle_start_game_command_is_classified_as_dev_launch(self):
         mode = start_game_command.classify_launch_mode("cmd /c .\\gradlew.bat --no-daemon run", command_source="discovered_gradle_wrapper")
 
@@ -854,6 +933,58 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         classification = recovery.classify_recovery_failure(initial_state=initial, final_state=final, actions_taken=actions)
 
         self.assertEqual(classification["failureClass"], "visible_button_no_transition")
+
+    def test_clicked_wrong_window_reports_instance_mismatch(self):
+        initial = recovery_state("disconnected_dialog", detected_buttons=["disconnected_ok"])
+        final = recovery_state("disconnected_dialog", detected_buttons=["disconnected_ok"])
+        actions = [
+            {
+                "action": "run_bootstrap_recovery",
+                "clickedCandidateDetails": [
+                    clicked_candidate(
+                        "disconnected_ok",
+                        before="disconnected_dialog",
+                        after="disconnected_dialog",
+                        proof={
+                            "clickedWindowMatchesSelected": False,
+                            "targetWindowAtPoint": {"title": "RuneLite", "rootHwnd": 222},
+                            "selectedRuneLiteWindow": {"title": "RuneLite", "hwnd": 111},
+                        },
+                    )
+                ],
+            }
+        ]
+
+        classification = recovery.classify_recovery_failure(initial_state=initial, final_state=final, actions_taken=actions)
+
+        self.assertEqual(classification["failureClass"], "clicked_wrong_window_or_instance")
+
+    def test_repeated_verified_no_transition_clicks_report_stale_dead_instance(self):
+        initial = recovery_state("disconnected_dialog", detected_buttons=["disconnected_ok"])
+        final = recovery_state("disconnected_dialog", detected_buttons=["disconnected_ok"])
+        actions = [
+            {
+                "action": "run_bootstrap_recovery",
+                "clickedCandidateDetails": [
+                    clicked_candidate(
+                        "disconnected_ok",
+                        before="disconnected_dialog",
+                        after="disconnected_dialog",
+                        proof={"recoveryInputMethod": "move_and_down_up"},
+                    ),
+                    clicked_candidate(
+                        "disconnected_ok",
+                        before="disconnected_dialog",
+                        after="disconnected_dialog",
+                        proof={"recoveryInputMethod": "direct_click", "mouseDownSent": False, "mouseUpSent": False},
+                    ),
+                ],
+            }
+        ]
+
+        classification = recovery.classify_recovery_failure(initial_state=initial, final_state=final, actions_taken=actions)
+
+        self.assertEqual(classification["failureClass"], "stale_dead_runelite_instance")
 
     def test_login_surface_no_saved_account_triggers_start_game_relaunch(self):
         launched = []

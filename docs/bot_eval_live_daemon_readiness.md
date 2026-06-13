@@ -516,3 +516,36 @@ Latest result:
 
 The remaining blocker is now a genuine post-click no-transition: the
 disconnected dialog stayed visible after bounded, focused, grounded clicks.
+
+## 2026-06-13 Update: Wrong Target Fixed, Loaded Scene Recovered
+
+Follow-up screenshot evidence showed the previous `visible_button_no_transition`
+was caused by a wrong recovery target, not a dead OK button. The visible screen
+was saved-account `Play Now`, but the stale disconnected detector selected a
+lower-panel `disconnected_ok` candidate.
+
+Recovery behavior now:
+
+- visible recovery clicks save before/after/after-wait screenshots;
+- attempts record selected RuneLite HWND, clicked HWND, and match result;
+- repeated no-effect clicks try one direct `CLICK` alternate before stale/dead
+  classification;
+- saved-account `Play Now` suppresses stale disconnected false positives.
+
+Validation:
+
+| Field | Result |
+| --- | --- |
+| wrong-target artifact | `bot_runs\20260613_verified_click_no_transition_diagnosis` |
+| corrected recovery artifact | `bot_runs\20260613_play_now_recovery_after_target_fix` |
+| corrected buttons clicked | `play_now`, `click_here_to_play` |
+| loaded scene verified | true |
+| game state | `LOGGED_IN` |
+| world objects | 1248 |
+| input geometry check | PASS |
+| real live run | `bot_runs\20260613_132900_live_woodcutting_loop` |
+| live gameplay input | not executed |
+| current blocker | `arduino_pointer_calibration_required` |
+
+The next blocker is the Arduino pointer calibration gate, not login recovery or
+the woodcutting route logic.

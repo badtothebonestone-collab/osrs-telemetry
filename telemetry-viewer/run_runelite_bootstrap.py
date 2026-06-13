@@ -153,6 +153,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--print-candidates", action="store_true")
     parser.add_argument("--save-debug-screenshot", action="store_true")
     parser.add_argument("--capture-debug-screenshots", dest="save_debug_screenshot", action="store_true", help="Alias for --save-debug-screenshot.")
+    parser.add_argument("--click-debug-dir", default="", help="Directory for before/after recovery-button click screenshots.")
     parser.add_argument("--template-confidence", type=float, default=0.85)
     parser.add_argument("--template-dir", default=str(BOOTSTRAP_TEMPLATE_DIR))
     parser.add_argument("--start-daemon", action="store_true")
@@ -1054,6 +1055,41 @@ def _default_screenshot() -> Any:
     return pyautogui.screenshot()
 
 
+def _safe_file_token(value: str) -> str:
+    output = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(value or "").strip())
+    return output.strip("_") or "unknown"
+
+
+def _click_debug_dir(args: argparse.Namespace) -> Path | None:
+    raw = str(getattr(args, "click_debug_dir", "") or "").strip()
+    if raw:
+        path = Path(raw)
+        return path if path.is_absolute() else PROJECT_ROOT / path
+    if bool(getattr(args, "save_debug_screenshot", False)):
+        return PROJECT_ROOT / "bot_runs" / "recovery_click_debug"
+    return None
+
+
+def save_click_debug_screenshot(
+    args: argparse.Namespace,
+    *,
+    label: str,
+    attempt_index: int,
+    candidate_name: str,
+) -> str | None:
+    directory = _click_debug_dir(args)
+    if directory is None:
+        return None
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        image = _default_screenshot()
+        path = directory / f"{int(time.time() * 1000)}_{attempt_index:02d}_{_safe_file_token(candidate_name)}_{_safe_file_token(label)}.png"
+        image.save(path)
+        return str(path)
+    except Exception:
+        return None
+
+
 def _mean_luma(image: Any) -> float:
     if image is None:
         return 0.0
@@ -1133,7 +1169,7 @@ def saved_account_play_candidate(
         25.0 <= button_stats["mean"] <= 115.0
         and button_stats["stddev"] >= 20.0
         and button_stats["brightRatio"] >= 0.01
-        and button_stats["darkRatio"] >= 0.15
+        and button_stats["darkRatio"] >= 0.08
         and label_stats["stddev"] >= 20.0
     )
     if not detected:
@@ -1429,13 +1465,15 @@ def button_candidates(
 
         disconnected = disconnected_candidate()
         click_here = click_here_candidate()
-        saved = saved_account_candidate() if not click_here and not (prefer_disconnected_dialog and disconnected) else None
+        saved = saved_account_candidate() if not click_here else None
         if click_here:
             candidate = click_here
+        elif saved:
+            if prefer_disconnected_dialog and disconnected:
+                vision_warnings.append("saved-account Play Now suppressed stale disconnected OK candidate")
+            candidate = saved
         elif prefer_disconnected_dialog and disconnected:
             candidate = disconnected
-        elif saved:
-            candidate = saved
         elif disconnected:
             candidate = disconnected
         else:
@@ -1501,6 +1539,43 @@ def point_window_matches_allowed_title(point_info: dict[str, Any] | None, allowe
         return False
     title = str((point_info or {}).get("title") or "").lower()
     return bool(title and any(str(item or "").lower() in title for item in allowed_titles))
+
+
+def selected_window_identity(window: dict[str, Any] | None) -> dict[str, Any]:
+    raw = dict_value(window)
+    handle = int(raw.get("windowHandle") or raw.get("hwnd") or raw.get("rootHwnd") or 0)
+    return {
+        "title": window_title_text(window),
+        "hwnd": handle or None,
+        "processId": raw.get("processId") or raw.get("pid"),
+        "windowBounds": physical_window_bounds(window) or logical_window_bounds(window),
+    }
+
+
+def clicked_window_identity(point_info: dict[str, Any] | None) -> dict[str, Any]:
+    raw = dict_value(point_info)
+    return {
+        "title": str(raw.get("title") or ""),
+        "hwnd": int(raw.get("hwnd") or 0) or None,
+        "rootHwnd": int(raw.get("rootHwnd") or 0) or None,
+        "processId": raw.get("processId") or raw.get("pid"),
+    }
+
+
+def clicked_window_matches_selected(window: dict[str, Any] | None, point_info: dict[str, Any] | None) -> bool | None:
+    selected = selected_window_identity(window)
+    clicked = clicked_window_identity(point_info)
+    selected_handle = selected.get("hwnd")
+    clicked_handles = {value for value in (clicked.get("rootHwnd"), clicked.get("hwnd")) if value}
+    if selected_handle and clicked_handles:
+        return int(selected_handle) in {int(value) for value in clicked_handles}
+    if clicked_handles and not selected_handle:
+        return None
+    selected_title = str(selected.get("title") or "").strip().lower()
+    clicked_title = str(clicked.get("title") or "").strip().lower()
+    if selected_title and clicked_title:
+        return selected_title == clicked_title or selected_title in clicked_title or clicked_title in selected_title
+    return None
 
 
 def window_looks_like_launcher(window: dict[str, Any] | None) -> bool:
@@ -1697,6 +1772,7 @@ def click_proof_payload(
     cursor_before: dict[str, int] | None,
     cursor_after_click: dict[str, int] | None,
     movement_trace: dict[str, Any] | None,
+    input_method: str = "move_and_down_up",
 ) -> dict[str, Any]:
     traces = _current_command_traces(before_status=before_status, after_status=after_status, serial_trace=serial_trace)
     names = [_command_name(trace) for trace in traces if _command_name(trace)]
@@ -1718,6 +1794,7 @@ def click_proof_payload(
     full_click = bool((mouse_move_sent or cursor_already_at_target) and click_sent and cursor_at_target)
     return {
         "schema": "visible_recovery_click_proof.v1",
+        "recoveryInputMethod": input_method,
         "targetPoint": target_point,
         "cursorBefore": cursor_before,
         "cursorAfterMove": cursor_after_move,
@@ -1747,6 +1824,7 @@ def click_candidate(
     seed: int | None = None,
     allowed_region: dict[str, Any] | None = None,
     allowed_foreground_titles: list[str] | tuple[str, ...] | None = None,
+    input_method: str = "move_and_down_up",
 ) -> dict[str, Any]:
     backend_name = str(getattr(backend, "name", backend.__class__.__name__) or backend.__class__.__name__)
     input_path = "HumanInputController/ArduinoHIDBackend" if backend_name == "arduino" else f"HumanInputController/{backend.__class__.__name__}"
@@ -1816,8 +1894,12 @@ def click_candidate(
     plan = controller.plan_mouse_movement(start, target, profile)
     if plan.validation_status == "FAIL":
         return {"status": "FAIL", "warning": "; ".join(plan.warnings) or "movement plan invalid", "inputBackend": backend_name, "inputPathUsed": input_path}
+    effective_input_method = "direct_click" if input_method == "direct_click" else "move_and_down_up"
     try:
-        controller.move_and_click(plan, button="left")
+        if effective_input_method == "direct_click":
+            controller.click_at(target.x, target.y, button="left")
+        else:
+            controller.move_and_click(plan, button="left")
     except Exception as error:  # noqa: BLE001
         trace = getattr(backend, "last_movement_trace", None)
         backend_status = backend_status_payload()
@@ -1831,6 +1913,7 @@ def click_candidate(
             cursor_before=cursor_before,
             cursor_after_click=cursor_after_click,
             movement_trace=trace if isinstance(trace, dict) else None,
+            input_method=effective_input_method,
         )
         timeout_classification = serial_trace.get("timeoutClassification")
         retry_policy = "retry_not_safe"
@@ -1852,6 +1935,7 @@ def click_candidate(
             "retryRequiresScreenRecheck": retry_policy == "retry_requires_screen_recheck",
             "inputBackend": backend_name,
             "inputPathUsed": input_path,
+            "recoveryInputMethod": effective_input_method,
         }
     backend_status = backend_status_payload()
     serial_trace = dict_value(backend_status.get("lastCommandTrace"))
@@ -1865,6 +1949,7 @@ def click_candidate(
         cursor_before=cursor_before,
         cursor_after_click=cursor_after_click,
         movement_trace=trace if isinstance(trace, dict) else None,
+        input_method=effective_input_method,
     )
     return {
         "status": "PASS",
@@ -1876,6 +1961,7 @@ def click_candidate(
         **proof,
         "inputBackend": backend_name,
         "inputPathUsed": input_path,
+        "recoveryInputMethod": effective_input_method,
         "command": serial_trace.get("commandSent") or serial_trace.get("command"),
         "arduinoAck": serial_trace.get("ack") or serial_trace.get("ackLine"),
     }
@@ -2144,20 +2230,27 @@ def run_bootstrap(
             launcher_clicked=launcher_clicked,
             prefer_saved_account_play_now=bool(getattr(args, "prefer_saved_account_play_now", False)),
         )
-        repeated_candidate_clicks = sum(
-            1
+        same_candidate_clicks = [
+            item
             for item in clicked
             if str(item.get("name") or "") == candidate.name
             and str(item.get("source") or "") == candidate.source
+        ]
+        repeated_candidate_clicks = len(same_candidate_clicks)
+        direct_click_attempted = any(
+            str(dict_value(item.get("clickDetails")).get("recoveryInputMethod") or "") == "direct_click"
+            for item in same_candidate_clicks
         )
-        if repeated_candidate_clicks >= MAX_REPEAT_VISIBLE_BUTTON_CLICKS:
-            startup_stage = "visible_button_no_transition"
-            warning = f"{candidate.name} remained visible after {repeated_candidate_clicks} safe click attempts"
+        alternate_direct_click = bool(repeated_candidate_clicks >= 1 and not direct_click_attempted)
+        if repeated_candidate_clicks >= MAX_REPEAT_VISIBLE_BUTTON_CLICKS and not alternate_direct_click:
+            startup_stage = "stale_dead_runelite_instance"
+            warning = f"{candidate.name} remained visible after {repeated_candidate_clicks} bounded safe click attempts"
             warnings.append(warning)
-            failures.append("visible_button_no_transition")
+            failures.append("stale_dead_runelite_instance")
             add_stage(stages, startup_stage, status="FAIL", reason=warning)
             break
         last_selected_candidate = candidate
+        attempt_index = len(clicked) + 1
         before_visual_state = bootstrap_state_from_signals(
             summary=summary,
             window=window,
@@ -2176,6 +2269,9 @@ def run_bootstrap(
             warnings.extend(str(item) for item in click_focus.get("warnings") or [])
             target_window = window_title_at_point_func(candidate.screen_point)
             pre_click_focus["targetWindowAtPoint"] = target_window
+            pre_click_focus["selectedRuneLiteWindow"] = selected_window_identity(window)
+            pre_click_focus["clickedWindowAtTarget"] = clicked_window_identity(target_window)
+            pre_click_focus["clickedWindowMatchesSelected"] = clicked_window_matches_selected(window, target_window)
             target_window_matches = point_window_matches_allowed_title(target_window, allowed_titles)
             add_stage(
                 stages,
@@ -2195,7 +2291,26 @@ def run_bootstrap(
                 startup_stage = "blocked_window_focus_required"
                 failures.append("foreground_window_not_allowed")
                 break
+            if pre_click_focus.get("clickedWindowMatchesSelected") is False:
+                startup_stage = "clicked_wrong_window_or_instance"
+                failures.append("clicked_wrong_window_or_instance")
+                add_stage(
+                    stages,
+                    startup_stage,
+                    status="FAIL",
+                    reason="target point belongs to a different window handle than the selected RuneLite window",
+                )
+                break
         add_stage(stages, f"click_{candidate.name}_candidate", reason=candidate.reason)
+        before_screenshot_path = save_click_debug_screenshot(
+            args,
+            label="before_click",
+            attempt_index=attempt_index,
+            candidate_name=candidate.name,
+        )
+        click_input_method = "direct_click" if alternate_direct_click else "move_and_down_up"
+        if alternate_direct_click:
+            add_stage(stages, "alternate_direct_click_candidate", status="WARN", reason="previous complete click produced no transition")
         click_result = click_candidate(
             candidate,
             backend=backend,
@@ -2210,6 +2325,13 @@ def run_bootstrap(
                 launcher_automation_allowed=launcher_automation_allowed,
             ),
             allowed_foreground_titles=foreground_titles_for_movement,
+            input_method=click_input_method,
+        )
+        after_click_screenshot_path = save_click_debug_screenshot(
+            args,
+            label="after_click",
+            attempt_index=attempt_index,
+            candidate_name=candidate.name,
         )
         if pre_click_focus is not None:
             click_result["preClickFocus"] = pre_click_focus
@@ -2217,6 +2339,12 @@ def run_bootstrap(
             click_result["runeliteWindowFocused"] = bool(pre_click_focus.get("focused"))
             click_result["windowFocusVerified"] = bool(pre_click_focus.get("focused"))
             click_result["targetWindowAtPoint"] = pre_click_focus.get("targetWindowAtPoint")
+            click_result["selectedRuneLiteWindow"] = pre_click_focus.get("selectedRuneLiteWindow")
+            click_result["clickedWindowAtTarget"] = pre_click_focus.get("clickedWindowAtTarget")
+            click_result["clickedWindowMatchesSelected"] = pre_click_focus.get("clickedWindowMatchesSelected")
+        click_result["beforeScreenshotPath"] = before_screenshot_path
+        click_result["afterClickScreenshotPath"] = after_click_screenshot_path
+        click_result["afterMoveScreenshotPath"] = None
         clicked_payload = candidate.to_dict()
         clicked_payload["beforeVisualState"] = before_visual_state
         clicked_payload["beforeHotGameState"] = before_hot_game_state
@@ -2274,6 +2402,14 @@ def run_bootstrap(
             break
         transition_wait_seconds = max(poll_seconds, float(getattr(args, "post_play_wait_ms", 8000)) / 1000.0)
         sleep_func(transition_wait_seconds if candidate.name in {"play_now", "continue"} else poll_seconds)
+        after_wait_screenshot_path = save_click_debug_screenshot(
+            args,
+            label="after_wait",
+            attempt_index=attempt_index,
+            candidate_name=candidate.name,
+        )
+        clicked_payload["afterWaitScreenshotPath"] = after_wait_screenshot_path
+        click_result["afterWaitScreenshotPath"] = after_wait_screenshot_path
         try:
             snapshot_payload = fetch_snapshot_func(args.snapshot_url, timeout=3.0)
             summary = snapshot_summary(snapshot_payload, reachable=True)

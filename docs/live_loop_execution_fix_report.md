@@ -1587,3 +1587,85 @@ Next command:
 ```powershell
 python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3
 ```
+
+## Verified Recovery Click No-Transition Diagnosis
+
+Updated: 2026-06-13.
+
+Root cause:
+
+The previous `visible_button_no_transition` was not a dead OK button as first labeled. The new screenshot evidence showed RuneLite was on the saved-account `Play Now` screen, while `run_runelite_bootstrap.py` had selected a stale `disconnected_ok` candidate at `{x:1362,y:1013}`. The target landed below the real Play Now text/account panel, so the client did not transition.
+
+Fixes made:
+
+- `run_runelite_bootstrap.py` now records before-click, after-click, and after-wait screenshots for visible recovery clicks.
+- Recovery click attempts now record selected RuneLite window identity, clicked window identity, and whether the target HWND matches the selected RuneLite HWND.
+- If a complete click causes no visual/hot-state transition, recovery tries one bounded alternate direct `CLICK` method before classifying the surface.
+- Repeated no-effect visible button clicks now classify as `stale_dead_runelite_instance` and may use the existing Start Game relaunch path.
+- Saved-account `Play Now` detection now suppresses stale disconnected-OK false positives, and its contrast threshold was relaxed enough to recognize the current live Play Now screen.
+
+Evidence:
+
+```text
+wrong-target artifact: bot_runs\20260613_verified_click_no_transition_diagnosis
+overlay: bot_runs\20260613_verified_click_no_transition_diagnosis\target_overlay.png
+selected window: RuneLite, hwnd 16189074
+clicked window: RuneLite, rootHwnd 16189074
+clickedWindowMatchesSelected: true
+old selected action: disconnected_ok
+old target: {x:1362,y:1013}
+actual visible screen: saved-account Play Now
+```
+
+Recovery validation after fix:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3 --recovery-artifact-dir bot_runs\20260613_play_now_recovery_after_target_fix
+```
+
+Result:
+
+```text
+status: recovered_loaded_scene
+clicked buttons: play_now, click_here_to_play
+loadedSceneVerified: true
+gameState: LOGGED_IN
+worldModelObjectTotal: 1248
+recovery artifact folder: bot_runs\20260613_play_now_recovery_after_target_fix
+```
+
+Input geometry:
+
+```text
+command: python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+status: PASS
+inputGeometryPass: true
+RuneLite foreground: true
+canvas: 1229x868 at {x:148,y:57}
+```
+
+Real live command:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```
+
+Result:
+
+```text
+live run folder: bot_runs\20260613_132900_live_woodcutting_loop
+linked recording: recordings\20260613_132909_live_woodcutting_loop_20260613_132909
+bot actions sent: 0
+live input executed: no
+loop completed: no
+blocker: arduino_pointer_calibration_required
+secondary readiness note: live readiness reported loaded_scene_not_ready from stale client_tick_hot during the executor gate
+```
+
+Next exact task:
+
+Run or repair the canonical Arduino pointer calibration gate, then rerun:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```

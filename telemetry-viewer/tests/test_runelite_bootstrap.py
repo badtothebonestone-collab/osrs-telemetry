@@ -81,16 +81,57 @@ class FakeBackend:
     def __init__(self):
         self.focused = False
         self.clicks = []
+        self.position = (0, 0)
+        self.command_trace = []
+        self.last_movement_trace = None
 
     def current_position(self):
-        return (0, 0)
+        return self.position
 
     def focus_window(self):
         self.focused = True
         return True
 
+    def _record(self, command):
+        self.command_trace.append({"status": "PASS", "command": command, "ack": f"OK {command}"})
+
+    def status(self):
+        return {
+            "status": "PASS",
+            "commandCount": len(self.command_trace),
+            "commandTrace": list(self.command_trace),
+            "lastCommandTrace": self.command_trace[-1] if self.command_trace else None,
+        }
+
+    def move(self, plan):
+        self.position = (int(plan.click_point.x), int(plan.click_point.y))
+        self.last_movement_trace = {
+            "chunkCount": 1,
+            "cursorPositionAfter": {"x": self.position[0], "y": self.position[1]},
+        }
+        self._record("MOVE")
+
+    def mouse_down(self, *, button="left"):
+        self._record("MOUSE_DOWN")
+
+    def mouse_up(self, *, button="left"):
+        self._record("MOUSE_UP")
+        self.clicks.append({"x": self.position[0], "y": self.position[1], "button": button, "method": "down_up"})
+
+    def click_at(self, x, y, *, button="left", hold_ms=0):
+        self.position = (int(x), int(y))
+        self.last_movement_trace = {
+            "chunkCount": 1,
+            "cursorPositionAfter": {"x": self.position[0], "y": self.position[1]},
+        }
+        self._record("MOVE")
+        self._record("CLICK")
+        self.clicks.append({"x": self.position[0], "y": self.position[1], "button": button, "method": "direct_click"})
+
     def move_and_click(self, plan, *, button="left"):
-        self.clicks.append({"x": plan.click_point.x, "y": plan.click_point.y, "button": button})
+        self.move(plan)
+        self.mouse_down(button=button)
+        self.mouse_up(button=button)
 
 
 class FakeArduinoStartupBackend(FakeBackend):
@@ -371,7 +412,7 @@ class RuneLiteBootstrapTest(unittest.TestCase):
         self.assertEqual([candidate.name for candidate in candidates], ["disconnected_ok"])
         self.assertEqual(warnings, [])
 
-    def test_disconnected_dialog_wins_over_saved_account_candidate_in_stale_login(self):
+    def test_saved_account_candidate_suppresses_stale_disconnected_false_positive(self):
         play = bootstrap.StartupButtonCandidate(
             name="play_now",
             source="saved_account_play_panel",
@@ -397,8 +438,8 @@ class RuneLiteBootstrapTest(unittest.TestCase):
             disconnected_candidate_func=lambda *_args, **_kwargs: (disconnected, []),
         )
 
-        self.assertEqual([candidate.name for candidate in candidates], ["disconnected_ok"])
-        self.assertEqual(warnings, [])
+        self.assertEqual([candidate.name for candidate in candidates], ["play_now"])
+        self.assertTrue(any("Play Now suppressed stale disconnected" in warning for warning in warnings))
 
     def test_stale_logged_in_without_recognized_button_does_not_use_percent_fallback(self):
         candidates, warnings = bootstrap.button_candidates(
@@ -666,7 +707,7 @@ class RuneLiteBootstrapTest(unittest.TestCase):
 
         self.assertEqual(payload["clickedCandidates"][0]["name"], "disconnected_ok")
         self.assertEqual(payload["clickedCandidates"][0]["candidateMethod"], "disconnected_dialog")
-        self.assertEqual(backend.clicks, [{"x": 500, "y": 488, "button": "left"}])
+        self.assertEqual(backend.clicks, [{"x": 500, "y": 488, "button": "left", "method": "down_up"}])
 
     def test_launch_runelite_dry_run_still_launches_process_but_not_clicks(self):
         launches = []
@@ -1098,6 +1139,59 @@ class RuneLiteBootstrapTest(unittest.TestCase):
         self.assertEqual(len(backend.clicks), 1)
         self.assertEqual(payload["startupStage"], "blocked_user_login_required")
         self.assertIn("max startup clicks reached", payload["warnings"])
+
+    def test_repeated_visible_button_tries_direct_click_then_dead_surface(self):
+        backend = FakeArduinoStartupBackend()
+        old_focus = bootstrap.focus_matched_os_window
+
+        def fake_focus(window, *, execute):
+            return {
+                "focused": True,
+                "focusMethod": "mock_focus",
+                "foregroundTitle": "RuneLite",
+                "warnings": [],
+            }
+
+        bootstrap.focus_matched_os_window = fake_focus
+        try:
+            payload = bootstrap.run_bootstrap(
+                bootstrap.parse_args([
+                    "--skip-runelite-launch",
+                    "--execute",
+                    "--recover-loaded-scene",
+                    "--verify-loaded-scene",
+                    "--max-startup-clicks",
+                    "3",
+                    "--timeout-seconds",
+                    "10",
+                ]),
+                fetch_snapshot_func=lambda *_args, **_kwargs: snapshot("LOGIN_SCREEN"),
+                backend=backend,
+                window_finder=FakeWindowFinder(title="RuneLite"),
+                vision_candidate_func=lambda *_args, **_kwargs: ([], []),
+                disconnected_candidate_func=lambda *_args, **_kwargs: (
+                    bootstrap.StartupButtonCandidate(
+                        name="disconnected_ok",
+                        source="disconnected_dialog",
+                        screen_point={"x": 50, "y": 60},
+                        canvas_point=None,
+                        confidence=0.92,
+                        reason="recognized disconnected dialog OK button",
+                    ),
+                    [],
+                ),
+                window_title_at_point_func=lambda _point: {"available": True, "title": "RuneLite"},
+                sleep_func=lambda _seconds: None,
+                monotonic_func=FakeClock(step=0.1).__call__,
+            )
+        finally:
+            bootstrap.focus_matched_os_window = old_focus
+
+        self.assertEqual(payload["startupStage"], "stale_dead_runelite_instance")
+        self.assertIn("stale_dead_runelite_instance", payload["failures"])
+        methods = [item["clickDetails"]["recoveryInputMethod"] for item in payload["clickedCandidates"]]
+        self.assertEqual(methods, ["move_and_down_up", "direct_click"])
+        self.assertEqual([item["method"] for item in backend.clicks], ["down_up", "direct_click"])
 
     def test_daemon_already_listening_is_reused(self):
         starts = []
