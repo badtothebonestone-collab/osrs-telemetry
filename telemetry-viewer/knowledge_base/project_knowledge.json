@@ -1,6 +1,6 @@
 {
   "schema": "project_knowledge.v1",
-  "updatedAtUtc": "2026-06-13T20:04:44.970494Z",
+  "updatedAtUtc": "2026-06-13T20:31:14.307070Z",
   "repoRoot": "C:\\Users\\badto\\osrs-telemetry",
   "sourceReports": [
     "C:\\Users\\badto\\osrs-telemetry\\docs\\recording_analysis_bank_to_woodcutting_latest.md",
@@ -3695,6 +3695,37 @@
       "goodFixture": false,
       "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_145507_live_woodcutting_loop_20260613_145507\\summary.json",
       "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_145507_live_woodcutting_loop_20260613_145507\\schema_gap_report.md"
+    },
+    {
+      "recordingId": "20260613_152511_live_woodcutting_loop_20260613_152511",
+      "folder": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_152511_live_woodcutting_loop_20260613_152511",
+      "label": "live_woodcutting_loop_20260613_152511",
+      "activityType": "Woodcutting Loop",
+      "verdict": "WARN",
+      "durationSeconds": 330.078,
+      "tickRange": {
+        "first": 4623,
+        "last": 5180,
+        "count": 16
+      },
+      "usefulEvidence": [
+        "loop state interrupted",
+        "next phase recover_or_resume_task",
+        "phases interrupted",
+        "interruption lifecycle evidence present",
+        "human click/camera profile available"
+      ],
+      "missingData": [
+        "banking.bankContainer.delta",
+        "banking.bankContainer.items",
+        "banking.bankOpen_or_depositBoxOpen",
+        "banking.bankWidgetRoot",
+        "warning: No camera yaw/pitch changes were found, or source snapshots lack camera fields.",
+        "warning: arduino_events.jsonl is missing or empty"
+      ],
+      "goodFixture": false,
+      "summaryPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_152511_live_woodcutting_loop_20260613_152511\\summary.json",
+      "reportPath": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260613_152511_live_woodcutting_loop_20260613_152511\\schema_gap_report.md"
     }
   ],
   "activityKnowledge": [

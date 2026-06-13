@@ -113,6 +113,36 @@ class ClientTickCoreTest(unittest.TestCase):
         self.assertTrue(result.details["rightClickResourceSelectionDeferred"])
         self.assertEqual(expected_entries_not_top(sample, intent)[0]["target"], "Tree")
 
+    def test_dead_tree_resource_intent_accepts_basic_tree_hover_without_id_match(self):
+        proposal = ActionProposal(
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Dead tree",
+            target_explanation={"objectId": 1282, "name": "Dead tree", "classId": "tree"},
+        )
+        intent = action_intent_from_proposal(proposal)
+        sample = {
+            "wallTimeMillis": 2200,
+            "mouseCanvasX": 331,
+            "mouseCanvasY": 74,
+            "topOption": "Chop down",
+            "topTarget": "<col=ffff>Tree",
+            "topIdentifier": 1276,
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "entries": [
+                {"option": "Chop down", "target": "<col=ffff>Tree", "identifier": 1276, "type": "GAME_OBJECT_FIRST_OPTION"},
+                {"option": "Walk here", "target": "", "identifier": 0, "type": "WALK"},
+            ],
+        }
+
+        result = hover_sample_matches_intent(sample, intent, {"x": 331, "y": 74}, tolerance_px=3)
+
+        self.assertNotIn(1282, intent.expected_object_ids)
+        self.assertIn("Tree", intent.expected_targets)
+        self.assertIn("Dead tree", intent.expected_targets)
+        self.assertTrue(result.confirmed)
+        self.assertEqual(result.reason, "hover_menu_confirmed")
+
     def test_hover_sample_rejects_stale_position_and_walk_here(self):
         intent = ActionIntent.for_target(
             activity="woodcutting",

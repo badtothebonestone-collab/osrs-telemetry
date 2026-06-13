@@ -1302,6 +1302,29 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(event["reason"], "unsafe_geometry")
         self.assertEqual(summary["targetsSuppressed"], 1)
 
+    def test_resource_hover_mismatch_keeps_specific_observed_result(self):
+        result = ExecutionResult(
+            status="FAIL",
+            dry_run=False,
+            proposed_action="select_resource_target",
+            executed=False,
+            missing_capabilities=["hover_menu"],
+            proposal={
+                "proposedAction": "select_resource_target",
+                "targetKind": "resource",
+                "targetName": "Tree",
+                "targetExplanation": {"name": "Tree", "targetKey": "tree"},
+            },
+            lifecycle_state={"reason": "resource_target_hover_mismatch"},
+        )
+
+        observed = _no_click_safety_skip_observed(result)
+
+        self.assertEqual(observed["observedResult"], "resource_target_hover_mismatch")
+        self.assertEqual(observed["resultOutcome"], "skipped")
+        self.assertEqual(observed["skipReason"], "resource_target_hover_mismatch")
+        self.assertTrue(observed["nextActionAllowed"])
+
     def test_live_movement_safety_blocks_off_region_screen_point_before_move(self):
         backend = MovementSafetyBackend({"x": 100, "y": 100, "width": 500, "height": 500})
         proposal = ActionProposal(
@@ -5957,7 +5980,7 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertTrue(result.confirmed)
         self.assertEqual(result.reason, "hover_menu_confirmed")
 
-    def test_hover_menu_parser_accepts_oak_top_for_generic_tree_woodcutting_target(self):
+    def test_hover_menu_parser_rejects_oak_top_for_generic_tree_woodcutting_target(self):
         proposal = ActionProposal(
             proposed_action="select_resource_target",
             target_kind="resource",
@@ -5987,9 +6010,128 @@ class InputControlExecutorTest(unittest.TestCase):
             min_wall_time_millis=1000,
         )
 
+        self.assertFalse(result.confirmed)
+        self.assertEqual(result.reason, "top_target_not_expected")
+        self.assertTrue(result.details["expectedEntryPresentButNotTop"])
+
+    def test_hover_menu_parser_accepts_dead_tree_candidate_with_basic_tree_hover(self):
+        proposal = ActionProposal(
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Dead tree",
+            suggested_click_point={"x": 331, "y": 74},
+            click_point_space="canvas",
+            target_explanation={"objectId": 1282, "name": "Dead tree", "classId": "tree"},
+        )
+        sample = {
+            "wallTimeMillis": 2000,
+            "mouseCanvasX": 331,
+            "mouseCanvasY": 74,
+            "topOption": "Chop down",
+            "topTarget": "<col=ffff>Tree",
+            "topIdentifier": 1276,
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "entries": [
+                {"option": "Chop down", "target": "<col=ffff>Tree", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 1276},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+            ],
+        }
+
+        result = hover_menu_matches_target(
+            sample,
+            proposal,
+            {"x": 331, "y": 74},
+            tolerance_px=3,
+            min_wall_time_millis=1000,
+        )
+
         self.assertTrue(result.confirmed)
         self.assertEqual(result.reason, "hover_menu_confirmed")
-        self.assertTrue(result.details["expectedEntryPresentButNotTop"])
+
+    def test_confirmed_basic_tree_hover_executes_without_clickbox_with_warning(self):
+        backend = FakeBackend()
+        proposal = ActionProposal(
+            proposed_action="select_resource_target",
+            target_kind="resource",
+            target_name="Dead tree",
+            suggested_click_point={"x": 331, "y": 74},
+            click_point_space="canvas",
+            resolved_screen_click_point={"x": 1331, "y": 2074},
+            click_point_resolution={"status": "PASS", "screenClickPoint": {"x": 1331, "y": 2074}},
+            input_geometry={
+                "status": "PASS",
+                "inputGeometryAvailable": True,
+                "geometryFreshnessMs": 10,
+                "canvasScreenOrigin": {"x": 1000, "y": 2000},
+                "canvasSize": {"width": 765, "height": 503},
+                "clientRect": {"left": 1000, "top": 2000, "right": 1765, "bottom": 2503},
+            },
+            target_explanation={
+                "objectId": 1282,
+                "name": "Dead tree",
+                "classId": "tree",
+                "safeAimPoint": {"status": "PASS", "canvasX": 331, "canvasY": 74, "source": "semanticAimPoint"},
+            },
+            confidence=0.9,
+        )
+        hover = {
+            "wallTimeMillis": 2000,
+            "mouseCanvasX": 331,
+            "mouseCanvasY": 74,
+            "topOption": "Chop down",
+            "topTarget": "<col=ffff>Tree",
+            "topIdentifier": 1276,
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "entries": [
+                {"option": "Chop down", "target": "<col=ffff>Tree", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 1276},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+            ],
+        }
+        snapshots = [
+            {"hoverMenu": hover, "lastMenuOptionClicked": {"wallTimeMillis": 1990, "option": "Walk here", "target": ""}},
+            {"hoverMenu": hover, "lastMenuOptionClicked": {"wallTimeMillis": 1990, "option": "Walk here", "target": ""}},
+            {
+                "hoverMenu": hover,
+                "lastMenuOptionClicked": {
+                    "wallTimeMillis": 2050,
+                    "option": "Chop down",
+                    "target": "Tree",
+                    "identifier": 1276,
+                    "type": "GAME_OBJECT_FIRST_OPTION",
+                },
+            },
+        ]
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile="instant_test",
+            dry_run=False,
+            input_controller=HumanInputController(backend, profile="steady", sleep_func=lambda _seconds: None, seed=10),
+            hover_options=HoverConfirmationOptions(
+                enabled=True,
+                snapshot_url="http://snapshot",
+                timeout_ms=60,
+                poll_ms=10,
+                tolerance_px=3,
+            ),
+            snapshot_fetch_func=lambda *_args, **_kwargs: snapshots.pop(0),
+            sleep_func=lambda _seconds: None,
+            monotonic_func=IncrementingClock(start=1.0, step=0.02),
+            wall_time_millis_func=lambda: 1000,
+        )
+
+        self.assertEqual(result.status, "PASS", result.warnings)
+        self.assertTrue(result.executed)
+        self.assertEqual(result.hover_confirmation["clickClassification"], "clicked_chop_tree")
+        self.assertIn("tree_clickbox_missing", result.warnings)
+        safety = result.action_trace["resourceTargetSafety"]
+        self.assertEqual(safety["safetyDecision"], "allow")
+        self.assertTrue(safety["actionExecuted"])
+        self.assertEqual(safety["hoverOption"], "Chop down")
+        self.assertIn("Tree", safety["hoverTarget"])
+        self.assertFalse(safety["clickboxAvailable"])
+        self.assertEqual(safety["aimPoint"], {"x": 331, "y": 74})
 
     def test_hover_menu_parser_rejects_walk_here(self):
         proposal = ActionProposal(

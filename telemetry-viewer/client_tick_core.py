@@ -18,6 +18,15 @@ WOODCUTTING_COMPATIBLE_TARGETS = {
     "magic tree",
     "dead tree",
 }
+_WOODCUTTING_BASIC_TREE_TARGETS = {"tree", "dead tree"}
+_WOODCUTTING_TARGET_GROUPS = {
+    "basic_tree": _WOODCUTTING_BASIC_TREE_TARGETS,
+    "oak": {"oak", "oak tree"},
+    "willow": {"willow", "willow tree"},
+    "maple": {"maple tree"},
+    "yew": {"yew tree"},
+    "magic": {"magic tree"},
+}
 
 
 def _clean_menu_text(value: Any) -> str:
@@ -514,17 +523,52 @@ def _target_text_matches_expected(target: str, expected: str) -> bool:
     return expected_key in target_key
 
 
+def _woodcutting_target_group_for_expected(expected_key: str) -> str | None:
+    if expected_key in _WOODCUTTING_BASIC_TREE_TARGETS:
+        return "basic_tree"
+    if expected_key in {"oak", "oak tree"}:
+        return "oak"
+    if expected_key in {"willow", "willow tree"}:
+        return "willow"
+    if expected_key == "maple tree":
+        return "maple"
+    if expected_key == "yew tree":
+        return "yew"
+    if expected_key == "magic tree":
+        return "magic"
+    return None
+
+
+def _woodcutting_target_matches_expected_group(target: str, expected_targets: tuple[str, ...]) -> bool:
+    target_key = _lower_menu_text(target)
+    if target_key not in WOODCUTTING_COMPATIBLE_TARGETS:
+        return False
+    expected_keys = {_lower_menu_text(expected) for expected in expected_targets if _lower_menu_text(expected)}
+    if not expected_keys:
+        return False
+    groups = {
+        group
+        for expected_key in expected_keys
+        for group in [_woodcutting_target_group_for_expected(expected_key)]
+        if group
+    }
+    if not groups:
+        return False
+    return any(target_key in _WOODCUTTING_TARGET_GROUPS[group] for group in groups)
+
+
 def _target_matches(sample: dict[str, Any], intent: ActionIntent, *, top_prefix: bool = True) -> bool:
     identifier = _sample_int(sample, "topIdentifier" if top_prefix else "identifier", "identifier")
     if intent.expected_object_ids and identifier is not None:
-        return identifier in intent.expected_object_ids
+        if identifier in intent.expected_object_ids:
+            return True
+        if intent.activity != "woodcutting":
+            return False
     target = _lower_menu_text(sample.get("topTarget" if top_prefix else "target") or sample.get("target"))
     if not intent.expected_targets and not intent.expected_object_ids:
         return True
-    if intent.activity == "woodcutting" and target in WOODCUTTING_COMPATIBLE_TARGETS:
-        expected_keys = {_lower_menu_text(expected) for expected in intent.expected_targets if _lower_menu_text(expected)}
-        if expected_keys.intersection({"tree", "oak", "oak tree"}):
-            return True
+    if intent.activity == "woodcutting" and _woodcutting_target_matches_expected_group(target, intent.expected_targets):
+        return True
     return any(_target_text_matches_expected(target, expected) for expected in intent.expected_targets if _lower_menu_text(expected))
 
 
@@ -703,16 +747,29 @@ def action_intent_from_proposal(proposal: Any, *, tolerance_px: int = 3, freshne
         lower_name = target_name.lower()
         if "oak" in lower_name:
             expected_targets = ["Oak tree", "Oak"]
+        elif "willow" in lower_name:
+            expected_targets = ["Willow tree", "Willow"]
+        elif "maple" in lower_name:
+            expected_targets = ["Maple tree"]
+        elif "yew" in lower_name:
+            expected_targets = ["Yew tree"]
+        elif "magic" in lower_name:
+            expected_targets = ["Magic tree"]
         elif "dead" in lower_name:
-            expected_targets = ["Dead tree"]
+            expected_targets = ["Tree", "Dead tree"]
         elif target_name:
             expected_targets = [target_name]
         else:
             expected_targets = ["Tree", "Dead tree"]
+        basic_tree_targets = {
+            _lower_menu_text(target)
+            for target in expected_targets
+            if _lower_menu_text(target)
+        }.issubset(_WOODCUTTING_BASIC_TREE_TARGETS)
         return ActionIntent.for_target(
             activity="woodcutting",
             target_name=target_name,
-            object_id=object_id,
+            object_id=None if basic_tree_targets else object_id,
             expected_options=["Chop down", "Chop"],
             expected_targets=expected_targets,
             allow_menu_types=["GAME_OBJECT_FIRST_OPTION", "GAME_OBJECT_SECOND_OPTION", "object"],

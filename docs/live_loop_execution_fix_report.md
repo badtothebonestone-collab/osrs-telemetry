@@ -1947,3 +1947,112 @@ Export trustworthy RuneLite menu bounds/row geometry for `MenuOpened`, or implem
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
 ```
+
+## Post-Return Resource Target Hover Safety Diagnosis
+
+Updated: 2026-06-13.
+
+Source run:
+
+```text
+live run folder: bot_runs\20260613_145500_live_woodcutting_loop
+linked recording folder: recordings\20260613_145507_live_woodcutting_loop_20260613_145507
+status: FAIL
+bot actions sent: 2
+live input executed: yes
+strict lower-menu selection: Climb-down / Staircase selected for object 16672
+plane change: 1 -> 0 succeeded
+final location: 3198,3235,0
+final phase: target_selected
+final active intent: select_target
+inventory free slots: 27
+inventory full: false
+loop completed: no
+final blocker: resource_target_hover_safety_skip / no_click_safety_skip
+```
+
+Evidence:
+
+```text
+proposed resource target: Dead tree, object id 1282, world 3202,3250,0
+selected aim point: canvas 332,75 from safeAimPoint/clickboxCenter
+hover/top menu: Chop down / Tree
+observed menu identifiers: Tree ids 1276/1278 and lower Dead tree id 1282 in the same object stack
+clickbox/tile polygon status: live trace had a safe aim point; clickbox/tile polygon proof was not the actual blocker
+click planner status: movement plan was usable; no input geometry or Arduino blocker was reported
+safety gate: client_tick_core.action_intent_from_proposal + input_control.executor hover confirmation
+old mismatch: a Dead tree proposal carried a strict candidate object id and target text, so fresh Chop down / Tree hover was rejected as top_target_not_expected
+skip result: executor suppressed the target as hover_mismatch and emitted generic no_click_safety_skip without sending a resource click
+```
+
+Fix behavior:
+
+```text
+Basic woodcutting targets now treat Tree and Dead tree as one low-level resource target class for hover/menu confirmation.
+The resource click still requires Chop down/Chop, an object menu entry, a fresh hover sample at the planned aim point, valid input geometry, and an available aim point.
+Oak/Willow/Maple/Yew/Magic tree targets remain separate classes; a basic Tree/Dead tree candidate does not accept Oak or other higher-level tree hovers.
+The executor now records resourceTargetSafety fields for resource clicks and resource hover blocks, including hover option/target, aim point/source, clickbox/tile polygon availability, click planner status, safety decision, blockers, warnings, planned screen point, and expected woodcutting postcondition.
+Missing Tree clickbox or tile polygon is recorded as tree_clickbox_missing/tree_tile_polygon_missing, but it no longer blocks by itself when semantic target and hover/menu proof are strong.
+If hover proof is wrong or missing, the blocker is now resource_target_hover_mismatch or tree_target_aim_missing instead of generic no_click_safety_skip.
+```
+
+Checks before live rerun:
+
+```text
+PASS: python -m py_compile telemetry-viewer\client_tick_core.py
+PASS: python -m py_compile telemetry-viewer\input_control\executor.py
+PASS: python -m py_compile telemetry-viewer\input_control\action_proposal.py
+PASS: python -m py_compile telemetry-viewer\input_control\action_lifecycle.py
+PASS: python -m py_compile telemetry-viewer\input_control\click_planner.py
+PASS: python -m py_compile telemetry-viewer\candidate_core.py
+PASS: python -m py_compile telemetry-viewer\target_match_quality.py
+PASS: python -m py_compile telemetry-viewer\woodcutting_lifecycle.py
+PASS: python telemetry-viewer\tests\test_client_tick_core.py
+PASS: focused executor tests for resource hover parser, Dead tree -> Tree hover acceptance, Oak rejection, missing-clickbox confirmed Tree execution, and alternate aimpoint recovery
+PASS: python telemetry-viewer\tests\test_action_proposal.py
+PASS: python telemetry-viewer\tests\test_human_click_planning.py
+PASS: python telemetry-viewer\tests\test_woodcutting_lifecycle.py
+PASS: python telemetry-viewer\tests\test_bot_eval_runner.py
+PASS: python telemetry-viewer\tests\test_project_knowledge.py
+PASS: python telemetry-viewer\telemetry_ui.py --check
+PASS: python telemetry-viewer\update_project_knowledge.py --check
+TIMEOUT: python telemetry-viewer\tests\test_input_control_executor.py timed out after 184 seconds; focused executor coverage passed.
+NOTE: python telemetry-viewer\tests\test_input_control_executor.py -k ... matched zero tests because this file uses unittest, not pytest filtering.
+```
+
+Next live validation:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```
+
+Live validation after fix:
+
+```text
+geometry gate: PASS
+live run folder: bot_runs\20260613_152350_live_woodcutting_loop
+linked recording folder: recordings\20260613_152511_live_woodcutting_loop_20260613_152511
+status: FAIL
+executor reason: max_runtime_reached
+bot actions sent: 6
+live input executed: yes
+resource target actions executed: 6
+clicked menu/action: Chop down / Tree
+inventory free slots: 27 -> 21
+resource/log count: 1 -> 7
+progress: 1 -> 7
+final location: 3201,3242,0
+final phase: target_selected
+final active intent: select_target
+woodcutting postcondition: PASS, inventory changed/activity_progress and woodcutting animation 879 observed
+loop completed: no
+remaining blocker: max_runtime_reached while continuing/collecting resources; analyzer also reported combat interruption evidence from Giant spiders without a recorded task resume before the runtime ended
+```
+
+Conclusion:
+
+```text
+The post-return resource_target_hover_safety_skip blocker is fixed for the intended Tree case. The bot now sends Arduino-backed Chop down / Tree clicks after route return and gains logs.
+The remaining end condition is not the old resource hover safety gate. The next work should validate the longer collect-until-full/bank cycle after the confirmed tree-click path, and handle interruption/resume policy if Giant spider combat remains active.
+```

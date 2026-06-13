@@ -5729,9 +5729,43 @@ def _resource_target_movement_safety_reacquirable(result: ExecutionResult, reaso
     return resolved_reason == "screen_click_point_outside_movement_safety_region"
 
 
+RESOURCE_TARGET_EXPLICIT_BLOCKERS = {
+    "tree_target_aim_missing",
+    "resource_target_hover_mismatch",
+    "resource_target_postcondition_failed",
+    "interruption_active_no_recovery_policy",
+    "inventory_full_route_needed",
+}
+
+
+def _resource_target_specific_skip_observed(result: ExecutionResult) -> dict[str, Any] | None:
+    if result.executed or result.proposed_action != "select_resource_target":
+        return None
+    lifecycle = result.lifecycle_state if isinstance(result.lifecycle_state, dict) else {}
+    reason = str(lifecycle.get("reason") or "")
+    if reason not in RESOURCE_TARGET_EXPLICIT_BLOCKERS:
+        trace = result.action_trace if isinstance(result.action_trace, dict) else {}
+        safety = trace.get("resourceTargetSafety") if isinstance(trace.get("resourceTargetSafety"), dict) else {}
+        blockers = [str(item) for item in safety.get("safetyBlockers") or []]
+        reason = next((item for item in blockers if item in RESOURCE_TARGET_EXPLICIT_BLOCKERS), reason)
+    if reason not in RESOURCE_TARGET_EXPLICIT_BLOCKERS:
+        return None
+    return {
+        "observedResult": reason,
+        "resultOutcome": "skipped",
+        "resultComplete": True,
+        "nextActionAllowed": True,
+        "verificationStatus": "FAIL",
+        "skipReason": reason,
+    }
+
+
 def _no_click_safety_skip_observed(result: ExecutionResult) -> dict[str, Any] | None:
     if result.executed:
         return None
+    resource_specific = _resource_target_specific_skip_observed(result)
+    if resource_specific is not None:
+        return resource_specific
     missing = {str(item) for item in (result.missing_capabilities or [])}
     lifecycle = result.lifecycle_state if isinstance(result.lifecycle_state, dict) else {}
     reason = str(lifecycle.get("reason") or "")
@@ -9690,6 +9724,93 @@ def _set_trace_intended_point(
     result.action_trace["intendedPoint"] = payload
 
 
+def _resource_trace_bool(value: Any) -> bool:
+    return isinstance(value, dict) and bool(value)
+
+
+def _resource_target_safety_trace(
+    result: ExecutionResult,
+    proposal: ActionProposal,
+    confirmation: dict[str, Any] | None,
+    *,
+    canvas_point: dict[str, Any] | None,
+    screen_point: dict[str, Any] | None,
+    plan: Any | None,
+    geometry_validation: dict[str, Any] | None = None,
+    safety_decision: str,
+    safety_blockers: list[str] | None = None,
+    action_executed: bool | None = None,
+) -> None:
+    if not isinstance(result.action_trace, dict) or not _is_resource_object_proposal(proposal):
+        return
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    sample = _confirmation_hover_sample(confirmation)
+    selected = client_tick_core.get_left_click_entry(sample)
+    safe = explanation.get("safeAimPoint") if isinstance(explanation.get("safeAimPoint"), dict) else {}
+    aim_point = canvas_point if isinstance(canvas_point, dict) else proposal.suggested_click_point
+    clickbox_available = _resource_trace_bool(explanation.get("clickboxBounds") or explanation.get("clickbox") or explanation.get("convexHullBounds"))
+    tile_polygon_available = _resource_trace_bool(explanation.get("tilePolygon") or explanation.get("tilePoly") or explanation.get("tilePolygonBounds"))
+    warnings: list[str] = []
+    if not clickbox_available:
+        warnings.append("tree_clickbox_missing")
+    if not tile_polygon_available:
+        warnings.append("tree_tile_polygon_missing")
+    if aim_point and not clickbox_available:
+        warnings.append("semantic_target_used_for_click")
+        if safe:
+            warnings.append("aim_point_fallback_used")
+    if warnings:
+        for warning in warnings:
+            if warning not in result.warnings:
+                result.warnings.append(warning)
+    hover_option = (selected or {}).get("option") if isinstance(selected, dict) else sample.get("topOption")
+    hover_target = (selected or {}).get("target") if isinstance(selected, dict) else sample.get("topTarget")
+    inside_canvas = None
+    if isinstance(geometry_validation, dict):
+        inside_canvas = geometry_validation.get("insideCanvas")
+        if inside_canvas is None:
+            inside_canvas = geometry_validation.get("status") == "PASS"
+    result.action_trace["resourceTargetSafety"] = {
+        "schema": "resource_target_safety.v1",
+        "resourceTargetCandidateId": explanation.get("objectId") or explanation.get("id") or explanation.get("hash"),
+        "expectedAction": "Chop down",
+        "expectedTarget": "Tree",
+        "hoverOption": hover_option,
+        "hoverTarget": hover_target,
+        "semanticTargetConfidence": "strong" if (confirmation or {}).get("confirmed") is True else "unconfirmed",
+        "aimPoint": dict(aim_point) if isinstance(aim_point, dict) else None,
+        "aimPointSource": safe.get("source") or explanation.get("selectedAimpointSource") or explanation.get("aimPointSource"),
+        "clickboxAvailable": clickbox_available,
+        "tilePolygonAvailable": tile_polygon_available,
+        "clickPlannerStatus": getattr(plan, "validation_status", None),
+        "safetyDecision": safety_decision,
+        "safetyBlockers": list(safety_blockers or []),
+        "warnings": warnings,
+        "plannedScreenPoint": dict(screen_point) if isinstance(screen_point, dict) else None,
+        "insideCanvas": inside_canvas,
+        "actionExecuted": bool(action_executed) if action_executed is not None else bool(result.executed),
+        "expectedPostcondition": {
+            "animation": 879,
+            "signals": ["woodcutting_animation", "log_gain", "continued_chopping"],
+        },
+    }
+
+
+def _resource_hover_blocker_from_confirmation(confirmation: dict[str, Any] | None) -> str:
+    confirmation = confirmation if isinstance(confirmation, dict) else {}
+    latest_match = confirmation.get("latestMatch") if isinstance(confirmation.get("latestMatch"), dict) else {}
+    reason = str(latest_match.get("reason") or confirmation.get("reason") or "")
+    details = latest_match.get("details") if isinstance(latest_match.get("details"), dict) else {}
+    mismatch = str(details.get("mismatchReason") or "")
+    if reason in {"mouse_position_outside_tolerance", "hover_menu_missing", "mouse_position_missing"}:
+        return "tree_target_aim_missing"
+    if mismatch in {"hover_option_mismatch", "hover_target_mismatch", "wrong_intent_matcher"}:
+        return "resource_target_hover_mismatch"
+    if reason in {"top_option_rejected", "top_option_not_expected", "top_target_not_expected", "top_type_not_allowed"}:
+        return "resource_target_hover_mismatch"
+    return "resource_target_hover_mismatch"
+
+
 def _attach_human_input_trace(result: ExecutionResult, input_controller: HumanInputController | None) -> None:
     if input_controller is None or not isinstance(result.action_trace, dict):
         return
@@ -10982,15 +11103,29 @@ def execute_action(
                         result.action_trace[_route_lower_menu_trace_key(proposal)] = dict(route_direct_entry)
                 else:
                     result.status = "FAIL"
-                    reason = _navigation_hover_failure_reason(proposal, confirmation)
+                    resource_blocker = _resource_hover_blocker_from_confirmation(confirmation) if _is_resource_object_proposal(proposal) else None
+                    reason = resource_blocker or _navigation_hover_failure_reason(proposal, confirmation)
                     result.warnings.append(f"hover confirmation failed: {reason}; top menu={_hover_menu_label(confirmation)}")
                     if "hover_menu" not in result.missing_capabilities:
                         result.missing_capabilities.append("hover_menu")
+                    if resource_blocker:
+                        _resource_target_safety_trace(
+                            result,
+                            proposal,
+                            confirmation,
+                            canvas_point=canvas_point,
+                            screen_point=screen_point,
+                            plan=plan,
+                            geometry_validation=geometry_validation,
+                            safety_decision="blocked",
+                            safety_blockers=[resource_blocker],
+                            action_executed=False,
+                        )
                     lifecycle = lifecycle_state_for_proposal(proposal)
                     lifecycle.current_state = "blocked"
-                    lifecycle.reason = "hover_confirm_timeout"
+                    lifecycle.reason = reason if resource_blocker else "hover_confirm_timeout"
                     _apply_lifecycle(result, lifecycle)
-                    _set_trace_final(result, "hover_confirm_timeout")
+                    _set_trace_final(result, reason if resource_blocker else "hover_confirm_timeout")
                     _attach_human_input_trace(result, input_controller)
                     return result
         if confirmation.get("confirmed") is not True:
@@ -11000,16 +11135,43 @@ def execute_action(
                     result.action_trace[_route_lower_menu_trace_key(proposal)] = dict(route_direct_entry)
             else:
                 result.status = "FAIL"
-                result.warnings.append(f"hover confirmation failed: {confirmation.get('reason') or 'unknown'}")
+                resource_blocker = _resource_hover_blocker_from_confirmation(confirmation) if _is_resource_object_proposal(proposal) else None
+                result.warnings.append(f"hover confirmation failed: {resource_blocker or confirmation.get('reason') or 'unknown'}")
                 if "hover_menu" not in result.missing_capabilities:
                     result.missing_capabilities.append("hover_menu")
+                if resource_blocker:
+                    _resource_target_safety_trace(
+                        result,
+                        proposal,
+                        confirmation,
+                        canvas_point=canvas_point,
+                        screen_point=screen_point,
+                        plan=plan,
+                        geometry_validation=geometry_validation,
+                        safety_decision="blocked",
+                        safety_blockers=[resource_blocker],
+                        action_executed=False,
+                    )
                 lifecycle = lifecycle_state_for_proposal(proposal)
                 lifecycle.current_state = "blocked"
-                lifecycle.reason = "hover_confirm_timeout"
+                lifecycle.reason = resource_blocker or "hover_confirm_timeout"
                 _apply_lifecycle(result, lifecycle)
-                _set_trace_final(result, "hover_confirm_timeout")
+                _set_trace_final(result, resource_blocker or "hover_confirm_timeout")
                 _attach_human_input_trace(result, input_controller)
                 return result
+        if confirmation.get("confirmed") is True:
+            _resource_target_safety_trace(
+                result,
+                proposal,
+                confirmation,
+                canvas_point=canvas_point,
+                screen_point=screen_point,
+                plan=plan,
+                geometry_validation=geometry_validation,
+                safety_decision="allow",
+                safety_blockers=[],
+                action_executed=False,
+            )
         if hover_options.hover_only:
             lifecycle = lifecycle_after_execution(proposal, executed=False, dry_run=True)
             lifecycle.reason = "hover_only_confirmed"
@@ -11110,17 +11272,44 @@ def execute_action(
                         _attach_human_input_trace(result, input_controller)
                         return result
                     result.status = "FAIL"
-                    result.warnings.append(f"pre-click hover confirmation failed: {pre_click_confirmation.get('reason') or 'unknown'}")
+                    resource_blocker = _resource_hover_blocker_from_confirmation(pre_click_confirmation) if _is_resource_object_proposal(proposal) else None
+                    result.warnings.append(f"pre-click hover confirmation failed: {resource_blocker or pre_click_confirmation.get('reason') or 'unknown'}")
                     if "hover_menu" not in result.missing_capabilities:
                         result.missing_capabilities.append("hover_menu")
+                    if resource_blocker:
+                        _resource_target_safety_trace(
+                            result,
+                            proposal,
+                            pre_click_confirmation,
+                            canvas_point=canvas_point,
+                            screen_point=screen_point,
+                            plan=plan,
+                            geometry_validation=geometry_validation,
+                            safety_decision="blocked",
+                            safety_blockers=[resource_blocker],
+                            action_executed=False,
+                        )
                     lifecycle = lifecycle_state_for_proposal(proposal)
                     lifecycle.current_state = "blocked"
-                    lifecycle.reason = "pre_click_hover_confirm_failed"
+                    lifecycle.reason = resource_blocker or "pre_click_hover_confirm_failed"
                     _apply_lifecycle(result, lifecycle)
-                    _set_trace_final(result, "hover_mismatch_skipped")
+                    _set_trace_final(result, resource_blocker or "hover_mismatch_skipped")
                     _attach_human_input_trace(result, input_controller)
                     return result
             _update_trace_from_hover(result, pre_click_confirmation)
+            if pre_click_confirmation.get("confirmed") is True:
+                _resource_target_safety_trace(
+                    result,
+                    proposal,
+                    pre_click_confirmation,
+                    canvas_point=canvas_point,
+                    screen_point=screen_point,
+                    plan=plan,
+                    geometry_validation=geometry_validation,
+                    safety_decision="allow",
+                    safety_blockers=[],
+                    action_executed=False,
+                )
             volatility = _navigation_volatile_hover_zone(proposal, pre_click_confirmation)
             if volatility is not None:
                 volatile_alternate = (
@@ -11348,6 +11537,18 @@ def execute_action(
                     context=_human_context(proposal, "hover_confirmed_click"),
                 )
                 result.executed = True
+                _resource_target_safety_trace(
+                    result,
+                    proposal,
+                    pre_click_confirmation,
+                    canvas_point=canvas_point,
+                    screen_point=screen_point,
+                    plan=plan,
+                    geometry_validation=geometry_validation,
+                    safety_decision="allow",
+                    safety_blockers=[],
+                    action_executed=True,
+                )
                 if isinstance(result.action_trace, dict):
                     result.action_trace["clickTimestampWallMillis"] = int(wall_time_millis_func())
                     _attach_human_input_trace(result, input_controller)
