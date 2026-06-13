@@ -74,6 +74,20 @@ def window(title="RuneLite"):
     }
 
 
+def recovery_state(name, *, loaded=False, game_state="LOGIN_SCREEN", detected_buttons=None):
+    return {
+        "state": name,
+        "loadedSceneVerified": bool(loaded),
+        "detectedButtons": [{"name": item} for item in (detected_buttons or [])],
+        "loadedSceneProof": {
+            "loadedSceneVerified": bool(loaded),
+            "gameState": game_state,
+            "clientTickHotFresh": True,
+            "worldModelObjectTotal": 12 if loaded else 0,
+        },
+    }
+
+
 def candidate(name, source):
     return bootstrap.StartupButtonCandidate(
         name=name,
@@ -83,6 +97,53 @@ def candidate(name, source):
         confidence=0.92,
         reason=f"test {name}",
     )
+
+
+def clicked_candidate(
+    name,
+    *,
+    before="disconnected_dialog",
+    after="disconnected_dialog",
+    transition=False,
+    proof=None,
+):
+    item = candidate(name, "disconnected_dialog" if name == "disconnected_ok" else "saved_account_play_panel").to_dict()
+    item.update(
+        {
+            "targetValidationStatus": "PASS",
+            "targetInsideRuneLiteWindow": True,
+            "targetInsideSafeClickRegion": True,
+            "beforeVisualState": before,
+            "afterVisualState": after,
+            "beforeHotGameState": "LOGIN_SCREEN",
+            "afterHotGameState": "LOGIN_SCREEN" if after != "loaded_scene" else "LOGGED_IN",
+            "expectedNextStates": recovery._expected_next_states_for_button(name),
+            "expectedTransitionSatisfied": bool(transition),
+            "transitionResult": "expected_transition_satisfied" if transition else "expected_transition_not_observed",
+            "clickResult": "PASS",
+        }
+    )
+    click_proof = {
+        "status": "PASS",
+        "inputPathUsed": "HumanInputController/ArduinoHIDBackend",
+        "inputBackend": "arduino",
+        "targetPoint": {"x": 450, "y": 350},
+        "cursorBefore": {"x": 440, "y": 340},
+        "cursorAfterMove": {"x": 450, "y": 350},
+        "cursorAfterClick": {"x": 450, "y": 350},
+        "cursorTargetDistance": 0,
+        "cursorAtTarget": True,
+        "mouseMoveSent": True,
+        "mouseDownSent": True,
+        "mouseUpSent": True,
+        "clickSent": True,
+        "arduinoAcks": ["OK MOVE", "OK MOUSE_DOWN", "OK MOUSE_UP"],
+        "fullClickSequenceVerified": True,
+        "windowFocusVerified": True,
+    }
+    click_proof.update(proof or {})
+    item["clickDetails"] = click_proof
+    return item
 
 
 class LivenessRecoveryCoreTest(unittest.TestCase):
@@ -390,10 +451,10 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         )
 
         self.assertEqual(payload["status"], "unsafe")
-        self.assertEqual(payload["blocker"], "visible_button_no_transition")
-        self.assertEqual(payload["recoveryFailureClass"], "visible_button_no_transition")
+        self.assertEqual(payload["blocker"], "disconnected_loop")
+        self.assertEqual(payload["recoveryFailureClass"], "disconnected_loop")
         machine = payload["recoveryStateMachine"]
-        self.assertEqual(machine["failureClassification"]["failureClass"], "visible_button_no_transition")
+        self.assertEqual(machine["failureClassification"]["failureClass"], "disconnected_loop")
         self.assertEqual([item["selectedRecoveryAction"] for item in machine["clickAttempts"]], ["disconnected_ok", "play_now"])
         self.assertTrue(payload["visibleSafeButtonClicked"])
 
@@ -462,7 +523,7 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         )
 
         self.assertEqual(payload["status"], "recovered_loaded_scene")
-        self.assertFalse(payload["disconnectedLoopDetected"])
+        self.assertTrue(payload["disconnectedLoopDetected"])
         self.assertTrue(payload["relaunchRequired"])
         self.assertTrue(payload["relaunchAttempted"])
         self.assertTrue(payload["loadedSceneAfterRelaunch"])
@@ -638,7 +699,7 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         )
 
         self.assertEqual(payload["status"], "unsafe")
-        self.assertEqual(payload["blocker"], "visible_button_no_transition")
+        self.assertEqual(payload["blocker"], "disconnected_loop")
         self.assertEqual(len(bootstrap_calls), 2)
         self.assertTrue(payload["visibleSafeButtonClicked"])
         self.assertEqual(payload["attempts"]["post_relaunch_visible_button_recovery"], 1)
@@ -681,6 +742,118 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         self.assertEqual(payload["blocker"], "visible_button_no_transition")
         self.assertEqual(payload["recoveryFailureClass"], "visible_button_no_transition")
         self.assertTrue(payload["visibleSafeButtonClicked"])
+
+    def test_disconnected_ok_to_login_surface_is_transition_success_not_no_transition(self):
+        initial = recovery_state("disconnected_dialog", detected_buttons=["disconnected_ok"])
+        final = recovery_state("login_screen")
+        actions = [
+            {
+                "action": "run_bootstrap_recovery",
+                "clickedCandidateDetails": [
+                    clicked_candidate(
+                        "disconnected_ok",
+                        before="disconnected_dialog",
+                        after="login_screen",
+                        transition=True,
+                    )
+                ],
+                "buttonCandidates": [],
+            }
+        ]
+
+        machine = recovery.build_recovery_state_machine(initial_state=initial, final_state=final, actions_taken=actions)
+        classification = recovery.classify_recovery_failure(initial_state=initial, final_state=final, actions_taken=actions)
+
+        self.assertTrue(machine["clickAttempts"][0]["transitionSuccess"])
+        self.assertEqual(machine["clickAttempts"][0]["expectedNextStates"][0], "login_screen")
+        self.assertNotEqual(classification["failureClass"], "visible_button_no_transition")
+
+    def test_missing_mouse_down_reports_incomplete_click_sequence(self):
+        initial = recovery_state("saved_account_play_now", detected_buttons=["play_now"])
+        final = recovery_state("saved_account_play_now", detected_buttons=["play_now"])
+        actions = [
+            {
+                "action": "run_bootstrap_recovery",
+                "clickedCandidateDetails": [
+                    clicked_candidate(
+                        "play_now",
+                        before="saved_account_play_now",
+                        after="saved_account_play_now",
+                        proof={"mouseDownSent": False, "clickSent": False, "fullClickSequenceVerified": False},
+                    )
+                ],
+            }
+        ]
+
+        classification = recovery.classify_recovery_failure(initial_state=initial, final_state=final, actions_taken=actions)
+
+        self.assertEqual(classification["failureClass"], "incomplete_click_sequence")
+
+    def test_missing_cursor_grounding_reports_click_not_grounded(self):
+        initial = recovery_state("saved_account_play_now", detected_buttons=["play_now"])
+        final = recovery_state("saved_account_play_now", detected_buttons=["play_now"])
+        actions = [
+            {
+                "action": "run_bootstrap_recovery",
+                "clickedCandidateDetails": [
+                    clicked_candidate(
+                        "play_now",
+                        before="saved_account_play_now",
+                        after="saved_account_play_now",
+                        proof={
+                            "cursorAtTarget": False,
+                            "cursorTargetDistance": 41,
+                            "fullClickSequenceVerified": False,
+                        },
+                    )
+                ],
+            }
+        ]
+
+        classification = recovery.classify_recovery_failure(initial_state=initial, final_state=final, actions_taken=actions)
+
+        self.assertEqual(classification["failureClass"], "visible_button_click_not_grounded")
+
+    def test_runelite_not_focused_reports_window_not_focused(self):
+        initial = recovery_state("saved_account_play_now", detected_buttons=["play_now"])
+        final = recovery_state("saved_account_play_now", detected_buttons=["play_now"])
+        actions = [
+            {
+                "action": "run_bootstrap_recovery",
+                "clickedCandidateDetails": [
+                    clicked_candidate(
+                        "play_now",
+                        before="saved_account_play_now",
+                        after="saved_account_play_now",
+                        proof={"windowFocusVerified": False},
+                    )
+                ],
+            }
+        ]
+
+        classification = recovery.classify_recovery_failure(initial_state=initial, final_state=final, actions_taken=actions)
+
+        self.assertEqual(classification["failureClass"], "recovery_click_window_not_focused")
+
+    def test_no_visual_or_hot_change_after_full_click_reports_no_transition(self):
+        initial = recovery_state("disconnected_dialog", detected_buttons=["disconnected_ok"])
+        final = recovery_state("disconnected_dialog", detected_buttons=["disconnected_ok"])
+        actions = [
+            {
+                "action": "run_bootstrap_recovery",
+                "clickedCandidateDetails": [
+                    clicked_candidate(
+                        "disconnected_ok",
+                        before="disconnected_dialog",
+                        after="disconnected_dialog",
+                    )
+                ],
+            }
+        ]
+
+        classification = recovery.classify_recovery_failure(initial_state=initial, final_state=final, actions_taken=actions)
+
+        self.assertEqual(classification["failureClass"], "visible_button_no_transition")
 
     def test_login_surface_no_saved_account_triggers_start_game_relaunch(self):
         launched = []

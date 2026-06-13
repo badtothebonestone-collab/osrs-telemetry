@@ -479,3 +479,40 @@ Latest result:
 This is no longer a pre-recovery `manual_login_required` stop. The remaining
 blocker is that the visible disconnected OK button can be clicked safely, but
 the client does not transition into a loaded scene.
+
+## 2026-06-13 Update: Visible Click Effect Proof
+
+The recovery artifacts now prove the click sequence itself instead of relying on
+the last Arduino acknowledgement. `recovery_attempts.jsonl` rows use
+`recovery_attempt.v2` and include focused window, target rect/point, cursor
+before/after, cursor distance to target, mouse move/down/up evidence, Arduino
+ACKs, before/after visual state, before/after hot state, and the expected
+transition result.
+
+`disconnected_ok` now expects the disconnected dialog to disappear and a
+login/play/loading/loaded state to appear. It does not require immediate
+`loadedSceneVerified=true`.
+
+Latest command:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3 --recovery-artifact-dir bot_runs\20260613_visible_click_proof_recovery_v3
+```
+
+Latest result:
+
+| Field | Result |
+| --- | --- |
+| recovery status | `unsafe` |
+| recovery blocker | `visible_button_no_transition` |
+| visible button | `disconnected_ok` |
+| foreground/focus | `RuneLite`, `windowFocusVerified=true` |
+| target validation | `PASS`, target `{x:1362,y:1013}` |
+| cursor proof | cursor at target, about `3.61px` from center |
+| click sequence | `MOUSE_DOWN` and `MOUSE_UP` ACKs present |
+| full click sequence | `true` |
+| expected transition | `expected_transition_not_observed` |
+| loaded scene verified | false |
+
+The remaining blocker is now a genuine post-click no-transition: the
+disconnected dialog stayed visible after bounded, focused, grounded clicks.

@@ -33,6 +33,12 @@ RECOVERABLE_STATES = {
 
 MANUAL_STATES = {"credential_required", "login_screen"}
 SAFE_VISIBLE_BUTTON_NAMES = {"disconnected_ok", "play_now", "click_here_to_play", "continue"}
+BUTTON_EXPECTED_NEXT_STATES = {
+    "disconnected_ok": ["login_screen", "saved_account_play_now", "click_here_to_play", "loading", "loaded_scene"],
+    "play_now": ["logging_in", "loading", "click_here_to_play", "loaded_scene"],
+    "click_here_to_play": ["logged_in", "loaded_scene"],
+    "continue": ["login_screen", "saved_account_play_now", "click_here_to_play", "loading", "loaded_scene"],
+}
 
 _LAST_SUCCESS: dict[str, Any] | None = None
 
@@ -43,6 +49,104 @@ def _dict(value: Any) -> dict[str, Any]:
 
 def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _expected_next_states_for_button(name: str) -> list[str]:
+    return list(BUTTON_EXPECTED_NEXT_STATES.get(str(name or ""), ["unknown"]))
+
+
+def _state_after_for_button_name(name: str) -> str | None:
+    if name == "disconnected_ok":
+        return "login_screen"
+    if name == "play_now":
+        return "loading"
+    if name == "click_here_to_play":
+        return "loaded_scene"
+    if name == "continue":
+        return "loading"
+    return None
+
+
+def _click_value(click: dict[str, Any], key: str) -> Any:
+    if key in click:
+        return click.get(key)
+    details = _dict(click.get("clickDetails"))
+    return details.get(key)
+
+
+def _click_has_proof_fields(click: dict[str, Any]) -> bool:
+    details = _dict(click.get("clickDetails"))
+    for key in (
+        "fullClickSequenceVerified",
+        "mouseMoveSent",
+        "mouseDownSent",
+        "mouseUpSent",
+        "clickSent",
+        "cursorTargetDistance",
+        "cursorAtTarget",
+        "windowFocusVerified",
+    ):
+        if key in click or key in details:
+            return True
+    return False
+
+
+def _click_target_valid(click: dict[str, Any]) -> bool:
+    status = str(click.get("targetValidationStatus") or _click_value(click, "targetValidationStatus") or "").upper()
+    if status:
+        return status != "FAIL"
+    if not _click_has_proof_fields(click):
+        return True
+    inside_window = click.get("targetInsideRuneLiteWindow")
+    inside_safe = click.get("targetInsideSafeClickRegion")
+    if inside_window is not None or inside_safe is not None:
+        return bool(inside_window and inside_safe)
+    return True
+
+
+def _click_window_focused(click: dict[str, Any]) -> bool | None:
+    focused = _click_value(click, "windowFocusVerified")
+    if focused is not None:
+        return bool(focused)
+    details = _dict(click.get("clickDetails"))
+    pre_focus = _dict(details.get("preClickFocus"))
+    if "focused" in pre_focus:
+        return bool(pre_focus.get("focused"))
+    return None
+
+
+def _click_proof_blocker(click: dict[str, Any]) -> str | None:
+    if not _click_target_valid(click):
+        return "recovery_click_target_invalid"
+    if not _click_has_proof_fields(click):
+        return None
+    focused = _click_window_focused(click)
+    if focused is False:
+        return "recovery_click_window_not_focused"
+    cursor_at_target = _click_value(click, "cursorAtTarget")
+    if cursor_at_target is False:
+        return "visible_button_click_not_grounded"
+    full_sequence = _click_value(click, "fullClickSequenceVerified")
+    if full_sequence is False:
+        click_sent = bool(_click_value(click, "clickSent"))
+        mouse_down = bool(_click_value(click, "mouseDownSent"))
+        mouse_up = bool(_click_value(click, "mouseUpSent"))
+        if not click_sent and (not mouse_down or not mouse_up):
+            return "incomplete_click_sequence"
+        return "visible_button_click_not_grounded"
+    return None
+
+
+def _expected_transition_satisfied(click: dict[str, Any], state_after: str, final_state: dict[str, Any]) -> bool:
+    explicit = click.get("expectedTransitionSatisfied")
+    if explicit is not None:
+        return bool(explicit)
+    name = str(click.get("name") or "")
+    expected = set(_list(click.get("expectedNextStates")) or _expected_next_states_for_button(name))
+    if state_after in expected:
+        return True
+    proof = _dict(final_state.get("loadedSceneProof"))
+    return bool(proof.get("loadedSceneVerified") and "loaded_scene" in expected)
 
 
 def _state_name(state: dict[str, Any] | None) -> str:
@@ -463,8 +567,27 @@ def _compact_click_details(details: dict[str, Any]) -> dict[str, Any]:
         "inputPathUsed": details.get("inputPathUsed"),
         "command": details.get("command") or details.get("commandSent"),
         "arduinoAck": details.get("arduinoAck"),
+        "arduinoAcks": details.get("arduinoAcks") or [],
+        "arduinoCommandNames": details.get("arduinoCommandNames") or [],
+        "commandTrace": details.get("commandTrace") or [],
         "serialTrace": serial_trace or None,
         "humanInput": details.get("humanInput"),
+        "cursorBefore": details.get("cursorBefore"),
+        "cursorAfterMove": details.get("cursorAfterMove"),
+        "cursorAfterClick": details.get("cursorAfterClick"),
+        "targetPoint": details.get("targetPoint"),
+        "cursorTargetDistance": details.get("cursorTargetDistance"),
+        "cursorBeforeTargetDistance": details.get("cursorBeforeTargetDistance"),
+        "cursorAlreadyAtTarget": details.get("cursorAlreadyAtTarget"),
+        "cursorAtTarget": details.get("cursorAtTarget"),
+        "mouseMoveSent": details.get("mouseMoveSent"),
+        "mouseDownSent": details.get("mouseDownSent"),
+        "mouseUpSent": details.get("mouseUpSent"),
+        "clickSent": details.get("clickSent"),
+        "fullClickSequenceVerified": details.get("fullClickSequenceVerified"),
+        "foregroundWindowTitle": details.get("foregroundWindowTitle"),
+        "windowFocusVerified": details.get("windowFocusVerified"),
+        "runeliteWindowFocused": details.get("runeliteWindowFocused"),
         "targetWindowAtPoint": pre_focus.get("targetWindowAtPoint"),
         "foregroundTitle": pre_focus.get("foregroundTitle"),
         "focusMethod": pre_focus.get("focusMethod"),
@@ -486,6 +609,17 @@ def _compact_clicked_candidate(candidate: Any) -> dict[str, Any]:
         "targetInsideRuneLiteWindow": item.get("targetInsideRuneLiteWindow"),
         "targetInsideSafeClickRegion": item.get("targetInsideSafeClickRegion"),
         "expectedStateAfterClick": item.get("expectedStateAfterClick"),
+        "expectedNextStates": item.get("expectedNextStates") or _expected_next_states_for_button(str(item.get("name") or "")),
+        "beforeVisualState": item.get("beforeVisualState"),
+        "afterVisualState": item.get("afterVisualState"),
+        "beforeHotGameState": item.get("beforeHotGameState"),
+        "afterHotGameState": item.get("afterHotGameState"),
+        "loadedSceneVerifiedAfter": item.get("loadedSceneVerifiedAfter"),
+        "visibleButtonsAfter": item.get("visibleButtonsAfter") or [],
+        "visualTransitionObserved": item.get("visualTransitionObserved"),
+        "hotStateTransitionObserved": item.get("hotStateTransitionObserved"),
+        "expectedTransitionSatisfied": item.get("expectedTransitionSatisfied"),
+        "transitionResult": item.get("transitionResult"),
         "clickResult": item.get("clickResult"),
         "reason": item.get("reason"),
         "clickDetails": _compact_click_details(_dict(item.get("clickDetails"))),
@@ -757,9 +891,32 @@ def classify_recovery_failure(
     elif safe_detected_names and not safe_clicked_names:
         failure_class = "visible_button_found_not_clicked"
         reason = "a safe visible recovery button was detected but no recovery click was sent"
-    elif safe_clicked_names and (final_name in {"disconnected_dialog", "login_screen", "saved_account_play_now", "click_here_to_play"} or game_state == "LOGIN_SCREEN"):
-        failure_class = "visible_button_no_transition"
-        reason = "safe visible recovery button click was sent, but no loaded-scene transition followed"
+    elif safe_clicked:
+        proof_blocker = _click_proof_blocker(safe_clicked[-1])
+        if proof_blocker:
+            failure_class = proof_blocker
+            reason_map = {
+                "visible_button_click_not_grounded": "visible recovery button click was not proven at the button target",
+                "incomplete_click_sequence": "visible recovery button click lacked a complete CLICK or MOUSE_DOWN/MOUSE_UP sequence",
+                "recovery_click_window_not_focused": "RuneLite was not proven focused before the recovery click",
+                "recovery_click_target_invalid": "visible recovery button target failed RuneLite/window safety validation",
+            }
+            reason = reason_map.get(proof_blocker, proof_blocker)
+        elif "play_now" in safe_clicked_names and final_name == "disconnected_dialog":
+            failure_class = "disconnected_loop"
+            reason = "Play Now was clicked but the client returned to the disconnected dialog"
+        elif final_name in {"disconnected_dialog", "login_screen", "saved_account_play_now", "click_here_to_play"} or game_state == "LOGIN_SCREEN":
+            last_click = safe_clicked[-1]
+            transition_ok = bool(last_click.get("expectedTransitionSatisfied"))
+            if not transition_ok:
+                failure_class = "visible_button_no_transition"
+                reason = "safe visible recovery button click was sent, but no expected visual/client transition followed"
+            else:
+                failure_class = "loading_timeout"
+                reason = "safe visible recovery button advanced to the next login/loading state but loaded-scene proof did not arrive"
+        else:
+            failure_class = "loading_timeout"
+            reason = "safe visible recovery button click did not reach loaded-scene proof before the recovery budget expired"
     elif final_name == "login_screen" and "play_now" not in clicked_names and "disconnected_ok" not in clicked_names:
         failure_class = "login_surface_no_saved_account"
         reason = "login surface is present without a safe saved-account or disconnected recovery target"
@@ -803,7 +960,10 @@ def build_recovery_state_machine(
     previous_state = _state_name(initial_state)
     for index, click in enumerate(clicked):
         name = str(click.get("name") or "unknown")
-        if name == "disconnected_ok":
+        before_from_click = str(click.get("beforeVisualState") or "").strip()
+        if before_from_click:
+            state_before = before_from_click
+        elif name == "disconnected_ok":
             state_before = "disconnected_dialog"
         elif name == "play_now":
             state_before = "saved_account_visible" if previous_state in {"disconnected_dialog", "login_surface"} else previous_state
@@ -812,15 +972,26 @@ def build_recovery_state_machine(
         else:
             state_before = previous_state
         expected = click.get("expectedStateAfterClick")
+        expected_next_states = _list(click.get("expectedNextStates")) or _expected_next_states_for_button(name)
         click_details = _dict(click.get("clickDetails"))
+        if click.get("afterVisualState"):
+            state_after = str(click.get("afterVisualState"))
+        elif index + 1 < len(clicked):
+            state_after = _state_after_for_button_name(str(clicked[index + 1].get("name") or "")) or previous_state
+        else:
+            state_after = _state_name(final_state)
+        transition_success = _expected_transition_satisfied(click, state_after, final_state)
+        proof_blocker = _click_proof_blocker(click)
         clicks.append(
             {
+                "schema": "recovery_attempt.v2",
                 "attemptIndex": index,
                 "stateBefore": state_before,
                 "visibleButtonScanAttempted": True,
                 "visibleButtonsFound": [name] if name in SAFE_VISIBLE_BUTTON_NAMES else [],
                 "selectedRecoveryAction": name,
                 "selectedButton": name,
+                "buttonType": name,
                 "screenPoint": click.get("screenPoint") or click.get("targetPointLogical"),
                 "targetPoint": click.get("targetPointPhysical") or click.get("screenPoint") or click.get("targetPointLogical"),
                 "targetRect": click.get("buttonBoundsPhysical") or click.get("buttonBoundsLogical"),
@@ -829,14 +1000,40 @@ def build_recovery_state_machine(
                 "inputPathUsed": click_details.get("inputPathUsed"),
                 "inputBackend": click_details.get("inputBackend"),
                 "arduinoCommandAck": click_details.get("arduinoAck"),
+                "arduinoAcks": click_details.get("arduinoAcks") or [],
+                "beforeVisualState": click.get("beforeVisualState"),
+                "afterVisualState": click.get("afterVisualState"),
+                "beforeHotGameState": click.get("beforeHotGameState"),
+                "afterHotGameState": click.get("afterHotGameState"),
+                "cursorBefore": click_details.get("cursorBefore"),
+                "cursorAfterMove": click_details.get("cursorAfterMove"),
+                "cursorAfterClick": click_details.get("cursorAfterClick"),
+                "cursorTargetDistance": click_details.get("cursorTargetDistance"),
+                "cursorBeforeTargetDistance": click_details.get("cursorBeforeTargetDistance"),
+                "cursorAlreadyAtTarget": click_details.get("cursorAlreadyAtTarget"),
+                "foregroundWindowTitle": click_details.get("foregroundWindowTitle") or click_details.get("foregroundTitle"),
+                "windowFocusVerified": click_details.get("windowFocusVerified"),
+                "runeliteWindowFocused": click_details.get("runeliteWindowFocused"),
+                "targetWindowAtPoint": click_details.get("targetWindowAtPoint"),
+                "mouseMoveSent": click_details.get("mouseMoveSent"),
+                "mouseDownSent": click_details.get("mouseDownSent"),
+                "mouseUpSent": click_details.get("mouseUpSent"),
+                "clickSent": click_details.get("clickSent"),
+                "fullClickSequenceVerified": click_details.get("fullClickSequenceVerified"),
+                "visualTransitionObserved": click.get("visualTransitionObserved"),
+                "hotStateTransitionObserved": click.get("hotStateTransitionObserved"),
+                "expectedTransitionSatisfied": transition_success,
                 "expectedNextState": expected,
-                "stateAfter": _state_name(final_state) if index == len(clicked) - 1 else None,
-                "transitionSuccess": bool(index == len(clicked) - 1 and _dict(final_state.get("loadedSceneProof")).get("loadedSceneVerified")),
+                "expectedNextStates": expected_next_states,
+                "stateAfter": state_after,
+                "transitionSuccess": transition_success,
+                "transitionResult": click.get("transitionResult") or ("expected_transition_satisfied" if transition_success else "expected_transition_not_observed"),
+                "blocker": proof_blocker,
                 "reason": click.get("reason"),
                 "clickEvidence": click,
             }
         )
-        previous_state = str(expected or previous_state)
+        previous_state = str(state_after or expected or previous_state)
     for index, action in enumerate(actions):
         item = _dict(action)
         if item.get("action") not in {"relaunch_required", "relaunch_client", "wait_for_loaded_scene_after_relaunch"}:
@@ -1525,6 +1722,7 @@ def ensure_loaded_scene(
                         "visible_button_no_transition",
                         "visible_button_found_not_clicked",
                         "saved_account_play_now_not_attempted",
+                        "disconnected_loop",
                     }:
                         break
                 if final_state.get("loadedSceneVerified") and not _dict(final_state.get("daemon")).get("fresh"):
@@ -1582,6 +1780,7 @@ def ensure_loaded_scene(
                     "visible_button_found_not_clicked",
                     "visible_button_no_transition",
                     "saved_account_play_now_not_attempted",
+                    "disconnected_loop",
                     "credentials_required",
                 }:
                     blocker_after_relaunch = str(classification_after_relaunch.get("failureClass"))

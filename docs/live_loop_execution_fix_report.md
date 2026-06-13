@@ -1475,6 +1475,59 @@ Next command once the disconnected/login surface is cleared:
 
 ```powershell
 python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3
+
+## Visible Recovery Click Proof Fix - 2026-06-13
+
+Branch: stabilization/live-loop-recovery-20260609
+
+Changed recovery layers:
+
+- `telemetry-viewer\run_runelite_bootstrap.py`
+- `telemetry-viewer\liveness_recovery_core.py`
+- `telemetry-viewer\context_service.py`
+- `telemetry-viewer\tests\test_liveness_recovery_core.py`
+
+Previous bug:
+
+`disconnected_ok` recovery artifacts only showed the last Arduino acknowledgement, usually `OK MOUSE_UP`. That did not prove the cursor was at the button, that the click was complete, that RuneLite was focused, or that the post-click state changed. The recovery state machine also treated `disconnected_ok` as if it had to produce `loadedSceneVerified=true` immediately.
+
+New behavior:
+
+- `disconnected_ok` expects a state-specific transition to login/play/loading/loaded scene. It is not required to load the scene immediately.
+- `play_now`, `click_here_to_play`, and `continue` each carry their own expected next-state set.
+- `recovery_attempts.jsonl` rows now use `recovery_attempt.v2`.
+- Each visible button attempt records foreground window title, RuneLite focus proof, target rect/point, cursor before/after move/click, cursor-target distance, Arduino ACK list, `mouseDownSent`, `mouseUpSent`, `clickSent`, `fullClickSequenceVerified`, before/after visual/hot states, expected transition result, and blocker.
+- `visible_button_no_transition` is only emitted after a focused, valid, grounded, complete click produces no expected visual or hot-state change.
+- Missing focus, invalid target, missing cursor grounding, or incomplete click sequence now produce specific blockers instead of generic no-transition.
+
+Latest recovery command:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3 --recovery-artifact-dir bot_runs\20260613_visible_click_proof_recovery_v3
+```
+
+Latest recovery result:
+
+- status: unsafe
+- blocker: `visible_button_no_transition`
+- loaded scene: false
+- recovery artifact folder: `bot_runs\20260613_visible_click_proof_recovery_v3`
+- visible button: `disconnected_ok`
+- foreground/focus: `RuneLite`, `windowFocusVerified=true`
+- target validation: `PASS`, target point `{x:1362,y:1013}`
+- cursor proof: cursor at target, distance about `3.61px`
+- click sequence: `mouseDownSent=true`, `mouseUpSent=true`, `clickSent=true`, `fullClickSequenceVerified=true`
+- transition: `expected_transition_not_observed`; dialog remained `disconnected_dialog`
+
+Loaded scene result:
+
+Loaded-scene proof remained false, so the input-geometry check and real live bot loop were not run in this pass.
+
+Exact next command after the environment is expected to transition:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3
+```
 ```
 
 Only after that returns `loadedSceneVerified=true`, continue with:

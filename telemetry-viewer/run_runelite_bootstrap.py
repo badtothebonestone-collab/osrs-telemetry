@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -112,6 +113,7 @@ class StartupButtonCandidate:
             "targetInsideSafeClickRegion": bool(dict_value(self.target_validation).get("targetInsideSafeClickRegion")),
             "targetValidationStatus": dict_value(self.target_validation).get("targetValidationStatus"),
             "expectedStateAfterClick": self.expected_state_after_click,
+            "expectedNextStates": candidate_expected_next_states(self.name),
         }
 
 
@@ -512,6 +514,70 @@ def candidate_expected_state(name: str) -> str:
     if name == "continue":
         return "loading_or_loaded_scene"
     return "unknown"
+
+
+def candidate_expected_next_states(name: str) -> list[str]:
+    if name == "disconnected_ok":
+        return [
+            "login_screen",
+            "saved_account_play_now",
+            "click_here_to_play",
+            "loading",
+            "loaded_scene",
+        ]
+    if name == "play_now":
+        return [
+            "logging_in",
+            "loading",
+            "click_here_to_play",
+            "loaded_scene",
+        ]
+    if name == "click_here_to_play":
+        return ["logged_in", "loaded_scene"]
+    if name == "continue":
+        return [
+            "login_screen",
+            "saved_account_play_now",
+            "click_here_to_play",
+            "loading",
+            "loaded_scene",
+        ]
+    return ["unknown"]
+
+
+def transition_result_for_candidate(
+    name: str,
+    *,
+    before_visual_state: str | None,
+    after_visual_state: str | None,
+    before_hot_game_state: str | None,
+    after_hot_game_state: str | None,
+    loaded_scene_verified: bool = False,
+    after_candidates: list[StartupButtonCandidate] | None = None,
+) -> dict[str, Any]:
+    expected = candidate_expected_next_states(name)
+    after_state = str(after_visual_state or "").strip()
+    hot_after = str(after_hot_game_state or "").strip().upper()
+    candidate_names = {candidate.name for candidate in after_candidates or []}
+    visual_changed = bool(after_state and before_visual_state and after_state != before_visual_state)
+    hot_changed = bool(after_hot_game_state and before_hot_game_state and after_hot_game_state != before_hot_game_state)
+    satisfied = bool(loaded_scene_verified or after_state in expected)
+    if name == "disconnected_ok" and candidate_names & {"play_now", "click_here_to_play"}:
+        satisfied = True
+    if name == "play_now" and hot_after in {"LOGGING_IN", "LOADING", "LOGGED_IN"}:
+        satisfied = True
+    if name == "click_here_to_play" and hot_after == "LOGGED_IN" and bool(loaded_scene_verified):
+        satisfied = True
+    result = "expected_transition_satisfied" if satisfied else "expected_transition_not_observed"
+    if name == "play_now" and after_state == "disconnected_dialog":
+        result = "disconnected_loop"
+    return {
+        "expectedNextStates": expected,
+        "visualTransitionObserved": visual_changed,
+        "hotStateTransitionObserved": hot_changed,
+        "expectedTransitionSatisfied": satisfied,
+        "transitionResult": result,
+    }
 
 
 def visual_bootstrap_surface_candidates(candidates: list[StartupButtonCandidate] | None) -> list[StartupButtonCandidate]:
@@ -1556,6 +1622,121 @@ def startup_movement_region(
     }
 
 
+def _point_dict(point: Any) -> dict[str, int] | None:
+    if isinstance(point, dict):
+        try:
+            return {"x": int(point.get("x")), "y": int(point.get("y"))}
+        except Exception:
+            return None
+    if isinstance(point, (list, tuple)) and len(point) >= 2:
+        try:
+            return {"x": int(point[0]), "y": int(point[1])}
+        except Exception:
+            return None
+    return None
+
+
+def _current_position_payload(backend: Any) -> dict[str, int] | None:
+    current = getattr(backend, "current_position", None)
+    if not callable(current):
+        return None
+    try:
+        return _point_dict(current())
+    except Exception:
+        return None
+
+
+def _command_name(trace: dict[str, Any]) -> str:
+    name = str(trace.get("commandName") or trace.get("command") or "").strip().upper()
+    if name:
+        return name.split(" ", 1)[0]
+    command = str(trace.get("commandSent") or trace.get("commandLine") or "").strip().upper()
+    return command.split(" ", 1)[0] if command else ""
+
+
+def _command_ack(trace: dict[str, Any]) -> str | None:
+    for key in ("ackLine", "firmwareAck", "ack", "responseLine"):
+        value = trace.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _command_ok(trace: dict[str, Any]) -> bool:
+    ack = _command_ack(trace)
+    return bool(str(trace.get("status") or "").upper() == "PASS" or (ack and ack.strip().upper().startswith("OK")))
+
+
+def _current_command_traces(
+    *,
+    before_status: dict[str, Any],
+    after_status: dict[str, Any],
+    serial_trace: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    after_trace = [dict_value(item) for item in after_status.get("commandTrace") or [] if isinstance(item, dict)]
+    before_count = int(before_status.get("commandCount") or 0)
+    after_count = int(after_status.get("commandCount") or 0)
+    delta = max(0, after_count - before_count)
+    ok_traces = [item for item in after_trace if _command_ok(item)]
+    if delta > 0 and ok_traces:
+        selected = ok_traces[-delta:]
+    else:
+        before_trace = [dict_value(item) for item in before_status.get("commandTrace") or [] if isinstance(item, dict)]
+        selected = after_trace[len(before_trace) :] if len(after_trace) >= len(before_trace) else ok_traces
+    if not selected and serial_trace:
+        selected = [dict(serial_trace)]
+    return selected
+
+
+def click_proof_payload(
+    *,
+    candidate: StartupButtonCandidate,
+    before_status: dict[str, Any],
+    after_status: dict[str, Any],
+    serial_trace: dict[str, Any] | None,
+    cursor_before: dict[str, int] | None,
+    cursor_after_click: dict[str, int] | None,
+    movement_trace: dict[str, Any] | None,
+) -> dict[str, Any]:
+    traces = _current_command_traces(before_status=before_status, after_status=after_status, serial_trace=serial_trace)
+    names = [_command_name(trace) for trace in traces if _command_name(trace)]
+    arduino_acks = [_command_ack(trace) for trace in traces if _command_ack(trace)]
+    cursor_after_move = _point_dict(dict_value(movement_trace).get("cursorPositionAfter")) or cursor_after_click
+    target_point = _point_dict(candidate.screen_point)
+    distance: float | None = None
+    if cursor_after_move and target_point:
+        distance = math.hypot(float(cursor_after_move["x"] - target_point["x"]), float(cursor_after_move["y"] - target_point["y"]))
+    before_distance: float | None = None
+    if cursor_before and target_point:
+        before_distance = math.hypot(float(cursor_before["x"] - target_point["x"]), float(cursor_before["y"] - target_point["y"]))
+    mouse_move_sent = "MOVE" in names or bool(dict_value(movement_trace).get("chunkCount"))
+    mouse_down_sent = "MOUSE_DOWN" in names
+    mouse_up_sent = "MOUSE_UP" in names
+    click_sent = "CLICK" in names or (mouse_down_sent and mouse_up_sent)
+    cursor_at_target = bool(distance is not None and distance <= 12.0)
+    cursor_already_at_target = bool(before_distance is not None and before_distance <= 12.0)
+    full_click = bool((mouse_move_sent or cursor_already_at_target) and click_sent and cursor_at_target)
+    return {
+        "schema": "visible_recovery_click_proof.v1",
+        "targetPoint": target_point,
+        "cursorBefore": cursor_before,
+        "cursorAfterMove": cursor_after_move,
+        "cursorAfterClick": cursor_after_click,
+        "cursorTargetDistance": round(distance, 2) if distance is not None else None,
+        "cursorBeforeTargetDistance": round(before_distance, 2) if before_distance is not None else None,
+        "cursorAlreadyAtTarget": cursor_already_at_target,
+        "cursorAtTarget": cursor_at_target,
+        "mouseMoveSent": mouse_move_sent,
+        "mouseDownSent": mouse_down_sent,
+        "mouseUpSent": mouse_up_sent,
+        "clickSent": click_sent,
+        "arduinoCommandNames": names,
+        "arduinoAcks": arduino_acks,
+        "commandTrace": traces,
+        "fullClickSequenceVerified": full_click,
+    }
+
+
 def click_candidate(
     candidate: StartupButtonCandidate,
     *,
@@ -1597,7 +1778,9 @@ def click_candidate(
     ):
         return {"status": "FAIL", "warning": "candidate outside allowed startup window", "inputBackend": backend_name, "inputPathUsed": input_path}
     effective_foreground_titles = ["RuneLite"] if allowed_foreground_titles is None else list(allowed_foreground_titles)
-    start_position = backend.current_position()
+    before_status = backend_status_payload()
+    cursor_before = _current_position_payload(backend)
+    start_position = (cursor_before["x"], cursor_before["y"]) if cursor_before else backend.current_position()
     movement_region = startup_movement_region(allowed_region, start_position, max_padding_px=192, max_corridor_px=4096)
     configure_safety = getattr(backend, "configure_movement_safety", None)
     if callable(configure_safety) and movement_region:
@@ -1639,6 +1822,16 @@ def click_candidate(
         trace = getattr(backend, "last_movement_trace", None)
         backend_status = backend_status_payload()
         serial_trace = dict_value(backend_status.get("lastCommandTrace"))
+        cursor_after_click = _current_position_payload(backend)
+        proof = click_proof_payload(
+            candidate=candidate,
+            before_status=before_status,
+            after_status=backend_status,
+            serial_trace=serial_trace,
+            cursor_before=cursor_before,
+            cursor_after_click=cursor_after_click,
+            movement_trace=trace if isinstance(trace, dict) else None,
+        )
         timeout_classification = serial_trace.get("timeoutClassification")
         retry_policy = "retry_not_safe"
         if timeout_classification in {"serial_timeout_before_command", "serial_timeout_during_move", "serial_timeout_waiting_for_ack"}:
@@ -1653,6 +1846,7 @@ def click_candidate(
             "humanInput": controller.metrics(),
             "serialTrace": serial_trace or None,
             "backendStatus": backend_status or None,
+            **proof,
             "timeoutClassification": timeout_classification,
             "bootstrapRetryPolicy": retry_policy,
             "retryRequiresScreenRecheck": retry_policy == "retry_requires_screen_recheck",
@@ -1661,12 +1855,25 @@ def click_candidate(
         }
     backend_status = backend_status_payload()
     serial_trace = dict_value(backend_status.get("lastCommandTrace"))
+    trace = getattr(backend, "last_movement_trace", None)
+    cursor_after_click = _current_position_payload(backend)
+    proof = click_proof_payload(
+        candidate=candidate,
+        before_status=before_status,
+        after_status=backend_status,
+        serial_trace=serial_trace,
+        cursor_before=cursor_before,
+        cursor_after_click=cursor_after_click,
+        movement_trace=trace if isinstance(trace, dict) else None,
+    )
     return {
         "status": "PASS",
         "movementPlan": plan.to_dict(include_points=False),
+        "movementTrace": trace if isinstance(trace, dict) else None,
         "humanInput": controller.metrics(),
         "backendStatus": backend_status or None,
         "serialTrace": serial_trace or None,
+        **proof,
         "inputBackend": backend_name,
         "inputPathUsed": input_path,
         "command": serial_trace.get("commandSent") or serial_trace.get("command"),
@@ -1951,6 +2158,14 @@ def run_bootstrap(
             add_stage(stages, startup_stage, status="FAIL", reason=warning)
             break
         last_selected_candidate = candidate
+        before_visual_state = bootstrap_state_from_signals(
+            summary=summary,
+            window=window,
+            candidates=candidates,
+            selected_candidate=candidate,
+            canvas_bounds=bootstrap_surface_bounds(snapshot_payload, window),
+        ).get("state")
+        before_hot_game_state = summary.get("gameState")
         allowed_titles = ["RuneLite"] if window_looks_like_runelite(window) else ["Jagex Launcher"] if launcher_automation_allowed else None
         foreground_titles_for_movement = allowed_titles
         pre_click_focus: dict[str, Any] | None = None
@@ -1998,7 +2213,14 @@ def run_bootstrap(
         )
         if pre_click_focus is not None:
             click_result["preClickFocus"] = pre_click_focus
+            click_result["foregroundWindowTitle"] = pre_click_focus.get("foregroundTitle")
+            click_result["runeliteWindowFocused"] = bool(pre_click_focus.get("focused"))
+            click_result["windowFocusVerified"] = bool(pre_click_focus.get("focused"))
+            click_result["targetWindowAtPoint"] = pre_click_focus.get("targetWindowAtPoint")
         clicked_payload = candidate.to_dict()
+        clicked_payload["beforeVisualState"] = before_visual_state
+        clicked_payload["beforeHotGameState"] = before_hot_game_state
+        clicked_payload["expectedNextStates"] = candidate_expected_next_states(candidate.name)
         clicked_payload["clickResult"] = click_result.get("status")
         clicked_payload["clickDetails"] = click_result
         clicked.append(clicked_payload)
@@ -2069,6 +2291,27 @@ def run_bootstrap(
             )
             warnings.extend(str(item) for item in candidate_warnings)
             summary = apply_visual_loaded_scene_veto(summary, candidates, warnings)
+            after_visual_state = bootstrap_state_from_signals(
+                summary=summary,
+                window=window,
+                candidates=candidates,
+                selected_candidate=None,
+                canvas_bounds=bootstrap_surface_bounds(snapshot_payload, window),
+            ).get("state")
+            transition = transition_result_for_candidate(
+                candidate.name,
+                before_visual_state=str(before_visual_state or ""),
+                after_visual_state=str(after_visual_state or ""),
+                before_hot_game_state=str(before_hot_game_state or ""),
+                after_hot_game_state=str(summary.get("gameState") or ""),
+                loaded_scene_verified=bool(summary.get("loadedSceneVerified")),
+                after_candidates=candidates,
+            )
+            clicked_payload["afterVisualState"] = after_visual_state
+            clicked_payload["afterHotGameState"] = summary.get("gameState")
+            clicked_payload["loadedSceneVerifiedAfter"] = bool(summary.get("loadedSceneVerified"))
+            clicked_payload["visibleButtonsAfter"] = [item.name for item in candidates]
+            clicked_payload.update(transition)
             if summary["loggedIn"]:
                 if candidates:
                     startup_stage = "waiting_for_click_here_to_play"
@@ -2087,6 +2330,9 @@ def run_bootstrap(
                     )
         except Exception as error:  # noqa: BLE001
             snapshot_error = f"{type(error).__name__}: {error}"
+            clicked_payload["afterSnapshotError"] = snapshot_error
+            clicked_payload["expectedTransitionSatisfied"] = False
+            clicked_payload["transitionResult"] = "post_click_snapshot_unavailable"
         if monotonic_func() >= deadline:
             startup_stage = "failed_timeout"
             failures.append("timeout waiting for LOGGED_IN")

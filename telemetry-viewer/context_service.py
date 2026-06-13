@@ -3481,15 +3481,20 @@ def _recovery_click_attempts(payload: dict[str, Any], command: list[str]) -> lis
         item = _dict(attempt)
         records.append(
             {
-                "schema": "loaded_scene_recovery_attempt.v1",
+                "schema": "recovery_attempt.v2",
                 "generatedAtUtc": utc_now(),
                 "attemptIndex": item.get("attemptIndex", index),
                 "command": command,
                 "status": payload.get("status"),
                 "loadedSceneVerified": bool(payload.get("loadedSceneVerified")),
-                "blocker": payload.get("blocker"),
                 "recoveryFailureClass": classification.get("failureClass"),
                 "stateBefore": item.get("stateBefore"),
+                "buttonType": item.get("buttonType") or item.get("selectedButton"),
+                "expectedNextStates": item.get("expectedNextStates") or [],
+                "beforeVisualState": item.get("beforeVisualState") or item.get("stateBefore"),
+                "afterVisualState": item.get("afterVisualState") or item.get("stateAfter"),
+                "beforeHotGameState": item.get("beforeHotGameState"),
+                "afterHotGameState": item.get("afterHotGameState"),
                 "visibleButtonsFound": item.get("visibleButtonsFound") or [],
                 "selectedRecoveryAction": item.get("selectedRecoveryAction"),
                 "selectedButton": item.get("selectedButton"),
@@ -3499,10 +3504,31 @@ def _recovery_click_attempts(payload: dict[str, Any], command: list[str]) -> lis
                 "inputPathUsed": item.get("inputPathUsed"),
                 "inputBackend": item.get("inputBackend"),
                 "arduinoCommandAck": item.get("arduinoCommandAck"),
+                "arduinoAcks": item.get("arduinoAcks") or [],
+                "cursorBefore": item.get("cursorBefore"),
+                "cursorAfterMove": item.get("cursorAfterMove"),
+                "cursorAfterClick": item.get("cursorAfterClick"),
+                "cursorTargetDistance": item.get("cursorTargetDistance"),
+                "cursorBeforeTargetDistance": item.get("cursorBeforeTargetDistance"),
+                "cursorAlreadyAtTarget": item.get("cursorAlreadyAtTarget"),
+                "foregroundWindowTitle": item.get("foregroundWindowTitle"),
+                "windowFocusVerified": item.get("windowFocusVerified"),
+                "runeliteWindowFocused": item.get("runeliteWindowFocused"),
+                "targetWindowAtPoint": item.get("targetWindowAtPoint"),
+                "mouseMoveSent": item.get("mouseMoveSent"),
+                "mouseDownSent": item.get("mouseDownSent"),
+                "mouseUpSent": item.get("mouseUpSent"),
+                "clickSent": item.get("clickSent"),
+                "fullClickSequenceVerified": item.get("fullClickSequenceVerified"),
+                "visualTransitionObserved": item.get("visualTransitionObserved"),
+                "hotStateTransitionObserved": item.get("hotStateTransitionObserved"),
+                "expectedTransitionSatisfied": bool(item.get("expectedTransitionSatisfied")),
+                "transitionResult": item.get("transitionResult"),
                 "clickEvidence": item.get("clickEvidence"),
                 "stateAfter": item.get("stateAfter"),
                 "transitionSuccess": bool(item.get("transitionSuccess")),
                 "reason": item.get("reason") or classification.get("reason"),
+                "blocker": item.get("blocker") or payload.get("blocker"),
                 **metadata,
             }
         )
@@ -3510,7 +3536,7 @@ def _recovery_click_attempts(payload: dict[str, Any], command: list[str]) -> lis
         item = _dict(attempt)
         records.append(
             {
-                "schema": "loaded_scene_recovery_attempt.v1",
+                "schema": "recovery_attempt.v2",
                 "generatedAtUtc": utc_now(),
                 "attemptIndex": item.get("attemptIndex", index),
                 "command": command,
@@ -3533,7 +3559,7 @@ def _recovery_click_attempts(payload: dict[str, Any], command: list[str]) -> lis
     if not records:
         records.append(
             {
-                "schema": "loaded_scene_recovery_attempt.v1",
+                "schema": "recovery_attempt.v2",
                 "generatedAtUtc": utc_now(),
                 "attemptIndex": 0,
                 "command": command,
