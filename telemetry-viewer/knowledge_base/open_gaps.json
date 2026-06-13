@@ -67,9 +67,10 @@
         "start_game_command.py separates devStartCommand from liveStartCommand.",
         "Jagex Launcher quick launch is discoverable with --launch=osrs_runelite when installed.",
         "dev_gradle_run remains classified as a dev/plugin launch and is not accepted as the live authenticated start path.",
-        "2026-06-13 Jagex quick-launch recovery started RuneLite but stopped at disconnected_dialog / LOGIN_SCREEN with stale_login_screen_after_relaunch."
+        "2026-06-13 Jagex quick-launch recovery started RuneLite but stopped at disconnected_dialog / LOGIN_SCREEN with stale_login_screen_after_relaunch.",
+        "2026-06-13 visible-button recovery detects disconnected_ok, validates it inside RuneLite, clicks through HumanInputController/ArduinoHIDBackend, and now stops as visible_button_no_transition when the client does not transition."
       ],
-      "suggestedNextTask": "Use the existing safe recovery/launcher session path to clear disconnected/login, then rerun context_service.py --ensure-loaded-scene until loadedSceneVerified=true before live actions."
+      "suggestedNextTask": "Clear the current disconnected/login no-transition surface, then rerun context_service.py --ensure-loaded-scene until loadedSceneVerified=true before live actions."
     },
     {
       "id": "input_geometry_live_source_stale",
@@ -156,7 +157,7 @@
       "task": "Validate the discovered Jagex Launcher RuneLite quick-launch path and loaded-scene recovery.",
       "successCriteria": [
         "start_game_command.py --validate-live reports jagex_launcher_runelite_quick_launch.",
-        "context_service.py --ensure-loaded-scene reaches loadedSceneVerified=true without dev_launch_not_loaded."
+        "context_service.py --ensure-loaded-scene reaches loadedSceneVerified=true without visible_button_no_transition or dev_launch_not_loaded."
       ]
     },
     {

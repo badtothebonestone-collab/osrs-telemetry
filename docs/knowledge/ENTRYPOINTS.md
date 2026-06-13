@@ -24,4 +24,5 @@ Future cleanup and live-bot work must reuse these canonical paths.
 
 <!-- BEGIN MANUAL NOTES -->
 - 2026-06-13: Login/startup surfaces belong to `liveness_recovery_core.py` plus `run_runelite_bootstrap.py` and `start_game_command.py`. Live bot code should not report `manual_login_required` before the canonical ladder has tried safe Click here/Play Now/disconnected/Start Game recovery and written recovery artifacts.
+- 2026-06-13: Visible safe recovery buttons must be handled by the canonical loaded-scene recovery path before manual login is reported. Post-relaunch visible `disconnected_ok`, `play_now`, or `click_here_to_play` states must re-enter `run_runelite_bootstrap.py`; repeated no-transition clicks stop as `visible_button_no_transition`.
 <!-- END MANUAL NOTES -->

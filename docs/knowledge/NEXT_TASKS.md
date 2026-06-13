@@ -2,7 +2,7 @@
 
 | Priority | ID | Task | Success criteria |
 | --- | --- | --- | --- |
-| 1 | validate_authenticated_live_start | Validate the discovered Jagex Launcher RuneLite quick-launch path and loaded-scene recovery. | start_game_command.py --validate-live reports jagex_launcher_runelite_quick_launch.; context_service.py --ensure-loaded-scene reaches loadedSceneVerified=true without dev_launch_not_loaded. |
+| 1 | validate_authenticated_live_start | Validate the discovered Jagex Launcher RuneLite quick-launch path and loaded-scene recovery. | start_game_command.py --validate-live reports jagex_launcher_runelite_quick_launch.; context_service.py --ensure-loaded-scene reaches loadedSceneVerified=true without visible_button_no_transition or dev_launch_not_loaded. |
 | 1 | fix_deposit_region_label | Clean up Deposit-All menu-context region classification. | Deposit-All bank UI clicks no longer appear as minimap_click when menu context proves bank UI. |
 | 2 | record_second_bank_direct_sample | Record another bank open/deposit/close sample with bankContainerDelta explicit plugin field. | bankContainerDeltaSource is explicit plugin delta or recorded diff, lifecycle PASS. |
 | 3 | extract_more_route_templates | Extract templates for new route directions after repeated PASS recordings. | Two clean route recordings compare PASS against the new template. |
@@ -20,4 +20,5 @@
 - 2026-06-13: Before the next live-loop run, fix startup/authentication: the recovery ladder now attempts Click here, visible Play Now, and Start Game relaunch, but the configured Start Game command is a `dev_gradle_run` and ended at `dev_launch_not_loaded`.
 - 2026-06-13: Authenticated live start discovery is now implemented. Next live gate should run Jagex quick-launch recovery via `context_service.py --ensure-loaded-scene`, then geometry/calibration, before trying the real loop.
 - 2026-06-13: Latest Jagex quick-launch recovery reached RuneLite but stayed on disconnected/login with `stale_login_screen_after_relaunch`. Next task is to clear that login/disconnect surface through existing safe recovery or launcher session state, then rerun loaded-scene recovery.
+- 2026-06-13: Visible `disconnected_ok` is now clicked through Arduino before any manual-login result, including after Start Game relaunch. Latest recovery blocker is `visible_button_no_transition`: safe OK clicks were acknowledged but the client stayed on disconnected/login. Next task is to make that surface actually transition or identify why RuneLite/Jagex session stays disconnected.
 <!-- END MANUAL NOTES -->

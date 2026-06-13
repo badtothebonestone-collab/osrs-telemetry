@@ -75,6 +75,7 @@ WINDOW_TITLE_HINTS = ["RuneLite", "RuneLite Launcher", "Jagex Launcher", "Java",
 CREDENTIAL_MARKERS = ("PASSWORD", "CREDENTIAL", "AUTHENTICATOR", "ACCOUNT_CONFIRM", "ACCOUNT_MANAGEMENT", "MFA", "TWO_FACTOR")
 BOOTSTRAP_SURFACE_NAMES = {"disconnected_ok", "play_now", "click_here_to_play", "continue"}
 BOOTSTRAP_VISUAL_SOURCES = {"template", "disconnected_dialog", "saved_account_play_panel", "welcome_panel"}
+MAX_REPEAT_VISIBLE_BUTTON_CLICKS = 2
 
 
 @dataclass(frozen=True)
@@ -1566,20 +1567,35 @@ def click_candidate(
     allowed_region: dict[str, Any] | None = None,
     allowed_foreground_titles: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
+    backend_name = str(getattr(backend, "name", backend.__class__.__name__) or backend.__class__.__name__)
+    input_path = "HumanInputController/ArduinoHIDBackend" if backend_name == "arduino" else f"HumanInputController/{backend.__class__.__name__}"
+
+    def backend_status_payload() -> dict[str, Any]:
+        status_func = getattr(backend, "status", None)
+        if callable(status_func):
+            try:
+                status = status_func()
+                return status if isinstance(status, dict) else {}
+            except Exception as error:  # noqa: BLE001
+                return {"statusError": f"{type(error).__name__}: {error}"}
+        return {}
+
     if not candidate.screen_point:
-        return {"status": "FAIL", "warning": "candidate has no screen point"}
+        return {"status": "FAIL", "warning": "candidate has no screen point", "inputBackend": backend_name, "inputPathUsed": input_path}
     validation = dict_value(candidate.target_validation)
     if validation and validation.get("targetValidationStatus") == "FAIL":
         return {
             "status": "FAIL",
             "warning": str(validation.get("targetValidationReason") or "candidate outside safe RuneLite click region"),
             "targetValidation": validation,
+            "inputBackend": backend_name,
+            "inputPathUsed": input_path,
         }
     if allowed_region and not (
         int(allowed_region.get("x", 0)) <= int(candidate.screen_point["x"]) <= int(allowed_region.get("x", 0)) + int(allowed_region.get("width", 0))
         and int(allowed_region.get("y", 0)) <= int(candidate.screen_point["y"]) <= int(allowed_region.get("y", 0)) + int(allowed_region.get("height", 0))
     ):
-        return {"status": "FAIL", "warning": "candidate outside allowed startup window"}
+        return {"status": "FAIL", "warning": "candidate outside allowed startup window", "inputBackend": backend_name, "inputPathUsed": input_path}
     effective_foreground_titles = ["RuneLite"] if allowed_foreground_titles is None else list(allowed_foreground_titles)
     start_position = backend.current_position()
     movement_region = startup_movement_region(allowed_region, start_position, max_padding_px=192, max_corridor_px=4096)
@@ -1616,12 +1632,12 @@ def click_candidate(
     )
     plan = controller.plan_mouse_movement(start, target, profile)
     if plan.validation_status == "FAIL":
-        return {"status": "FAIL", "warning": "; ".join(plan.warnings) or "movement plan invalid"}
+        return {"status": "FAIL", "warning": "; ".join(plan.warnings) or "movement plan invalid", "inputBackend": backend_name, "inputPathUsed": input_path}
     try:
         controller.move_and_click(plan, button="left")
     except Exception as error:  # noqa: BLE001
         trace = getattr(backend, "last_movement_trace", None)
-        backend_status = backend.status() if callable(getattr(backend, "status", None)) else {}
+        backend_status = backend_status_payload()
         serial_trace = dict_value(backend_status.get("lastCommandTrace"))
         timeout_classification = serial_trace.get("timeoutClassification")
         retry_policy = "retry_not_safe"
@@ -1636,11 +1652,26 @@ def click_candidate(
             "movementTrace": trace if isinstance(trace, dict) else None,
             "humanInput": controller.metrics(),
             "serialTrace": serial_trace or None,
+            "backendStatus": backend_status or None,
             "timeoutClassification": timeout_classification,
             "bootstrapRetryPolicy": retry_policy,
             "retryRequiresScreenRecheck": retry_policy == "retry_requires_screen_recheck",
+            "inputBackend": backend_name,
+            "inputPathUsed": input_path,
         }
-    return {"status": "PASS", "movementPlan": plan.to_dict(include_points=False), "humanInput": controller.metrics()}
+    backend_status = backend_status_payload()
+    serial_trace = dict_value(backend_status.get("lastCommandTrace"))
+    return {
+        "status": "PASS",
+        "movementPlan": plan.to_dict(include_points=False),
+        "humanInput": controller.metrics(),
+        "backendStatus": backend_status or None,
+        "serialTrace": serial_trace or None,
+        "inputBackend": backend_name,
+        "inputPathUsed": input_path,
+        "command": serial_trace.get("commandSent") or serial_trace.get("command"),
+        "arduinoAck": serial_trace.get("ack") or serial_trace.get("ackLine"),
+    }
 
 
 def allowed_region_for_startup_candidate(
@@ -1906,6 +1937,19 @@ def run_bootstrap(
             launcher_clicked=launcher_clicked,
             prefer_saved_account_play_now=bool(getattr(args, "prefer_saved_account_play_now", False)),
         )
+        repeated_candidate_clicks = sum(
+            1
+            for item in clicked
+            if str(item.get("name") or "") == candidate.name
+            and str(item.get("source") or "") == candidate.source
+        )
+        if repeated_candidate_clicks >= MAX_REPEAT_VISIBLE_BUTTON_CLICKS:
+            startup_stage = "visible_button_no_transition"
+            warning = f"{candidate.name} remained visible after {repeated_candidate_clicks} safe click attempts"
+            warnings.append(warning)
+            failures.append("visible_button_no_transition")
+            add_stage(stages, startup_stage, status="FAIL", reason=warning)
+            break
         last_selected_candidate = candidate
         allowed_titles = ["RuneLite"] if window_looks_like_runelite(window) else ["Jagex Launcher"] if launcher_automation_allowed else None
         foreground_titles_for_movement = allowed_titles

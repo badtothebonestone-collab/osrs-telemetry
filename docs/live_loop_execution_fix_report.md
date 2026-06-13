@@ -1483,3 +1483,54 @@ Only after that returns `loadedSceneVerified=true`, continue with:
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
 python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
 ```
+
+## Visible Play Button Recovery Fix
+
+Updated: 2026-06-13.
+
+Visible Play Button Recovery Audit:
+
+```text
+manual_login_required owner: liveness_recovery_core.py result classification
+visible screen classifier: run_runelite_bootstrap.py screenshot/window button candidates
+safe visible buttons: disconnected_ok, play_now, click_here_to_play, continue
+previous gap: after Start Game relaunch, recovery waited for loaded-scene proof and could stop at stale/login state without re-entering the safe visible-button click ladder.
+patched gate: post-relaunch disconnected/play/click-here surfaces now run the same canonical bootstrap recovery once before reporting failure.
+spam guard: repeated identical visible button clicks stop at visible_button_no_transition instead of max-budget looping.
+input path: HumanInputController -> ArduinoHIDBackend, recorded per click attempt.
+manual_login_required: only valid after visibleButtonScanAttempted=true and no safe visible recovery button exists, or credentials/account/2FA are required.
+```
+
+Latest recovery command:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3 --recovery-artifact-dir bot_runs\20260613_visible_button_recovery_rerun
+```
+
+Latest recovery result:
+
+```text
+status: unsafe
+blocker: visible_button_no_transition
+recoveryFailureClass: visible_button_no_transition
+loadedSceneVerified: false
+initial state: disconnected_dialog
+final state: disconnected_dialog
+final hot game state: LOGIN_SCREEN
+visibleButtonScanAttempted: true
+visibleButtonsFound: disconnected_ok
+target validation: PASS, inside RuneLite safe click region
+input path: HumanInputController/ArduinoHIDBackend
+Arduino evidence: OK MOUSE_UP acknowledgements recorded
+click attempts: 4 bounded disconnected_ok attempts across initial and post-relaunch recovery
+Start Game relaunch: attempted through jagex_launcher_runelite_quick_launch
+live bot loop run: not run
+reason: loadedSceneVerified=false; gameplay input remains blocked until a loaded scene is proven.
+recovery artifacts: bot_runs\20260613_visible_button_recovery_rerun
+```
+
+Next command:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3
+```

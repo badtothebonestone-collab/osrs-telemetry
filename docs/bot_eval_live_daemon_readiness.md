@@ -438,3 +438,44 @@ input_geometry_stale
 
 Do not start the live action loop until `--check-input-geometry --json` returns
 `inputGeometryPass=true`.
+
+## 2026-06-13 Update: Visible Button Recovery Before Manual Login
+
+Loaded-scene recovery now treats visible safe login/play/disconnect controls as
+mandatory recovery evidence before any manual-login blocker is reported.
+
+Current behavior:
+
+- `liveness_recovery_core.py` owns the loaded-scene state machine.
+- `run_runelite_bootstrap.py` owns visible button detection and guarded clicks.
+- Safe buttons are `disconnected_ok`, `play_now`, `click_here_to_play`, and `continue`.
+- A Start Game relaunch that lands on a visible safe surface now re-enters the
+  canonical visible-button ladder before failing.
+- Repeated identical visible-button clicks stop quickly with
+  `visible_button_no_transition`.
+- Recovery artifacts include visible button scan, target validation, input path,
+  and Arduino acknowledgement fields.
+
+Latest command:
+
+```powershell
+python telemetry-viewer\context_service.py --ensure-loaded-scene --daemon-url http://127.0.0.1:8890 --snapshot-url http://127.0.0.1:8893 --arduino-port COM6 --liveness-max-total-seconds 240 --liveness-max-attempts-per-state 3 --recovery-artifact-dir bot_runs\20260613_visible_button_recovery_rerun
+```
+
+Latest result:
+
+| Field | Result |
+| --- | --- |
+| recovery status | `unsafe` |
+| recovery blocker | `visible_button_no_transition` |
+| visible buttons found | `disconnected_ok` |
+| target validation | PASS, inside RuneLite safe click region |
+| input path | HumanInputController / ArduinoHIDBackend |
+| Arduino evidence | `OK MOUSE_UP` acknowledgements |
+| loaded scene verified | false |
+| final screen state | `disconnected_dialog` / `LOGIN_SCREEN` |
+| live gameplay actions | not sent |
+
+This is no longer a pre-recovery `manual_login_required` stop. The remaining
+blocker is that the visible disconnected OK button can be clicked safely, but
+the client does not transition into a loaded scene.

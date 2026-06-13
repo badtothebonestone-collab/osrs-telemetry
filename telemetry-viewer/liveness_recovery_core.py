@@ -32,6 +32,7 @@ RECOVERABLE_STATES = {
 }
 
 MANUAL_STATES = {"credential_required", "login_screen"}
+SAFE_VISIBLE_BUTTON_NAMES = {"disconnected_ok", "play_now", "click_here_to_play", "continue"}
 
 _LAST_SUCCESS: dict[str, Any] | None = None
 
@@ -451,13 +452,19 @@ def _compact_click_details(details: dict[str, Any]) -> dict[str, Any]:
     if not details:
         return {}
     pre_focus = _dict(details.get("preClickFocus"))
+    backend_status = _dict(details.get("backendStatus"))
+    serial_trace = _dict(details.get("serialTrace") or backend_status.get("lastCommandTrace"))
     return {
         "status": details.get("status"),
         "warning": details.get("warning"),
         "timeoutClassification": details.get("timeoutClassification"),
         "retryRequiresScreenRecheck": details.get("retryRequiresScreenRecheck"),
         "inputBackend": details.get("inputBackend") or details.get("backend"),
+        "inputPathUsed": details.get("inputPathUsed"),
         "command": details.get("command") or details.get("commandSent"),
+        "arduinoAck": details.get("arduinoAck"),
+        "serialTrace": serial_trace or None,
+        "humanInput": details.get("humanInput"),
         "targetWindowAtPoint": pre_focus.get("targetWindowAtPoint"),
         "foregroundTitle": pre_focus.get("foregroundTitle"),
         "focusMethod": pre_focus.get("focusMethod"),
@@ -473,6 +480,8 @@ def _compact_clicked_candidate(candidate: Any) -> dict[str, Any]:
         "screenPoint": item.get("screenPoint"),
         "targetPointLogical": item.get("targetPointLogical"),
         "targetPointPhysical": item.get("targetPointPhysical"),
+        "buttonBoundsLogical": item.get("buttonBoundsLogical"),
+        "buttonBoundsPhysical": item.get("buttonBoundsPhysical"),
         "targetValidationStatus": item.get("targetValidationStatus"),
         "targetInsideRuneLiteWindow": item.get("targetInsideRuneLiteWindow"),
         "targetInsideSafeClickRegion": item.get("targetInsideSafeClickRegion"),
@@ -509,6 +518,19 @@ def _bootstrap_action_from_recovery(
         if isinstance(item, dict)
     ]
     bootstrap_state = _dict(recovery.get("bootstrapState"))
+    button_candidates = [
+        _compact_clicked_candidate(item)
+        for item in _list(recovery.get("buttonCandidates"))
+        if isinstance(item, dict)
+    ]
+    visible_buttons = sorted(
+        {
+            str(item.get("name") or "")
+            for item in [*button_candidates, *clicked_details]
+            if str(item.get("name") or "") in SAFE_VISIBLE_BUTTON_NAMES
+        }
+    )
+    clicked_visible = [item for item in clicked_details if str(item.get("name") or "") in SAFE_VISIBLE_BUTTON_NAMES]
     action = {
         "action": "run_bootstrap_recovery",
         "state": state_name,
@@ -516,11 +538,12 @@ def _bootstrap_action_from_recovery(
         "loadedSceneVerified": recovery.get("loadedSceneVerified"),
         "startupStage": recovery.get("startupStage"),
         "preferSavedAccountPlayNow": bool(prefer_saved_account_play_now),
-        "buttonCandidates": [
-            _compact_clicked_candidate(item)
-            for item in _list(recovery.get("buttonCandidates"))
-            if isinstance(item, dict)
-        ],
+        "visibleButtonScanAttempted": True,
+        "visibleButtonsFound": visible_buttons,
+        "visibleSafeButtonFound": bool(visible_buttons),
+        "visibleSafeButtonClicked": bool(clicked_visible),
+        "visibleButtonClickDetails": clicked_visible,
+        "buttonCandidates": button_candidates,
         "clickedCandidates": [item.get("name") for item in clicked_details if item.get("name")],
         "clickedCandidateDetails": clicked_details,
         "bootstrapState": {
@@ -600,6 +623,14 @@ def _button_candidate_names_from_actions(actions_taken: list[dict[str, Any]] | N
     return names
 
 
+def _safe_visible_button_names_from_actions(actions_taken: list[dict[str, Any]] | None) -> set[str]:
+    return {name for name in _button_candidate_names_from_actions(actions_taken) if name in SAFE_VISIBLE_BUTTON_NAMES}
+
+
+def _safe_visible_clicked_from_actions(actions_taken: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return [item for item in _clicked_candidates_from_actions(actions_taken or []) if str(item.get("name") or "") in SAFE_VISIBLE_BUTTON_NAMES]
+
+
 def _recovery_action_metadata(
     *,
     status: str,
@@ -616,6 +647,8 @@ def _recovery_action_metadata(
         | _detected_button_names_from_state(final_state)
         | _button_candidate_names_from_actions(actions_taken)
     )
+    visible_buttons_found = sorted(name for name in detected_names if name in SAFE_VISIBLE_BUTTON_NAMES)
+    clicked_visible = _safe_visible_clicked_from_actions(actions_taken)
     recovery_actions: list[str] = []
     for action in actions_taken:
         item = _dict(action)
@@ -649,6 +682,12 @@ def _recovery_action_metadata(
         "playNowAttempted": "play_now" in clicked_set,
         "disconnectedOkAttempted": "disconnected_ok" in clicked_set,
         "clickHereToPlayAttempted": "click_here_to_play" in clicked_set,
+        "visibleButtonScanAttempted": bool(actions_taken),
+        "visibleButtonsFound": visible_buttons_found,
+        "visibleSafeButtonFound": bool(visible_buttons_found),
+        "visibleSafeButtonClicked": bool(clicked_visible),
+        "visibleButtonClickDetails": clicked_visible,
+        "visibleButtonClickBlocked": bool(visible_buttons_found and not clicked_visible),
         "launcherRecoveryAttempted": launcher_attempted,
         "waitForLoadedSceneAttempted": wait_attempted,
         "manualLoginRequiredOnlyAfterRecovery": bool(status == "manual_login_required" and actions_taken),
@@ -682,6 +721,9 @@ def classify_recovery_failure(
         | _detected_button_names_from_state(final_state)
         | _button_candidate_names_from_actions(actions)
     )
+    safe_detected_names = sorted(name for name in detected_names if name in SAFE_VISIBLE_BUTTON_NAMES)
+    safe_clicked = [item for item in clicked if str(item.get("name") or "") in SAFE_VISIBLE_BUTTON_NAMES]
+    safe_clicked_names = [str(item.get("name") or "") for item in safe_clicked if item.get("name")]
     proof = _dict(final_state.get("loadedSceneProof"))
     game_state = str(proof.get("gameState") or "").upper()
     object_total = _int(proof.get("worldModelObjectTotal"))
@@ -690,6 +732,8 @@ def classify_recovery_failure(
     evidence: list[str] = []
     if clicked_names:
         evidence.append("clicked=" + ",".join(clicked_names))
+    if safe_detected_names:
+        evidence.append("visibleButtons=" + ",".join(safe_detected_names))
     if game_state:
         evidence.append(f"gameState={game_state}")
     if object_total is not None:
@@ -701,22 +745,21 @@ def classify_recovery_failure(
     if loaded:
         failure_class = "none"
         reason = "loaded_scene_verified"
+    elif final_name == "credential_required":
+        failure_class = "credentials_required"
+        reason = "credential, account picker, or authenticator surface requires human action"
     elif (
         (initial_name == "saved_account_play_now" or final_name == "saved_account_play_now" or "play_now" in detected_names)
         and "play_now" not in clicked_names
     ):
         failure_class = "saved_account_play_now_not_attempted"
         reason = "saved-account Play Now was visible but was not attempted by the recovery ladder"
-    elif (
-        initial_name == "disconnected_dialog"
-        and final_name == "disconnected_dialog"
-        and ("disconnected_ok" in clicked_names or "play_now" in clicked_names)
-    ):
-        failure_class = "disconnected_loop"
-        reason = "safe recovery clicks were sent, but the client returned to the disconnected dialog"
-    elif "play_now" in clicked_names and final_name in {"saved_account_play_now", "login_screen"}:
-        failure_class = "play_now_no_transition"
-        reason = "saved-account Play Now was clicked, but no loading or logged-in scene followed"
+    elif safe_detected_names and not safe_clicked_names:
+        failure_class = "visible_button_found_not_clicked"
+        reason = "a safe visible recovery button was detected but no recovery click was sent"
+    elif safe_clicked_names and (final_name in {"disconnected_dialog", "login_screen", "saved_account_play_now", "click_here_to_play"} or game_state == "LOGIN_SCREEN"):
+        failure_class = "visible_button_no_transition"
+        reason = "safe visible recovery button click was sent, but no loaded-scene transition followed"
     elif final_name == "login_screen" and "play_now" not in clicked_names and "disconnected_ok" not in clicked_names:
         failure_class = "login_surface_no_saved_account"
         reason = "login surface is present without a safe saved-account or disconnected recovery target"
@@ -769,14 +812,23 @@ def build_recovery_state_machine(
         else:
             state_before = previous_state
         expected = click.get("expectedStateAfterClick")
+        click_details = _dict(click.get("clickDetails"))
         clicks.append(
             {
                 "attemptIndex": index,
                 "stateBefore": state_before,
+                "visibleButtonScanAttempted": True,
+                "visibleButtonsFound": [name] if name in SAFE_VISIBLE_BUTTON_NAMES else [],
                 "selectedRecoveryAction": name,
+                "selectedButton": name,
                 "screenPoint": click.get("screenPoint") or click.get("targetPointLogical"),
+                "targetPoint": click.get("targetPointPhysical") or click.get("screenPoint") or click.get("targetPointLogical"),
+                "targetRect": click.get("buttonBoundsPhysical") or click.get("buttonBoundsLogical"),
                 "targetValidationStatus": click.get("targetValidationStatus"),
                 "clickResult": click.get("clickResult"),
+                "inputPathUsed": click_details.get("inputPathUsed"),
+                "inputBackend": click_details.get("inputBackend"),
+                "arduinoCommandAck": click_details.get("arduinoAck"),
                 "expectedNextState": expected,
                 "stateAfter": _state_name(final_state) if index == len(clicked) - 1 else None,
                 "transitionSuccess": bool(index == len(clicked) - 1 and _dict(final_state.get("loadedSceneProof")).get("loadedSceneVerified")),
@@ -823,6 +875,15 @@ def build_recovery_state_machine(
         "clickAttempts": clicks,
         "relaunchAttempts": relaunch_attempts,
         "failureClassification": classification,
+        "visibleButtonScanAttempted": bool(actions),
+        "visibleButtonsFound": sorted(
+            (
+                _detected_button_names_from_state(initial_state)
+                | _detected_button_names_from_state(final_state)
+                | _safe_visible_button_names_from_actions(actions)
+            )
+            & SAFE_VISIBLE_BUTTON_NAMES
+        ),
         "transitionObserved": bool(
             (clicks or relaunch_attempts)
             and (
@@ -1285,6 +1346,7 @@ def ensure_loaded_scene(
             "disconnected_loop",
             "loading_timeout",
             "play_now_no_transition",
+            "visible_button_no_transition",
             "login_surface_no_saved_account",
             "logged_in_without_scene",
             "stale_hot_client",
@@ -1385,6 +1447,7 @@ def ensure_loaded_scene(
                     relaunch_info=relaunch_info,
                 )
             relaunch_poll_count = 0
+            post_relaunch_visible_recovery_attempted = False
             relaunch_deadline = (float(started_ms) / 1000.0) + max(1.0, float(max_total_ms) / 1000.0)
             while monotonic_func() < relaunch_deadline:
                 sleep_func(2.0)
@@ -1400,6 +1463,70 @@ def ensure_loaded_scene(
                 )
                 warnings.extend(current_warnings)
                 final_state = current_state
+                post_relaunch_state = _state_name(final_state)
+                if (
+                    not final_state.get("loadedSceneVerified")
+                    and not post_relaunch_visible_recovery_attempted
+                    and post_relaunch_state in {"disconnected_dialog", "saved_account_play_now", "click_here_to_play"}
+                ):
+                    post_relaunch_visible_recovery_attempted = True
+                    attempts["post_relaunch_visible_button_recovery"] = attempts.get("post_relaunch_visible_button_recovery", 0) + 1
+                    remaining_ms = max(1000, int((relaunch_deadline - monotonic_func()) * 1000.0))
+                    recovery_args = _bootstrap_args(
+                        state=final_state,
+                        snapshot_url=snapshot_url,
+                        daemon_url=daemon_url,
+                        backend=backend,
+                        arduino_port=arduino_port,
+                        max_total_ms=remaining_ms,
+                        max_attempts_per_state=max(1, max_attempts_per_state),
+                        allow_jagex_launcher=allow_jagex_launcher,
+                    )
+                    setattr(recovery_args, "prefer_saved_account_play_now", post_relaunch_state == "saved_account_play_now")
+                    post_relaunch_recovery = run_bootstrap_recovery_func(recovery_args)
+                    actions.append(
+                        _bootstrap_action_from_recovery(
+                            post_relaunch_recovery,
+                            state_name=f"post_relaunch_{post_relaunch_state}",
+                            prefer_saved_account_play_now=bool(getattr(recovery_args, "prefer_saved_account_play_now", False)),
+                            retry_reason="Start Game relaunch produced a visible safe recovery surface",
+                        )
+                    )
+                    if "startup input backend failed" in [str(item) for item in _list(post_relaunch_recovery.get("failures"))]:
+                        return _result(
+                            status="arduino_unavailable",
+                            initial_state=initial_state,
+                            final_state=final_state,
+                            actions_taken=actions,
+                            started_ms=started_ms,
+                            monotonic_func=monotonic_func,
+                            attempts=attempts,
+                            blocker="arduino_unavailable",
+                            next_recommendation="check Arduino COM port/firmware, then retry",
+                            warnings=[*warnings, *[str(item) for item in _list(post_relaunch_recovery.get("warnings"))]],
+                            relaunch_info=relaunch_info,
+                        )
+                    final_state, final_warnings = _inspect_state(
+                        snapshot_url=snapshot_url,
+                        daemon_url=daemon_url,
+                        fetch_snapshot_func=fetch_snapshot_func,
+                        fetch_daemon_status_func=fetch_daemon_status_func,
+                        window_finder=window_finder,
+                        button_candidates_func=button_candidates_func,
+                        timeout=1.0,
+                    )
+                    warnings.extend(final_warnings)
+                    post_relaunch_classification = classify_recovery_failure(
+                        initial_state=initial_state,
+                        final_state=final_state,
+                        actions_taken=actions,
+                    )
+                    if post_relaunch_classification.get("failureClass") in {
+                        "visible_button_no_transition",
+                        "visible_button_found_not_clicked",
+                        "saved_account_play_now_not_attempted",
+                    }:
+                        break
                 if final_state.get("loadedSceneVerified") and not _dict(final_state.get("daemon")).get("fresh"):
                     attempts["daemon_rebind_after_relaunch"] = attempts.get("daemon_rebind_after_relaunch", 0) + 1
                     start = start_daemon_func(execute=True)
@@ -1446,6 +1573,18 @@ def ensure_loaded_scene(
                     break
             if not relaunch_info.get("loadedSceneAfterRelaunch"):
                 blocker_after_relaunch = _relaunch_failure_blocker(final_state)
+                classification_after_relaunch = classify_recovery_failure(
+                    initial_state=initial_state,
+                    final_state=final_state,
+                    actions_taken=actions,
+                )
+                if classification_after_relaunch.get("failureClass") in {
+                    "visible_button_found_not_clicked",
+                    "visible_button_no_transition",
+                    "saved_account_play_now_not_attempted",
+                    "credentials_required",
+                }:
+                    blocker_after_relaunch = str(classification_after_relaunch.get("failureClass"))
                 proof_after_relaunch = _dict(final_state.get("loadedSceneProof"))
                 state_after_relaunch = _state_name(final_state)
                 game_state_after_relaunch = str(proof_after_relaunch.get("gameState") or "").upper()
@@ -1512,7 +1651,7 @@ def ensure_loaded_scene(
         blocker = "plugin_endpoint_down"
     elif final_state.get("manualLoginRequired"):
         status = "manual_login_required"
-        blocker = "manual_login_required"
+        blocker = "manual_login_required_after_recovery" if actions else "manual_login_required"
     elif final_state.get("unknownScreen"):
         status = "unknown_screen"
         blocker = "unknown_screen"
@@ -1528,7 +1667,11 @@ def ensure_loaded_scene(
         monotonic_func=monotonic_func,
         attempts=attempts,
         blocker=blocker,
-        manual_action_required="Manual RuneLite recovery required." if status == "manual_login_required" else None,
+        manual_action_required=(
+            "Manual RuneLite recovery required after the safe visible-button scan found no usable recovery button."
+            if status == "manual_login_required"
+            else None
+        ),
         next_recommendation=final_state.get("nextRecommendation"),
         warnings=warnings,
     )

@@ -207,11 +207,13 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
 
         self.assertEqual(len(bootstrap_calls), 1)
         self.assertEqual(payload["status"], "manual_login_required")
-        self.assertEqual(payload["blocker"], "manual_login_required")
+        self.assertEqual(payload["blocker"], "manual_login_required_after_recovery")
         self.assertEqual(payload["recoveryFailureClass"], "login_surface_no_saved_account")
         self.assertTrue(payload["recoveryAttempted"])
         self.assertTrue(payload["autologinRecoveryAttempted"])
         self.assertTrue(payload["manualLoginRequiredOnlyAfterRecovery"])
+        self.assertTrue(payload["visibleButtonScanAttempted"])
+        self.assertEqual(payload["visibleButtonsFound"], [])
         self.assertEqual(payload["recoveryActionsTried"], ["run_bootstrap_recovery"])
         self.assertEqual(payload["recoveryResult"]["failureClass"], "login_surface_no_saved_account")
         self.assertEqual(payload["finalLoginSurface"], "login_screen")
@@ -388,11 +390,12 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         )
 
         self.assertEqual(payload["status"], "unsafe")
-        self.assertEqual(payload["blocker"], "disconnected_loop")
-        self.assertEqual(payload["recoveryFailureClass"], "disconnected_loop")
+        self.assertEqual(payload["blocker"], "visible_button_no_transition")
+        self.assertEqual(payload["recoveryFailureClass"], "visible_button_no_transition")
         machine = payload["recoveryStateMachine"]
-        self.assertEqual(machine["failureClassification"]["failureClass"], "disconnected_loop")
+        self.assertEqual(machine["failureClassification"]["failureClass"], "visible_button_no_transition")
         self.assertEqual([item["selectedRecoveryAction"] for item in machine["clickAttempts"]], ["disconnected_ok", "play_now"])
+        self.assertTrue(payload["visibleSafeButtonClicked"])
 
     def test_disconnected_loop_triggers_start_game_relaunch(self):
         snapshots = [snapshot("LOGIN_SCREEN", object_total=0, hot_age_ms=5000), snapshot("LOGIN_SCREEN", object_total=0, hot_age_ms=5000), loaded_snapshot()]
@@ -459,7 +462,7 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         )
 
         self.assertEqual(payload["status"], "recovered_loaded_scene")
-        self.assertTrue(payload["disconnectedLoopDetected"])
+        self.assertFalse(payload["disconnectedLoopDetected"])
         self.assertTrue(payload["relaunchRequired"])
         self.assertTrue(payload["relaunchAttempted"])
         self.assertTrue(payload["loadedSceneAfterRelaunch"])
@@ -601,13 +604,15 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         self.assertEqual(payload["liveStartCommand"], "")
         self.assertIn("configure Jagex Launcher", payload["launchModeWarnings"])
 
-    def test_stale_login_screen_after_relaunch_fails(self):
-        times = iter([0.0, 0.0, 0.1, 2.0, 2.0])
+    def test_visible_button_after_relaunch_is_clicked_before_failure(self):
+        times = iter([0.0] * 20 + [2.0])
+        bootstrap_calls = []
 
         def buttons(_payload, _window, **_kwargs):
             return [candidate("disconnected_ok", "disconnected_dialog")], []
 
-        def run_bootstrap(_args):
+        def run_bootstrap(args):
+            bootstrap_calls.append(args)
             return {
                 "schema": bootstrap.SCHEMA,
                 "status": "WARN",
@@ -633,7 +638,10 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         )
 
         self.assertEqual(payload["status"], "unsafe")
-        self.assertEqual(payload["blocker"], "stale_login_screen_after_relaunch")
+        self.assertEqual(payload["blocker"], "visible_button_no_transition")
+        self.assertEqual(len(bootstrap_calls), 2)
+        self.assertTrue(payload["visibleSafeButtonClicked"])
+        self.assertEqual(payload["attempts"]["post_relaunch_visible_button_recovery"], 1)
         self.assertTrue(payload["relaunchAttempted"])
         self.assertFalse(payload["loadedSceneAfterRelaunch"])
 
@@ -670,8 +678,9 @@ class LivenessRecoveryCoreTest(unittest.TestCase):
         )
 
         self.assertEqual(payload["status"], "unsafe")
-        self.assertEqual(payload["blocker"], "play_now_no_transition")
-        self.assertEqual(payload["recoveryFailureClass"], "play_now_no_transition")
+        self.assertEqual(payload["blocker"], "visible_button_no_transition")
+        self.assertEqual(payload["recoveryFailureClass"], "visible_button_no_transition")
+        self.assertTrue(payload["visibleSafeButtonClicked"])
 
     def test_login_surface_no_saved_account_triggers_start_game_relaunch(self):
         launched = []
