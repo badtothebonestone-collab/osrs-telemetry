@@ -1321,7 +1321,7 @@ If Play Now is visible but not attempted, the result is saved_account_play_now_n
 Commit / push:
 
 ```text
-commit: 7a1dbd3 enforce canonical auto-login recovery before manual login blocker
+commit: 358ced27ab7a0ec51f91f68eaecc55d6675ce063 enforce canonical auto-login recovery before manual login blocker
 push result: pending at report write time
 remaining unstaged generated JSON: capability_registry.json, project_knowledge.json, recordings_index.json, script_api_map.json
 ```
