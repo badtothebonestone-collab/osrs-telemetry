@@ -31,6 +31,7 @@ from input_control.executor import (
     _new_loop_summary,
     _no_click_safety_skip_observed,
     _proposal_has_actionable_safe_target,
+    _merge_plugin_snapshot_into_status,
     _proposal_reacquire_budget_type,
     _resource_progress_during_view_recovery_observation,
     _clear_suppression_on_progress_if_needed,
@@ -566,6 +567,36 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(status["daemonStatusFallback"]["source"], "plugin_snapshot")
         self.assertIn("using plugin snapshot", " ".join(status["warnings"]))
 
+    def test_plugin_snapshot_merge_marks_post_recovery_player_position_hydrated(self):
+        snapshot = {
+            "schema": "plugin_snapshot_response.v1",
+            "latestTick": 778,
+            "latestExportSeq": 43,
+            "freshness": {"maxCacheAgeMillis": 20},
+            "payloads": {
+                "baseline": {
+                    "player": {
+                        "worldX": 3206,
+                        "worldY": 3229,
+                        "plane": 1,
+                    }
+                }
+            },
+        }
+
+        status = _merge_plugin_snapshot_into_status({"schema": "live_status.v1"}, snapshot)
+
+        self.assertEqual(status["playerWorldPosition"], {"worldX": 3206, "worldY": 3229, "plane": 1})
+        self.assertEqual(status["brain"]["playerWorldPosition"], {"worldX": 3206, "worldY": 3229, "plane": 1})
+        hydration = status["postRecoveryContextHydration"]
+        self.assertTrue(hydration["postRecoveryContextHydrated"])
+        self.assertEqual(hydration["hydrationSource"], "plugin_snapshot_baseline")
+        self.assertEqual(hydration["freshSnapshotTick"], 778)
+        self.assertEqual(hydration["freshExportSeq"], 43)
+        self.assertEqual(hydration["freshPlayerWorldPosition"], {"worldX": 3206, "worldY": 3229, "plane": 1})
+        self.assertEqual(hydration["freshPlane"], 1)
+        self.assertEqual(hydration["hydrationBlockers"], [])
+
     def test_plugin_snapshot_full_inventory_blocks_unproven_ladder_transition(self):
         snapshot = {
             "schema": "plugin_snapshot_response.v1",
@@ -1059,6 +1090,83 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(proposal.target_tile, {"worldX": 3209, "worldY": 3216, "plane": 0})
         self.assertEqual(proposal.target_explanation["routeGuideName"], "woodcutting_area_to_bank")
         self.assertEqual(enriched["brain"]["inventoryContext"]["freeSlots"], 0)
+
+    def test_context_action_fallback_does_not_mask_fresh_plane1_reentry(self):
+        current = ActionProposal(
+            status="FAIL",
+            proposed_action="wait_for_context",
+            target_kind="none",
+            reason="no_executable_action",
+            missing_capabilities=["live.action_context"],
+        )
+        context_response = {
+            "schema": "context_response.v1",
+            "status": "WARN",
+            "latestTick": 779,
+            "knowledgeCurrentDebugContext": {
+                "data": {
+                    "actionProposal": {
+                        "schema": "action_proposal.v1",
+                        "status": "WARN",
+                        "proposedAction": "wait_for_context",
+                        "targetKind": "none",
+                        "reason": "no_executable_action",
+                        "confidence": 0.2,
+                    }
+                }
+            },
+        }
+        live_status = {
+            "schema": "context_status.v1",
+            "latestTick": 779,
+            "playerWorldPosition": {"worldX": 3206, "worldY": 3229, "plane": 1},
+            "brain": {
+                "genericTaskState": {},
+                "inventoryContext": {"inventoryFull": False, "freeSlots": 15},
+                "bankUiContext": {"bankOpen": False, "bankReadable": False},
+                "bankOperationContext": {"operationNeeded": False, "bankingComplete": False},
+                "intentOverlayContext": {"selectedMarker": None, "markers": []},
+            },
+            "serviceRouteObjectCensus": {
+                "topRouteObjects": [
+                    {
+                        "name": "Staircase",
+                        "objectId": 16672,
+                        "worldLocation": {"worldX": 3204, "worldY": 3229, "plane": 1},
+                        "candidate": {
+                            "targetType": "sceneObject",
+                            "classId": "route_transition",
+                            "name": "Staircase",
+                            "id": 16672,
+                            "rawId": 16672,
+                            "worldX": 3204,
+                            "worldY": 3229,
+                            "plane": 1,
+                            "aimPoint": {"x": 191, "y": 146},
+                            "geometryAvailable": True,
+                        },
+                    }
+                ]
+            },
+        }
+
+        with patch("input_control.executor.fetch_action_context", return_value=context_response):
+            enriched, proposal, fallback = _maybe_context_action_proposal(
+                "http://daemon",
+                Namespace(task="woodcutting_loop"),
+                live_status,
+                current,
+                timeout=0.01,
+            )
+
+        self.assertEqual(fallback["status"], "WARN")
+        self.assertEqual(fallback["reason"], "context_action_proposal_rejected_non_executable")
+        self.assertEqual(fallback["freshProposalAction"], "interact_service_route_object")
+        self.assertEqual(proposal.proposed_action, "interact_service_route_object")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.reason, "route_guide_plane1_recovery_interaction")
+        self.assertEqual(proposal.target_explanation["routeGuideReentryCandidate"], "plane1_recovery_interaction")
+        self.assertEqual(enriched["latestTick"], 779)
 
     def test_context_action_fallback_rejects_fresh_tree_proposal_when_inventory_full(self):
         current = ActionProposal(

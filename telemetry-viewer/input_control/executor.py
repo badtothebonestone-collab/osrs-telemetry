@@ -2065,7 +2065,33 @@ def _merge_plugin_snapshot_into_status(status: dict[str, Any], snapshot: dict[st
         world_tile = _dict(player_context.get("worldTile"))
         if world_tile:
             enriched["playerLocation"] = dict(world_tile)
+            enriched["playerWorldPosition"] = dict(world_tile)
+            enriched["playerWorldTile"] = dict(world_tile)
             enriched["playerLocationSource"] = "plugin_snapshot_baseline"
+            brain["playerLocation"] = dict(world_tile)
+            brain["playerWorldPosition"] = dict(world_tile)
+            brain["playerWorldTile"] = dict(world_tile)
+            export_seq = snapshot.get("latestExportSeq")
+            if export_seq is None:
+                export_seq = snapshot.get("latestSequence")
+            hydration = dict(enriched.get("postRecoveryContextHydration")) if isinstance(enriched.get("postRecoveryContextHydration"), dict) else {}
+            hydration.update(
+                {
+                    "schema": "post_recovery_context_hydration.v1",
+                    "postRecoveryContextHydrated": True,
+                    "hydrationAttemptedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "hydrationSource": "plugin_snapshot_baseline",
+                    "freshSnapshotTick": snapshot_tick,
+                    "freshExportSeq": export_seq,
+                    "freshPlayerWorldPosition": dict(world_tile),
+                    "freshPlane": world_tile.get("plane"),
+                    "freshArea": enriched.get("currentArea"),
+                    "hydrationBlockers": [],
+                    "hydrationWarnings": [],
+                }
+            )
+            enriched["postRecoveryContextHydration"] = hydration
+            brain["postRecoveryContextHydration"] = hydration
     activity_context = _plugin_snapshot_activity_context(snapshot)
     if activity_context:
         brain["activityContext"] = activity_context
@@ -2161,6 +2187,24 @@ def _context_navigation_proposal_is_stale(proposal: ActionProposal | None) -> bo
     if age_ms is not None and age_ms > 10_000:
         return True
     return False
+
+
+def _route_reentry_proposal_has_specific_evidence(proposal: ActionProposal | None) -> bool:
+    if proposal is None:
+        return False
+    explanation = proposal.target_explanation if isinstance(proposal.target_explanation, dict) else {}
+    if explanation.get("routeGuideReentryAttempted") is True:
+        return True
+    reason = str(proposal.reason or "").strip()
+    return reason in {
+        "route_guide_plane1_recovery_interaction",
+        "plane1_recovery_live_target_missing",
+        "plane1_recovery_menu_missing",
+        "plane1_recovery_postcondition_failed",
+        "route_guide_no_same_plane_reentry",
+        "route_guide_reentry_unavailable",
+        "post_recovery_context_unavailable",
+    }
 
 
 def _status_without_context_action_proposal(status: dict[str, Any]) -> dict[str, Any]:
@@ -2271,6 +2315,28 @@ def _maybe_context_action_proposal(
                 )
             )
             return enriched_status, fresh_status_proposal, fallback
+        if _route_reentry_proposal_has_specific_evidence(fresh_status_proposal) and not _route_reentry_proposal_has_specific_evidence(context_proposal):
+            fallback.update(
+                {
+                    "status": "WARN",
+                    "reason": "context_action_proposal_rejected_missing_route_reentry",
+                    "contextStatus": context_response.get("status"),
+                    "contextProposalAction": context_proposal.proposed_action,
+                    "contextProposalExecutable": False,
+                    "freshProposalAction": fresh_status_proposal.proposed_action,
+                    "freshProposalReason": fresh_status_proposal.reason,
+                    "freshProposalExecutable": bool(fresh_status_proposal.executable),
+                }
+            )
+            fresh_status_proposal.target_explanation = fresh_status_proposal.target_explanation or {}
+            fresh_status_proposal.target_explanation["contextActionFallback"] = fallback
+            fresh_status_proposal.warnings = list(
+                dict.fromkeys(
+                    fresh_status_proposal.warnings
+                    + ["non-executable context action fallback rejected; using fresh route-guide reentry evidence"]
+                )
+            )
+            return enriched_status, fresh_status_proposal, fallback
     if _context_navigation_proposal_is_stale(context_proposal):
         fresh_status = _status_without_context_action_proposal(enriched_status)
         fresh_status_proposal = build_action_proposal(fresh_status)
@@ -2345,7 +2411,7 @@ def _fetch_status_or_action_context(
             snapshot = fetch_plugin_snapshot(
                 str(getattr(options, "snapshot_url", "http://127.0.0.1:8893")),
                 timeout=min(max(timeout, 0.2), 1.0),
-                extra_needs=["inventory", "activity", "projection"],
+                extra_needs=["baseline", "inventory", "activity", "projection"],
             )
         except Exception:
             return payload
@@ -2401,7 +2467,7 @@ def _fetch_status_or_action_context(
             snapshot = fetch_plugin_snapshot(
                 str(getattr(options, "snapshot_url", "http://127.0.0.1:8893")),
                 timeout=min(max(timeout, 0.2), 1.0),
-                extra_needs=["inventory", "activity", "projection"],
+                extra_needs=["baseline", "inventory", "activity", "projection"],
             )
             enriched = _merge_plugin_snapshot_into_status(
                 {

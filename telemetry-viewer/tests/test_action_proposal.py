@@ -2516,6 +2516,95 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.actionability, "ready")
         self.assertIsNotNone(proposal.suggested_click_point)
 
+    def test_post_recovery_position_without_phase_uses_plane1_recovery_interaction(self):
+        status = status_for(
+            phase=None,
+            active_intent=None,
+            active_target={"targetName": "", "classId": "none"},
+            bank_ui={"bankOpen": False, "bankReadable": False},
+            bank_operation={"operationNeeded": False, "bankingComplete": False, "resourceItemsHeld": None},
+            overlay={"selectedMarker": None, "markers": []},
+            latest_tick=777,
+        )
+        status["brain"]["genericTaskState"].pop("phase", None)
+        status["brain"]["genericTaskState"].pop("activeIntent", None)
+        status["brain"]["genericTaskState"].pop("activeIntentTarget", None)
+        status["playerWorldPosition"] = {"worldX": 3206, "worldY": 3229, "plane": 1}
+        status["postRecoveryContextHydration"] = {
+            "schema": "post_recovery_context_hydration.v1",
+            "postRecoveryContextHydrated": True,
+            "hydrationSource": "plugin_snapshot_baseline",
+            "freshSnapshotTick": 777,
+            "freshExportSeq": 42,
+            "freshPlayerWorldPosition": {"worldX": 3206, "worldY": 3229, "plane": 1},
+            "freshPlane": 1,
+        }
+        status["serviceRouteObjectCensus"] = {
+            "topRouteObjects": [
+                {
+                    "name": "Staircase",
+                    "objectId": 16672,
+                    "worldLocation": {"worldX": 3204, "worldY": 3229, "plane": 1},
+                    "source": "serviceRouteObjectCensus",
+                    "candidate": {
+                        "targetType": "sceneObject",
+                        "classId": "route_transition",
+                        "name": "Staircase",
+                        "id": 16672,
+                        "rawId": 16672,
+                        "worldX": 3204,
+                        "worldY": 3229,
+                        "plane": 1,
+                        "aimPoint": {"x": 191, "y": 146},
+                        "geometryAvailable": True,
+                    },
+                }
+            ]
+        }
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "interact_service_route_object")
+        self.assertEqual(proposal.reason, "route_guide_plane1_recovery_interaction")
+        self.assertTrue(proposal.executable)
+        self.assertEqual(proposal.target_explanation["objectId"], 16672)
+        self.assertEqual(proposal.target_explanation["world"], {"worldX": 3204, "worldY": 3229, "plane": 1})
+        self.assertTrue(proposal.target_explanation["postRecoveryContextHydrated"])
+        self.assertEqual(proposal.target_explanation["hydrationSource"], "plugin_snapshot_baseline")
+        self.assertEqual(proposal.target_explanation["freshSnapshotTick"], 777)
+        self.assertEqual(proposal.target_explanation["freshExportSeq"], 42)
+        self.assertEqual(
+            proposal.target_explanation["freshPlayerWorldPosition"],
+            {"worldX": 3206, "worldY": 3229, "plane": 1},
+        )
+        self.assertEqual(proposal.target_explanation["routeGuideReentryCandidate"], "plane1_recovery_interaction")
+
+    def test_post_recovery_plane1_without_live_target_reports_specific_blocker(self):
+        status = status_for(
+            phase=None,
+            active_intent=None,
+            active_target={"targetName": "", "classId": "none"},
+            bank_ui={"bankOpen": False, "bankReadable": False},
+            bank_operation={"operationNeeded": False, "bankingComplete": False, "resourceItemsHeld": None},
+            overlay={"selectedMarker": None, "markers": []},
+            latest_tick=778,
+        )
+        status["brain"]["genericTaskState"].pop("phase", None)
+        status["brain"]["genericTaskState"].pop("activeIntent", None)
+        status["brain"]["genericTaskState"].pop("activeIntentTarget", None)
+        status["playerWorldPosition"] = {"worldX": 3206, "worldY": 3229, "plane": 1}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.reason, "plane1_recovery_live_target_missing")
+        self.assertFalse(proposal.executable)
+        self.assertEqual(proposal.target_kind, "service_route_object")
+        self.assertEqual(proposal.target_explanation["routeGuideName"], "Bank_to_Woodcutting_area")
+        self.assertEqual(proposal.target_explanation["recoveryCandidateType"], "plane1_recovery_interaction")
+        self.assertEqual(proposal.target_explanation["blocker"], "plane1_recovery_live_target_missing")
+        self.assertTrue(proposal.target_explanation["routeGuideReentryAttempted"])
+
     def test_wrong_floor_without_plane1_recovery_still_reports_reentry_blocker(self):
         status = status_for(
             phase="return_to_resource",

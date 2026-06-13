@@ -3446,6 +3446,56 @@ def _route_reentry_action_for_route(route_name: str | None) -> str:
     return "return_to_resource_area" if str(route_name or "") == "Bank_to_Woodcutting_area" else "navigate_to_service"
 
 
+def _apply_post_recovery_context_fields(
+    target: dict[str, Any],
+    *,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+    player_tile: dict[str, Any] | None,
+    reentry: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(target, dict):
+        return target
+    hydration = _dict(status.get("postRecoveryContextHydration"))
+    if not hydration:
+        hydration = _dict(brain.get("postRecoveryContextHydration"))
+    route_candidate = reentry.get("recoveryCandidateType")
+    fields = {
+        "postRecoveryContextHydrated": bool(
+            hydration.get("postRecoveryContextHydrated")
+            or hydration.get("hydrated")
+            or player_tile
+        ),
+        "hydrationAttemptedAt": hydration.get("hydrationAttemptedAt"),
+        "hydrationSource": hydration.get("hydrationSource") or "live_player_position_route_guide_reentry",
+        "freshSnapshotTick": _first_present(
+            hydration.get("freshSnapshotTick"),
+            status.get("latestTick"),
+            brain.get("latestTick"),
+        ),
+        "freshExportSeq": _first_present(
+            hydration.get("freshExportSeq"),
+            status.get("latestExportSeq"),
+            brain.get("latestExportSeq"),
+        ),
+        "freshPlayerWorldPosition": hydration.get("freshPlayerWorldPosition") or player_tile,
+        "freshPlane": _first_present(
+            hydration.get("freshPlane"),
+            _dict(player_tile).get("plane"),
+        ),
+        "freshArea": _first_present(hydration.get("freshArea"), status.get("currentArea"), brain.get("currentArea")),
+        "routeGuideReentryStatus": reentry.get("status"),
+        "routeGuideReentryName": reentry.get("routeGuideName"),
+        "routeGuideReentryCandidate": route_candidate,
+        "hydrationBlockers": _list(hydration.get("hydrationBlockers")),
+        "hydrationWarnings": _list(hydration.get("hydrationWarnings")),
+    }
+    for key, value in fields.items():
+        if value not in (None, {}, []):
+            target[key] = value
+    return target
+
+
 def _route_reentry_path_target(reentry: dict[str, Any]) -> dict[str, Any]:
     step = _dict(reentry.get("nextRecoveryStep"))
     point = _normalise_tile(step.get("world"))
@@ -3627,7 +3677,7 @@ def _wrong_floor_route_reentry_proposal(
         or phase in {"needs_more_context", "route_reentry_needed", "route_transition_pending"}
         or active_intent in {"observe", "return_to_resource_area", "navigate_to_resource_area", "route_to_service", "needs_service"}
     )
-    if not routeish or plane in {0, 2}:
+    if plane in {0, 2}:
         return None
 
     attempts: list[dict[str, Any]] = []
@@ -3653,12 +3703,28 @@ def _wrong_floor_route_reentry_proposal(
     selected = min(pass_attempts or attempts, key=_reentry_sort_distance)
     route_name = str(selected.get("routeGuideName") or "")
     recovery_type = str(selected.get("recoveryCandidateType") or "")
+    if not routeish and not (selected.get("status") == "PASS" and "interaction" in recovery_type):
+        return None
     if selected.get("status") == "PASS" and "interaction" in recovery_type:
         target = _route_reentry_interaction_target(selected)
         if target:
+            target = _apply_post_recovery_context_fields(
+                target,
+                status=status,
+                brain=brain,
+                player_tile=player_tile,
+                reentry=selected,
+            )
             live_target = _live_route_object_for_guide_interaction(status, brain, _dict(selected.get("nextRecoveryStep")))
             if live_target:
                 target = _merge_live_route_object_into_guide_target(target, live_target)
+                target = _apply_post_recovery_context_fields(
+                    target,
+                    status=status,
+                    brain=brain,
+                    player_tile=player_tile,
+                    reentry=selected,
+                )
                 return _proposal(
                     "interact_service_route_object",
                     target_kind="service_route_object",
@@ -3673,11 +3739,18 @@ def _wrong_floor_route_reentry_proposal(
                     status=status,
                     brain=brain,
                 )
+            missing_reason = "plane1_recovery_live_target_missing" if recovery_type == "plane1_recovery_interaction" else "route_interaction_live_target_missing"
+            target["blocker"] = missing_reason
+            target["actionability"] = f"blocked_{missing_reason}"
+            validation = _dict(target.get("routeCandidateValidation"))
+            validation["status"] = "WARN"
+            validation["classification"] = missing_reason
+            target["routeCandidateValidation"] = validation
             return _proposal(
                 "wait_for_context",
                 target_kind="service_route_object",
                 target=target,
-                reason="route_interaction_live_target_missing",
+                reason=missing_reason,
                 confidence=0.58,
                 warnings=["same-plane route guide interaction exists, but live target geometry must be reacquired before clicking"],
                 missing=["route.interaction.liveTarget"],
@@ -3692,6 +3765,13 @@ def _wrong_floor_route_reentry_proposal(
     if selected.get("status") == "PASS":
         target = _route_reentry_path_target(selected)
         if target:
+            target = _apply_post_recovery_context_fields(
+                target,
+                status=status,
+                brain=brain,
+                player_tile=player_tile,
+                reentry=selected,
+            )
             return _proposal(
                 _route_reentry_action_for_route(route_name),
                 target_kind="path_tile",
@@ -3709,6 +3789,13 @@ def _wrong_floor_route_reentry_proposal(
 
     blocker = str(selected.get("blocker") or "route_guide_no_same_plane_reentry")
     target = _route_reentry_blocker_target(selected, route_name)
+    target = _apply_post_recovery_context_fields(
+        target,
+        status=status,
+        brain=brain,
+        player_tile=player_tile,
+        reentry=selected,
+    )
     warnings = ["current player floor is not represented by a demonstrated same-plane route guide step"]
     if selected.get("likelyReason"):
         warnings.append(str(selected.get("likelyReason")))

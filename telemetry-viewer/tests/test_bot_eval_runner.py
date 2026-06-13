@@ -1115,6 +1115,48 @@ class BotEvalRunnerTest(unittest.TestCase):
             for key in ("manifest", "readiness", "decisions", "candidates", "actions", "observations", "postconditions", "summary", "executorPayload"):
                 self.assertTrue(Path(artifacts[key]).exists(), key)
 
+    def test_candidate_trace_exposes_post_recovery_reentry_fields(self):
+        payload = {
+            "schema": "input_control_execution_loop_result.v1",
+            "actionResults": [
+                {
+                    "status": "FAIL",
+                    "proposedAction": "wait_for_context",
+                    "executed": False,
+                    "proposal": {
+                        "proposedAction": "wait_for_context",
+                        "targetKind": "service_route_object",
+                        "reason": "plane1_recovery_live_target_missing",
+                        "targetName": "Staircase",
+                        "targetExplanation": {
+                            "routeGuideReentryAttempted": True,
+                            "routeGuideReentryStatus": "PASS",
+                            "routeGuideReentryName": "Bank_to_Woodcutting_area",
+                            "routeGuideReentryCandidate": "plane1_recovery_interaction",
+                            "postRecoveryContextHydrated": True,
+                            "hydrationSource": "plugin_snapshot_baseline",
+                            "freshSnapshotTick": 779,
+                            "freshExportSeq": 43,
+                            "freshPlayerWorldPosition": {"worldX": 3206, "worldY": 3229, "plane": 1},
+                            "freshPlane": 1,
+                            "hydrationBlockers": [],
+                            "hydrationWarnings": [],
+                        },
+                    },
+                    "observedResult": {"observedResult": "plane1_recovery_live_target_missing"},
+                }
+            ],
+        }
+
+        _observations, _decisions, candidates, _actions, _postconditions = bot_eval_runner._trace_records_from_executor_payload(payload)
+
+        self.assertEqual(candidates[0]["reason"], "plane1_recovery_live_target_missing")
+        self.assertTrue(candidates[0]["routeGuideReentryAttempted"])
+        self.assertEqual(candidates[0]["routeGuideReentryCandidate"], "plane1_recovery_interaction")
+        self.assertTrue(candidates[0]["postRecoveryContextHydrated"])
+        self.assertEqual(candidates[0]["hydrationSource"], "plugin_snapshot_baseline")
+        self.assertEqual(candidates[0]["freshPlayerWorldPosition"], {"worldX": 3206, "worldY": 3229, "plane": 1})
+
     def test_live_action_no_executable_action_is_hard_blocker_trace(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -953,3 +953,154 @@ test_project_knowledge.py: PASS, 7 tests
 telemetry_ui.py --check: PASS
 update_project_knowledge.py --check: PASS
 ```
+
+## 24. Post-Recovery Route Context Rehydration Diagnosis
+
+Updated: 2026-06-13.
+
+Patch scope:
+
+```text
+branch: stabilization/live-loop-recovery-20260609
+changed source: bot_eval_runner.py, candidate_core.py, input_control/action_proposal.py, input_control/executor.py
+changed tests: test_action_proposal.py, test_bot_eval_runner.py, test_input_control_executor.py
+changed report: docs/live_loop_execution_fix_report.md
+strict Staircase guards loosened: no
+```
+
+Root cause of `route_context_not_rehydrated_after_loaded_scene_recovery`:
+
+```text
+The live proposal path could receive a fresh player tile after recovery while the older route/task phase labels were empty or stale.
+_wrong_floor_route_reentry_proposal required a route-ish phase/intent before calling route_demonstration.resolve_reentry, so the proven plane-1 recovery interaction was skipped.
+_merge_plugin_snapshot_into_status exposed playerLocation but not canonical playerWorldPosition or hydration provenance.
+_maybe_context_action_proposal could keep a generic non-executable context fallback instead of a fresh route-guide reentry proposal/blocker.
+```
+
+Post-recovery hydration behavior after the patch:
+
+```text
+fresh plugin snapshot baseline player tile is copied to playerWorldPosition and brain.playerWorldPosition
+postRecoveryContextHydration records hydrationSource, freshSnapshotTick, freshExportSeq, freshPlayerWorldPosition, freshPlane, blockers, and warnings
+same-plane route-guide reentry is recomputed from the current WorldPoint even when route phase labels are missing
+generic no_executable_action is not allowed to mask a specific route-guide reentry candidate/blocker
+candidate traces now surface routeGuideReentryAttempted, routeGuideReentryCandidate, postRecoveryContextHydrated, hydrationSource, and freshPlayerWorldPosition
+```
+
+Expected behavior at `3206,3229,1` after patch:
+
+```text
+with live Staircase object 16672 at 3204,3229,1 available:
+  proposedAction: interact_service_route_object
+  reason: route_guide_plane1_recovery_interaction
+  target: Staircase
+  object id: 16672
+  action: Climb-down
+
+without a live matching target:
+  proposedAction: wait_for_context
+  reason: plane1_recovery_live_target_missing
+  routeGuideReentryCandidate: plane1_recovery_interaction
+```
+
+Input geometry gate:
+
+```text
+initial gate: FAIL because 8890/8893 were down, foreground was Codex, and no RuneLite window was matched
+self-heal used: live_control_panel.py --auto-start-normal-live --profile woodcutting from the current repo, then canonical start_game_command launch
+Start Game classification: dev_gradle_run
+second gate: PASS
+RuneLite foreground: RuneLite
+context health: PASS
+snapshot health: PASS
+inputGeometryPass: true
+geometry source: win32.window_client_geometry
+canvas: 1268x898 at screen origin 144,30
+```
+
+Real command run:
+
+```powershell
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```
+
+Live run result:
+
+```text
+run folder: bot_runs\20260613_110620_live_woodcutting_loop
+linked recording: recordings\20260613_110750_live_woodcutting_loop_20260613_110750
+status: FAIL
+dry-run/no-input flags used: no
+bot actions sent: 0
+live input executed: no
+plane-1 recovery candidate appeared: no
+Climb-down / Staircase 16672 attempted: no
+plane 1 -> 0 postcondition: not reached
+route back continued: no
+loop completed: no
+```
+
+Reason the patched route path was not live-validated:
+
+```text
+loaded-scene recovery result: unsafe
+loadedSceneVerified after recovery: false
+finalHotGameState: LOGIN_SCREEN
+recovery blocker: stale_hot_client
+readiness status: WARN
+readiness rootCause: telemetry_stale
+executor reason: arduino_pointer_calibration_required
+candidate trace reason: arduino_pointer_calibration_required
+safe result: no gameplay click was sent
+```
+
+Responsible gates in the latest live attempt:
+
+```text
+loaded-scene recovery blocked before a valid loaded scene was proven.
+executor hardware gate blocked on missing/invalid Arduino pointer calibration before gameplay action proposal could execute.
+route-guide reentry did not run in the live trace because the environment/hardware gates failed first.
+```
+
+Checks run:
+
+```powershell
+python -m py_compile telemetry-viewer\bot_eval_runner.py telemetry-viewer\candidate_core.py telemetry-viewer\input_control\action_proposal.py telemetry-viewer\input_control\executor.py telemetry-viewer\task_script_api.py telemetry-viewer\knowledge_fabric.py telemetry-viewer\context_service.py telemetry-viewer\route_demonstration.py
+python telemetry-viewer\tests\test_action_proposal.py
+python telemetry-viewer\tests\test_bot_eval_runner.py
+python telemetry-viewer\tests\test_task_script_api.py
+python telemetry-viewer\tests\test_knowledge_fabric.py
+python telemetry-viewer\tests\test_route_demonstration.py
+python telemetry-viewer\tests\test_project_knowledge.py
+python telemetry-viewer\tests\test_input_control_executor.py -k post_recovery -k context_action_fallback_does_not_mask_fresh_plane1_reentry
+python telemetry-viewer\telemetry_ui.py --check
+python telemetry-viewer\update_project_knowledge.py --check
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --check-input-geometry --json
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+```
+
+Check results:
+
+```text
+py_compile: PASS
+test_action_proposal.py: PASS, 94 tests
+test_bot_eval_runner.py: PASS, 33 tests
+test_task_script_api.py: PASS, 31 tests
+test_knowledge_fabric.py: PASS, 44 tests
+test_route_demonstration.py: PASS, 17 tests
+test_project_knowledge.py: PASS, 7 tests
+focused executor tests: PASS, 2 tests
+full test_input_control_executor.py: timed out after 184 seconds; focused touched tests passed
+telemetry_ui.py --check: PASS
+update_project_knowledge.py --check: PASS
+```
+
+Remaining blocker and next task:
+
+```text
+The route/context rehydration bug is fixed in code and covered by focused tests.
+It still needs live validation after the client is authenticated/loaded and Arduino pointer calibration is valid.
+Exact next command after those environment gates are true:
+python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+First live evidence to verify: candidate trace includes route_guide_plane1_recovery_interaction, Staircase 16672, Climb-down, plane 1, followed by a plane 1 -> 0 postcondition.
+```
