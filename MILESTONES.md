@@ -1,10 +1,48 @@
 ﻿# Milestones
 
-Active milestone: R4 - Read-only live readiness fixtures
+Active milestone: R4 - Read-only live readiness fixtures (deterministic baseline gate for S1)
 
-Current planning branch: R5 - Read-only integration triage
+Active script-development milestone: S1 - Baseline Launch Smoke
 
-R5 is documentation-only and uses the existing R4 deterministic fixture gate until a future deterministic documentation check is explicitly designed. `scripts/run_current_milestone.ps1` is intentionally unchanged for R5.
+Current branch: `work/baseline-launch-smoke`
+
+Recovery mode is complete. No R6, R7, or R8 milestone is active.
+
+The deterministic baseline remains the R1/R2/R3/R4 gate through `scripts/run_current_milestone.ps1`.
+
+## S1 - Baseline Launch Smoke
+
+Status:
+Active.
+
+Goal:
+Provide one command that starts the supported baseline development-client path, captures proof logs, waits long enough to verify the launch process remains alive, and reruns the deterministic baseline gate.
+
+Command:
+
+`powershell -ExecutionPolicy Bypass -File scripts/start_baseline_stack.ps1`
+
+Out of scope:
+- login automation
+- gameplay automation
+- route execution
+- banking behavior
+- activity automation
+- direct client control
+- anti-detection
+- copying or importing old dirty-checkout code
+
+Acceptance:
+- the launcher verifies it is running from `C:\Users\badto\OneDrive\Documents\osrs-telemetry-recovery`
+- the launcher refuses the quarantined old checkout path
+- the deterministic baseline gate passes before launch
+- the supported Gradle `run` task starts the RuneLite development client path
+- stdout, stderr, process info, command details, baseline output, and JSON result are written under `_run_proofs\baseline_launch\<timestamp>\`
+- the launch process remains alive after the wait window
+- fatal startup log patterns fail the smoke clearly
+- read-only telemetry health is reported when available, and missing login/plugin readiness is reported as `WARN_TELEMETRY_NOT_READY` rather than faked as loaded-scene proof
+- the deterministic baseline gate passes again after launch
+- no input, login, route, action, banking, activity, gameplay-control, or anti-detection behavior is added
 
 ## R1 - Read-only state baseline
 

@@ -12,6 +12,8 @@
 
 Recovery mode is complete. The recovered project is baseline-ready on `work/resume-script-development`; normal script-development work should start from this branch.
 
+Active script-development milestone: S1 - Baseline Launch Smoke.
+
 The deterministic baseline remains the R1/R2/R3/R4 read-only recovery gate. It includes:
 
 - R1 state baseline checks
@@ -55,6 +57,16 @@ The verifier test exercises deterministic fixture CLI output and `scripts\verify
 For R4, the runner does not call `--latest-session`. Latest-session diagnostics remain optional outside R4 and are not proof that loaded-scene observation readiness passed.
 
 Command quarantine and support command details live in `scripts\README.md`. That file does not bless any additional recovery entrypoint.
+
+## Canonical baseline launch smoke
+
+`powershell -ExecutionPolicy Bypass -File scripts/start_baseline_stack.ps1`
+
+The S1 launch smoke runs the deterministic baseline gate, verifies required tools, uses the repository Gradle `run` task to start the RuneLite development client with the telemetry plugin test entrypoint, captures stdout/stderr and process details, waits for the launch process to stay alive, probes the read-only plugin snapshot health endpoint on `127.0.0.1:8893` when available, and runs the deterministic baseline gate again.
+
+Run proofs and logs are written under `_run_proofs\baseline_launch\<timestamp>\`.
+
+The launch smoke proves that the recovered project can start the supported development client path and keep the launch process alive while the deterministic R1/R2/R3/R4 baseline still passes. It does not prove login, loaded-scene readiness, route execution, banking/activity automation, gameplay automation, or direct client control. If live telemetry is unavailable because the user is not logged in or the plugin endpoint is not ready, the smoke reports `WARN_TELEMETRY_NOT_READY` without treating that as a launch failure.
 
 ## Canonical R1 state parser
 
@@ -166,6 +178,7 @@ Current known limitations:
 - `scripts\doctor.ps1` - read-only repository/environment doctor.
 - `scripts\verify_recovery_response.py` - JSON verifier used by deterministic recovery tests.
 - `scripts\run_current_milestone.ps1` - blessed current-milestone recovery runner.
+- `scripts\start_baseline_stack.ps1` - S1 baseline launch smoke for the supported Gradle development-client launch path.
 - `telemetry-viewer\recovery_diagnostics.py` - R3 in-memory diagnostic boundary; not a standalone runner.
 - `gradlew.bat` / `gradlew` - Gradle wrapper for Java build/test/dev launch.
 
