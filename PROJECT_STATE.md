@@ -64,6 +64,8 @@ Command quarantine and support command details live in `scripts\README.md`. That
 
 The S1 launch smoke runs the deterministic baseline gate, verifies required tools, uses the repository Gradle `run` task to start the RuneLite development client with the telemetry plugin test entrypoint, captures stdout/stderr and process details, waits for the launch process to stay alive, probes the read-only plugin snapshot health endpoint on `127.0.0.1:8893` when available, and runs the deterministic baseline gate again.
 
+If the plugin snapshot endpoint is already alive, the launch smoke records that existing endpoint and does not start a duplicate Gradle client that would fail to bind `127.0.0.1:8893`.
+
 Run proofs and logs are written under `_run_proofs\baseline_launch\<timestamp>\`.
 
 The launch smoke proves that the recovered project can start the supported development client path and keep the launch process alive while the deterministic R1/R2/R3/R4 baseline still passes. It does not prove login, loaded-scene readiness, route execution, banking/activity automation, gameplay automation, or direct client control. If live telemetry is unavailable because the user is not logged in or the plugin endpoint is not ready, the smoke reports `WARN_TELEMETRY_NOT_READY` without treating that as a launch failure.
@@ -88,7 +90,9 @@ The S3 manual live payload capture runs the deterministic baseline gate first, p
 
 Run proofs are written under `_run_proofs\live_payload\<timestamp>\`.
 
-S3 proves whether a real live telemetry payload is available from the already-launched development client and, when a payload is captured, runs a pure read-only adapter through the recovered R1 state baseline, R2 compact context boundary, R3 diagnostic, and R4 observation-readiness diagnostic helpers. The current expected state remains endpoint-alive/no-payload until the user manually logs in and puts the dev client into a live scene.
+S3 proves whether a real live telemetry payload is available from the already-launched development client and, when a payload is captured, runs a pure read-only adapter through the recovered R1 state baseline, R2 compact context boundary, R3 diagnostic, and R4 observation-readiness diagnostic helpers.
+
+Current S3 result: hard blocked on `USER_NOT_IN_LIVE_SCENE` for the endpoint-owning development client. Proof `_run_proofs\live_payload\20260614_164844` showed endpoint alive and parseable, `latestTick = -1`, `liveCacheUpdates = 0`, no cached packet types, no baseline payload, and empty client tick hot buffers. Later duplicate RuneLite windows do not populate the endpoint if the original `127.0.0.1:8893` owner remains bound.
 
 Manual login and live-scene readiness are user-provided. The scripts do not automate login, click, type, move, choose routes, run banking/activity behavior, execute gameplay behavior, or control the client.
 

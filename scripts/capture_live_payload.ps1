@@ -1,5 +1,5 @@
 param(
-    [int]$WaitSeconds = 180,
+    [int]$WaitSeconds = 240,
     [int]$PollIntervalSeconds = 3
 )
 
@@ -603,7 +603,10 @@ if ($script:BaselineExitCode -ne 0) {
     Complete-Capture -Status "FAIL_BASELINE_GATE" -Reason "deterministic baseline gate failed before live payload capture" -AttemptCount 0
 }
 
-Write-Host "Manual step required: put the dev client into a live scene yourself. This script will only observe the endpoint; it will not login, click, type, move, route, or control the client."
+Write-Host "MANUAL STEP REQUIRED:"
+Write-Host "Put the dev client into a live scene yourself."
+Write-Host "This script will only observe the endpoint."
+Write-Host "It will not login, click, type, move, route, bank, or control the client."
 
 $attempt = 0
 $deadline = (Get-Date).AddSeconds([Math]::Max(0, $WaitSeconds))

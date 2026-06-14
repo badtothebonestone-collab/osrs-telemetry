@@ -73,6 +73,7 @@ function Complete-Smoke {
     if ($Status -ne "PASS") {
         exit 1
     }
+    exit 0
 }
 
 function Invoke-BaselineGate {
@@ -197,8 +198,14 @@ Write-TextFile -Path $commandPath -Lines @(
     "No login automation, gameplay automation, route execution, or direct client control is performed."
 )
 
-if ($script:Branch -ne "work/baseline-launch-smoke") {
-    Complete-Smoke -Status "FAIL" -Reason "wrong_branch" -Extra @{ expectedBranch = "work/baseline-launch-smoke"; actualBranch = $script:Branch }
+$allowedBranches = @(
+    "work/baseline-launch-smoke",
+    "work/telemetry-payload-handshake",
+    "work/manual-live-payload-capture",
+    "work/live-payload-unblocker"
+)
+if ($allowedBranches -notcontains $script:Branch) {
+    Complete-Smoke -Status "FAIL" -Reason "wrong_branch" -Extra @{ expectedBranches = $allowedBranches; actualBranch = $script:Branch }
 }
 
 $python = Get-Command python -ErrorAction SilentlyContinue
@@ -223,6 +230,55 @@ if (-not (Test-Path -LiteralPath $gradlew)) {
 $preBaselineExit = Invoke-BaselineGate -Label "Pre-launch deterministic baseline" -OutputPath $baselineResultPath
 if ($preBaselineExit -ne 0) {
     Complete-Smoke -Status "FAIL" -Reason "pre_launch_baseline_failed" -Extra @{ tools = $toolInfo; baselineExitCode = $preBaselineExit }
+}
+
+$existingTelemetry = Test-PluginSnapshotHealth
+if ($existingTelemetry.available -eq $true) {
+    Write-TextFile -Path $processInfoPath -Lines @(
+        "Repo root: $script:RepoRoot",
+        "Branch: $script:Branch",
+        "Python: $($toolInfo.python)",
+        "Java: $($toolInfo.java)",
+        "Gradle wrapper: $($toolInfo.gradlewBat)",
+        "Launch command: $LaunchCommandText",
+        "Proof folder: $script:ProofDir",
+        "Existing plugin snapshot endpoint detected before launching a duplicate process.",
+        "Endpoint URL: $($existingTelemetry.url)"
+    )
+    Write-TextFile -Path $stdoutPath -Lines @("Existing endpoint detected; no duplicate Gradle run process was started.")
+    Write-TextFile -Path $stderrPath -Lines @("")
+    $postBaselineExit = Invoke-BaselineGate -Label "Post-launch deterministic baseline" -OutputPath $baselineResultPath
+    if ($postBaselineExit -ne 0) {
+        Complete-Smoke -Status "FAIL" -Reason "post_launch_baseline_failed" -Extra @{
+            tools = $toolInfo
+            telemetry = $existingTelemetry
+            preLaunchBaselineExitCode = $preBaselineExit
+            postLaunchBaselineExitCode = $postBaselineExit
+            logs = [ordered]@{
+                stdout = $stdoutPath
+                stderr = $stderrPath
+                baseline = $baselineResultPath
+                processInfo = $processInfoPath
+                commandUsed = $commandPath
+                result = $launchResultPath
+            }
+        }
+    }
+    Complete-Smoke -Status "PASS" -Reason "existing_endpoint_alive_and_baseline_passed" -Extra @{
+        tools = $toolInfo
+        telemetry = $existingTelemetry
+        launchAlreadyRunning = $true
+        preLaunchBaselineExitCode = $preBaselineExit
+        postLaunchBaselineExitCode = $postBaselineExit
+        logs = [ordered]@{
+            stdout = $stdoutPath
+            stderr = $stderrPath
+            baseline = $baselineResultPath
+            processInfo = $processInfoPath
+            commandUsed = $commandPath
+            result = $launchResultPath
+        }
+    }
 }
 
 $tasksOutput = & $gradlew tasks --all --console=plain --no-daemon 2>&1

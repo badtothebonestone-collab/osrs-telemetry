@@ -13,7 +13,7 @@ The deterministic baseline remains the R1/R2/R3/R4 gate through `scripts/run_cur
 ## S3 - Manual Live Payload Capture
 
 Status:
-Active.
+Hard blocked pending a user-provided live scene in the development client that owns `127.0.0.1:8893`.
 
 Goal:
 Provide one command that waits for user-provided manual live-scene readiness, captures the first readable plugin snapshot payload, and proves the recovered read-only stack can consume it safely.
@@ -37,6 +37,9 @@ Acceptance:
 - `FAIL_ENDPOINT_NOT_LISTENING`, `FAIL_ENDPOINT_BAD_RESPONSE`, and `FAIL_BASELINE_GATE` are reported for their respective failure modes
 - manual login/live-scene readiness remains user-provided
 - no login, click, input, route, banking, activity, gameplay-control, or anti-detection behavior is added
+
+Current blocker:
+The endpoint is alive and parseable, but the endpoint-owning development client has produced no live cache updates and no client tick hot samples. The next human action is to manually put the client instance that owns `127.0.0.1:8893` into a live scene, then rerun the capture command.
 
 ## S2 - Telemetry Payload Handshake
 
