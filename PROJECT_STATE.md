@@ -2,7 +2,7 @@
 
 ## Active branch
 
-`work/resume-script-development`
+`work/telemetry-payload-handshake`
 
 ## Active worktree
 
@@ -10,9 +10,9 @@
 
 ## Recovery mode and baseline status
 
-Recovery mode is complete. The recovered project is baseline-ready on `work/resume-script-development`; normal script-development work should start from this branch.
+Recovery mode is complete. The recovered project is baseline-ready; normal script-development work now continues on `work/telemetry-payload-handshake`, created from the post-recovery work branch.
 
-Active script-development milestone: S1 - Baseline Launch Smoke.
+Active script-development milestone: S2 - Telemetry Payload Handshake.
 
 The deterministic baseline remains the R1/R2/R3/R4 read-only recovery gate. It includes:
 
@@ -67,6 +67,18 @@ The S1 launch smoke runs the deterministic baseline gate, verifies required tool
 Run proofs and logs are written under `_run_proofs\baseline_launch\<timestamp>\`.
 
 The launch smoke proves that the recovered project can start the supported development client path and keep the launch process alive while the deterministic R1/R2/R3/R4 baseline still passes. It does not prove login, loaded-scene readiness, route execution, banking/activity automation, gameplay automation, or direct client control. If live telemetry is unavailable because the user is not logged in or the plugin endpoint is not ready, the smoke reports `WARN_TELEMETRY_NOT_READY` without treating that as a launch failure.
+
+## Canonical telemetry payload handshake
+
+`powershell -ExecutionPolicy Bypass -File scripts/check_telemetry_payload.ps1`
+
+The S2 telemetry payload handshake runs the deterministic baseline gate first, checks the read-only plugin snapshot endpoint on `127.0.0.1:8893`, reads `GET /health` and `GET /schema`, and posts a minimal read-only `baseline` snapshot probe to `POST /snapshot`.
+
+Run proofs are written under `_run_proofs\telemetry_payload\<timestamp>\`.
+
+The handshake reports `PASS_ENDPOINT_PAYLOAD_READY` only when the endpoint returns a fresh baseline telemetry payload. It reports `WARN_ENDPOINT_ALIVE_NO_PAYLOAD` when the endpoint is reachable but the plugin live cache has no usable baseline payload yet, which is expected before login/live cache samples are available. It reports `FAIL_ENDPOINT_NOT_LISTENING` when port `8893` is not listening and `FAIL_ENDPOINT_BAD_RESPONSE` when an expected JSON endpoint cannot be parsed or has the wrong schema.
+
+S2 does not control the client, perform login, send input, click, choose routes, run banking/activity behavior, or execute gameplay behavior.
 
 ## Canonical R1 state parser
 

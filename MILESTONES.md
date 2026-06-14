@@ -1,19 +1,46 @@
 ﻿# Milestones
 
-Active milestone: R4 - Read-only live readiness fixtures (deterministic baseline gate for S1)
+Active milestone: R4 - Read-only live readiness fixtures (deterministic baseline gate for S1/S2)
 
-Active script-development milestone: S1 - Baseline Launch Smoke
+Active script-development milestone: S2 - Telemetry Payload Handshake
 
-Current branch: `work/baseline-launch-smoke`
+Current branch: `work/telemetry-payload-handshake`
 
 Recovery mode is complete. No R6, R7, or R8 milestone is active.
 
 The deterministic baseline remains the R1/R2/R3/R4 gate through `scripts/run_current_milestone.ps1`.
 
-## S1 - Baseline Launch Smoke
+## S2 - Telemetry Payload Handshake
 
 Status:
 Active.
+
+Goal:
+Provide one command that verifies the already-launched development client plugin endpoint is readable, distinguishes port-not-listening from endpoint-alive/no-payload, and reports payload readiness without controlling the client.
+
+Command:
+
+`powershell -ExecutionPolicy Bypass -File scripts/check_telemetry_payload.ps1`
+
+Endpoint:
+
+`127.0.0.1:8893`
+
+Acceptance:
+- the checker verifies it is running from `C:\Users\badto\OneDrive\Documents\osrs-telemetry-recovery`
+- the checker refuses the quarantined old checkout path
+- the deterministic baseline gate passes before endpoint probing
+- the checker uses only discovered read-only endpoint paths: `GET /health`, `GET /schema`, and `POST /snapshot`
+- proof files are written under `_run_proofs\telemetry_payload\<timestamp>\`
+- `PASS_ENDPOINT_PAYLOAD_READY` is reported only for a fresh readable baseline telemetry payload
+- `WARN_ENDPOINT_ALIVE_NO_PAYLOAD` is reported when the endpoint is alive but the live cache has no usable baseline payload yet
+- `FAIL_ENDPOINT_NOT_LISTENING` and `FAIL_ENDPOINT_BAD_RESPONSE` are reported for their respective failure modes
+- no login, click, input, route, banking, activity, gameplay-control, or anti-detection behavior is added
+
+## S1 - Baseline Launch Smoke
+
+Status:
+Complete in commit `413ad4a`.
 
 Goal:
 Provide one command that starts the supported baseline development-client path, captures proof logs, waits long enough to verify the launch process remains alive, and reruns the deterministic baseline gate.
