@@ -2197,3 +2197,89 @@ Conclusion:
 The route_object_not_on_expected_segment Gate blocker is fixed at the action proposal layer. The Gate is now classified as unrelated_or_rejected and skipped, and the demonstrated woodcutting_area_to_bank guide waypoint is selected instead.
 The route-to-bank path still needs one clean loaded-scene rerun to validate the new sparse guide corridor through to bank/deposit. If it reaches the route layer and fails again, the next blocker should be waypoint projection or route_postcondition_failed, not Gate segment matching.
 ```
+
+## Route-To-Bank Guide Corridor Live Validation
+
+Updated: 2026-06-13.
+
+Source runs:
+
+```text
+pre-patch corridor validation: bot_runs\20260613_191548_live_woodcutting_loop
+pre-patch linked recording: recordings\20260613_191637_live_woodcutting_loop_20260613_191636
+pre-patch rerun: bot_runs\20260613_192431_live_woodcutting_loop
+pre-patch rerun linked recording: recordings\20260613_192444_live_woodcutting_loop_20260613_192444
+post-patch live validation: bot_runs\20260613_194046_live_woodcutting_loop
+post-patch linked recording: recordings\20260613_194200_live_woodcutting_loop_20260613_194159
+```
+
+Diagnosis:
+
+```text
+The route-to-bank Gate fix held: full inventory suppressed Tree/resource clicks and selected route_to_bank.
+Gate 12986 at 3213,3261,0 was not clicked. Later unrelated Staircase candidates were also rejected by strict route/object/segment guards.
+The corridor did reach the executor, but the 20260613_192431 rerun exposed a route waypoint conversion bug: structured guide-waypoint projections needed current input geometry, while the Arduino backend intentionally does not expose canvas_to_screen_point.
+The exact bad warning was: path tile screen conversion failed: AttributeError: 'ArduinoHIDBackend' object has no attribute 'canvas_to_screen_point'.
+The missing layer was executor route-waypoint projection, not Gate matching, tree-click logic, route guide extraction, or banking.
+```
+
+Fix behavior:
+
+```text
+input_control.executor now copies fresh plugin snapshot baseline inputGeometry into route waypoint projection proposals when proposal-local input geometry is missing.
+Route tile projection now uses the canonical input_geometry.resolve_screen_click_point path before any backend fallback.
+The backend fallback is guarded: Arduino-style backends without canvas_to_screen_point no longer produce AttributeError loops.
+Focused executor regression coverage now proves a structured route alternate can become clickable from snapshot input geometry with a backend that would fail if backend canvas conversion were called.
+```
+
+Validation after fix:
+
+```text
+git branch: stabilization/live-loop-recovery-20260609
+preflight result: PASS
+geometry result: WARN/PASS; inputGeometryPass=true, RuneLite foreground, context health recovered, context status endpoint still timed out
+real command: python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+live run folder: bot_runs\20260613_194046_live_woodcutting_loop
+linked recording folder: recordings\20260613_194200_live_woodcutting_loop_20260613_194159
+status: FAIL
+bot actions sent: 5
+live input executed: yes
+inventory full handoff: yes, collectStopReason=inventory_full_route_to_bank_ready
+Gate rejected/skipped: yes; strict unrelated route objects stayed blocked
+selected guide/corridor candidates: structured alternates around 3204,3221,0 and compact context alternates around 3201,3222/3223,0 while targeting the demonstrated 3209,3216,0 route point
+route_to_bank progress: partial; five navigate_to_service actions executed and every executed action verified service_route_object_reacquired/player_tile_changed
+distance evidence: guide distance alternated 8 -> 5 -> 8 -> 5 -> 8 -> 5 near the 3209,3216,0 route interaction
+bank/service reached: no
+deposit happened: no
+loop completed: no
+```
+
+Remaining blocker:
+
+```text
+normalized blocker: route_interaction_live_projection_missing
+trace blocker: route_guide_progress_after_rejected_route_object with missingCapabilities click_point and context.action_proposal
+specific target: Trapdoor object 14880 at 3209,3216,0
+expected route action: Climb-down / Trapdoor
+expected postcondition: plane 0 -> 2, proven in route guide recording 20260607_104613_Woodcutting_area_to_bank
+current live position at block: around 3204,3221,0
+why it blocked: the strict Trapdoor route-guide interaction was selected, but no live aim point/click geometry was available and context action fallback timed out.
+next fix layer: route interaction live target projection/reacquisition for the demonstrated Trapdoor, plus route waypoint oscillation handling near the transition point.
+do not change next: Tree/resource click policy, Gate matching, banking/deposit logic, or route guide extraction unless a new trace proves those layers are involved.
+```
+
+Checks run for this pass:
+
+```text
+python -m py_compile telemetry-viewer\route_demonstration.py telemetry-viewer\candidate_core.py telemetry-viewer\input_control\action_proposal.py telemetry-viewer\input_control\executor.py telemetry-viewer\bot_eval_runner.py telemetry-viewer\task_script_api.py telemetry-viewer\knowledge_fabric.py telemetry-viewer\route_monitor.py
+python telemetry-viewer\tests\test_input_control_executor.py -k navigation_path_tile_projection
+python telemetry-viewer\tests\test_route_demonstration.py
+python telemetry-viewer\tests\test_action_proposal.py
+python telemetry-viewer\tests\test_route_monitor.py
+python telemetry-viewer\tests\test_task_script_api.py
+python telemetry-viewer\tests\test_bot_eval_runner.py
+python telemetry-viewer\tests\test_knowledge_fabric.py
+python telemetry-viewer\tests\test_project_knowledge.py
+python telemetry-viewer\telemetry_ui.py --check
+python telemetry-viewer\update_project_knowledge.py --check
+```

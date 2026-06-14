@@ -22,7 +22,7 @@ from .action_lifecycle import (
     verify_expected_result,
 )
 from .action_proposal import ActionProposal, build_action_proposal
-from .input_geometry import CLICK_FAILURE_BUCKETS, resolve_screen_click_point, validate_screen_point_inside_geometry
+from .input_geometry import CLICK_FAILURE_BUCKETS, normalize_input_geometry, resolve_screen_click_point, validate_screen_point_inside_geometry
 from .backend_pyautogui import PyAutoGuiBackend
 from .backend_pydirectinput import PyDirectInputBackend
 from .backend_arduino_hid import DEFAULT_COMMAND_TIMEOUT_MS, ArduinoHIDBackend, check_arduino_monitor_status
@@ -1572,6 +1572,51 @@ def _screen_point_from_canvas(backend: Any, point: dict[str, int]) -> dict[str, 
     if not isinstance(converted, dict) or converted.get("x") is None or converted.get("y") is None:
         return None
     return {"x": int(round(float(converted["x"]))), "y": int(round(float(converted["y"])))}
+
+
+def _input_geometry_available(value: Any) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    try:
+        return bool(normalize_input_geometry(value).get("inputGeometryAvailable"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _input_geometry_from_plugin_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    payloads = _dict(snapshot.get("payloads"))
+    candidates = [
+        snapshot.get("inputGeometry"),
+        snapshot.get("canvasGeometry"),
+        _dict(snapshot.get("baseline")).get("inputGeometry"),
+        _dict(snapshot.get("baseline")).get("canvasGeometry"),
+        _dict(payloads.get("baseline")).get("inputGeometry"),
+        _dict(payloads.get("baseline")).get("canvasGeometry"),
+    ]
+    fallback: dict[str, Any] | None = None
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        geometry = normalize_input_geometry(candidate)
+        if fallback is None:
+            fallback = geometry
+        if geometry.get("inputGeometryAvailable"):
+            return geometry
+    return fallback
+
+
+def _attach_snapshot_input_geometry(proposal: ActionProposal, snapshot: dict[str, Any] | None) -> ActionProposal:
+    if _input_geometry_available(proposal.input_geometry):
+        return proposal
+    geometry = _input_geometry_from_plugin_snapshot(snapshot)
+    if not _input_geometry_available(geometry):
+        return proposal
+    proposal = deepcopy(proposal)
+    proposal.input_geometry = geometry
+    if isinstance(proposal.target_explanation, dict):
+        proposal.target_explanation.setdefault("inputGeometrySource", "plugin_snapshot.baseline.inputGeometry")
+    return proposal
 
 
 def _screen_point_from_canvas_for_proposal(
@@ -7787,22 +7832,31 @@ def _apply_path_tile_projection(
             proposal.missing_capabilities.append("screen_click_point")
         return proposal, warnings
     else:
-        try:
-            resolution = {
-                "status": "PASS",
-                "method": "plugin_tile_projection",
-                "coordinateMethod": "backend_fallback_window_geometry",
-                "coordinateResolver": "backend.canvas_to_screen_point",
-                "screenClickPoint": backend.canvas_to_screen_point(point),
-                "displayScaleApplied": False,
-                "displayScaleReason": "dynamic_input_geometry_unavailable_backend_fallback",
-                "warnings": ["dynamic input geometry unavailable; used backend fallback window geometry"],
-                "missingCapabilities": [],
-                "tileProjection": dict(projection),
-            }
-        except Exception as error:  # noqa: BLE001
-            warnings.append(f"path tile screen conversion failed: {type(error).__name__}: {error}")
+        converter = getattr(backend, "canvas_to_screen_point", None)
+        if not callable(converter):
+            warnings.append("path tile screen conversion unavailable: input geometry unavailable and backend canvas conversion unavailable")
             resolution = None
+        else:
+            try:
+                converted = converter(point)
+                if not isinstance(converted, dict) or converted.get("x") is None or converted.get("y") is None:
+                    raise ValueError("backend canvas conversion returned no screen point")
+                screen_point = {"x": int(round(float(converted["x"]))), "y": int(round(float(converted["y"])))}
+                resolution = {
+                    "status": "PASS",
+                    "method": "plugin_tile_projection",
+                    "coordinateMethod": "backend_fallback_window_geometry",
+                    "coordinateResolver": "backend.canvas_to_screen_point",
+                    "screenClickPoint": screen_point,
+                    "displayScaleApplied": False,
+                    "displayScaleReason": "dynamic_input_geometry_unavailable_backend_fallback",
+                    "warnings": ["dynamic input geometry unavailable; used backend fallback window geometry"],
+                    "missingCapabilities": [],
+                    "tileProjection": dict(projection),
+                }
+            except Exception as error:  # noqa: BLE001
+                warnings.append(f"path tile screen conversion failed: {type(error).__name__}: {error}")
+                resolution = None
     if isinstance(resolution, dict) and isinstance(resolution.get("screenClickPoint"), dict):
         movement_preflight = _movement_safety_preflight(resolution.get("screenClickPoint"), backend)
         if _movement_safety_preflight_failed(movement_preflight):
@@ -7862,6 +7916,7 @@ def _resolve_path_tile_projection(
     except Exception as error:  # noqa: BLE001
         return proposal, [f"path tile projection unavailable: {type(error).__name__}: {error}"]
 
+    proposal = _attach_snapshot_input_geometry(proposal, snapshot)
     projection = _matching_tile_projection(snapshot, request)
     if not isinstance(projection, dict):
         return proposal, ["path tile projection missing from plugin snapshot response"]
@@ -7894,7 +7949,7 @@ def _resolve_path_tile_projection(
         if not isinstance(alternate_projection, dict):
             attempt_warnings.append(f"alternate {alternate_request.get('worldX')},{alternate_request.get('worldY')} projection missing")
             continue
-        candidate = deepcopy(proposal)
+        candidate = _attach_snapshot_input_geometry(deepcopy(proposal), alternate_snapshot)
         candidate.target_tile = {
             "worldX": _int_or_none(alternate_request.get("worldX")),
             "worldY": _int_or_none(alternate_request.get("worldY")),

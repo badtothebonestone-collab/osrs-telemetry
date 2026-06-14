@@ -2874,6 +2874,92 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertEqual(result.proposal["suggestedClickPoint"], {"x": 260, "y": 190})
         self.assertTrue(any("selected structured alternate" in warning for warning in result.warnings))
 
+    def test_navigation_path_tile_projection_uses_snapshot_geometry_for_arduino_backend(self):
+        backend = FailingCanvasBackend()
+        proposal = ActionProposal(
+            status="WARN",
+            proposed_action="navigate_to_service",
+            target_kind="path_tile",
+            target_name="Demonstrated woodcutting-to-bank route waypoint",
+            target_tile={"worldX": 3209, "worldY": 3216, "plane": 0},
+            target_explanation={
+                "destinationTile": {"worldX": 3209, "worldY": 3216, "plane": 0},
+                "localScoutPath": [
+                    {"worldX": 3202, "worldY": 3221, "plane": 0},
+                    {"worldX": 3203, "worldY": 3221, "plane": 0},
+                    {"worldX": 3204, "worldY": 3221, "plane": 0},
+                    {"worldX": 3209, "worldY": 3216, "plane": 0},
+                ],
+            },
+            confidence=0.72,
+            missing_capabilities=["click_point"],
+            warnings=["missing click point or key action"],
+        )
+
+        baseline = {
+            "player": {"worldX": 3201, "worldY": 3221, "plane": 0},
+            "inputGeometry": {
+                "schema": "input_geometry.v1",
+                "geometryAvailable": True,
+                "canvasWidth": 1530,
+                "canvasHeight": 1006,
+                "sourceCanvasWidth": 765,
+                "sourceCanvasHeight": 503,
+                "canvasScreenX": 100,
+                "canvasScreenY": 200,
+            },
+        }
+
+        def tile_payload(request, *, on_screen=True, x=260, y=190):
+            return {
+                "status": "PASS" if on_screen else "WARN",
+                "worldX": request["worldX"],
+                "worldY": request["worldY"],
+                "plane": request.get("plane", 0),
+                "geometryAvailable": True,
+                "onScreen": on_screen,
+                "aimPoint": {"canvasX": x, "canvasY": y, "source": "tileProjectionCenter"},
+                "canvasTileBounds": {"x": x - 10, "y": y - 10, "w": 20, "h": 20},
+                "canvasTilePolygon": [[x - 10, y - 10], [x + 10, y - 10], [x + 10, y + 10], [x - 10, y + 10]],
+                "reason": "tile projection is outside the visible viewport" if not on_screen else None,
+            }
+
+        def snapshot_fetch(_url, **kwargs):
+            requests = kwargs.get("tile_projection_requests") or []
+            if len(requests) == 1:
+                return {
+                    "payloads": {"baseline": baseline},
+                    "tileProjections": {
+                        "schema": "tile_projection_response.v1",
+                        "status": "WARN",
+                        "tiles": [tile_payload(requests[0], on_screen=False, x=1954, y=993)],
+                    },
+                }
+            return {
+                "payloads": {"baseline": baseline},
+                "tileProjections": {
+                    "schema": "tile_projection_response.v1",
+                    "status": "PASS",
+                    "tiles": [tile_payload(request, x=260, y=190) for request in requests],
+                },
+            }
+
+        result = execute_action(
+            proposal,
+            backend=backend,
+            movement_profile="instant_test",
+            dry_run=True,
+            snapshot_fetch_func=snapshot_fetch,
+            navigation_options=Namespace(max_waypoint_alternates=3),
+        )
+
+        self.assertEqual(result.status, "PASS", result.warnings)
+        self.assertEqual(result.click_point_resolution["coordinateMethod"], "dynamic_input_geometry")
+        self.assertEqual(result.click_point_resolution["coordinateResolver"], "input_geometry.resolve_screen_click_point")
+        self.assertEqual(result.commands[0]["clickPoint"]["x"], 620)
+        self.assertEqual(result.commands[0]["clickPoint"]["y"], 580)
+        self.assertTrue(any("selected structured alternate" in warning for warning in result.warnings))
+
     def test_navigation_path_tile_projection_skips_alternate_outside_movement_safety(self):
         backend = MovementSafetyBackend({"x": 100, "y": 100, "width": 500, "height": 500})
         proposal = ActionProposal(
@@ -3368,8 +3454,8 @@ class InputControlExecutorTest(unittest.TestCase):
         self.assertFalse(result.action_trace["intendedPoint"]["displayScaleApplied"])
         self.assertEqual(result.action_trace["intendedPoint"]["displayScaleReason"], "display_scale_identity")
         self.assertEqual(result.action_trace["intendedPoint"]["coordinateResolver"], "input_geometry.resolve_screen_click_point")
-        self.assertEqual(result.commands[0]["clickPoint"]["x"], 4555)
-        self.assertEqual(result.commands[0]["clickPoint"]["y"], 500)
+        self.assertEqual(result.commands[0]["clickPoint"]["x"], 1623)
+        self.assertEqual(result.commands[0]["clickPoint"]["y"], 2393)
 
     def test_coordinate_transform_failure_bucket_attaches_to_failed_click_result(self):
         result = ExecutionResult(

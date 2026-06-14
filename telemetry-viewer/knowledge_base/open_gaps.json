@@ -1,6 +1,6 @@
 {
   "schema": "project_open_gaps.v1",
-  "updatedAtUtc": "2026-06-13T22:33:35.175587Z",
+  "updatedAtUtc": "2026-06-14T00:47:08.816946Z",
   "gaps": [
     {
       "id": "deposit_all_region_classification",
@@ -152,13 +152,26 @@
       "title": "Route-to-bank guide waypoint projection needs live validation after rejected Gate fix",
       "severity": "high",
       "requiredLayer": "route/executor",
-      "status": "open",
+      "status": "resolved",
       "evidence": [
         "bot_runs\\20260613_171727_live_woodcutting_loop proved the Gate was rejected and a guide waypoint selected.",
-        "That run executed one route movement, but several guide waypoint attempts lacked actionable projection before the sparse guide corridor patch.",
-        "bot_runs\\20260613_172652_live_woodcutting_loop did not reach route logic because loaded-scene recovery stopped at visible_button_found_not_clicked."
+        "bot_runs\\20260613_194046_live_woodcutting_loop sent five live navigate_to_service actions through the demonstrated corridor using snapshot input geometry.",
+        "Strict unrelated route objects stayed rejected and Tree/resource candidates remained suppressed while inventory was full."
       ],
-      "suggestedNextTask": "After loaded-scene recovery, rerun the real loop and validate the generated woodcutting_area_to_bank guide corridor; if it still fails, fix waypoint projection/postcondition rather than Gate classification."
+      "suggestedNextTask": "Continue from the strict Trapdoor live projection blocker, not Gate matching or Tree click policy."
+    },
+    {
+      "id": "route_to_bank_trapdoor_live_projection_missing",
+      "title": "Strict Trapdoor route interaction lacks live aim/click geometry after corridor movement",
+      "severity": "high",
+      "requiredLayer": "route/executor",
+      "status": "open",
+      "evidence": [
+        "bot_runs\\20260613_194046_live_woodcutting_loop reached the strict woodcutting_area_to_bank Trapdoor interaction.",
+        "Target was Trapdoor object 14880 at 3209,3216,0 with expected action Climb-down and expected plane change 0 -> 2.",
+        "Candidate trace stopped with missingCapabilities click_point and context.action_proposal after context fallback timed out."
+      ],
+      "suggestedNextTask": "Recover a live aim/menu target for Climb-down / Trapdoor 14880 at 3209,3216,0 and verify the plane 0 -> 2 transition without changing Gate, Tree, or banking logic."
     },
     {
       "id": "input_geometry_live_source_stale",
@@ -257,11 +270,11 @@
       ]
     },
     {
-      "id": "validate_route_to_bank_waypoint_projection_after_gate_rejection",
+      "id": "fix_route_to_bank_trapdoor_live_projection",
       "priority": 1,
-      "task": "Validate the woodcutting_area_to_bank guide waypoint/corridor after the rejected Gate fix.",
+      "task": "Fix live projection/reacquisition for the strict woodcutting_area_to_bank Trapdoor route interaction.",
       "successCriteria": [
-        "With full inventory, the bot keeps Tree/resource candidates suppressed, rejects unproven Gate/Object candidates, projects the demonstrated bank-route waypoint/corridor, and reaches bank/deposit readiness or reports a specific waypoint/postcondition blocker."
+        "At full inventory, after corridor movement, the bot selects the proven Trapdoor 14880 at 3209,3216,0 with Climb-down, obtains a safe live aim/menu target, and either performs the plane 0 -> 2 transition or reports a specific Trapdoor live-target blocker."
       ]
     },
     {
