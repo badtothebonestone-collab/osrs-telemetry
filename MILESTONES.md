@@ -1,8 +1,8 @@
-# Milestones
+﻿# Milestones
 
-Active milestone: R2 — Compact context boundary
+Active milestone: R3 - No-action diagnostic scaffold
 
-## R1 — Read-only state baseline
+## R1 - Read-only state baseline
 
 Goal:
 One command can verify that the project can read/parse/report state safely.
@@ -21,7 +21,7 @@ Acceptance:
 - missing/malformed/stale state is handled cleanly
 - status output is clear
 
-## R2 — Compact context boundary
+## R2 - Compact context boundary
 
 Goal:
 Expose compact context response from read-only state.
@@ -36,17 +36,23 @@ Acceptance:
 - no action fields
 - tests cover compact response shape
 
-## R3 — Single simple task scaffold, no unsafe behavior
+## R3 - No-action diagnostic scaffold
 
 Goal:
-Prepare a modular task scaffold that consumes context but does not perform direct input/action execution.
+Prepare a modular diagnostic scaffold that consumes compact context and reports read-only readiness only.
 
 Out of scope:
 - anti-detection
 - bypass behavior
 - direct game input
+- task behavior
+- route behavior
+- banking behavior
+- activity behavior
 
 Acceptance:
-- task module boundary exists
-- state/context is dependency-injected
-- tests cover decision output shape only
+- diagnostic module boundary exists
+- `context_response.v1` is dependency-injected
+- output contains diagnostic fields only
+- forbidden field names are absent recursively
+- tests cover diagnostic output shape only

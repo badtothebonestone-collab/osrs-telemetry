@@ -68,7 +68,10 @@ $milestonesPath = Join-Path $repoRoot "MILESTONES.md"
 
 if (Test-Path -LiteralPath $milestonesPath) {
     $milestonesText = Get-Content -LiteralPath $milestonesPath -Raw
-    if ($milestonesText -match "Active milestone:\s*R2\b") {
+    if ($milestonesText -match "Active milestone:\s*R3\b") {
+        $script:CurrentMilestone = "R3"
+    }
+    elseif ($milestonesText -match "Active milestone:\s*R2\b") {
         $script:CurrentMilestone = "R2"
     }
 }
@@ -84,7 +87,7 @@ if (-not (Test-Path -LiteralPath $projectStatePath)) {
 
 $projectState = Get-Content -LiteralPath $projectStatePath -Raw
 if (-not $projectState.Contains($blessedCommand)) {
-    Fail-Clearly "R1 state baseline command is not listed exactly in PROJECT_STATE.md: $blessedCommand"
+    Fail-Clearly "Blessed recovery command is not listed exactly in PROJECT_STATE.md: $blessedCommand"
 }
 
 Write-Section "Doctor"
@@ -152,10 +155,15 @@ if errors:
     $unittestScripts = @(
         "telemetry-viewer\tests\test_state_baseline.py"
     )
-    if ($script:CurrentMilestone -eq "R2") {
+    if (@("R2", "R3") -contains $script:CurrentMilestone) {
         $unittestScripts += @(
             "telemetry-viewer\tests\test_compact_context_boundary.py",
             "telemetry-viewer\tests\test_recovery_response_verifier.py"
+        )
+    }
+    if ($script:CurrentMilestone -eq "R3") {
+        $unittestScripts += @(
+            "telemetry-viewer\tests\test_recovery_diagnostics.py"
         )
     }
 
@@ -188,7 +196,7 @@ if errors:
         Write-Host "Advisory latest-session state parser command exited nonzero: $parserExit"
     }
 
-    if ($script:CurrentMilestone -eq "R2") {
+    if (@("R2", "R3") -contains $script:CurrentMilestone) {
         Write-Host "Latest-session R2 diagnostic:"
         $compactExit = Invoke-Native { & $python.Source $contextService --latest-session --compact-context }
         if ($compactExit -ne 0) {

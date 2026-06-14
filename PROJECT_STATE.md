@@ -2,7 +2,7 @@
 
 ## Active branch
 
-`recovery/2026-06-14-surgical-reset`
+`recovery/r2.5-context-boundary-hardening`
 
 ## Active worktree
 
@@ -10,7 +10,7 @@
 
 ## Current architecture boundary
 
-Recovery is limited to read-only state work: parse available telemetry/state, validate shape/freshness, summarize current status, and report clear blockers.
+Recovery is limited to read-only state and diagnostic work: parse available telemetry/state, validate shape/freshness, summarize current status, and report clear blockers.
 
 Runtime/source feature work, gameplay behavior, route behavior, banking behavior, direct input, and anti-detection behavior are outside the current recovery boundary.
 
@@ -22,13 +22,14 @@ This is the only blessed command for the current recovery milestone. Do not inve
 
 The command runs `scripts\doctor.ps1`, in-memory Python syntax compilation, and deterministic standard-library unittest checks.
 
-Because `MILESTONES.md` marks R2 active, the deterministic gate includes:
+Because `MILESTONES.md` marks R3 active, the deterministic gate includes:
 
 - `telemetry-viewer\tests\test_state_baseline.py`
 - `telemetry-viewer\tests\test_compact_context_boundary.py`
 - `telemetry-viewer\tests\test_recovery_response_verifier.py`
+- `telemetry-viewer\tests\test_recovery_diagnostics.py`
 
-The verifier test exercises deterministic fixture CLI output and `scripts\verify_recovery_response.py`. Required responses fail the gate on invalid JSON, missing required fields, `status: "FAIL"`, `ok: false`, forbidden response fields, or forbidden compact-context response text.
+The verifier test exercises deterministic fixture CLI output and `scripts\verify_recovery_response.py`. Required R1/R2 responses fail the gate on invalid JSON, missing required fields, `status: "FAIL"`, `ok: false`, forbidden response fields, or forbidden compact-context response text. The R3 test is deterministic and no-action; it consumes in-memory `context_response.v1` fixtures only.
 
 The runner may print `--latest-session` R1/R2 output as an optional diagnostic. Latest-session warnings or `ok: false` are advisory only and are not the proof that R1/R2 passed.
 
@@ -70,6 +71,24 @@ Current known limitations:
 - It does not emit action, click, mouse, keyboard, menu, input, command, movement, interact, interaction, target, execute, anti-detection, or gameplay command fields.
 - It does not start RuneLite, the daemon, the snapshot endpoint, or any external service.
 
+## Canonical R3 diagnostic boundary
+
+- Path: `telemetry-viewer\recovery_diagnostics.py`
+- Test command: `python telemetry-viewer\tests\test_recovery_diagnostics.py`
+- Input schema: `context_response.v1`
+- Output schema: `recovery_diagnostic.v1`
+
+The diagnostic boundary accepts an already-built compact context response and reports readiness only. It does not read live files, call subprocesses, start services, or call action-capable scripts.
+
+Allowed output fields are `schema`, `ok`, `status`, `reasons`, `required_context`, `observed_context`, and `warnings`.
+
+Current known limitations:
+
+- It validates only the presence and shape of read-only facts needed for diagnostics.
+- It does not choose tasks, routes, targets, banking behavior, or activity behavior.
+- It does not emit action, click, mouse, keyboard, menu, input, command, movement, interact, interaction, target, execute, anti-detection, or gameplay command fields.
+- It does not prove loaded-scene readiness.
+
 ## Current known entrypoints
 
 - `src\main\java\com\osrstelemetry\TelemetryPlugin.java` - RuneLite plugin entrypoint.
@@ -87,6 +106,7 @@ Current known limitations:
 - `scripts\doctor.ps1` - read-only repository/environment doctor.
 - `scripts\verify_recovery_response.py` - JSON verifier used by deterministic recovery tests.
 - `scripts\run_current_milestone.ps1` - blessed current-milestone recovery runner.
+- `telemetry-viewer\recovery_diagnostics.py` - R3 in-memory diagnostic boundary; not a standalone runner.
 - `gradlew.bat` / `gradlew` - Gradle wrapper for Java build/test/dev launch.
 
 ## Current known test/check commands
@@ -99,6 +119,7 @@ Current known limitations:
 - `python telemetry-viewer\context_service.py --latest-session --state-baseline`
 - `python telemetry-viewer\context_service.py --latest-session --compact-context`
 - `python telemetry-viewer\tests\test_recovery_response_verifier.py`
+- `python telemetry-viewer\tests\test_recovery_diagnostics.py`
 - `python telemetry-viewer\context_service.py --query pipeline-health`
 - `python telemetry-viewer\context_service.py --query current-debug-context`
 - `python telemetry-viewer\context_service.py --query explain-current-blocker`

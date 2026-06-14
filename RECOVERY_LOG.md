@@ -738,3 +738,45 @@ Remaining risks:
 - `context_service.py` remains mixed-responsibility outside the narrow R1/R2 path.
 - R1 still has a raw `bank`/`activity` pass-through when those optional read-only objects are present; this was not changed in this blocker fix.
 - Large historical docs and old launcher/action examples remain in the tree as reference material and should not be treated as active recovery instructions.
+
+## R3 no-action diagnostic scaffold - 2026-06-14
+
+Started R3 as a diagnostic-only boundary.
+
+Changed files:
+
+- `telemetry-viewer\recovery_diagnostics.py`
+- `telemetry-viewer\tests\test_recovery_diagnostics.py`
+- `scripts\run_current_milestone.ps1`
+- `MILESTONES.md`
+- `PROJECT_STATE.md`
+- `RECOVERY_LOG.md`
+
+What was added:
+
+- Added `recovery_diagnostic.v1`, an in-memory diagnostic response produced from `context_response.v1`.
+- Added a small diagnostic module that validates read-only context presence and shape.
+- Added deterministic tests for missing context, malformed context, valid minimal context, context warnings, and forbidden field rejection.
+- Updated the blessed runner so R3 runs only deterministic no-action tests when `MILESTONES.md` marks R3 active.
+
+Why it is safe:
+
+- The R3 module accepts an already-built compact context object.
+- It does not read live files.
+- It does not call subprocesses.
+- It does not start RuneLite, the daemon, the snapshot endpoint, or any external service.
+- It does not choose tasks, routes, targets, banking behavior, or activity behavior.
+- It returns diagnostic fields only: `schema`, `ok`, `status`, `reasons`, `required_context`, `observed_context`, and `warnings`.
+- It rejects forbidden context field names without echoing raw field names into the diagnostic response.
+
+Commands run:
+
+- `python telemetry-viewer\tests\test_recovery_diagnostics.py`
+- `python telemetry-viewer\tests\test_state_baseline.py`
+- `python telemetry-viewer\tests\test_compact_context_boundary.py`
+- `python telemetry-viewer\tests\test_recovery_response_verifier.py`
+- `powershell -ExecutionPolicy Bypass -File scripts/run_current_milestone.ps1`
+
+Remaining risks:
+
+- `context_service.py` remains mixed-responsibility outside the R1/R2 path. R3 was kept in a separate small module instead of further expanding that file.
