@@ -1,6 +1,6 @@
 ﻿# Milestones
 
-Active milestone: R2.5 - Context boundary hardening after R3
+Active milestone: R4 - Read-only live readiness fixtures
 
 ## R1 - Read-only state baseline
 
@@ -42,7 +42,7 @@ Acceptance:
 ## R2.5 - Context boundary hardening after R3
 
 Status:
-Active cleanup pass.
+Complete in commit `632ad0f`.
 
 Goal:
 Separate the pure/read-only R1 and R2 payload boundaries from broad CLI/server glue without changing behavior.
@@ -87,3 +87,30 @@ Acceptance:
 - output contains diagnostic fields only
 - forbidden field names are absent recursively
 - tests cover diagnostic output shape only
+
+## R4 - Read-only live readiness fixtures
+
+Status:
+Active fixture validation pass.
+
+Goal:
+Prove that the R1/R2/R3 boundary handles live-like telemetry safely with deterministic, read-only fixtures.
+
+Out of scope:
+- task selection
+- route behavior or route execution
+- banking behavior
+- activity automation
+- action execution
+- anti-detection
+- live RuneLite/dev-client state as a test dependency
+- treating `--latest-session` or `gradlew run` as loaded-scene proof
+
+Acceptance:
+- R4 fixtures cover missing state, malformed state, stale logged-in state, login-screen state, logged-in state without scene evidence, loaded-scene evidence, and incomplete telemetry
+- loaded-scene readiness is observation-readiness only
+- `context_response.v1` has no forbidden fields recursively
+- `recovery_diagnostic.v1` has no forbidden fields recursively
+- no fixture name implies execution permission
+- R1, R2, R2 verifier, R3, R2.5, and R4 deterministic tests pass
+- blessed command passes without calling `--latest-session` for proof

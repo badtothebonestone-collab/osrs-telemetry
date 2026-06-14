@@ -2,7 +2,7 @@
 
 ## Active branch
 
-`recovery/r2.5-context-boundary-hardening-after-r3`
+`recovery/r4-readonly-live-readiness-fixtures`
 
 ## Active worktree
 
@@ -10,11 +10,11 @@
 
 ## Current architecture boundary
 
-Recovery is limited to read-only state, compact context, and diagnostic work: parse available telemetry/state, validate shape/freshness, summarize current status, and report clear blockers.
+Recovery is limited to read-only state, compact context, diagnostic work, and deterministic live-readiness fixture validation: parse available telemetry/state, validate shape/freshness, summarize current status, and report clear blockers.
 
 Runtime/source feature work, gameplay behavior, route behavior, banking behavior, direct input, and anti-detection behavior are outside the current recovery boundary.
 
-R2.5 separates the pure R1/R2 payload boundaries from broad `context_service.py` CLI/server glue without changing public schemas or runner behavior.
+R4 validates loaded-scene readiness as observation-readiness only. It proves that live-like fixture telemetry is handled safely across the R1/R2/R3 boundary; it does not grant permission to choose a task, route, target, bank, activity, or action.
 
 ## Blessed run/check command
 
@@ -24,16 +24,17 @@ This is the only blessed command for the current recovery milestone. Do not inve
 
 The command runs `scripts\doctor.ps1`, in-memory Python syntax compilation, and deterministic standard-library unittest checks.
 
-Because `MILESTONES.md` marks R2.5 active after the R3 checkpoint, the deterministic gate includes:
+Because `MILESTONES.md` marks R4 active after the final recovery checkpoint, the deterministic gate includes:
 
 - `telemetry-viewer\tests\test_state_baseline.py`
 - `telemetry-viewer\tests\test_compact_context_boundary.py`
 - `telemetry-viewer\tests\test_recovery_response_verifier.py`
 - `telemetry-viewer\tests\test_recovery_diagnostics.py`
+- `telemetry-viewer\tests\test_r4_live_readiness_fixtures.py`
 
-The verifier test exercises deterministic fixture CLI output and `scripts\verify_recovery_response.py`. Required R1/R2 responses fail the gate on invalid JSON, missing required fields, `status: "FAIL"`, `ok: false`, forbidden response fields, or forbidden compact-context response text. The R3 test is deterministic and no-action; it consumes in-memory `context_response.v1` fixtures only. R2.5 keeps the same deterministic gate and adds no alternate runner.
+The verifier test exercises deterministic fixture CLI output and `scripts\verify_recovery_response.py`. Required R1/R2 responses fail the gate on invalid JSON, missing required fields, `status: "FAIL"`, `ok: false`, forbidden response fields, or forbidden compact-context response text. The R3 test is deterministic and no-action; it consumes in-memory `context_response.v1` fixtures only. The R4 test is deterministic and fixture-only; it consumes local fixture data and in-memory diagnostic helpers only.
 
-The runner may print `--latest-session` R1/R2 output as an optional diagnostic. Latest-session warnings or `ok: false` are advisory only and are not the proof that R1/R2 passed.
+For R4, the runner does not call `--latest-session`. Latest-session diagnostics remain optional outside R4 and are not proof that loaded-scene observation readiness passed.
 
 Command quarantine and support command details live in `scripts\README.md`. That file does not bless any additional recovery entrypoint.
 
@@ -92,6 +93,24 @@ Current known limitations:
 - It does not choose tasks, routes, targets, banking behavior, or activity behavior.
 - It does not emit action, click, mouse, keyboard, menu, input, command, movement, interact, interaction, target, execute, anti-detection, or gameplay command fields.
 - It does not prove loaded-scene readiness.
+
+## Canonical R4 read-only live-readiness fixtures
+
+- Fixture path: `telemetry-viewer\tests\fixtures\r4_live_readiness`
+- Test command: `python telemetry-viewer\tests\test_r4_live_readiness_fixtures.py`
+- Input boundary: already-loaded fixture data and `context_response.v1`
+- Output schema: `recovery_diagnostic.v1`
+
+R4 validates missing state, malformed state, stale logged-in state, login-screen state, logged-in state without scene evidence, loaded-scene evidence, incomplete telemetry, and recursive response safety invariants.
+
+Loaded-scene readiness in R4 means observation-readiness only: current player position plus loaded-scene/world-model-style evidence is present in deterministic fixture data. It does not permit gameplay input, route execution, banking, task selection, or activity automation.
+
+Current known limitations:
+
+- R4 does not read live RuneLite/dev-client state.
+- R4 does not call `--latest-session` as proof.
+- `gradlew run` remains a development launch only and is not proof of a loaded scene.
+- R4 does not start RuneLite, the daemon, the snapshot endpoint, or any external service.
 
 ## Current known entrypoints
 

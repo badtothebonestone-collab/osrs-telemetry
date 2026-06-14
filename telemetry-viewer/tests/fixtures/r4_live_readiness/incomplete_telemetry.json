@@ -1,0 +1,12 @@
+{
+  "schema": "r4_live_readiness_fixture.v1",
+  "baseline": {
+    "schema": "live_baseline_state.v1",
+    "generatedAtUtc": "__NOW__",
+    "latestTick": 56,
+    "gameState": "LOGGED_IN"
+  },
+  "context": {
+    "schema": "live_context_index.v1"
+  }
+}

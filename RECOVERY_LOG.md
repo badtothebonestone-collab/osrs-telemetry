@@ -2,7 +2,7 @@
 
 ## Current branch and worktree
 
-- Branch: `recovery/2026-06-14-surgical-reset`
+- Branch: `recovery/r4-readonly-live-readiness-fixtures`
 - Worktree path: `C:\Users\badto\OneDrive\Documents\osrs-telemetry-recovery`
 - Original repo status summary: this recovery folder was created by cloning because the starting directory was not inside a Git repository. No original repo path or uncommitted original worktree diff was captured. The recovery worktree already had `_recovery/` untracked from the initial evidence capture before this audit log was added.
 
@@ -826,3 +826,49 @@ Remaining risks:
 Recovery completion note:
 
 - After the blessed command passes and this cleanup is reviewed, the read-only recovery baseline can be considered complete enough to checkpoint before any R4 work.
+
+## R4 read-only live readiness fixtures - 2026-06-14
+
+Started R4 from checkpoint `632ad0f91e8a613ef0608fee509adf127d62e709`.
+
+Changed files:
+
+- `telemetry-viewer\recovery_diagnostics.py`
+- `telemetry-viewer\tests\test_r4_live_readiness_fixtures.py`
+- `telemetry-viewer\tests\fixtures\r4_live_readiness\stale_logged_in.json`
+- `telemetry-viewer\tests\fixtures\r4_live_readiness\login_screen.json`
+- `telemetry-viewer\tests\fixtures\r4_live_readiness\logged_in_no_scene_evidence.json`
+- `telemetry-viewer\tests\fixtures\r4_live_readiness\loaded_scene_evidence_present.json`
+- `telemetry-viewer\tests\fixtures\r4_live_readiness\incomplete_telemetry.json`
+- `scripts\run_current_milestone.ps1`
+- `PROJECT_STATE.md`
+- `MILESTONES.md`
+- `RECOVERY_LOG.md`
+
+What was added:
+
+- Added deterministic R4 fixtures for missing state setup, malformed state setup, stale logged-in state, login-screen state, logged-in state without scene evidence, loaded-scene evidence, and incomplete telemetry.
+- Added `evaluate_observation_readiness`, a read-only in-memory diagnostic helper that accepts already-loaded compact context data plus already-loaded fixture evidence.
+- Added R4 tests for observation-readiness only, recursive `context_response.v1` safety, recursive `recovery_diagnostic.v1` safety, and fixture naming.
+- Updated the blessed runner to recognize R4 and run the deterministic R1/R2/R2 verifier/R3/R4 test gate.
+- For R4, the runner omits `--latest-session` diagnostics so the pass proof is fixture-only and deterministic.
+
+Why it is safe:
+
+- No live files are required for R4 tests.
+- No subprocesses are launched by the R4 helper.
+- No client control or gameplay behavior is implemented.
+- No task, route, banking, activity, anti-detection, or direct action execution behavior is added.
+- Loaded-scene readiness is documented and tested as observation-readiness only.
+- `gradlew run` remains documented as a development launch, not loaded-scene proof.
+
+Commands run:
+
+- `powershell -ExecutionPolicy Bypass -File scripts/run_current_milestone.ps1` before R4 edits; result: PASS.
+- `python telemetry-viewer\tests\test_r4_live_readiness_fixtures.py`; first run found a test assertion mismatch, then rerun passed after narrowing the assertion to the diagnostic contract.
+
+Remaining risks:
+
+- `context_service.py` remains broad outside the isolated R1/R2 payload boundary.
+- R4 proves only deterministic fixture behavior and does not prove the current live client is loaded.
+- R4 does not validate task selection, routing, banking, activity automation, or gameplay execution.

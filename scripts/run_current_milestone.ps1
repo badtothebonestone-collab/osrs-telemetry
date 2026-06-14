@@ -68,7 +68,10 @@ $milestonesPath = Join-Path $repoRoot "MILESTONES.md"
 
 if (Test-Path -LiteralPath $milestonesPath) {
     $milestonesText = Get-Content -LiteralPath $milestonesPath -Raw
-    if ($milestonesText -match "Active milestone:\s*R2\.5\b") {
+    if ($milestonesText -match "Active milestone:\s*R4\b") {
+        $script:CurrentMilestone = "R4"
+    }
+    elseif ($milestonesText -match "Active milestone:\s*R2\.5\b") {
         $script:CurrentMilestone = "R2.5"
     }
     elseif ($milestonesText -match "Active milestone:\s*R3\b") {
@@ -83,6 +86,9 @@ Write-Section "$script:CurrentMilestone recovery checks"
 Write-Host "Repo root: $repoRoot"
 Write-Host "Blessed command: $blessedCommand"
 Write-Host "Active milestone: $script:CurrentMilestone"
+if ($script:CurrentMilestone -eq "R4") {
+    Write-Host "R4 gate: deterministic/no-action fixture suite only."
+}
 
 if (-not (Test-Path -LiteralPath $projectStatePath)) {
     Fail-Clearly "PROJECT_STATE.md is missing; expected it at $projectStatePath"
@@ -158,15 +164,20 @@ if errors:
     $unittestScripts = @(
         "telemetry-viewer\tests\test_state_baseline.py"
     )
-    if (@("R2", "R2.5", "R3") -contains $script:CurrentMilestone) {
+    if (@("R2", "R2.5", "R3", "R4") -contains $script:CurrentMilestone) {
         $unittestScripts += @(
             "telemetry-viewer\tests\test_compact_context_boundary.py",
             "telemetry-viewer\tests\test_recovery_response_verifier.py"
         )
     }
-    if (@("R2.5", "R3") -contains $script:CurrentMilestone) {
+    if (@("R2.5", "R3", "R4") -contains $script:CurrentMilestone) {
         $unittestScripts += @(
             "telemetry-viewer\tests\test_recovery_diagnostics.py"
+        )
+    }
+    if ($script:CurrentMilestone -eq "R4") {
+        $unittestScripts += @(
+            "telemetry-viewer\tests\test_r4_live_readiness_fixtures.py"
         )
     }
 
@@ -186,24 +197,30 @@ if errors:
         }
     }
 
-    Write-Section "Optional latest-session diagnostic"
-    Write-Host "Advisory only. The pass gate is the deterministic unittest and fixture suite above."
-    $contextService = "telemetry-viewer\context_service.py"
-    if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $contextService))) {
-        Fail-Clearly "Missing expected read-only state parser: $contextService"
+    if ($script:CurrentMilestone -eq "R4") {
+        Write-Section "Latest-session diagnostic omitted"
+        Write-Host "R4 proof is deterministic/no-action and fixture-only; no latest-session path is called."
     }
+    else {
+        Write-Section "Optional latest-session diagnostic"
+        Write-Host "Advisory only. The pass gate is the deterministic unittest and fixture suite above."
+        $contextService = "telemetry-viewer\context_service.py"
+        if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $contextService))) {
+            Fail-Clearly "Missing expected read-only state parser: $contextService"
+        }
 
-    Write-Host "Latest-session R1 diagnostic:"
-    $parserExit = Invoke-Native { & $python.Source $contextService --latest-session --state-baseline }
-    if ($parserExit -ne 0) {
-        Write-Host "Advisory latest-session state parser command exited nonzero: $parserExit"
-    }
+        Write-Host "Latest-session R1 diagnostic:"
+        $parserExit = Invoke-Native { & $python.Source $contextService --latest-session --state-baseline }
+        if ($parserExit -ne 0) {
+            Write-Host "Advisory latest-session state parser command exited nonzero: $parserExit"
+        }
 
-    if (@("R2", "R2.5", "R3") -contains $script:CurrentMilestone) {
-        Write-Host "Latest-session R2 diagnostic:"
-        $compactExit = Invoke-Native { & $python.Source $contextService --latest-session --compact-context }
-        if ($compactExit -ne 0) {
-            Write-Host "Advisory latest-session compact context command exited nonzero: $compactExit"
+        if (@("R2", "R2.5", "R3") -contains $script:CurrentMilestone) {
+            Write-Host "Latest-session R2 diagnostic:"
+            $compactExit = Invoke-Native { & $python.Source $contextService --latest-session --compact-context }
+            if ($compactExit -ne 0) {
+                Write-Host "Advisory latest-session compact context command exited nonzero: $compactExit"
+            }
         }
     }
 }
