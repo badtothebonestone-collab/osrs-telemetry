@@ -27,6 +27,7 @@ CAPABILITY_REGISTRY_SCHEMA = "capability_registry.v1"
 WATCH_LIBRARY_SCHEMA = "watch_library.v1"
 WATCH_REQUEST_SCHEMA = "context_watch_request.v1"
 WATCH_RESPONSE_SCHEMA = "context_watch_response.v1"
+STATE_BASELINE_SCHEMA = "recovery_state_baseline.v1"
 CAPABILITY_REGISTRY_PATH = Path(__file__).resolve().with_name("capability_registry.json")
 WATCH_LIBRARY_PATH = Path(__file__).resolve().with_name("watch_library.json")
 PIPELINE_MANIFEST_PATH = Path(__file__).resolve().with_name("pipeline_manifest.json")
@@ -1488,6 +1489,331 @@ def status_payload(context: dict) -> dict:
     }
 
 
+def _dict_value(*values: Any) -> dict:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _bool_value(*values: Any) -> bool | None:
+    for value in values:
+        if isinstance(value, bool):
+            return value
+    return None
+
+
+def _compact_player(player: dict) -> dict:
+    world_location = _dict_value(player.get("worldLocation"), player.get("location"))
+    return {
+        "worldX": query.first_value(player.get("worldX"), player.get("world_x"), player.get("playerWorldX"), world_location.get("worldX"), world_location.get("x")),
+        "worldY": query.first_value(player.get("worldY"), player.get("world_y"), player.get("playerWorldY"), world_location.get("worldY"), world_location.get("y")),
+        "plane": query.first_value(player.get("plane"), player.get("z"), player.get("playerPlane"), world_location.get("plane"), world_location.get("z")),
+        "sceneX": query.first_value(player.get("sceneX"), player.get("scene_x"), player.get("playerSceneX")),
+        "sceneY": query.first_value(player.get("sceneY"), player.get("scene_y"), player.get("playerSceneY")),
+        "localX": query.first_value(player.get("localX"), player.get("local_x")),
+        "localY": query.first_value(player.get("localY"), player.get("local_y")),
+        "animation": player.get("animation"),
+        "isMoving": player.get("isMoving"),
+        "runEnergy": query.first_value(player.get("runEnergy"), player.get("runEnergyPercent")),
+    }
+
+
+def _compact_inventory(inventory: dict) -> dict:
+    normalized = query.normalize_inventory_state(inventory)
+    if not normalized.get("known"):
+        return {}
+    return {
+        "known": normalized.get("known"),
+        "freeSlots": normalized.get("freeSlots"),
+        "filledSlots": normalized.get("filledSlots"),
+        "slotCount": normalized.get("slotCount"),
+        "itemCount": normalized.get("itemCount"),
+        "inventoryFull": normalized.get("inventoryFull"),
+        "signature": normalized.get("signature"),
+    }
+
+
+def _compact_activity(activity: dict) -> dict:
+    if not isinstance(activity, dict):
+        return {}
+    summary: dict[str, Any] = {}
+    for key in (
+        "apparentState",
+        "currentActivity",
+        "state",
+        "confidence",
+        "isBusy",
+        "isMoving",
+        "animation",
+        "poseAnimation",
+        "changedRecently",
+        "latestTick",
+        "generatedAtUtc",
+        "timestampUtc",
+    ):
+        if key in activity:
+            summary[key] = activity.get(key)
+    evidence = activity.get("evidence")
+    if isinstance(evidence, list):
+        summary["evidenceCount"] = len(evidence)
+    return summary
+
+
+def _state_timestamp(status_doc: dict, baseline: dict, activity: dict) -> str | None:
+    value = query.first_value(
+        status_doc.get("generatedAtUtc"),
+        status_doc.get("updatedAtUtc"),
+        status_doc.get("timestampUtc"),
+        status_doc.get("timestamp"),
+        baseline.get("generatedAtUtc"),
+        baseline.get("updatedAtUtc"),
+        baseline.get("timestampUtc"),
+        baseline.get("timestamp"),
+        activity.get("generatedAtUtc"),
+        activity.get("updatedAtUtc"),
+        activity.get("timestampUtc"),
+        activity.get("timestamp"),
+    )
+    return str(value) if value not in (None, "") else None
+
+
+def _state_age_millis(timestamp: str | None) -> float | None:
+    parsed = query.parse_utc(timestamp)
+    if parsed is None:
+        return None
+    return round(max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds() * 1000.0), 3)
+
+
+def _state_source_files(context: dict) -> list[dict]:
+    wanted = {"baseline", "status", "activity"}
+    source_files = []
+    for item in context.get("sourceFiles") or []:
+        if isinstance(item, dict) and item.get("name") in wanted:
+            source_files.append(
+                {
+                    "name": item.get("name"),
+                    "path": item.get("path"),
+                    "exists": item.get("exists"),
+                    "modifiedUtc": item.get("modifiedUtc"),
+                    "sizeBytes": item.get("sizeBytes"),
+                }
+            )
+    return source_files
+
+
+def state_baseline_payload(context: dict, args) -> dict[str, Any]:
+    status_doc = context.get("status") if isinstance(context.get("status"), dict) else {}
+    baseline = context.get("baseline") if isinstance(context.get("baseline"), dict) else {}
+    activity = context.get("activity") if isinstance(context.get("activity"), dict) else {}
+    client_tick_hot = _dict_value(status_doc.get("clientTickHot"), baseline.get("clientTickHot"))
+    status_baseline = _dict_value(status_doc.get("baseline"))
+    player = _dict_value(
+        baseline.get("player"),
+        status_doc.get("player"),
+        activity.get("player"),
+        client_tick_hot.get("player"),
+        status_doc.get("playerLocation"),
+    )
+    inventory_source = _dict_value(
+        activity.get("inventoryState"),
+        activity.get("inventory"),
+        baseline.get("inventory"),
+        status_doc.get("inventory"),
+    )
+    timestamp = _state_timestamp(status_doc, baseline, activity)
+    age_millis = _state_age_millis(timestamp)
+    stale_threshold_ms = int(getattr(args, "state_stale_ms", query.DEFAULT_FRESHNESS_MS) or query.DEFAULT_FRESHNESS_MS)
+    warnings = sorted(set(str(warning) for warning in context.get("warnings") or [] if warning))
+    missing = sorted(set(str(field) for field in context.get("missingFields") or [] if field))
+    if age_millis is None:
+        warnings.append("state timestamp is unavailable; age cannot be computed.")
+    elif age_millis > stale_threshold_ms:
+        warnings.append(f"state timestamp is stale by {int(age_millis)} ms.")
+    if not baseline and not status_doc:
+        warnings.append("no readable baseline or status state is available.")
+
+    game_state = query.first_value(
+        status_doc.get("gameState"),
+        client_tick_hot.get("gameState"),
+        status_baseline.get("gameState"),
+        baseline.get("gameState"),
+        status_doc.get("game_state"),
+        baseline.get("game_state"),
+        status_doc.get("clientGameState"),
+        baseline.get("clientGameState"),
+    )
+    logged_in = _bool_value(
+        status_doc.get("loggedIn"),
+        status_doc.get("isLoggedIn"),
+        baseline.get("loggedIn"),
+        baseline.get("isLoggedIn"),
+        client_tick_hot.get("loggedIn"),
+        client_tick_hot.get("isLoggedIn"),
+    )
+    if logged_in is None and isinstance(game_state, str):
+        logged_in = game_state.upper() == "LOGGED_IN"
+
+    bank = _dict_value(activity.get("bankState"), activity.get("bankUiContext"), status_doc.get("bankUiContext"), baseline.get("bank"))
+    activity_state = _dict_value(activity.get("activityState"), activity.get("activity"))
+    status = "PASS"
+    if warnings or missing or not (baseline or status_doc):
+        status = "WARN"
+
+    payload: dict[str, Any] = {
+        "schema": STATE_BASELINE_SCHEMA,
+        "status": status,
+        "generatedAtUtc": utc_now(),
+        "sessionPath": str(context.get("session")) if context.get("session") else None,
+        "gameState": game_state,
+        "loggedIn": logged_in,
+        "latestTick": query.latest_tick({"status": status_doc, "baseline": baseline}),
+        "timestampUtc": timestamp,
+        "stateAgeMillis": age_millis,
+        "staleThresholdMillis": stale_threshold_ms,
+        "player": _compact_player(player),
+        "inventory": _compact_inventory(inventory_source),
+        "warnings": sorted(set(warnings)),
+        "missingFields": missing,
+        "sourceFiles": _state_source_files(context),
+    }
+    if bank:
+        payload["bank"] = bank
+    if activity_state:
+        payload["activity"] = activity_state
+    return payload
+
+
+COMPACT_CONTEXT_ALLOWED_NEEDS = {"state", "player", "inventory", "activity", "liveness", "source"}
+COMPACT_CONTEXT_ALLOWED_REQUEST_FIELDS = {"schema", "needs", "responseMode", "maxAgeMs"}
+COMPACT_CONTEXT_DEFAULT_NEEDS = ["state", "player", "inventory", "activity", "liveness", "source"]
+
+
+def _compact_source_metadata(state_baseline: dict) -> dict:
+    files = []
+    for item in state_baseline.get("sourceFiles") or []:
+        if isinstance(item, dict):
+            files.append(
+                {
+                    "name": item.get("name"),
+                    "exists": item.get("exists"),
+                    "modifiedUtc": item.get("modifiedUtc"),
+                    "sizeBytes": item.get("sizeBytes"),
+                }
+            )
+    return {
+        "stateSchema": state_baseline.get("schema"),
+        "stateStatus": state_baseline.get("status"),
+        "sessionPath": state_baseline.get("sessionPath"),
+        "files": files,
+    }
+
+
+def _compact_warning_text(value: Any) -> str:
+    text = str(value)
+    for marker in (" missing: ", " unreadable: "):
+        if marker in text:
+            return text.split(marker, 1)[0] + marker.rstrip()
+    return text
+
+
+def _compact_context_request(payload: Any) -> tuple[dict, list[str]]:
+    warnings: list[str] = []
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return {"schema": REQUEST_SCHEMA, "needs": COMPACT_CONTEXT_DEFAULT_NEEDS, "responseMode": "compact"}, ["invalid_request"]
+    if payload.get("schema") not in (None, REQUEST_SCHEMA):
+        warnings.append("invalid_schema")
+    if payload.get("task") not in (None, ""):
+        warnings.append("unsupported_task")
+    if payload.get("profile") not in (None, ""):
+        warnings.append("unsupported_profile")
+    unsupported_fields = sorted(set(payload) - COMPACT_CONTEXT_ALLOWED_REQUEST_FIELDS - {"task", "profile"})
+    if unsupported_fields:
+        warnings.append(f"unsupported_request_field_count:{len(unsupported_fields)}")
+
+    raw_needs = payload.get("needs")
+    if isinstance(raw_needs, str):
+        raw_needs = [raw_needs]
+    if not isinstance(raw_needs, list) or not raw_needs:
+        if raw_needs is not None:
+            warnings.append("invalid_needs")
+        needs = list(COMPACT_CONTEXT_DEFAULT_NEEDS)
+    else:
+        needs = []
+        unsupported_need_count = 0
+        for need in raw_needs:
+            text = str(need).strip().lower().replace("_", "-")
+            if text in {"baseline", "state-baseline"}:
+                text = "state"
+            text = text.replace("-", "_")
+            if text in COMPACT_CONTEXT_ALLOWED_NEEDS:
+                needs.append(text)
+            else:
+                unsupported_need_count += 1
+        if unsupported_need_count:
+            warnings.append("unsupported_need")
+            warnings.append(f"unsupported_need_count:{unsupported_need_count}")
+        if not needs:
+            needs = ["state"]
+
+    response_mode = str(payload.get("responseMode") or "compact").strip().lower()
+    if response_mode != "compact":
+        warnings.append("unsupported_response_mode")
+        response_mode = "compact"
+
+    request = {"schema": REQUEST_SCHEMA, "needs": sorted(set(needs)), "responseMode": response_mode}
+    max_age = query.as_int(payload.get("maxAgeMs"))
+    if max_age is not None and max_age >= 0:
+        request["maxAgeMs"] = max_age
+    return request, warnings
+
+
+def compact_context_response(state_baseline: dict, request_payload: Any | None = None) -> dict[str, Any]:
+    request, request_warnings = _compact_context_request(request_payload)
+    needs = set(request["needs"])
+    warnings = sorted(set(request_warnings + [_compact_warning_text(warning) for warning in state_baseline.get("warnings") or [] if warning]))
+    errors = [str(field) for field in state_baseline.get("missingFields") or [] if field in {"baseline", "status"}]
+    max_age = request.get("maxAgeMs")
+    state_age = state_baseline.get("stateAgeMillis")
+    if max_age is not None and isinstance(state_age, (int, float)) and state_age > max_age:
+        errors.append(f"stateAgeMillis exceeds maxAgeMs: {int(state_age)} > {max_age}")
+    if state_age is None and max_age is not None:
+        warnings.append("state age is unavailable; maxAgeMs could not be evaluated.")
+
+    response: dict[str, Any] = {
+        "schema": RESPONSE_SCHEMA,
+        "ok": not errors,
+        "errors": sorted(set(errors)),
+        "warnings": sorted(set(warnings)),
+        "generatedAtUtc": utc_now(),
+    }
+
+    if "state" in needs:
+        response["state"] = {
+            "gameState": state_baseline.get("gameState"),
+            "loggedIn": state_baseline.get("loggedIn"),
+            "latestTick": state_baseline.get("latestTick"),
+            "timestampUtc": state_baseline.get("timestampUtc"),
+            "stateAgeMillis": state_age,
+            "staleThresholdMillis": state_baseline.get("staleThresholdMillis"),
+        }
+    if "player" in needs and isinstance(state_baseline.get("player"), dict):
+        response["player"] = state_baseline.get("player")
+    if "inventory" in needs and isinstance(state_baseline.get("inventory"), dict):
+        response["inventory"] = state_baseline.get("inventory")
+    if "activity" in needs and isinstance(state_baseline.get("activity"), dict):
+        activity_summary = _compact_activity(state_baseline.get("activity"))
+        if activity_summary:
+            response["activity"] = activity_summary
+    if "liveness" in needs:
+        response["liveness"] = {}
+    if "source" in needs:
+        response["source"] = _compact_source_metadata(state_baseline)
+    return response
+
+
 def schema_payload() -> dict:
     return {
         "schema": SCHEMA_SCHEMA,
@@ -2310,6 +2636,34 @@ def pipeline_health_cli(args) -> int:
     return print_json_response(pipeline_health_payload(args))
 
 
+def state_baseline_cli(args) -> int:
+    state = ContextState(args)
+    context = state.load_context(force=True)
+    return print_json_response(state_baseline_payload(context, args))
+
+
+def compact_context_cli(args) -> int:
+    request_payload: Any | None = None
+    if args.compact_context_request:
+        try:
+            request_payload = json.loads(args.compact_context_request)
+        except json.JSONDecodeError:
+            request_payload = {
+                "schema": REQUEST_SCHEMA,
+                "needs": ["state", "source"],
+                "responseMode": "compact",
+                "_requestError": "invalid_json_request",
+            }
+    state = ContextState(args)
+    context = state.load_context(force=True)
+    baseline = state_baseline_payload(context, args)
+    response = compact_context_response(baseline, request_payload)
+    if isinstance(request_payload, dict) and request_payload.get("_requestError"):
+        response["ok"] = False
+        response["errors"] = sorted(set(list(response.get("errors") or []) + [request_payload["_requestError"]]))
+    return print_json_response(response)
+
+
 def ensure_loaded_scene_cli(args) -> int:
     import liveness_recovery_core
 
@@ -2369,6 +2723,9 @@ def parse_args():
     parser.add_argument("--query-coverage-matrix", action="store_true", help="Print query_coverage_matrix.v1 and exit.")
     parser.add_argument("--coverage-report", action="store_true", help="Print coverage_report.v1 and exit.")
     parser.add_argument("--pipeline-health", action="store_true", help="Print pipeline_health.v1 and exit.")
+    parser.add_argument("--state-baseline", action="store_true", help="Print read-only recovery_state_baseline.v1 and exit.")
+    parser.add_argument("--compact-context", action="store_true", help="Print compact read-only context_response.v1 from the R1 state baseline and exit.")
+    parser.add_argument("--compact-context-request", help="Optional context_request.v1 JSON for --compact-context.")
     parser.add_argument("--ensure-loaded-scene", action="store_true", help="Recover known RuneLite liveness states, verify loaded scene, and rebind daemon.")
     parser.add_argument("--probe-task", help="Run read-only task probe for a task description and exit.")
     parser.add_argument("--probe-task-capture", action="store_true", help="Capture a script_authoring_context bundle during --probe-task.")
@@ -2393,6 +2750,7 @@ def parse_args():
     parser.add_argument("--liveness-max-attempts-per-state", type=int, default=2, help="Maximum attempts per known liveness state for --ensure-loaded-scene.")
     parser.add_argument("--context-json", help="Use a saved context/status JSON file for Knowledge Fabric CLI commands.")
     parser.add_argument("--live-timeout", type=float, default=1.0, help="HTTP timeout for live Knowledge Fabric CLI commands.")
+    parser.add_argument("--state-stale-ms", type=int, default=query.DEFAULT_FRESHNESS_MS, help="Age threshold for --state-baseline stale warnings. Default: 5000.")
     parser.add_argument("--world-max-objects", type=int, default=160, help="Max world objects requested by live Knowledge Fabric CLI commands.")
     parser.add_argument("--max-response-bytes", type=int, default=1_000_000, help="Compact response size guard. Default: 1000000.")
     parser.add_argument("--compact-include-source-files", action="store_true", help="Include full sourceFiles even for compact responses.")
@@ -2426,6 +2784,10 @@ def main() -> int:
         return coverage_report_cli(args)
     if args.pipeline_health:
         return pipeline_health_cli(args)
+    if args.state_baseline:
+        return state_baseline_cli(args)
+    if args.compact_context:
+        return compact_context_cli(args)
     if args.ensure_loaded_scene:
         return ensure_loaded_scene_cli(args)
     if args.probe_task:
