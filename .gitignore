@@ -19,6 +19,7 @@ exports/
 *.jsonl
 latest/
 live_logs/
+_run_proofs/
 telemetry-viewer/logs/
 telemetry-viewer/config/*.local.json
 .osrs-telemetry/
