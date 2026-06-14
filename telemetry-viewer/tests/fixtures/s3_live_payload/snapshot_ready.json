@@ -1,0 +1,39 @@
+{
+  "schema": "plugin_snapshot_response.v1",
+  "generatedAtUtc": "2026-06-14T21:40:00Z",
+  "latestTick": 42,
+  "snapshotTier": "hot",
+  "status": "PASS",
+  "freshness": {
+    "latestTick": 42,
+    "fresh": true,
+    "staleReasons": []
+  },
+  "payloads": {
+    "baseline": {
+      "tick": 42,
+      "gameState": "LOGGED_IN",
+      "player": {
+        "worldX": 3200,
+        "worldY": 3201,
+        "plane": 0,
+        "sceneX": 48,
+        "sceneY": 52,
+        "animation": -1,
+        "runEnergyPercent": 87
+      },
+      "source": {
+        "sourceSceneKnowledgeComplete": true,
+        "sceneObjectsSeen": 12,
+        "sceneObjectsCaptured": 12
+      }
+    },
+    "inventory": {
+      "freeSlots": 24,
+      "itemCount": 4,
+      "slotCount": 28
+    }
+  },
+  "missingCapabilities": [],
+  "warnings": []
+}

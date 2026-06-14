@@ -2,7 +2,7 @@
 
 ## Active branch
 
-`work/telemetry-payload-handshake`
+`work/manual-live-payload-capture`
 
 ## Active worktree
 
@@ -10,9 +10,9 @@
 
 ## Recovery mode and baseline status
 
-Recovery mode is complete. The recovered project is baseline-ready; normal script-development work now continues on `work/telemetry-payload-handshake`, created from the post-recovery work branch.
+Recovery mode is complete. The recovered project is baseline-ready; normal script-development work now continues on `work/manual-live-payload-capture`, created from the telemetry payload handshake branch.
 
-Active script-development milestone: S2 - Telemetry Payload Handshake.
+Active script-development milestone: S3 - Manual Live Payload Capture.
 
 The deterministic baseline remains the R1/R2/R3/R4 read-only recovery gate. It includes:
 
@@ -79,6 +79,18 @@ Run proofs are written under `_run_proofs\telemetry_payload\<timestamp>\`.
 The handshake reports `PASS_ENDPOINT_PAYLOAD_READY` only when the endpoint returns a fresh baseline telemetry payload. It reports `WARN_ENDPOINT_ALIVE_NO_PAYLOAD` when the endpoint is reachable but the plugin live cache has no usable baseline payload yet, which is expected before login/live cache samples are available. It reports `FAIL_ENDPOINT_NOT_LISTENING` when port `8893` is not listening and `FAIL_ENDPOINT_BAD_RESPONSE` when an expected JSON endpoint cannot be parsed or has the wrong schema.
 
 S2 does not control the client, perform login, send input, click, choose routes, run banking/activity behavior, or execute gameplay behavior.
+
+## Canonical manual live payload capture
+
+`powershell -ExecutionPolicy Bypass -File scripts/capture_live_payload.ps1`
+
+The S3 manual live payload capture runs the deterministic baseline gate first, prompts for user-provided manual live-scene readiness, then polls the read-only plugin snapshot endpoint on `127.0.0.1:8893` using only `GET /health`, `GET /schema`, and `POST /snapshot`.
+
+Run proofs are written under `_run_proofs\live_payload\<timestamp>\`.
+
+S3 proves whether a real live telemetry payload is available from the already-launched development client and, when a payload is captured, runs a pure read-only adapter through the recovered R1 state baseline, R2 compact context boundary, R3 diagnostic, and R4 observation-readiness diagnostic helpers. The current expected state remains endpoint-alive/no-payload until the user manually logs in and puts the dev client into a live scene.
+
+Manual login and live-scene readiness are user-provided. The scripts do not automate login, click, type, move, choose routes, run banking/activity behavior, execute gameplay behavior, or control the client.
 
 ## Canonical R1 state parser
 

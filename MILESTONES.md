@@ -2,18 +2,46 @@
 
 Active milestone: R4 - Read-only live readiness fixtures (deterministic baseline gate for S1/S2)
 
-Active script-development milestone: S2 - Telemetry Payload Handshake
+Active script-development milestone: S3 - Manual Live Payload Capture
 
-Current branch: `work/telemetry-payload-handshake`
+Current branch: `work/manual-live-payload-capture`
 
 Recovery mode is complete. No R6, R7, or R8 milestone is active.
 
 The deterministic baseline remains the R1/R2/R3/R4 gate through `scripts/run_current_milestone.ps1`.
 
-## S2 - Telemetry Payload Handshake
+## S3 - Manual Live Payload Capture
 
 Status:
 Active.
+
+Goal:
+Provide one command that waits for user-provided manual live-scene readiness, captures the first readable plugin snapshot payload, and proves the recovered read-only stack can consume it safely.
+
+Command:
+
+`powershell -ExecutionPolicy Bypass -File scripts/capture_live_payload.ps1`
+
+Endpoint:
+
+`127.0.0.1:8893`
+
+Acceptance:
+- the capture verifies it is running from `C:\Users\badto\OneDrive\Documents\osrs-telemetry-recovery`
+- the capture refuses the quarantined old checkout path
+- the deterministic baseline gate passes before polling
+- the capture uses only discovered read-only endpoint paths: `GET /health`, `GET /schema`, and `POST /snapshot`
+- proof files are written under `_run_proofs\live_payload\<timestamp>\`
+- `PASS_LIVE_PAYLOAD_CAPTURED` is reported only when a parseable live payload with a freshness marker and canonical payload section is observed
+- `WARN_ENDPOINT_ALIVE_NO_PAYLOAD` is reported when the endpoint is alive but no usable live payload exists yet
+- `FAIL_ENDPOINT_NOT_LISTENING`, `FAIL_ENDPOINT_BAD_RESPONSE`, and `FAIL_BASELINE_GATE` are reported for their respective failure modes
+- manual login/live-scene readiness remains user-provided
+- no login, click, input, route, banking, activity, gameplay-control, or anti-detection behavior is added
+
+## S2 - Telemetry Payload Handshake
+
+Status:
+Complete in commit `e7c8a44`.
 
 Goal:
 Provide one command that verifies the already-launched development client plugin endpoint is readable, distinguishes port-not-listening from endpoint-alive/no-payload, and reports payload readiness without controlling the client.
