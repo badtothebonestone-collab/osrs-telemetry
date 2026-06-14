@@ -2,8 +2,9 @@
 
 ## Current branch and worktree
 
-- Branch: `recovery/r5-readonly-integration-triage`
+- Branch: `work/resume-script-development`
 - Worktree path: `C:\Users\badto\OneDrive\Documents\osrs-telemetry-recovery`
+- Recovery mode: complete; baseline-ready after the R5 documentation checkpoint.
 - Original repo status summary: this recovery folder was created by cloning because the starting directory was not inside a Git repository. No original repo path or uncommitted original worktree diff was captured. The recovery worktree already had `_recovery/` untracked from the initial evidence capture before this audit log was added.
 
 ## Files that appear authoritative

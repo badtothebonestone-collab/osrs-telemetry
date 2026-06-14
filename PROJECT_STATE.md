@@ -2,31 +2,47 @@
 
 ## Active branch
 
-`recovery/r5-readonly-integration-triage`
+`work/resume-script-development`
 
 ## Active worktree
 
 `C:\Users\badto\OneDrive\Documents\osrs-telemetry-recovery`
 
+## Recovery mode and baseline status
+
+Recovery mode is complete. The recovered project is baseline-ready on `work/resume-script-development`; normal script-development work should start from this branch.
+
+The deterministic baseline remains the R1/R2/R3/R4 read-only recovery gate. It includes:
+
+- R1 state baseline checks
+- R2 compact context boundary checks
+- R2 response verifier checks
+- R3 no-action diagnostic checks
+- R4 read-only live-readiness fixture checks
+
+No R6, R7, or R8 milestone is active.
+
+The dirty old checkout at `C:\Users\badto\osrs-telemetry` remains quarantined and reference-only. Do not import, copy, merge, or execute code from that checkout without a new explicit milestone and review.
+
 ## Current architecture boundary
 
-Recovery is limited to read-only state, compact context, diagnostic work, deterministic live-readiness fixture validation, and R5 documentation-only integration triage: parse available telemetry/state, validate shape/freshness, summarize current status, report clear blockers, and document how old dirty-checkout changes should be evaluated.
+The recovered baseline is limited to read-only state, compact context, diagnostic work, deterministic live-readiness fixture validation, and documentation-only integration triage: parse available telemetry/state, validate shape/freshness, summarize current status, report clear blockers, and document how old dirty-checkout changes should be evaluated.
 
 Runtime/source feature work, gameplay behavior, route behavior, banking behavior, direct input, and anti-detection behavior are outside the current recovery boundary.
 
 R4 validates loaded-scene readiness as observation-readiness only. It proves that live-like fixture telemetry is handled safely across the R1/R2/R3 boundary; it does not grant permission to choose a task, route, target, bank, activity, or action.
 
-R5 is documentation-only integration triage. It inventories old dirty-checkout changes and defines how they may be evaluated later against the recovered R1/R2/R3/R4 boundary. It does not import, copy, merge, restore, or execute old behavior.
+R5 documentation-only integration triage is complete. It inventories old dirty-checkout changes and defines how they may be evaluated later against the recovered R1/R2/R3/R4 boundary. It does not import, copy, merge, restore, or execute old behavior.
 
 ## Blessed run/check command
 
 `powershell -ExecutionPolicy Bypass -File scripts/run_current_milestone.ps1`
 
-This is the only blessed command for the current recovery milestone. Do not invent substitute run commands.
+This is the blessed baseline command. Do not invent substitute run commands.
 
 The command runs `scripts\doctor.ps1`, in-memory Python syntax compilation, and deterministic standard-library unittest checks.
 
-Because `MILESTONES.md` keeps the blessed gate on R4 for this R5 documentation-only branch, the deterministic gate includes:
+The deterministic baseline currently includes:
 
 - `telemetry-viewer\tests\test_state_baseline.py`
 - `telemetry-viewer\tests\test_compact_context_boundary.py`
