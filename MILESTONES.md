@@ -2,6 +2,10 @@
 
 Active milestone: R4 - Read-only live readiness fixtures
 
+Current planning branch: R5 - Read-only integration triage
+
+R5 is documentation-only and uses the existing R4 deterministic fixture gate until a future deterministic documentation check is explicitly designed. `scripts/run_current_milestone.ps1` is intentionally unchanged for R5.
+
 ## R1 - Read-only state baseline
 
 Goal:
@@ -91,7 +95,7 @@ Acceptance:
 ## R4 - Read-only live readiness fixtures
 
 Status:
-Active fixture validation pass.
+Complete in commit `d890f6e`. It remains the blessed deterministic gate during R5 documentation-only triage.
 
 Goal:
 Prove that the R1/R2/R3 boundary handles live-like telemetry safely with deterministic, read-only fixtures.
@@ -114,3 +118,31 @@ Acceptance:
 - no fixture name implies execution permission
 - R1, R2, R2 verifier, R3, R2.5, and R4 deterministic tests pass
 - blessed command passes without calling `--latest-session` for proof
+
+## R5 - Read-only integration triage
+
+Status:
+Documentation-only planning branch.
+
+Goal:
+Create a read-only integration plan for evaluating old dirty-checkout changes against the recovered R1/R2/R3/R4 boundary.
+
+Out of scope:
+- runtime/source code changes
+- test behavior changes
+- copying or importing old code
+- merging old dirty-checkout changes
+- task behavior
+- route behavior or route execution
+- banking behavior
+- activity automation
+- action execution
+- anti-detection
+
+Acceptance:
+- `docs/recovery/R5_INTEGRATION_TRIAGE.md` documents the old checkout inventory and risk categories
+- high-risk action proposal, executor, route demonstration, route guide/template, knowledge base, and execution-test changes are marked do-not-blindly-merge
+- candidate salvage categories are classified as docs/reference, fixture/data, read-only diagnostics, no-action tests, quarantined action-capable code, or obsolete/unknown
+- integration rules require all future behavior to pass through R1/R2/R3/R4 boundaries
+- no runtime/source/test behavior changes
+- blessed command passes using the unchanged deterministic gate

@@ -2,7 +2,7 @@
 
 ## Current branch and worktree
 
-- Branch: `recovery/r4-readonly-live-readiness-fixtures`
+- Branch: `recovery/r5-readonly-integration-triage`
 - Worktree path: `C:\Users\badto\OneDrive\Documents\osrs-telemetry-recovery`
 - Original repo status summary: this recovery folder was created by cloning because the starting directory was not inside a Git repository. No original repo path or uncommitted original worktree diff was captured. The recovery worktree already had `_recovery/` untracked from the initial evidence capture before this audit log was added.
 
@@ -872,3 +872,48 @@ Remaining risks:
 - `context_service.py` remains broad outside the isolated R1/R2 payload boundary.
 - R4 proves only deterministic fixture behavior and does not prove the current live client is loaded.
 - R4 does not validate task selection, routing, banking, activity automation, or gameplay execution.
+
+## R5 read-only integration triage documentation - 2026-06-14
+
+Started R5 from checkpoint `d890f6ed035bba06060cb3b82e50e485b9954669`.
+
+Changed files:
+
+- `docs\recovery\R5_INTEGRATION_TRIAGE.md`
+- `PROJECT_STATE.md`
+- `MILESTONES.md`
+- `RECOVERY_LOG.md`
+
+Old checkout inspected read-only:
+
+- Path: `C:\Users\badto\osrs-telemetry`
+- Branch: `stabilization/live-loop-recovery-20260609`
+- Status: dirty with modified docs, route guide/template data, input-control/executor code, generated knowledge base data, route demonstration code, and execution-oriented tests, plus one untracked recording-analysis document.
+
+What was added:
+
+- Added a documentation-only R5 integration plan.
+- Documented the current R1/R2/R3/R4 safe baseline and blessed command.
+- Grouped old dirty-checkout changes by file category.
+- Marked action proposal, input executor, route demonstration, route guides/templates, generated knowledge, and execution-oriented tests as do-not-blindly-merge areas.
+- Classified candidate salvage categories for future milestones.
+- Proposed R6/R7/R8 as follow-up planning milestones.
+
+Why it is safe:
+
+- No runtime/source code was changed.
+- No tests were changed.
+- No old code was copied, imported, or merged.
+- No old entrypoint was blessed.
+- No task, route, banking, activity, anti-detection, or direct action behavior was restored.
+- `scripts\run_current_milestone.ps1` was intentionally left unchanged; R5 documentation-only triage uses the existing deterministic R4 gate.
+
+Commands run:
+
+- `powershell -ExecutionPolicy Bypass -File scripts/run_current_milestone.ps1`
+
+Remaining risks:
+
+- The dirty old checkout still contains action-capable and route-behavior changes that require quarantine.
+- Generated knowledge-base changes from the old checkout contain local evidence and should not be merged without human review.
+- R5 is a plan only; it does not decide whether any old behavior is safe to reintroduce.

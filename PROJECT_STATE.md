@@ -2,7 +2,7 @@
 
 ## Active branch
 
-`recovery/r4-readonly-live-readiness-fixtures`
+`recovery/r5-readonly-integration-triage`
 
 ## Active worktree
 
@@ -10,11 +10,13 @@
 
 ## Current architecture boundary
 
-Recovery is limited to read-only state, compact context, diagnostic work, and deterministic live-readiness fixture validation: parse available telemetry/state, validate shape/freshness, summarize current status, and report clear blockers.
+Recovery is limited to read-only state, compact context, diagnostic work, deterministic live-readiness fixture validation, and R5 documentation-only integration triage: parse available telemetry/state, validate shape/freshness, summarize current status, report clear blockers, and document how old dirty-checkout changes should be evaluated.
 
 Runtime/source feature work, gameplay behavior, route behavior, banking behavior, direct input, and anti-detection behavior are outside the current recovery boundary.
 
 R4 validates loaded-scene readiness as observation-readiness only. It proves that live-like fixture telemetry is handled safely across the R1/R2/R3 boundary; it does not grant permission to choose a task, route, target, bank, activity, or action.
+
+R5 is documentation-only integration triage. It inventories old dirty-checkout changes and defines how they may be evaluated later against the recovered R1/R2/R3/R4 boundary. It does not import, copy, merge, restore, or execute old behavior.
 
 ## Blessed run/check command
 
@@ -24,7 +26,7 @@ This is the only blessed command for the current recovery milestone. Do not inve
 
 The command runs `scripts\doctor.ps1`, in-memory Python syntax compilation, and deterministic standard-library unittest checks.
 
-Because `MILESTONES.md` marks R4 active after the final recovery checkpoint, the deterministic gate includes:
+Because `MILESTONES.md` keeps the blessed gate on R4 for this R5 documentation-only branch, the deterministic gate includes:
 
 - `telemetry-viewer\tests\test_state_baseline.py`
 - `telemetry-viewer\tests\test_compact_context_boundary.py`
@@ -112,6 +114,23 @@ Current known limitations:
 - `gradlew run` remains a development launch only and is not proof of a loaded scene.
 - R4 does not start RuneLite, the daemon, the snapshot endpoint, or any external service.
 
+## Canonical R5 read-only integration triage
+
+- Path: `docs\recovery\R5_INTEGRATION_TRIAGE.md`
+- Scope: documentation-only planning and inventory
+- Input: read-only inspection results from `C:\Users\badto\osrs-telemetry`
+- Gate: unchanged blessed command above
+
+R5 documents how to evaluate old dirty-checkout changes against the recovered R1/R2/R3/R4 boundary. It classifies old docs, fixtures, diagnostics, tests, generated knowledge, and action-capable code by salvage risk.
+
+Current known limitations:
+
+- R5 does not modify runtime/source code.
+- R5 does not modify tests.
+- R5 does not import, copy, merge, or execute old code.
+- R5 does not bless old entrypoints.
+- R5 does not restore task, route, banking, activity, or action behavior.
+
 ## Current known entrypoints
 
 - `src\main\java\com\osrstelemetry\TelemetryPlugin.java` - RuneLite plugin entrypoint.
@@ -172,3 +191,4 @@ These are discovered commands, not the blessed recovery command. The `--latest-s
 - Treating `gradlew run` as loaded-scene proof.
 - Copying execution-capable commands from old docs.
 - Moving uncertain historical docs without human review.
+- Blindly merging dirty-checkout action proposal, executor, route demonstration, route guide/template, generated knowledge, or execution-test changes.
