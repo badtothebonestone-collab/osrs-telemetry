@@ -2,7 +2,7 @@
 
 ## Active branch
 
-`recovery/r2.5-context-boundary-hardening`
+`recovery/r2.5-context-boundary-hardening-after-r3`
 
 ## Active worktree
 
@@ -10,9 +10,11 @@
 
 ## Current architecture boundary
 
-Recovery is limited to read-only state and diagnostic work: parse available telemetry/state, validate shape/freshness, summarize current status, and report clear blockers.
+Recovery is limited to read-only state, compact context, and diagnostic work: parse available telemetry/state, validate shape/freshness, summarize current status, and report clear blockers.
 
 Runtime/source feature work, gameplay behavior, route behavior, banking behavior, direct input, and anti-detection behavior are outside the current recovery boundary.
+
+R2.5 separates the pure R1/R2 payload boundaries from broad `context_service.py` CLI/server glue without changing public schemas or runner behavior.
 
 ## Blessed run/check command
 
@@ -22,14 +24,14 @@ This is the only blessed command for the current recovery milestone. Do not inve
 
 The command runs `scripts\doctor.ps1`, in-memory Python syntax compilation, and deterministic standard-library unittest checks.
 
-Because `MILESTONES.md` marks R3 active, the deterministic gate includes:
+Because `MILESTONES.md` marks R2.5 active after the R3 checkpoint, the deterministic gate includes:
 
 - `telemetry-viewer\tests\test_state_baseline.py`
 - `telemetry-viewer\tests\test_compact_context_boundary.py`
 - `telemetry-viewer\tests\test_recovery_response_verifier.py`
 - `telemetry-viewer\tests\test_recovery_diagnostics.py`
 
-The verifier test exercises deterministic fixture CLI output and `scripts\verify_recovery_response.py`. Required R1/R2 responses fail the gate on invalid JSON, missing required fields, `status: "FAIL"`, `ok: false`, forbidden response fields, or forbidden compact-context response text. The R3 test is deterministic and no-action; it consumes in-memory `context_response.v1` fixtures only.
+The verifier test exercises deterministic fixture CLI output and `scripts\verify_recovery_response.py`. Required R1/R2 responses fail the gate on invalid JSON, missing required fields, `status: "FAIL"`, `ok: false`, forbidden response fields, or forbidden compact-context response text. The R3 test is deterministic and no-action; it consumes in-memory `context_response.v1` fixtures only. R2.5 keeps the same deterministic gate and adds no alternate runner.
 
 The runner may print `--latest-session` R1/R2 output as an optional diagnostic. Latest-session warnings or `ok: false` are advisory only and are not the proof that R1/R2 passed.
 
@@ -37,11 +39,12 @@ Command quarantine and support command details live in `scripts\README.md`. That
 
 ## Canonical R1 state parser
 
-- Path: `telemetry-viewer\context_service.py`
+- Payload module: `telemetry-viewer\state_baseline.py`
+- CLI wrapper: `telemetry-viewer\context_service.py`
 - Status command: `python telemetry-viewer\context_service.py --latest-session --state-baseline`
 - Output schema: `recovery_state_baseline.v1`
 
-The parser reads existing live state files under `interaction_geometry\live` when a session is available. It reports a compact snapshot with game state, logged-in inference, tick, timestamp, state age, player position, inventory, bank, and activity fields when those fields are already present in read-only telemetry.
+The parser reads existing live state files under `interaction_geometry\live` when a session is available. `context_service.py` loads the existing files and delegates read-only normalization to `state_baseline.py`. It reports a compact snapshot with game state, logged-in inference, tick, timestamp, state age, player position, inventory, bank, and activity fields when those fields are already present in read-only telemetry.
 
 Current known limitations:
 
@@ -54,13 +57,14 @@ Current known limitations:
 
 ## Canonical R2 compact context boundary
 
-- Path: `telemetry-viewer\context_service.py`
+- Payload module: `telemetry-viewer\context_boundary.py`
+- CLI wrapper: `telemetry-viewer\context_service.py`
 - Status command: `python telemetry-viewer\context_service.py --latest-session --compact-context`
 - Optional request: `--compact-context-request '{"schema":"context_request.v1","needs":["state","player","inventory","source"],"responseMode":"compact"}'`
 - Request schema: `context_request.v1`
 - Response schema: `context_response.v1`
 
-The compact context boundary consumes the R1 `recovery_state_baseline.v1` payload and returns only read-only facts: schema, ok, errors, warnings, timestamp/tick/state age, game/logged-in state, player position, inventory summary, an allowlisted activity summary when already present, liveness summary, and source metadata.
+The compact context boundary consumes the R1 `recovery_state_baseline.v1` payload and returns only read-only facts: schema, ok, errors, warnings, timestamp/tick/state age, game/logged-in state, player position, inventory summary, an allowlisted activity summary when already present, liveness summary, and source metadata. Existing imports through `context_service.py` remain compatible for tests and callers.
 
 Unsupported compact-context request values are never echoed verbatim. Unsupported `needs`, `task`, `profile`, `responseMode`, invalid schema, invalid JSON, and unknown request fields are reported with safe codes such as `unsupported_need`, `unsupported_task`, `unsupported_profile`, `unsupported_response_mode`, `invalid_schema`, `invalid_json_request`, and `unsupported_request_field_count`.
 
@@ -96,6 +100,8 @@ Current known limitations:
 - `src\main\java\com\osrstelemetry\WorldModelCache.java` - loaded-scene/world-model cache.
 - `telemetry-viewer\live_core_daemon.py` - read-only live daemon on `127.0.0.1:8890`.
 - `telemetry-viewer\context_service.py` - query/context service and recovery-capable CLI.
+- `telemetry-viewer\state_baseline.py` - R1 read-only state baseline payload boundary; not a standalone runner.
+- `telemetry-viewer\context_boundary.py` - R2 compact context request/response boundary; not a standalone runner.
 - `telemetry-viewer\live_control_panel.py` - current daily control panel per registry.
 - `telemetry-viewer\run_daily_gauntlet.py` - daily sanity check surface.
 - `telemetry-viewer\run_woodcut_bank_live_qa.py` - read-only live QA surface.

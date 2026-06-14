@@ -68,7 +68,10 @@ $milestonesPath = Join-Path $repoRoot "MILESTONES.md"
 
 if (Test-Path -LiteralPath $milestonesPath) {
     $milestonesText = Get-Content -LiteralPath $milestonesPath -Raw
-    if ($milestonesText -match "Active milestone:\s*R3\b") {
+    if ($milestonesText -match "Active milestone:\s*R2\.5\b") {
+        $script:CurrentMilestone = "R2.5"
+    }
+    elseif ($milestonesText -match "Active milestone:\s*R3\b") {
         $script:CurrentMilestone = "R3"
     }
     elseif ($milestonesText -match "Active milestone:\s*R2\b") {
@@ -155,13 +158,13 @@ if errors:
     $unittestScripts = @(
         "telemetry-viewer\tests\test_state_baseline.py"
     )
-    if (@("R2", "R3") -contains $script:CurrentMilestone) {
+    if (@("R2", "R2.5", "R3") -contains $script:CurrentMilestone) {
         $unittestScripts += @(
             "telemetry-viewer\tests\test_compact_context_boundary.py",
             "telemetry-viewer\tests\test_recovery_response_verifier.py"
         )
     }
-    if ($script:CurrentMilestone -eq "R3") {
+    if (@("R2.5", "R3") -contains $script:CurrentMilestone) {
         $unittestScripts += @(
             "telemetry-viewer\tests\test_recovery_diagnostics.py"
         )
@@ -196,7 +199,7 @@ if errors:
         Write-Host "Advisory latest-session state parser command exited nonzero: $parserExit"
     }
 
-    if (@("R2", "R3") -contains $script:CurrentMilestone) {
+    if (@("R2", "R2.5", "R3") -contains $script:CurrentMilestone) {
         Write-Host "Latest-session R2 diagnostic:"
         $compactExit = Invoke-Native { & $python.Source $contextService --latest-session --compact-context }
         if ($compactExit -ne 0) {

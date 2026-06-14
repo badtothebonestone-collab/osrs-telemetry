@@ -780,3 +780,49 @@ Commands run:
 Remaining risks:
 
 - `context_service.py` remains mixed-responsibility outside the R1/R2 path. R3 was kept in a separate small module instead of further expanding that file.
+
+## R2.5 context-boundary hardening after R3 - 2026-06-14
+
+Started the final cleanup pass from clean checkpoint `548c179`.
+
+Responsibility classification:
+
+- R1 state loading/file discovery remains in `telemetry-viewer\context_service.py` through `ContextState`.
+- R1 state parsing and normalization now lives in `telemetry-viewer\state_baseline.py`.
+- R2 compact context request/response handling now lives in `telemetry-viewer\context_boundary.py`.
+- R2 response safety is covered by `telemetry-viewer\tests\test_compact_context_boundary.py` and `scripts\verify_recovery_response.py`.
+- CLI/server/wrapper glue remains in `telemetry-viewer\context_service.py`.
+- Older query, watch, server, recovery, and maintenance surfaces remain outside the R1/R2 recovery boundary.
+
+What was extracted:
+
+- Moved the pure `recovery_state_baseline.v1` payload builder and read-only normalization helpers into `state_baseline.py`.
+- Moved the pure `context_request.v1`/`context_response.v1` compact boundary into `context_boundary.py`.
+- Kept compatibility imports in `context_service.py` so existing tests and callers can still use `context_service.state_baseline_payload` and `context_service.compact_context_response`.
+- Updated the blessed runner to recognize `R2.5` and run the same deterministic R1/R2/R3 safety gate.
+
+Why this stayed small:
+
+- No schema changed.
+- No runner was duplicated.
+- No parser was duplicated.
+- No live file loading behavior moved.
+- No task, route, banking, activity automation, anti-detection, or direct action execution was added.
+
+Commands run:
+
+- `python telemetry-viewer\tests\test_state_baseline.py`
+- `python telemetry-viewer\tests\test_compact_context_boundary.py`
+- `python telemetry-viewer\tests\test_recovery_response_verifier.py`
+- `python telemetry-viewer\tests\test_recovery_diagnostics.py`
+- `powershell -ExecutionPolicy Bypass -File scripts/run_current_milestone.ps1`
+
+Remaining risks:
+
+- `context_service.py` remains broad because it still owns CLI/server/query/watch glue and older non-recovery surfaces.
+- The remaining broadness is not blocking the read-only recovery boundary because R1/R2 payload logic is now isolated and covered by deterministic tests.
+- A larger server split should wait for a non-recovery refactor milestone.
+
+Recovery completion note:
+
+- After the blessed command passes and this cleanup is reviewed, the read-only recovery baseline can be considered complete enough to checkpoint before any R4 work.
