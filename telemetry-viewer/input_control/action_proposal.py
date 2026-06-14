@@ -334,30 +334,26 @@ def _reconcile_context_route_waypoint(proposal: ActionProposal, status: dict[str
             player_tile=player_tile,
             explanation=explanation,
         )
+        invalid_segment = _route_guide_invalid_segment_proposal(
+            guide_progress,
+            input_geometry=proposal.input_geometry,
+            source_canvas_size=source_canvas_size_from_status(status),
+            source_tick=proposal.source_tick,
+            status=status,
+            brain=brain,
+        )
+        if invalid_segment is not None:
+            return invalid_segment
         guide_tile = _guide_point_tile(guide_progress)
         guide_interaction = _guide_interaction_target(guide_progress)
         if guide_interaction and _guide_interaction_should_win(guide_progress, guide_tile):
-            guide_interaction["actionability"] = "blocked_route_guide_interaction_needs_live_target"
-            guide_interaction["routeCandidateValidation"] = {
-                **_dict(guide_interaction.get("routeCandidateValidation")),
-                "status": "WARN",
-                "classification": "route_guide_interaction_needs_live_target",
-            }
-            return _proposal(
-                "wait_for_context",
-                target_kind="service_route_object",
-                target=guide_interaction,
-                reason="route_guide_interaction_needs_live_target",
-                confidence=0.58,
-                warnings=["demonstrated route guide expects an interaction step, but live target geometry is not actionable yet"],
-                missing=["route.interaction.liveTarget"],
-                required_context=["route_guide", "service_route", "client_tick"],
+            return _route_guide_interaction_proposal(
+                guide_interaction,
+                status=status,
+                brain=brain,
                 source_tick=proposal.source_tick,
                 input_geometry=proposal.input_geometry,
                 source_canvas_size=source_canvas_size_from_status(status),
-                status=status,
-                brain=brain,
-                suppress_click_point=True,
             )
         if guide_tile and _route_tile_distance_same_plane(guide_tile, player_tile) != 0:
             previous_selection = _dict(explanation.get("routeWaypointSelection"))
@@ -414,27 +410,13 @@ def _reconcile_context_route_waypoint(proposal: ActionProposal, status: dict[str
             )
             return proposal
         if guide_interaction:
-            guide_interaction["actionability"] = "blocked_route_guide_interaction_needs_live_target"
-            guide_interaction["routeCandidateValidation"] = {
-                **_dict(guide_interaction.get("routeCandidateValidation")),
-                "status": "WARN",
-                "classification": "route_guide_interaction_needs_live_target",
-            }
-            return _proposal(
-                "wait_for_context",
-                target_kind="service_route_object",
-                target=guide_interaction,
-                reason="route_guide_interaction_needs_live_target",
-                confidence=0.58,
-                warnings=["demonstrated route guide expects an interaction step, but live target geometry is not actionable yet"],
-                missing=["route.interaction.liveTarget"],
-                required_context=["route_guide", "service_route", "client_tick"],
+            return _route_guide_interaction_proposal(
+                guide_interaction,
+                status=status,
+                brain=brain,
                 source_tick=proposal.source_tick,
                 input_geometry=proposal.input_geometry,
                 source_canvas_size=source_canvas_size_from_status(status),
-                status=status,
-                brain=brain,
-                suppress_click_point=True,
             )
         previous_selection = _dict(explanation.get("routeWaypointSelection"))
         selection = {
@@ -3317,6 +3299,13 @@ def _guide_interaction_target(progress: dict[str, Any]) -> dict[str, Any]:
         "routeStepIndex": interaction.get("segmentIndex"),
         "routeStepType": route_step_type,
         "interactionType": interaction.get("interactionType"),
+        "executionStatus": interaction.get("executionStatus"),
+        "invalidForExecution": interaction.get("invalidForExecution"),
+        "invalidReason": interaction.get("invalidReason"),
+        "blocker": interaction.get("blocker"),
+        "safeState": interaction.get("safeState"),
+        "suggestedFixture": interaction.get("suggestedFixture"),
+        "routeObjectClassification": interaction.get("routeObjectClassification"),
         "floorSelectionOption": action if is_floor_selection else None,
         "plane1RecoveryOption": action if is_plane1_recovery else None,
         "sourcePlane": interaction.get("sourcePlane"),
@@ -3546,6 +3535,245 @@ def _merge_live_route_object_into_guide_target(guide_target: dict[str, Any], liv
         else _dict(guide_target.get("routeCandidateValidation")).get("classification"),
     }
     return merged
+
+
+def _route_interaction_marked_invalid(target: dict[str, Any]) -> bool:
+    status_text = _compact_words(target.get("executionStatus"))
+    classification = _compact_words(target.get("routeObjectClassification"))
+    if _bool(target.get("invalidForExecution")) is True:
+        return True
+    if status_text in {"disabled", "quarantined", "invalid"}:
+        return True
+    if classification in {"invalid route evidence", "unrelated or rejected"}:
+        return True
+    return False
+
+
+def _is_invalid_woodcutting_bank_trapdoor_interaction(target: dict[str, Any]) -> bool:
+    route_name = _compact_words(target.get("routeGuideName") or target.get("routeName") or target.get("routeId"))
+    name = _compact_words(target.get("targetName") or target.get("name") or target.get("target"))
+    actions = " ".join(_compact_words(value) for value in (_list(target.get("expectedOptions")) or _list(target.get("actions"))))
+    object_ids = [_int(value, None) for value in _list(target.get("expectedObjectIds"))]
+    object_id = _route_target_id(target)
+    if object_id is not None:
+        object_ids.append(object_id)
+    world = _target_world_tile(target)
+    return (
+        "woodcutting area to bank" in route_name
+        and "trapdoor" in name
+        and 14880 in [value for value in object_ids if value is not None]
+        and "climb down" in actions
+        and _dict(world) == {"worldX": 3209, "worldY": 3216, "plane": 0}
+    )
+
+
+def _route_interaction_invalid_reason(target: dict[str, Any]) -> str | None:
+    if _route_interaction_marked_invalid(target) or _is_invalid_woodcutting_bank_trapdoor_interaction(target):
+        return str(target.get("blocker") or "route_guide_invalid_members_route_segment")
+    return None
+
+
+def _route_interaction_live_target_missing_reason(target: dict[str, Any]) -> str:
+    return "route_interaction_live_target_missing"
+
+
+def _route_interaction_click_point_missing_reason(target: dict[str, Any]) -> str:
+    return "route_interaction_click_point_missing"
+
+
+def _route_interaction_blocker_proposal(
+    target: dict[str, Any],
+    *,
+    reason: str,
+    warning: str,
+    missing: list[str],
+    input_geometry: dict[str, Any] | None,
+    source_canvas_size: dict[str, Any] | None,
+    source_tick: int | None,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+) -> ActionProposal:
+    blocked = dict(target)
+    blocked["blocker"] = reason
+    blocked["actionability"] = f"blocked_{reason}"
+    validation = _dict(blocked.get("routeCandidateValidation"))
+    validation["status"] = "WARN"
+    validation["classification"] = reason
+    validation["missingCapabilities"] = list(dict.fromkeys(_list(validation.get("missingCapabilities")) + missing))
+    blocked["routeCandidateValidation"] = validation
+    return _proposal(
+        "wait_for_context",
+        target_kind="service_route_object",
+        target=blocked,
+        reason=reason,
+        confidence=0.58,
+        warnings=[warning],
+        missing=missing,
+        required_context=["route_guide", "client_tick", "route_object"],
+        source_tick=source_tick,
+        input_geometry=input_geometry,
+        source_canvas_size=source_canvas_size,
+        status=status,
+        brain=brain,
+        suppress_click_point=True,
+    )
+
+
+def _route_guide_interaction_proposal(
+    guide_interaction: dict[str, Any],
+    *,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+    source_tick: int | None,
+    input_geometry: dict[str, Any] | None,
+    source_canvas_size: dict[str, Any] | None,
+) -> ActionProposal:
+    invalid_reason = _route_interaction_invalid_reason(guide_interaction)
+    if invalid_reason:
+        return _route_interaction_blocker_proposal(
+            guide_interaction,
+            reason=invalid_reason,
+            warning=str(
+                guide_interaction.get("invalidReason")
+                or "route guide interaction is quarantined as invalid route evidence and will not be clicked"
+            ),
+            missing=["route_guide.valid_bank_route_segment"],
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
+            source_tick=source_tick,
+            status=status,
+            brain=brain,
+        )
+    live_target = _live_route_object_for_guide_interaction(
+        status,
+        brain,
+        {
+            "targetId": guide_interaction.get("objectId") or guide_interaction.get("id"),
+            "objectId": guide_interaction.get("objectId") or guide_interaction.get("id"),
+            "targetName": guide_interaction.get("targetName") or guide_interaction.get("name"),
+            "action": (_list(guide_interaction.get("expectedOptions")) or _list(guide_interaction.get("actions")) or [None])[0],
+            "world": guide_interaction.get("world"),
+        },
+    )
+    if live_target:
+        target = _merge_live_route_object_into_guide_target(guide_interaction, live_target)
+        if not _click_point_from(target):
+            return _route_interaction_blocker_proposal(
+                target,
+                reason=_route_interaction_click_point_missing_reason(target),
+                warning="strict route guide interaction was reacquired, but live object geometry did not provide a safe click point",
+                missing=["route.interaction.clickPoint"],
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
+                source_tick=source_tick,
+                status=status,
+                brain=brain,
+            )
+        target["routeObjectReacquired"] = True
+        target["reacquiredTargetSource"] = live_target.get("routeGuideLiveTargetSource") or live_target.get("source") or "route_object_census"
+        target["matchedObjectId"] = _route_target_id(live_target)
+        target["matchedWorld"] = _target_world_tile(live_target)
+        target["matchedPlane"] = _dict(target.get("matchedWorld")).get("plane")
+        target["matchedAction"] = (_list(target.get("expectedOptions")) or _list(target.get("actions")) or [None])[0]
+        target["geometrySource"] = _point_space_from_aim(target.get("aimPoint")) or ("clickboxBounds" if target.get("clickboxBounds") else None) or "route_object_census"
+        target["clickPointSource"] = _point_space_from_aim(target.get("aimPoint")) or ("clickboxBounds" if target.get("clickboxBounds") else None) or "live_route_object"
+        return _proposal(
+            "interact_service_route_object",
+            target_kind="service_route_object",
+            target=target,
+            reason="route_guide_interaction_live_reacquired",
+            confidence=0.76,
+            warnings=["strict route guide interaction reacquired from live route-object census"],
+            required_context=["route_guide", "client_tick", "route_object"],
+            source_tick=source_tick,
+            input_geometry=input_geometry,
+            source_canvas_size=source_canvas_size,
+            status=status,
+            brain=brain,
+        )
+    return _route_interaction_blocker_proposal(
+        guide_interaction,
+        reason=_route_interaction_live_target_missing_reason(guide_interaction),
+        warning="demonstrated route guide expects an interaction step, but live target geometry is not actionable yet",
+        missing=["route.interaction.liveTarget"],
+        input_geometry=input_geometry,
+        source_canvas_size=source_canvas_size,
+        source_tick=source_tick,
+        status=status,
+        brain=brain,
+    )
+
+
+def _route_guide_invalid_segment_proposal(
+    guide_progress: dict[str, Any],
+    *,
+    input_geometry: dict[str, Any] | None,
+    source_canvas_size: dict[str, Any] | None,
+    source_tick: int | None,
+    status: dict[str, Any],
+    brain: dict[str, Any],
+) -> ActionProposal | None:
+    blocker = str(guide_progress.get("blocker") or "")
+    if blocker != "route_guide_invalid_members_route_segment":
+        return None
+    invalid = _dict(_dict(guide_progress.get("invalidRouteEvidence")).get("item"))
+    primary_action = _dict(invalid.get("primaryAction"))
+    target_name = (
+        invalid.get("target")
+        or invalid.get("targetName")
+        or primary_action.get("target")
+        or invalid.get("label")
+        or "Invalid route segment"
+    )
+    target = {
+        "targetName": target_name,
+        "name": target_name,
+        "targetType": "route_guide_invalid_segment",
+        "classId": "route_guide_invalid_segment",
+        "source": "route_guide",
+        "routeGuideName": guide_progress.get("routeGuideName"),
+        "routeGuideProgress": dict(guide_progress),
+        "invalidRouteEvidence": invalid or None,
+        "invalidForExecution": True,
+        "executionStatus": "disabled",
+        "actionability": f"blocked_{blocker}",
+        "routeObjectClassification": "invalid_route_evidence",
+        "blocker": blocker,
+        "invalidReason": invalid.get("reason")
+        or invalid.get("invalidReason")
+        or "route guide contains an invalid bank route segment",
+        "safeState": invalid.get("safeState") or "no click sent because the bank route guide segment is invalid",
+        "suggestedFixture": invalid.get("suggestedFixture")
+        or "record or extract the correct free-to-play woodcutting_area_to_bank route segment",
+        "world": invalid.get("world") or guide_progress.get("currentWorld"),
+        "expectedOptions": [invalid.get("option")] if invalid.get("option") else [],
+        "expectedTargets": [target_name] if target_name else [],
+        "expectedObjectIds": [invalid.get("objectId")] if invalid.get("objectId") is not None else [],
+        "routeCandidateValidation": {
+            "schema": "route_candidate_validation.v1",
+            "status": "FAIL",
+            "classification": blocker,
+            "routeCorridorMatch": False,
+            "rejectionReasons": [blocker],
+            "missingCapabilities": ["route_guide.valid_bank_route_segment"],
+        },
+    }
+    return _proposal(
+        "wait_for_context",
+        target_kind="service_route_object",
+        target=target,
+        reason=blocker,
+        confidence=0.64,
+        warnings=[str(target["invalidReason"])],
+        missing=["route_guide.valid_bank_route_segment"],
+        required_context=["route_guide", "player_world_position"],
+        source_tick=source_tick,
+        input_geometry=input_geometry,
+        source_canvas_size=source_canvas_size,
+        status=status,
+        brain=brain,
+        suppress_click_point=True,
+    )
 
 
 def _route_reentry_action_for_route(route_name: str | None) -> str:
@@ -3935,6 +4163,11 @@ def _guide_interaction_should_win(progress: dict[str, Any], point_tile: dict[str
         return True
     interaction_distance = _route_tile_distance_same_plane(current, interaction_tile)
     point_distance = _route_tile_distance_same_plane(current, point_tile)
+    if point_distance is not None:
+        point_payload = _dict(progress.get("nextGuidePoint"))
+        reached_tolerance = _int(point_payload.get("reachedToleranceTiles"), 2) or 2
+        if point_distance > max(1, reached_tolerance):
+            return False
     if interaction_distance is not None and point_distance is not None:
         return interaction_distance <= point_distance + 1
     return interaction_distance is not None and interaction_distance <= 8
@@ -5065,15 +5298,26 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
         route_navigation_target = _dict(service_route.get("currentNavigationTarget"))
         if _bool(pathing.get("pathingNeeded")) is True and (_pathing_has_concrete_waypoint(pathing) or route_navigation_target):
             target = _path_target(pathing, route_navigation_target or _service_target(service, generic), "Service waypoint")
+            guide_progress = _route_guide_progress_for_action(
+                "navigate_to_service",
+                status,
+                brain,
+                player_tile=player_tile or _current_pathing_player_tile(pathing),
+                explanation=target,
+            )
+            invalid_segment = _route_guide_invalid_segment_proposal(
+                guide_progress,
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
+                source_tick=source_tick,
+                status=status,
+                brain=brain,
+            )
+            if invalid_segment is not None:
+                return invalid_segment
             target = _apply_route_guide_to_path_target(
                 target,
-                _route_guide_progress_for_action(
-                    "navigate_to_service",
-                    status,
-                    brain,
-                    player_tile=player_tile or _current_pathing_player_tile(pathing),
-                    explanation=target,
-                ),
+                guide_progress,
                 action="navigate_to_service",
             )
             return _proposal(
@@ -5120,15 +5364,26 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
 
         if _bool(pathing.get("pathingNeeded")) is True:
             target = _path_target(pathing, route_navigation_target or _service_target(service, generic), "Service waypoint")
+            guide_progress = _route_guide_progress_for_action(
+                "navigate_to_service",
+                status,
+                brain,
+                player_tile=player_tile or _current_pathing_player_tile(pathing),
+                explanation=target,
+            )
+            invalid_segment = _route_guide_invalid_segment_proposal(
+                guide_progress,
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
+                source_tick=source_tick,
+                status=status,
+                brain=brain,
+            )
+            if invalid_segment is not None:
+                return invalid_segment
             target = _apply_route_guide_to_path_target(
                 target,
-                _route_guide_progress_for_action(
-                    "navigate_to_service",
-                    status,
-                    brain,
-                    player_tile=player_tile or _current_pathing_player_tile(pathing),
-                    explanation=target,
-                ),
+                guide_progress,
                 action="navigate_to_service",
             )
             return _proposal(
@@ -5158,8 +5413,34 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                     )
                 except Exception:
                     guide_progress = {}
+            invalid_segment = _route_guide_invalid_segment_proposal(
+                guide_progress,
+                input_geometry=input_geometry,
+                source_canvas_size=source_canvas_size,
+                source_tick=source_tick,
+                status=status,
+                brain=brain,
+            )
+            if invalid_segment is not None:
+                return invalid_segment
             guide_tile = _guide_point_tile(guide_progress)
             guide_interaction = _guide_interaction_target(guide_progress)
+            if route_issue and guide_interaction and _guide_interaction_should_win(guide_progress, guide_tile):
+                guide_interaction = _annotate_guide_target_with_rejected_route_object(
+                    guide_interaction,
+                    rejected_target=route_target,
+                    issue=route_issue,
+                    route_name="woodcutting_area_to_bank",
+                    guide_progress=guide_progress,
+                )
+                return _route_guide_interaction_proposal(
+                    guide_interaction,
+                    status=status,
+                    brain=brain,
+                    source_tick=source_tick,
+                    input_geometry=input_geometry,
+                    source_canvas_size=source_canvas_size,
+                )
             if route_issue and guide_tile and player_tile and _route_tile_distance_same_plane(guide_tile, player_tile) != 0:
                 target = _apply_route_guide_to_path_target(
                     {
@@ -5196,27 +5477,13 @@ def build_action_proposal(status_or_context: dict[str, Any]) -> ActionProposal:
                     brain=brain,
                 )
             if guide_interaction and _guide_interaction_should_win(guide_progress, guide_tile):
-                guide_interaction["actionability"] = "blocked_route_guide_interaction_needs_live_target"
-                guide_interaction["routeCandidateValidation"] = {
-                    **_dict(guide_interaction.get("routeCandidateValidation")),
-                    "status": "WARN",
-                    "classification": "route_guide_interaction_needs_live_target",
-                }
-                return _proposal(
-                    "wait_for_context",
-                    target_kind="service_route_object",
-                    target=guide_interaction,
-                    reason="route_guide_interaction_needs_live_target",
-                    confidence=0.58,
-                    warnings=["demonstrated route guide expects an interaction step, but live target geometry is not actionable yet"],
-                    missing=["route.interaction.liveTarget"],
-                    required_context=["route_guide", "service_route", "client_tick"],
+                return _route_guide_interaction_proposal(
+                    guide_interaction,
+                    status=status,
+                    brain=brain,
                     source_tick=source_tick,
                     input_geometry=input_geometry,
                     source_canvas_size=source_canvas_size,
-                    status=status,
-                    brain=brain,
-                    suppress_click_point=True,
                 )
             if guide_tile and _route_tile_distance_same_plane(guide_tile, player_tile) != 0:
                 target = _apply_route_guide_to_path_target(

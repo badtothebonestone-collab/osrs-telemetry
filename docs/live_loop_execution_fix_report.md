@@ -2283,3 +2283,136 @@ python telemetry-viewer\tests\test_project_knowledge.py
 python telemetry-viewer\telemetry_ui.py --check
 python telemetry-viewer\update_project_knowledge.py --check
 ```
+
+## Route-To-Bank Trapdoor Projection Diagnosis
+
+Updated: 2026-06-13.
+
+Source runs:
+
+```text
+original blocker run: bot_runs\20260613_194046_live_woodcutting_loop
+original linked recording: recordings\20260613_194200_live_woodcutting_loop_20260613_194159
+first fix validation run: bot_runs\20260613_200936_live_woodcutting_loop
+first fix linked recording: recordings\20260613_201049_live_woodcutting_loop_20260613_201049
+latest validation run: bot_runs\20260613_201504_live_woodcutting_loop
+latest linked recording: recordings\20260613_201520_live_woodcutting_loop_20260613_201519
+```
+
+Diagnosis:
+
+```text
+route leg: woodcutting_area_to_bank
+expected route segment: demonstrated plane transition at 3209,3216,0
+expected interaction: Climb-down / Trapdoor
+object id: 14880
+world/plane: 3209,3216,0
+expected postcondition: plane 0 -> 2
+route evidence: route_guides\woodcutting_area_to_bank.route_guide.json, interactionSteps[0]
+template evidence: route_templates\woodcutting_area_to_bank.route_template.json describes Climb-down Trapdoor as the required plane transition
+successful source recording: recordings\20260607_104613_Woodcutting_area_to_bank
+```
+
+Root cause:
+
+```text
+The route proposal layer promoted the strict Trapdoor guide interaction too early while the player was still outside the guide point tolerance, which produced a route_guide_progress_after_rejected_route_object candidate with targetName=Trapdoor but no click_point.
+The rejected-object branch also ran before strict live route-object reacquisition, so once the player was near the Trapdoor point it still masked the specific route interaction state as a path_tile/context fallback failure.
+The generic context.action_proposal fallback then timed out, yielding the old missing click_point + context.action_proposal blocker.
+```
+
+Fix behavior:
+
+```text
+_guide_interaction_should_win now waits until the demonstrated guide point is within its reachedToleranceTiles before promoting a same-plane object interaction.
+When a strict guide interaction does win, action_proposal now reuses the existing route-object census reacquisition helper before falling back to context.action_proposal.
+Reacquired route interactions record routeObjectReacquired, reacquiredTargetSource, matchedObjectId, matchedWorld, matchedPlane, matchedAction, geometrySource, and clickPointSource in candidate traces.
+Trapdoor-specific failures are now explicit:
+- trapdoor_live_target_missing when Trapdoor 14880 at 3209,3216,0 is not present in live route-object evidence
+- trapdoor_click_point_missing when the strict live Trapdoor is found but has no safe aim/click geometry
+Generic Climb does not satisfy strict Climb-down / Trapdoor direct row selection.
+```
+
+Validation:
+
+```text
+geometry gate before rerun: WARN/PASS; inputGeometryPass=true, RuneLite foreground, loadedSceneVerified=true
+real command: python telemetry-viewer\bot_eval_runner.py --task woodcutting_loop --live --execute-actions --auto-recover-loaded-scene --record-everything --analyze-after --json
+latest live run folder: bot_runs\20260613_201504_live_woodcutting_loop
+latest linked recording: recordings\20260613_201520_live_woodcutting_loop_20260613_201519
+status: FAIL
+bot actions sent: 0 gameplay route clicks in the latest validation; Arduino armed/disarmed only
+live input executed: no gameplay click
+inventory full handoff: yes, collectStopReason=inventory_full_route_to_bank_ready
+Trapdoor Climb-down attempted: no
+plane 0 -> 2 succeeded: no
+bank/service reached: no
+deposit happened: no
+loop completed: no
+```
+
+Current blocker:
+
+```text
+blocker: trapdoor_live_target_missing
+candidate trace: strict Trapdoor 14880 / Climb-down / world 3209,3216,0 is selected from the route guide and fails closed before click.
+live target evidence: routeObjectReacquired=null, matchedObjectId=null, matchedWorld=null, clickPointSource=null.
+source warning: latest session live_candidates.jsonl is missing; selected daemon target is not present in highlighter marker source.
+recovery note: latest run reported daemon_rebind_failed even though finalLoadedSceneVerified=true and snapshot proof was fresh. This likely reduced live route-object census availability.
+acceptable safety result: no wrong object clicked, no generic Climb accepted, no dry-run substitution, no generic context fallback timeout.
+next fix layer: restore/refresh the live route-object candidate source or plugin snapshot census near 3209,3216,0 so Trapdoor 14880 can be reacquired with live geometry, then rerun the real command.
+```
+
+Checks run for this pass:
+
+```text
+python -m py_compile telemetry-viewer\route_demonstration.py telemetry-viewer\candidate_core.py telemetry-viewer\input_control\action_proposal.py telemetry-viewer\input_control\executor.py telemetry-viewer\input_control\click_planner.py telemetry-viewer\target_match_quality.py telemetry-viewer\bot_eval_runner.py
+python telemetry-viewer\tests\test_action_proposal.py
+python telemetry-viewer\tests\test_input_control_executor.py -k trapdoor
+python telemetry-viewer\tests\test_route_demonstration.py
+python telemetry-viewer\tests\test_bot_eval_runner.py
+python telemetry-viewer\tests\test_target_match_quality.py
+python telemetry-viewer\tests\test_project_knowledge.py
+python telemetry-viewer\telemetry_ui.py --check
+python telemetry-viewer\update_project_knowledge.py --check
+```
+
+## Route-To-Bank Trapdoor Correction
+
+Updated: 2026-06-13.
+
+User correction:
+
+```text
+Trapdoor 14880 at 3209,3216,0 is members-only and is not the correct route to the bank.
+The previous Trapdoor projection diagnosis was based on bad/stale route evidence, not a missing live target projection feature.
+```
+
+Root cause:
+
+```text
+route_guides\woodcutting_area_to_bank.route_guide.json contained an executable Climb-down / Trapdoor interaction for object 14880 at 3209,3216,0.
+route_templates\woodcutting_area_to_bank.route_template.json also allowed the Trapdoor as a tolerated variant for the bank route.
+action_proposal then followed the guide/template faithfully and tried to promote that interaction after the Gate/corridor fixes.
+That behavior was technically strict, but the source route evidence was wrong for the actual free-to-play bank path.
+```
+
+Fix behavior:
+
+```text
+The woodcutting_area_to_bank guide/template now quarantine Trapdoor 14880 and dependent plane-2 route evidence as invalid route evidence.
+route_demonstration.resolve_progress skips invalid path points, interactions, direct plane skips, and variants during normal progress.
+If the route reaches the last safe guide point and only the quarantined Trapdoor segment remains, proposal generation fails closed with route_guide_invalid_members_route_segment.
+Stale context proposals and live route-object census entries can no longer turn this Trapdoor into an executable action.
+No Tree/resource, Gate matching, Staircase, lower-menu, recovery, geometry, calibration, banking, or deposit logic was changed for this correction.
+```
+
+Current safe blocker:
+
+```text
+blocker: route_guide_invalid_members_route_segment
+safe state: no Trapdoor click is allowed from the bank route guide
+last safe known guide waypoint: 3208,3212,0
+missing evidence: correct free-to-play woodcutting_area_to_bank route segment from 3208,3212,0 to the bank/service area
+next task: record or extract the correct bank route segment, then rerun the real live loop
+```

@@ -56,6 +56,10 @@
       "sourceTick": null,
       "sourceTime": null,
       "areaLabel": "Climb-down Trapdoor",
+      "invalidForExecution": true,
+      "routeObjectClassification": "invalid_route_evidence",
+      "blocker": "route_guide_invalid_members_route_segment",
+      "invalidReason": "User confirmed Trapdoor 14880 is members-only and not the correct route to the bank.",
       "reachedToleranceTiles": 2,
       "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_104613_Woodcutting_area_to_bank",
       "sourceKind": "segment_end",
@@ -74,6 +78,10 @@
       "sourceTick": null,
       "sourceTime": null,
       "areaLabel": "Walk",
+      "invalidForExecution": true,
+      "routeObjectClassification": "invalid_route_evidence",
+      "blocker": "route_guide_invalid_members_route_segment",
+      "invalidReason": "This plane-2 waypoint depends on the invalid Trapdoor bank segment.",
       "reachedToleranceTiles": 2,
       "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_104613_Woodcutting_area_to_bank",
       "sourceKind": "segment_end",
@@ -92,6 +100,10 @@
       "sourceTick": 548,
       "sourceTime": 15.453,
       "areaLabel": "plane_transition",
+      "invalidForExecution": true,
+      "routeObjectClassification": "invalid_route_evidence",
+      "blocker": "route_guide_invalid_members_route_segment",
+      "invalidReason": "This transition point belongs to the invalid Trapdoor bank segment.",
       "reachedToleranceTiles": 2,
       "sourceRecording": "C:\\Users\\badto\\osrs-telemetry\\recordings\\20260607_104613_Woodcutting_area_to_bank",
       "sourceKind": "step_plane_transition",
@@ -104,6 +116,10 @@
       "schema": "route_demonstration_plane_change.v1",
       "segmentIndex": 3,
       "label": "Climb-down Trapdoor",
+      "invalidForExecution": true,
+      "routeObjectClassification": "invalid_route_evidence",
+      "blocker": "route_guide_invalid_members_route_segment",
+      "invalidReason": "User confirmed Trapdoor 14880 is members-only and not the correct route to the bank.",
       "startPlane": 0,
       "endPlane": 2,
       "startWorld": {
@@ -133,6 +149,13 @@
       "target": "Trapdoor",
       "targetId": 14880,
       "objectId": 14880,
+      "executionStatus": "disabled",
+      "invalidForExecution": true,
+      "routeObjectClassification": "invalid_route_evidence",
+      "blocker": "route_guide_invalid_members_route_segment",
+      "invalidReason": "User confirmed Trapdoor 14880 is members-only and not the correct route to the bank.",
+      "safeState": "no click sent because the bank route guide segment is invalid",
+      "suggestedFixture": "record or extract the correct free-to-play woodcutting_area_to_bank route segment after waypoint 3208,3212,0",
       "targetKind": "object",
       "world": {
         "worldX": 3209,
@@ -218,6 +241,11 @@
       "option": "Climb-down",
       "target": "Trapdoor",
       "objectId": 14880,
+      "executionStatus": "disabled",
+      "invalidForExecution": true,
+      "routeObjectClassification": "invalid_route_evidence",
+      "blocker": "route_guide_invalid_members_route_segment",
+      "invalidReason": "User confirmed Trapdoor 14880 is members-only and not the correct route to the bank.",
       "world": {
         "worldX": 3209,
         "worldY": 3216,
@@ -305,6 +333,10 @@
       "segmentIndex": 3,
       "segmentType": "door_transition",
       "label": "Climb-down Trapdoor",
+      "invalidForExecution": true,
+      "routeObjectClassification": "invalid_route_evidence",
+      "blocker": "route_guide_invalid_members_route_segment",
+      "invalidReason": "User confirmed Trapdoor 14880 is members-only and not the correct route to the bank.",
       "startWorld": {
         "worldX": 3208,
         "worldY": 3212,
@@ -332,6 +364,10 @@
       "segmentIndex": 4,
       "segmentType": "walk_segment",
       "label": "Walk",
+      "invalidForExecution": true,
+      "routeObjectClassification": "invalid_route_evidence",
+      "blocker": "route_guide_invalid_members_route_segment",
+      "invalidReason": "This plane-2 walk segment depends on the invalid Trapdoor bank segment.",
       "startWorld": {
         "worldX": 3205,
         "worldY": 3209,
@@ -359,6 +395,10 @@
       "segmentIndex": 5,
       "segmentType": "area_arrival",
       "label": "Arrive: bank_area",
+      "invalidForExecution": true,
+      "routeObjectClassification": "invalid_route_evidence",
+      "blocker": "route_guide_invalid_members_route_segment",
+      "invalidReason": "This bank arrival depends on the invalid Trapdoor bank segment.",
       "startWorld": {
         "worldX": 3209,
         "worldY": 3220,
@@ -445,7 +485,12 @@
   "toleratedVariants": [
     {
       "variantName": "trapdoor_climb_down_to_bank",
-      "description": "Climb-down Trapdoor satisfies the required woodcutting-area to bank plane transition when the route reaches bank_area.",
+      "description": "Quarantined invalid evidence: Trapdoor 14880 is members-only and not the correct woodcutting-area to bank route.",
+      "executionStatus": "disabled",
+      "invalidForExecution": true,
+      "routeObjectClassification": "invalid_route_evidence",
+      "blocker": "route_guide_invalid_members_route_segment",
+      "invalidReason": "User confirmed Trapdoor 14880 is members-only and not the correct route to the bank.",
       "segmentOverrides": [
         {
           "baseSegmentIndex": 3,
@@ -453,11 +498,15 @@
           "allowedAlternatives": [
             {
               "segmentType": "door_transition",
+              "executionStatus": "disabled",
+              "invalidForExecution": true,
+              "routeObjectClassification": "invalid_route_evidence",
+              "blocker": "route_guide_invalid_members_route_segment",
               "primaryAction": {
                 "option": "Climb-down",
                 "target": "Trapdoor"
               },
-              "satisfiesBaseSegment": true,
+              "satisfiesBaseSegment": false,
               "requiresPostcondition": {
                 "type": "plane_change"
               },
@@ -465,7 +514,8 @@
                 "minTargetQuality": null
               },
               "notes": [
-                "Some reverse route recordings surface the same plane transition as a Trapdoor/Climb-down segment instead of Staircase/Climb-up."
+                "Quarantined: user confirmed this Trapdoor is members-only and not the correct route to the bank.",
+                "Do not execute or use this as a route alternative."
               ]
             }
           ]
@@ -473,5 +523,25 @@
       ]
     }
   ],
-  "warnings": []
+  "invalidRouteEvidence": [
+    {
+      "schema": "route_invalid_evidence.v1",
+      "routeName": "woodcutting_area_to_bank",
+      "objectId": 14880,
+      "target": "Trapdoor",
+      "option": "Climb-down",
+      "world": {
+        "worldX": 3209,
+        "worldY": 3216,
+        "plane": 0
+      },
+      "blocker": "route_guide_invalid_members_route_segment",
+      "reason": "User confirmed Trapdoor 14880 is members-only and not the correct route to the bank.",
+      "safeState": "no Trapdoor click is allowed from the bank route guide",
+      "suggestedFixture": "record or extract the correct free-to-play woodcutting_area_to_bank route segment after waypoint 3208,3212,0"
+    }
+  ],
+  "warnings": [
+    "Trapdoor 14880 / Climb-down segment is quarantined as invalid route evidence; the guide is incomplete after waypoint 3208,3212,0 until the correct bank route is recorded."
+  ]
 }

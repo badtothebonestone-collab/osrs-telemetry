@@ -190,7 +190,7 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(proposal.proposed_action, "navigate_to_service")
         self.assertTrue(proposal.executable)
         self.assertEqual(proposal.reason, "route_guide_progress_without_live_route_context")
-        self.assertEqual(proposal.target_tile, {"worldX": 3209, "worldY": 3216, "plane": 0})
+        self.assertEqual(proposal.target_tile, {"worldX": 3208, "worldY": 3212, "plane": 0})
         self.assertEqual(proposal.target_explanation["routeGuideName"], "woodcutting_area_to_bank")
 
     def test_inventory_full_rejected_gate_uses_next_bank_route_guide_point(self):
@@ -248,6 +248,112 @@ class ActionProposalTest(unittest.TestCase):
         self.assertEqual(explanation["selectedCandidateReason"], "route_guide_next_step_selected_after_rejected_route_object")
         self.assertIn("route_object_not_on_expected_segment", explanation["rejectedRouteObjectCandidate"]["rejectionReasons"])
         self.assertEqual(explanation["rejectedRouteObjectCandidate"]["objectId"], 12986)
+
+    def test_route_to_bank_stops_at_quarantined_trapdoor_segment(self):
+        route_target = {
+            "targetName": "Staircase",
+            "targetType": "sceneObject",
+            "id": 56230,
+            "objectId": 56230,
+            "worldX": 3204,
+            "worldY": 3229,
+            "plane": 0,
+            "aimPoint": aim(225, 185),
+            "actions": ["Climb-up", "Top-floor"],
+            "expectedOptions": ["Climb-up", "Top-floor"],
+            "expectedTargets": ["Staircase"],
+            "routeId": "plugin_snapshot_route_to_service",
+        }
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceRequired": True, "serviceReady": False, "candidateCount": 0},
+            service_route={
+                "schema": "service_route_context.v1",
+                "routeAvailable": True,
+                "routeStepStatus": "plugin_snapshot_route_transition_visible",
+                "actionReady": True,
+                "visibleInteractionTarget": route_target,
+            },
+            bank_ui={"bankOpen": False},
+        )
+        status["playerWorldPosition"] = {"worldX": 3208, "worldY": 3212, "plane": 0}
+        status["brain"]["genericTaskState"]["activeIntentTarget"] = None
+        status["brain"]["intentOverlayContext"] = {"selectedMarker": None}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.reason, "route_guide_invalid_members_route_segment")
+        self.assertEqual(proposal.target_kind, "service_route_object")
+        self.assertFalse(proposal.executable)
+        self.assertIn("route_guide.valid_bank_route_segment", proposal.missing_capabilities)
+        self.assertEqual(proposal.target_explanation["routeObjectClassification"], "invalid_route_evidence")
+        self.assertIn("Trapdoor", proposal.target_name)
+
+    def test_route_to_bank_rejects_live_trapdoor_even_with_geometry(self):
+        status = status_for(
+            phase="needs_service",
+            active_intent="needs_service",
+            inventory_full=True,
+            free_slots=0,
+            active_target=None,
+            service={"serviceNeeded": True, "serviceRequired": True, "serviceReady": False, "candidateCount": 0},
+            service_route={
+                "schema": "service_route_context.v1",
+                "routeAvailable": True,
+                "routeStepStatus": "plugin_snapshot_route_transition_visible",
+                "actionReady": True,
+                "visibleInteractionTarget": {
+                    "targetName": "Staircase",
+                    "targetType": "sceneObject",
+                    "id": 56230,
+                    "objectId": 56230,
+                    "worldX": 3204,
+                    "worldY": 3229,
+                    "plane": 0,
+                    "actions": ["Climb-up", "Top-floor"],
+                    "routeId": "plugin_snapshot_route_to_service",
+                },
+            },
+            bank_ui={"bankOpen": False},
+        )
+        status["playerWorldPosition"] = {"worldX": 3209, "worldY": 3216, "plane": 0}
+        status["serviceRouteObjectCensus"] = {
+            "topRouteObjects": [
+                {
+                    "name": "Trapdoor",
+                    "objectId": 14880,
+                    "worldLocation": {"worldX": 3209, "worldY": 3216, "plane": 0},
+                    "source": "serviceRouteObjectCensus",
+                    "candidate": {
+                        "targetType": "sceneObject",
+                        "classId": "service_route_transition",
+                        "name": "Trapdoor",
+                        "id": 14880,
+                        "rawId": 14880,
+                        "worldX": 3209,
+                        "worldY": 3216,
+                        "plane": 0,
+                        "actions": ["Climb-down"],
+                    },
+                }
+            ]
+        }
+        status["brain"]["genericTaskState"]["activeIntentTarget"] = None
+        status["brain"]["intentOverlayContext"] = {"selectedMarker": None}
+
+        proposal = build_action_proposal(status)
+
+        self.assertEqual(proposal.proposed_action, "wait_for_context")
+        self.assertEqual(proposal.reason, "route_guide_invalid_members_route_segment")
+        self.assertEqual(proposal.target_kind, "service_route_object")
+        self.assertFalse(proposal.executable)
+        self.assertEqual(proposal.target_explanation["routeObjectClassification"], "invalid_route_evidence")
+        self.assertIn("route_guide.valid_bank_route_segment", proposal.missing_capabilities)
 
     def test_logs_held_at_actionable_service_target_proposes_open_service_with_free_slots(self):
         service_target = {
@@ -948,9 +1054,9 @@ class ActionProposalTest(unittest.TestCase):
 
         self.assertEqual(proposal.proposed_action, "wait_for_context")
         self.assertFalse(proposal.executable)
-        self.assertEqual(proposal.reason, "route_guide_interaction_needs_live_target")
-        self.assertIn("route.interaction.liveTarget", proposal.missing_capabilities)
-        self.assertEqual(proposal.target_explanation["name"], "Trapdoor")
+        self.assertEqual(proposal.reason, "route_guide_invalid_members_route_segment")
+        self.assertIn("route_guide.valid_bank_route_segment", proposal.missing_capabilities)
+        self.assertEqual(proposal.target_explanation["routeObjectClassification"], "invalid_route_evidence")
         self.assertEqual(proposal.target_explanation["routeGuideName"], "woodcutting_area_to_bank")
 
     def test_live_service_route_uses_guide_from_pathing_player_tile_and_service_route_id(self):

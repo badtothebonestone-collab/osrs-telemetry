@@ -70,6 +70,67 @@ def _text_key(value: Any) -> str:
     return " ".join(_text(value).lower().replace("-", " ").replace("_", " ").split())
 
 
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on", "disabled", "quarantined"}
+    return False
+
+
+def route_item_invalid_for_execution(item: Any) -> bool:
+    payload = _dict(item)
+    if not payload:
+        return False
+    if _truthy(payload.get("invalidForExecution")):
+        return True
+    if _text_key(payload.get("executionStatus")) in {"disabled", "quarantined", "invalid"}:
+        return True
+    if _text_key(payload.get("routeObjectClassification")) in {"invalid route evidence", "unrelated or rejected"}:
+        return True
+    return False
+
+
+def valid_route_items(items: list[Any]) -> list[dict[str, Any]]:
+    return [dict(item) for item in items if isinstance(item, dict) and not route_item_invalid_for_execution(item)]
+
+
+def _invalid_route_evidence_items(guide: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for key in ("invalidRouteEvidence", "pathPoints", "interactionSteps", "directPlaneSkips", "routeLegs"):
+        for item in _list(guide.get(key)):
+            if isinstance(item, dict) and (key == "invalidRouteEvidence" or route_item_invalid_for_execution(item)):
+                copy = dict(item)
+                copy.setdefault("sourceList", key)
+                candidates.append(copy)
+    return candidates
+
+
+def _nearest_invalid_route_evidence(
+    guide: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    max_distance: float | None = None,
+) -> dict[str, Any]:
+    best: tuple[float, dict[str, Any]] | None = None
+    for item in _invalid_route_evidence_items(guide):
+        world = _tile(item.get("world") or item.get("startWorld") or item.get("endWorld"))
+        distance = tile_distance(current, world) if world else None
+        if distance is None:
+            distance = _xy_distance(current, world) if world else None
+        if distance is None:
+            continue
+        if max_distance is not None and distance > max_distance:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, item)
+    if best is None:
+        return {}
+    return {"item": best[1], "distanceTiles": round(best[0], 3)}
+
+
 def _floor_selection_option(value: Any) -> str | None:
     key = _text_key(value)
     return FLOOR_SELECTION_OPTIONS.get(key)
@@ -780,7 +841,7 @@ def save_route_guide(guide: dict[str, Any], out_path: str | Path) -> Path:
 def nearest_guide_point(guide: dict[str, Any], current_world: dict[str, Any], *, max_distance: float | None = None) -> dict[str, Any]:
     current = _tile(current_world)
     best: tuple[float, dict[str, Any]] | None = None
-    for point in _list(guide.get("pathPoints")):
+    for point in valid_route_items(_list(guide.get("pathPoints"))):
         if not isinstance(point, dict):
             continue
         distance = tile_distance(current, point.get("world"))
@@ -811,7 +872,7 @@ def _nearest_same_plane_item(
     max_distance: float | None = None,
 ) -> dict[str, Any]:
     best: tuple[float, dict[str, Any]] | None = None
-    for item in items:
+    for item in valid_route_items(items):
         if not isinstance(item, dict):
             continue
         world = _tile(item.get(world_key))
@@ -829,7 +890,7 @@ def _nearest_same_plane_item(
 
 def _nearest_cross_plane_item(items: list[Any], current: dict[str, Any], *, world_key: str = "world") -> dict[str, Any]:
     best: tuple[float, dict[str, Any]] | None = None
-    for item in items:
+    for item in valid_route_items(items):
         if not isinstance(item, dict):
             continue
         world = _tile(item.get(world_key))
@@ -851,7 +912,7 @@ def _nearest_floor_selection_for_plane(
 ) -> dict[str, Any]:
     current_plane = _int(current.get("plane"), None)
     best: tuple[float, dict[str, Any]] | None = None
-    for item in items:
+    for item in valid_route_items(items):
         if not isinstance(item, dict):
             continue
         allowed = [_int(value, None) for value in _list(item.get("allowedSourcePlanes"))]
@@ -879,8 +940,8 @@ def _direct_plane_skip_crossing_current(guide: dict[str, Any], current: dict[str
     if current_plane is None:
         return {}
     best: tuple[float, dict[str, Any]] | None = None
-    candidates = list(_list(guide.get("directPlaneSkips")))
-    for interaction in _list(guide.get("floorSelectionInteractions")):
+    candidates = list(valid_route_items(_list(guide.get("directPlaneSkips"))))
+    for interaction in valid_route_items(_list(guide.get("floorSelectionInteractions"))):
         interaction = _dict(interaction)
         source_plane = _int(interaction.get("sourcePlane"), None)
         destination_plane = _int(interaction.get("destinationPlane"), None)
@@ -903,7 +964,7 @@ def _direct_plane_skip_crossing_current(guide: dict[str, Any], current: dict[str
                     "evidence": interaction.get("evidence"),
                 }
             )
-    for item in candidates:
+    for item in valid_route_items(candidates):
         if not isinstance(item, dict):
             continue
         skipped_planes = [_int(value, None) for value in _list(item.get("skippedPlanes"))]
@@ -983,10 +1044,10 @@ def resolve_reentry(
             "blocker": "route_guide_or_position_missing",
         }
 
-    points = _list(guide.get("pathPoints"))
-    interactions = _list(guide.get("interactionSteps"))
-    floor_interactions = _list(guide.get("floorSelectionInteractions"))
-    plane1_recovery_interactions = _list(guide.get("plane1RecoveryInteractions"))
+    points = valid_route_items(_list(guide.get("pathPoints")))
+    interactions = valid_route_items(_list(guide.get("interactionSteps")))
+    floor_interactions = valid_route_items(_list(guide.get("floorSelectionInteractions")))
+    plane1_recovery_interactions = valid_route_items(_list(guide.get("plane1RecoveryInteractions")))
     nearest_point = _nearest_same_plane_item(points, current, max_distance=max_same_plane_distance)
     nearest_interaction = _nearest_same_plane_item(interactions, current, max_distance=max_same_plane_distance)
     nearest_floor_selection = _nearest_floor_selection_for_plane(floor_interactions, current, max_distance=max_same_plane_distance)
@@ -1017,7 +1078,8 @@ def resolve_reentry(
         next_step = _dict(nearest_point.get("item"))
 
     status = "PASS" if next_step else "WARN"
-    blocker = None if next_step else "route_guide_no_same_plane_reentry"
+    invalid_evidence = _nearest_invalid_route_evidence(guide, current, max_distance=max_same_plane_distance or 10)
+    blocker = None if next_step else ("route_guide_invalid_members_route_segment" if invalid_evidence else "route_guide_no_same_plane_reentry")
     nearest_cross_point = _nearest_cross_plane_item(points, current)
     nearest_cross_interaction = _nearest_cross_plane_item(interactions, current)
     direct_skip = _direct_plane_skip_crossing_current(guide, current)
@@ -1037,6 +1099,7 @@ def resolve_reentry(
         "nearestCrossPlaneGuidePoint": nearest_cross_point,
         "nearestCrossPlaneInteraction": nearest_cross_interaction,
         "directPlaneSkipEvidence": direct_skip,
+        "invalidRouteEvidence": invalid_evidence,
         "inferredSubsegment": _reentry_subsegment(guide, current),
         "nextRecoveryStep": next_step,
         "recoveryCandidateType": recovery_type,
@@ -1046,8 +1109,16 @@ def resolve_reentry(
         "suggestedFixture": "record a short plane-1 Staircase recovery from 3206,3229,1"
         if blocker
         else None,
-        "safeState": "no click sent because route guide lacks same-plane proof" if blocker else None,
-        "missingCapabilities": ["route_guide.same_plane_reentry"] if blocker else [],
+        "safeState": (
+            "no click sent because the bank route guide segment is invalid"
+            if blocker == "route_guide_invalid_members_route_segment"
+            else ("no click sent because route guide lacks same-plane proof" if blocker else None)
+        ),
+        "missingCapabilities": (
+            ["route_guide.valid_bank_route_segment"]
+            if blocker == "route_guide_invalid_members_route_segment"
+            else (["route_guide.same_plane_reentry"] if blocker else [])
+        ),
     }
 
 
@@ -1070,7 +1141,9 @@ def resolve_progress(
     nearest_index = _int(point.get("orderIndex"), None)
     nearest_distance = _float(nearest.get("distanceTiles"))
     reached_indices: list[int] = []
-    for item in _list(guide.get("pathPoints")):
+    points = valid_route_items(_list(guide.get("pathPoints")))
+    interactions = valid_route_items(_list(guide.get("interactionSteps")))
+    for item in points:
         idx = _int(_dict(item).get("orderIndex"), None)
         distance = tile_distance(current, _dict(item).get("world"))
         tolerance = _int(_dict(item).get("reachedToleranceTiles"), reached_tolerance_tiles) or reached_tolerance_tiles
@@ -1088,19 +1161,19 @@ def resolve_progress(
     else:
         progress_index = nearest_index
     next_point = None
-    for item in _list(guide.get("pathPoints")):
+    for item in points:
         idx = _int(_dict(item).get("orderIndex"), None)
         if idx is not None and idx > progress_index:
             next_point = item
             break
     next_interaction = None
-    for item in _list(guide.get("interactionSteps")):
+    for item in interactions:
         world = _tile(_dict(item).get("world"))
         distance = tile_distance(current, world)
         if distance is not None and distance <= 8:
             next_interaction = dict(item)
             break
-    nearest_floor_selection = _nearest_floor_selection_for_plane(_list(guide.get("floorSelectionInteractions")), current, max_distance=14)
+    nearest_floor_selection = _nearest_floor_selection_for_plane(valid_route_items(_list(guide.get("floorSelectionInteractions"))), current, max_distance=14)
     next_floor_selection = _dict(nearest_floor_selection.get("item"))
     if next_floor_selection:
         floor_distance = _float(nearest_floor_selection.get("distanceTiles"))
@@ -1114,8 +1187,14 @@ def resolve_progress(
         point_distance = tile_distance(current, point_world)
         if point_distance is not None and interaction_distance is not None and point_distance + 1 < interaction_distance:
             next_interaction = None
+    invalid_evidence = _nearest_invalid_route_evidence(guide, current, max_distance=10)
+    invalid_distance = _float(invalid_evidence.get("distanceTiles"))
+    if invalid_distance is not None and invalid_distance <= max(reached_tolerance_tiles, 2):
+        next_point = None
+        next_interaction = None
+        next_floor_selection = {}
     status = "PASS" if next_point or next_interaction else "WARN"
-    blocker = None if status == "PASS" else "route_guide_next_step_missing"
+    blocker = None if status == "PASS" else ("route_guide_invalid_members_route_segment" if invalid_evidence else "route_guide_next_step_missing")
     return {
         "schema": "route_guide_progress.v1",
         "status": status,
@@ -1128,8 +1207,13 @@ def resolve_progress(
         "nextGuidePoint": next_point,
         "nextGuideInteraction": next_interaction,
         "nextFloorSelectionInteraction": next_floor_selection,
+        "invalidRouteEvidence": invalid_evidence,
         "guideProgressReason": "nearest_reached" if reached_indices else "between_sparse_demonstrated_points",
         "blocker": blocker,
+        "safeState": "no click sent because the bank route guide segment is invalid" if blocker == "route_guide_invalid_members_route_segment" else None,
+        "suggestedFixture": "record or extract the correct free-to-play woodcutting_area_to_bank route segment after waypoint 3208,3212,0"
+        if blocker == "route_guide_invalid_members_route_segment"
+        else None,
     }
 
 

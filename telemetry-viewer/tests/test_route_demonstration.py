@@ -310,8 +310,19 @@ class RouteDemonstrationTest(unittest.TestCase):
         progress = route_demonstration.resolve_progress(guide, {"worldX": 3201, "worldY": 3219, "plane": 0})
 
         self.assertEqual(progress["status"], "PASS")
-        self.assertEqual(progress["nextGuidePoint"]["world"], {"worldX": 3209, "worldY": 3216, "plane": 0})
+        self.assertEqual(progress["nextGuidePoint"]["world"], {"worldX": 3208, "worldY": 3212, "plane": 0})
         self.assertNotEqual(progress["blocker"], "route_guide_next_step_missing")
+
+    def test_quarantined_trapdoor_bank_segment_is_not_route_progress(self):
+        guide = route_demonstration.load_route_guide("woodcutting_area_to_bank")
+
+        progress = route_demonstration.resolve_progress(guide, {"worldX": 3208, "worldY": 3212, "plane": 0})
+
+        self.assertEqual(progress["status"], "WARN")
+        self.assertEqual(progress["blocker"], "route_guide_invalid_members_route_segment")
+        self.assertIsNone(progress["nextGuidePoint"])
+        self.assertIsNone(progress["nextGuideInteraction"])
+        self.assertIn("Trapdoor", progress["invalidRouteEvidence"]["item"]["label"])
 
     def test_wrong_floor_uses_plane1_recovery_when_probe_evidence_is_modeled(self):
         guide = route_demonstration.load_route_guide("Bank_to_Woodcutting_area")

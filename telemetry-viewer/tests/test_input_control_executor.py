@@ -32,6 +32,7 @@ from input_control.executor import (
     _loop_stop_reason,
     _new_loop_summary,
     _no_click_safety_skip_observed,
+    _proposal_requires_strict_route_lower_menu,
     _proposal_has_actionable_safe_target,
     _merge_plugin_snapshot_into_status,
     _proposal_reacquire_budget_type,
@@ -65,6 +66,7 @@ from input_control.executor import (
     _route_transition_reverse_issue,
     _route_transition_plane_mismatch_issue,
     _executed_navigation_waypoint_key,
+    _entry_matches_route_transition_direct_option,
     _menu_row_canvas_point,
     _maybe_context_action_proposal,
     _blocked_by_no_executable_result,
@@ -6746,6 +6748,45 @@ class InputControlExecutorTest(unittest.TestCase):
             classify_last_menu_option_clicked(None, {"option": "Climb-up", "target": "Staircase", "identifier": 56230}, proposal),
             "clicked_expected_action",
         )
+
+    def test_trapdoor_generic_climb_does_not_satisfy_climb_down(self):
+        proposal = ActionProposal(
+            proposed_action="interact_service_route_object",
+            target_kind="service_route_object",
+            target_name="Trapdoor",
+            target_explanation={
+                "name": "Trapdoor",
+                "objectId": 14880,
+                "profile": "woodcutting",
+                "expectedOptions": ["Climb-down"],
+                "dialogueOpenerOptions": ["Climb"],
+                "expectedTargets": ["Trapdoor"],
+                "expectedObjectIds": [14880],
+                "world": {"worldX": 3209, "worldY": 3216, "plane": 0},
+                "expectedPlaneChange": 2,
+            },
+        )
+        sample = {
+            "wallTimeMillis": 2000,
+            "mouseCanvasX": 345,
+            "mouseCanvasY": 216,
+            "menuOpen": False,
+            "topOption": "Climb",
+            "topTarget": "<col=ffff>Trapdoor",
+            "topType": "GAME_OBJECT_FIRST_OPTION",
+            "topIdentifier": 14880,
+            "entries": [
+                {"option": "Climb", "target": "<col=ffff>Trapdoor", "type": "GAME_OBJECT_FIRST_OPTION", "identifier": 14880},
+                {"option": "Climb-down", "target": "<col=ffff>Trapdoor", "type": "GAME_OBJECT_SECOND_OPTION", "identifier": 14880},
+                {"option": "Walk here", "target": "", "type": "WALK", "identifier": 0},
+            ],
+        }
+
+        exact_entry = sample["entries"][1]
+
+        self.assertTrue(_proposal_requires_strict_route_lower_menu(proposal))
+        self.assertTrue(_entry_matches_route_transition_direct_option(exact_entry, proposal))
+        self.assertFalse(_entry_matches_route_transition_direct_option(sample["entries"][0], proposal))
 
     def test_route_transition_plane_mismatch_blocks_stale_target_before_click(self):
         proposal = ActionProposal(
