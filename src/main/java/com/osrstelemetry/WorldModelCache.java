@@ -358,7 +358,12 @@ class WorldModelCache
 		Object key = record.get("objectKey");
 		if (key != null)
 		{
-			snapshot.objectRefs.put(String.valueOf(key), object);
+			String objectKey = String.valueOf(key);
+			if (snapshot.objectRefs.containsKey(objectKey))
+			{
+				return;
+			}
+			snapshot.objectRefs.put(objectKey, object);
 		}
 		snapshot.objects.add(record);
 	}

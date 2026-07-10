@@ -14,15 +14,16 @@ public class ClientTickHotStateTest
 	public void compactSnapshotExposesLatestSamplesWithoutTail()
 	{
 		ClientTickHotState state = new ClientTickHotState(2);
-		state.recordClientTick(Map.of("clientTick", 7L, "wallTimeMillis", 1000L, "mouseCanvasX", 10, "mouseCanvasY", 20));
-		state.recordPostMenuSort(Map.of("clientTick", 7L, "wallTimeMillis", 1010L, "topOption", "Walk here"));
-		state.recordPostMenuSort(Map.of("clientTick", 8L, "wallTimeMillis", 1020L, "topOption", "Chop down", "topTarget", "Tree"));
-		state.recordMenuOptionClicked(Map.of("clientTick", 8L, "wallTimeMillis", 1030L, "option", "Chop down", "target", "Tree"));
+		state.recordClientTick(Map.of("clientTick", 7L, "wallTimeMillis", 1000L, "mouseCanvasX", 10, "mouseCanvasY", 20, "clientProcessId", 1234L));
+		state.recordPostMenuSort(Map.of("clientTick", 7L, "wallTimeMillis", 1010L, "topOption", "Walk here", "clientProcessId", 1234L));
+		state.recordPostMenuSort(Map.of("clientTick", 8L, "wallTimeMillis", 1020L, "topOption", "Chop down", "topTarget", "Tree", "clientProcessId", 1234L));
+		state.recordMenuOptionClicked(Map.of("clientTick", 8L, "wallTimeMillis", 1030L, "option", "Chop down", "target", "Tree", "clientProcessId", 1234L));
 
 		Map<String, Object> snapshot = state.snapshot(0, 0, 0, true, 5);
 
 		assertEquals("client_tick_hot.v1", snapshot.get("schema"));
 		assertEquals(8L, snapshot.get("clientTick"));
+		assertEquals(1234L, snapshot.get("clientProcessId"));
 		assertEquals("Tree", ((Map<?, ?>) snapshot.get("postMenuSort")).get("topTarget"));
 		assertEquals("Chop down", ((Map<?, ?>) snapshot.get("lastMenuOptionClicked")).get("option"));
 		assertTrue(snapshot.containsKey("latency"));

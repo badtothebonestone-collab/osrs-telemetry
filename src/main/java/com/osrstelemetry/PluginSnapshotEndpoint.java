@@ -35,8 +35,6 @@ public class PluginSnapshotEndpoint implements Closeable
 	static final String HEALTH_SCHEMA = "plugin_snapshot_health.v1";
 	static final String REQUEST_SCHEMA = "plugin_snapshot_request.v1";
 	static final String RESPONSE_SCHEMA = "plugin_snapshot_response.v1";
-	static final String PRESET_REQUEST_SCHEMA = "telemetry_preset_request.v1";
-	static final String PRESET_RESPONSE_SCHEMA = "telemetry_preset_response.v1";
 	static final int MAX_REQUEST_BODY_BYTES = 16 * 1024;
 	static final int MAX_TILE_PROJECTION_REQUESTS = 16;
 	static final long CACHE_FRESHNESS_THRESHOLD_MILLIS = 5_000L;
@@ -44,40 +42,18 @@ public class PluginSnapshotEndpoint implements Closeable
 	private static final String CONTENT_TYPE_JSON = "application/json; charset=utf-8";
 	private static final List<String> SUPPORTED_NEEDS = Arrays.asList(
 			"baseline",
-			"scene_delta",
-			"projection",
 			"inventory",
-			"inventory_delta",
 			"activity",
-			"navigation",
-			"collision_window",
 			"bank_ui",
 			"dialogue_state",
 			"interaction_hot",
-			"client_tick_tail",
-			"world_model_summary",
-			"scene_object_census",
 			"route_object_census",
 			"resource_object_census",
-			"service_object_census",
-			"pathing_frontier",
-			"projection_audit",
-			"minimap_projection",
-			"view_quality_inputs",
-			"full_world_model_debug",
-			"writer_health",
-			"watch_values");
+			"service_object_census");
 	private static final List<String> WORLD_MODEL_NEEDS = Arrays.asList(
-			"world_model_summary",
-			"scene_object_census",
 			"route_object_census",
 			"resource_object_census",
-			"service_object_census",
-			"pathing_frontier",
-			"projection_audit",
-			"minimap_projection",
-			"view_quality_inputs",
-			"full_world_model_debug");
+			"service_object_census");
 	private static final Map<String, String> NEED_TO_PACKET_TYPE = createNeedMap();
 
 	private final PluginLiveCache liveCache;
@@ -88,7 +64,6 @@ public class PluginSnapshotEndpoint implements Closeable
 	private final int maxProjectionRefs;
 	private final int maxResponseBytes;
 	private final boolean allowNonLocalHost;
-	private final TelemetryPresetApplier presetApplier;
 	private final Supplier<Map<String, Object>> hoverMenuSupplier;
 	private final Supplier<Map<String, Object>> lastMenuOptionClickedSupplier;
 	private final ClientTickHotState clientTickHotState;
@@ -120,20 +95,6 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxResponseBytes,
 			boolean allowNonLocalHost)
 	{
-		this(liveCache, gson, host, port, authToken, maxProjectionRefs, maxResponseBytes, allowNonLocalHost, null);
-	}
-
-	public PluginSnapshotEndpoint(
-			PluginLiveCache liveCache,
-			Gson gson,
-			String host,
-			int port,
-			String authToken,
-			int maxProjectionRefs,
-			int maxResponseBytes,
-			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier)
-	{
 		this(
 				liveCache,
 				gson,
@@ -143,7 +104,6 @@ public class PluginSnapshotEndpoint implements Closeable
 				maxProjectionRefs,
 				maxResponseBytes,
 				allowNonLocalHost,
-				presetApplier,
 				null,
 				null,
 				null,
@@ -160,7 +120,6 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxProjectionRefs,
 			int maxResponseBytes,
 			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier,
 			Supplier<Map<String, Object>> hoverMenuSupplier,
 			Supplier<Map<String, Object>> lastMenuOptionClickedSupplier)
 	{
@@ -173,7 +132,6 @@ public class PluginSnapshotEndpoint implements Closeable
 				maxProjectionRefs,
 				maxResponseBytes,
 				allowNonLocalHost,
-				presetApplier,
 				hoverMenuSupplier,
 				lastMenuOptionClickedSupplier,
 				null,
@@ -190,7 +148,6 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxProjectionRefs,
 			int maxResponseBytes,
 			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier,
 			ClientTickHotState clientTickHotState)
 	{
 		this(
@@ -202,7 +159,6 @@ public class PluginSnapshotEndpoint implements Closeable
 				maxProjectionRefs,
 				maxResponseBytes,
 				allowNonLocalHost,
-				presetApplier,
 				null,
 				null,
 				clientTickHotState,
@@ -219,7 +175,6 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxProjectionRefs,
 			int maxResponseBytes,
 			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier,
 			ClientTickHotState clientTickHotState,
 			TileProjectionProvider tileProjectionProvider)
 	{
@@ -232,7 +187,6 @@ public class PluginSnapshotEndpoint implements Closeable
 				maxProjectionRefs,
 				maxResponseBytes,
 				allowNonLocalHost,
-				presetApplier,
 				null,
 				null,
 				clientTickHotState,
@@ -249,7 +203,6 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxProjectionRefs,
 			int maxResponseBytes,
 			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier,
 			ClientTickHotState clientTickHotState,
 			TileProjectionProvider tileProjectionProvider,
 			WorldModelQueryProvider worldModelQueryProvider)
@@ -263,7 +216,6 @@ public class PluginSnapshotEndpoint implements Closeable
 				maxProjectionRefs,
 				maxResponseBytes,
 				allowNonLocalHost,
-				presetApplier,
 				null,
 				null,
 				clientTickHotState,
@@ -280,7 +232,6 @@ public class PluginSnapshotEndpoint implements Closeable
 			int maxProjectionRefs,
 			int maxResponseBytes,
 			boolean allowNonLocalHost,
-			TelemetryPresetApplier presetApplier,
 			Supplier<Map<String, Object>> hoverMenuSupplier,
 			Supplier<Map<String, Object>> lastMenuOptionClickedSupplier,
 			ClientTickHotState clientTickHotState,
@@ -295,7 +246,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		this.maxProjectionRefs = Math.max(0, maxProjectionRefs);
 		this.maxResponseBytes = Math.max(8 * 1024, maxResponseBytes);
 		this.allowNonLocalHost = allowNonLocalHost;
-		this.presetApplier = presetApplier;
 		this.hoverMenuSupplier = hoverMenuSupplier;
 		this.lastMenuOptionClickedSupplier = lastMenuOptionClickedSupplier;
 		this.clientTickHotState = clientTickHotState;
@@ -318,9 +268,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		server.createContext("/health", this::handleHealth);
 		server.createContext("/schema", this::handleSchema);
 		server.createContext("/snapshot", this::handleSnapshot);
-		server.createContext("/presets", this::handlePresets);
-		server.createContext("/preset/preview", this::handlePresetPreview);
-		server.createContext("/preset/apply", this::handlePresetApply);
 		server.start();
 		log.info("Plugin snapshot endpoint started on {}:{}", host, boundPort);
 	}
@@ -372,19 +319,17 @@ public class PluginSnapshotEndpoint implements Closeable
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("schema", "plugin_snapshot_schema.v1");
-		payload.put("supportedSchemas", List.of(HEALTH_SCHEMA, REQUEST_SCHEMA, RESPONSE_SCHEMA, PRESET_REQUEST_SCHEMA, PRESET_RESPONSE_SCHEMA));
+		payload.put("supportedSchemas", List.of(HEALTH_SCHEMA, REQUEST_SCHEMA, RESPONSE_SCHEMA));
 		payload.put("supportedNeeds", SUPPORTED_NEEDS);
-		payload.put("presetEndpointAvailable", presetApplier != null);
-		payload.put("supportedPresets", TelemetryPresetApplier.PRESET_NAMES);
-		payload.put("presetEndpoints", List.of("GET /presets", "POST /preset/preview", "POST /preset/apply"));
-		payload.put("snapshotTiers", List.of("hot", "expanded", "audit"));
+		payload.put("endpoints", List.of("GET /health", "GET /schema", "POST /snapshot"));
+		payload.put("snapshotTiers", List.of("hot"));
 		payload.put("configLimits", Map.of(
 				"maxProjectionRefs", maxProjectionRefs,
 				"maxResponseBytes", maxResponseBytes,
 				"maxRequestBodyBytes", MAX_REQUEST_BODY_BYTES,
 				"maxTileProjectionRequests", MAX_TILE_PROJECTION_REQUESTS));
-		payload.put("projectionFieldModes", List.of("compact", "normal", "full"));
-		payload.put("hotSamples", List.of("clientTickHot", "hoverMenu", "lastMenuOptionClicked"));
+		payload.put("projectionFieldModes", List.of("compact"));
+		payload.put("hotSamples", List.of("clientTickHot", "hoverMenu"));
 		payload.put("clientTickHotSchema", ClientTickHotState.SCHEMA);
 		payload.put("requestControls", List.of("tileProjectionRequests"));
 		payload.put("tileProjectionSchema", "tile_projection_response.v1");
@@ -392,25 +337,9 @@ public class PluginSnapshotEndpoint implements Closeable
 		payload.put("worldModelQueryControls", List.of(
 				"worldModel.maxObjects",
 				"worldModel.radiusTiles",
-				"worldModel.centerWorldLocation",
-				"worldModel.includeProjection",
-				"worldModel.includeCollision"));
-		payload.put("readOnlyStatement", "Returns cached telemetry observations and can apply fixed whitelisted telemetry config presets. It has no game input, command, or game-state mutation endpoints.");
+				"worldModel.includeProjection"));
+		payload.put("readOnlyStatement", "Returns cached telemetry observations only. It has no configuration, game input, command, or game-state mutation endpoints.");
 		return payload;
-	}
-
-	Map<String, Object> presetsPayload()
-	{
-		return presetApplier == null ? presetUnavailablePayload() : presetApplier.presetsPayload();
-	}
-
-	Map<String, Object> presetPayload(JsonObject request, boolean preview)
-	{
-		if (presetApplier == null)
-		{
-			return presetUnavailablePayload();
-		}
-		return presetApplier.apply(stringValue(request, "preset", ""), preview);
 	}
 
 	Map<String, Object> snapshotPayload(JsonObject request)
@@ -632,6 +561,8 @@ public class PluginSnapshotEndpoint implements Closeable
 		payload.put("wallTimeMillis", hoverMenu == null ? null : hoverMenu.get("wallTimeMillis"));
 		payload.put("gameTickAtSample", hoverMenu == null ? null : hoverMenu.get("gameTickAtSample"));
 		payload.put("gameState", hoverMenu == null ? null : hoverMenu.get("gameState"));
+		payload.put("sessionId", hoverMenu == null ? null : hoverMenu.get("sessionId"));
+		payload.put("clientProcessId", hoverMenu == null ? null : hoverMenu.get("clientProcessId"));
 		Map<String, Object> mouse = new LinkedHashMap<>();
 		mouse.put("canvasX", hoverMenu == null ? null : hoverMenu.get("mouseCanvasX"));
 		mouse.put("canvasY", hoverMenu == null ? null : hoverMenu.get("mouseCanvasY"));
@@ -884,72 +815,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		writeJson(exchange, httpStatusFor(response), response);
 	}
 
-	private void handlePresets(HttpExchange exchange) throws IOException
-	{
-		if (!requireMethod(exchange, "GET") || !checkAuth(exchange))
-		{
-			return;
-		}
-		if (presetApplier == null)
-		{
-			writeJson(exchange, 503, presetUnavailablePayload());
-			return;
-		}
-		writeJson(exchange, 200, presetsPayload());
-	}
-
-	private void handlePresetPreview(HttpExchange exchange) throws IOException
-	{
-		handlePresetRequest(exchange, true);
-	}
-
-	private void handlePresetApply(HttpExchange exchange) throws IOException
-	{
-		handlePresetRequest(exchange, false);
-	}
-
-	private void handlePresetRequest(HttpExchange exchange, boolean preview) throws IOException
-	{
-		if (!requireMethod(exchange, "POST") || !checkAuth(exchange))
-		{
-			return;
-		}
-		if (presetApplier == null)
-		{
-			writeJson(exchange, 503, presetUnavailablePayload());
-			return;
-		}
-
-		JsonObject request;
-		try
-		{
-			String body = readBody(exchange);
-			request = body.isBlank() ? new JsonObject() : gson.fromJson(body, JsonObject.class);
-			if (request == null)
-			{
-				request = new JsonObject();
-			}
-		}
-		catch (IllegalArgumentException e)
-		{
-			writeJson(exchange, 400, errorPayload("bad_request", e.getMessage()));
-			return;
-		}
-
-		Map<String, Object> response = presetPayload(request, preview);
-		writeJson(exchange, "FAIL".equals(response.get("status")) ? 400 : 200, response);
-	}
-
-	private Map<String, Object> presetUnavailablePayload()
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("schema", PRESET_RESPONSE_SCHEMA);
-		payload.put("status", "FAIL");
-		payload.put("errorCode", "preset_endpoint_unavailable");
-		payload.put("message", "preset endpoint is unavailable");
-		payload.put("readOnlyGameState", true);
-		return payload;
-	}
 
 	private JsonElement compactPayloadForResponse(
 			String need,
@@ -1461,11 +1326,10 @@ public class PluginSnapshotEndpoint implements Closeable
 		if (needs.isEmpty() && !explicitNeeds)
 		{
 			needs.add("baseline");
-			needs.add("projection");
 			needs.add("inventory");
 			needs.add("activity");
-			needs.add("navigation");
-			needs.add("writer_health");
+			needs.add("bank_ui");
+			needs.add("dialogue_state");
 		}
 
 		if (!includeCollisionWindow)
@@ -1491,7 +1355,7 @@ public class PluginSnapshotEndpoint implements Closeable
 				if (element.isJsonPrimitive())
 				{
 					String need = normalizeNeed(element.getAsString());
-					if (("interaction_hot".equals(need) || "client_tick_tail".equals(need)) && !needs.contains(need))
+					if ("interaction_hot".equals(need) && !needs.contains(need))
 					{
 						needs.add(need);
 					}
@@ -2098,17 +1962,10 @@ public class PluginSnapshotEndpoint implements Closeable
 	{
 		Map<String, String> map = new LinkedHashMap<>();
 		map.put("baseline", "live_baseline_packet.v1");
-		map.put("scene_delta", "live_scene_delta_packet.v1");
-		map.put("projection", "live_projection_packet.v1");
 		map.put("inventory", "live_inventory_packet.v1");
-		map.put("inventory_delta", "live_inventory_delta_packet.v1");
 		map.put("activity", "live_activity_packet.v1");
-		map.put("navigation", "live_navigation_packet.v1");
-		map.put("collision_window", "live_collision_window_packet.v1");
 		map.put("bank_ui", "live_bank_ui_packet.v1");
 		map.put("dialogue_state", "live_dialogue_state_packet.v1");
-		map.put("writer_health", "live_writer_health_packet.v1");
-		map.put("watch_values", "live_watch_values_packet.v1");
 		return map;
 	}
 

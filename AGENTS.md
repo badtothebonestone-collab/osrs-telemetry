@@ -1,37 +1,62 @@
-# Codex Instructions
+# Engineering Rules
 
-Read this file first. Then read `PROJECT_STATE.md` and `MILESTONES.md`.
+## Product boundary
 
-## Source Of Truth
+The only supported product is the Lumbridge west ordinary-tree to Lumbridge
+Castle bank vertical slice described in `docs/RESCUE_CONTRACT.md`.
 
-- `PROJECT_STATE.md` describes current repo facts.
-- `MILESTONES.md` describes current build order.
-- `RECOVERY_LOG.md` records recovery history.
-- Deprecated, historical, cleanup, handoff, and archive docs are reference only.
-- If older docs conflict with the three files above, follow the three files above.
+Keep one source of truth for each layer:
 
-## Operating Rules
+- RuneLite snapshot endpoint
+- `Observation`
+- `WoodcutBankTask`
+- `SafetyGate`
+- `ArduinoActionInterface`
+- `Verifier`
 
-- Do not invent alternate run commands.
-- Use only blessed commands listed in `PROJECT_STATE.md`.
-- If a blessed command is missing, say it is missing; do not substitute another command.
-- When blessed commands change, update `PROJECT_STATE.md` in the same change.
-- Source changes must be tied to the current milestone in `MILESTONES.md`.
-- Keep changes small and scoped to the active milestone.
-- Inspect worktree status before edits and do not overwrite user work.
-- Do not delete, move, reset, clean, or discard files unless the user explicitly asks.
+Do not add planners, task languages, knowledge systems, compatibility launchers,
+fallback input backends, recovery frameworks, or configuration frameworks.
 
-## Recovery Safety
+## Safety
 
-- During recovery milestones, do not implement features or refactor runtime/source code.
-- During recovery milestones, do not add anti-detection, evasion, randomization, bypass, or stealth behavior.
-- During recovery milestones, do not add or run click, mouse, keyboard, menu, banking, route, task, or gameplay action execution.
-- Read-only telemetry/state parsing and documentation are allowed when tied to the current milestone.
-- Execution-capable examples in old docs are not active instructions.
+- Live input is Arduino-only.
+- Never type credentials or MFA.
+- `run.cmd login COMx` may click only the retained idle-disconnect OK,
+  saved-session Play Now, and Click here to play surfaces; all other
+  login/recovery surfaces fail closed.
+- Require a fresh loaded scene, exact target identity, verified screen geometry,
+  exact post-move hover, and post-action verification.
+- Always issue and confirm `STOP_ALL` and `DISARM` after a connected attempt.
+- Fail closed; a missing proof is not a reason to add a fallback.
+- Keep dry-run behavior free of input and hardware connections.
 
-## Current Architecture Boundary
+## Development
 
-- The active recovery boundary is read-only state: parse, validate, summarize, and report.
-- Runtime action layers are out of scope until a milestone explicitly allows them.
-- `gradlew run` is a development launch only; it is not loaded-scene proof.
-- Loaded-scene readiness must be proven by current telemetry/state, not by chat memory or stale files.
+- Use `run.cmd` as the public entrypoint.
+- Everything downstream of the plugin consumes `Observation`; do not read
+  plugin caches or raw response dictionaries elsewhere.
+- Keep the task explicit and specific to the supported route.
+- Prefer deletion and direct code over new abstraction.
+- Preserve the Arduino firmware/backend unless hardware evidence proves a
+  change is necessary.
+- Add focused tests for behavior, not for retired architecture.
+
+## Validation
+
+With RuneLite closed:
+
+```powershell
+.\run.cmd test
+```
+
+For live read-only proof:
+
+```powershell
+.\run.cmd plugin
+.\run.cmd observe
+.\run.cmd task
+.\run.cmd login COM6
+```
+
+`task` is dry-run. Both login assistance and gameplay execution are explicit,
+Arduino-only modes; gameplay uses `run.cmd execute COM6`.

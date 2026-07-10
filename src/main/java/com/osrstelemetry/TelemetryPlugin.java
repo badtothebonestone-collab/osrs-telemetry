@@ -5,23 +5,18 @@ import com.google.inject.Provides;
 import java.awt.Canvas;
 import java.awt.Dimension;
 import java.awt.GraphicsConfiguration;
-import java.awt.Image;
 import java.awt.IllegalComponentStateException;
 import java.awt.Polygon;
 import java.awt.Rectangle;
-import java.awt.Robot;
 import java.awt.Shape;
 import java.awt.Window;
 import java.awt.geom.PathIterator;
 import java.awt.geom.AffineTransform;
-import java.awt.image.BufferedImage;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -36,38 +31,20 @@ import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
 import net.runelite.api.Client;
-import net.runelite.api.CollisionData;
-import net.runelite.api.CollisionDataFlag;
-import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameState;
-import net.runelite.api.GameObject;
-import net.runelite.api.GraphicsObject;
-import net.runelite.api.GroundObject;
-import net.runelite.api.Hitsplat;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.MenuEntry;
 import net.runelite.api.NPC;
-import net.runelite.api.NPCComposition;
-import net.runelite.api.ObjectComposition;
 import net.runelite.api.Perspective;
 import net.runelite.api.Player;
 import net.runelite.api.Point;
 import net.runelite.api.Prayer;
-import net.runelite.api.Projectile;
-import net.runelite.api.Scene;
 import net.runelite.api.Skill;
-import net.runelite.api.Tile;
-import net.runelite.api.TileItem;
-import net.runelite.api.TileObject;
-import net.runelite.api.WallObject;
-import net.runelite.api.WorldView;
 import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldPoint;
-import net.runelite.api.events.ActorDeath;
-import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.DecorativeObjectDespawned;
 import net.runelite.api.events.DecorativeObjectSpawned;
@@ -75,30 +52,11 @@ import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GameObjectDespawned;
 import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
-import net.runelite.api.events.GraphicsObjectCreated;
 import net.runelite.api.events.GroundObjectDespawned;
 import net.runelite.api.events.GroundObjectSpawned;
-import net.runelite.api.events.HitsplatApplied;
-import net.runelite.api.events.InteractingChanged;
-import net.runelite.api.events.ItemContainerChanged;
-import net.runelite.api.events.ItemDespawned;
-import net.runelite.api.events.ItemQuantityChanged;
-import net.runelite.api.events.ItemSpawned;
 import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.MenuOptionClicked;
-import net.runelite.api.events.NpcChanged;
-import net.runelite.api.events.NpcDespawned;
-import net.runelite.api.events.NpcSpawned;
-import net.runelite.api.events.OverheadTextChanged;
-import net.runelite.api.events.PlayerChanged;
-import net.runelite.api.events.PlayerDespawned;
-import net.runelite.api.events.PlayerSpawned;
 import net.runelite.api.events.PostMenuSort;
-import net.runelite.api.events.ProjectileMoved;
-import net.runelite.api.events.StatChanged;
-import net.runelite.api.events.VarClientIntChanged;
-import net.runelite.api.events.VarClientStrChanged;
-import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.WallObjectDespawned;
 import net.runelite.api.events.WallObjectSpawned;
 import net.runelite.client.config.ConfigManager;
@@ -106,12 +64,6 @@ import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
-import net.runelite.client.ui.DrawManager;
-import net.runelite.client.ui.overlay.OverlayManager;
-import net.runelite.client.util.ImageCapture;
-import net.runelite.client.util.ImageUtil;
-import net.runelite.api.events.WidgetClosed;
-import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
@@ -119,41 +71,20 @@ import net.runelite.client.callback.ClientThread;
 @Slf4j
 @PluginDescriptor(
 		name = "Telemetry Collector",
-		description = "Read-only telemetry logger for external analysis",
-		tags = {"telemetry", "data", "logger"}
+		description = "Read-only live telemetry sensor for the local snapshot endpoint",
+		tags = {"telemetry", "sensor", "snapshot"}
 )
 public class TelemetryPlugin extends Plugin
 {
-	private static final int MAX_GROUND_ITEMS = 250;
 	private static final int INVENTORY_SLOT_COUNT = 28;
 	private static final String PACKET_BASELINE = "live_baseline_packet.v1";
-	private static final String PACKET_SCENE_DELTA = "live_scene_delta_packet.v1";
-	private static final String PACKET_PROJECTION = "live_projection_packet.v1";
 	private static final String PACKET_INVENTORY = "live_inventory_packet.v1";
-	private static final String PACKET_INVENTORY_DELTA = "live_inventory_delta_packet.v1";
 	private static final String PACKET_ACTIVITY = "live_activity_packet.v1";
-	private static final String PACKET_NAVIGATION = "live_navigation_packet.v1";
-	private static final String PACKET_COLLISION_WINDOW = "live_collision_window_packet.v1";
-	private static final String PACKET_COLLISION_GRID = "live_collision_grid_packet.v1";
 	private static final String PACKET_BANK_UI = "live_bank_ui_packet.v1";
 	private static final String PACKET_DIALOGUE_STATE = "live_dialogue_state_packet.v1";
-	private static final String PACKET_WRITER_HEALTH = "live_writer_health_packet.v1";
+	// Wire name retained for existing snapshot clients; the payload now reports cache/sensor health only.
+	private static final String PACKET_SENSOR_HEALTH = "live_writer_health_packet.v1";
 	private static final int DIALOGUE_WIDGET_SCAN_LIMIT = 160;
-	private static final int MAX_SERVICE_SCENE_OBJECTS = 32;
-	private static final int SERVICE_SCENE_OBJECT_RADIUS = 48;
-	private static final int COMPACT_LIVE_GEOMETRY_MAX_REFS_HARD_CAP = 200;
-	private static final int COLLISION_MOVEMENT_MASK = CollisionDataFlag.BLOCK_MOVEMENT_NORTH_WEST
-			| CollisionDataFlag.BLOCK_MOVEMENT_NORTH
-			| CollisionDataFlag.BLOCK_MOVEMENT_NORTH_EAST
-			| CollisionDataFlag.BLOCK_MOVEMENT_EAST
-			| CollisionDataFlag.BLOCK_MOVEMENT_SOUTH_EAST
-			| CollisionDataFlag.BLOCK_MOVEMENT_SOUTH
-			| CollisionDataFlag.BLOCK_MOVEMENT_SOUTH_WEST
-			| CollisionDataFlag.BLOCK_MOVEMENT_WEST
-			| CollisionDataFlag.BLOCK_MOVEMENT_OBJECT
-			| CollisionDataFlag.BLOCK_MOVEMENT_FLOOR_DECORATION
-			| CollisionDataFlag.BLOCK_MOVEMENT_FLOOR
-			| CollisionDataFlag.BLOCK_MOVEMENT_FULL;
 
 	@Inject
 	private Client client;
@@ -167,62 +98,19 @@ public class TelemetryPlugin extends Plugin
 	@Inject
 	private TelemetryConfig config;
 
-	@Inject
-	private ConfigManager configManager;
-
-	@Inject
-	private DrawManager drawManager;
-
-	@Inject
-	private OverlayManager overlayManager;
-
-	@Inject
-	private TelemetryDebugOverlay debugOverlay;
-
-	@Inject
-	private ImageCapture imageCapture;
-
-	private TelemetryWriter writer;
 	private PluginLiveCache liveCache;
 	private PluginSnapshotEndpoint pluginSnapshotEndpoint;
+	private String pluginInstanceId;
 	private final ClientTickHotState clientTickHotState = new ClientTickHotState();
 	private final WorldModelCache worldModelCache = new WorldModelCache();
 	private volatile Map<String, Object> latestHoverMenu;
 	private volatile Map<String, Object> lastMenuOptionClicked;
 	private long tickId = 0;
 	private long clientTickId = 0;
-	private long eventSeq = 0;
-	private final Set<Integer> knownItemIds = new HashSet<>();
-	private final Set<Integer> knownNpcIds = new HashSet<>();
-	private final Set<Integer> knownObjectIds = new HashSet<>();
 	private final Map<Integer, DefinitionName> itemNameCache = new LinkedHashMap<>();
-	private final Map<Integer, DefinitionName> npcNameCache = new LinkedHashMap<>();
-	private final Map<Integer, DefinitionName> objectNameCache = new LinkedHashMap<>();
-	private final Map<String, SceneIndexEntry> sceneObjectIndex = new LinkedHashMap<>();
-	private final Set<String> dirtySceneObjectKeys = new HashSet<>();
-	private final Map<String, TickSnapshot.SceneObjectSnapshot> sceneProjectionCache = new LinkedHashMap<>();
-	private boolean sceneIndexNeedsFullResync = true;
-	private String sceneIndexResyncReason = "startup";
-	private int sceneIndexPlane = -1;
-	private long lastSceneIndexResyncTick = -1;
-	private String lastSceneProjectionStateHash;
-	private Map<String, Object> lastCompactInventorySnapshot;
 	private int lastActivityAnimation = Integer.MIN_VALUE;
 	private int lastActivityPoseAnimation = Integer.MIN_VALUE;
 	private String lastActivityInteractingSignature;
-	private boolean debugOverlayRegistered;
-	private int lastCompactGeometryRefsWithPolygons;
-	private int lastCompactGeometryRefsSkippedByCap;
-	private int lastCompactGeometryMaxRefs;
-	private boolean lastCompactGeometryCapHit;
-	private boolean lastCompactLiveIncludeClickableHull;
-	private boolean lastCompactLiveIncludeCanvasTilePolygon;
-	private boolean lastCompactLiveIncludeConvexHull;
-	private int lastCompactHullsEmitted;
-	private int lastCompactHullDroppedOffscreen;
-	private int lastCompactHullDroppedNoCanvasIntersection;
-	private int lastCompactHullDroppedByCap;
-	private int lastCompactHullDroppedNullClickbox;
 
 	@Provides
 	TelemetryConfig provideConfig(ConfigManager configManager)
@@ -230,156 +118,36 @@ public class TelemetryPlugin extends Plugin
 		return configManager.getConfig(TelemetryConfig.class);
 	}
 
-	private void cleanupRetiredConfigKeys()
-	{
-		if (configManager == null)
-		{
-			return;
-		}
-
-		String oldEndpointAlias = configManager.getConfiguration(
-				TelemetryConfigKeys.CONFIG_GROUP,
-				"pluginSnapshotEnabledInNormalLive");
-		String currentEndpoint = configManager.getConfiguration(
-				TelemetryConfigKeys.CONFIG_GROUP,
-				"enablePluginSnapshotEndpoint");
-		if (Boolean.parseBoolean(oldEndpointAlias) && !Boolean.parseBoolean(currentEndpoint))
-		{
-			configManager.setConfiguration(TelemetryConfigKeys.CONFIG_GROUP, "enablePluginSnapshotEndpoint", true);
-		}
-
-		int removed = 0;
-		for (String key : TelemetryConfigKeys.RETIRED_KEYS)
-		{
-			if (configManager.getConfiguration(TelemetryConfigKeys.CONFIG_GROUP, key) != null)
-			{
-				configManager.unsetConfiguration(TelemetryConfigKeys.CONFIG_GROUP, key);
-				removed++;
-			}
-		}
-
-		if (removed > 0)
-		{
-			log.info("Cleaned {} retired Telemetry Collector config keys", removed);
-		}
-	}
-
 	@Override
 	protected void startUp() throws Exception
 	{
-		cleanupRetiredConfigKeys();
-		TelemetryRecordingMode recordingMode = recordingMode();
-
-		knownItemIds.clear();
-		knownNpcIds.clear();
-		knownObjectIds.clear();
 		itemNameCache.clear();
-		npcNameCache.clear();
-		objectNameCache.clear();
-		clearSceneIndex("startup");
-		lastCompactInventorySnapshot = null;
 		lastActivityAnimation = Integer.MIN_VALUE;
 		lastActivityPoseAnimation = Integer.MIN_VALUE;
 		lastActivityInteractingSignature = null;
 		liveCache = new PluginLiveCache(gson);
+		pluginInstanceId = "plugin-" + ProcessHandle.current().pid() + "-" + Instant.now().toEpochMilli();
 		worldModelCache.clear("startup");
-
-		writer = new TelemetryWriter(
-				config.outputDirectory(),
-				gson,
-				config.maxSegmentMb(),
-				config.retentionEnabled(),
-				config.maxTelemetryGb(),
-				config.cleanupIntervalSeconds(),
-				config.preservePinnedSessions(),
-				config.allowDeletingClosedSegmentsFromActiveSession(),
-				recordingMode,
-				rawTickRecordingEnabled(recordingMode),
-				rawEventRecordingEnabled(recordingMode),
-				frameRecordingEnabled(recordingMode),
-				effectiveScreenshotEveryTicks(recordingMode),
-				config.screenshotFormat(),
-				config.jpegQuality(),
-				config.maxFrameStorageMb(),
-				config.frameCleanupIntervalSeconds(),
-				config.deleteOldFrames(),
-				config.maxFrameQueueSize(),
-				config.frameCaptureMode(),
-				config.allowScreenRectangleFallback(),
-				liveCache);
-		writer.start();
-		startPluginSnapshotEndpoint(recordingMode);
-		if (!debugOverlayRegistered)
-		{
-			overlayManager.add(debugOverlay);
-			debugOverlayRegistered = true;
-		}
+		startPluginSnapshotEndpoint();
+		clientThread.invokeLater(() -> publishGameStateBaseline(client.getGameState()));
 
 		log.info("Telemetry Collector started");
-	}
-
-	private TelemetryRecordingMode recordingMode()
-	{
-		TelemetryRecordingMode mode = config.telemetryRecordingMode();
-		return mode == null ? TelemetryRecordingMode.LIVE_COMPACT_ONLY : mode;
-	}
-
-	private boolean rawTickRecordingEnabled(TelemetryRecordingMode mode)
-	{
-		return mode == TelemetryRecordingMode.DEBUG_RECORDING || config.debugRecordRawTicks();
-	}
-
-	private boolean rawEventRecordingEnabled(TelemetryRecordingMode mode)
-	{
-		return mode == TelemetryRecordingMode.DEBUG_RECORDING || config.debugRecordRawEvents();
-	}
-
-	private boolean frameRecordingEnabled(TelemetryRecordingMode mode)
-	{
-		if (!config.captureScreenshots() || !config.debugRecordFrames())
-		{
-			return false;
-		}
-
-		return mode == TelemetryRecordingMode.LIVE_COMPACT_WITH_FRAMES
-				|| mode == TelemetryRecordingMode.DEBUG_RECORDING
-				|| mode == TelemetryRecordingMode.HYBRID_DEBUG;
-	}
-
-	private int effectiveScreenshotEveryTicks(TelemetryRecordingMode mode)
-	{
-		if (mode == TelemetryRecordingMode.LIVE_COMPACT_WITH_FRAMES)
-		{
-			return Math.max(1, config.debugFrameIntervalTicks());
-		}
-
-		return Math.max(1, config.screenshotEveryTicks());
 	}
 
 	@Override
 	protected void shutDown() throws Exception
 	{
-		if (debugOverlayRegistered)
-		{
-			overlayManager.remove(debugOverlay);
-			debugOverlayRegistered = false;
-		}
 		stopPluginSnapshotEndpoint();
-		if (writer != null)
-		{
-			writer.close();
-			writer = null;
-		}
 		liveCache = null;
-		clearSceneIndex("shutdown");
+		pluginInstanceId = null;
 		worldModelCache.clear("shutdown");
 
 		log.info("Telemetry Collector stopped");
 	}
 
-	private void startPluginSnapshotEndpoint(TelemetryRecordingMode recordingMode)
+	private void startPluginSnapshotEndpoint()
 	{
-		if (!pluginSnapshotEndpointEnabled(recordingMode) || pluginSnapshotEndpoint != null || liveCache == null)
+		if (!config.enablePluginSnapshotEndpoint() || pluginSnapshotEndpoint != null || liveCache == null)
 		{
 			return;
 		}
@@ -393,7 +161,6 @@ public class TelemetryPlugin extends Plugin
 				config.pluginSnapshotMaxProjectionRefs(),
 				config.pluginSnapshotMaxResponseBytes(),
 				config.pluginSnapshotAllowNonLocalHost(),
-				new TelemetryPresetApplier(configManager),
 				clientTickHotState,
 				this::pluginSnapshotTileProjections,
 				this::pluginSnapshotWorldModelQuery);
@@ -408,11 +175,6 @@ public class TelemetryPlugin extends Plugin
 		}
 	}
 
-	private boolean pluginSnapshotEndpointEnabled(TelemetryRecordingMode recordingMode)
-	{
-		return config.enablePluginSnapshotEndpoint();
-	}
-
 	private void stopPluginSnapshotEndpoint()
 	{
 		if (pluginSnapshotEndpoint == null)
@@ -424,16 +186,6 @@ public class TelemetryPlugin extends Plugin
 		pluginSnapshotEndpoint = null;
 	}
 
-	Path currentOverlayDebugStatePath()
-	{
-		TelemetryWriter currentWriter = writer;
-		if (currentWriter == null)
-		{
-			return null;
-		}
-		return currentWriter.getSessionDir().resolve("interaction_geometry").resolve("live").resolve("overlay_debug_state.json");
-	}
-
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
@@ -443,31 +195,7 @@ public class TelemetryPlugin extends Plugin
 		}
 
 		String key = event.getKey();
-		if ("applyWorkflowPreset".equals(key) && config.applyWorkflowPreset())
-		{
-			applySelectedWorkflowPreset();
-			return;
-		}
-
 		if (isSnapshotEndpointConfigKey(key))
-		{
-			restartPluginSnapshotEndpoint();
-		}
-	}
-
-	private void applySelectedWorkflowPreset()
-	{
-		TelemetryWorkflowPreset preset = config.workflowPreset();
-		if (preset == null)
-		{
-			preset = TelemetryWorkflowPreset.DAILY_LIVE;
-		}
-		boolean preview = config.presetPreviewOnly();
-		TelemetryPresetApplier applier = new TelemetryPresetApplier(configManager);
-		Map<String, Object> result = applier.apply(preset.name(), preview);
-		log.info("Telemetry workflow preset {} {}: {}", preset.name(), preview ? "preview" : "apply", result.get("status"));
-		configManager.setConfiguration(TelemetryPresetApplier.CONFIG_GROUP, "applyWorkflowPreset", false);
-		if (!preview)
 		{
 			restartPluginSnapshotEndpoint();
 		}
@@ -488,16 +216,15 @@ public class TelemetryPlugin extends Plugin
 	private void restartPluginSnapshotEndpoint()
 	{
 		stopPluginSnapshotEndpoint();
-		startPluginSnapshotEndpoint(recordingMode());
+		startPluginSnapshotEndpoint();
 	}
 
 	@Subscribe
 	public void onGameTick(GameTick event)
 	{
 		long snapshotStartNanos = System.nanoTime();
-		TelemetryWriter currentWriter = writer;
 
-		if (!config.enabled() || currentWriter == null)
+		if (!config.enabled() || liveCache == null)
 		{
 			return;
 		}
@@ -523,35 +250,28 @@ public class TelemetryPlugin extends Plugin
 
 		try
 		{
+			safeCapture(captureErrors, "cameraViewport", () -> captureCameraViewport(snapshot));
+			safeCapture(captureErrors, "welcomeScreen", () -> captureWelcomeScreen(snapshot));
 			if (gameState == GameState.LOGGED_IN)
 			{
-				safeCapture(captureErrors, "cameraViewport", () -> captureCameraViewport(snapshot));
 				safeCapture(captureErrors, "localPlayer", () -> captureLocalPlayer(snapshot));
 				safeCapture(captureErrors, "inventory", () -> captureInventory(snapshot));
-				safeCapture(captureErrors, "equipment", () -> captureEquipment(snapshot));
-				safeCapture(captureErrors, "skills", () -> captureSkills(snapshot));
-				safeCapture(captureErrors, "npcs", () -> captureNpcs(snapshot));
-				safeCapture(captureErrors, "players", () -> capturePlayers(snapshot));
-				safeCapture(captureErrors, "widgets", () -> captureWidgets(snapshot));
 				safeCapture(captureErrors, "bankUi", () -> captureBankUi(snapshot));
 				safeCapture(captureErrors, "dialogueState", () -> captureDialogueState(snapshot));
-				safeCapture(captureErrors, "scene", () -> captureScene(snapshot));
 				safeCapture(captureErrors, "status", () -> captureStatus(snapshot));
-				safeCapture(captureErrors, "activePrayers", () -> captureActivePrayers(snapshot));
 			}
 		}
 		finally
 		{
 			snapshot.captureErrors = captureErrors.toArray(new String[0]);
-			snapshot.writerQueueSize = currentWriter.getQueueSize();
-			snapshot.writerDroppedRecords = currentWriter.getDroppedRecords();
 			snapshot.snapshotBuildDurationMillis = elapsedMillis(snapshotStartNanos);
-			boolean tickEnqueuedAsync = captureFrame(snapshot, captureErrors, currentWriter);
-			snapshot.captureErrors = captureErrors.toArray(new String[0]);
-
-			if (!tickEnqueuedAsync)
+			try
 			{
-				enqueueTickSnapshot(currentWriter, snapshot);
+				publishCompactLivePackets(snapshot);
+			}
+			catch (RuntimeException e)
+			{
+				log.warn("Failed to publish live telemetry tick {}", snapshot.tickId, e);
 			}
 		}
 	}
@@ -562,14 +282,13 @@ public class TelemetryPlugin extends Plugin
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("gameState", String.valueOf(event.getGameState()));
 
-		logEvent("GameStateChanged", payload);
 		recordGameStateHotSample(event.getGameState());
+		publishGameStateBaseline(event.getGameState());
 
 		if (event.getGameState() == GameState.LOADING
 				|| event.getGameState() == GameState.LOGIN_SCREEN
 				|| event.getGameState() == GameState.HOPPING)
 		{
-			clearSceneIndex("gameState:" + event.getGameState());
 			worldModelCache.clear("gameState:" + event.getGameState());
 		}
 	}
@@ -582,77 +301,51 @@ public class TelemetryPlugin extends Plugin
 	}
 
 	@Subscribe
-	public void onItemContainerChanged(ItemContainerChanged event)
-	{
-		logEvent("ItemContainerChanged", itemContainerPayload(event));
-	}
-
-	@Subscribe
 	public void onGameObjectSpawned(GameObjectSpawned event)
 	{
-		indexSceneObjectFromEvent("GAME_OBJECT", event.getGameObject(), event.getGameObject() == null ? -1 : event.getGameObject().getOrientation());
 		worldModelCache.markDirty("gameObjectSpawned");
 	}
 
 	@Subscribe
 	public void onGameObjectDespawned(GameObjectDespawned event)
 	{
-		despawnSceneObjectFromEvent("GAME_OBJECT", event.getGameObject(), event.getGameObject() == null ? -1 : event.getGameObject().getOrientation());
 		worldModelCache.markDirty("gameObjectDespawned");
 	}
 
 	@Subscribe
 	public void onWallObjectSpawned(WallObjectSpawned event)
 	{
-		indexSceneObjectFromEvent("WALL_OBJECT", event.getWallObject(), event.getWallObject() == null ? -1 : event.getWallObject().getOrientationA());
 		worldModelCache.markDirty("wallObjectSpawned");
 	}
 
 	@Subscribe
 	public void onWallObjectDespawned(WallObjectDespawned event)
 	{
-		despawnSceneObjectFromEvent("WALL_OBJECT", event.getWallObject(), event.getWallObject() == null ? -1 : event.getWallObject().getOrientationA());
 		worldModelCache.markDirty("wallObjectDespawned");
 	}
 
 	@Subscribe
 	public void onDecorativeObjectSpawned(DecorativeObjectSpawned event)
 	{
-		indexSceneObjectFromEvent("DECORATIVE_OBJECT", event.getDecorativeObject(), -1);
 		worldModelCache.markDirty("decorativeObjectSpawned");
 	}
 
 	@Subscribe
 	public void onDecorativeObjectDespawned(DecorativeObjectDespawned event)
 	{
-		despawnSceneObjectFromEvent("DECORATIVE_OBJECT", event.getDecorativeObject(), -1);
 		worldModelCache.markDirty("decorativeObjectDespawned");
 	}
 
 	@Subscribe
 	public void onGroundObjectSpawned(GroundObjectSpawned event)
 	{
-		indexSceneObjectFromEvent("GROUND_OBJECT", event.getGroundObject(), -1);
 		worldModelCache.markDirty("groundObjectSpawned");
 	}
 
 	@Subscribe
 	public void onGroundObjectDespawned(GroundObjectDespawned event)
 	{
-		despawnSceneObjectFromEvent("GROUND_OBJECT", event.getGroundObject(), -1);
 		worldModelCache.markDirty("groundObjectDespawned");
-	}
-
-	@Subscribe
-	public void onStatChanged(StatChanged event)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("skill", String.valueOf(event.getSkill()));
-		payload.put("xp", event.getXp());
-		payload.put("level", event.getLevel());
-		payload.put("boostedLevel", event.getBoostedLevel());
-
-		logEvent("StatChanged", payload);
 	}
 
 	@Subscribe
@@ -662,7 +355,6 @@ public class TelemetryPlugin extends Plugin
 		payload.put("sampleSource", "MenuOpened");
 		payload.put("sourceEvent", "MenuOpened");
 		payload.put("menuEntryCount", event.getMenuEntries() == null ? 0 : event.getMenuEntries().length);
-		logEvent("MenuOpened", payload);
 		clientTickHotState.recordPostMenuSort(payload);
 	}
 
@@ -671,6 +363,10 @@ public class TelemetryPlugin extends Plugin
 	{
 		clientTickId++;
 		clientTickHotState.recordClientTick(clientTickPayload("ClientTick"));
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			publishGameStateBaseline(client.getGameState());
+		}
 	}
 
 	@Subscribe
@@ -689,507 +385,47 @@ public class TelemetryPlugin extends Plugin
 		clientTickHotState.recordMenuOptionClicked(payload);
 	}
 
-	@Subscribe
-	public void onVarbitChanged(VarbitChanged event)
+	private void publishCompactLivePackets(TickSnapshot snapshot)
 	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("index", event.getIndex());
-		payload.put("varpId", event.getVarpId());
-		payload.put("varbitId", event.getVarbitId());
-		payload.put("value", event.getValue());
-
-		logEvent("VarbitChanged", payload);
+		updateLiveCache(PACKET_BASELINE, snapshot, baselinePayload(snapshot));
+		updateLiveCache(PACKET_INVENTORY, snapshot, inventoryPayload(snapshot));
+		updateLiveCache(PACKET_ACTIVITY, snapshot, activityPayload(snapshot));
+		updateLiveCache(PACKET_BANK_UI, snapshot, bankUiPayload(snapshot));
+		updateLiveCache(PACKET_DIALOGUE_STATE, snapshot, dialogueStatePayload(snapshot));
 	}
 
-	@Subscribe
-	public void onVarClientIntChanged(VarClientIntChanged event)
+	private void publishGameStateBaseline(GameState gameState)
 	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		int index = event.getIndex();
-		payload.put("index", index);
-		payload.put("value", client.getVarcIntValue(index));
-
-		logEvent("VarClientIntChanged", payload);
-	}
-
-	@Subscribe
-	public void onVarClientStrChanged(VarClientStrChanged event)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		int index = event.getIndex();
-		payload.put("index", index);
-		payload.put("value", truncate(client.getVarcStrValue(index), 256));
-
-		logEvent("VarClientStrChanged", payload);
-	}
-
-	@Subscribe
-	public void onAnimationChanged(AnimationChanged event)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("actor", actorPayload(event.getActor()));
-
-		logEvent("AnimationChanged", payload);
-	}
-
-	@Subscribe
-	public void onInteractingChanged(InteractingChanged event)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("source", actorPayload(event.getSource()));
-		payload.put("target", actorPayload(event.getTarget()));
-
-		logEvent("InteractingChanged", payload);
-	}
-
-	@Subscribe
-	public void onHitsplatApplied(HitsplatApplied event)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		Hitsplat hitsplat = event.getHitsplat();
-		payload.put("actor", actorPayload(event.getActor()));
-
-		if (hitsplat != null)
-		{
-			payload.put("hitsplatType", hitsplat.getHitsplatType());
-			payload.put("amount", hitsplat.getAmount());
-			payload.put("disappearsOnGameCycle", hitsplat.getDisappearsOnGameCycle());
-			payload.put("mine", hitsplat.isMine());
-			payload.put("others", hitsplat.isOthers());
-		}
-
-		logEvent("HitsplatApplied", payload);
-	}
-
-	@Subscribe
-	public void onProjectileMoved(ProjectileMoved event)
-	{
-		Map<String, Object> payload = projectilePayload(event.getProjectile());
-		LocalPoint position = event.getPosition();
-		payload.put("z", event.getZ());
-
-		if (position != null)
-		{
-			payload.put("localX", position.getX());
-			payload.put("localY", position.getY());
-			WorldPoint worldPoint = WorldPoint.fromLocal(client, position);
-
-			if (worldPoint != null)
-			{
-				payload.put("worldX", worldPoint.getX());
-				payload.put("worldY", worldPoint.getY());
-				payload.put("plane", worldPoint.getPlane());
-			}
-		}
-
-		logEvent("ProjectileMoved", payload);
-	}
-
-	@Subscribe
-	public void onGraphicsObjectCreated(GraphicsObjectCreated event)
-	{
-		logEvent("GraphicsObjectCreated", graphicsObjectPayload(event.getGraphicsObject()));
-	}
-
-	@Subscribe
-	public void onOverheadTextChanged(OverheadTextChanged event)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("actor", actorPayload(event.getActor()));
-		payload.put("text", truncate(event.getOverheadText(), 256));
-
-		logEvent("OverheadTextChanged", payload);
-	}
-
-	@Subscribe
-	public void onNpcSpawned(NpcSpawned event)
-	{
-		rememberNpc(event.getNpc());
-		logEvent("NpcSpawned", actorPayload(event.getNpc()));
-	}
-
-	@Subscribe
-	public void onNpcDespawned(NpcDespawned event)
-	{
-		rememberNpc(event.getNpc());
-		logEvent("NpcDespawned", actorPayload(event.getNpc()));
-	}
-
-	@Subscribe
-	public void onNpcChanged(NpcChanged event)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		rememberNpc(event.getNpc());
-		payload.put("npc", actorPayload(event.getNpc()));
-
-		if (event.getOld() != null)
-		{
-			payload.put("oldId", event.getOld().getId());
-			payload.put("oldName", event.getOld().getName());
-		}
-
-		logEvent("NpcChanged", payload);
-	}
-
-	@Subscribe
-	public void onActorDeath(ActorDeath event)
-	{
-		if (event.getActor() instanceof NPC)
-		{
-			rememberNpc((NPC) event.getActor());
-			logEvent("NpcDeath", actorPayload(event.getActor()));
-		}
-	}
-
-	private boolean captureFrame(TickSnapshot snapshot, List<String> captureErrors, TelemetryWriter currentWriter)
-	{
-		if (!currentWriter.isFrameRecordingEnabled())
-		{
-			snapshot.frameCaptureStatus = "DISABLED_BY_RECORDING_MODE";
-			currentWriter.recordFrameSuppressedByMode();
-			return false;
-		}
-
-		int interval = currentWriter.getScreenshotEveryTicks();
-
-		if (interval <= 0)
-		{
-			snapshot.frameCaptureStatus = "DISABLED";
-			return false;
-		}
-
-		if (snapshot.tickId % interval != 0)
-		{
-			snapshot.frameCaptureStatus = "SKIPPED_INTERVAL";
-			return false;
-		}
-
-		String format = normalizeScreenshotFormat(config.screenshotFormat());
-		String relativePath = String.format("frames/frame-tick-%08d.%s", snapshot.tickId, format);
-		String captureMode = normalizeFrameCaptureMode(config.frameCaptureMode());
-		String requestedAtUtc = Instant.now().toString();
-		snapshot.frameCaptureSource = captureMode;
-
-		try
-		{
-			if ("RUNELITE_ONLY".equals(captureMode))
-			{
-				if (config.includeFramePathInTicks())
-				{
-					snapshot.framePath = relativePath;
-				}
-
-				snapshot.frameCaptureStatus = "QUEUED";
-				requestRuneliteOnlyFrame(relativePath, currentWriter, snapshot, captureErrors);
-				return true;
-			}
-
-			if (!config.allowScreenRectangleFallback())
-			{
-				snapshot.frameCaptureStatus = "CAPTURE_FAILED";
-				snapshot.frameCaptureWarning = "Screen rectangle fallback is disabled";
-				captureErrors.add("frame");
-				currentWriter.recordFrameIndex(
-						snapshot.tickId,
-						relativePath,
-						captureMode,
-						snapshot.frameCaptureStatus,
-						requestedAtUtc,
-						Instant.now().toString(),
-						snapshot.frameCaptureWarning);
-				return false;
-			}
-
-			BufferedImage frame = captureScreenRectangle();
-			String capturedAtUtc = Instant.now().toString();
-
-			if (frame == null)
-			{
-				snapshot.frameCaptureStatus = "CAPTURE_FAILED";
-				captureErrors.add("frame");
-				currentWriter.recordFrameIndex(
-						snapshot.tickId,
-						relativePath,
-						"SCREEN_RECTANGLE",
-						snapshot.frameCaptureStatus,
-						requestedAtUtc,
-						capturedAtUtc,
-						"screen rectangle capture returned null");
-				return false;
-			}
-
-			snapshot.frameCaptureSource = "SCREEN_RECTANGLE";
-			snapshot.frameCaptureWarning = "Screen rectangle capture may include overlapping windows";
-
-			if (config.includeFramePathInTicks())
-			{
-				snapshot.framePath = relativePath;
-			}
-
-			if (currentWriter.enqueueFrame(
-					snapshot.tickId,
-					relativePath,
-					frame,
-					snapshot.frameCaptureSource,
-					requestedAtUtc,
-					capturedAtUtc))
-			{
-				snapshot.frameCaptureStatus = "QUEUED";
-			}
-			else
-			{
-				snapshot.frameCaptureStatus = "DROPPED_QUEUE_FULL";
-			}
-		}
-		catch (Exception e)
-		{
-			snapshot.frameCaptureStatus = "CAPTURE_FAILED";
-			captureErrors.add("frame");
-			currentWriter.recordFrameIndex(
-					snapshot.tickId,
-					relativePath,
-					captureMode,
-					snapshot.frameCaptureStatus,
-					requestedAtUtc,
-					Instant.now().toString(),
-					e.toString());
-			log.warn("Telemetry frame capture failed", e);
-		}
-
-		return false;
-	}
-
-	private void requestRuneliteOnlyFrame(String relativePath, TelemetryWriter currentWriter, TickSnapshot snapshot, List<String> captureErrors)
-	{
-		String requestedAtUtc = Instant.now().toString();
-
-		drawManager.requestNextFrameListener((image) ->
-		{
-			try
-			{
-				BufferedImage frame = copyRuneliteFrame(image);
-				String capturedAtUtc = Instant.now().toString();
-
-				if (frame == null)
-				{
-					snapshot.frameCaptureStatus = "CAPTURE_FAILED";
-					captureErrors.add("frame");
-					currentWriter.recordFrameIndex(
-							snapshot.tickId,
-							relativePath,
-							snapshot.frameCaptureSource,
-							snapshot.frameCaptureStatus,
-							requestedAtUtc,
-							capturedAtUtc,
-							"RuneLite frame capture returned null");
-				}
-				else if (currentWriter.enqueueFrame(
-						snapshot.tickId,
-						relativePath,
-						frame,
-						snapshot.frameCaptureSource,
-						requestedAtUtc,
-						capturedAtUtc))
-				{
-					snapshot.frameCaptureStatus = "QUEUED";
-				}
-				else
-				{
-					snapshot.frameCaptureStatus = "DROPPED_QUEUE_FULL";
-				}
-			}
-			catch (Exception e)
-			{
-				snapshot.frameCaptureStatus = "CAPTURE_FAILED";
-				captureErrors.add("frame");
-				currentWriter.recordFrameIndex(
-						snapshot.tickId,
-						relativePath,
-						snapshot.frameCaptureSource,
-						snapshot.frameCaptureStatus,
-						requestedAtUtc,
-						Instant.now().toString(),
-						e.toString());
-				log.warn("Telemetry RuneLite-only frame capture failed", e);
-			}
-			finally
-			{
-				snapshot.captureErrors = captureErrors.toArray(new String[0]);
-				enqueueTickSnapshot(currentWriter, snapshot);
-			}
-		});
-	}
-
-	private void enqueueTickSnapshot(TelemetryWriter currentWriter, TickSnapshot snapshot)
-	{
-		try
-		{
-			enqueueCompactLivePackets(currentWriter, snapshot);
-			if (currentWriter.isRawTickRecordingEnabled())
-			{
-				currentWriter.enqueueTick(gson.toJson(snapshot));
-			}
-			else
-			{
-				currentWriter.recordRawTickSuppressedByMode();
-			}
-		}
-		catch (Exception e)
-		{
-			log.warn("Failed to enqueue tick telemetry", e);
-		}
-	}
-
-	private void enqueueCompactLivePackets(TelemetryWriter currentWriter, TickSnapshot snapshot)
-	{
-		if (!currentWriter.isCompactLivePacketsEnabled() || snapshot == null)
+		if (!config.enabled() || liveCache == null)
 		{
 			return;
 		}
-
-		if (compactPacketTypeEnabled("baseline"))
-		{
-			currentWriter.enqueueLivePacket(PACKET_BASELINE, snapshot.tickId, snapshot.timestampUtc, baselinePayload(snapshot));
-		}
-
-		if (compactPacketTypeEnabled("sceneDelta"))
-		{
-			currentWriter.enqueueLivePacket(PACKET_SCENE_DELTA, snapshot.tickId, snapshot.timestampUtc, sceneDeltaPayload(snapshot));
-		}
-
-		if (compactPacketTypeEnabled("projection"))
-		{
-			currentWriter.enqueueLivePacket(PACKET_PROJECTION, snapshot.tickId, snapshot.timestampUtc, projectionPayload(snapshot));
-		}
-
-		Map<String, Object> compactInventoryPayload = null;
-		if (compactPacketTypeEnabled("inventory") || compactPacketTypeEnabled("inventoryDelta"))
-		{
-			compactInventoryPayload = inventoryPayload(snapshot);
-		}
-
-		if (compactPacketTypeEnabled("inventory"))
-		{
-			currentWriter.enqueueLivePacket(PACKET_INVENTORY, snapshot.tickId, snapshot.timestampUtc, compactInventoryPayload);
-		}
-
-		if (compactPacketTypeEnabled("inventoryDelta"))
-		{
-			Map<String, Object> deltaPayload = inventoryDeltaPayload(snapshot, compactInventoryPayload);
-			if (deltaPayload != null)
-			{
-				currentWriter.enqueueLivePacket(PACKET_INVENTORY_DELTA, snapshot.tickId, snapshot.timestampUtc, deltaPayload);
-			}
-		}
-
-		if (compactPacketTypeEnabled("activity"))
-		{
-			currentWriter.enqueueLivePacket(PACKET_ACTIVITY, snapshot.tickId, snapshot.timestampUtc, activityPayload(snapshot));
-		}
-
-		boolean navigationEffective = emitNavigationEffective(currentWriter);
-		boolean collisionWindowEffective = emitCollisionWindowEffective(currentWriter);
-		boolean bankUiEffective = emitBankUiEffective(currentWriter);
-
-		if (navigationEffective)
-		{
-			currentWriter.enqueueLivePacket(PACKET_NAVIGATION, snapshot.tickId, snapshot.timestampUtc, navigationPayload(snapshot));
-		}
-
-		if (collisionWindowEffective)
-		{
-			currentWriter.enqueueLivePacket(PACKET_COLLISION_WINDOW, snapshot.tickId, snapshot.timestampUtc, collisionWindowPayload(snapshot));
-		}
-
-		if (bankUiEffective)
-		{
-			currentWriter.updateLiveCache(PACKET_BANK_UI, snapshot.tickId, snapshot.timestampUtc, bankUiPayload(snapshot));
-		}
-
-		if (bankUiEffective)
-		{
-			currentWriter.updateLiveCache(PACKET_DIALOGUE_STATE, snapshot.tickId, snapshot.timestampUtc, dialogueStatePayload(snapshot));
-		}
-
-		if (config.emitCompactNavigationPackets()
-				&& config.compactNavigationIncludeFullCollisionGrid()
-				&& compactNavigationFullGridIntervalTicks() > 0
-				&& snapshot.tickId % compactNavigationFullGridIntervalTicks() == 0
-				&& compactPacketTypeEnabled("collisionGrid"))
-		{
-			currentWriter.enqueueLivePacket(PACKET_COLLISION_GRID, snapshot.tickId, snapshot.timestampUtc, collisionGridPayload(snapshot));
-		}
-
-		if (compactPacketTypeEnabled("writerHealth"))
-		{
-			currentWriter.enqueueLivePacket(PACKET_WRITER_HEALTH, snapshot.tickId, snapshot.timestampUtc, writerHealthPayload(currentWriter, snapshot));
-		}
+		TickSnapshot snapshot = new TickSnapshot();
+		List<String> captureErrors = new ArrayList<>();
+		snapshot.schemaVersion = "0.1.0";
+		snapshot.tickId = tickId;
+		snapshot.timestampUtc = Instant.now().toString();
+		snapshot.gameState = String.valueOf(gameState);
+		safeCapture(captureErrors, "cameraViewport", () -> captureCameraViewport(snapshot));
+		safeCapture(captureErrors, "welcomeScreen", () -> captureWelcomeScreen(snapshot));
+		snapshot.captureErrors = captureErrors.toArray(new String[0]);
+		updateLiveCache(PACKET_BASELINE, snapshot, baselinePayload(snapshot));
 	}
 
-	private boolean snapshotNoFileLiveCacheOnly(TelemetryWriter currentWriter)
+	private void updateLiveCache(String packetType, TickSnapshot snapshot, Map<String, Object> payload)
 	{
-		return CompactLiveEmissionPolicy.snapshotNoFileLiveCacheOnly(
-				currentWriter.isLiveCacheEnabled(),
-				false,
-				false,
-				pluginSnapshotEndpoint != null);
+		updateLiveCache(liveCache, packetType, snapshot, payload);
 	}
 
-	private boolean emitNavigationEffective(TelemetryWriter currentWriter)
+	static boolean updateLiveCache(
+			PluginLiveCache cache,
+			String packetType,
+			TickSnapshot snapshot,
+			Map<String, Object> payload)
 	{
-		return CompactLiveEmissionPolicy.navigationEffective(
-				config.emitCompactNavigationPackets(),
-				compactPacketTypeEnabled("navigation"),
-				snapshotNoFileLiveCacheOnly(currentWriter));
-	}
-
-	private boolean emitCollisionWindowEffective(TelemetryWriter currentWriter)
-	{
-		return CompactLiveEmissionPolicy.collisionWindowEffective(
-				config.emitCompactNavigationPackets(),
-				config.compactNavigationEmitCollisionWindow(),
-				compactPacketTypeEnabled("navigation"),
-				compactPacketTypeEnabled("collisionWindow"),
-				snapshotNoFileLiveCacheOnly(currentWriter));
-	}
-
-	private boolean emitBankUiEffective(TelemetryWriter currentWriter)
-	{
-		return CompactLiveEmissionPolicy.bankUiEffective(
-				compactPacketTypeEnabled("bankUi"),
-				snapshotNoFileLiveCacheOnly(currentWriter));
-	}
-
-	private boolean compactPacketTypeEnabled(String packetGroup)
-	{
-		String configured = config.compactLivePacketTypes();
-
-		if (configured == null || configured.isBlank())
-		{
-			return true;
-		}
-
-		for (String part : configured.split(","))
-		{
-			String normalized = normalizePacketGroup(part);
-
-			if ("all".equals(normalized) || normalizePacketGroup(packetGroup).equals(normalized))
-			{
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	private String normalizePacketGroup(String value)
-	{
-		if (value == null)
-		{
-			return "";
-		}
-
-		return value.trim().replace("-", "").replace("_", "").toLowerCase();
+		return cache != null
+				&& snapshot != null
+				&& cache.update(packetType, snapshot.tickId, snapshot.timestampUtc, payload);
 	}
 
 	private Map<String, Object> baselinePayload(TickSnapshot snapshot)
@@ -1200,11 +436,17 @@ public class TelemetryPlugin extends Plugin
 		payload.put("player", playerPayload(snapshot));
 		payload.put("cameraViewport", cameraViewportPayload(snapshot));
 		payload.put("inputGeometry", inputGeometryPayload(snapshot));
-		payload.put("latestFramePath", snapshot.framePath);
-		payload.put("frameCaptureStatus", snapshot.frameCaptureStatus);
-		payload.put("sceneCaptureMode", snapshot.sceneCaptureSummary == null ? null : snapshot.sceneCaptureSummary.sceneCaptureMode);
-		payload.put("source", sourceCompletenessPayload(snapshot));
+		payload.put("welcomeScreenVisible", snapshot == null ? null : snapshot.welcomeScreenVisible);
+		payload.put("scenePlayable", scenePlayable(snapshot));
 		return payload;
+	}
+
+	static boolean scenePlayable(TickSnapshot snapshot)
+	{
+		return snapshot != null
+				&& "LOGGED_IN".equals(snapshot.gameState)
+				&& snapshot.localPlayer != null
+				&& Boolean.FALSE.equals(snapshot.welcomeScreenVisible);
 	}
 
 	private Map<String, Object> playerPayload(TickSnapshot snapshot)
@@ -1267,11 +509,10 @@ public class TelemetryPlugin extends Plugin
 		camera.put("viewportYOffset", snapshot.viewportYOffset);
 		camera.put("canvasWidth", snapshot.canvasWidth);
 		camera.put("canvasHeight", snapshot.canvasHeight);
-		camera.put("projectionStateHash", snapshot.sceneProjectionSummary == null ? null : snapshot.sceneProjectionSummary.projectionStateHash);
 		return camera;
 	}
 
-	private Map<String, Object> inputGeometryPayload(TickSnapshot snapshot)
+	static Map<String, Object> inputGeometryPayload(TickSnapshot snapshot)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
 		TickSnapshot.InputGeometrySnapshot geometry = snapshot == null ? null : snapshot.inputGeometry;
@@ -1293,895 +534,9 @@ public class TelemetryPlugin extends Plugin
 		payload.put("displayScaleY", geometry == null ? null : geometry.displayScaleY);
 		payload.put("isCanvasShowing", geometry == null ? null : geometry.isCanvasShowing);
 		payload.put("isClientFocused", geometry == null ? null : geometry.isClientFocused);
-		return payload;
-	}
-
-	private Map<String, Object> sourceCompletenessPayload(TickSnapshot snapshot)
-	{
-		Map<String, Object> source = new LinkedHashMap<>();
-		TickSnapshot.SceneCaptureSummary capture = snapshot.sceneCaptureSummary;
-		TickSnapshot.SceneIndexSummary index = snapshot.sceneIndexSummary;
-		boolean capHit = (capture != null && (capture.sceneObjectCapHit || capture.sceneObjectsSkippedByCap > 0))
-				|| (index != null && index.indexCapHit);
-		boolean complete = capture == null || (!capHit && capture.sceneObjectsSeen == capture.sceneObjectsCaptured);
-
-		source.put("sourceSceneKnowledgeComplete", complete);
-		source.put("sourceCapHit", capHit);
-		source.put("sceneObjectsSeen", capture == null ? null : capture.sceneObjectsSeen);
-		source.put("sceneObjectsCaptured", capture == null ? null : capture.sceneObjectsCaptured);
-		source.put("sceneObjectsSkippedByCap", capture == null ? null : capture.sceneObjectsSkippedByCap);
-		source.put("sceneObjectCapHit", capture == null ? null : capture.sceneObjectCapHit);
-		source.put("indexCapHit", index == null ? null : index.indexCapHit);
-		return source;
-	}
-
-	private Map<String, Object> sceneDeltaPayload(TickSnapshot snapshot)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("sceneIndexSummary", snapshot.sceneIndexSummary);
-		payload.put("sceneCaptureSummary", snapshot.sceneCaptureSummary);
-		payload.put("sceneObjectDeltas", compactDeltas(snapshot.sceneObjectDeltas));
-		return payload;
-	}
-
-	private Map<String, Object> compactDeltas(TickSnapshot.SceneObjectDeltas deltas)
-	{
-		Map<String, Object> compact = new LinkedHashMap<>();
-
-		if (deltas == null)
-		{
-			compact.put("newObjects", new ArrayList<>());
-			compact.put("updatedObjects", new ArrayList<>());
-			compact.put("despawnedObjects", new ArrayList<>());
-			return compact;
-		}
-
-		compact.put("newObjects", compactSceneObjects(deltas.newObjects, false));
-		compact.put("updatedObjects", compactSceneObjects(deltas.updatedObjects, false));
-		compact.put("despawnedObjects", compactSceneObjects(deltas.despawnedObjects, false));
-		return compact;
-	}
-
-	private Map<String, Object> projectionPayload(TickSnapshot snapshot)
-	{
-		CompactProjectionGeometryOptions geometryOptions = compactProjectionGeometryOptions(snapshot);
-		List<Map<String, Object>> serviceSceneObjects = compactServiceSceneObjects(snapshot);
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("sceneProjectionSummary", snapshot.sceneProjectionSummary);
-		payload.put("projectionStateHash", snapshot.sceneProjectionSummary == null ? null : snapshot.sceneProjectionSummary.projectionStateHash);
-		payload.put("refreshMode", snapshot.sceneProjectionSummary == null ? null : snapshot.sceneProjectionSummary.projectionRefreshMode);
-		payload.put("visibleObjectRefs", compactSceneObjects(snapshot.visibleSceneObjectRefs, true, geometryOptions));
-		payload.put("serviceSceneObjects", serviceSceneObjects);
-		payload.put("serviceSceneObjectCount", serviceSceneObjects.size());
-		payload.put("serviceSceneObjectCap", MAX_SERVICE_SCENE_OBJECTS);
-		payload.put("serviceSceneObjectRadius", SERVICE_SCENE_OBJECT_RADIUS);
-		payload.put("serviceSceneObjectCapHit", serviceSceneObjects.size() >= MAX_SERVICE_SCENE_OBJECTS);
-		payload.put("geometryEmission", compactProjectionGeometrySummary(geometryOptions));
-		recordLastCompactProjectionGeometry(geometryOptions);
-		return payload;
-	}
-
-	private List<Map<String, Object>> compactServiceSceneObjects(TickSnapshot snapshot)
-	{
-		List<TickSnapshot.SceneObjectSnapshot> matches = new ArrayList<>();
-
-		if (snapshot != null)
-		{
-			for (SceneIndexEntry entry : sceneObjectIndex.values())
-			{
-				if (!serviceSceneEntryEligible(entry, snapshot))
-				{
-					continue;
-				}
-
-				TickSnapshot.SceneObjectSnapshot object = snapshotFromIndex(entry, false);
-				matches.add(object);
-			}
-		}
-
-		matches.sort(Comparator
-				.comparingInt((TickSnapshot.SceneObjectSnapshot object) -> serviceScenePriority(serviceSceneClass(object.objectName, object.actions)))
-				.thenComparingDouble(object -> serviceSceneDistanceSquared(object, snapshot))
-				.thenComparing(object -> String.valueOf(object.objectKey)));
-
-		List<Map<String, Object>> compact = new ArrayList<>();
-		for (TickSnapshot.SceneObjectSnapshot object : matches)
-		{
-			if (compact.size() >= MAX_SERVICE_SCENE_OBJECTS)
-			{
-				break;
-			}
-
-			Map<String, Object> payload = compactSceneObject(object, false, null, false);
-			String serviceClass = serviceSceneClass(object.objectName, object.actions);
-			payload.put("classId", serviceClass);
-			payload.put("serviceSceneClass", serviceClass);
-			payload.put("serviceSceneLane", "loadedServiceScene");
-			compact.add(payload);
-		}
-
-		for (Map<String, Object> npc : compactServiceNpcCandidates(snapshot))
-		{
-			if (compact.size() >= MAX_SERVICE_SCENE_OBJECTS)
-			{
-				break;
-			}
-
-			compact.add(npc);
-		}
-
-		return compact;
-	}
-
-	private boolean serviceSceneEntryEligible(SceneIndexEntry entry, TickSnapshot snapshot)
-	{
-		if (entry == null || !entry.present || snapshot == null || snapshot.localPlayer == null)
-		{
-			return false;
-		}
-		if (entry.plane != snapshot.localPlayer.plane)
-		{
-			return false;
-		}
-		if (snapshot.localPlayer.sceneX == null || snapshot.localPlayer.sceneY == null)
-		{
-			return false;
-		}
-		if (Math.abs(entry.sceneX - snapshot.localPlayer.sceneX) > SERVICE_SCENE_OBJECT_RADIUS
-				|| Math.abs(entry.sceneY - snapshot.localPlayer.sceneY) > SERVICE_SCENE_OBJECT_RADIUS)
-		{
-			return false;
-		}
-		return isServiceSceneClass(serviceSceneClass(entry.objectName, entry.actions));
-	}
-
-	private List<Map<String, Object>> compactServiceNpcCandidates(TickSnapshot snapshot)
-	{
-		List<Map<String, Object>> compact = new ArrayList<>();
-		if (snapshot == null || snapshot.localPlayer == null || snapshot.npcs == null)
-		{
-			return compact;
-		}
-
-		for (TickSnapshot.NpcSnapshot npc : snapshot.npcs)
-		{
-			if (npc == null || npc.plane != snapshot.localPlayer.plane)
-			{
-				continue;
-			}
-			String name = firstNonBlank(npc.npcName, npc.name);
-			String serviceClass = serviceSceneClass(name, null);
-			if (!"banker".equals(serviceClass))
-			{
-				continue;
-			}
-			if (snapshot.localPlayer.sceneX != null && snapshot.localPlayer.sceneY != null
-					&& npc.localX != null && npc.localY != null)
-			{
-				int npcSceneX = npc.worldX - (snapshot.localPlayer.worldX - snapshot.localPlayer.sceneX);
-				int npcSceneY = npc.worldY - (snapshot.localPlayer.worldY - snapshot.localPlayer.sceneY);
-				if (Math.abs(npcSceneX - snapshot.localPlayer.sceneX) > SERVICE_SCENE_OBJECT_RADIUS
-						|| Math.abs(npcSceneY - snapshot.localPlayer.sceneY) > SERVICE_SCENE_OBJECT_RADIUS)
-				{
-					continue;
-				}
-			}
-
-			Map<String, Object> payload = new LinkedHashMap<>();
-			payload.put("targetKey", "npc:" + npc.index + ":" + npc.id + ":" + npc.worldX + ":" + npc.worldY + ":" + npc.plane);
-			payload.put("targetType", "npc");
-			payload.put("id", npc.id);
-			payload.put("name", name);
-			payload.put("classId", "banker");
-			payload.put("serviceCandidateType", "banker");
-			payload.put("serviceSceneClass", "banker");
-			payload.put("serviceSceneLane", "loadedServiceScene");
-			payload.put("worldX", npc.worldX);
-			payload.put("worldY", npc.worldY);
-			payload.put("plane", npc.plane);
-			payload.put("localX", npc.localX);
-			payload.put("localY", npc.localY);
-			payload.put("present", !npc.dead);
-			payload.put("source", "loadedServiceScene");
-			compact.add(payload);
-		}
-
-		return compact;
-	}
-
-	private double serviceSceneDistanceSquared(TickSnapshot.SceneObjectSnapshot object, TickSnapshot snapshot)
-	{
-		if (object == null || snapshot == null || snapshot.localPlayer == null)
-		{
-			return Double.MAX_VALUE;
-		}
-		int dx = object.worldX - snapshot.localPlayer.worldX;
-		int dy = object.worldY - snapshot.localPlayer.worldY;
-		return (double) dx * dx + (double) dy * dy;
-	}
-
-	private int serviceScenePriority(String serviceClass)
-	{
-		if ("bank_booth".equals(serviceClass))
-		{
-			return 0;
-		}
-		if ("banker".equals(serviceClass))
-		{
-			return 1;
-		}
-		if ("bank_chest".equals(serviceClass))
-		{
-			return 2;
-		}
-		if ("deposit_box".equals(serviceClass))
-		{
-			return 3;
-		}
-		if ("deposit_chest".equals(serviceClass))
-		{
-			return 4;
-		}
-		return 5;
-	}
-
-	private boolean isServiceSceneClass(String serviceClass)
-	{
-		return "bank_booth".equals(serviceClass)
-				|| "banker".equals(serviceClass)
-				|| "bank_chest".equals(serviceClass)
-				|| "deposit_box".equals(serviceClass)
-				|| "deposit_chest".equals(serviceClass)
-				|| "bank_related".equals(serviceClass)
-				|| "bank_service".equals(serviceClass);
-	}
-
-	private String serviceSceneClass(String name, String[] actions)
-	{
-		String text = (name == null ? "" : name).toLowerCase(Locale.ROOT);
-		String actionText = "";
-		if (actions != null)
-		{
-			List<String> clean = new ArrayList<>();
-			for (String action : actions)
-			{
-				if (action != null && !action.isBlank())
-				{
-					clean.add(action.toLowerCase(Locale.ROOT));
-				}
-			}
-			actionText = String.join(" ", clean);
-		}
-
-		if (text.contains("bank deposit box") || text.contains("deposit box"))
-		{
-			return "deposit_box";
-		}
-		if (text.contains("deposit chest"))
-		{
-			return "deposit_chest";
-		}
-		if (text.contains("bank booth"))
-		{
-			return "bank_booth";
-		}
-		if (text.contains("banker"))
-		{
-			return "banker";
-		}
-		if (text.contains("bank chest"))
-		{
-			return "bank_chest";
-		}
-		if (text.contains("bank table"))
-		{
-			return "bank_related";
-		}
-		if (text.contains("bank") || actionText.contains("bank"))
-		{
-			return "bank_service";
-		}
-		if (actionText.contains("deposit"))
-		{
-			return "deposit_box";
-		}
-		return "";
-	}
-
-	private String firstNonBlank(String first, String second)
-	{
-		if (first != null && !first.isBlank())
-		{
-			return first;
-		}
-		if (second != null && !second.isBlank())
-		{
-			return second;
-		}
-		return "";
-	}
-
-	private List<Map<String, Object>> compactSceneObjects(TickSnapshot.SceneObjectSnapshot[] objects, boolean includeProjection)
-	{
-		return compactSceneObjects(objects, includeProjection, null);
-	}
-
-	private List<Map<String, Object>> compactSceneObjects(
-			TickSnapshot.SceneObjectSnapshot[] objects,
-			boolean includeProjection,
-			CompactProjectionGeometryOptions geometryOptions)
-	{
-		List<Map<String, Object>> compact = new ArrayList<>();
-		Set<String> polygonObjectKeys = includeProjection
-				? selectProjectionPolygonObjectKeys(objects, geometryOptions)
-				: new HashSet<>();
-
-		if (objects == null)
-		{
-			return compact;
-		}
-
-		for (TickSnapshot.SceneObjectSnapshot object : objects)
-		{
-			if (object != null)
-			{
-				boolean includePolygons = includeProjection
-						&& polygonObjectKeys.contains(compactProjectionGeometryKey(object));
-				compact.add(compactSceneObject(object, includeProjection, geometryOptions, includePolygons));
-			}
-		}
-
-		return compact;
-	}
-
-	private Set<String> selectProjectionPolygonObjectKeys(
-			TickSnapshot.SceneObjectSnapshot[] objects,
-			CompactProjectionGeometryOptions geometryOptions)
-	{
-		Set<String> selected = new HashSet<>();
-
-		if (objects == null || geometryOptions == null || !geometryOptions.includeAnyPolygons)
-		{
-			return selected;
-		}
-
-		List<TickSnapshot.SceneObjectSnapshot> eligible = new ArrayList<>();
-
-		for (TickSnapshot.SceneObjectSnapshot object : objects)
-		{
-			if (object == null)
-			{
-				continue;
-			}
-			if (!object.onScreen)
-			{
-				if (object.geometryAvailable)
-				{
-					geometryOptions.hullDroppedNoCanvasIntersection++;
-				}
-				else
-				{
-					geometryOptions.hullDroppedOffscreen++;
-				}
-				continue;
-			}
-			if (geometryOptions.includeClickableHull && object.clickboxPolygon == null)
-			{
-				geometryOptions.hullDroppedNullClickbox++;
-			}
-			if (!hasEnabledProjectionPolygon(object, geometryOptions))
-			{
-				continue;
-			}
-			eligible.add(object);
-		}
-
-		eligible.sort(Comparator
-				.comparingDouble((TickSnapshot.SceneObjectSnapshot object) -> projectionGeometryPriority(object, geometryOptions))
-				.thenComparing(object -> String.valueOf(object.objectKey)));
-
-		for (TickSnapshot.SceneObjectSnapshot object : eligible)
-		{
-			if (geometryOptions.refsWithPolygons >= geometryOptions.maxRefs)
-			{
-				geometryOptions.refsSkippedByCap++;
-				geometryOptions.hullDroppedByCap++;
-				geometryOptions.capHit = true;
-				continue;
-			}
-
-			selected.add(compactProjectionGeometryKey(object));
-			geometryOptions.refsWithPolygons++;
-		}
-
-		return selected;
-	}
-
-	private Map<String, Object> compactSceneObject(
-			TickSnapshot.SceneObjectSnapshot object,
-			boolean includeProjection,
-			CompactProjectionGeometryOptions geometryOptions,
-			boolean includePolygons)
-	{
-		Map<String, Object> compact = new LinkedHashMap<>();
-		compact.put("objectKey", object.objectKey);
-		compact.put("targetType", "sceneObject");
-		compact.put("id", object.id);
-		compact.put("hash", object.hash);
-		compact.put("name", object.objectName);
-		compact.put("nameSource", object.objectNameSource);
-		compact.put("actions", compactActions(object.actions));
-		compact.put("kind", object.kind);
-		compact.put("layer", object.kind);
-		compact.put("worldX", object.worldX);
-		compact.put("worldY", object.worldY);
-		compact.put("plane", object.plane);
-		compact.put("sceneX", object.sceneX);
-		compact.put("sceneY", object.sceneY);
-		compact.put("present", object.present);
-		compact.put("despawnedTick", object.despawnedTick);
-		compact.put("source", object.source);
-		compact.put("firstSeenTick", object.firstSeenTick);
-		compact.put("lastSeenTick", object.lastSeenTick);
-		compact.put("lastUpdatedTick", object.lastUpdatedTick);
-
-		if (includeProjection)
-		{
-			compact.put("onScreen", object.onScreen);
-			compact.put("geometryAvailable", object.geometryAvailable);
-			compact.put("aimPoint", aimPointPayload(object));
-			compact.put("geometrySummary", geometrySummaryPayload(object));
-			compact.put("projectionVersion", object.projectionVersion);
-			compact.put("geometryWarning", object.geometryWarning);
-			compact.put("bounds", preferredBoundsPayload(object));
-			compact.put("geometrySource", geometrySourceFor(object, geometryOptions, includePolygons));
-
-			if (includePolygons)
-			{
-				putProjectionPolygonFields(compact, object, geometryOptions);
-			}
-
-			if (geometryOptions != null && geometryOptions.includeAnyPolygons)
-			{
-				compact.put("clickableHullAvailable", compact.containsKey("clickableHull"));
-				if (!compact.containsKey("clickableHull"))
-				{
-					compact.put("clickableHullMissingReason", clickableHullMissingReason(object, geometryOptions, includePolygons));
-				}
-			}
-		}
-
-		return compact;
-	}
-
-	private String compactProjectionGeometryKey(TickSnapshot.SceneObjectSnapshot object)
-	{
-		if (object == null)
-		{
-			return "";
-		}
-		if (object.objectKey != null && !object.objectKey.isBlank())
-		{
-			return object.objectKey;
-		}
-		return object.id + ":" + object.hash + ":" + object.worldX + ":" + object.worldY + ":" + object.plane + ":" + object.kind;
-	}
-
-	private double projectionGeometryPriority(
-			TickSnapshot.SceneObjectSnapshot object,
-			CompactProjectionGeometryOptions geometryOptions)
-	{
-		double sourcePriority = 3_000_000_000.0;
-		if (object.clickboxPolygon != null)
-		{
-			sourcePriority = 0.0;
-		}
-		else if (object.convexHullPolygon != null)
-		{
-			sourcePriority = 1_000_000_000.0;
-		}
-		else if (object.canvasTilePolygon != null)
-		{
-			sourcePriority = 2_000_000_000.0;
-		}
-		return sourcePriority + playerSceneDistanceSquared(object, geometryOptions) * 1_000_000.0 + screenCenterDistanceSquared(object);
-	}
-
-	private double playerSceneDistanceSquared(
-			TickSnapshot.SceneObjectSnapshot object,
-			CompactProjectionGeometryOptions geometryOptions)
-	{
-		if (object == null || geometryOptions == null
-				|| geometryOptions.playerSceneX == null
-				|| geometryOptions.playerSceneY == null
-				|| geometryOptions.playerPlane == null
-				|| object.plane != geometryOptions.playerPlane)
-		{
-			return 1_000_000.0;
-		}
-		double dx = object.sceneX - geometryOptions.playerSceneX;
-		double dy = object.sceneY - geometryOptions.playerSceneY;
-		return dx * dx + dy * dy;
-	}
-
-	private double screenCenterDistanceSquared(TickSnapshot.SceneObjectSnapshot object)
-	{
-		Rectangle visibleArea = currentVisibleArea();
-		TickSnapshot.CanvasPoint center = geometryCenterPoint(object);
-		if (visibleArea == null || center == null)
-		{
-			return Double.MAX_VALUE;
-		}
-		double dx = center.x - visibleArea.getCenterX();
-		double dy = center.y - visibleArea.getCenterY();
-		return dx * dx + dy * dy;
-	}
-
-	private TickSnapshot.CanvasPoint geometryCenterPoint(TickSnapshot.SceneObjectSnapshot object)
-	{
-		if (object.clickboxBounds != null)
-		{
-			return boundsCenter(object.clickboxBounds);
-		}
-		if (object.convexHullBounds != null)
-		{
-			return boundsCenter(object.convexHullBounds);
-		}
-		TickSnapshot.Bounds tileBounds = boundsSnapshot(object.canvasTilePolygon);
-		if (tileBounds != null)
-		{
-			return boundsCenter(tileBounds);
-		}
-		return object.canvasLocation;
-	}
-
-	private boolean hasEnabledProjectionPolygon(
-			TickSnapshot.SceneObjectSnapshot object,
-			CompactProjectionGeometryOptions geometryOptions)
-	{
-		return (geometryOptions.includeClickableHull && object.clickboxPolygon != null)
-				|| (geometryOptions.includeConvexHull && object.convexHullPolygon != null)
-				|| (geometryOptions.includeCanvasTilePolygon && object.canvasTilePolygon != null);
-	}
-
-	private void putProjectionPolygonFields(
-			Map<String, Object> compact,
-			TickSnapshot.SceneObjectSnapshot object,
-			CompactProjectionGeometryOptions geometryOptions)
-	{
-		List<Map<String, Object>> clickboxPoints = polygonPointsPayload(object.clickboxPolygon);
-		if (geometryOptions.includeClickableHull && clickboxPoints != null)
-		{
-			compact.put("clickableHull", clickboxPoints);
-			compact.put("clickboxPolygon", clickboxPoints);
-			geometryOptions.hullsEmitted++;
-		}
-
-		List<Map<String, Object>> convexPoints = polygonPointsPayload(object.convexHullPolygon);
-		if (geometryOptions.includeConvexHull && convexPoints != null)
-		{
-			compact.put("convexHull", convexPoints);
-			compact.put("convexHullPolygon", convexPoints);
-		}
-
-		List<Map<String, Object>> tilePoints = polygonPointsPayload(object.canvasTilePolygon);
-		if (geometryOptions.includeCanvasTilePolygon && tilePoints != null)
-		{
-			compact.put("canvasTilePolygon", tilePoints);
-		}
-	}
-
-	private CompactProjectionGeometryOptions compactProjectionGeometryOptions(TickSnapshot snapshot)
-	{
-		TelemetryDebugOverlayGeometryMode mode = config.telemetryDebugOverlayGeometryMode();
-		boolean heavyGeometry = config.compactLiveIncludeHeavyGeometry();
-		boolean overlayEnabled = config.telemetryDebugOverlayEnabled();
-		boolean overlayHullMode = overlayEnabled && (
-				config.telemetryDebugOverlayShowClickableHull()
-						|| mode == TelemetryDebugOverlayGeometryMode.CLICKABLE_HULL
-						|| mode == TelemetryDebugOverlayGeometryMode.HULL_AND_BOUNDS
-						|| mode == TelemetryDebugOverlayGeometryMode.ALL_GEOMETRY_DEBUG);
-		boolean overlayTileMode = overlayEnabled && (
-				config.telemetryDebugOverlayShowCanvasTilePolygon()
-						|| mode == TelemetryDebugOverlayGeometryMode.TILE_POLYGON
-						|| mode == TelemetryDebugOverlayGeometryMode.ALL_GEOMETRY_DEBUG);
-		boolean includeClickableHull = heavyGeometry || config.compactLiveIncludeClickableHull() || overlayHullMode;
-		boolean includeConvexHull = heavyGeometry || config.compactLiveIncludeConvexHull() || overlayHullMode;
-		boolean includeCanvasTilePolygon = heavyGeometry || config.compactLiveIncludeCanvasTilePolygon() || overlayTileMode;
-		int maxRefs = clampCompactLiveGeometryMaxRefs(config.compactLiveGeometryMaxRefs());
-		return new CompactProjectionGeometryOptions(
-				includeClickableHull,
-				includeConvexHull,
-				includeCanvasTilePolygon,
-				maxRefs,
-				snapshot == null || snapshot.localPlayer == null ? null : snapshot.localPlayer.sceneX,
-				snapshot == null || snapshot.localPlayer == null ? null : snapshot.localPlayer.sceneY,
-				snapshot == null || snapshot.localPlayer == null ? null : snapshot.localPlayer.plane);
-	}
-
-	private Map<String, Object> compactProjectionGeometrySummary(CompactProjectionGeometryOptions geometryOptions)
-	{
-		Map<String, Object> summary = new LinkedHashMap<>();
-		summary.put("includeClickableHull", geometryOptions.includeClickableHull);
-		summary.put("includeConvexHull", geometryOptions.includeConvexHull);
-		summary.put("includeCanvasTilePolygon", geometryOptions.includeCanvasTilePolygon);
-		summary.put("maxRefs", geometryOptions.maxRefs);
-		summary.put("refsWithPolygons", geometryOptions.refsWithPolygons);
-		summary.put("refsSkippedByCap", geometryOptions.refsSkippedByCap);
-		summary.put("capHit", geometryOptions.capHit);
-		summary.put("hullEmitted", geometryOptions.hullsEmitted);
-		summary.put("hullDroppedOffscreen", geometryOptions.hullDroppedOffscreen);
-		summary.put("hullDroppedNoCanvasIntersection", geometryOptions.hullDroppedNoCanvasIntersection);
-		summary.put("hullDroppedByCap", geometryOptions.hullDroppedByCap);
-		summary.put("hullDroppedNullClickbox", geometryOptions.hullDroppedNullClickbox);
-		return summary;
-	}
-
-	private void recordLastCompactProjectionGeometry(CompactProjectionGeometryOptions geometryOptions)
-	{
-		lastCompactGeometryRefsWithPolygons = geometryOptions.refsWithPolygons;
-		lastCompactGeometryRefsSkippedByCap = geometryOptions.refsSkippedByCap;
-		lastCompactGeometryMaxRefs = geometryOptions.maxRefs;
-		lastCompactGeometryCapHit = geometryOptions.capHit;
-		lastCompactLiveIncludeClickableHull = geometryOptions.includeClickableHull;
-		lastCompactLiveIncludeCanvasTilePolygon = geometryOptions.includeCanvasTilePolygon;
-		lastCompactLiveIncludeConvexHull = geometryOptions.includeConvexHull;
-		lastCompactHullsEmitted = geometryOptions.hullsEmitted;
-		lastCompactHullDroppedOffscreen = geometryOptions.hullDroppedOffscreen;
-		lastCompactHullDroppedNoCanvasIntersection = geometryOptions.hullDroppedNoCanvasIntersection;
-		lastCompactHullDroppedByCap = geometryOptions.hullDroppedByCap;
-		lastCompactHullDroppedNullClickbox = geometryOptions.hullDroppedNullClickbox;
-	}
-
-	static int clampCompactLiveGeometryMaxRefs(int value)
-	{
-		return Math.max(0, Math.min(COMPACT_LIVE_GEOMETRY_MAX_REFS_HARD_CAP, value));
-	}
-
-	static List<Map<String, Object>> polygonPointsPayload(int[][] polygon)
-	{
-		if (polygon == null || polygon.length < 3)
-		{
-			return null;
-		}
-
-		List<Map<String, Object>> points = new ArrayList<>();
-
-		for (int[] point : polygon)
-		{
-			if (point == null || point.length < 2)
-			{
-				return null;
-			}
-
-			Map<String, Object> payload = new LinkedHashMap<>();
-			payload.put("x", point[0]);
-			payload.put("y", point[1]);
-			points.add(payload);
-		}
-
-		return points;
-	}
-
-	private String geometrySourceFor(
-			TickSnapshot.SceneObjectSnapshot object,
-			CompactProjectionGeometryOptions geometryOptions,
-			boolean includePolygons)
-	{
-		if (includePolygons && geometryOptions != null)
-		{
-			if (geometryOptions.includeClickableHull && object.clickboxPolygon != null)
-			{
-				return "clickbox";
-			}
-			if (geometryOptions.includeConvexHull && object.convexHullPolygon != null)
-			{
-				return "convexHull";
-			}
-			if (geometryOptions.includeCanvasTilePolygon && object.canvasTilePolygon != null)
-			{
-				return "canvasTilePolygon";
-			}
-		}
-		if (geometryOptions != null && geometryOptions.includeAnyPolygons)
-		{
-			return fallbackProjectionGeometrySource(object);
-		}
-
-		return geometrySourceFor(object);
-	}
-
-	private String fallbackProjectionGeometrySource(TickSnapshot.SceneObjectSnapshot object)
-	{
-		if (object == null)
-		{
-			return "none";
-		}
-		if (object.clickboxBounds != null || object.convexHullBounds != null || boundsSnapshot(object.canvasTilePolygon) != null)
-		{
-			return "bounds";
-		}
-		if (object.canvasLocation != null)
-		{
-			return "aimPoint";
-		}
-		return "none";
-	}
-
-	private String clickableHullMissingReason(
-			TickSnapshot.SceneObjectSnapshot object,
-			CompactProjectionGeometryOptions geometryOptions,
-			boolean includePolygons)
-	{
-		if (object == null)
-		{
-			return "object unavailable";
-		}
-		if (!geometryOptions.includeClickableHull)
-		{
-			return "clickable hull emission disabled";
-		}
-		if (!object.onScreen)
-		{
-			return "target off screen";
-		}
-		if (object.clickboxPolygon == null)
-		{
-			return "clickbox unavailable";
-		}
-		if (!includePolygons)
-		{
-			return "compact geometry cap reached";
-		}
-		return "clickbox polygon unavailable";
-	}
-
-	private String geometrySourceFor(TickSnapshot.SceneObjectSnapshot object)
-	{
-		if (object == null)
-		{
-			return "none";
-		}
-		if (object.clickboxPolygon != null)
-		{
-			return "clickbox";
-		}
-		if (object.convexHullPolygon != null)
-		{
-			return "convexHull";
-		}
-		if (object.canvasTilePolygon != null)
-		{
-			return "canvasTilePolygon";
-		}
-		if (object.clickboxBounds != null || object.convexHullBounds != null || boundsSnapshot(object.canvasTilePolygon) != null)
-		{
-			return "bounds";
-		}
-		if (object.canvasLocation != null)
-		{
-			return "aimPoint";
-		}
-		return "none";
-	}
-
-	private List<String> compactActions(String[] actions)
-	{
-		List<String> compact = new ArrayList<>();
-
-		if (actions == null)
-		{
-			return compact;
-		}
-
-		for (String action : actions)
-		{
-			if (action != null && !action.isBlank() && !"null".equalsIgnoreCase(action))
-			{
-				compact.add(action);
-			}
-		}
-
-		return compact;
-	}
-
-	private Map<String, Object> aimPointPayload(TickSnapshot.SceneObjectSnapshot object)
-	{
-		TickSnapshot.CanvasPoint point = null;
-		String source = null;
-
-		if (object.clickboxBounds != null)
-		{
-			point = boundsCenter(object.clickboxBounds);
-			source = "clickboxBoundsCenter";
-		}
-		else if (object.convexHullBounds != null)
-		{
-			point = boundsCenter(object.convexHullBounds);
-			source = "convexHullBoundsCenter";
-		}
-		else if (object.canvasLocation != null)
-		{
-			point = object.canvasLocation;
-			source = "canvasLocation";
-		}
-		else if (object.canvasTilePolygon != null)
-		{
-			point = polygonCenter(object.canvasTilePolygon);
-			source = "canvasTilePolygonCenter";
-		}
-
-		if (point == null)
-		{
-			return null;
-		}
-
-		Map<String, Object> aim = new LinkedHashMap<>();
-		aim.put("canvasX", point.x);
-		aim.put("canvasY", point.y);
-		aim.put("source", source);
-		return aim;
-	}
-
-	private TickSnapshot.CanvasPoint boundsCenter(TickSnapshot.Bounds bounds)
-	{
-		if (bounds == null)
-		{
-			return null;
-		}
-
-		TickSnapshot.CanvasPoint point = new TickSnapshot.CanvasPoint();
-		point.x = bounds.x + bounds.w / 2;
-		point.y = bounds.y + bounds.h / 2;
-		return point;
-	}
-
-	private Map<String, Object> geometrySummaryPayload(TickSnapshot.SceneObjectSnapshot object)
-	{
-		Map<String, Object> summary = new LinkedHashMap<>();
-		boolean hasClickbox = object.clickboxBounds != null || object.clickboxPolygon != null;
-		boolean hasConvexHull = object.convexHullBounds != null || object.convexHullPolygon != null;
-		boolean hasCanvasTilePolygon = object.canvasTilePolygon != null;
-		summary.put("hasClickbox", hasClickbox);
-		summary.put("hasConvexHull", hasConvexHull);
-		summary.put("hasCanvasTilePolygon", hasCanvasTilePolygon);
-		summary.put("clickboxBounds", boundsPayload(object.clickboxBounds));
-		summary.put("convexHullBounds", boundsPayload(object.convexHullBounds));
-
-		TickSnapshot.Bounds tileBounds = boundsSnapshot(object.canvasTilePolygon);
-		summary.put("canvasTileBounds", boundsPayload(tileBounds));
-		return summary;
-	}
-
-	private Map<String, Object> preferredBoundsPayload(TickSnapshot.SceneObjectSnapshot object)
-	{
-		Map<String, Object> bounds = boundsPayload(object.clickboxBounds);
-		if (bounds != null)
-		{
-			return bounds;
-		}
-
-		bounds = boundsPayload(object.convexHullBounds);
-		if (bounds != null)
-		{
-			return bounds;
-		}
-
-		return boundsPayload(boundsSnapshot(object.canvasTilePolygon));
-	}
-
-	private Map<String, Object> boundsPayload(TickSnapshot.Bounds bounds)
-	{
-		if (bounds == null)
-		{
-			return null;
-		}
-
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("x", bounds.x);
-		payload.put("y", bounds.y);
-		payload.put("w", bounds.w);
-		payload.put("h", bounds.h);
+		payload.put("clientProcessId", geometry == null || geometry.clientProcessId == null
+				? ProcessHandle.current().pid()
+				: geometry.clientProcessId);
 		return payload;
 	}
 
@@ -2189,9 +544,6 @@ public class TelemetryPlugin extends Plugin
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("inventory", itemContainerSnapshot(snapshot.inventory));
-		payload.put("equipment", itemContainerSnapshot(snapshot.equipment));
-		payload.put("inventoryDeltaTrackingAvailable", true);
-		payload.put("inventoryDeltaPacketType", PACKET_INVENTORY_DELTA);
 		return payload;
 	}
 
@@ -2202,6 +554,7 @@ public class TelemetryPlugin extends Plugin
 
 		payload.put("schema", "bank_ui_context_payload.v1");
 		payload.put("tick", snapshot == null ? null : snapshot.tickId);
+		payload.put("known", bankUiKnown(snapshot));
 		payload.put("topLevelInterfaceId", bankUi == null ? null : bankUi.topLevelInterfaceId);
 		payload.put("bankOpen", bankUi == null ? null : bankUi.bankOpen);
 		payload.put("bankPinOpen", bankUi == null ? null : bankUi.bankPinOpen);
@@ -2319,213 +672,6 @@ public class TelemetryPlugin extends Plugin
 	}
 
 	@SuppressWarnings("unchecked")
-	private Map<String, Object> inventoryDeltaPayload(TickSnapshot snapshot, Map<String, Object> compactInventoryPayload)
-	{
-		if (compactInventoryPayload == null)
-		{
-			return null;
-		}
-
-		Object inventoryObject = compactInventoryPayload.get("inventory");
-		if (!(inventoryObject instanceof Map))
-		{
-			return null;
-		}
-
-		Map<String, Object> current = (Map<String, Object>) inventoryObject;
-		if (!Boolean.TRUE.equals(current.get("known")))
-		{
-			lastCompactInventorySnapshot = current;
-			return null;
-		}
-
-		Map<String, Object> previous = lastCompactInventorySnapshot;
-		lastCompactInventorySnapshot = current;
-
-		if (previous == null || !Boolean.TRUE.equals(previous.get("known")))
-		{
-			return null;
-		}
-
-		String previousSignature = stringValue(previous.get("signature"));
-		String currentSignature = stringValue(current.get("signature"));
-		boolean sameSignature = previousSignature.equals(currentSignature);
-		boolean sameFreeSlots = getInt(previous.get("freeSlots"), -1) == getInt(current.get("freeSlots"), -1);
-		boolean sameFilledSlots = getInt(previous.get("filledSlots"), -1) == getInt(current.get("filledSlots"), -1);
-
-		if (sameSignature && sameFreeSlots && sameFilledSlots)
-		{
-			return null;
-		}
-
-		List<Map<String, Object>> changedSlots = changedInventorySlots(previous, current);
-		List<Map<String, Object>> quantityChanges = inventoryQuantityChanges(previous, current);
-		List<Map<String, Object>> addedItems = new ArrayList<>();
-		List<Map<String, Object>> removedItems = new ArrayList<>();
-
-		for (Map<String, Object> change : quantityChanges)
-		{
-			int delta = getInt(change.get("delta"), 0);
-			if (delta > 0)
-			{
-				addedItems.add(change);
-			}
-			else if (delta < 0)
-			{
-				removedItems.add(change);
-			}
-		}
-
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("tick", snapshot.tickId);
-		payload.put("inventorySignatureBefore", previousSignature);
-		payload.put("inventorySignatureAfter", currentSignature);
-		payload.put("changedSlots", changedSlots);
-		payload.put("addedItems", addedItems);
-		payload.put("removedItems", removedItems);
-		payload.put("quantityChanges", quantityChanges);
-		payload.put("freeSlotsBefore", nullableInt(previous.get("freeSlots")));
-		payload.put("freeSlotsAfter", nullableInt(current.get("freeSlots")));
-		payload.put("filledSlotsBefore", nullableInt(previous.get("filledSlots")));
-		payload.put("filledSlotsAfter", nullableInt(current.get("filledSlots")));
-		payload.put("inventoryFull", getInt(current.get("freeSlots"), -1) == 0);
-		payload.put("generatedFromItemContainerChanged", false);
-		payload.put("eventSource", "gameTickInventorySnapshot");
-		return payload;
-	}
-
-	private List<Map<String, Object>> changedInventorySlots(Map<String, Object> previous, Map<String, Object> current)
-	{
-		Map<Integer, Map<String, Object>> previousSlots = itemsBySlot(previous);
-		Map<Integer, Map<String, Object>> currentSlots = itemsBySlot(current);
-		Set<Integer> slots = new HashSet<>();
-		slots.addAll(previousSlots.keySet());
-		slots.addAll(currentSlots.keySet());
-
-		List<Map<String, Object>> changes = new ArrayList<>();
-		for (Integer slot : slots)
-		{
-			Map<String, Object> before = previousSlots.get(slot);
-			Map<String, Object> after = currentSlots.get(slot);
-			int beforeItemId = before == null ? -1 : getInt(before.get("itemId"), -1);
-			int beforeQuantity = before == null ? 0 : getInt(before.get("quantity"), 0);
-			int afterItemId = after == null ? -1 : getInt(after.get("itemId"), -1);
-			int afterQuantity = after == null ? 0 : getInt(after.get("quantity"), 0);
-
-			if (beforeItemId == afterItemId && beforeQuantity == afterQuantity)
-			{
-				continue;
-			}
-
-			Map<String, Object> change = new LinkedHashMap<>();
-			change.put("slot", slot);
-			change.put("beforeItemId", beforeItemId);
-			change.put("beforeQuantity", beforeQuantity);
-			change.put("afterItemId", afterItemId);
-			change.put("afterQuantity", afterQuantity);
-			changes.add(change);
-		}
-
-		return changes;
-	}
-
-	@SuppressWarnings("unchecked")
-	private Map<Integer, Map<String, Object>> itemsBySlot(Map<String, Object> snapshot)
-	{
-		Map<Integer, Map<String, Object>> bySlot = new LinkedHashMap<>();
-		Object itemsObject = snapshot.get("items");
-		if (!(itemsObject instanceof List))
-		{
-			return bySlot;
-		}
-
-		for (Object itemObject : (List<Object>) itemsObject)
-		{
-			if (!(itemObject instanceof Map))
-			{
-				continue;
-			}
-
-			Map<String, Object> item = (Map<String, Object>) itemObject;
-			Integer slot = nullableInt(item.get("slot"));
-			if (slot != null)
-			{
-				bySlot.put(slot, item);
-			}
-		}
-
-		return bySlot;
-	}
-
-	private List<Map<String, Object>> inventoryQuantityChanges(Map<String, Object> previous, Map<String, Object> current)
-	{
-		Map<Integer, Integer> previousCounts = itemQuantityById(previous);
-		Map<Integer, Integer> currentCounts = itemQuantityById(current);
-		Set<Integer> itemIds = new HashSet<>();
-		itemIds.addAll(previousCounts.keySet());
-		itemIds.addAll(currentCounts.keySet());
-
-		List<Map<String, Object>> changes = new ArrayList<>();
-		for (Integer itemId : itemIds)
-		{
-			int before = previousCounts.getOrDefault(itemId, 0);
-			int after = currentCounts.getOrDefault(itemId, 0);
-			if (before == after)
-			{
-				continue;
-			}
-
-			Map<String, Object> change = new LinkedHashMap<>();
-			change.put("itemId", itemId);
-			change.put("beforeQuantity", before);
-			change.put("afterQuantity", after);
-			change.put("delta", after - before);
-			change.put("changeType", after > before ? "itemAdded" : "itemRemoved");
-			changes.add(change);
-		}
-
-		return changes;
-	}
-
-	@SuppressWarnings("unchecked")
-	private Map<Integer, Integer> itemQuantityById(Map<String, Object> snapshot)
-	{
-		Map<Integer, Integer> counts = new LinkedHashMap<>();
-		Object itemsObject = snapshot.get("items");
-		if (!(itemsObject instanceof List))
-		{
-			return counts;
-		}
-
-		for (Object itemObject : (List<Object>) itemsObject)
-		{
-			if (!(itemObject instanceof Map))
-			{
-				continue;
-			}
-
-			Map<String, Object> item = (Map<String, Object>) itemObject;
-			int itemId = getInt(item.get("itemId"), -1);
-			int quantity = getInt(item.get("quantity"), 0);
-			if (itemId > 0 && quantity > 0)
-			{
-				counts.put(itemId, counts.getOrDefault(itemId, 0) + quantity);
-			}
-		}
-
-		return counts;
-	}
-
-	private Integer nullableInt(Object value)
-	{
-		return value instanceof Number ? ((Number) value).intValue() : null;
-	}
-
-	private String stringValue(Object value)
-	{
-		return value == null ? "" : String.valueOf(value);
-	}
-
 	private Map<String, Object> activityPayload(TickSnapshot snapshot)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
@@ -2599,539 +745,13 @@ public class TelemetryPlugin extends Plugin
 			return "";
 		}
 
-		return stringValue(status.interactingType)
+		return safeString(status.interactingType)
 				+ ":" + status.interactingIndex
 				+ ":" + status.interactingId
-				+ ":" + stringValue(status.interactingName)
+				+ ":" + safeString(status.interactingName)
 				+ ":" + status.interactingWorldX
 				+ ":" + status.interactingWorldY
 				+ ":" + status.interactingPlane;
-	}
-
-	private Map<String, Object> navigationPayload(TickSnapshot snapshot)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("tick", snapshot.tickId);
-		payload.put("plane", snapshot.localPlayer == null ? null : snapshot.localPlayer.plane);
-		payload.put("player", navigationPlayerPayload(snapshot));
-		payload.put("collision", collisionSummaryPayload(snapshot, false));
-		payload.put("bounds", navigationBoundsPayload(snapshot));
-		payload.put("source", navigationSourcePayload());
-		payload.put("fullCollisionGridIncluded", false);
-		payload.put("fullCollisionGridConfigured", config.compactNavigationIncludeFullCollisionGrid());
-		payload.put("hashOnly", config.compactNavigationHashOnly());
-		return payload;
-	}
-
-	private Map<String, Object> collisionGridPayload(TickSnapshot snapshot)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("tick", snapshot.tickId);
-		payload.put("plane", snapshot.localPlayer == null ? null : snapshot.localPlayer.plane);
-		payload.put("collision", collisionSummaryPayload(snapshot, true));
-		payload.put("source", navigationSourcePayload());
-		payload.put("encoding", "json-int-grid");
-		payload.put("debugOnly", true);
-		return payload;
-	}
-
-	private Map<String, Object> collisionWindowPayload(TickSnapshot snapshot)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		int plane = snapshot.localPlayer == null ? -1 : snapshot.localPlayer.plane;
-		Integer playerSceneX = snapshot.localPlayer == null ? null : snapshot.localPlayer.sceneX;
-		Integer playerSceneY = snapshot.localPlayer == null ? null : snapshot.localPlayer.sceneY;
-		int radius = compactNavigationCollisionWindowRadius();
-		CollisionData collisionData = collisionDataForPlane(plane);
-		int[][] flags = collisionData == null ? null : collisionData.getFlags();
-		List<String> warnings = new ArrayList<>();
-
-		payload.put("tick", snapshot.tickId);
-		payload.put("plane", plane >= 0 ? plane : null);
-		payload.put("playerSceneX", playerSceneX);
-		payload.put("playerSceneY", playerSceneY);
-		payload.put("windowRadius", radius);
-		payload.put("mapWidth", flags == null ? null : flags.length);
-		payload.put("mapHeight", flags == null ? null : collisionHeight(flags));
-		payload.put("generatedFromPlane", plane >= 0 ? plane : null);
-		payload.put("encoding", "json-rows-int-flags");
-
-		if (flags == null || playerSceneX == null || playerSceneY == null)
-		{
-			warnings.add("collision window unavailable: collision flags or player scene tile missing");
-			payload.put("collisionKnown", false);
-			payload.put("warnings", warnings);
-			return payload;
-		}
-
-		int mapWidth = flags.length;
-		int mapHeight = collisionHeight(flags);
-		int minSceneX = Math.max(0, playerSceneX - radius);
-		int maxSceneX = Math.min(mapWidth - 1, playerSceneX + radius);
-		int minSceneY = Math.max(0, playerSceneY - radius);
-		int maxSceneY = Math.min(mapHeight - 1, playerSceneY + radius);
-		List<List<Integer>> rows = new ArrayList<>();
-		long hash = 1469598103934665603L;
-
-		for (int sceneY = minSceneY; sceneY <= maxSceneY; sceneY++)
-		{
-			List<Integer> row = new ArrayList<>();
-			for (int sceneX = minSceneX; sceneX <= maxSceneX; sceneX++)
-			{
-				int value = collisionFlagAt(flags, sceneX, sceneY);
-				row.add(value);
-				hash = collisionHashStep(hash, value);
-			}
-			rows.add(row);
-		}
-
-		int width = Math.max(0, maxSceneX - minSceneX + 1);
-		int height = Math.max(0, maxSceneY - minSceneY + 1);
-		payload.put("collisionKnown", true);
-		payload.put("minSceneX", minSceneX);
-		payload.put("maxSceneX", maxSceneX);
-		payload.put("minSceneY", minSceneY);
-		payload.put("maxSceneY", maxSceneY);
-		payload.put("width", width);
-		payload.put("height", height);
-		payload.put("flags", rows);
-		payload.put("collisionWindowTileCount", width * height);
-		payload.put("collisionWindowHash", Long.toUnsignedString(hash, 16));
-		payload.put("windowHash", Long.toUnsignedString(hash, 16));
-		payload.put("movementMask", COLLISION_MOVEMENT_MASK);
-		payload.put("warnings", warnings);
-		return payload;
-	}
-
-	private Map<String, Object> navigationPlayerPayload(TickSnapshot snapshot)
-	{
-		Map<String, Object> player = new LinkedHashMap<>();
-
-		if (snapshot.localPlayer == null)
-		{
-			return player;
-		}
-
-		player.put("worldX", snapshot.localPlayer.worldX);
-		player.put("worldY", snapshot.localPlayer.worldY);
-		player.put("plane", snapshot.localPlayer.plane);
-		player.put("sceneX", snapshot.localPlayer.sceneX);
-		player.put("sceneY", snapshot.localPlayer.sceneY);
-		player.put("localX", snapshot.localPlayer.localX);
-		player.put("localY", snapshot.localPlayer.localY);
-		return player;
-	}
-
-	private Map<String, Object> navigationBoundsPayload(TickSnapshot snapshot)
-	{
-		Map<String, Object> bounds = new LinkedHashMap<>();
-		int width = 0;
-		int height = 0;
-		int plane = snapshot.localPlayer == null ? -1 : snapshot.localPlayer.plane;
-		CollisionData collision = collisionDataForPlane(plane);
-
-		if (collision != null && collision.getFlags() != null)
-		{
-			int[][] flags = collision.getFlags();
-			width = flags.length;
-			height = collisionHeight(flags);
-		}
-
-		bounds.put("sceneMinX", width > 0 ? 0 : null);
-		bounds.put("sceneMaxX", width > 0 ? width - 1 : null);
-		bounds.put("sceneMinY", height > 0 ? 0 : null);
-		bounds.put("sceneMaxY", height > 0 ? height - 1 : null);
-		return bounds;
-	}
-
-	private Map<String, Object> navigationSourcePayload()
-	{
-		Map<String, Object> source = new LinkedHashMap<>();
-		WorldView worldView = client.getTopLevelWorldView();
-		source.put("worldViewId", worldView == null ? null : worldView.getId());
-		source.put("topLevelWorldView", worldView == null || worldView.isTopLevel());
-		source.put("currentPlane", worldView == null ? client.getPlane() : worldView.getPlane());
-		source.put("baseX", worldView == null ? client.getBaseX() : worldView.getBaseX());
-		source.put("baseY", worldView == null ? client.getBaseY() : worldView.getBaseY());
-		source.put("warning", "Collision summary is read-only and does not include route planning.");
-		return source;
-	}
-
-	private Map<String, Object> collisionSummaryPayload(TickSnapshot snapshot, boolean includeGrid)
-	{
-		Map<String, Object> collision = new LinkedHashMap<>();
-		int plane = snapshot.localPlayer == null ? -1 : snapshot.localPlayer.plane;
-		CollisionData collisionData = collisionDataForPlane(plane);
-
-		collision.put("collisionKnown", collisionData != null && collisionData.getFlags() != null);
-		collision.put("planeKnown", plane >= 0);
-		collision.put("plane", plane >= 0 ? plane : null);
-
-		if (collisionData == null || collisionData.getFlags() == null)
-		{
-			collision.put("warning", "collision maps unavailable");
-			return collision;
-		}
-
-		int[][] flags = collisionData.getFlags();
-		int width = flags.length;
-		int height = collisionHeight(flags);
-		int blockedMovementTileCount = 0;
-		int blockedFullTileCount = 0;
-		long hash = 1469598103934665603L;
-
-		for (int x = 0; x < flags.length; x++)
-		{
-			int[] column = flags[x];
-			if (column == null)
-			{
-				hash = collisionHashStep(hash, 0);
-				continue;
-			}
-
-			for (int y = 0; y < column.length; y++)
-			{
-				int value = column[y];
-				hash = collisionHashStep(hash, value);
-				if ((value & COLLISION_MOVEMENT_MASK) != 0)
-				{
-					blockedMovementTileCount++;
-				}
-				if ((value & CollisionDataFlag.BLOCK_MOVEMENT_FULL) != 0)
-				{
-					blockedFullTileCount++;
-				}
-			}
-		}
-
-		collision.put("mapWidth", width);
-		collision.put("mapHeight", height);
-		collision.put("blockedMovementTileCount", blockedMovementTileCount);
-		collision.put("blockedFullTileCount", blockedFullTileCount);
-		collision.put("collisionHash", Long.toUnsignedString(hash, 16));
-		collision.put("collisionMapVersion", Long.toUnsignedString(hash, 16));
-		collision.put("movementMask", COLLISION_MOVEMENT_MASK);
-
-		if (includeGrid)
-		{
-			collision.put("flags", flags);
-		}
-
-		return collision;
-	}
-
-	private CollisionData collisionDataForPlane(int plane)
-	{
-		if (plane < 0)
-		{
-			return null;
-		}
-
-		WorldView worldView = client.getTopLevelWorldView();
-		CollisionData[] collisionMaps = worldView == null ? client.getCollisionMaps() : worldView.getCollisionMaps();
-
-		if (collisionMaps == null || plane >= collisionMaps.length)
-		{
-			return null;
-		}
-
-		return collisionMaps[plane];
-	}
-
-	private int compactNavigationCollisionWindowRadius()
-	{
-		return Math.max(8, Math.min(52, config.compactNavigationCollisionWindowRadius()));
-	}
-
-	private int compactNavigationFullGridIntervalTicks()
-	{
-		int configured = config.compactNavigationFullGridIntervalTicks();
-		if (configured > 0)
-		{
-			return configured;
-		}
-		return config.compactNavigationGridIntervalTicks();
-	}
-
-	private int collisionFlagAt(int[][] flags, int sceneX, int sceneY)
-	{
-		if (flags == null || sceneX < 0 || sceneX >= flags.length)
-		{
-			return 0;
-		}
-
-		int[] column = flags[sceneX];
-		if (column == null || sceneY < 0 || sceneY >= column.length)
-		{
-			return 0;
-		}
-
-		return column[sceneY];
-	}
-
-	private int collisionHeight(int[][] flags)
-	{
-		int height = 0;
-		if (flags == null)
-		{
-			return height;
-		}
-
-		for (int[] column : flags)
-		{
-			if (column != null)
-			{
-				height = Math.max(height, column.length);
-			}
-		}
-		return height;
-	}
-
-	private long collisionHashStep(long current, int value)
-	{
-		long hash = current ^ (value & 0xffffffffL);
-		return hash * 1099511628211L;
-	}
-
-	private Map<String, Object> writerHealthPayload(TelemetryWriter currentWriter, TickSnapshot snapshot)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		List<String> liveCachePayloadTypes = currentWriter.getLiveCachePayloadTypes();
-		Map<String, Object> liveCacheHealth = currentWriter.getLiveCacheHealth();
-		payload.put("recordingMode", currentWriter.getRecordingMode());
-		payload.put("rawTickRecordingEnabled", currentWriter.isRawTickRecordingEnabled());
-		payload.put("rawEventRecordingEnabled", currentWriter.isRawEventRecordingEnabled());
-		payload.put("frameRecordingEnabled", currentWriter.isFrameRecordingEnabled());
-		payload.put("compactPacketRecordingEnabled", currentWriter.isCompactLivePacketsEnabled());
-		payload.put("rawTicksWritten", currentWriter.getRawTicksWritten());
-		payload.put("rawTicksSuppressedByMode", currentWriter.getRawTicksSuppressedByMode());
-		payload.put("rawEventsWritten", currentWriter.getRawEventsWritten());
-		payload.put("rawEventsSuppressedByMode", currentWriter.getRawEventsSuppressedByMode());
-		payload.put("framesWritten", currentWriter.getFramesWritten());
-		payload.put("framesSuppressedByMode", currentWriter.getFramesSuppressedByMode());
-		payload.put("rawWriterQueueDepth", currentWriter.getQueueSize());
-		payload.put("droppedRawRecords", currentWriter.getDroppedRecords());
-		payload.put("droppedFrameCount", currentWriter.getDroppedFrameCount());
-		payload.put("compactLiveEnabled", currentWriter.isCompactLivePacketsEnabled());
-		payload.put("livePacketsRuntimeRemoved", true);
-		payload.put("ndjsonRuntimeRemoved", true);
-		payload.put("jsonlRuntimeRemoved", true);
-		payload.put("livePacketWriterActive", false);
-		payload.put("compactLivePacketFilesEnabled", false);
-		payload.put("compactLiveQueueDepth", currentWriter.getLivePacketQueueDepth());
-		payload.put("livePacketsWritten", currentWriter.getLivePacketsWritten());
-		payload.put("livePacketsDropped", currentWriter.getLivePacketsDropped());
-		payload.put("livePacketWriteErrors", currentWriter.getLivePacketWriteErrors());
-		payload.put("livePacketLastWriteMillis", currentWriter.getLivePacketLastWriteMillis());
-		payload.put("livePacketSegmentCount", currentWriter.getLivePacketSegmentCount());
-		payload.put("livePacketTotalBytes", currentWriter.getLivePacketTotalBytes());
-		payload.put("livePacketSegmentsPruned", currentWriter.getLivePacketSegmentsPruned());
-		payload.put("livePacketRetentionBytes", 0L);
-		payload.put("livePacketRetentionSegments", 0L);
-		payload.put("livePacketActiveSegment", currentWriter.getLivePacketActiveSegment());
-		payload.put("liveCacheEnabled", currentWriter.isLiveCacheEnabled());
-		payload.put("liveCacheUpdates", currentWriter.getLiveCacheUpdates());
-		payload.put("liveCacheUpdateErrors", currentWriter.getLiveCacheUpdateErrors());
-		payload.put("liveCachePayloadTypes", liveCachePayloadTypes);
-		payload.put("liveCacheLatestTick", currentWriter.getLiveCacheLatestTick());
-		payload.put("liveCacheLatestSequence", currentWriter.getLiveCacheLatestSequence());
-		payload.put("liveCacheEstimatedBytes", currentWriter.getLiveCacheEstimatedBytes());
-		payload.put("liveCacheHealth", liveCacheHealth);
-		payload.put("navigationCachePresent", liveCachePayloadTypes.contains(PACKET_NAVIGATION));
-		payload.put("collisionWindowCachePresent", liveCachePayloadTypes.contains(PACKET_COLLISION_WINDOW));
-		payload.put("bankUiCachePresent", liveCachePayloadTypes.contains(PACKET_BANK_UI));
-		payload.put("dialogueStateCachePresent", liveCachePayloadTypes.contains(PACKET_DIALOGUE_STATE));
-		payload.put("navigationPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_NAVIGATION, snapshot));
-		payload.put("collisionWindowPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_COLLISION_WINDOW, snapshot));
-		payload.put("bankUiPacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_BANK_UI, snapshot));
-		payload.put("dialogueStatePacketBuiltThisTick", liveCachePacketBuiltThisTick(liveCacheHealth, PACKET_DIALOGUE_STATE, snapshot));
-		payload.put("emitNavigationEffective", emitNavigationEffective(currentWriter));
-		payload.put("emitCollisionWindowEffective", emitCollisionWindowEffective(currentWriter));
-		payload.put("emitBankUiEffective", emitBankUiEffective(currentWriter));
-		payload.put("emitCompactNavigationPacketsConfigured", config.emitCompactNavigationPackets());
-		payload.put("compactNavigationEmitCollisionWindowConfigured", config.compactNavigationEmitCollisionWindow());
-		payload.put("compactLivePacketTypesConfigured", config.compactLivePacketTypes());
-		payload.put("snapshotNoFileLiveCacheOnly", snapshotNoFileLiveCacheOnly(currentWriter));
-		payload.put("compactLiveStreamEnabled", false);
-		payload.put("compactLiveStreamHost", null);
-		payload.put("compactLiveStreamPort", 0);
-		payload.put("compactLiveStreamQueueSize", 0);
-		payload.put("compactLiveStreamAlsoWriteFiles", false);
-		payload.put("compactLiveStreamCircuitBreakerEnabled", false);
-		payload.put("compactLiveStreamMaxWriteMillisConfigured", 0);
-		payload.put("compactLiveStreamQueueDepth", currentWriter.getCompactLiveStreamQueueDepth());
-		payload.put("compactLiveStreamClientCount", currentWriter.getCompactLiveStreamClientCount());
-		payload.put("compactLiveStreamPacketsOffered", currentWriter.getCompactLiveStreamPacketsOffered());
-		payload.put("compactLiveStreamPacketsWritten", currentWriter.getCompactLiveStreamPacketsWritten());
-		payload.put("compactLiveStreamPacketsDropped", currentWriter.getCompactLiveStreamPacketsDropped());
-		payload.put("compactLiveStreamPacketsDroppedNoClients", currentWriter.getCompactLiveStreamPacketsDroppedNoClients());
-		payload.put("compactLiveStreamPacketsDroppedByCircuitBreaker", currentWriter.getCompactLiveStreamPacketsDroppedByCircuitBreaker());
-		payload.put("compactLiveStreamWriteErrors", currentWriter.getCompactLiveStreamWriteErrors());
-		payload.put("compactLiveStreamAcceptedClients", currentWriter.getCompactLiveStreamAcceptedClients());
-		payload.put("compactLiveStreamDisconnectedClients", currentWriter.getCompactLiveStreamDisconnectedClients());
-		payload.put("compactLiveStreamLastWriteMillis", currentWriter.getCompactLiveStreamLastWriteMillis());
-		payload.put("compactLiveStreamMaxWriteMillisObserved", currentWriter.getCompactLiveStreamMaxWriteMillisObserved());
-		payload.put("compactLiveStreamCircuitBreakerTripped", currentWriter.isCompactLiveStreamCircuitBreakerTripped());
-		payload.put("compactLiveStreamCircuitBreakerReason", currentWriter.getCompactLiveStreamCircuitBreakerReason());
-		payload.put("compactLiveStreamDisabledUntilUtc", currentWriter.getCompactLiveStreamDisabledUntilUtc());
-		payload.put("compactLiveStreamCircuitBreakerTrips", currentWriter.getCompactLiveStreamCircuitBreakerTrips());
-		payload.put("compactLiveStreamPacketsByType", currentWriter.getCompactLiveStreamPacketsByType());
-		payload.put("compactLiveStreamPacketsOfferedByType", currentWriter.getCompactLiveStreamPacketsOfferedByType());
-		payload.put("compactLiveStreamPacketsSentByType", currentWriter.getCompactLiveStreamPacketsSentByType());
-		payload.put("compactLiveStreamPacketsDroppedByType", currentWriter.getCompactLiveStreamPacketsDroppedByType());
-		payload.put("compactLiveStreamLatestOfferedTickByType", currentWriter.getCompactLiveStreamLatestOfferedTickByType());
-		payload.put("compactLiveStreamLatestTickByType", currentWriter.getCompactLiveStreamLatestTickByType());
-		payload.put("compactLiveIncludeHeavyGeometry", config.compactLiveIncludeHeavyGeometry());
-		payload.put("compactLiveIncludeClickableHull", lastCompactLiveIncludeClickableHull);
-		payload.put("compactLiveIncludeCanvasTilePolygon", lastCompactLiveIncludeCanvasTilePolygon);
-		payload.put("compactLiveIncludeConvexHull", lastCompactLiveIncludeConvexHull);
-		payload.put("compactLiveGeometryMaxRefs", lastCompactGeometryMaxRefs);
-		payload.put("compactLiveGeometryRefsWithPolygons", lastCompactGeometryRefsWithPolygons);
-		payload.put("compactLiveGeometryRefsSkippedByCap", lastCompactGeometryRefsSkippedByCap);
-		payload.put("compactLiveGeometryCapHit", lastCompactGeometryCapHit);
-		payload.put("compactLiveHullsEmitted", lastCompactHullsEmitted);
-		payload.put("compactLiveHullDroppedOffscreen", lastCompactHullDroppedOffscreen);
-		payload.put("compactLiveHullDroppedNoCanvasIntersection", lastCompactHullDroppedNoCanvasIntersection);
-		payload.put("compactLiveHullDroppedByCap", lastCompactHullDroppedByCap);
-		payload.put("compactLiveHullDroppedNullClickbox", lastCompactHullDroppedNullClickbox);
-		payload.put("rawRecordingEnabled", currentWriter.isRawRecordingEnabled());
-		return payload;
-	}
-
-	@SuppressWarnings("unchecked")
-	private boolean liveCachePacketBuiltThisTick(Map<String, Object> liveCacheHealth, String packetType, TickSnapshot snapshot)
-	{
-		if (liveCacheHealth == null || snapshot == null)
-		{
-			return false;
-		}
-		Object raw = liveCacheHealth.get("liveCacheLatestTickByType");
-		if (!(raw instanceof Map<?, ?>))
-		{
-			return false;
-		}
-		Map<Object, Object> latestTickByType = (Map<Object, Object>) raw;
-		Object tick = latestTickByType.get(packetType);
-		return tick instanceof Number && ((Number) tick).longValue() == snapshot.tickId;
-	}
-
-	private BufferedImage copyRuneliteFrame(Image image)
-	{
-		if (image == null)
-		{
-			return null;
-		}
-
-		if (config.includeClientFrame())
-		{
-			return imageCapture.addClientFrame(image);
-		}
-
-		return ImageUtil.bufferedImageFromImage(image);
-	}
-
-	private BufferedImage captureScreenRectangle() throws Exception
-	{
-		Canvas canvas = client.getCanvas();
-
-		if (canvas == null)
-		{
-			return null;
-		}
-
-		Dimension size = canvas.getSize();
-
-		if (size.width <= 0 || size.height <= 0 || !canvas.isShowing())
-		{
-			return null;
-		}
-
-		java.awt.Point location = canvas.getLocationOnScreen();
-		Rectangle rectangle = new Rectangle(location.x, location.y, size.width, size.height);
-		return new Robot().createScreenCapture(rectangle);
-	}
-
-	private String normalizeScreenshotFormat(String format)
-	{
-		if (format == null)
-		{
-			return "jpg";
-		}
-
-		String normalized = format.trim().toLowerCase();
-		return "png".equals(normalized) ? "png" : "jpg";
-	}
-
-	private String normalizeFrameCaptureMode(String mode)
-	{
-		if (mode == null)
-		{
-			return "RUNELITE_ONLY";
-		}
-
-		String normalized = mode.trim().toUpperCase();
-		return "SCREEN_RECTANGLE".equals(normalized) ? "SCREEN_RECTANGLE" : "RUNELITE_ONLY";
-	}
-
-	@Subscribe
-	public void onPlayerSpawned(PlayerSpawned event)
-	{
-		logEvent("PlayerSpawned", actorPayload(event.getPlayer()));
-	}
-
-	@Subscribe
-	public void onPlayerDespawned(PlayerDespawned event)
-	{
-		logEvent("PlayerDespawned", actorPayload(event.getPlayer()));
-	}
-
-	@Subscribe
-	public void onPlayerChanged(PlayerChanged event)
-	{
-		logEvent("PlayerChanged", actorPayload(event.getPlayer()));
-	}
-
-	@Subscribe
-	public void onItemSpawned(ItemSpawned event)
-	{
-		rememberItem(event.getItem());
-		logEvent("ItemSpawned", itemEventPayload(event.getTile(), event.getItem()));
-	}
-
-	@Subscribe
-	public void onItemDespawned(ItemDespawned event)
-	{
-		rememberItem(event.getItem());
-		logEvent("ItemDespawned", itemEventPayload(event.getTile(), event.getItem()));
-	}
-
-	@Subscribe
-	public void onItemQuantityChanged(ItemQuantityChanged event)
-	{
-		Map<String, Object> payload = itemEventPayload(event.getTile(), event.getItem());
-		payload.put("oldQuantity", event.getOldQuantity());
-		payload.put("newQuantity", event.getNewQuantity());
-		rememberItem(event.getItem());
-
-		logEvent("ItemQuantityChanged", payload);
-	}
-
-	@Subscribe
-	public void onWidgetLoaded(WidgetLoaded event)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("groupId", event.getGroupId());
-
-		logEvent("WidgetLoaded", payload);
-	}
-
-	@Subscribe
-	public void onWidgetClosed(WidgetClosed event)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("groupId", event.getGroupId());
-
-		logEvent("WidgetClosed", payload);
 	}
 
 	private void captureStatus(TickSnapshot snapshot)
@@ -3172,29 +792,6 @@ public class TelemetryPlugin extends Plugin
 		snapshot.status = status;
 	}
 
-	private void captureActivePrayers(TickSnapshot snapshot)
-	{
-		List<TickSnapshot.ActivePrayerSnapshot> prayers = new ArrayList<>();
-
-		for (Prayer prayer : Prayer.values())
-		{
-			int varbit = prayer.getVarbit();
-
-			if (varbit < 0)
-			{
-				continue;
-			}
-
-			TickSnapshot.ActivePrayerSnapshot prayerSnapshot = new TickSnapshot.ActivePrayerSnapshot();
-			prayerSnapshot.name = prayer.name();
-			prayerSnapshot.varbit = varbit;
-			prayerSnapshot.active = client.getVarbitValue(varbit) == 1;
-			prayers.add(prayerSnapshot);
-		}
-
-		snapshot.activePrayers = prayers.toArray(new TickSnapshot.ActivePrayerSnapshot[0]);
-	}
-
 	private void captureCameraViewport(TickSnapshot snapshot)
 	{
 		snapshot.cameraX = client.getCameraX();
@@ -3226,10 +823,18 @@ public class TelemetryPlugin extends Plugin
 		snapshot.inputGeometry = captureInputGeometry(snapshot, canvas);
 	}
 
+	private void captureWelcomeScreen(TickSnapshot snapshot)
+	{
+		Widget play = client.getWidget(InterfaceID.WelcomeScreen.PLAY);
+		Widget clickHere = client.getWidget(InterfaceID.WelcomeScreen.CLICKHERE_TEXT);
+		snapshot.welcomeScreenVisible = widgetVisible(play) || widgetVisible(clickHere);
+	}
+
 	private TickSnapshot.InputGeometrySnapshot captureInputGeometry(TickSnapshot snapshot, Canvas canvas)
 	{
 		TickSnapshot.InputGeometrySnapshot geometry = new TickSnapshot.InputGeometrySnapshot();
 		geometry.sourceTick = snapshot == null ? null : snapshot.tickId;
+		geometry.clientProcessId = ProcessHandle.current().pid();
 		geometry.geometryAvailable = false;
 		geometry.reason = "canvas_unavailable";
 		geometry.canvasWidth = snapshot == null ? null : snapshot.canvasWidth;
@@ -3300,48 +905,6 @@ public class TelemetryPlugin extends Plugin
 		}
 
 		return geometry;
-	}
-
-	private void captureWidgets(TickSnapshot snapshot)
-	{
-		Widget[] roots = client.getWidgetRoots();
-
-		if (roots == null || roots.length == 0)
-		{
-			snapshot.widgets = new TickSnapshot.WidgetSnapshot[0];
-			return;
-		}
-
-		TickSnapshot.WidgetSnapshot[] widgets = new TickSnapshot.WidgetSnapshot[roots.length];
-
-		for (int i = 0; i < roots.length; i++)
-		{
-			Widget widget = roots[i];
-
-			if (widget == null)
-			{
-				continue;
-			}
-
-			TickSnapshot.WidgetSnapshot widgetSnapshot = new TickSnapshot.WidgetSnapshot();
-			widgetSnapshot.index = i;
-			widgetSnapshot.id = widget.getId();
-			widgetSnapshot.type = widget.getType();
-			widgetSnapshot.hidden = widget.isHidden();
-			widgetSnapshot.text = cleanWidgetText(widget.getText());
-			widgetSnapshot.name = cleanWidgetText(widget.getName());
-			widgetSnapshot.x = widget.getCanvasLocation() != null ? widget.getCanvasLocation().getX() : -1;
-			widgetSnapshot.y = widget.getCanvasLocation() != null ? widget.getCanvasLocation().getY() : -1;
-			widgetSnapshot.width = widget.getWidth();
-			widgetSnapshot.height = widget.getHeight();
-
-			Widget[] children = widget.getChildren();
-			widgetSnapshot.childCount = children == null ? 0 : children.length;
-
-			widgets[i] = widgetSnapshot;
-		}
-
-		snapshot.widgets = widgets;
 	}
 
 	private void captureBankUi(TickSnapshot snapshot)
@@ -3821,7 +1384,6 @@ public class TelemetryPlugin extends Plugin
 			slot.slot = i;
 			slot.itemId = item == null ? -1 : item.getId();
 			slot.quantity = item == null ? 0 : item.getQuantity();
-			rememberItem(slot.itemId);
 
 			snapshot.inventory[i] = slot;
 		}
@@ -3845,1440 +1407,10 @@ public class TelemetryPlugin extends Plugin
 			slot.slot = i;
 			slot.itemId = item == null ? -1 : item.getId();
 			slot.quantity = item == null ? 0 : item.getQuantity();
-			rememberItem(slot.itemId);
 			slots[i] = slot;
 		}
 
 		return slots;
-	}
-
-	private void captureEquipment(TickSnapshot snapshot)
-	{
-		ItemContainer equipment = client.getItemContainer(InventoryID.EQUIPMENT);
-
-		if (equipment == null)
-		{
-			snapshot.equipment = new TickSnapshot.InventorySlot[0];
-			return;
-		}
-
-		Item[] items = equipment.getItems();
-		snapshot.equipment = new TickSnapshot.InventorySlot[items.length];
-
-		for (int i = 0; i < items.length; i++)
-		{
-			Item item = items[i];
-
-			TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
-			slot.slot = i;
-			slot.itemId = item == null ? -1 : item.getId();
-			slot.quantity = item == null ? 0 : item.getQuantity();
-			rememberItem(slot.itemId);
-
-			snapshot.equipment[i] = slot;
-		}
-	}
-	private void captureSkills(TickSnapshot snapshot)
-	{
-		ArrayList<TickSnapshot.SkillSnapshot> skills = new ArrayList<>();
-
-		for (Skill skill : Skill.values())
-		{
-			if (skill == Skill.OVERALL)
-			{
-				continue;
-			}
-
-			TickSnapshot.SkillSnapshot skillSnapshot = new TickSnapshot.SkillSnapshot();
-			skillSnapshot.name = skill.name();
-			skillSnapshot.realLevel = client.getRealSkillLevel(skill);
-			skillSnapshot.boostedLevel = client.getBoostedSkillLevel(skill);
-			skillSnapshot.xp = client.getSkillExperience(skill);
-
-			skills.add(skillSnapshot);
-		}
-
-		snapshot.skills = skills.toArray(new TickSnapshot.SkillSnapshot[0]);
-	}
-	private void captureNpcs(TickSnapshot snapshot)
-	{
-		List<NPC> npcs = client.getNpcs();
-
-		if (npcs == null || npcs.isEmpty())
-		{
-			snapshot.npcs = new TickSnapshot.NpcSnapshot[0];
-			return;
-		}
-
-		snapshot.npcs = new TickSnapshot.NpcSnapshot[npcs.size()];
-
-		for (int i = 0; i < npcs.size(); i++)
-		{
-			NPC npc = npcs.get(i);
-
-			if (npc == null)
-			{
-				continue;
-			}
-
-			TickSnapshot.NpcSnapshot npcSnapshot = new TickSnapshot.NpcSnapshot();
-			rememberNpc(npc);
-			npcSnapshot.index = npc.getIndex();
-			npcSnapshot.id = npc.getId();
-			npcSnapshot.name = npc.getName();
-			DefinitionName npcName = npcNameLookup(npc);
-			npcSnapshot.npcName = npcName.name;
-			npcSnapshot.npcNameSource = npcName.source;
-			npcSnapshot.combatLevel = npc.getCombatLevel();
-
-			WorldPoint worldLocation = npc.getWorldLocation();
-
-			if (worldLocation != null)
-			{
-				npcSnapshot.worldX = worldLocation.getX();
-				npcSnapshot.worldY = worldLocation.getY();
-				npcSnapshot.plane = worldLocation.getPlane();
-			}
-
-			npcSnapshot.animation = npc.getAnimation();
-			npcSnapshot.poseAnimation = npc.getPoseAnimation();
-			npcSnapshot.orientation = npc.getOrientation();
-			npcSnapshot.healthRatio = npc.getHealthRatio();
-			npcSnapshot.healthScale = npc.getHealthScale();
-			npcSnapshot.dead = npc.isDead();
-			applyActorProjection(npcSnapshot, npc);
-
-			snapshot.npcs[i] = npcSnapshot;
-		}
-	}
-	private void capturePlayers(TickSnapshot snapshot)
-	{
-		List<Player> players = client.getPlayers();
-		Player localPlayer = client.getLocalPlayer();
-
-		if (players == null || players.isEmpty())
-		{
-			snapshot.players = new TickSnapshot.PlayerSnapshot[0];
-			return;
-		}
-
-		snapshot.players = players.stream()
-				.filter(player -> player != null)
-				.filter(player -> localPlayer == null || player != localPlayer)
-				.map(this::toPlayerSnapshot)
-				.toArray(TickSnapshot.PlayerSnapshot[]::new);
-	}
-
-	private void captureScene(TickSnapshot snapshot)
-	{
-		long sceneStartNanos = System.nanoTime();
-		SceneCaptureMode sceneCaptureMode = sceneCaptureMode();
-		TickSnapshot.SceneCaptureSummary summary = newSceneCaptureSummary(sceneCaptureMode);
-		snapshot.sceneCaptureSummary = summary;
-
-		try
-		{
-			if (sceneCaptureMode == SceneCaptureMode.STATIC_SCENE_INDEX_DIAGNOSTIC)
-			{
-				captureSceneWithStaticIndex(snapshot, summary);
-				return;
-			}
-
-			Player localPlayer = client.getLocalPlayer();
-
-			if (localPlayer == null || localPlayer.getWorldLocation() == null)
-			{
-				snapshot.sceneObjects = new TickSnapshot.SceneObjectSnapshot[0];
-				snapshot.groundItems = new TickSnapshot.GroundItemSnapshot[0];
-				return;
-			}
-
-			WorldView worldView = client.getTopLevelWorldView();
-			Scene scene = worldView == null ? client.getScene() : worldView.getScene();
-
-			if (scene == null || scene.getTiles() == null)
-			{
-				snapshot.sceneObjects = new TickSnapshot.SceneObjectSnapshot[0];
-				snapshot.groundItems = new TickSnapshot.GroundItemSnapshot[0];
-				return;
-			}
-
-			WorldPoint localWorld = localPlayer.getWorldLocation();
-			int plane = localWorld.getPlane();
-			Tile[][][] tiles = scene.getTiles();
-
-			if (plane < 0 || plane >= tiles.length || tiles[plane] == null)
-			{
-				snapshot.sceneObjects = new TickSnapshot.SceneObjectSnapshot[0];
-				snapshot.groundItems = new TickSnapshot.GroundItemSnapshot[0];
-				return;
-			}
-
-			int baseX = worldView == null ? scene.getBaseX() : worldView.getBaseX();
-			int baseY = worldView == null ? scene.getBaseY() : worldView.getBaseY();
-			int centerSceneX = localWorld.getX() - baseX;
-			int centerSceneY = localWorld.getY() - baseY;
-			Tile[][] planeTiles = tiles[plane];
-			List<TickSnapshot.SceneObjectSnapshot> sceneObjects = new ArrayList<>();
-			List<TickSnapshot.GroundItemSnapshot> groundItems = new ArrayList<>();
-			summary.scannedPlane = plane;
-
-			int minSceneX = sceneCaptureMode.fullCurrentPlaneScan() ? 0 : Math.max(0, centerSceneX - sceneCaptureMode.radius());
-			int maxSceneX = sceneCaptureMode.fullCurrentPlaneScan() ? planeTiles.length - 1 : Math.min(planeTiles.length - 1, centerSceneX + sceneCaptureMode.radius());
-			summary.scanMinSceneX = minSceneX;
-			summary.scanMaxSceneX = maxSceneX;
-			summary.scanWidth = Math.max(0, maxSceneX - minSceneX + 1);
-
-			for (int sceneX = minSceneX; sceneX <= maxSceneX; sceneX++)
-			{
-				Tile[] column = planeTiles[sceneX];
-
-				if (column == null)
-				{
-					continue;
-				}
-
-				int minSceneY = sceneCaptureMode.fullCurrentPlaneScan() ? 0 : Math.max(0, centerSceneY - sceneCaptureMode.radius());
-				int maxSceneY = sceneCaptureMode.fullCurrentPlaneScan() ? column.length - 1 : Math.min(column.length - 1, centerSceneY + sceneCaptureMode.radius());
-				summary.scanMinSceneY = summary.scannedTiles == 0 ? minSceneY : Math.min(summary.scanMinSceneY, minSceneY);
-				summary.scanMaxSceneY = summary.scannedTiles == 0 ? maxSceneY : Math.max(summary.scanMaxSceneY, maxSceneY);
-
-				for (int sceneY = minSceneY; sceneY <= maxSceneY; sceneY++)
-				{
-					Tile tile = column[sceneY];
-
-					if (tile == null)
-					{
-						continue;
-					}
-
-					summary.scannedTiles++;
-					boolean tileHadObjects = captureTileObjects(tile, sceneObjects, summary);
-					boolean tileHadGroundItems = captureTileGroundItems(tile, groundItems, summary);
-
-					if (tileHadObjects || tileHadGroundItems)
-					{
-						summary.tilesWithObjects++;
-					}
-				}
-			}
-
-			summary.sceneObjectsCaptured = sceneObjects.size();
-			summary.groundItemsCaptured = groundItems.size();
-			summary.sceneObjectCapHit = sceneObjects.size() >= sceneCaptureMode.maxSceneObjects() || summary.sceneObjectsSkippedByCap > 0;
-			summary.groundItemCapHit = groundItems.size() >= MAX_GROUND_ITEMS || summary.groundItemsSkippedByCap > 0;
-			summary.scanHeight = Math.max(0, summary.scanMaxSceneY - summary.scanMinSceneY + 1);
-			summary.captureRatio = summary.sceneObjectsSeen == 0 ? 1.0 : (double) summary.sceneObjectsCaptured / (double) summary.sceneObjectsSeen;
-			snapshot.sceneObjects = sceneObjects.toArray(new TickSnapshot.SceneObjectSnapshot[0]);
-			snapshot.groundItems = groundItems.toArray(new TickSnapshot.GroundItemSnapshot[0]);
-		}
-		finally
-		{
-			snapshot.sceneCaptureDurationMillis = elapsedMillis(sceneStartNanos);
-		}
-	}
-
-	private SceneCaptureMode sceneCaptureMode()
-	{
-		SceneCaptureMode mode = config.sceneCaptureMode();
-		return mode == null ? SceneCaptureMode.LOCAL_DEFAULT : mode;
-	}
-
-	private TickSnapshot.SceneCaptureSummary newSceneCaptureSummary(SceneCaptureMode mode)
-	{
-		TickSnapshot.SceneCaptureSummary summary = new TickSnapshot.SceneCaptureSummary();
-		summary.sceneCaptureMode = mode.name();
-		summary.fullCurrentPlaneScan = mode.fullCurrentPlaneScan();
-		summary.configuredRadius = mode.radius();
-		summary.configuredMaxSceneObjects = mode.maxSceneObjects();
-		summary.scanRadius = mode.radius();
-		summary.maxSceneObjects = mode.maxSceneObjects();
-		summary.maxGroundItems = MAX_GROUND_ITEMS;
-		return summary;
-	}
-
-	private void captureSceneWithStaticIndex(TickSnapshot snapshot, TickSnapshot.SceneCaptureSummary captureSummary)
-	{
-		long updateStartNanos = System.nanoTime();
-		TickSnapshot.SceneIndexSummary indexSummary = new TickSnapshot.SceneIndexSummary();
-		TickSnapshot.SceneProjectionSummary projectionSummary = new TickSnapshot.SceneProjectionSummary();
-		TickSnapshot.SceneObjectDeltas deltas = new TickSnapshot.SceneObjectDeltas();
-		List<TickSnapshot.SceneObjectSnapshot> newObjects = new ArrayList<>();
-		List<TickSnapshot.SceneObjectSnapshot> updatedObjects = new ArrayList<>();
-		List<TickSnapshot.SceneObjectSnapshot> despawnedObjects = new ArrayList<>();
-		snapshot.sceneIndexSummary = indexSummary;
-		snapshot.sceneProjectionSummary = projectionSummary;
-		snapshot.sceneObjectDeltas = deltas;
-		snapshot.sceneObjects = new TickSnapshot.SceneObjectSnapshot[0];
-		snapshot.groundItems = new TickSnapshot.GroundItemSnapshot[0];
-
-		SceneContext context = sceneContext();
-
-		if (context == null)
-		{
-			indexSummary.sceneCaptureMode = SceneCaptureMode.STATIC_SCENE_INDEX_DIAGNOSTIC.name();
-			indexSummary.indexEnabled = true;
-			indexSummary.resyncReason = "scene unavailable";
-			return;
-		}
-
-		int rescanInterval = Math.max(0, config.sceneIndexRescanIntervalTicks());
-		boolean rescanDue = rescanInterval > 0 && lastSceneIndexResyncTick >= 0 && tickId - lastSceneIndexResyncTick >= rescanInterval;
-		boolean planeChanged = sceneIndexPlane != -1 && sceneIndexPlane != context.plane;
-		boolean shouldFullResync = sceneObjectIndex.isEmpty() || sceneIndexNeedsFullResync || rescanDue || planeChanged;
-
-		if (planeChanged)
-		{
-			clearSceneIndex("planeChanged");
-		}
-
-		if (rescanDue)
-		{
-			sceneIndexResyncReason = "periodicResync";
-		}
-
-		if (shouldFullResync)
-		{
-			long buildStartNanos = System.nanoTime();
-			fullResyncSceneIndex(context, captureSummary, indexSummary, newObjects, updatedObjects);
-			indexSummary.sceneIndexBuildDurationMillis = elapsedMillis(buildStartNanos);
-			indexSummary.fullResyncThisTick = true;
-			indexSummary.resyncReason = sceneIndexResyncReason;
-			sceneIndexNeedsFullResync = false;
-			sceneIndexResyncReason = null;
-			sceneIndexPlane = context.plane;
-			lastSceneIndexResyncTick = tickId;
-		}
-
-		collectDirtySceneDeltas(newObjects, updatedObjects, despawnedObjects);
-		indexSummary.sceneIndexUpdateDurationMillis = elapsedMillis(updateStartNanos);
-		indexSummary.sceneCaptureMode = SceneCaptureMode.STATIC_SCENE_INDEX_DIAGNOSTIC.name();
-		indexSummary.indexEnabled = true;
-		indexSummary.indexObjectCount = sceneObjectIndex.size();
-		indexSummary.presentObjectCount = presentSceneIndexObjectCount();
-		indexSummary.newlyIndexedCount = newObjects.size();
-		indexSummary.updatedCount = updatedObjects.size();
-		indexSummary.despawnedCount = despawnedObjects.size();
-		indexSummary.maxSceneIndexObjects = maxSceneIndexObjects();
-		indexSummary.indexCapHit = sceneObjectIndex.size() >= maxSceneIndexObjects();
-		deltas.newObjects = newObjects.toArray(new TickSnapshot.SceneObjectSnapshot[0]);
-		deltas.updatedObjects = updatedObjects.toArray(new TickSnapshot.SceneObjectSnapshot[0]);
-		deltas.despawnedObjects = despawnedObjects.toArray(new TickSnapshot.SceneObjectSnapshot[0]);
-		refreshSceneProjections(snapshot, context, projectionSummary);
-		captureSummary.sceneObjectsSeen = indexSummary.presentObjectCount;
-		captureSummary.sceneObjectsCaptured = indexSummary.presentObjectCount;
-		captureSummary.captureRatio = 1.0;
-	}
-
-	private SceneContext sceneContext()
-	{
-		Player localPlayer = client.getLocalPlayer();
-
-		if (localPlayer == null || localPlayer.getWorldLocation() == null)
-		{
-			return null;
-		}
-
-		WorldView worldView = client.getTopLevelWorldView();
-		Scene scene = worldView == null ? client.getScene() : worldView.getScene();
-
-		if (scene == null || scene.getTiles() == null)
-		{
-			return null;
-		}
-
-		WorldPoint localWorld = localPlayer.getWorldLocation();
-		int plane = localWorld.getPlane();
-		Tile[][][] tiles = scene.getTiles();
-
-		if (plane < 0 || plane >= tiles.length || tiles[plane] == null)
-		{
-			return null;
-		}
-
-		SceneContext context = new SceneContext();
-		context.worldView = worldView;
-		context.scene = scene;
-		context.localWorld = localWorld;
-		context.plane = plane;
-		context.planeTiles = tiles[plane];
-		context.baseX = worldView == null ? scene.getBaseX() : worldView.getBaseX();
-		context.baseY = worldView == null ? scene.getBaseY() : worldView.getBaseY();
-		context.centerSceneX = localWorld.getX() - context.baseX;
-		context.centerSceneY = localWorld.getY() - context.baseY;
-		return context;
-	}
-
-	private void fullResyncSceneIndex(SceneContext context, TickSnapshot.SceneCaptureSummary captureSummary, TickSnapshot.SceneIndexSummary indexSummary, List<TickSnapshot.SceneObjectSnapshot> newObjects, List<TickSnapshot.SceneObjectSnapshot> updatedObjects)
-	{
-		int maxIndexObjects = maxSceneIndexObjects();
-		Set<String> seenKeys = new HashSet<>();
-		int minSceneX = 0;
-		int maxSceneX = context.planeTiles.length - 1;
-		captureSummary.scannedPlane = context.plane;
-		captureSummary.scanMinSceneX = minSceneX;
-		captureSummary.scanMaxSceneX = maxSceneX;
-		captureSummary.scanWidth = Math.max(0, maxSceneX - minSceneX + 1);
-
-		for (int sceneX = minSceneX; sceneX <= maxSceneX; sceneX++)
-		{
-			Tile[] column = context.planeTiles[sceneX];
-
-			if (column == null)
-			{
-				continue;
-			}
-
-			int minSceneY = 0;
-			int maxSceneY = column.length - 1;
-			captureSummary.scanMinSceneY = captureSummary.scannedTiles == 0 ? minSceneY : Math.min(captureSummary.scanMinSceneY, minSceneY);
-			captureSummary.scanMaxSceneY = captureSummary.scannedTiles == 0 ? maxSceneY : Math.max(captureSummary.scanMaxSceneY, maxSceneY);
-
-			for (int sceneY = minSceneY; sceneY <= maxSceneY; sceneY++)
-			{
-				Tile tile = column[sceneY];
-
-				if (tile == null)
-				{
-					continue;
-				}
-
-				captureSummary.scannedTiles++;
-				if (indexTileObjects(tile, captureSummary, seenKeys, maxIndexObjects, newObjects, updatedObjects))
-				{
-					captureSummary.tilesWithObjects++;
-				}
-			}
-		}
-
-		captureSummary.scanHeight = Math.max(0, captureSummary.scanMaxSceneY - captureSummary.scanMinSceneY + 1);
-		for (SceneIndexEntry entry : sceneObjectIndex.values())
-		{
-			if (entry.present && entry.plane == context.plane && !seenKeys.contains(entry.objectKey))
-			{
-				entry.present = false;
-				entry.despawnedTick = tickId;
-				entry.lastUpdatedTick = tickId;
-				entry.source = "refreshedScan";
-				dirtySceneObjectKeys.add(entry.objectKey);
-			}
-		}
-	}
-
-	private boolean indexTileObjects(Tile tile, TickSnapshot.SceneCaptureSummary summary, Set<String> seenKeys, int maxIndexObjects, List<TickSnapshot.SceneObjectSnapshot> newObjects, List<TickSnapshot.SceneObjectSnapshot> updatedObjects)
-	{
-		boolean hadObjects = false;
-		WallObject wallObject = tile.getWallObject();
-		hadObjects |= indexSceneObject("WALL_OBJECT", wallObject, wallObject == null ? -1 : wallObject.getOrientationA(), "initialFullPlaneScan", summary, seenKeys, maxIndexObjects, newObjects, updatedObjects, false);
-		hadObjects |= indexSceneObject("GROUND_OBJECT", tile.getGroundObject(), -1, "initialFullPlaneScan", summary, seenKeys, maxIndexObjects, newObjects, updatedObjects, false);
-		hadObjects |= indexSceneObject("DECORATIVE_OBJECT", tile.getDecorativeObject(), -1, "initialFullPlaneScan", summary, seenKeys, maxIndexObjects, newObjects, updatedObjects, false);
-		GameObject[] gameObjects = tile.getGameObjects();
-
-		if (gameObjects == null)
-		{
-			return hadObjects;
-		}
-
-		for (GameObject gameObject : gameObjects)
-		{
-			hadObjects |= indexSceneObject("GAME_OBJECT", gameObject, gameObject == null ? -1 : gameObject.getOrientation(), "initialFullPlaneScan", summary, seenKeys, maxIndexObjects, newObjects, updatedObjects, true);
-		}
-
-		return hadObjects;
-	}
-
-	private boolean indexSceneObject(String kind, TileObject object, int orientation, String source, TickSnapshot.SceneCaptureSummary summary, Set<String> seenKeys, int maxIndexObjects, List<TickSnapshot.SceneObjectSnapshot> newObjects, List<TickSnapshot.SceneObjectSnapshot> updatedObjects, boolean countNull)
-	{
-		if (object == null)
-		{
-			if (countNull)
-			{
-				summary.nullObjectsSkipped++;
-			}
-			return false;
-		}
-
-		incrementSceneObjectSeen(summary, kind);
-		summary.sceneObjectsSeen++;
-		String key = sceneObjectKey(kind, object, orientation);
-		seenKeys.add(key);
-		SceneIndexEntry existing = sceneObjectIndex.get(key);
-
-		if (existing == null && sceneObjectIndex.size() >= maxIndexObjects)
-		{
-			incrementSceneObjectSkippedByCap(summary, kind);
-			summary.sceneObjectsSkippedByCap++;
-			summary.sceneObjectCapHit = true;
-			return true;
-		}
-
-		TickSnapshot.SceneObjectSnapshot snapshot = sceneObjectSnapshot(kind, object, orientation, source, false);
-
-		if (existing == null)
-		{
-			SceneIndexEntry entry = SceneIndexEntry.from(snapshot, tickId);
-			sceneObjectIndex.put(key, entry);
-			newObjects.add(snapshotFromIndex(entry, false));
-		}
-		else
-		{
-			boolean changed = existing.updateFrom(snapshot, tickId, source);
-			if (changed)
-			{
-				updatedObjects.add(snapshotFromIndex(existing, false));
-			}
-		}
-
-		incrementSceneObjectCaptured(summary, kind);
-		return true;
-	}
-
-	private void indexSceneObjectFromEvent(String kind, TileObject object, int orientation)
-	{
-		if (object == null)
-		{
-			return;
-		}
-
-		String key = sceneObjectKey(kind, object, orientation);
-		if (!sceneObjectIndex.containsKey(key) && sceneObjectIndex.size() >= maxSceneIndexObjects())
-		{
-			return;
-		}
-
-		TickSnapshot.SceneObjectSnapshot snapshot = sceneObjectSnapshot(kind, object, orientation, "spawnedEvent", false);
-		SceneIndexEntry entry = sceneObjectIndex.get(key);
-
-		if (entry == null)
-		{
-			sceneObjectIndex.put(key, SceneIndexEntry.from(snapshot, tickId));
-		}
-		else
-		{
-			entry.updateFrom(snapshot, tickId, "spawnedEvent");
-		}
-
-		dirtySceneObjectKeys.add(key);
-	}
-
-	private void despawnSceneObjectFromEvent(String kind, TileObject object, int orientation)
-	{
-		if (object == null)
-		{
-			return;
-		}
-
-		String key = sceneObjectKey(kind, object, orientation);
-		SceneIndexEntry entry = sceneObjectIndex.get(key);
-
-		if (entry == null)
-		{
-			TickSnapshot.SceneObjectSnapshot snapshot = sceneObjectSnapshot(kind, object, orientation, "despawnedEvent", false);
-			entry = SceneIndexEntry.from(snapshot, tickId);
-			sceneObjectIndex.put(key, entry);
-		}
-
-		entry.present = false;
-		entry.despawnedTick = tickId;
-		entry.lastUpdatedTick = tickId;
-		entry.source = "despawnedEvent";
-		dirtySceneObjectKeys.add(key);
-
-		if (!config.keepDespawnedSceneObjectsInIndex())
-		{
-			sceneObjectIndex.remove(key);
-			sceneProjectionCache.remove(key);
-		}
-	}
-
-	private void collectDirtySceneDeltas(List<TickSnapshot.SceneObjectSnapshot> newObjects, List<TickSnapshot.SceneObjectSnapshot> updatedObjects, List<TickSnapshot.SceneObjectSnapshot> despawnedObjects)
-	{
-		for (String key : new ArrayList<>(dirtySceneObjectKeys))
-		{
-			SceneIndexEntry entry = sceneObjectIndex.get(key);
-
-			if (entry == null)
-			{
-				continue;
-			}
-
-			TickSnapshot.SceneObjectSnapshot snapshot = snapshotFromIndex(entry, false);
-
-			if (!entry.present)
-			{
-				despawnedObjects.add(snapshot);
-			}
-			else if (entry.firstSeenTick == tickId)
-			{
-				newObjects.add(snapshot);
-			}
-			else
-			{
-				updatedObjects.add(snapshot);
-			}
-		}
-
-		dirtySceneObjectKeys.clear();
-	}
-
-	private void refreshSceneProjections(TickSnapshot snapshot, SceneContext context, TickSnapshot.SceneProjectionSummary projectionSummary)
-	{
-		long projectionStartNanos = System.nanoTime();
-		SceneProjectionRefreshMode refreshMode = sceneProjectionRefreshMode();
-		String stateHash = projectionStateHash(context);
-		boolean stateChanged = !stateHash.equals(lastSceneProjectionStateHash);
-		List<TickSnapshot.SceneObjectSnapshot> refs = new ArrayList<>();
-		projectionSummary.projectionStateHash = stateHash;
-		projectionSummary.projectionStateChanged = stateChanged;
-		projectionSummary.projectionRefreshMode = refreshMode.name();
-
-		for (SceneIndexEntry entry : sceneObjectIndex.values())
-		{
-			if (!entry.present)
-			{
-				continue;
-			}
-
-			TickSnapshot.SceneObjectSnapshot cached = sceneProjectionCache.get(entry.objectKey);
-			boolean shouldUpdate = stateChanged || cached == null || shouldRefreshProjection(entry, cached, context, refreshMode);
-
-			if (shouldUpdate)
-			{
-				projectionSummary.projectionCandidatesConsidered++;
-				TickSnapshot.SceneObjectSnapshot projected = snapshotFromIndex(entry, false);
-				TileObject object = findTileObjectForEntry(context, entry);
-
-				if (object != null)
-				{
-					applySceneObjectProjection(projected, object);
-				}
-				else
-				{
-					projected.geometryWarning = "object not found for projection refresh";
-				}
-
-				projected.projectionVersion = tickId;
-				sceneProjectionCache.put(entry.objectKey, projected);
-				cached = projected;
-				projectionSummary.projectionObjectsUpdated++;
-			}
-			else
-			{
-				projectionSummary.projectionObjectsReused++;
-			}
-
-			if (cached != null && (cached.onScreen || cached.geometryAvailable))
-			{
-				refs.add(cached);
-			}
-		}
-
-		lastSceneProjectionStateHash = stateHash;
-		snapshot.visibleSceneObjectRefs = refs.toArray(new TickSnapshot.SceneObjectSnapshot[0]);
-		projectionSummary.visibleObjectCount = refs.size();
-
-		for (TickSnapshot.SceneObjectSnapshot ref : refs)
-		{
-			if (ref.onScreen)
-			{
-				projectionSummary.onScreenObjectCount++;
-			}
-
-			if (ref.geometryAvailable)
-			{
-				projectionSummary.geometryAvailableCount++;
-			}
-			else
-			{
-				projectionSummary.missingGeometryCount++;
-			}
-		}
-
-		projectionSummary.projectionDurationMillis = elapsedMillis(projectionStartNanos);
-	}
-
-	private boolean shouldRefreshProjection(SceneIndexEntry entry, TickSnapshot.SceneObjectSnapshot cached, SceneContext context, SceneProjectionRefreshMode refreshMode)
-	{
-		if (refreshMode == SceneProjectionRefreshMode.ALL_PRESENT_OBJECTS)
-		{
-			return true;
-		}
-
-		if (refreshMode == SceneProjectionRefreshMode.VISIBLE_ONLY)
-		{
-			return cached.onScreen;
-		}
-
-		if (cached.onScreen)
-		{
-			return true;
-		}
-
-		int radius = SceneCaptureMode.STATIC_SCENE_INDEX_DIAGNOSTIC.radius();
-		return Math.abs(entry.sceneX - context.centerSceneX) <= radius && Math.abs(entry.sceneY - context.centerSceneY) <= radius;
-	}
-
-	private TileObject findTileObjectForEntry(SceneContext context, SceneIndexEntry entry)
-	{
-		if (entry.sceneX < 0 || entry.sceneX >= context.planeTiles.length)
-		{
-			return null;
-		}
-
-		Tile[] column = context.planeTiles[entry.sceneX];
-
-		if (column == null || entry.sceneY < 0 || entry.sceneY >= column.length)
-		{
-			return null;
-		}
-
-		Tile tile = column[entry.sceneY];
-
-		if (tile == null)
-		{
-			return null;
-		}
-
-		if ("WALL_OBJECT".equals(entry.kind))
-		{
-			return tile.getWallObject();
-		}
-
-		if ("GROUND_OBJECT".equals(entry.kind))
-		{
-			return tile.getGroundObject();
-		}
-
-		if ("DECORATIVE_OBJECT".equals(entry.kind))
-		{
-			return tile.getDecorativeObject();
-		}
-
-		GameObject[] gameObjects = tile.getGameObjects();
-
-		if (gameObjects == null)
-		{
-			return null;
-		}
-
-		for (GameObject gameObject : gameObjects)
-		{
-			if (gameObject != null && sceneObjectKey("GAME_OBJECT", gameObject, gameObject.getOrientation()).equals(entry.objectKey))
-			{
-				return gameObject;
-			}
-		}
-
-		return null;
-	}
-
-	private String projectionStateHash(SceneContext context)
-	{
-		Canvas canvas = client.getCanvas();
-		String text = context.plane
-				+ ":" + client.getCameraX()
-				+ ":" + client.getCameraY()
-				+ ":" + client.getCameraZ()
-				+ ":" + client.getCameraPitch()
-				+ ":" + client.getCameraYaw()
-				+ ":" + client.getViewportXOffset()
-				+ ":" + client.getViewportYOffset()
-				+ ":" + client.getViewportWidth()
-				+ ":" + client.getViewportHeight()
-				+ ":" + (canvas == null ? -1 : canvas.getWidth())
-				+ ":" + (canvas == null ? -1 : canvas.getHeight())
-				+ ":" + context.localWorld.getX()
-				+ ":" + context.localWorld.getY();
-		return hashName(text);
-	}
-
-	private int maxSceneIndexObjects()
-	{
-		return Math.max(1, config.maxSceneIndexObjects());
-	}
-
-	private SceneProjectionRefreshMode sceneProjectionRefreshMode()
-	{
-		SceneProjectionRefreshMode mode = config.sceneProjectionRefreshMode();
-		return mode == null ? SceneProjectionRefreshMode.VISIBLE_AND_NEARBY : mode;
-	}
-
-	private int presentSceneIndexObjectCount()
-	{
-		int count = 0;
-
-		for (SceneIndexEntry entry : sceneObjectIndex.values())
-		{
-			if (entry.present)
-			{
-				count++;
-			}
-		}
-
-		return count;
-	}
-
-	private TickSnapshot.SceneObjectSnapshot snapshotFromIndex(SceneIndexEntry entry, boolean includeProjection)
-	{
-		TickSnapshot.SceneObjectSnapshot snapshot = new TickSnapshot.SceneObjectSnapshot();
-		snapshot.objectKey = entry.objectKey;
-		snapshot.kind = entry.kind;
-		snapshot.id = entry.id;
-		snapshot.hash = entry.hash;
-		snapshot.objectName = entry.objectName;
-		snapshot.objectNameSource = entry.objectNameSource;
-		snapshot.actions = entry.actions;
-		snapshot.worldX = entry.worldX;
-		snapshot.worldY = entry.worldY;
-		snapshot.plane = entry.plane;
-		snapshot.orientation = entry.orientation;
-		snapshot.sceneX = entry.sceneX;
-		snapshot.sceneY = entry.sceneY;
-		snapshot.localX = entry.localX;
-		snapshot.localY = entry.localY;
-		snapshot.firstSeenTick = entry.firstSeenTick;
-		snapshot.lastSeenTick = entry.lastSeenTick;
-		snapshot.lastUpdatedTick = entry.lastUpdatedTick;
-		snapshot.present = entry.present;
-		snapshot.despawnedTick = entry.despawnedTick;
-		snapshot.source = entry.source;
-		return snapshot;
-	}
-
-	private void clearSceneIndex(String reason)
-	{
-		sceneObjectIndex.clear();
-		dirtySceneObjectKeys.clear();
-		sceneProjectionCache.clear();
-		sceneIndexNeedsFullResync = true;
-		sceneIndexResyncReason = reason;
-		sceneIndexPlane = -1;
-		lastSceneIndexResyncTick = -1;
-		lastSceneProjectionStateHash = null;
-	}
-
-
-
-
-	private boolean captureTileObjects(Tile tile, List<TickSnapshot.SceneObjectSnapshot> sceneObjects, TickSnapshot.SceneCaptureSummary summary)
-	{
-		boolean hadObjects = false;
-		WallObject wallObject = tile.getWallObject();
-
-		hadObjects |= addSceneObject(sceneObjects, summary, "WALL_OBJECT", wallObject, wallObject == null ? -1 : wallObject.getOrientationA(), false);
-		hadObjects |= addSceneObject(sceneObjects, summary, "GROUND_OBJECT", tile.getGroundObject(), -1, false);
-		hadObjects |= addSceneObject(sceneObjects, summary, "DECORATIVE_OBJECT", tile.getDecorativeObject(), -1, false);
-
-		GameObject[] gameObjects = tile.getGameObjects();
-
-		if (gameObjects == null)
-		{
-			return hadObjects;
-		}
-
-		for (GameObject gameObject : gameObjects)
-		{
-			hadObjects |= addSceneObject(sceneObjects, summary, "GAME_OBJECT", gameObject, gameObject == null ? -1 : gameObject.getOrientation(), true);
-		}
-
-		return hadObjects;
-	}
-
-	private boolean addSceneObject(List<TickSnapshot.SceneObjectSnapshot> sceneObjects, TickSnapshot.SceneCaptureSummary summary, String kind, TileObject object, int orientation, boolean countNull)
-	{
-		if (object == null)
-		{
-			if (countNull)
-			{
-				summary.nullObjectsSkipped++;
-			}
-
-			return false;
-		}
-
-		incrementSceneObjectSeen(summary, kind);
-		summary.sceneObjectsSeen++;
-
-		if (sceneObjects.size() >= summary.configuredMaxSceneObjects)
-		{
-			incrementSceneObjectSkippedByCap(summary, kind);
-			summary.sceneObjectsSkippedByCap++;
-			return true;
-		}
-
-		TickSnapshot.SceneObjectSnapshot snapshot = sceneObjectSnapshot(kind, object, orientation, "fullSnapshot", true);
-		sceneObjects.add(snapshot);
-		incrementSceneObjectCaptured(summary, kind);
-		return true;
-	}
-
-	private TickSnapshot.SceneObjectSnapshot sceneObjectSnapshot(String kind, TileObject object, int orientation, String source, boolean includeProjection)
-	{
-		WorldPoint worldLocation = object.getWorldLocation();
-		Point sceneLocation = worldLocationToSceneLocation(object);
-		TickSnapshot.SceneObjectSnapshot snapshot = new TickSnapshot.SceneObjectSnapshot();
-		snapshot.kind = kind;
-		snapshot.id = object.getId();
-		snapshot.hash = objectHash(object);
-		snapshot.objectKey = sceneObjectKey(kind, object, orientation);
-		DefinitionName objectName = objectNameLookup(snapshot.id);
-		snapshot.objectName = objectName.name;
-		snapshot.objectNameSource = objectName.source;
-		snapshot.actions = objectActions(snapshot.id);
-		rememberObject(snapshot.id);
-		snapshot.orientation = orientation;
-		snapshot.sceneX = sceneLocation == null ? -1 : sceneLocation.getX();
-		snapshot.sceneY = sceneLocation == null ? -1 : sceneLocation.getY();
-		snapshot.present = true;
-		snapshot.source = source;
-
-		if (worldLocation != null)
-		{
-			snapshot.worldX = worldLocation.getX();
-			snapshot.worldY = worldLocation.getY();
-			snapshot.plane = worldLocation.getPlane();
-		}
-		else
-		{
-			snapshot.plane = object.getPlane();
-		}
-
-		if (includeProjection)
-		{
-			applySceneObjectProjection(snapshot, object);
-		}
-
-		return snapshot;
-	}
-
-	private void incrementSceneObjectSeen(TickSnapshot.SceneCaptureSummary summary, String kind)
-	{
-		if ("GAME_OBJECT".equals(kind))
-		{
-			summary.gameObjectsSeen++;
-		}
-		else if ("WALL_OBJECT".equals(kind))
-		{
-			summary.wallObjectsSeen++;
-		}
-		else if ("DECORATIVE_OBJECT".equals(kind))
-		{
-			summary.decorativeObjectsSeen++;
-		}
-		else if ("GROUND_OBJECT".equals(kind))
-		{
-			summary.groundObjectsSeen++;
-		}
-	}
-
-	private void incrementSceneObjectCaptured(TickSnapshot.SceneCaptureSummary summary, String kind)
-	{
-		if ("GAME_OBJECT".equals(kind))
-		{
-			summary.gameObjectsCaptured++;
-		}
-		else if ("WALL_OBJECT".equals(kind))
-		{
-			summary.wallObjectsCaptured++;
-		}
-		else if ("DECORATIVE_OBJECT".equals(kind))
-		{
-			summary.decorativeObjectsCaptured++;
-		}
-		else if ("GROUND_OBJECT".equals(kind))
-		{
-			summary.groundObjectsCaptured++;
-		}
-	}
-
-	private void incrementSceneObjectSkippedByCap(TickSnapshot.SceneCaptureSummary summary, String kind)
-	{
-		if ("GAME_OBJECT".equals(kind))
-		{
-			summary.gameObjectsSkippedByCap++;
-		}
-		else if ("WALL_OBJECT".equals(kind))
-		{
-			summary.wallObjectsSkippedByCap++;
-		}
-		else if ("DECORATIVE_OBJECT".equals(kind))
-		{
-			summary.decorativeObjectsSkippedByCap++;
-		}
-		else if ("GROUND_OBJECT".equals(kind))
-		{
-			summary.groundObjectsSkippedByCap++;
-		}
-	}
-
-	private Point worldLocationToSceneLocation(TileObject object)
-	{
-		WorldPoint worldLocation = object.getWorldLocation();
-		WorldView worldView = object.getWorldView();
-
-		if (worldLocation == null || worldView == null)
-		{
-			return null;
-		}
-
-		return new Point(worldLocation.getX() - worldView.getBaseX(), worldLocation.getY() - worldView.getBaseY());
-	}
-
-	private Long objectHash(TileObject object)
-	{
-		try
-		{
-			return object == null ? null : object.getHash();
-		}
-		catch (Exception e)
-		{
-			return null;
-		}
-	}
-
-	private String sceneObjectKey(String kind, TileObject object, int orientation)
-	{
-		if (object == null)
-		{
-			return kind + ":missing";
-		}
-
-		WorldPoint worldLocation = object.getWorldLocation();
-		Point sceneLocation = worldLocationToSceneLocation(object);
-		Long hash = objectHash(object);
-		int plane = worldLocation == null ? object.getPlane() : worldLocation.getPlane();
-		int worldX = worldLocation == null ? -1 : worldLocation.getX();
-		int worldY = worldLocation == null ? -1 : worldLocation.getY();
-		int sceneX = sceneLocation == null ? -1 : sceneLocation.getX();
-		int sceneY = sceneLocation == null ? -1 : sceneLocation.getY();
-		return plane + ":" + worldX + ":" + worldY + ":" + sceneX + ":" + sceneY + ":" + kind + ":" + object.getId() + ":" + (hash == null ? "nohash" : hash) + ":" + orientation;
-	}
-
-	private String[] objectActions(int objectId)
-	{
-		try
-		{
-			ObjectComposition composition = client.getObjectDefinition(objectId);
-
-			if (composition == null)
-			{
-				return null;
-			}
-
-			return composition.getActions();
-		}
-		catch (Exception e)
-		{
-			return null;
-		}
-	}
-
-	private void applySceneObjectProjection(TickSnapshot.SceneObjectSnapshot snapshot, TileObject object)
-	{
-		SceneObjectProjection projection = captureSceneObjectProjection(object);
-		snapshot.localX = projection.localX;
-		snapshot.localY = projection.localY;
-		snapshot.canvasLocation = projection.canvasLocation;
-		snapshot.canvasTilePolygon = projection.canvasTilePolygon;
-		snapshot.clickboxBounds = projection.clickboxBounds;
-		snapshot.clickboxPolygon = projection.clickboxPolygon;
-		snapshot.convexHullBounds = projection.convexHullBounds;
-		snapshot.convexHullPolygon = projection.convexHullPolygon;
-		snapshot.onScreen = projection.onScreen;
-		snapshot.geometryAvailable = projection.geometryAvailable;
-		snapshot.geometryWarning = projection.geometryWarning;
-	}
-
-	private SceneObjectProjection captureSceneObjectProjection(TileObject object)
-	{
-		SceneObjectProjection projection = new SceneObjectProjection();
-		List<String> warnings = new ArrayList<>();
-
-		if (object == null)
-		{
-			projection.geometryWarning = "object missing";
-			return projection;
-		}
-
-		try
-		{
-			LocalPoint localLocation = object.getLocalLocation();
-
-			if (localLocation != null)
-			{
-				projection.localX = localLocation.getX();
-				projection.localY = localLocation.getY();
-			}
-			else
-			{
-				warnings.add("local location unavailable");
-			}
-		}
-		catch (Exception e)
-		{
-			warnings.add("local location failed: " + exceptionSummary(e));
-		}
-
-		try
-		{
-			projection.canvasLocation = canvasPointSnapshot(object.getCanvasLocation());
-		}
-		catch (Exception e)
-		{
-			warnings.add("canvas location failed: " + exceptionSummary(e));
-		}
-
-		try
-		{
-			projection.canvasTilePolygon = polygonSnapshot(object.getCanvasTilePoly());
-		}
-		catch (Exception e)
-		{
-			warnings.add("canvas tile polygon failed: " + exceptionSummary(e));
-		}
-
-		try
-		{
-			Shape clickbox = object.getClickbox();
-			projection.clickboxBounds = boundsSnapshot(clickbox);
-			projection.clickboxPolygon = polygonSnapshot(clickbox);
-		}
-		catch (Exception e)
-		{
-			warnings.add("clickbox failed: " + exceptionSummary(e));
-		}
-
-		try
-		{
-			Shape convexHull = tileObjectConvexHull(object);
-			projection.convexHullBounds = boundsSnapshot(convexHull);
-			projection.convexHullPolygon = polygonSnapshot(convexHull);
-		}
-		catch (Exception e)
-		{
-			warnings.add("convex hull failed: " + exceptionSummary(e));
-		}
-
-		projection.geometryAvailable = projection.canvasLocation != null
-				|| projection.canvasTilePolygon != null
-				|| projection.clickboxBounds != null
-				|| projection.clickboxPolygon != null
-				|| projection.convexHullBounds != null
-				|| projection.convexHullPolygon != null;
-		projection.onScreen = projection.geometryAvailable && geometryIntersectsVisibleArea(
-				projection.canvasLocation,
-				combinePolygons(projection.canvasTilePolygon, projection.clickboxPolygon, projection.convexHullPolygon),
-				projection.clickboxBounds,
-				projection.convexHullBounds);
-
-		if (!projection.geometryAvailable && warnings.isEmpty())
-		{
-			warnings.add("projection returned no canvas geometry");
-		}
-
-		if (!warnings.isEmpty())
-		{
-			projection.geometryWarning = String.join("; ", warnings);
-		}
-
-		return projection;
-	}
-
-	private Shape tileObjectConvexHull(TileObject object)
-	{
-		if (object instanceof GameObject)
-		{
-			return ((GameObject) object).getConvexHull();
-		}
-
-		if (object instanceof WallObject)
-		{
-			return ((WallObject) object).getConvexHull();
-		}
-
-		if (object instanceof DecorativeObject)
-		{
-			return ((DecorativeObject) object).getConvexHull();
-		}
-
-		if (object instanceof GroundObject)
-		{
-			return ((GroundObject) object).getConvexHull();
-		}
-
-		return null;
-	}
-
-	private boolean captureTileGroundItems(Tile tile, List<TickSnapshot.GroundItemSnapshot> groundItems, TickSnapshot.SceneCaptureSummary summary)
-	{
-		List<TileItem> tileItems = tile.getGroundItems();
-
-		if (tileItems == null || tileItems.isEmpty())
-		{
-			return false;
-		}
-
-		WorldPoint worldLocation = tile.getWorldLocation();
-		Point sceneLocation = tile.getSceneLocation();
-		boolean hadGroundItems = false;
-
-		for (TileItem item : tileItems)
-		{
-			if (item == null)
-			{
-				summary.nullGroundItemsSkipped++;
-				continue;
-			}
-
-			hadGroundItems = true;
-			summary.groundItemsSeen++;
-
-			if (groundItems.size() >= MAX_GROUND_ITEMS)
-			{
-				summary.groundItemsSkippedByCap++;
-				continue;
-			}
-
-			TickSnapshot.GroundItemSnapshot snapshot = new TickSnapshot.GroundItemSnapshot();
-			snapshot.id = item.getId();
-			DefinitionName itemName = itemNameLookup(snapshot.id);
-			snapshot.itemName = itemName.name;
-			snapshot.itemNameSource = itemName.source;
-			snapshot.quantity = item.getQuantity();
-			rememberItem(snapshot.id);
-			snapshot.sceneX = sceneLocation == null ? -1 : sceneLocation.getX();
-			snapshot.sceneY = sceneLocation == null ? -1 : sceneLocation.getY();
-
-			if (worldLocation != null)
-			{
-				snapshot.worldX = worldLocation.getX();
-				snapshot.worldY = worldLocation.getY();
-				snapshot.plane = worldLocation.getPlane();
-			}
-			else
-			{
-				snapshot.plane = tile.getPlane();
-			}
-
-			applyGroundItemProjection(snapshot, tile);
-			groundItems.add(snapshot);
-		}
-
-		return hadGroundItems;
-	}
-
-	private void applyGroundItemProjection(TickSnapshot.GroundItemSnapshot snapshot, Tile tile)
-	{
-		GroundItemProjection projection = captureGroundItemProjection(tile);
-		snapshot.localX = projection.localX;
-		snapshot.localY = projection.localY;
-		snapshot.canvasTilePolygon = projection.canvasTilePolygon;
-		snapshot.canvasCenter = projection.canvasCenter;
-		snapshot.onScreen = projection.onScreen;
-		snapshot.geometryAvailable = projection.geometryAvailable;
-		snapshot.geometryWarning = projection.geometryWarning;
-	}
-
-	private GroundItemProjection captureGroundItemProjection(Tile tile)
-	{
-		GroundItemProjection projection = new GroundItemProjection();
-		List<String> warnings = new ArrayList<>();
-		LocalPoint localLocation = null;
-
-		if (tile == null)
-		{
-			projection.geometryWarning = "tile missing";
-			return projection;
-		}
-
-		try
-		{
-			localLocation = tile.getLocalLocation();
-
-			if (localLocation != null)
-			{
-				projection.localX = localLocation.getX();
-				projection.localY = localLocation.getY();
-			}
-			else
-			{
-				warnings.add("local location unavailable");
-			}
-		}
-		catch (Exception e)
-		{
-			warnings.add("local location failed: " + exceptionSummary(e));
-		}
-
-		if (localLocation != null)
-		{
-			try
-			{
-				projection.canvasTilePolygon = polygonSnapshot(Perspective.getCanvasTilePoly(client, localLocation));
-				projection.canvasCenter = polygonCenter(projection.canvasTilePolygon);
-			}
-			catch (Exception e)
-			{
-				warnings.add("canvas tile polygon failed: " + exceptionSummary(e));
-			}
-		}
-
-		projection.geometryAvailable = projection.canvasTilePolygon != null || projection.canvasCenter != null;
-		projection.onScreen = projection.geometryAvailable && geometryIntersectsVisibleArea(
-				projection.canvasCenter,
-				projection.canvasTilePolygon);
-
-		if (!projection.geometryAvailable && warnings.isEmpty())
-		{
-			warnings.add("projection returned no canvas geometry");
-		}
-
-		if (!warnings.isEmpty())
-		{
-			projection.geometryWarning = String.join("; ", warnings);
-		}
-
-		return projection;
-	}
-
-	private TickSnapshot.PlayerSnapshot toPlayerSnapshot(Player player)
-	{
-		TickSnapshot.PlayerSnapshot playerSnapshot = new TickSnapshot.PlayerSnapshot();
-
-		playerSnapshot.index = player.getId();
-		playerSnapshot.nameHash = hashName(player.getName());
-		playerSnapshot.combatLevel = player.getCombatLevel();
-
-		WorldPoint worldLocation = player.getWorldLocation();
-
-		if (worldLocation != null)
-		{
-			playerSnapshot.worldX = worldLocation.getX();
-			playerSnapshot.worldY = worldLocation.getY();
-			playerSnapshot.plane = worldLocation.getPlane();
-		}
-
-		playerSnapshot.animation = player.getAnimation();
-		playerSnapshot.poseAnimation = player.getPoseAnimation();
-		playerSnapshot.orientation = player.getOrientation();
-		playerSnapshot.healthRatio = player.getHealthRatio();
-		playerSnapshot.healthScale = player.getHealthScale();
-		applyActorProjection(playerSnapshot, player);
-
-		return playerSnapshot;
-	}
-
-	private void applyActorProjection(TickSnapshot.NpcSnapshot snapshot, Actor actor)
-	{
-		ActorProjection projection = captureActorProjection(actor);
-		snapshot.localX = projection.localX;
-		snapshot.localY = projection.localY;
-		snapshot.canvasPoint = projection.canvasPoint;
-		snapshot.clickboxBounds = projection.clickboxBounds;
-		snapshot.convexHullBounds = projection.convexHullBounds;
-		snapshot.onScreen = projection.onScreen;
-		snapshot.geometryAvailable = projection.geometryAvailable;
-		snapshot.geometryWarning = projection.geometryWarning;
-	}
-
-	private void applyActorProjection(TickSnapshot.PlayerSnapshot snapshot, Actor actor)
-	{
-		ActorProjection projection = captureActorProjection(actor);
-		snapshot.localX = projection.localX;
-		snapshot.localY = projection.localY;
-		snapshot.canvasPoint = projection.canvasPoint;
-		snapshot.clickboxBounds = projection.clickboxBounds;
-		snapshot.convexHullBounds = projection.convexHullBounds;
-		snapshot.onScreen = projection.onScreen;
-		snapshot.geometryAvailable = projection.geometryAvailable;
-		snapshot.geometryWarning = projection.geometryWarning;
-	}
-
-	private ActorProjection captureActorProjection(Actor actor)
-	{
-		ActorProjection projection = new ActorProjection();
-		List<String> warnings = new ArrayList<>();
-
-		if (actor == null)
-		{
-			projection.geometryWarning = "actor missing";
-			return projection;
-		}
-
-		LocalPoint localLocation = null;
-
-		try
-		{
-			localLocation = actor.getLocalLocation();
-
-			if (localLocation != null)
-			{
-				projection.localX = localLocation.getX();
-				projection.localY = localLocation.getY();
-			}
-			else
-			{
-				warnings.add("local location unavailable");
-			}
-		}
-		catch (Exception e)
-		{
-			warnings.add("local location failed: " + exceptionSummary(e));
-		}
-
-		if (localLocation != null)
-		{
-			try
-			{
-				Point canvasPoint = Perspective.localToCanvas(client, localLocation, actorPlane(actor));
-				projection.canvasPoint = canvasPointSnapshot(canvasPoint);
-			}
-			catch (Exception e)
-			{
-				warnings.add("canvas projection failed: " + exceptionSummary(e));
-			}
-		}
-
-		try
-		{
-			projection.convexHullBounds = boundsSnapshot(actor.getConvexHull());
-		}
-		catch (Exception e)
-		{
-			warnings.add("convex hull failed: " + exceptionSummary(e));
-		}
-
-		projection.geometryAvailable = projection.canvasPoint != null
-				|| projection.clickboxBounds != null
-				|| projection.convexHullBounds != null;
-		projection.onScreen = projection.geometryAvailable && geometryIntersectsVisibleArea(
-				projection.canvasPoint,
-				projection.clickboxBounds,
-				projection.convexHullBounds);
-
-		if (!projection.geometryAvailable && warnings.isEmpty())
-		{
-			warnings.add("projection returned no canvas geometry");
-		}
-
-		if (!warnings.isEmpty())
-		{
-			projection.geometryWarning = String.join("; ", warnings);
-		}
-
-		return projection;
-	}
-
-	private int actorPlane(Actor actor)
-	{
-		WorldPoint worldLocation = actor.getWorldLocation();
-
-		if (worldLocation != null)
-		{
-			return worldLocation.getPlane();
-		}
-
-		return client.getPlane();
 	}
 
 	private TickSnapshot.CanvasPoint canvasPointSnapshot(Point point)
@@ -5632,8 +1764,7 @@ public class TelemetryPlugin extends Plugin
 		{
 			payload.put("status", "FAIL");
 			payload.put("reason", "world tile missing");
-			payload.put("geometryAvailable", false);
-			payload.put("onScreen", false);
+			addTileProjectionReadiness(payload, false, false, false, null, null);
 			return payload;
 		}
 		if (plane != client.getPlane())
@@ -5655,8 +1786,7 @@ public class TelemetryPlugin extends Plugin
 		{
 			payload.put("status", "WARN");
 			payload.put("reason", "world tile is outside the loaded scene");
-			payload.put("geometryAvailable", false);
-			payload.put("onScreen", false);
+			addTileProjectionReadiness(payload, false, false, false, null, null);
 			if (!warnings.isEmpty())
 			{
 				payload.put("warnings", warnings);
@@ -5692,8 +1822,8 @@ public class TelemetryPlugin extends Plugin
 		}
 		boolean geometryAvailable = polygon != null || center != null || tileBounds != null;
 		boolean onScreen = geometryAvailable && geometryIntersectsVisibleArea(center, polygon, tileBounds);
-		payload.put("geometryAvailable", geometryAvailable);
-		payload.put("onScreen", onScreen);
+		boolean aimPointVisible = center != null && geometryIntersectsVisibleArea(center);
+		addTileProjectionReadiness(payload, geometryAvailable, onScreen, aimPointVisible, polygon, center);
 		payload.put("canvasTilePolygon", polygon);
 		payload.put("canvasTileBounds", boundsPayload(tileBounds));
 		if (center != null)
@@ -5717,6 +1847,65 @@ public class TelemetryPlugin extends Plugin
 			payload.put("reason", warnings.get(0));
 		}
 		return payload;
+	}
+
+	static boolean bankUiKnown(TickSnapshot snapshot)
+	{
+		return snapshot != null && snapshot.bankUi != null;
+	}
+
+	private Map<String, Object> boundsPayload(TickSnapshot.Bounds bounds)
+	{
+		if (bounds == null)
+		{
+			return null;
+		}
+		return Map.of("x", bounds.x, "y", bounds.y, "width", bounds.w, "height", bounds.h);
+	}
+
+	static void addTileProjectionReadiness(
+			Map<String, Object> payload,
+			boolean geometryAvailable,
+			boolean onScreen,
+			boolean aimPointVisible,
+			int[][] polygon,
+			TickSnapshot.CanvasPoint aimPoint)
+	{
+		boolean actionable = tileProjectionActionable(
+				geometryAvailable,
+				onScreen,
+				aimPointVisible,
+				polygon,
+				aimPoint);
+		payload.put("geometryAvailable", geometryAvailable);
+		payload.put("onScreen", onScreen);
+		payload.put("visible", onScreen);
+		payload.put("actionable", actionable);
+		payload.put("actionableByCanvas", actionable);
+	}
+
+	static boolean tileProjectionActionable(
+			boolean geometryAvailable,
+			boolean onScreen,
+			boolean aimPointVisible,
+			int[][] polygon,
+			TickSnapshot.CanvasPoint aimPoint)
+	{
+		if (!geometryAvailable || !onScreen || !aimPointVisible || polygon == null || polygon.length < 3 || aimPoint == null)
+		{
+			return false;
+		}
+
+		Polygon shape = new Polygon();
+		for (int[] point : polygon)
+		{
+			if (point == null || point.length < 2)
+			{
+				return false;
+			}
+			shape.addPoint(point[0], point[1]);
+		}
+		return shape.contains(aimPoint.x, aimPoint.y);
 	}
 
 	private boolean isDegeneratePolygon(int[][] polygon)
@@ -5795,187 +1984,6 @@ public class TelemetryPlugin extends Plugin
 		return e == null ? "unknown" : e.getClass().getSimpleName();
 	}
 
-	private static class CompactProjectionGeometryOptions
-	{
-		private final boolean includeClickableHull;
-		private final boolean includeConvexHull;
-		private final boolean includeCanvasTilePolygon;
-		private final boolean includeAnyPolygons;
-		private final int maxRefs;
-		private final Integer playerSceneX;
-		private final Integer playerSceneY;
-		private final Integer playerPlane;
-		private int refsWithPolygons;
-		private int refsSkippedByCap;
-		private boolean capHit;
-		private int hullsEmitted;
-		private int hullDroppedOffscreen;
-		private int hullDroppedNoCanvasIntersection;
-		private int hullDroppedByCap;
-		private int hullDroppedNullClickbox;
-
-		private CompactProjectionGeometryOptions(
-				boolean includeClickableHull,
-				boolean includeConvexHull,
-				boolean includeCanvasTilePolygon,
-				int maxRefs,
-				Integer playerSceneX,
-				Integer playerSceneY,
-				Integer playerPlane)
-		{
-			this.includeClickableHull = includeClickableHull;
-			this.includeConvexHull = includeConvexHull;
-			this.includeCanvasTilePolygon = includeCanvasTilePolygon;
-			this.includeAnyPolygons = includeClickableHull || includeConvexHull || includeCanvasTilePolygon;
-			this.maxRefs = maxRefs;
-			this.playerSceneX = playerSceneX;
-			this.playerSceneY = playerSceneY;
-			this.playerPlane = playerPlane;
-		}
-	}
-
-	private static class ActorProjection
-	{
-		private Integer localX;
-		private Integer localY;
-		private TickSnapshot.CanvasPoint canvasPoint;
-		private TickSnapshot.Bounds clickboxBounds;
-		private TickSnapshot.Bounds convexHullBounds;
-		private boolean onScreen;
-		private boolean geometryAvailable;
-		private String geometryWarning;
-	}
-
-	private static class SceneObjectProjection
-	{
-		private Integer localX;
-		private Integer localY;
-		private TickSnapshot.CanvasPoint canvasLocation;
-		private int[][] canvasTilePolygon;
-		private TickSnapshot.Bounds clickboxBounds;
-		private int[][] clickboxPolygon;
-		private TickSnapshot.Bounds convexHullBounds;
-		private int[][] convexHullPolygon;
-		private boolean onScreen;
-		private boolean geometryAvailable;
-		private String geometryWarning;
-	}
-
-	private static class SceneContext
-	{
-		private WorldView worldView;
-		private Scene scene;
-		private WorldPoint localWorld;
-		private int plane;
-		private Tile[][] planeTiles;
-		private int baseX;
-		private int baseY;
-		private int centerSceneX;
-		private int centerSceneY;
-	}
-
-	private static class SceneIndexEntry
-	{
-		private String objectKey;
-		private String kind;
-		private int id;
-		private Long hash;
-		private String objectName;
-		private String objectNameSource;
-		private String[] actions;
-		private int worldX;
-		private int worldY;
-		private int plane;
-		private int orientation;
-		private int sceneX;
-		private int sceneY;
-		private Integer localX;
-		private Integer localY;
-		private long firstSeenTick;
-		private long lastSeenTick;
-		private long lastUpdatedTick;
-		private boolean present;
-		private Long despawnedTick;
-		private String source;
-
-		private static SceneIndexEntry from(TickSnapshot.SceneObjectSnapshot snapshot, long tickId)
-		{
-			SceneIndexEntry entry = new SceneIndexEntry();
-			entry.objectKey = snapshot.objectKey;
-			entry.kind = snapshot.kind;
-			entry.id = snapshot.id;
-			entry.hash = snapshot.hash;
-			entry.objectName = snapshot.objectName;
-			entry.objectNameSource = snapshot.objectNameSource;
-			entry.actions = snapshot.actions;
-			entry.worldX = snapshot.worldX;
-			entry.worldY = snapshot.worldY;
-			entry.plane = snapshot.plane;
-			entry.orientation = snapshot.orientation;
-			entry.sceneX = snapshot.sceneX;
-			entry.sceneY = snapshot.sceneY;
-			entry.localX = snapshot.localX;
-			entry.localY = snapshot.localY;
-			entry.firstSeenTick = tickId;
-			entry.lastSeenTick = tickId;
-			entry.lastUpdatedTick = tickId;
-			entry.present = true;
-			entry.source = snapshot.source;
-			return entry;
-		}
-
-		private boolean updateFrom(TickSnapshot.SceneObjectSnapshot snapshot, long tickId, String source)
-		{
-			boolean changed = !present
-					|| worldX != snapshot.worldX
-					|| worldY != snapshot.worldY
-					|| plane != snapshot.plane
-					|| sceneX != snapshot.sceneX
-					|| sceneY != snapshot.sceneY
-					|| orientation != snapshot.orientation
-					|| !stringEquals(objectName, snapshot.objectName);
-			this.kind = snapshot.kind;
-			this.id = snapshot.id;
-			this.hash = snapshot.hash;
-			this.objectName = snapshot.objectName;
-			this.objectNameSource = snapshot.objectNameSource;
-			this.actions = snapshot.actions;
-			this.worldX = snapshot.worldX;
-			this.worldY = snapshot.worldY;
-			this.plane = snapshot.plane;
-			this.orientation = snapshot.orientation;
-			this.sceneX = snapshot.sceneX;
-			this.sceneY = snapshot.sceneY;
-			this.localX = snapshot.localX;
-			this.localY = snapshot.localY;
-			this.lastSeenTick = tickId;
-			this.present = true;
-			this.despawnedTick = null;
-			this.source = source;
-			if (changed)
-			{
-				this.lastUpdatedTick = tickId;
-			}
-			return changed;
-		}
-
-		private static boolean stringEquals(String left, String right)
-		{
-			return left == null ? right == null : left.equals(right);
-		}
-	}
-
-	private static class GroundItemProjection
-	{
-		private Integer localX;
-		private Integer localY;
-		private int[][] canvasTilePolygon;
-		private TickSnapshot.CanvasPoint canvasCenter;
-		private boolean onScreen;
-		private boolean geometryAvailable;
-		private String geometryWarning;
-	}
-
 	private String hashName(String name)
 	{
 		if (name == null || name.isBlank())
@@ -6002,39 +2010,6 @@ public class TelemetryPlugin extends Plugin
 			return "";
 		}
 	}
-	private void logEvent(String eventType, Object payload)
-	{
-		TelemetryWriter currentWriter = writer;
-
-		if (!config.enabled() || currentWriter == null)
-		{
-			return;
-		}
-
-		if (!currentWriter.isRawEventRecordingEnabled())
-		{
-			currentWriter.recordRawEventSuppressedByMode();
-			return;
-		}
-
-		try
-		{
-			EventRecord record = new EventRecord();
-			record.schemaVersion = "0.1.0";
-			record.tickId = tickId;
-			record.eventSeq = ++eventSeq;
-			record.timestampUtc = Instant.now().toString();
-			record.eventType = eventType;
-			record.payload = payload;
-
-			currentWriter.enqueueEvent(gson.toJson(record));
-		}
-		catch (Exception e)
-		{
-			log.warn("Failed to enqueue event telemetry: {}", eventType, e);
-		}
-	}
-
 	private Map<String, Object> actorPayload(Actor actor)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
@@ -6140,182 +2115,6 @@ public class TelemetryPlugin extends Plugin
 		return -1;
 	}
 
-	private Map<String, Object> projectilePayload(Projectile projectile)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-
-		if (projectile == null)
-		{
-			return payload;
-		}
-
-		payload.put("id", projectile.getId());
-		payload.put("x", projectile.getX());
-		payload.put("y", projectile.getY());
-		payload.put("projectileZ", projectile.getZ());
-		payload.put("floor", projectile.getFloor());
-		payload.put("height", projectile.getHeight());
-		payload.put("startCycle", projectile.getStartCycle());
-		payload.put("endCycle", projectile.getEndCycle());
-		payload.put("remainingCycles", projectile.getRemainingCycles());
-		payload.put("source", actorPayload(projectile.getSourceActor()));
-		payload.put("target", actorPayload(projectile.getTargetActor()));
-		addWorldPoint(payload, "source", projectile.getSourcePoint());
-		addWorldPoint(payload, "target", projectile.getTargetPoint());
-		return payload;
-	}
-
-	private Map<String, Object> graphicsObjectPayload(GraphicsObject graphicsObject)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-
-		if (graphicsObject == null)
-		{
-			return payload;
-		}
-
-		payload.put("id", graphicsObject.getId());
-		payload.put("startCycle", graphicsObject.getStartCycle());
-		payload.put("level", graphicsObject.getLevel());
-		payload.put("z", graphicsObject.getZ());
-		payload.put("finished", graphicsObject.finished());
-		payload.put("animationFrame", graphicsObject.getAnimationFrame());
-
-		LocalPoint localPoint = graphicsObject.getLocation();
-
-		if (localPoint != null)
-		{
-			payload.put("localX", localPoint.getX());
-			payload.put("localY", localPoint.getY());
-			WorldPoint worldPoint = graphicsObject.getWorldView() == null
-					? WorldPoint.fromLocal(client, localPoint)
-					: WorldPoint.fromLocal(graphicsObject.getWorldView(), localPoint.getX(), localPoint.getY(), graphicsObject.getLevel());
-			addWorldPoint(payload, "", worldPoint);
-		}
-
-		return payload;
-	}
-
-	private Map<String, Object> itemEventPayload(Tile tile, TileItem item)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-
-		if (item != null)
-		{
-			payload.put("id", item.getId());
-			payload.put("quantity", item.getQuantity());
-			payload.put("visibleTime", item.getVisibleTime());
-			payload.put("despawnTime", item.getDespawnTime());
-			payload.put("ownership", item.getOwnership());
-			payload.put("private", item.isPrivate());
-		}
-
-		if (tile != null)
-		{
-			WorldPoint worldLocation = tile.getWorldLocation();
-			Point sceneLocation = tile.getSceneLocation();
-			addWorldPoint(payload, "", worldLocation);
-
-			if (sceneLocation != null)
-			{
-				payload.put("sceneX", sceneLocation.getX());
-				payload.put("sceneY", sceneLocation.getY());
-			}
-		}
-
-		return payload;
-	}
-
-	private void addWorldPoint(Map<String, Object> payload, String prefix, WorldPoint worldPoint)
-	{
-		if (worldPoint == null)
-		{
-			return;
-		}
-
-		if (prefix == null || prefix.isEmpty())
-		{
-			payload.put("worldX", worldPoint.getX());
-			payload.put("worldY", worldPoint.getY());
-			payload.put("plane", worldPoint.getPlane());
-			return;
-		}
-
-		payload.put(prefix + "WorldX", worldPoint.getX());
-		payload.put(prefix + "WorldY", worldPoint.getY());
-		payload.put(prefix + "Plane", worldPoint.getPlane());
-	}
-
-	private void rememberItem(TileItem item)
-	{
-		if (item != null)
-		{
-			rememberItem(item.getId());
-		}
-	}
-
-	private void rememberItem(int itemId)
-	{
-		TelemetryWriter currentWriter = writer;
-
-		if (currentWriter == null || itemId < 0 || !knownItemIds.add(itemId))
-		{
-			return;
-		}
-
-		try
-		{
-			currentWriter.rememberItem(itemId, itemName(itemId));
-		}
-		catch (Exception e)
-		{
-			log.debug("Failed to remember item definition {}", itemId, e);
-		}
-	}
-
-	private void rememberNpc(NPC npc)
-	{
-		if (npc == null)
-		{
-			return;
-		}
-
-		TelemetryWriter currentWriter = writer;
-
-		if (currentWriter == null || npc.getId() < 0 || !knownNpcIds.add(npc.getId()))
-		{
-			return;
-		}
-
-		try
-		{
-			currentWriter.rememberNpc(npc.getId(), npcDisplayName(npc));
-		}
-		catch (Exception e)
-		{
-			log.debug("Failed to remember npc definition {}", npc.getId(), e);
-		}
-	}
-
-	private void rememberObject(int objectId)
-	{
-		TelemetryWriter currentWriter = writer;
-
-		if (currentWriter == null || objectId < 0 || !knownObjectIds.add(objectId))
-		{
-			return;
-		}
-
-		try
-		{
-			currentWriter.rememberObject(objectId, objectName(objectId));
-		}
-		catch (Exception e)
-		{
-			log.debug("Failed to remember object definition {}", objectId, e);
-		}
-	}
-
 	private String itemName(int itemId)
 	{
 		return itemNameLookup(itemId).name;
@@ -6351,131 +2150,6 @@ public class TelemetryPlugin extends Plugin
 		}
 
 		itemNameCache.put(itemId, lookup);
-		return lookup;
-	}
-
-	private String objectName(int objectId)
-	{
-		return objectNameLookup(objectId).name;
-	}
-
-	private DefinitionName objectNameLookup(int objectId)
-	{
-		if (objectId < 0)
-		{
-			return DefinitionName.unavailable();
-		}
-
-		if (objectNameCache.containsKey(objectId))
-		{
-			return objectNameCache.get(objectId);
-		}
-
-		DefinitionName lookup = DefinitionName.unavailable();
-
-		try
-		{
-			ObjectComposition objectComposition = client.getObjectDefinition(objectId);
-
-			if (objectComposition != null)
-			{
-				String impostorName = null;
-
-				if (objectComposition.getImpostorIds() != null)
-				{
-					try
-					{
-						ObjectComposition impostor = objectComposition.getImpostor();
-						impostorName = impostor == null ? null : usableDefinitionName(impostor.getName());
-					}
-					catch (Exception e)
-					{
-						log.debug("Failed to read object impostor definition {}", objectId, e);
-					}
-				}
-
-				if (impostorName != null)
-				{
-					lookup = new DefinitionName(impostorName, "objectImpostor");
-				}
-				else
-				{
-					String name = usableDefinitionName(objectComposition.getName());
-					lookup = name == null ? DefinitionName.fallback() : new DefinitionName(name, "objectDefinition");
-				}
-			}
-		}
-		catch (Exception e)
-		{
-			log.debug("Failed to read object definition {}", objectId, e);
-		}
-
-		objectNameCache.put(objectId, lookup);
-		return lookup;
-	}
-
-	private String npcDisplayName(NPC npc)
-	{
-		return npcNameLookup(npc).name;
-	}
-
-	private DefinitionName npcNameLookup(NPC npc)
-	{
-		if (npc == null)
-		{
-			return DefinitionName.unavailable();
-		}
-
-		String name = usableDefinitionName(npc.getName());
-
-		if (name != null)
-		{
-			DefinitionName lookup = new DefinitionName(name, "npcName");
-			npcNameCache.put(npc.getId(), lookup);
-			return lookup;
-		}
-
-		return npcDefinitionName(npc);
-	}
-
-	private DefinitionName npcDefinitionName(NPC npc)
-	{
-		int npcId = npc.getId();
-
-		if (npcId < 0)
-		{
-			return DefinitionName.unavailable();
-		}
-
-		if (npcNameCache.containsKey(npcId))
-		{
-			return npcNameCache.get(npcId);
-		}
-
-		DefinitionName lookup = DefinitionName.unavailable();
-
-		try
-		{
-			NPCComposition transformed = npc.getTransformedComposition();
-			String transformedName = transformed == null ? null : usableDefinitionName(transformed.getName());
-
-			if (transformedName != null)
-			{
-				lookup = new DefinitionName(transformedName, "transformedComposition");
-			}
-			else
-			{
-				NPCComposition composition = npc.getComposition();
-				String compositionName = composition == null ? null : usableDefinitionName(composition.getName());
-				lookup = compositionName == null ? DefinitionName.fallback() : new DefinitionName(compositionName, "npcComposition");
-			}
-		}
-		catch (Exception e)
-		{
-			log.debug("Failed to read npc definition {}", npcId, e);
-		}
-
-		npcNameCache.put(npcId, lookup);
 		return lookup;
 	}
 
@@ -6531,43 +2205,6 @@ public class TelemetryPlugin extends Plugin
 		}
 
 		return value.length() <= maxLength ? value : value.substring(0, maxLength);
-	}
-
-	private Map<String, Object> itemContainerPayload(ItemContainerChanged event)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		payload.put("containerId", event.getContainerId());
-
-		if (event.getItemContainer() != null)
-		{
-			payload.put("size", event.getItemContainer().size());
-		}
-
-		return payload;
-	}
-
-	private Map<String, Object> menuOpenedPayload(MenuOpened event)
-	{
-		Map<String, Object> payload = new LinkedHashMap<>();
-		MenuEntry[] entries = event.getMenuEntries();
-
-		payload.put("menuEntryCount", entries == null ? 0 : entries.length);
-
-		List<Map<String, Object>> entrySummaries = new ArrayList<>();
-
-		if (entries != null)
-		{
-			for (MenuEntry entry : entries)
-			{
-				if (entry != null)
-				{
-					entrySummaries.add(menuEntryPayload(entry));
-				}
-			}
-		}
-
-		payload.put("entries", entrySummaries);
-		return payload;
 	}
 
 	private Map<String, Object> latestHoverMenuPayload()
@@ -6753,32 +2390,27 @@ public class TelemetryPlugin extends Plugin
 	{
 		if (client == null)
 		{
-			return false;
+			return failClosedMenuOpen(null);
 		}
 		try
 		{
-			return client.isMenuOpen();
+			return failClosedMenuOpen(client.isMenuOpen());
 		}
 		catch (Exception e)
 		{
-			return false;
+			return failClosedMenuOpen(null);
 		}
+	}
+
+	static boolean failClosedMenuOpen(Boolean menuOpen)
+	{
+		return menuOpen == null || menuOpen;
 	}
 
 	private void addSessionIdentity(Map<String, Object> payload)
 	{
-		TelemetryWriter currentWriter = writer;
-		if (currentWriter == null)
-		{
-			return;
-		}
-		Path sessionDir = currentWriter.getSessionDir();
-		if (sessionDir == null)
-		{
-			return;
-		}
-		payload.put("sessionPath", sessionDir.toString());
-		payload.put("sessionId", sessionDir.getFileName() == null ? null : sessionDir.getFileName().toString());
+		payload.put("sessionId", pluginInstanceId);
+		payload.put("clientProcessId", ProcessHandle.current().pid());
 	}
 
 	private Map<String, Object> menuEntryPayload(MenuEntry entry)
