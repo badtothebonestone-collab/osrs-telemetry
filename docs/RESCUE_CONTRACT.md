@@ -1,5 +1,9 @@
 # Rescue Contract
 
+> Historical baseline contract. This document freezes the proven regression
+> slice. `docs/PRODUCT_VISION.md`, `PLANS.md`, and `docs/ENGINE_STATUS.md` now
+> govern active modular-engine development.
+
 ## Product
 
 Prove one reliable cycle:

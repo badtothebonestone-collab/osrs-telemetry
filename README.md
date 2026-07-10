@@ -1,10 +1,12 @@
 # OSRS Telemetry
 
-This repository proves one deliberately narrow vertical slice:
+This repository builds a small OSRS-specific automation engine around one
+proven regression baseline:
 
 > Lumbridge west ordinary Trees -> Lumbridge Castle bank -> return to Trees.
 
-It is not a general bot framework. The supported design is:
+It is not a general bot framework, planner, task language, learned policy, or
+anti-detection system. The current baseline implementation is:
 
 ```text
 RuneLite plugin -> snapshot -> Observation -> WoodcutBankTask
@@ -47,9 +49,11 @@ In another terminal, prove that the game scene is observable:
 .\run.cmd observe
 ```
 
-The command exits successfully only for a fresh, loaded scene. Its JSON output
-contains the player location, inventory/log count, nearby-object count, menu
-count, bank state, timestamp freshness, and tick.
+The command exits successfully only when the current baseline checks report a
+fresh, loaded scene. Its JSON output contains the player location,
+inventory/log count, nearby-object count, menu count, bank state, assembled
+timestamp freshness, and tick. Atomic source-coherent freshness is the next
+safety milestone and is not claimed by this command yet.
 
 Ask the task engine for its first action without sending input:
 
@@ -92,7 +96,8 @@ does not pretend that the ignored live traces contain full raw observations.
 - `osrs_bot/observation.py`: the only snapshot-to-Observation adapter.
 - `osrs_bot/task.py`: the only supported task state machine.
 - `osrs_bot/safety.py`: pre-move and post-move validation.
-- `osrs_bot/action.py`: the only live input pathway.
+- `osrs_bot/action.py`: the only gameplay input pathway; saved-session login is
+  the other current Arduino session owner until Phase 5 centralizes both.
 - `osrs_bot/verification.py`: the only post-action verifier.
 - `osrs_bot/runtime.py`: bounded orchestration of those components.
 - `osrs_bot/login.py`: bounded saved-session prompt assistance, outside the task engine.
@@ -100,7 +105,10 @@ does not pretend that the ignored live traces contain full raw observations.
 - `tests/`: focused Python tests for the active baseline.
 - `tests/fixtures/golden_lumbridge_cycle.json`: sanitized cycle provenance,
   route contract, and deterministic replay facts.
+- `docs/PRODUCT_VISION.md`: governing product scope and future user experience.
 - `docs/ARCHITECTURE.md`: contracts and state transitions.
+- `docs/ENGINE_STATUS.md`: completed milestone, evidence boundary, and blockers.
+- `PLANS.md`: active phases, acceptance criteria, and decision log.
 - `docs/RESCUE_AUDIT.md`: archaeology findings and removal rationale.
 
 ## Current limits
@@ -117,4 +125,6 @@ does not pretend that the ignored live traces contain full raw observations.
   sequence; it is not a replacement for future bounded live regression proof.
 - The current task performs exactly one full-inventory bank cycle and stops.
 
-See `docs/RESCUE_CONTRACT.md` before extending the product.
+Read `docs/PRODUCT_VISION.md`, `PLANS.md`, and `docs/ENGINE_STATUS.md` before
+extending the engine. `docs/RESCUE_CONTRACT.md` remains the frozen baseline
+contract, not the active development phase.
