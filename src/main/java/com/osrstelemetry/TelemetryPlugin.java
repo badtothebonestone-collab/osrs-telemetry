@@ -363,6 +363,15 @@ public class TelemetryPlugin extends Plugin
 	{
 		clientTickId++;
 		clientTickHotState.recordClientTick(clientTickPayload("ClientTick"));
+		if (shouldRefreshOpenMenu(currentMenuOpen()))
+		{
+			Map<String, Object> payload = hoverMenuPayload();
+			payload.put("sampleSource", "ClientTickMenuOpen");
+			payload.put("sourceEvent", "ClientTickMenuOpen");
+			payload.put("menuOpen", true);
+			latestHoverMenu = payload;
+			clientTickHotState.recordPostMenuSort(payload);
+		}
 		if (client.getGameState() != GameState.LOGGED_IN)
 		{
 			publishGameStateBaseline(client.getGameState());
@@ -2388,18 +2397,28 @@ public class TelemetryPlugin extends Plugin
 
 	private boolean isMenuOpenSafe()
 	{
+		return failClosedMenuOpen(currentMenuOpen());
+	}
+
+	private Boolean currentMenuOpen()
+	{
 		if (client == null)
 		{
-			return failClosedMenuOpen(null);
+			return null;
 		}
 		try
 		{
-			return failClosedMenuOpen(client.isMenuOpen());
+			return client.isMenuOpen();
 		}
 		catch (Exception e)
 		{
-			return failClosedMenuOpen(null);
+			return null;
 		}
+	}
+
+	static boolean shouldRefreshOpenMenu(Boolean menuOpen)
+	{
+		return Boolean.TRUE.equals(menuOpen);
 	}
 
 	static boolean failClosedMenuOpen(Boolean menuOpen)

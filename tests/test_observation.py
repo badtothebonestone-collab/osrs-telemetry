@@ -116,13 +116,39 @@ class ObservationParsingTests(unittest.TestCase):
         self.assertEqual("Chop down", observation.menus[0].option)
         self.assertEqual("Tree", observation.menus[0].target)
 
+    def test_unnamed_census_object_is_omitted_without_losing_named_objects(self) -> None:
+        payload = load_fixture()
+        unnamed = dict(payload["payloads"]["resource_object_census"]["objects"][0])
+        unnamed.update({"objectKey": "unnamed:27270", "id": 27270, "name": ""})
+        payload["payloads"]["route_object_census"]["objects"].append(unnamed)
+
+        observation = parse_observation(payload)
+
+        self.assertIsNone(observation.object_by_key("unnamed:27270"))
+        self.assertIsNotNone(observation.object_by_key("tree:3193:3244:1276"))
+
+    def test_open_menu_exposes_screen_bounds_for_each_visual_row(self) -> None:
+        payload = load_fixture()
+        menu = payload["payloads"]["interaction_hot"]["postMenuSort"]
+        menu["menuOpen"] = True
+        menu["menuBounds"] = {"x": 50, "y": 60, "width": 100, "height": 52}
+
+        observation = parse_observation(payload)
+
+        self.assertEqual(ScreenBounds(1100, 2120, 200, 104), observation.menu_bounds)
+        self.assertEqual(ScreenBounds(1102, 2158, 198, 30), observation.menus[0].row_bounds)
+        self.assertEqual(ScreenBounds(1102, 2188, 198, 30), observation.menus[1].row_bounds)
+
     def test_parses_bank_widget_targets_in_screen_coordinates(self) -> None:
-        widgets = parse_observation(load_fixture()).widgets
+        payload = load_fixture()
+        payload["payloads"]["bank_ui"]["keyboardClosePossible"] = True
+        widgets = parse_observation(payload).widgets
 
         self.assertTrue(widgets.bank_known)
         self.assertTrue(widgets.bank_open)
         self.assertFalse(widgets.bank_pin_open)
         self.assertTrue(widgets.bank_readable)
+        self.assertTrue(widgets.keyboard_close_possible)
         self.assertEqual(ScreenBounds(1600, 2500, 80, 40), widgets.deposit_inventory.screen_bounds)
         self.assertEqual(ScreenPoint(1640, 2520), widgets.deposit_inventory.screen_point)
         self.assertEqual(ScreenBounds(1760, 2020, 32, 32), widgets.close_bank.screen_bounds)

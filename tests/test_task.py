@@ -210,10 +210,16 @@ class WoodcutBankTaskTests(unittest.TestCase):
         invalid_geometry = TargetGeometry(
             available=True, on_screen=True, visible=True, actionable=True
         )
+        point_outside_bounds = replace(
+            GEOMETRY,
+            screen_bounds=ScreenBounds(1000, 2000, 10, 10),
+        )
         cases = (
+            tree(object_id=1278),
             tree(name="Oak tree"),
             tree(action="Chop"),
             tree(geometry=invalid_geometry),
+            tree(geometry=point_outside_bounds),
             tree(resource=False),
         )
         for candidate in cases:
@@ -228,6 +234,32 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(TaskPhase.CHOP, task.progress.phase)
         self.assertEqual(ActionKind.WAIT, decision.action.kind)
         self.assertEqual("tree:1276", task.progress.target_key)
+
+    def test_find_tree_skips_aim_point_occluded_by_another_tree(self) -> None:
+        occluded = tree(
+            key="tree:occluded",
+            location=WorldPoint(3196, 3248, 0),
+            geometry=replace(
+                GEOMETRY,
+                screen_point=ScreenPoint(1300, 2200),
+                screen_bounds=ScreenBounds(1250, 2150, 100, 100),
+            ),
+        )
+        clear = tree(
+            key="tree:clear",
+            location=WorldPoint(3197, 3248, 0),
+            geometry=replace(
+                GEOMETRY,
+                screen_point=ScreenPoint(1400, 2200),
+                screen_bounds=ScreenBounds(1200, 2100, 250, 200),
+            ),
+        )
+
+        task = WoodcutBankTask()
+        task.decide(observation(objects=(occluded, clear)))
+
+        self.assertEqual("tree:clear", task.progress.target_key)
+        self.assertEqual(TaskPhase.CHOP, task.progress.phase)
 
     def test_stale_scene_and_unknown_inventory_never_emit_actions(self) -> None:
         task = WoodcutBankTask()
@@ -294,13 +326,23 @@ class WoodcutBankTaskTests(unittest.TestCase):
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
         step = ROUTE_TO_BANK[0]
+        approach = WorldPoint(3195, 3252, 0)
         self.assertEqual(((step.target_key, step.location),), task.requested_tile_projections())
+
+        missing = task.decide(
+            observation(
+                location=approach,
+                inv=inventory(logs=28, full=True),
+            )
+        )
+        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, missing.phase)
+        self.assertEqual(ActionKind.WAIT, missing.action.kind)
 
         invalid = route_tile(step)
         invalid = NearbyObject(**{**invalid.__dict__, "object_id": 99})
         blocked = task.decide(
             observation(
-                location=TREE_AREA,
+                location=approach,
                 inv=inventory(logs=28, full=True),
                 objects=(invalid,),
             )
@@ -310,9 +352,22 @@ class WoodcutBankTaskTests(unittest.TestCase):
 
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
+        unavailable = replace(route_tile(step), geometry=TargetGeometry())
+        waiting = task.decide(
+            observation(
+                location=approach,
+                inv=inventory(logs=28, full=True),
+                objects=(unavailable,),
+            )
+        )
+        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, waiting.phase)
+        self.assertEqual(ActionKind.WAIT, waiting.action.kind)
+
+        task = WoodcutBankTask()
+        task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
         decision = task.decide(
             observation(
-                location=TREE_AREA,
+                location=approach,
                 inv=inventory(logs=28, full=True),
                 objects=(route_tile(step),),
             )
@@ -324,9 +379,22 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(0, task.progress.route_index)
 
         arrived = task.decide(
-            observation(location=step.location, inv=inventory(logs=28, full=True))
+            observation(
+                location=step.location,
+                inv=inventory(logs=28, full=True),
+                tick=20,
+            )
         )
         self.assertEqual(ActionKind.WAIT, arrived.action.kind)
+        self.assertEqual(0, task.progress.route_index)
+        settled = task.decide(
+            observation(
+                location=step.location,
+                inv=inventory(logs=28, full=True),
+                tick=24,
+            )
+        )
+        self.assertEqual(ActionKind.WAIT, settled.action.kind)
         self.assertEqual(1, task.progress.route_index)
 
     def test_stairs_require_exact_id_action_plane_and_external_plane_proof(self) -> None:
@@ -348,7 +416,8 @@ class WoodcutBankTaskTests(unittest.TestCase):
                         objects=(bad_target,),
                     )
                 )
-                self.assertEqual(TaskPhase.BLOCKED, decision.phase)
+                self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, decision.phase)
+                self.assertEqual(ActionKind.WAIT, decision.action.kind)
 
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
@@ -357,7 +426,10 @@ class WoodcutBankTaskTests(unittest.TestCase):
             observation(
                 location=step.location,
                 inv=inventory(logs=28, full=True),
-                objects=(route_object(step),),
+                objects=(replace(
+                    route_object(step),
+                    actions=("Climb", "Climb-up", "Climb-down"),
+                ),),
             )
         )
         self.assertEqual(ActionKind.INTERACT_OBJECT, decision.action.kind)
@@ -511,6 +583,45 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
         self.assertEqual(TaskPhase.NAVIGATE_TO_TREES, closed.phase)
 
+    def test_close_bank_uses_verified_escape_when_button_geometry_is_absent(self) -> None:
+        task = WoodcutBankTask()
+        task.progress.phase = TaskPhase.CLOSE_BANK
+        widgets = replace(
+            bank_widgets(),
+            close_bank=WidgetTarget(CLOSE_WIDGET_NAME, True),
+            keyboard_close_possible=True,
+        )
+
+        decision = task.decide(
+            observation(location=BANK_ANCHOR, widgets=widgets, tick=11)
+        )
+
+        self.assertEqual(ActionKind.PRESS_KEY, decision.action.kind)
+        self.assertEqual("escape", decision.action.key)
+        self.assertEqual("close_bank_keyboard", decision.action.target_key)
+        self.assertEqual(VerificationKind.BANK_CLOSED, task.progress.pending.kind)
+
+    def test_verified_return_phase_does_not_reopen_inventory_uncertainty(self) -> None:
+        task = WoodcutBankTask()
+        task.progress.phase = TaskPhase.CLOSE_BANK
+        widgets = replace(
+            bank_widgets(),
+            close_bank=None,
+            keyboard_close_possible=True,
+        )
+
+        decision = task.decide(
+            observation(
+                location=BANK_ANCHOR,
+                inv=inventory(known=False),
+                widgets=widgets,
+                tick=11,
+            )
+        )
+
+        self.assertEqual(ActionKind.PRESS_KEY, decision.action.kind)
+        self.assertNotIn("inventory", decision.reason)
+
     def test_unknown_bank_capture_cannot_prove_closed_or_emit_bank_input(self) -> None:
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.CLOSE_BANK
@@ -530,21 +641,20 @@ class WoodcutBankTaskTests(unittest.TestCase):
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.NAVIGATE_TO_TREES
 
-        first = ROUTE_TO_TREES[0]
-        task.decide(
-            observation(location=first.location, objects=(route_object(first),))
-        )
-        task.apply_verification(True, "plane_changed")
-        second = ROUTE_TO_TREES[1]
-        task.decide(
-            observation(location=second.location, objects=(route_object(second),))
-        )
-        task.apply_verification(True, "plane_changed")
+        self.assertEqual("Bottom-floor", ROUTE_TO_TREES[2].action)
 
-        for step in ROUTE_TO_TREES[2:]:
-            self.assertEqual(((step.target_key, step.location),), task.requested_tile_projections())
-            decision = task.decide(observation(location=step.location))
-            self.assertEqual(ActionKind.WAIT, decision.action.kind)
+        for step in ROUTE_TO_TREES:
+            expected = ((step.target_key, step.location),) if step.is_walk else ()
+            self.assertEqual(expected, task.requested_tile_projections())
+            if step.is_walk:
+                decision = task.decide(observation(location=step.location))
+                self.assertEqual(ActionKind.WAIT, decision.action.kind)
+            else:
+                decision = task.decide(
+                    observation(location=step.location, objects=(route_object(step),))
+                )
+                self.assertEqual(ActionKind.INTERACT_OBJECT, decision.action.kind)
+                task.apply_verification(True, "plane_changed")
 
         self.assertEqual(TaskPhase.COMPLETE, task.progress.phase)
         self.assertEqual(1, task.progress.cycles_completed)

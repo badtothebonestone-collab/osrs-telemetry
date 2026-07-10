@@ -27,7 +27,14 @@ from osrs_bot.safety import SafetyGate
 POINT = ScreenPoint(110, 110)
 
 
-def observation(*, menus: tuple[MenuEntry, ...], tick: int = 10) -> Observation:
+def observation(
+    *,
+    menus: tuple[MenuEntry, ...],
+    tick: int = 10,
+    menu_open: bool = False,
+    menu_bounds: ScreenBounds | None = None,
+    menu_point: ScreenPoint = POINT,
+) -> Observation:
     tree = NearbyObject(
         key="tree-1",
         object_id=1276,
@@ -67,7 +74,9 @@ def observation(*, menus: tuple[MenuEntry, ...], tick: int = 10) -> Observation:
         scene_playable=True,
         session_id="session-1",
         menu_client_tick=1000 + tick,
-        menu_mouse_screen_point=POINT,
+        menu_mouse_screen_point=menu_point,
+        menu_open=menu_open,
+        menu_bounds=menu_bounds,
         client_focused=True,
         client_process_id=1234,
     )
@@ -93,7 +102,9 @@ def tree_action() -> Action:
 class FakeBackend:
     def __init__(self, fail_at: str | None = None) -> None:
         self.calls: list[str] = []
+        self.buttons: list[str] = []
         self.fail_at = fail_at
+        self.move_kwargs: dict[str, object] = {}
 
     def _call(self, name: str) -> None:
         self.calls.append(name)
@@ -109,10 +120,12 @@ class FakeBackend:
     def arm(self) -> None:
         self._call("arm")
 
-    def move_to_absolute(self, *_: object, **__: object) -> None:
+    def move_to_absolute(self, *_: object, **kwargs: object) -> None:
+        self.move_kwargs = kwargs
         self._call("move")
 
-    def mouse_down(self, **_: object) -> None:
+    def mouse_down(self, **kwargs: object) -> None:
+        self.buttons.append(str(kwargs.get("button")))
         self._call("mouse_down")
 
     def mouse_up(self, **_: object) -> None:
@@ -160,6 +173,7 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
         self.assertEqual("SENT", result.status)
         self.assertTrue(result.stop_all_confirmed)
         self.assertTrue(result.disarm_confirmed)
+        self.assertEqual(1, backend.move_kwargs["tolerance_px"])
         self.assertEqual(
             ["connect", "configure", "arm", "move", "foreground", "mouse_down", "mouse_up", "stop_all", "disarm", "close"],
             backend.calls,
@@ -173,6 +187,104 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
         self.assertEqual("BLOCKED", result.status)
         self.assertEqual("hover_menu_mismatch", result.reason)
         self.assertNotIn("mouse_down", backend.calls)
+        self.assertEqual(["stop_all", "disarm", "close"], backend.calls[-3:])
+
+    def test_waits_boundedly_for_exact_hover_menu_after_pointer_arrives(self) -> None:
+        backend = FakeBackend()
+        samples = iter((observation(menus=(), tick=11), self.hover))
+        interface = ArduinoActionInterface(
+            backend,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            lambda: next(samples),
+            sleep=lambda _: None,
+            evidence_attempts=2,
+        )
+
+        result = interface.execute(tree_action(), self.pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertIn("mouse_down", backend.calls)
+
+    def test_selects_one_exact_lower_context_entry_and_cleans_up(self) -> None:
+        backend = FakeBackend()
+        generic = MenuEntry(
+            "Chop", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52
+        )
+        exact = MenuEntry(
+            "Chop down", "Tree", "GAME_OBJECT_SECOND_OPTION", 1276, 49, 52
+        )
+        candidate = observation(menus=(generic, exact), tick=11)
+        menu_bounds = ScreenBounds(80, 80, 200, 100)
+        row_bounds = ScreenBounds(81, 114, 199, 15)
+        opened_entries = (
+            replace(generic, row_bounds=ScreenBounds(81, 99, 199, 15)),
+            replace(exact, row_bounds=row_bounds),
+        )
+        opened = observation(
+            menus=opened_entries,
+            tick=12,
+            menu_open=True,
+            menu_bounds=menu_bounds,
+        )
+        row = observation(
+            menus=opened_entries,
+            tick=13,
+            menu_open=True,
+            menu_bounds=menu_bounds,
+            menu_point=row_bounds.center,
+        )
+        samples = iter((candidate, opened, row))
+        interface = ArduinoActionInterface(
+            backend,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            lambda: next(samples),
+            sleep=lambda _: None,
+        )
+
+        result = interface.execute(tree_action(), self.pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(["right", "left"], backend.buttons)
+        self.assertEqual(2, backend.calls.count("move"))
+        self.assertEqual(["stop_all", "disarm", "close"], backend.calls[-3:])
+
+    def test_context_cleanup_escape_is_skipped_after_focus_changes(self) -> None:
+        class FocusChangesBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.foreground_checks = 0
+
+            def assert_foreground(self, _: object, **__: object) -> None:
+                self.foreground_checks += 1
+                self.calls.append("foreground")
+                if self.foreground_checks == 2:
+                    raise RuntimeError("focus changed")
+
+        backend = FocusChangesBackend()
+        generic = MenuEntry(
+            "Chop", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52
+        )
+        exact = MenuEntry(
+            "Chop down", "Tree", "GAME_OBJECT_SECOND_OPTION", 1276, 49, 52
+        )
+        candidate = observation(menus=(generic, exact), tick=11)
+        still_closed = observation(menus=(generic, exact), tick=12)
+        samples = iter((candidate, still_closed))
+        interface = ArduinoActionInterface(
+            backend,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            lambda: next(samples),
+            sleep=lambda _: None,
+            evidence_attempts=1,
+        )
+
+        result = interface.execute(tree_action(), self.pre)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual("context_menu_not_open", result.reason)
+        self.assertEqual(["right"], backend.buttons)
+        self.assertNotIn("press", backend.calls)
+        self.assertEqual(2, backend.foreground_checks)
         self.assertEqual(["stop_all", "disarm", "close"], backend.calls[-3:])
 
     def test_failed_cleanup_overrides_a_blocked_post_move_result(self) -> None:
@@ -296,6 +408,39 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
 
         self.assertEqual("SENT", result.status)
         self.assertIn("press", backend.calls)
+
+    def test_bank_escape_waits_for_a_new_bank_tick_then_cleans_up(self) -> None:
+        widgets = WidgetObservation(
+            bank_known=True,
+            bank_open=True,
+            bank_readable=True,
+            keyboard_close_possible=True,
+        )
+        pre = replace(
+            self.pre,
+            location=WorldPoint(3208, 3220, 2),
+            plane=2,
+            widgets=widgets,
+        )
+        fresh = replace(pre, tick=11)
+        action = Action(
+            ActionKind.PRESS_KEY,
+            "Close bank with Escape",
+            10,
+            option="Close bank",
+            target_key="close_bank_keyboard",
+            target_name="Close bank",
+            target_id=0,
+            key="escape",
+            source_session_id="session-1",
+        )
+        backend = FakeBackend()
+
+        result = self.interface(backend, fresh).execute(action, pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertIn("press", backend.calls)
+        self.assertEqual(["stop_all", "disarm", "close"], backend.calls[-3:])
 
 
 if __name__ == "__main__":

@@ -10,9 +10,10 @@ if /I "%MODE%"=="observe" goto observe
 if /I "%MODE%"=="task" goto task
 if /I "%MODE%"=="login" goto login
 if /I "%MODE%"=="execute" goto execute
+if /I "%MODE%"=="replay" goto replay
 if /I "%MODE%"=="test" goto test
 
-echo Usage: run.cmd [plugin^|observe^|task^|login COMx^|execute COMx^|test] 1>&2
+echo Usage: run.cmd [plugin^|observe^|task^|login COMx^|execute COMx^|replay^|test] 1>&2
 exit /b 2
 
 :plugin
@@ -41,6 +42,10 @@ if "%~2"=="" (
     exit /b 2
 )
 python -m osrs_bot task --execute --arduino-port "%~2"
+exit /b %ERRORLEVEL%
+
+:replay
+python -m unittest -v tests.test_golden_replay
 exit /b %ERRORLEVEL%
 
 :test

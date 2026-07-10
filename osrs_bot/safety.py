@@ -6,6 +6,7 @@ from .model import (
     LOG_ITEM_ID,
     Action,
     ActionKind,
+    MenuEntry,
     NearbyObject,
     Observation,
     ScreenBounds,
@@ -47,7 +48,7 @@ class SafetyGate:
             sample = self._validate_source_menu_sample(action, observation)
             if not sample.allowed:
                 return sample
-        if action.kind is ActionKind.PRESS_KEY:
+        if action.kind is ActionKind.PRESS_KEY and not _is_bank_close_key(action):
             if (
                 action.source_dialogue_client_tick is None
                 or observation.widgets.dialogue_client_tick is None
@@ -61,6 +62,78 @@ class SafetyGate:
         return _allow("pre_move_safe")
 
     def validate_post_move(
+        self, action: Action, observation: Observation
+    ) -> SafetyResult:
+        base = self._validate_post_move_base(action, observation)
+        if not base.allowed:
+            return base
+        if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
+            hover_result = self._validate_hover_menu(action, observation)
+            if not hover_result.allowed:
+                return hover_result
+        return _allow("post_move_safe")
+
+    def validate_context_candidate(
+        self, action: Action, observation: Observation
+    ) -> SafetyResult:
+        base = self._validate_post_move_base(action, observation)
+        if not base.allowed:
+            return base
+        if action.kind is not ActionKind.INTERACT_OBJECT:
+            return _reject("context_selection_unsupported")
+        matches = _matching_menu_entries(action, observation)
+        if len(matches) != 1 or matches[0] is observation.menus[0]:
+            return _reject("context_option_not_unique_lower_entry")
+        return _allow("context_candidate_safe")
+
+    def validate_context_menu(
+        self,
+        action: Action,
+        observation: Observation,
+        *,
+        minimum_menu_client_tick: int,
+        row_point: ScreenPoint | None = None,
+    ) -> SafetyResult:
+        common = self._validate_observation(observation)
+        if not common.allowed:
+            return common
+        session = self._validate_session(action, observation)
+        if not session.allowed:
+            return session
+        if observation.tick < action.source_tick:
+            return _reject("tick_mismatch")
+        if action.kind is not ActionKind.INTERACT_OBJECT:
+            return _reject("context_selection_unsupported")
+        if observation.menu_client_tick is None:
+            return _reject("menu_sample_missing")
+        if observation.menu_client_tick <= minimum_menu_client_tick:
+            return _reject("menu_sample_not_newer")
+        if not observation.menu_open:
+            return _reject("context_menu_not_open")
+        action_result = self._validate_action(action, observation)
+        if not action_result.allowed:
+            return action_result
+        matches = _matching_menu_entries(action, observation)
+        if len(matches) != 1:
+            return _reject("context_option_not_unique")
+        entry = matches[0]
+        bounds = entry.row_bounds
+        menu_bounds = observation.menu_bounds
+        if bounds is None or not _valid_bounds(bounds):
+            return _reject("context_row_bounds_missing")
+        if menu_bounds is None or not _valid_bounds(menu_bounds):
+            return _reject("context_menu_bounds_missing")
+        if not menu_bounds.contains(bounds.center):
+            return _reject("context_row_outside_menu")
+        if row_point is None:
+            return _allow("context_menu_open_safe")
+        if not bounds.contains(row_point) or not menu_bounds.contains(row_point):
+            return _reject("context_row_pointer_outside")
+        if not _points_close(observation.menu_mouse_screen_point, row_point):
+            return _reject("context_row_pointer_mismatch")
+        return _allow("context_row_safe")
+
+    def _validate_post_move_base(
         self, action: Action, observation: Observation
     ) -> SafetyResult:
         common = self._validate_observation(observation)
@@ -85,21 +158,21 @@ class SafetyGate:
             if not _points_close(observation.menu_mouse_screen_point, action.screen_point):
                 return _reject("hover_pointer_mismatch")
         if action.kind is ActionKind.PRESS_KEY:
-            if (
-                action.source_dialogue_client_tick is None
-                or observation.widgets.dialogue_client_tick is None
-            ):
-                return _reject("dialogue_sample_missing")
-            if observation.widgets.dialogue_client_tick <= action.source_dialogue_client_tick:
-                return _reject("dialogue_sample_not_newer")
+            if _is_bank_close_key(action):
+                if observation.tick <= action.source_tick:
+                    return _reject("bank_sample_not_newer")
+            else:
+                if (
+                    action.source_dialogue_client_tick is None
+                    or observation.widgets.dialogue_client_tick is None
+                ):
+                    return _reject("dialogue_sample_missing")
+                if observation.widgets.dialogue_client_tick <= action.source_dialogue_client_tick:
+                    return _reject("dialogue_sample_not_newer")
         action_result = self._validate_action(action, observation)
         if not action_result.allowed:
             return action_result
-        if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
-            hover_result = self._validate_hover_menu(action, observation)
-            if not hover_result.allowed:
-                return hover_result
-        return _allow("post_move_safe")
+        return _allow("post_move_base_safe")
 
     def _validate_observation(self, observation: Observation) -> SafetyResult:
         if observation.status != "PASS":
@@ -142,6 +215,8 @@ class SafetyGate:
         if action.kind is ActionKind.CLICK_WIDGET:
             return self._validate_widget_action(action, observation)
         if action.kind is ActionKind.PRESS_KEY:
+            if _is_bank_close_key(action):
+                return self._validate_bank_close_key(action, observation)
             return self._validate_dialogue_key(action, observation)
         if action.kind is ActionKind.WAIT:
             return _allow("wait_safe")
@@ -173,6 +248,28 @@ class SafetyGate:
         if len(matches) != 1:
             return _reject("dialogue_option_mismatch")
         return _allow("dialogue_key_safe")
+
+    @staticmethod
+    def _validate_bank_close_key(
+        action: Action, observation: Observation
+    ) -> SafetyResult:
+        if action.key not in {"esc", "escape"}:
+            return _reject("unsafe_key")
+        if (
+            action.option != "Close bank"
+            or action.target_name != "Close bank"
+            or action.target_key != "close_bank_keyboard"
+            or action.target_id != 0
+        ):
+            return _reject("bank_close_identity_mismatch")
+        widgets = observation.widgets
+        if observation.plane != 2:
+            return _reject("bank_plane_mismatch")
+        if not widgets.bank_open:
+            return _reject("bank_not_open")
+        if not widgets.keyboard_close_possible:
+            return _reject("bank_keyboard_close_unavailable")
+        return _allow("bank_close_key_safe")
 
     @staticmethod
     def _validate_source_menu_sample(
@@ -262,26 +359,46 @@ class SafetyGate:
     ) -> SafetyResult:
         if action.option is None or action.target_name is None or action.target_id is None:
             return _reject("target_identity_incomplete")
-        expected_menu_target = "" if action.kind is ActionKind.WALK else action.target_name
         top = observation.menus[0] if observation.menus else None
-        exact_hover = bool(
-            top is not None
-            and top.option == action.option
-            and top.target == expected_menu_target
-            and top.identifier == action.target_id
-            and (
-                action.kind not in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}
-                or (
-                    action.target_param0 is not None
-                    and action.target_param1 is not None
-                    and top.param0 == action.target_param0
-                    and top.param1 == action.target_param1
-                )
+        if action.kind is ActionKind.WALK:
+            exact_hover = bool(
+                top is not None
+                and top.option == action.option
+                and top.entry_type == "WALK"
             )
-        )
+        else:
+            exact_hover = bool(top is not None and _menu_entry_matches(action, top))
         if not exact_hover:
             return _reject("hover_menu_mismatch")
         return _allow("hover_menu_exact")
+
+
+def _menu_entry_matches(action: Action, entry: MenuEntry) -> bool:
+    return bool(
+        action.option is not None
+        and action.target_name is not None
+        and action.target_id is not None
+        and action.target_param0 is not None
+        and action.target_param1 is not None
+        and entry.option == action.option
+        and entry.target == action.target_name
+        and entry.identifier == action.target_id
+        and entry.param0 == action.target_param0
+        and entry.param1 == action.target_param1
+    )
+
+
+def _is_bank_close_key(action: Action) -> bool:
+    return (
+        action.kind is ActionKind.PRESS_KEY
+        and action.target_key == "close_bank_keyboard"
+    )
+
+
+def _matching_menu_entries(
+    action: Action, observation: Observation
+) -> list[MenuEntry]:
+    return [entry for entry in observation.menus if _menu_entry_matches(action, entry)]
 
 
 def _validate_exact_target(action: Action, target: NearbyObject) -> SafetyResult:

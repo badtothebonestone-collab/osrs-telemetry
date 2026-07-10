@@ -74,6 +74,17 @@ Run all tests with the client closed:
 .\run.cmd test
 ```
 
+Replay the committed deterministic cycle fixture without RuneLite or Arduino:
+
+```powershell
+.\run.cmd replay
+```
+
+The replay drives the final task FSM through 28 verified log gains, the fixed
+outbound route, bank open/deposit/close, the fixed return route, and `COMPLETE`.
+It is a sanitized semantic regression derived from the bounded live proof; it
+does not pretend that the ignored live traces contain full raw observations.
+
 ## Repository map
 
 - `src/main/java/com/osrstelemetry/`: RuneLite sensor and read-only snapshot endpoint.
@@ -87,6 +98,8 @@ Run all tests with the client closed:
 - `osrs_bot/login.py`: bounded saved-session prompt assistance, outside the task engine.
 - `arduino/ArduinoHIDBridge/`: retained HID firmware.
 - `tests/`: focused Python tests for the active baseline.
+- `tests/fixtures/golden_lumbridge_cycle.json`: sanitized cycle provenance,
+  route contract, and deterministic replay facts.
 - `docs/ARCHITECTURE.md`: contracts and state transitions.
 - `docs/RESCUE_AUDIT.md`: archaeology findings and removal rationale.
 
@@ -97,7 +110,11 @@ Run all tests with the client closed:
 - Bank PIN entry, credential entry, recovery planning, and generalized tasks are out of scope.
 - Login assistance covers only the recognized idle-disconnect OK, saved-session Play Now,
   and Click here to play prompts.
-- Route coordinates and staircase/bank object identities are static priors and still need a complete live end-to-end proof.
+- The physical cycle was proven through bounded continuation runs while the
+  route was being hardened. That evidence is stitched rather than one
+  uninterrupted process, and it did not retain complete raw Observation frames.
+- The committed golden replay freezes the final-code FSM and verification
+  sequence; it is not a replacement for future bounded live regression proof.
 - The current task performs exactly one full-inventory bank cycle and stops.
 
 See `docs/RESCUE_CONTRACT.md` before extending the product.

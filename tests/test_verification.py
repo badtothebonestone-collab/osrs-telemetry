@@ -116,11 +116,15 @@ class VerifierTest(unittest.TestCase):
         arrived = self.verifier.evaluate(
             spec, observation(location=WorldPoint(3205, 3200, 0))
         )
+        unchanged = self.verifier.evaluate(
+            spec, observation(location=WorldPoint(3200, 3200, 0))
+        )
 
-        self.assertEqual(closer.reason, "condition_not_met")
+        self.assertEqual(closer.reason, "moved_closer")
         self.assertEqual(arrived.reason, "arrived")
-        self.assertTrue(closer.pending)
+        self.assertTrue(closer.passed)
         self.assertTrue(arrived.passed)
+        self.assertTrue(unchanged.pending)
 
     def test_passes_arrival_even_when_the_baseline_was_already_at_target(self) -> None:
         target = WorldPoint(3205, 3200, 0)

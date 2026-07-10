@@ -73,6 +73,14 @@ public class TelemetryPluginSensorContractTest
 	}
 
 	@Test
+	public void onlyAnObservedOpenMenuGetsClientTickGeometryRefreshes()
+	{
+		assertTrue(TelemetryPlugin.shouldRefreshOpenMenu(true));
+		assertFalse(TelemetryPlugin.shouldRefreshOpenMenu(false));
+		assertFalse(TelemetryPlugin.shouldRefreshOpenMenu(null));
+	}
+
+	@Test
 	public void welcomeScreenCannotBeClaimedAsPlayableScene()
 	{
 		TickSnapshot snapshot = new TickSnapshot();

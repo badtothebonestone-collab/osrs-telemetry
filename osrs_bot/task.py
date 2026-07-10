@@ -17,10 +17,11 @@ from .model import (
 )
 
 
-TREE_AREA = WorldPoint(3196, 3248, 0)
-BANK_ANCHOR = WorldPoint(3208, 3220, 2)
+TREE_AREA = WorldPoint(3196, 3240, 0)
+BANK_ANCHOR = WorldPoint(3208, 3221, 2)
 
 TREE_NAME = "Tree"
+TREE_OBJECT_ID = 1276
 CHOP_ACTION = "Chop down"
 BANK_NAME = "Bank booth"
 BANK_OBJECT_ID = 18491
@@ -30,6 +31,7 @@ CLOSE_WIDGET_NAME = "close_bank"
 
 ACTION_DEADLINE_TICKS = 8
 CHOP_DEADLINE_TICKS = 100
+ROUTE_STABLE_TICKS = 4
 
 
 @dataclass(frozen=True)
@@ -55,33 +57,45 @@ class _FixedRouteStep:
         return (self.action, "Climb") if not self.is_walk else ("Walk here",)
 
 
-# These are deliberately unverified static priors copied from service_routes.
-# Every click still requires a matching live NearbyObject and live geometry.
+# Fixed waypoints and stair objects come from the retained successful route
+# recordings. Every click still requires matching live telemetry and geometry.
 ROUTE_TO_BANK = (
-    _FixedRouteStep("tree_lane_east_1", WorldPoint(3196, 3244, 0), 1),
-    _FixedRouteStep("tree_lane_east_2", WorldPoint(3200, 3244, 0), 1),
-    _FixedRouteStep("castle_west_turn", WorldPoint(3203, 3241, 0), 1),
-    _FixedRouteStep("castle_west_approach", WorldPoint(3203, 3238, 0), 2),
-    _FixedRouteStep("castle_courtyard", WorldPoint(3205, 3234, 0), 1),
-    _FixedRouteStep("castle_entrance", WorldPoint(3205, 3232, 0), 1),
-    _FixedRouteStep("first_stairs_search", WorldPoint(3205, 3229, 0), 2),
-    _FixedRouteStep("ground_floor_stairs_up", WorldPoint(3205, 3229, 0), 4, 56230, "Staircase", "Climb-up", 1),
-    _FixedRouteStep("first_floor_stairs_up", WorldPoint(3205, 3229, 1), 6, 16672, "Staircase", "Climb-up", 2),
-    _FixedRouteStep("bank_floor_north_1", WorldPoint(3206, 3226, 2), 1),
-    _FixedRouteStep("bank_floor_north_2", WorldPoint(3206, 3223, 2), 1),
-    _FixedRouteStep("bank_booth_approach", WorldPoint(3207, 3221, 2), 1),
+    _FixedRouteStep("west_approach_bridge", WorldPoint(3200, 3238, 0), 2),
+    _FixedRouteStep("west_corridor_north", WorldPoint(3196, 3237, 0), 2),
+    _FixedRouteStep("west_wall_corner", WorldPoint(3196, 3234, 0), 1),
+    _FixedRouteStep("west_wall_descent_1", WorldPoint(3197, 3231, 0), 1),
+    _FixedRouteStep("west_wall_descent_2", WorldPoint(3198, 3228, 0), 1),
+    _FixedRouteStep("west_wall_descent_3", WorldPoint(3197, 3225, 0), 1),
+    _FixedRouteStep("west_wall_descent_4", WorldPoint(3197, 3222, 0), 1),
+    _FixedRouteStep("west_corridor_south", WorldPoint(3197, 3221, 0), 2),
+    _FixedRouteStep("south_corridor_entry", WorldPoint(3199, 3218, 0), 1),
+    _FixedRouteStep("south_corridor_west", WorldPoint(3202, 3215, 0), 2),
+    _FixedRouteStep("south_corridor_bridge", WorldPoint(3205, 3214, 0), 1),
+    _FixedRouteStep("south_corridor_safe", WorldPoint(3208, 3212, 0), 2),
+    _FixedRouteStep("south_stairs_approach", WorldPoint(3205, 3209, 0), 2),
+    _FixedRouteStep("ground_floor_stairs_up", WorldPoint(3204, 3207, 0), 4, 56230, "Staircase", "Climb-up", 1),
+    _FixedRouteStep("first_floor_stairs_up", WorldPoint(3204, 3207, 1), 4, 16672, "Staircase", "Climb-up", 2),
+    _FixedRouteStep("bank_floor_south_1", WorldPoint(3205, 3211, 2), 2),
+    _FixedRouteStep("bank_floor_south_2", WorldPoint(3205, 3215, 2), 2),
+    _FixedRouteStep("bank_floor_north", WorldPoint(3207, 3218, 2), 2),
+    _FixedRouteStep("bank_booth_approach", BANK_ANCHOR, 2),
 )
 
 ROUTE_TO_TREES = (
-    _FixedRouteStep("bank_floor_stairs_down", WorldPoint(3206, 3221, 2), 4, 16672, "Staircase", "Climb-down", 1),
-    _FixedRouteStep("first_floor_stairs_down", WorldPoint(3205, 3229, 1), 6, 16672, "Staircase", "Climb-down", 0),
-    _FixedRouteStep("first_stairs_search_return", WorldPoint(3205, 3229, 0), 2),
-    _FixedRouteStep("castle_entrance_return", WorldPoint(3205, 3232, 0), 1),
-    _FixedRouteStep("castle_courtyard_return", WorldPoint(3205, 3234, 0), 1),
-    _FixedRouteStep("castle_west_approach_return", WorldPoint(3203, 3238, 0), 2),
-    _FixedRouteStep("castle_west_turn_return", WorldPoint(3203, 3241, 0), 1),
-    _FixedRouteStep("tree_lane_west_1", WorldPoint(3200, 3244, 0), 1),
-    _FixedRouteStep("tree_lane_west_2", WorldPoint(3196, 3244, 0), 1),
+    _FixedRouteStep("bank_floor_return_1", WorldPoint(3206, 3226, 2), 2),
+    _FixedRouteStep("bank_floor_return_2", WorldPoint(3206, 3228, 2), 1),
+    _FixedRouteStep("bank_floor_bottom", WorldPoint(3205, 3229, 2), 3, 56231, "Staircase", "Bottom-floor", 0),
+    _FixedRouteStep("ground_corridor_east_1", WorldPoint(3210, 3228, 0), 2),
+    _FixedRouteStep("ground_corridor_east_2", WorldPoint(3215, 3228, 0), 2),
+    _FixedRouteStep("ground_corridor_south_1", WorldPoint(3215, 3225, 0), 2),
+    _FixedRouteStep("ground_corridor_south_2", WorldPoint(3215, 3222, 0), 2),
+    _FixedRouteStep("ground_corridor_south_3", WorldPoint(3215, 3219, 0), 2),
+    _FixedRouteStep("ground_corridor_west", WorldPoint(3211, 3219, 0), 2),
+    _FixedRouteStep("ground_corridor_west_2", WorldPoint(3207, 3214, 0), 2),
+    _FixedRouteStep("south_corridor_return", WorldPoint(3203, 3214, 0), 2),
+    _FixedRouteStep("west_corridor_return_1", WorldPoint(3198, 3222, 0), 2),
+    _FixedRouteStep("west_corridor_return_2", WorldPoint(3199, 3234, 0), 2),
+    _FixedRouteStep("tree_lane_return", WorldPoint(3196, 3240, 0), 2),
     _FixedRouteStep("west_trees", TREE_AREA, 2),
 )
 
@@ -91,6 +105,9 @@ class WoodcutBankTask:
 
     def __init__(self) -> None:
         self.progress = TaskProgress()
+        self._movement_verified = False
+        self._route_settle_location: WorldPoint | None = None
+        self._route_settle_since_tick: int | None = None
 
     def requested_tile_projections(self) -> tuple[tuple[str, WorldPoint], ...]:
         """Return only the current fixed walk target for snapshot projection."""
@@ -119,7 +136,14 @@ class WoodcutBankTask:
             return self._wait(observation, "client menu sample is unavailable")
         if observation.location.plane != observation.plane:
             return self._wait(observation, "player plane and location disagree")
-        if not observation.inventory.known:
+        inventory_already_verified_for_return = self.progress.phase in {
+            TaskPhase.CLOSE_BANK,
+            TaskPhase.NAVIGATE_TO_TREES,
+        }
+        if (
+            not observation.inventory.known
+            and not inventory_already_verified_for_return
+        ):
             return self._wait(observation, "inventory is not observable")
 
         held_ids = {
@@ -165,6 +189,9 @@ class WoodcutBankTask:
             self.progress.phase = TaskPhase.FIND_TREE
             return
         if pending.kind == VerificationKind.MOVED_CLOSER:
+            self._movement_verified = True
+            self._route_settle_location = None
+            self._route_settle_since_tick = None
             return
         if pending.kind == VerificationKind.ROUTE_TRANSITION_READY:
             if reason == "dialogue_open":
@@ -218,11 +245,18 @@ class WoodcutBankTask:
         if observation.plane != TREE_AREA.plane or observation.location.distance_to(TREE_AREA) > 16:
             return self._block(observation, "player is outside the supported tree area")
 
-        candidates = [
+        actionable = [
             item for item in observation.nearby_objects if self._is_actionable_tree(item)
         ]
+        candidates = [
+            item for item in actionable
+            if self._tree_aim_is_unambiguous(item, actionable)
+        ]
         if not candidates:
-            return self._wait(observation, "no exact actionable ordinary Tree is observed")
+            return self._wait(
+                observation,
+                "no geometrically unambiguous ordinary Tree is observed",
+            )
         candidates.sort(key=lambda item: (observation.location.distance_to(item.location), item.key))
         self.progress.target_key = candidates[0].key
         self.progress.phase = TaskPhase.CHOP
@@ -257,6 +291,18 @@ class WoodcutBankTask:
     def _navigate(
         self, observation: Observation, route: tuple[_FixedRouteStep, ...]
     ) -> Decision:
+        if self._movement_verified:
+            if self._route_settle_location != observation.location:
+                self._route_settle_location = observation.location
+                self._route_settle_since_tick = observation.tick
+                return self._wait(observation, "waiting for player location to settle")
+            assert self._route_settle_since_tick is not None
+            if observation.tick - self._route_settle_since_tick < ROUTE_STABLE_TICKS:
+                return self._wait(observation, "waiting for player location to settle")
+            self._movement_verified = False
+            self._route_settle_location = None
+            self._route_settle_since_tick = None
+
         if self.progress.route_index >= len(route):
             self._finish_route()
             return self._wait(observation, "fixed route complete")
@@ -272,8 +318,21 @@ class WoodcutBankTask:
                     self._finish_route()
                 return self._wait(observation, f"arrived at route step {step.step_id}")
             target = observation.object_by_key(step.target_key)
-            if not self._is_exact_walk_projection(target, step):
-                return self._block(observation, f"route projection invalid for {step.step_id}")
+            if target is None:
+                return self._wait(
+                    observation,
+                    f"waiting for route projection {step.step_id}",
+                )
+            if not self._walk_projection_identity_matches(target, step):
+                return self._block(
+                    observation,
+                    f"route projection identity mismatch for {step.step_id}",
+                )
+            if not self._has_geometry(target):
+                return self._wait(
+                    observation,
+                    f"waiting for actionable route projection {step.step_id}",
+                )
             verification = Verification(
                 VerificationKind.MOVED_CLOSER,
                 before_tick=observation.tick,
@@ -291,10 +350,17 @@ class WoodcutBankTask:
 
         target = self._strict_route_object(observation, step)
         if target is None:
-            return self._block(observation, f"strict route object unavailable for {step.step_id}")
-        route_option = next(
-            (option for option in target.actions if option in step.allowed_actions),
-            None,
+            return self._wait(
+                observation,
+                f"waiting for strict route object {step.step_id}",
+            )
+        route_option = (
+            step.action
+            if target.supports(step.action)
+            else next(
+                (option for option in target.actions if option in step.allowed_actions),
+                None,
+            )
         )
         if route_option is None:
             return self._block(observation, f"route action unavailable for {step.step_id}")
@@ -456,13 +522,6 @@ class WoodcutBankTask:
             self.progress.phase = TaskPhase.NAVIGATE_TO_TREES
             self.progress.route_index = 0
             return self._wait(observation, "bank is already closed")
-        target = observation.widgets.close_bank
-        if target is None or target.name != CLOSE_WIDGET_NAME or not target.visible:
-            return self._block(observation, "close-bank widget is unavailable")
-        point = target.screen_point
-        if point is None:
-            return self._block(observation, "close-bank widget has no geometry")
-
         verification = Verification(
             VerificationKind.BANK_CLOSED,
             before_tick=observation.tick,
@@ -470,6 +529,35 @@ class WoodcutBankTask:
             expected_plane=2,
             source_session_id=observation.session_id,
         )
+        target = observation.widgets.close_bank
+        point = (
+            target.screen_point
+            if target is not None
+            and target.name == CLOSE_WIDGET_NAME
+            and target.visible
+            else None
+        )
+        if point is None:
+            if not observation.widgets.keyboard_close_possible:
+                return self._block(observation, "close-bank input is unavailable")
+            self.progress.pending = verification
+            return Decision(
+                self.progress.phase,
+                "close bank with verified Escape support",
+                Action(
+                    ActionKind.PRESS_KEY,
+                    "Close bank with Escape",
+                    observation.tick,
+                    option="Close bank",
+                    target_key="close_bank_keyboard",
+                    target_name="Close bank",
+                    target_id=0,
+                    key="escape",
+                    verification=verification,
+                    source_session_id=observation.session_id,
+                ),
+            )
+
         return self._emit_action(
             observation, ActionKind.CLICK_WIDGET, "Close bank",
             "close bank before return route", CLOSE_WIDGET_NAME, verification,
@@ -543,7 +631,7 @@ class WoodcutBankTask:
         return sorted(matches, key=lambda item: (observation.location.distance_to(item.location), item.key))[0]
 
     @staticmethod
-    def _is_exact_walk_projection(
+    def _walk_projection_identity_matches(
         target: NearbyObject | None, step: _FixedRouteStep
     ) -> bool:
         return bool(
@@ -557,13 +645,23 @@ class WoodcutBankTask:
             and target.route_candidate
             and target.scene_x is not None
             and target.scene_y is not None
+        )
+
+    @staticmethod
+    def _is_exact_walk_projection(
+        target: NearbyObject | None, step: _FixedRouteStep
+    ) -> bool:
+        return bool(
+            WoodcutBankTask._walk_projection_identity_matches(target, step)
+            and target is not None
             and WoodcutBankTask._has_geometry(target)
         )
 
     @staticmethod
     def _is_actionable_tree(target: NearbyObject) -> bool:
         return bool(
-            target.name == TREE_NAME
+            target.object_id == TREE_OBJECT_ID
+            and target.name == TREE_NAME
             and target.supports(CHOP_ACTION)
             and target.location is not None
             and target.location.plane == TREE_AREA.plane
@@ -575,14 +673,33 @@ class WoodcutBankTask:
         )
 
     @staticmethod
+    def _tree_aim_is_unambiguous(
+        target: NearbyObject, actionable: list[NearbyObject]
+    ) -> bool:
+        point = target.geometry.screen_point
+        if point is None:
+            return False
+        return not any(
+            other.key != target.key
+            and other.geometry.screen_bounds is not None
+            and other.geometry.screen_bounds.contains(point)
+            for other in actionable
+        )
+
+    @staticmethod
     def _has_geometry(target: NearbyObject) -> bool:
         geometry = target.geometry
+        point = geometry.screen_point
         return bool(
             geometry.available
             and geometry.on_screen
             and geometry.visible
             and geometry.actionable
-            and geometry.screen_point is not None
+            and point is not None
+            and (
+                geometry.screen_bounds is None
+                or geometry.screen_bounds.contains(point)
+            )
         )
 
     def _block(self, observation: Observation, reason: str) -> Decision:

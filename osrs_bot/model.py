@@ -126,6 +126,7 @@ class MenuEntry:
     identifier: int
     param0: int | None = None
     param1: int | None = None
+    row_bounds: ScreenBounds | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,7 @@ class WidgetObservation:
     bank_open: bool = False
     bank_pin_open: bool = False
     bank_readable: bool = False
+    keyboard_close_possible: bool = False
     deposit_inventory: WidgetTarget | None = None
     close_bank: WidgetTarget | None = None
     dialogue_active: bool = False
@@ -183,6 +185,7 @@ class Observation:
     menu_client_tick: int | None = None
     menu_mouse_screen_point: ScreenPoint | None = None
     menu_open: bool = False
+    menu_bounds: ScreenBounds | None = None
     client_focused: bool = False
     client_process_id: int | None = None
 

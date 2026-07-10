@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .arduino import ArduinoHIDBackend
-from .model import Action, ActionKind, Observation, ScreenBounds
+from .model import Action, ActionKind, MenuEntry, Observation, ScreenBounds, ScreenPoint
 from .safety import SafetyGate
 
 
@@ -102,25 +102,34 @@ class ArduinoActionInterface:
                     point,
                     allowed_region=self._region(canvas),
                     allowed_foreground_titles=["RuneLite"],
+                    tolerance_px=1,
                     margin_px=1,
                 )
-                post_move, hover_check = self._await_post_move(
+                post_move, hover_check, context_check = self._await_post_move(
                     action,
-                    {"menu_sample_not_newer", "hover_pointer_mismatch"},
+                    {"menu_sample_not_newer", "hover_pointer_mismatch", "hover_menu_mismatch"},
                 )
-                if not hover_check.allowed:
+                if hover_check.allowed:
+                    self._backend.assert_foreground(
+                        ["RuneLite"], expected_pid=post_move.client_process_id
+                    )
+                    self._click("left")
+                elif context_check.allowed:
+                    post_move = self._select_context_entry(
+                        action, post_move, canvas
+                    )
+                else:
                     raise _ActionBlocked(hover_check.reason)
-                self._backend.assert_foreground(
-                    ["RuneLite"], expected_pid=post_move.client_process_id
-                )
-                self._backend.mouse_down(button="left")
-                self._sleep(0.06)
-                self._backend.mouse_up(button="left")
             elif action.kind == ActionKind.PRESS_KEY:
                 if not action.key:
                     raise ValueError("press_key action has no key")
-                post_move, key_check = self._await_post_move(
-                    action, {"dialogue_sample_not_newer"}
+                retry_reason = (
+                    "bank_sample_not_newer"
+                    if action.target_key == "close_bank_keyboard"
+                    else "dialogue_sample_not_newer"
+                )
+                post_move, key_check, _ = self._await_post_move(
+                    action, {retry_reason}
                 )
                 if not key_check.allowed:
                     raise _ActionBlocked(key_check.reason)
@@ -204,10 +213,114 @@ class ArduinoActionInterface:
     def _await_post_move(self, action: Action, retry_reasons: set[str]):
         observation = self._observe()
         result = self._safety.validate_post_move(action, observation)
+        context = self._safety.validate_context_candidate(action, observation)
+        for _ in range(1, self._evidence_attempts):
+            if result.allowed or context.allowed or result.reason not in retry_reasons:
+                break
+            self._sleep(self._evidence_delay_seconds)
+            observation = self._observe()
+            result = self._safety.validate_post_move(action, observation)
+            context = self._safety.validate_context_candidate(action, observation)
+        return observation, result, context
+
+    def _select_context_entry(
+        self, action: Action, hover: Observation, canvas: ScreenBounds
+    ) -> Observation:
+        minimum_tick = hover.menu_client_tick
+        if minimum_tick is None:
+            raise _ActionBlocked("menu_sample_missing")
+        self._backend.assert_foreground(
+            ["RuneLite"], expected_pid=hover.client_process_id
+        )
+        self._click("right")
+        try:
+            opened, result = self._await_context_menu(
+                action, minimum_tick=minimum_tick
+            )
+            if not result.allowed:
+                raise _ActionBlocked(result.reason)
+            entry = self._exact_context_entry(action, opened)
+            if entry is None or entry.row_bounds is None:
+                raise _ActionBlocked("context_row_bounds_missing")
+            point = entry.row_bounds.center
+            self._backend.move_to_absolute(
+                {"x": point.x, "y": point.y},
+                allowed_region=self._region(canvas),
+                allowed_foreground_titles=["RuneLite"],
+                tolerance_px=1,
+                margin_px=1,
+            )
+            row_observation, row_result = self._await_context_menu(
+                action,
+                minimum_tick=opened.menu_client_tick,
+                row_point=point,
+            )
+            if not row_result.allowed:
+                raise _ActionBlocked(row_result.reason)
+            self._backend.assert_foreground(
+                ["RuneLite"], expected_pid=row_observation.client_process_id
+            )
+            self._click("left")
+            return row_observation
+        except Exception:
+            try:
+                self._backend.assert_foreground(
+                    ["RuneLite"], expected_pid=hover.client_process_id
+                )
+                self._backend.press("ESC")
+            except Exception:
+                pass
+            raise
+
+    def _await_context_menu(
+        self,
+        action: Action,
+        *,
+        minimum_tick: int | None,
+        row_point: ScreenPoint | None = None,
+    ):
+        if minimum_tick is None:
+            raise _ActionBlocked("menu_sample_missing")
+        retry_reasons = {
+            "menu_sample_not_newer",
+            "context_menu_not_open",
+            "context_row_pointer_mismatch",
+        }
+        observation = self._observe()
+        result = self._safety.validate_context_menu(
+            action,
+            observation,
+            minimum_menu_client_tick=minimum_tick,
+            row_point=row_point,
+        )
         for _ in range(1, self._evidence_attempts):
             if result.allowed or result.reason not in retry_reasons:
                 break
             self._sleep(self._evidence_delay_seconds)
             observation = self._observe()
-            result = self._safety.validate_post_move(action, observation)
+            result = self._safety.validate_context_menu(
+                action,
+                observation,
+                minimum_menu_client_tick=minimum_tick,
+                row_point=row_point,
+            )
         return observation, result
+
+    def _click(self, button: str) -> None:
+        self._backend.mouse_down(button=button)
+        self._sleep(0.06)
+        self._backend.mouse_up(button=button)
+
+    @staticmethod
+    def _exact_context_entry(
+        action: Action, observation: Observation
+    ) -> MenuEntry | None:
+        matches = [
+            entry for entry in observation.menus
+            if entry.option == action.option
+            and entry.target == action.target_name
+            and entry.identifier == action.target_id
+            and entry.param0 == action.target_param0
+            and entry.param1 == action.target_param1
+        ]
+        return matches[0] if len(matches) == 1 else None

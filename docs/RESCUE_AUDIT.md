@@ -88,10 +88,32 @@ bank, advancing ticks, and no warnings or missing capabilities. A dry run again
 selected exact Tree `1276`; the safety gate accepted its live geometry. A
 synthetic full-log inventory selected the first fixed bank-route tile, obtained
 an actionable live tile projection, and passed the same pre-move safety gate.
-No gameplay action was sent during these proofs.
+No gameplay action was sent during those pre-cycle proofs.
 
-## Remaining proof gap
+## Vertical-slice completion proof
 
-The full route, bank booth, deposit widget, staircase IDs, and return path have
-unit coverage but have not yet completed a live end-to-end cycle. They remain
-fail-closed static priors, not claimed capabilities.
+On 2026-07-10 the ordinary-log cycle was physically completed: the inventory
+reached 28 logs, the character traversed the fixed route and both upward stair
+transitions, opened the exact bank booth, deposited 28 to 0 logs, closed the
+bank with verified Escape support, traversed the return route, and reached the
+tree area with task state `COMPLETE`. Every connected trace records acknowledged
+`STOP_ALL` and `DISARM` cleanup.
+
+The evidence must be interpreted precisely. It was accumulated across bounded
+continuation runs while route and interaction failures were patched. The
+terminal `_run_proofs/vertical_slice/20260710_170849/trace.jsonl` begins at the
+last return waypoint; it is not an uninterrupted autonomous-cycle trace. The
+ignored trace corpus also omits the complete raw `Observation`, menu, geometry,
+and safety inputs needed for a byte-for-byte replay.
+
+Phase 0 therefore preserves two complementary artifacts:
+
+- the ignored live component traces, with the key evidence hashes recorded in
+  `tests/fixtures/golden_lumbridge_cycle.json`; and
+- a committed sanitized semantic replay, run with `run.cmd replay`, that drives
+  the final task code through 28 log gains, both fixed routes, typed bank
+  outcomes, one completed cycle, and terminal `COMPLETE`.
+
+This is the regression baseline. A future bounded uninterrupted run remains
+valuable additional evidence, but the old claim that the route and bank path
+were never completed is no longer accurate.

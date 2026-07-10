@@ -141,6 +141,11 @@ def _successful_outcome(
         current_distance = observation.location.distance_to(specification.target_location)
         if current_distance <= specification.target_radius:
             return "arrived"
+        before_distance = specification.before_location.distance_to(
+            specification.target_location
+        )
+        if current_distance < before_distance:
+            return "moved_closer"
         return None
 
     if specification.kind is VerificationKind.PLANE_CHANGED:

@@ -75,6 +75,7 @@ def observation(
     menu_client_tick: int | None = None,
     menu_point: ScreenPoint | None = TREE_POINT,
     menu_open: bool = False,
+    menu_bounds: ScreenBounds | None = None,
 ) -> Observation:
     return Observation(
         player=PlayerObservation(),
@@ -96,6 +97,7 @@ def observation(
         menu_client_tick=1000 + tick if menu_client_tick is None else menu_client_tick,
         menu_mouse_screen_point=menu_point,
         menu_open=menu_open,
+        menu_bounds=menu_bounds,
         client_focused=True,
         client_process_id=1234,
     )
@@ -178,6 +180,45 @@ class SafetyGateTest(unittest.TestCase):
 
         self.assertTrue(result.allowed)
         self.assertEqual(result.reason, "post_move_safe")
+
+    def test_context_menu_requires_one_exact_bounded_lower_row(self) -> None:
+        generic = MenuEntry(
+            "Examine", "Tree", "EXAMINE_OBJECT", 1276, 49, 52
+        )
+        expected = exact_hover()
+        candidate = observation(tick=101, menus=(generic, expected))
+
+        self.assertTrue(
+            self.gate.validate_context_candidate(tree_action(), candidate).allowed
+        )
+
+        row_bounds = ScreenBounds(100, 120, 180, 24)
+        open_menu = observation(
+            tick=102,
+            menus=(generic, replace(expected, row_bounds=row_bounds)),
+            menu_open=True,
+            menu_bounds=ScreenBounds(90, 80, 200, 100),
+        )
+        self.assertTrue(
+            self.gate.validate_context_menu(
+                tree_action(), open_menu, minimum_menu_client_tick=1101
+            ).allowed
+        )
+
+        row_point = row_bounds.center
+        row_hover = replace(
+            open_menu,
+            tick=103,
+            menu_client_tick=1103,
+            menu_mouse_screen_point=row_point,
+        )
+        self.assertTrue(
+            self.gate.validate_context_menu(
+                tree_action(), row_hover,
+                minimum_menu_client_tick=1102,
+                row_point=row_point,
+            ).allowed
+        )
 
     def test_rejects_unusable_observations(self) -> None:
         base = observation()
@@ -416,33 +457,36 @@ class SafetyGateTest(unittest.TestCase):
             ).allowed
         )
 
-    def test_walk_hover_rejects_virtual_object_name_as_menu_target(self) -> None:
-        wrong_hover = replace(
-            walk_hover(), target="route:castle_west_approach"
+    def test_walk_hover_allows_dynamic_display_target_but_requires_walk_type(self) -> None:
+        player_under_cursor = replace(
+            walk_hover(), target="Player (level-3)", identifier=886
         )
         post = observation(
             tick=101,
-            menus=(wrong_hover,),
+            menus=(player_under_cursor,),
             nearby_objects=(walk_target(),),
         )
 
+        self.assertTrue(self.gate.validate_post_move(walk_action(), post).allowed)
+
+        wrong_type = replace(player_under_cursor, entry_type="PLAYER_THIRD_OPTION")
+        post = replace(post, menus=(wrong_type,))
         result = self.gate.validate_post_move(walk_action(), post)
 
         self.assertFalse(result.allowed)
         self.assertEqual(result.reason, "hover_menu_mismatch")
 
-    def test_walk_hover_requires_the_exact_projected_scene_tile(self) -> None:
-        wrong_tile = replace(walk_hover(), param0=50, param1=53)
+    def test_walk_hover_uses_projected_geometry_not_canvas_menu_params(self) -> None:
+        canvas_coordinates = replace(walk_hover(), param0=355, param1=314)
         post = observation(
             tick=101,
-            menus=(wrong_tile,),
+            menus=(canvas_coordinates,),
             nearby_objects=(walk_target(),),
         )
 
         result = self.gate.validate_post_move(walk_action(), post)
 
-        self.assertFalse(result.allowed)
-        self.assertEqual("hover_menu_mismatch", result.reason)
+        self.assertTrue(result.allowed)
 
     def test_deposit_inventory_allows_only_known_logs(self) -> None:
         point = ScreenPoint(600, 400)
@@ -586,6 +630,50 @@ class SafetyGateTest(unittest.TestCase):
             self.gate.validate_pre_move(
                 replace(action, key="2"), observation(widgets=widgets)
             ).reason,
+        )
+
+    def test_bank_escape_requires_exact_live_keyboard_close_support(self) -> None:
+        widgets = WidgetObservation(
+            bank_known=True,
+            bank_open=True,
+            bank_readable=True,
+            keyboard_close_possible=True,
+        )
+        action = Action(
+            ActionKind.PRESS_KEY,
+            "Close bank with Escape",
+            100,
+            option="Close bank",
+            target_key="close_bank_keyboard",
+            target_name="Close bank",
+            target_id=0,
+            key="escape",
+            source_session_id="session-1",
+        )
+        before = replace(
+            observation(tick=100, widgets=widgets),
+            location=WorldPoint(3208, 3220, 2),
+            plane=2,
+        )
+        after = replace(before, tick=101)
+
+        self.assertTrue(self.gate.validate_pre_move(action, before).allowed)
+        self.assertEqual(
+            "bank_sample_not_newer",
+            self.gate.validate_post_move(action, before).reason,
+        )
+        self.assertTrue(self.gate.validate_post_move(action, after).allowed)
+        self.assertEqual(
+            "unsafe_key",
+            self.gate.validate_pre_move(replace(action, key="enter"), before).reason,
+        )
+        unavailable = replace(
+            before,
+            widgets=replace(widgets, keyboard_close_possible=False),
+        )
+        self.assertEqual(
+            "bank_keyboard_close_unavailable",
+            self.gate.validate_pre_move(action, unavailable).reason,
         )
 
 

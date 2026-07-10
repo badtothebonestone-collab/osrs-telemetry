@@ -224,22 +224,60 @@ def _inventory(payloads: Mapping[str, Any]) -> InventoryObservation:
 
 def _menu_state(
     payloads: Mapping[str, Any], transform: _CanvasTransform | None
-) -> tuple[tuple[MenuEntry, ...], int | None, ScreenPoint | None, bool]:
+) -> tuple[
+    tuple[MenuEntry, ...], int | None, ScreenPoint | None, bool,
+    ScreenBounds | None,
+]:
     interaction = _payload(payloads, "interaction_hot")
     menu = _mapping(interaction.get("postMenuSort", interaction.get("hoverMenu")), "interaction_hot.postMenuSort", optional=True)
     values = menu.get("entries", []) if menu else []
     if not isinstance(values, list):
         raise ObservationSchemaError("interaction_hot menu entries must be an array")
+    menu_open = _boolean(menu.get("menuOpen"), "menu.menuOpen") if menu else False
+    raw_menu_bounds = _mapping(
+        menu.get("menuBounds"), "menu.menuBounds", optional=True
+    ) if menu else {}
+    menu_bounds = (
+        transform.bounds(raw_menu_bounds)
+        if menu_open and transform and raw_menu_bounds
+        else None
+    )
     entries: list[MenuEntry] = []
     for index, value in enumerate(values):
         raw = _mapping(value, f"menu.entries[{index}]")
         option, target, entry_type = raw.get("option"), raw.get("target", ""), raw.get("type")
         if not all(isinstance(field, str) for field in (option, target, entry_type)):
             raise ObservationSchemaError(f"menu.entries[{index}] has invalid text fields")
+        row_bounds = None
+        if menu_bounds is not None and transform is not None:
+            x = _number(raw_menu_bounds.get("x"), "menu.menuBounds.x")
+            y = _number(raw_menu_bounds.get("y"), "menu.menuBounds.y")
+            width = _number(raw_menu_bounds.get("width", raw_menu_bounds.get("w")), "menu.menuBounds.width")
+            height = _number(raw_menu_bounds.get("height", raw_menu_bounds.get("h")), "menu.menuBounds.height")
+            scroll = _integer(
+                raw_menu_bounds.get("scroll"),
+                "menu.menuBounds.scroll",
+                optional=True,
+            ) or 0
+            if width <= 2 or height <= 0 or scroll < 0:
+                raise ObservationSchemaError("open menu bounds are invalid")
+            visual_index = index - scroll
+            row_y = y + 19 + 15 * visual_index
+            if visual_index >= 0 and row_y + 15 <= y + height:
+                # RuneLite renders each option on a fixed 15-canvas-pixel row
+                # below the 19-pixel menu header. Stay one pixel inside the
+                # horizontal menu edge because the edge itself is not a hit.
+                row_bounds = transform.bounds({
+                    "x": x + 1,
+                    "y": row_y,
+                    "width": width - 1,
+                    "height": 15,
+                })
         entries.append(MenuEntry(option=option, target=unescape(_TAG.sub("", target)).strip(), entry_type=entry_type,
                                  identifier=_integer(raw.get("identifier"), f"menu.entries[{index}].identifier"),
                                  param0=_integer(raw.get("param0"), f"menu.entries[{index}].param0", optional=True),
-                                 param1=_integer(raw.get("param1"), f"menu.entries[{index}].param1", optional=True)))
+                                 param1=_integer(raw.get("param1"), f"menu.entries[{index}].param1", optional=True),
+                                 row_bounds=row_bounds))
     if entries and menu:
         top_option = menu.get("topOption")
         top_target = menu.get("topTarget")
@@ -258,8 +296,7 @@ def _menu_state(
     mouse_point = None
     if menu and transform:
         mouse_point = transform.point(menu.get("mouseCanvasX"), menu.get("mouseCanvasY"))
-    menu_open = _boolean(menu.get("menuOpen"), "menu.menuOpen") if menu else False
-    return tuple(entries), client_tick, mouse_point, menu_open
+    return tuple(entries), client_tick, mouse_point, menu_open, menu_bounds
 
 def _nearby_objects(payloads: Mapping[str, Any], transform: _CanvasTransform | None,
                     player_location: WorldPoint | None, requested_tiles: Mapping[str, WorldPoint]) -> tuple[NearbyObject, ...]:
@@ -273,8 +310,15 @@ def _nearby_objects(payloads: Mapping[str, Any], transform: _CanvasTransform | N
         for index, value in enumerate(values):
             raw = _mapping(value, f"{census_name}.objects[{index}]")
             key, name, kind = raw.get("objectKey"), raw.get("name", raw.get("objectName")), raw.get("kind")
-            if not all(isinstance(field, str) and field for field in (key, name, kind)):
+            if not all(isinstance(field, str) and field for field in (key, kind)):
                 raise ObservationSchemaError(f"{census_name}.objects[{index}] lacks object identity")
+            if name is None or (isinstance(name, str) and not name.strip()):
+                # RuneLite can expose valid object ids/actions before resolving
+                # a definition name. Such an object cannot be matched safely,
+                # so omit it without invalidating the rest of the census.
+                continue
+            if not isinstance(name, str):
+                raise ObservationSchemaError(f"{census_name}.objects[{index}] has an invalid name")
             actions = _string_tuple(raw.get("actions"), f"{census_name}.objects[{index}].actions")
             location = _world_point(raw, f"{census_name}.objects[{index}].location")
             distance = _integer(raw.get("distanceToPlayer"), f"{census_name}.objects[{index}].distanceToPlayer", optional=True)
@@ -344,6 +388,7 @@ def _widgets(payloads: Mapping[str, Any], transform: _CanvasTransform | None) ->
     deposit_visible = _boolean(raw.get("depositInventoryButtonVisible"), "bank_ui.depositInventoryButtonVisible") if raw else False
     close_visible = _boolean(raw.get("closeButtonVisible", raw.get("bankCloseButtonVisible")), "bank_ui.closeButtonVisible") if raw else False
     readable = _boolean(raw.get("bankReadable"), "bank_ui.bankReadable", default=bank_open and container_visible) if raw else False
+    keyboard_close = _boolean(raw.get("keyboardClosePossible"), "bank_ui.keyboardClosePossible") if raw else False
     dialogue = _payload(payloads, "dialogue_state")
     active = _boolean(dialogue.get("active"), "dialogue_state.active") if dialogue else False
     dialogue_type = dialogue.get("type", "none") if dialogue else "none"
@@ -372,6 +417,7 @@ def _widgets(payloads: Mapping[str, Any], transform: _CanvasTransform | None) ->
         optional=True,
     ) if dialogue else None
     return WidgetObservation(bank_known=bank_known, bank_open=bank_open, bank_pin_open=pin_open, bank_readable=readable,
+                             keyboard_close_possible=keyboard_close,
                              deposit_inventory=_widget_target("deposit_inventory", deposit_visible, raw.get("depositInventoryButtonWidget"), transform),
                              close_bank=_widget_target("close_bank", close_visible, raw.get("closeButtonWidget"), transform),
                              dialogue_active=active, dialogue_type=dialogue_type,
@@ -423,7 +469,7 @@ def parse_observation(value: Mapping[str, Any], tile_projections: Iterable[tuple
     session_id = interaction.get("sessionId")
     if session_id is not None and not isinstance(session_id, str):
         raise ObservationSchemaError("interaction_hot.sessionId must be a string")
-    menus, menu_client_tick, menu_mouse_point, menu_open = _menu_state(payloads, transform)
+    menus, menu_client_tick, menu_mouse_point, menu_open, menu_bounds = _menu_state(payloads, transform)
     return Observation(player=player, location=location, plane=location.plane if location else None,
                        inventory=_inventory(payloads), nearby_objects=_nearby_objects(payloads, transform, location, dict(tiles)),
                        menus=menus, widgets=_widgets(payloads, transform),
@@ -435,7 +481,7 @@ def parse_observation(value: Mapping[str, Any], tile_projections: Iterable[tuple
                        session_id=session_id, warnings=_string_tuple(root.get("warnings"), "warnings"),
                        missing_capabilities=_string_tuple(root.get("missingCapabilities"), "missingCapabilities"),
                        menu_client_tick=menu_client_tick, menu_mouse_screen_point=menu_mouse_point,
-                       menu_open=menu_open,
+                       menu_open=menu_open, menu_bounds=menu_bounds,
                        client_focused=_boolean(input_geometry.get("isClientFocused"), "inputGeometry.isClientFocused") if input_geometry else False,
                        client_process_id=_integer(
                            input_geometry.get("clientProcessId", interaction.get("clientProcessId")),
