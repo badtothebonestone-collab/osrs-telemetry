@@ -1624,6 +1624,47 @@ class InputCoordinator:
             min(margins) // CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT
         )
         if command_budget < active_axes:
+            tight_margin = min(margins)
+            recover_x = bool(
+                dx != 0
+                and (
+                    (
+                        dx > 0
+                        and margins[0] == tight_margin
+                        and margins[1] > tight_margin
+                    )
+                    or (
+                        dx < 0
+                        and margins[1] == tight_margin
+                        and margins[0] > tight_margin
+                    )
+                )
+            )
+            recover_y = bool(
+                dy != 0
+                and (
+                    (
+                        dy > 0
+                        and margins[2] == tight_margin
+                        and margins[3] > tight_margin
+                    )
+                    or (
+                        dy < 0
+                        and margins[3] == tight_margin
+                        and margins[2] > tight_margin
+                    )
+                )
+            )
+            if command_budget >= 1 and (recover_x or recover_y):
+                # Preserve the sum-based four-sided envelope when a diagonal
+                # unit probe cannot fit. Move one axis only, and only in a
+                # direction that increases a currently tight canvas margin;
+                # actual feedback must then earn room for the other axis.
+                if recover_x:
+                    magnitude = min(abs(dx), command_budget)
+                    return (magnitude if dx > 0 else -magnitude), 0
+                magnitude = min(abs(dy), command_budget)
+                return 0, (magnitude if dy > 0 else -magnitude)
             raise _TransactionAbort(
                 "cursor_bidirectional_transfer_headroom_insufficient"
             )

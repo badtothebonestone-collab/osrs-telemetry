@@ -1283,6 +1283,121 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertNotIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
+    def test_tight_margin_recovers_one_axis_at_a_time_away_from_edge(self) -> None:
+        bounds = ScreenBounds(0, 0, 100, 100)
+        backend = FakeBackend(start=(13, 50))
+        intent = ApprovedPointerIntent(
+            intent_id="sequential-headroom-recovery",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(50, 70),
+            movement_bounds=bounds,
+            target_bounds=ScreenBounds(50, 70, 1, 1),
+            expected_pid=321,
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertTrue(receipt.successful)
+        moves = [event for event in backend.events if event.startswith("move:")]
+        self.assertEqual("move:1,0", moves[0])
+        self.assertEqual((50, 70), backend.position)
+        self.assertTrue(all(bounds.contains(ScreenPoint(*p)) for p in backend.positions))
+
+    def test_tied_tight_margins_recover_deterministically_across_axes(self) -> None:
+        bounds = ScreenBounds(0, 0, 100, 100)
+        backend = FakeBackend(start=(13, 13))
+        intent = ApprovedPointerIntent(
+            intent_id="tied-sequential-headroom-recovery",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(50, 50),
+            movement_bounds=bounds,
+            target_bounds=ScreenBounds(50, 50, 1, 1),
+            expected_pid=321,
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertTrue(receipt.successful)
+        moves = [event for event in backend.events if event.startswith("move:")]
+        self.assertEqual(["move:1,0", "move:0,1"], moves[:2])
+        self.assertEqual((50, 50), backend.position)
+        self.assertTrue(all(bounds.contains(ScreenPoint(*p)) for p in backend.positions))
+
+    def test_live_tight_margin_shape_recovers_inside_canvas(self) -> None:
+        canvas = ScreenBounds(1199, 520, 2151, 1519)
+        backend = FakeBackend(
+            start=(1213, 1064),
+            device_pixel_scale=2.25,
+        )
+        intent = ApprovedPointerIntent(
+            intent_id="live-sequential-headroom-recovery",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(1649, 988),
+            movement_bounds=canvas,
+            target_bounds=ScreenBounds(1646, 985, 7, 7),
+            expected_pid=321,
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertTrue(receipt.successful)
+        moves = [event for event in backend.events if event.startswith("move:")]
+        self.assertEqual("move:1,0", moves[0])
+        self.assertLessEqual(len(moves), 512)
+        self.assertTrue(intent.target_bounds.contains(ScreenPoint(*backend.position)))
+        self.assertTrue(all(canvas.contains(ScreenPoint(*p)) for p in backend.positions))
+        self.assertIn("mouse_down:left", backend.events)
+
+    def test_opposite_tied_margins_do_not_claim_directional_recovery(self) -> None:
+        backend = FakeBackend(start=(13, 50))
+        intent = ApprovedPointerIntent(
+            intent_id="opposite-tied-headroom",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(20, 70),
+            movement_bounds=ScreenBounds(0, 0, 27, 100),
+            target_bounds=ScreenBounds(20, 70, 1, 1),
+            expected_pid=321,
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertIn("bidirectional_transfer_headroom_insufficient", receipt.reason)
+        self.assertEqual(0, backend.move_call_count)
+
+    def test_tight_margin_does_not_move_toward_the_nearest_edge(self) -> None:
+        backend = FakeBackend(start=(13, 50))
+        intent = ApprovedPointerIntent(
+            intent_id="unsafe-headroom-direction",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(5, 70),
+            movement_bounds=ScreenBounds(0, 0, 100, 100),
+            target_bounds=ScreenBounds(5, 70, 1, 1),
+            expected_pid=321,
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertIn("bidirectional_transfer_headroom_insufficient", receipt.reason)
+        self.assertEqual(0, backend.move_call_count)
+        self.assertNotIn("mouse_down:left", backend.events)
+
     def test_bidirectional_envelope_blocks_edge_reversal_or_cross_axis_drift(self) -> None:
         bounds = ScreenBounds(0, 0, 10, 10)
         cases = (
