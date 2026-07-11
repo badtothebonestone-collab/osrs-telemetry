@@ -35,16 +35,18 @@ task FSM, one safety gate, one Arduino session owner, one typed verification
 path, and one read-only diagnostic truth. Diagnostics have no control authority.
 
 The architecture is being migrated in bounded checkpoints. The current column
-describes the Phase 3 implementation; the target column names only contracts
+describes the Phase 4 implementation; the target column names only contracts
 still owned by later phases.
 
 | Layer | Current baseline | Governing target |
 |---|---|---|
 | Sensor | atomic game-tick `SensorFrame` plus separately stamped client/menu evidence | preserve the same single source contract while adding no second endpoint |
 | Observation | immutable source-coherent `Observation` | preserve the same single truth for task-neutral seams |
-| Task | minimal `Task` protocol plus concrete `WoodcutBankTask` FSM | preserve the protocol while binding one validated built-in definition/profile |
+| Definition/profile | one immutable `LUMBRIDGE_WEST_TREES_V1` plus one validated one-cycle default profile | preserve typed validation; add no dynamic loader during this mission |
+| Task | minimal `Task` protocol plus definition-bound concrete `WoodcutBankTask` FSM | preserve the protocol and explicit task-specific transitions |
 | Decision | opaque `Decision.state` + `Action` + `VerificationSpec` + typed task constraints | stable task-neutral intent contracts consumed by diagnostics/frontends |
 | Safety | one `SafetyGate`, explicitly split between engine invariants and typed task constraints | preserve the same non-overridable boundary |
+| Runtime configuration | immutable endpoint/Arduino/poll/bound values with engine caps | same contract consumed by the future facade |
 | Input | `ArduinoActionInterface` and login helper own sessions | one `InputCoordinator`, separate pointer policy, internal transport methods |
 | Verification | one `Verifier` returning immutable typed `Outcome` values | preserve the same typed pathway |
 | Diagnostics | CLI result dictionaries and traces | one immutable `EngineFrame` |
@@ -86,6 +88,12 @@ World-model and tile geometry must also match the frame's camera/window
 fingerprint before the endpoint merges them. Menu evidence is independently
 stamped from its real post-menu-sort sample.
 
+The canonical adapter requests one neutral `scene_object_census`. Filtered
+resource/route/service censuses remain endpoint diagnostics. Scene rows omit
+candidate/type/skill labels, and projection selection uses only the explicit
+projection request, factual distance, and stable object key. Candidate labels
+neither bias scene geometry nor authorize task behavior.
+
 ### Observation
 
 `osrs_bot.observation.ObservationClient` sends one canonical snapshot request
@@ -97,8 +105,8 @@ game_state, source timestamp, assembly timestamp, frame identity, tick
 ```
 
 Source coherence, freshness, canvas bounds, warnings, and missing capabilities
-travel with the same object because they determine whether any action is safe. Object census
-rows are deduplicated by stable object key. Canvas coordinates are converted to
+travel with the same object because they determine whether any action is safe.
+Object census rows are deduplicated by stable object key. Canvas coordinates are converted to
 screen coordinates once, at this boundary. Menu samples preserve the explicit
 top/default entry, scene parameters, client-tick sequence, and sampled pointer.
 When RuneLite opens a context menu, the adapter also exposes the transformed
@@ -137,7 +145,13 @@ NAVIGATE_TO_TREES <- CLOSE_BANK <- VERIFY_DEPOSIT <- DEPOSIT_LOGS
      COMPLETE
 ```
 
-The two routes are fixed tuples of walk targets and staircase interactions.
+The task accepts one validated `BoundProfile`. The sole built-in definition
+owns all resource/bank selectors, areas, route steps and transitions, inventory
+predicates, tick expectations, and evidence provenance. The profile owns only
+the selected definition and one-cycle goal. Neither owns mutable FSM state or
+engine safety controls.
+
+The two definition routes are fixed tuples of walk targets and staircase interactions.
 Only the current walk target is requested from RuneLite. Missing or temporarily
 non-actionable projection evidence waits without input; a present labeled
 projection with contradictory identity blocks. No planner substitutes a route.
@@ -195,6 +209,10 @@ outcome. Task-specific item IDs and dialogue expectations are supplied in the
 verification specification rather than embedded in shared control flow. The
 runtime adds a wall-clock and observation bound so a frozen client cannot wait
 forever.
+
+`RuntimeConfig` separately validates endpoint/token/Arduino/polling and hard
+observation/action/runtime/verification limits. Its finite engine-owned caps
+cannot be changed by a profile or task definition.
 
 Walk verification passes after authoritative movement closer or arrival. The
 task then waits until player location is stable for four game ticks before it

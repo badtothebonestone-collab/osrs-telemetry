@@ -5,16 +5,11 @@ import json
 import os
 import sys
 
+from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
 from .observation import ObservationClient
-from .runtime import (
-    DEFAULT_MAX_ACTIONS,
-    DEFAULT_MAX_OBSERVATIONS,
-    DEFAULT_MAX_RUNTIME_SECONDS,
-    DEFAULT_VERIFICATION_TIMEOUT_SECONDS,
-    TaskRuntime,
-    build_live_runtime,
-)
-from .task import LOG_ITEM_ID, WoodcutBankTask
+from .profile import DEFAULT_BINDING
+from .runtime import TaskRuntime, build_live_runtime
+from .task import WoodcutBankTask
 from .verification import Verifier
 
 
@@ -26,20 +21,36 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     for name in ("observe", "task"):
         child = subparsers.add_parser(name)
-        child.add_argument("--endpoint", default="http://127.0.0.1:8893")
+        child.add_argument("--endpoint", default=DEFAULT_RUNTIME_CONFIG.endpoint)
         child.add_argument("--auth-token", default=os.environ.get("OSRS_TELEMETRY_SNAPSHOT_AUTH_TOKEN"))
-        child.add_argument("--timeout-seconds", type=float, default=3.0)
+        child.add_argument(
+            "--timeout-seconds",
+            type=float,
+            default=DEFAULT_RUNTIME_CONFIG.request_timeout_seconds,
+        )
     task = subparsers.choices["task"]
     task.add_argument("--execute", action="store_true", help="send verified actions through Arduino HID")
     task.add_argument("--arduino-port", default=os.environ.get("OSRS_TELEMETRY_ARDUINO_PORT"))
-    task.add_argument("--poll-seconds", type=float, default=0.25)
-    task.add_argument("--max-observations", type=int, default=DEFAULT_MAX_OBSERVATIONS)
-    task.add_argument("--max-actions", type=int, default=DEFAULT_MAX_ACTIONS)
-    task.add_argument("--max-runtime-seconds", type=float, default=DEFAULT_MAX_RUNTIME_SECONDS)
+    task.add_argument(
+        "--poll-seconds", type=float, default=DEFAULT_RUNTIME_CONFIG.poll_seconds
+    )
+    task.add_argument(
+        "--max-observations",
+        type=int,
+        default=DEFAULT_RUNTIME_CONFIG.max_observations,
+    )
+    task.add_argument(
+        "--max-actions", type=int, default=DEFAULT_RUNTIME_CONFIG.max_actions
+    )
+    task.add_argument(
+        "--max-runtime-seconds",
+        type=float,
+        default=DEFAULT_RUNTIME_CONFIG.max_runtime_seconds,
+    )
     task.add_argument(
         "--verification-timeout-seconds",
         type=float,
-        default=DEFAULT_VERIFICATION_TIMEOUT_SECONDS,
+        default=DEFAULT_RUNTIME_CONFIG.verification_timeout_seconds,
     )
     return parser
 
@@ -78,7 +89,15 @@ def _observation_summary(observation) -> dict[str, object]:
             "known": observation.inventory.known,
             "occupiedSlots": observation.inventory.occupied_slots,
             "freeSlots": observation.inventory.free_slots,
-            "ordinaryLogs": observation.inventory.quantity(LOG_ITEM_ID),
+            "items": [
+                {
+                    "slot": item.slot,
+                    "itemId": item.item_id,
+                    "quantity": item.quantity,
+                    "name": item.name,
+                }
+                for item in observation.inventory.items
+            ],
         },
         "nearbyObjects": len(observation.nearby_objects),
         "menuEntries": len(observation.menus),
@@ -94,9 +113,31 @@ def main(argv: list[str] | None = None) -> int:
     command = args.command or "observe"
     if args.command is None:
         args = parser.parse_args(["observe"])
+    config_values = {
+        "endpoint": args.endpoint,
+        "auth_token": args.auth_token,
+        "request_timeout_seconds": args.timeout_seconds,
+    }
+    if command == "task":
+        config_values.update(
+            arduino_port=args.arduino_port,
+            poll_seconds=args.poll_seconds,
+            max_observations=args.max_observations,
+            max_actions=args.max_actions,
+            max_runtime_seconds=args.max_runtime_seconds,
+            verification_timeout_seconds=args.verification_timeout_seconds,
+        )
+    try:
+        configuration = RuntimeConfig(**config_values)
+        configuration.validated_for_mode(
+            execute=bool(command == "task" and args.execute)
+        )
+    except (TypeError, ValueError) as error:
+        parser.error(str(error))
     client = ObservationClient(
-        args.endpoint, auth_token=args.auth_token,
-        timeout_seconds=args.timeout_seconds,
+        configuration.endpoint,
+        auth_token=configuration.auth_token,
+        timeout_seconds=configuration.request_timeout_seconds,
     )
 
     if command == "observe":
@@ -108,30 +149,19 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(_observation_summary(observation), indent=2))
         return 0 if observation.loaded_scene else 2
 
-    if args.execute and not args.arduino_port:
-        parser.error("task --execute requires --arduino-port or OSRS_TELEMETRY_ARDUINO_PORT")
-    task = WoodcutBankTask()
+    task = WoodcutBankTask(DEFAULT_BINDING)
     if args.execute:
         print(
             "Live mode: focus the telemetry-owning RuneLite window within 15 seconds.",
             file=sys.stderr,
         )
         runtime = build_live_runtime(
-            client, task, arduino_port=args.arduino_port,
-            poll_seconds=args.poll_seconds,
-            max_observations=args.max_observations,
-            max_actions=args.max_actions,
-            max_runtime_seconds=args.max_runtime_seconds,
-            verification_timeout_seconds=args.verification_timeout_seconds,
+            client, task, configuration=configuration
         )
     else:
         runtime = TaskRuntime(
             client, task, Verifier(),
-            poll_seconds=args.poll_seconds,
-            max_observations=args.max_observations,
-            max_actions=args.max_actions,
-            max_runtime_seconds=args.max_runtime_seconds,
-            verification_timeout_seconds=args.verification_timeout_seconds,
+            configuration=configuration,
         )
     result = runtime.run(execute=args.execute)
     print(json.dumps(result.to_dict(), indent=2))

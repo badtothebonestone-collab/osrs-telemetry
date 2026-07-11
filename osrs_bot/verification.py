@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from .model import Observation, VerificationKind, VerificationSpec, WorldPoint
+from .model import (
+    BANK_INTERFACE_NAME,
+    Observation,
+    VerificationKind,
+    VerificationSpec,
+    WorldPoint,
+)
 
 
 class VerificationStatus(str, Enum):
@@ -23,7 +29,7 @@ class OutcomeKind(str, Enum):
     DIALOGUE_OPTION_APPEARED = "dialogue_option_appeared"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Outcome:
     kind: OutcomeKind
     observed_tick: int
@@ -35,7 +41,7 @@ class Outcome:
             raise ValueError("observed_tick must be a non-negative integer")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class VerificationResult:
     status: VerificationStatus
     reason: str
@@ -66,7 +72,7 @@ class VerificationResult:
         return self.status is VerificationStatus.FAIL
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Verifier:
     max_observation_age_seconds: float = 2.0
 
@@ -141,10 +147,10 @@ def _invalid_specification_reason(specification: VerificationSpec) -> str | None
             return "invalid_item_id"
         if not _is_nonnegative_integer(specification.expected_quantity):
             return "invalid_expected_quantity"
-        if specification.interface_name not in {None, "bank"}:
+        if specification.interface_name not in {None, BANK_INTERFACE_NAME}:
             return "unsupported_interface"
         if (
-            specification.interface_name == "bank"
+            specification.interface_name == BANK_INTERFACE_NAME
             and not _is_nonnegative_integer(specification.expected_plane)
         ):
             return "invalid_interface_plane"
@@ -179,7 +185,7 @@ def _invalid_specification_reason(specification: VerificationSpec) -> str | None
         VerificationKind.INTERFACE_OPENED,
         VerificationKind.INTERFACE_CLOSED,
     }:
-        if specification.interface_name != "bank":
+        if specification.interface_name != BANK_INTERFACE_NAME:
             return "unsupported_interface"
         if not _is_nonnegative_integer(specification.expected_plane):
             return "invalid_interface_plane"
@@ -206,7 +212,7 @@ def _successful_outcome(
             != specification.expected_quantity
         ):
             return None
-        if specification.interface_name == "bank" and not (
+        if specification.interface_name == BANK_INTERFACE_NAME and not (
             observation.plane == specification.expected_plane
             and observation.widgets.bank_known
             and observation.widgets.bank_open
@@ -254,7 +260,7 @@ def _successful_outcome(
 
     if specification.kind is VerificationKind.INTERFACE_OPENED:
         if (
-            specification.interface_name == "bank"
+            specification.interface_name == BANK_INTERFACE_NAME
             and observation.plane == specification.expected_plane
             and observation.widgets.bank_known
             and observation.widgets.bank_open
@@ -265,7 +271,7 @@ def _successful_outcome(
 
     if specification.kind is VerificationKind.INTERFACE_CLOSED:
         if (
-            specification.interface_name == "bank"
+            specification.interface_name == BANK_INTERFACE_NAME
             and observation.plane == specification.expected_plane
             and observation.widgets.bank_known
             and not observation.widgets.bank_open

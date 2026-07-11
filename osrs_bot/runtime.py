@@ -5,16 +5,13 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from .action import ArduinoActionInterface, ExecutionResult
+from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
 from .model import Action, ActionKind, Observation
 from .observation import ObservationClient
 from .task_contract import Decision, Task, TaskSnapshot, TaskStatus
 from .verification import VerificationResult, VerificationStatus, Verifier
 
 
-DEFAULT_MAX_OBSERVATIONS = 4800
-DEFAULT_MAX_ACTIONS = 80
-DEFAULT_MAX_RUNTIME_SECONDS = 1200.0
-DEFAULT_VERIFICATION_TIMEOUT_SECONDS = 75.0
 LIVE_FOCUS_HANDOFF_SECONDS = 15.0
 
 
@@ -22,7 +19,7 @@ class _ActionInterface(Protocol):
     def execute(self, action: Action, observation: Observation) -> ExecutionResult: ...
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RuntimeResult:
     status: str
     reason: str
@@ -98,31 +95,24 @@ class TaskRuntime:
         verifier: Verifier,
         action_interface: _ActionInterface | None = None,
         *,
-        poll_seconds: float = 0.25,
-        max_observations: int = DEFAULT_MAX_OBSERVATIONS,
-        max_actions: int = DEFAULT_MAX_ACTIONS,
-        max_runtime_seconds: float = DEFAULT_MAX_RUNTIME_SECONDS,
-        verification_timeout_seconds: float = DEFAULT_VERIFICATION_TIMEOUT_SECONDS,
+        configuration: RuntimeConfig = DEFAULT_RUNTIME_CONFIG,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if poll_seconds < 0:
-            raise ValueError("poll_seconds must be non-negative")
-        if max_observations <= 0 or max_actions <= 0:
-            raise ValueError("runtime limits must be positive")
-        if verification_timeout_seconds <= 0:
-            raise ValueError("verification_timeout_seconds must be positive")
-        if max_runtime_seconds <= 0:
-            raise ValueError("max_runtime_seconds must be positive")
+        if not isinstance(configuration, RuntimeConfig):
+            raise TypeError("configuration must be a validated RuntimeConfig")
         self._client = client
         self._task = task
         self._verifier = verifier
         self._action_interface = action_interface
-        self._poll_seconds = poll_seconds
-        self._max_observations = max_observations
-        self._max_actions = max_actions
-        self._max_runtime_seconds = max_runtime_seconds
-        self._verification_timeout_seconds = verification_timeout_seconds
+        self._configuration = configuration
+        self._poll_seconds = configuration.poll_seconds
+        self._max_observations = configuration.max_observations
+        self._max_actions = configuration.max_actions
+        self._max_runtime_seconds = configuration.max_runtime_seconds
+        self._verification_timeout_seconds = (
+            configuration.verification_timeout_seconds
+        )
         self._sleep = sleep
         self._clock = clock
 
@@ -498,18 +488,15 @@ def build_live_runtime(
     client: ObservationClient,
     task: Task,
     *,
-    arduino_port: str,
-    poll_seconds: float = 0.25,
-    max_observations: int = DEFAULT_MAX_OBSERVATIONS,
-    max_actions: int = DEFAULT_MAX_ACTIONS,
-    max_runtime_seconds: float = DEFAULT_MAX_RUNTIME_SECONDS,
-    verification_timeout_seconds: float = DEFAULT_VERIFICATION_TIMEOUT_SECONDS,
+    configuration: RuntimeConfig,
 ) -> TaskRuntime:
     from .arduino import ArduinoHIDBackend
     from .safety import SafetyGate
 
+    configuration.validated_for_mode(execute=True)
+    assert configuration.arduino_port is not None
     safety = SafetyGate()
-    backend = ArduinoHIDBackend(port=arduino_port, fail_closed=True)
+    backend = ArduinoHIDBackend(port=configuration.arduino_port, fail_closed=True)
     observe = lambda: client.fetch(task.observation_request().tile_projections)
     action_interface = ArduinoActionInterface(backend, safety, observe)
     return TaskRuntime(
@@ -517,9 +504,5 @@ def build_live_runtime(
         task,
         Verifier(),
         action_interface,
-        poll_seconds=poll_seconds,
-        max_observations=max_observations,
-        max_actions=max_actions,
-        max_runtime_seconds=max_runtime_seconds,
-        verification_timeout_seconds=verification_timeout_seconds,
+        configuration=configuration,
     )

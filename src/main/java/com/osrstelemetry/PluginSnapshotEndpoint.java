@@ -47,10 +47,12 @@ public class PluginSnapshotEndpoint implements Closeable
 			"bank_ui",
 			"dialogue_state",
 			"interaction_hot",
+			"scene_object_census",
 			"route_object_census",
 			"resource_object_census",
 			"service_object_census");
 	private static final List<String> WORLD_MODEL_NEEDS = Arrays.asList(
+			"scene_object_census",
 			"route_object_census",
 			"resource_object_census",
 			"service_object_census");

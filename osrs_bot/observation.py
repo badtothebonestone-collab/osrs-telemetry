@@ -19,7 +19,7 @@ SENSOR_FRAME_SCHEMA = "sensor_frame.v1"
 MAX_TILE_PROJECTIONS = 16
 CORE_FACT_NEEDS = ("baseline", "inventory", "activity", "bank_ui", "dialogue_state")
 CANONICAL_NEEDS = ("baseline", "inventory", "activity", "interaction_hot",
-                   "resource_object_census", "route_object_census", "service_object_census", "bank_ui", "dialogue_state")
+                   "scene_object_census", "bank_ui", "dialogue_state")
 _TAG = re.compile(r"<[^>]*>")
 
 class ObservationError(RuntimeError):
@@ -29,7 +29,7 @@ class ObservationTransportError(ObservationError): pass
 class ObservationDecodeError(ObservationError): pass
 class ObservationSchemaError(ObservationError): pass
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _CanvasTransform:
     canvas_bounds: ScreenBounds
     source_width: int
@@ -304,8 +304,12 @@ def _menu_state(
 def _nearby_objects(payloads: Mapping[str, Any], transform: _CanvasTransform | None,
                     player_location: WorldPoint | None, requested_tiles: Mapping[str, WorldPoint]) -> tuple[NearbyObject, ...]:
     objects: dict[str, NearbyObject] = {}
-    for census_name, forced_flag in (("resource_object_census", "resource"), ("route_object_census", "route"),
-                                     ("service_object_census", "service")):
+    for census_name in (
+        "scene_object_census",
+        "resource_object_census",
+        "route_object_census",
+        "service_object_census",
+    ):
         census = _payload(payloads, census_name)
         values = census.get("objects", []) if census else []
         if not isinstance(values, list):
@@ -332,9 +336,9 @@ def _nearby_objects(payloads: Mapping[str, Any], transform: _CanvasTransform | N
                                      geometry=_target_geometry(raw, transform),
                                      scene_x=_integer(raw.get("sceneX"), "object.sceneX", optional=True),
                                      scene_y=_integer(raw.get("sceneY"), "object.sceneY", optional=True),
-                                     resource_candidate=forced_flag == "resource" or _boolean(raw.get("resourceCandidate"), "object.resourceCandidate"),
-                                     route_candidate=forced_flag == "route" or _boolean(raw.get("routeObjectCandidate"), "object.routeObjectCandidate"),
-                                     service_candidate=forced_flag == "service" or _boolean(raw.get("serviceObjectCandidate"), "object.serviceObjectCandidate"))
+                                     resource_candidate=_boolean(raw.get("resourceCandidate"), "object.resourceCandidate"),
+                                     route_candidate=_boolean(raw.get("routeObjectCandidate"), "object.routeObjectCandidate"),
+                                     service_candidate=_boolean(raw.get("serviceObjectCandidate"), "object.serviceObjectCandidate"))
             objects[key] = _merge_object(objects.get(key), candidate)
 
     tile_payload = _payload(payloads, "tile_projection")
@@ -438,7 +442,7 @@ def _timestamp(value: Any, path: str) -> datetime:
     return timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _FrameContract:
     frame_id: str
     geometry_frame_id: str | None
@@ -561,6 +565,7 @@ def _dynamic_sources_coherent(
 ) -> bool:
     coherent = True
     for name in (
+        "scene_object_census",
         "resource_object_census",
         "route_object_census",
         "service_object_census",

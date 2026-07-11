@@ -3,9 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .definition import FixedRouteStep
 from .model import (
     Action,
     ActionKind,
+    BANK_INTERFACE_NAME,
+    CLOSE_BANK_WIDGET_KEY,
+    DEPOSIT_INVENTORY_WIDGET_KEY,
     DialogueOptionConstraint,
     InterfaceConstraint,
     InventoryConstraint,
@@ -16,12 +20,9 @@ from .model import (
     VerificationSpec,
     WorldPoint,
 )
+from .profile import DEFAULT_BINDING, BoundProfile
 from .task_contract import Decision, ObservationRequest, TaskSnapshot, TaskStatus
 from .verification import OutcomeKind, VerificationResult
-
-
-LOG_ITEM_ID = 1511
-
 
 class TaskPhase(str, Enum):
     FIND_TREE = "find_tree"
@@ -48,94 +49,19 @@ class TaskProgress:
     failures: list[str] = field(default_factory=list)
     resume_phase: TaskPhase | None = None
 
-
-TREE_AREA = WorldPoint(3196, 3240, 0)
-BANK_ANCHOR = WorldPoint(3208, 3221, 2)
-
-TREE_NAME = "Tree"
-TREE_OBJECT_ID = 1276
-CHOP_ACTION = "Chop down"
-BANK_NAME = "Bank booth"
-BANK_OBJECT_ID = 18491
-BANK_ACTION = "Bank"
-DEPOSIT_WIDGET_NAME = "deposit_inventory"
-CLOSE_WIDGET_NAME = "close_bank"
-
-ACTION_DEADLINE_TICKS = 8
-CHOP_DEADLINE_TICKS = 100
-ROUTE_STABLE_TICKS = 4
-
-
-@dataclass(frozen=True)
-class _FixedRouteStep:
-    step_id: str
-    location: WorldPoint
-    arrival_radius: int
-    object_id: int = 0
-    object_name: str | None = None
-    action: str = "Walk here"
-    expected_plane: int | None = None
-
-    @property
-    def is_walk(self) -> bool:
-        return self.object_id == 0
-
-    @property
-    def target_key(self) -> str:
-        return f"route:{self.step_id}"
-
-    @property
-    def allowed_actions(self) -> tuple[str, ...]:
-        return (self.action, "Climb") if not self.is_walk else ("Walk here",)
-
-
-# Fixed waypoints and stair objects come from the retained successful route
-# recordings. Every click still requires matching live telemetry and geometry.
-ROUTE_TO_BANK = (
-    _FixedRouteStep("west_approach_bridge", WorldPoint(3200, 3238, 0), 2),
-    _FixedRouteStep("west_corridor_north", WorldPoint(3196, 3237, 0), 2),
-    _FixedRouteStep("west_wall_corner", WorldPoint(3196, 3234, 0), 1),
-    _FixedRouteStep("west_wall_descent_1", WorldPoint(3197, 3231, 0), 1),
-    _FixedRouteStep("west_wall_descent_2", WorldPoint(3198, 3228, 0), 1),
-    _FixedRouteStep("west_wall_descent_3", WorldPoint(3197, 3225, 0), 1),
-    _FixedRouteStep("west_wall_descent_4", WorldPoint(3197, 3222, 0), 1),
-    _FixedRouteStep("west_corridor_south", WorldPoint(3197, 3221, 0), 2),
-    _FixedRouteStep("south_corridor_entry", WorldPoint(3199, 3218, 0), 1),
-    _FixedRouteStep("south_corridor_west", WorldPoint(3202, 3215, 0), 2),
-    _FixedRouteStep("south_corridor_bridge", WorldPoint(3205, 3214, 0), 1),
-    _FixedRouteStep("south_corridor_safe", WorldPoint(3208, 3212, 0), 2),
-    _FixedRouteStep("south_stairs_approach", WorldPoint(3205, 3209, 0), 2),
-    _FixedRouteStep("ground_floor_stairs_up", WorldPoint(3204, 3207, 0), 4, 56230, "Staircase", "Climb-up", 1),
-    _FixedRouteStep("first_floor_stairs_up", WorldPoint(3204, 3207, 1), 4, 16672, "Staircase", "Climb-up", 2),
-    _FixedRouteStep("bank_floor_south_1", WorldPoint(3205, 3211, 2), 2),
-    _FixedRouteStep("bank_floor_south_2", WorldPoint(3205, 3215, 2), 2),
-    _FixedRouteStep("bank_floor_north", WorldPoint(3207, 3218, 2), 2),
-    _FixedRouteStep("bank_booth_approach", BANK_ANCHOR, 2),
-)
-
-ROUTE_TO_TREES = (
-    _FixedRouteStep("bank_floor_return_1", WorldPoint(3206, 3226, 2), 2),
-    _FixedRouteStep("bank_floor_return_2", WorldPoint(3206, 3228, 2), 1),
-    _FixedRouteStep("bank_floor_bottom", WorldPoint(3205, 3229, 2), 3, 56231, "Staircase", "Bottom-floor", 0),
-    _FixedRouteStep("ground_corridor_east_1", WorldPoint(3210, 3228, 0), 2),
-    _FixedRouteStep("ground_corridor_east_2", WorldPoint(3215, 3228, 0), 2),
-    _FixedRouteStep("ground_corridor_south_1", WorldPoint(3215, 3225, 0), 2),
-    _FixedRouteStep("ground_corridor_south_2", WorldPoint(3215, 3222, 0), 2),
-    _FixedRouteStep("ground_corridor_south_3", WorldPoint(3215, 3219, 0), 2),
-    _FixedRouteStep("ground_corridor_west", WorldPoint(3211, 3219, 0), 2),
-    _FixedRouteStep("ground_corridor_west_2", WorldPoint(3207, 3214, 0), 2),
-    _FixedRouteStep("south_corridor_return", WorldPoint(3203, 3214, 0), 2),
-    _FixedRouteStep("west_corridor_return_1", WorldPoint(3198, 3222, 0), 2),
-    _FixedRouteStep("west_corridor_return_2", WorldPoint(3199, 3234, 0), 2),
-    _FixedRouteStep("tree_lane_return", WorldPoint(3196, 3240, 0), 2),
-    _FixedRouteStep("west_trees", TREE_AREA, 2),
-)
-
-
 class WoodcutBankTask:
-    """One fixed Lumbridge-west tree -> castle bank -> tree cycle."""
+    """Explicit woodcut/bank FSM bound to one validated task/site profile."""
 
-    def __init__(self) -> None:
+    def __init__(self, binding: BoundProfile = DEFAULT_BINDING) -> None:
+        if not isinstance(binding, BoundProfile):
+            raise TypeError("binding must be a validated BoundProfile")
+        if len(binding.definition.resource.produced_item_ids) != 1:
+            raise ValueError("WoodcutBankTask requires exactly one produced item ID")
+        self.binding = binding
+        self.definition = binding.definition
+        self._produced_item_id = next(
+            iter(binding.definition.resource.produced_item_ids)
+        )
         self.progress = TaskProgress()
         self._movement_verified = False
         self._route_settle_location: WorldPoint | None = None
@@ -164,7 +90,7 @@ class WoodcutBankTask:
             else None
         )
         return TaskSnapshot(
-            task_id="woodcut_bank_lumbridge_v1",
+            task_id="woodcut_bank",
             status=status,
             state=self.progress.phase.value,
             blocker=blocker,
@@ -202,8 +128,13 @@ class WoodcutBankTask:
         held_ids = {
             item.item_id for item in observation.inventory.items if item.quantity > 0
         }
-        if not held_ids.issubset({LOG_ITEM_ID}):
-            return self._block(observation, "inventory contains unsupported non-log items")
+        if (
+            self.definition.inventory.require_only_allowed_items
+            and not held_ids.issubset(self.definition.inventory.allowed_item_ids)
+        ):
+            return self._block(
+                observation, "inventory violates the selected task definition"
+            )
 
         if self.progress.phase == TaskPhase.FIND_TREE:
             return self._find_tree(observation)
@@ -212,7 +143,7 @@ class WoodcutBankTask:
         if self.progress.phase in {TaskPhase.VERIFY_LOGS, TaskPhase.VERIFY_DEPOSIT}:
             return self._block(observation, "verification phase has no pending verification")
         if self.progress.phase == TaskPhase.NAVIGATE_TO_BANK:
-            return self._navigate(observation, ROUTE_TO_BANK)
+            return self._navigate(observation, self.definition.route_to_bank.steps)
         if self.progress.phase == TaskPhase.OPEN_BANK:
             return self._open_bank(observation)
         if self.progress.phase == TaskPhase.DEPOSIT_LOGS:
@@ -220,7 +151,7 @@ class WoodcutBankTask:
         if self.progress.phase == TaskPhase.CLOSE_BANK:
             return self._close_bank(observation)
         if self.progress.phase == TaskPhase.NAVIGATE_TO_TREES:
-            return self._navigate(observation, ROUTE_TO_TREES)
+            return self._navigate(observation, self.definition.route_to_resource.steps)
         if self.progress.phase == TaskPhase.STAIR_DIALOGUE:
             return self._choose_stair_direction(observation)
         return self._block(observation, "unknown task phase")
@@ -306,17 +237,27 @@ class WoodcutBankTask:
         )
 
     def _find_tree(self, observation: Observation) -> Decision:
-        if self.progress.cycles_completed >= 1:
+        if self.progress.cycles_completed >= self.binding.profile.cycle_goal:
             self.progress.phase = TaskPhase.COMPLETE
-            return self._wait(observation, "one banking cycle is complete")
+            return self._wait(observation, "profile cycle goal is complete")
         if observation.inventory.full:
-            if observation.inventory.quantity(LOG_ITEM_ID) == 0:
-                return self._block(observation, "inventory is full without ordinary logs")
+            if (
+                self.definition.inventory.require_produced_item_when_full
+                and observation.inventory.quantity(self._produced_item_id) == 0
+            ):
+                return self._block(
+                    observation,
+                    "inventory is full without the definition's produced item",
+                )
             self.progress.phase = TaskPhase.NAVIGATE_TO_BANK
             self.progress.route_index = 0
             return self._wait(observation, "inventory is full; fixed bank route selected")
-        if observation.plane != TREE_AREA.plane or observation.location.distance_to(TREE_AREA) > 16:
-            return self._block(observation, "player is outside the supported tree area")
+        work_area = self.definition.resource.work_area
+        if (
+            observation.plane != work_area.anchor.plane
+            or observation.location.distance_to(work_area.anchor) > work_area.radius
+        ):
+            return self._block(observation, "player is outside the supported work area")
 
         actionable = [
             item for item in observation.nearby_objects if self._is_actionable_tree(item)
@@ -328,12 +269,12 @@ class WoodcutBankTask:
         if not candidates:
             return self._wait(
                 observation,
-                "no geometrically unambiguous ordinary Tree is observed",
+                "no geometrically unambiguous configured resource is observed",
             )
         candidates.sort(key=lambda item: (observation.location.distance_to(item.location), item.key))
         self.progress.target_key = candidates[0].key
         self.progress.phase = TaskPhase.CHOP
-        return self._wait(observation, "selected nearest exact ordinary Tree")
+        return self._wait(observation, "selected nearest exact configured resource")
 
     def _chop(self, observation: Observation) -> Decision:
         if observation.inventory.full:
@@ -346,24 +287,34 @@ class WoodcutBankTask:
         if target is None or not self._is_actionable_tree(target):
             self.progress.target_key = None
             self.progress.phase = TaskPhase.FIND_TREE
-            return self._wait(observation, "selected Tree is no longer exactly actionable")
+            return self._wait(
+                observation, "selected resource is no longer exactly actionable"
+            )
 
         verification = VerificationSpec(
             VerificationKind.ITEM_QUANTITY_INCREASED,
             before_tick=observation.tick,
-            deadline_tick=observation.tick + CHOP_DEADLINE_TICKS,
-            item_id=LOG_ITEM_ID,
-            before_quantity=observation.inventory.quantity(LOG_ITEM_ID),
+            deadline_tick=(
+                observation.tick
+                + self.definition.verification.resource_deadline_ticks
+            ),
+            item_id=self._produced_item_id,
+            before_quantity=observation.inventory.quantity(self._produced_item_id),
             source_session_id=observation.session_id,
         )
         self.progress.phase = TaskPhase.VERIFY_LOGS
         return self._emit_action(
-            observation, ActionKind.INTERACT_OBJECT, "Chop ordinary Tree",
-            "chop exact ordinary Tree", CHOP_ACTION, verification, target=target,
+            observation,
+            ActionKind.INTERACT_OBJECT,
+            f"{self.definition.resource.selector.action} configured resource",
+            "interact with exact configured resource",
+            self.definition.resource.selector.action,
+            verification,
+            target=target,
         )
 
     def _navigate(
-        self, observation: Observation, route: tuple[_FixedRouteStep, ...]
+        self, observation: Observation, route: tuple[FixedRouteStep, ...]
     ) -> Decision:
         if self._movement_verified:
             if self._route_settle_location != observation.location:
@@ -371,7 +322,10 @@ class WoodcutBankTask:
                 self._route_settle_since_tick = observation.tick
                 return self._wait(observation, "waiting for player location to settle")
             assert self._route_settle_since_tick is not None
-            if observation.tick - self._route_settle_since_tick < ROUTE_STABLE_TICKS:
+            if (
+                observation.tick - self._route_settle_since_tick
+                < self.definition.verification.route_stable_ticks
+            ):
                 return self._wait(observation, "waiting for player location to settle")
             self._movement_verified = False
             self._route_settle_location = None
@@ -410,7 +364,10 @@ class WoodcutBankTask:
             verification = VerificationSpec(
                 VerificationKind.MOVED_CLOSER,
                 before_tick=observation.tick,
-                deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
+                deadline_tick=(
+                    observation.tick
+                    + self.definition.verification.action_deadline_ticks
+                ),
                 before_location=observation.location,
                 target_location=step.location,
                 source_session_id=observation.session_id,
@@ -441,15 +398,19 @@ class WoodcutBankTask:
         verification = VerificationSpec(
             VerificationKind.ROUTE_TRANSITION,
             before_tick=observation.tick,
-            deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
+            deadline_tick=(
+                observation.tick + self.definition.verification.action_deadline_ticks
+            ),
             before_location=observation.location,
             expected_plane=step.expected_plane,
             source_session_id=observation.session_id,
-            dialogue_prompt_contains="climb",
+            dialogue_prompt_contains=(
+                self.definition.verification.transition_dialogue_prompt_contains
+            ),
             dialogue_option_contains=(
-                "climb up"
+                self.definition.verification.transition_up_option_contains
                 if step.expected_plane > observation.plane
-                else "climb down"
+                else self.definition.verification.transition_down_option_contains
             ),
         )
         return self._emit_action(
@@ -467,28 +428,42 @@ class WoodcutBankTask:
         if step.expected_plane is None:
             return self._block(observation, "stair route direction is unknown")
         widgets = observation.widgets
+        expectations = self.definition.verification
         if (
             not widgets.dialogue_active
             or widgets.dialogue_type != "options"
-            or "climb" not in widgets.dialogue_prompt.lower()
+            or expectations.transition_dialogue_prompt_contains.lower()
+            not in widgets.dialogue_prompt.lower()
             or not widgets.dialogue_number_keys
             or widgets.dialogue_client_tick is None
         ):
-            return self._block(observation, "expected staircase direction dialogue is unavailable")
+            return self._block(
+                observation, "expected route-transition dialogue is unavailable"
+            )
         direction = "up" if step.expected_plane > observation.plane else "down"
+        option_contains = (
+            expectations.transition_up_option_contains
+            if direction == "up"
+            else expectations.transition_down_option_contains
+        )
         matches = [
             option for option in widgets.dialogue_options
             if option.visible
-            and f"climb {direction}" in option.text.lower()
+            and option_contains.lower() in option.text.lower()
             and option.key in {str(value) for value in range(1, 10)}
         ]
         if len(matches) != 1:
-            return self._block(observation, f"exact climb {direction} dialogue option is unavailable")
+            return self._block(
+                observation,
+                f"exact {direction} route-transition option is unavailable",
+            )
         selected = matches[0]
         verification = VerificationSpec(
             VerificationKind.PLANE_CHANGED,
             before_tick=observation.tick,
-            deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
+            deadline_tick=(
+                observation.tick + expectations.action_deadline_ticks
+            ),
             before_location=observation.location,
             expected_plane=step.expected_plane,
             source_session_id=observation.session_id,
@@ -496,7 +471,7 @@ class WoodcutBankTask:
         self.progress.pending = verification
         return Decision(
             self.progress.phase.value,
-            f"choose exact climb {direction} dialogue option",
+            f"choose exact {direction} route-transition option",
             Action(
                 ActionKind.PRESS_KEY,
                 f"Choose {selected.text}",
@@ -511,7 +486,9 @@ class WoodcutBankTask:
                 source_dialogue_client_tick=widgets.dialogue_client_tick,
                 task_constraints=TaskConstraints(
                     dialogue=DialogueOptionConstraint(
-                        prompt_contains="climb",
+                        prompt_contains=(
+                            expectations.transition_dialogue_prompt_contains
+                        ),
                         option_text=selected.text,
                         option_index=selected.index,
                         option_key=selected.key,
@@ -521,6 +498,8 @@ class WoodcutBankTask:
         )
 
     def _open_bank(self, observation: Observation) -> Decision:
+        bank = self.definition.bank
+        selector = bank.selector
         if not observation.widgets.bank_known:
             return self._wait(observation, "bank state is not observable")
         if observation.widgets.bank_pin_open:
@@ -530,58 +509,90 @@ class WoodcutBankTask:
                 return self._wait(observation, "bank is open but not readable")
             self.progress.phase = TaskPhase.DEPOSIT_LOGS
             return self._wait(observation, "bank is already open and readable")
-        if observation.plane != BANK_ANCHOR.plane:
-            return self._block(observation, "bank may only be opened on plane 2")
+        if observation.plane != bank.anchor.plane:
+            return self._block(
+                observation, "bank may only be opened on its configured plane"
+            )
 
         targets = [
             item
             for item in observation.nearby_objects
-            if item.object_id == BANK_OBJECT_ID
-            and item.name == BANK_NAME
-            and item.location == BANK_ANCHOR
-            and item.supports(BANK_ACTION)
-            and item.service_candidate
+            if item.object_id in selector.object_ids
+            and item.name == selector.name
+            and item.location == bank.anchor
+            and item.supports(selector.action)
             and self._has_geometry(item)
-            and observation.location.distance_to(item.location) <= 6
+            and observation.location.distance_to(item.location)
+            <= bank.interaction_radius
         ]
         if not targets:
-            return self._block(observation, "exact Lumbridge bank booth is unavailable")
+            return self._block(observation, "exact configured bank is unavailable")
         target = sorted(targets, key=lambda item: item.key)[0]
         verification = VerificationSpec(
             VerificationKind.INTERFACE_OPENED,
             before_tick=observation.tick,
-            deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
+            deadline_tick=(
+                observation.tick
+                + self.definition.verification.action_deadline_ticks
+            ),
             before_location=observation.location,
-            expected_plane=2,
+            expected_plane=bank.anchor.plane,
             source_session_id=observation.session_id,
-            interface_name="bank",
+            interface_name=BANK_INTERFACE_NAME,
         )
         return self._emit_action(
-            observation, ActionKind.INTERACT_OBJECT, "Open Lumbridge Castle bank",
-            "open exact Lumbridge Castle bank booth", BANK_ACTION, verification,
+            observation,
+            ActionKind.INTERACT_OBJECT,
+            "Open configured bank",
+            "open exact configured bank",
+            selector.action,
+            verification,
             target=target,
             task_constraints=TaskConstraints(
-                interface=InterfaceConstraint("bank", BANK_ANCHOR.plane, False)
+                interface=InterfaceConstraint(
+                    BANK_INTERFACE_NAME, bank.anchor.plane, False
+                )
             ),
         )
 
     def _deposit_logs(self, observation: Observation) -> Decision:
+        bank_plane = self.definition.bank.anchor.plane
+        inventory_rule = self.definition.inventory
         if not observation.widgets.bank_known:
             return self._wait(observation, "bank state is not observable")
         if observation.widgets.bank_pin_open:
             return self._block(observation, "bank PIN handling is out of scope")
-        if observation.plane != BANK_ANCHOR.plane:
-            return self._block(observation, "logs may only be deposited on bank plane 2")
+        if observation.plane != bank_plane:
+            return self._block(
+                observation, "items may only be deposited on the configured bank plane"
+            )
         if not observation.widgets.bank_open or not observation.widgets.bank_readable:
             return self._block(observation, "readable bank must remain open before deposit")
         held = [item for item in observation.inventory.items if item.quantity > 0]
-        if not held or observation.inventory.quantity(LOG_ITEM_ID) <= 0:
-            return self._block(observation, "there are no ordinary logs to deposit")
-        if any(item.item_id != LOG_ITEM_ID for item in held):
-            return self._block(observation, "deposit-inventory requires an all-1511 inventory")
+        if (
+            inventory_rule.require_nonempty_deposit
+            and (
+                not held
+                or not any(
+                    item.item_id in inventory_rule.deposit_item_ids
+                    for item in held
+                )
+            )
+        ):
+            return self._block(observation, "there are no configured items to deposit")
+        if any(
+            item.item_id not in inventory_rule.deposit_item_ids for item in held
+        ):
+            return self._block(
+                observation, "deposit inventory violates the task definition"
+            )
 
         target = observation.widgets.deposit_inventory
-        if target is None or target.name != DEPOSIT_WIDGET_NAME or not target.visible:
+        if (
+            target is None
+            or target.name != DEPOSIT_INVENTORY_WIDGET_KEY
+            or not target.visible
+        ):
             return self._block(observation, "deposit-inventory widget is unavailable")
         point = target.screen_point
         if point is None:
@@ -590,34 +601,48 @@ class WoodcutBankTask:
         verification = VerificationSpec(
             VerificationKind.ITEM_QUANTITY_EQUALS,
             before_tick=observation.tick,
-            deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
-            item_id=LOG_ITEM_ID,
-            expected_quantity=0,
-            expected_plane=2,
+            deadline_tick=(
+                observation.tick
+                + self.definition.verification.action_deadline_ticks
+            ),
+            item_id=self._produced_item_id,
+            expected_quantity=(
+                self.definition.verification.deposit_expected_quantity
+            ),
+            expected_plane=bank_plane,
             source_session_id=observation.session_id,
-            interface_name="bank",
+            interface_name=BANK_INTERFACE_NAME,
         )
         self.progress.phase = TaskPhase.VERIFY_DEPOSIT
         return self._emit_action(
             observation, ActionKind.CLICK_WIDGET, "Deposit inventory",
-            "deposit all ordinary logs", DEPOSIT_WIDGET_NAME, verification,
-            target_key=DEPOSIT_WIDGET_NAME, target_name=target.name,
+            "deposit all configured items",
+            DEPOSIT_INVENTORY_WIDGET_KEY,
+            verification,
+            target_key=DEPOSIT_INVENTORY_WIDGET_KEY,
+            target_name=target.name,
             screen_point=point,
             task_constraints=TaskConstraints(
-                inventory=InventoryConstraint(frozenset({LOG_ITEM_ID})),
+                inventory=InventoryConstraint(inventory_rule.deposit_item_ids),
                 interface=InterfaceConstraint(
-                    "bank", BANK_ANCHOR.plane, True, require_readable=True
+                    BANK_INTERFACE_NAME,
+                    bank_plane,
+                    True,
+                    require_readable=True,
                 ),
             ),
         )
 
     def _close_bank(self, observation: Observation) -> Decision:
+        bank_plane = self.definition.bank.anchor.plane
         if not observation.widgets.bank_known:
             return self._wait(observation, "bank state is not observable")
         if observation.widgets.bank_pin_open:
             return self._block(observation, "bank PIN handling is out of scope")
-        if observation.plane != BANK_ANCHOR.plane:
-            return self._block(observation, "bank may only be closed on plane 2")
+        if observation.plane != bank_plane:
+            return self._block(
+                observation, "bank may only be closed on its configured plane"
+            )
         if not observation.widgets.bank_open:
             self.progress.phase = TaskPhase.NAVIGATE_TO_TREES
             self.progress.route_index = 0
@@ -625,16 +650,19 @@ class WoodcutBankTask:
         verification = VerificationSpec(
             VerificationKind.INTERFACE_CLOSED,
             before_tick=observation.tick,
-            deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
-            expected_plane=2,
+            deadline_tick=(
+                observation.tick
+                + self.definition.verification.action_deadline_ticks
+            ),
+            expected_plane=bank_plane,
             source_session_id=observation.session_id,
-            interface_name="bank",
+            interface_name=BANK_INTERFACE_NAME,
         )
         target = observation.widgets.close_bank
         point = (
             target.screen_point
             if target is not None
-            and target.name == CLOSE_WIDGET_NAME
+            and target.name == CLOSE_BANK_WIDGET_KEY
             and target.visible
             else None
         )
@@ -658,8 +686,8 @@ class WoodcutBankTask:
                     source_session_id=observation.session_id,
                     task_constraints=TaskConstraints(
                         interface=InterfaceConstraint(
-                            "bank",
-                            BANK_ANCHOR.plane,
+                            BANK_INTERFACE_NAME,
+                            bank_plane,
                             True,
                             require_keyboard_close=True,
                         )
@@ -669,11 +697,14 @@ class WoodcutBankTask:
 
         return self._emit_action(
             observation, ActionKind.CLICK_WIDGET, "Close bank",
-            "close bank before return route", CLOSE_WIDGET_NAME, verification,
-            target_key=CLOSE_WIDGET_NAME, target_name=target.name,
+            "close bank before return route",
+            CLOSE_BANK_WIDGET_KEY,
+            verification,
+            target_key=CLOSE_BANK_WIDGET_KEY,
+            target_name=target.name,
             screen_point=point,
             task_constraints=TaskConstraints(
-                interface=InterfaceConstraint("bank", BANK_ANCHOR.plane, True)
+                interface=InterfaceConstraint(BANK_INTERFACE_NAME, bank_plane, True)
             ),
         )
 
@@ -709,23 +740,27 @@ class WoodcutBankTask:
         )
         return Decision(self.progress.phase.value, reason, action)
 
-    def _current_route(self) -> tuple[_FixedRouteStep, ...] | None:
+    def _current_route(self) -> tuple[FixedRouteStep, ...] | None:
         phase = self.progress.resume_phase if self.progress.phase is TaskPhase.STAIR_DIALOGUE else self.progress.phase
         if phase == TaskPhase.NAVIGATE_TO_BANK:
-            return ROUTE_TO_BANK
+            return self.definition.route_to_bank.steps
         if phase == TaskPhase.NAVIGATE_TO_TREES:
-            return ROUTE_TO_TREES
+            return self.definition.route_to_resource.steps
         return None
 
     def _finish_route(self) -> None:
         if self.progress.phase == TaskPhase.NAVIGATE_TO_BANK:
             self.progress.phase = TaskPhase.OPEN_BANK
         elif self.progress.phase == TaskPhase.NAVIGATE_TO_TREES:
-            self.progress.cycles_completed = 1
-            self.progress.phase = TaskPhase.COMPLETE
+            self.progress.cycles_completed += 1
+            self.progress.phase = (
+                TaskPhase.COMPLETE
+                if self.progress.cycles_completed >= self.binding.profile.cycle_goal
+                else TaskPhase.FIND_TREE
+            )
 
     def _strict_route_object(
-        self, observation: Observation, step: _FixedRouteStep
+        self, observation: Observation, step: FixedRouteStep
     ) -> NearbyObject | None:
         matches = [
             item
@@ -737,16 +772,14 @@ class WoodcutBankTask:
             and item.location.distance_to(step.location) <= step.arrival_radius
             and observation.location.distance_to(item.location) <= step.arrival_radius
             and any(item.supports(option) for option in step.allowed_actions)
-            and item.route_candidate
             and self._has_geometry(item)
         ]
         if not matches:
             return None
         return sorted(matches, key=lambda item: (observation.location.distance_to(item.location), item.key))[0]
 
-    @staticmethod
     def _walk_projection_identity_matches(
-        target: NearbyObject | None, step: _FixedRouteStep
+        self, target: NearbyObject | None, step: FixedRouteStep
     ) -> bool:
         return bool(
             target is not None
@@ -756,34 +789,32 @@ class WoodcutBankTask:
             and target.kind == "NAVIGATION_TILE"
             and target.actions == ("Walk here",)
             and target.location == step.location
-            and target.route_candidate
             and target.scene_x is not None
             and target.scene_y is not None
         )
 
-    @staticmethod
     def _is_exact_walk_projection(
-        target: NearbyObject | None, step: _FixedRouteStep
+        self, target: NearbyObject | None, step: FixedRouteStep
     ) -> bool:
         return bool(
-            WoodcutBankTask._walk_projection_identity_matches(target, step)
+            self._walk_projection_identity_matches(target, step)
             and target is not None
-            and WoodcutBankTask._has_geometry(target)
+            and self._has_geometry(target)
         )
 
-    @staticmethod
-    def _is_actionable_tree(target: NearbyObject) -> bool:
+    def _is_actionable_tree(self, target: NearbyObject) -> bool:
+        selector = self.definition.resource.selector
+        work_area = self.definition.resource.work_area
         return bool(
-            target.object_id == TREE_OBJECT_ID
-            and target.name == TREE_NAME
-            and target.supports(CHOP_ACTION)
+            target.object_id in selector.object_ids
+            and target.name == selector.name
+            and target.supports(selector.action)
             and target.location is not None
-            and target.location.plane == TREE_AREA.plane
-            and target.location.distance_to(TREE_AREA) <= 16
-            and target.resource_candidate
+            and target.location.plane == work_area.anchor.plane
+            and target.location.distance_to(work_area.anchor) <= work_area.radius
             and target.scene_x is not None
             and target.scene_y is not None
-            and WoodcutBankTask._has_geometry(target)
+            and self._has_geometry(target)
         )
 
     @staticmethod

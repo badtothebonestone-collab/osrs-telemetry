@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from osrs_bot.definition import LUMBRIDGE_WEST_TREES_V1
 from osrs_bot.model import (
     ActionKind,
     InventoryItem,
@@ -20,19 +21,20 @@ from osrs_bot.model import (
     WidgetTarget,
     WorldPoint,
 )
-from osrs_bot.task import (
-    BANK_ANCHOR,
-    BANK_OBJECT_ID,
-    LOG_ITEM_ID,
-    ROUTE_STABLE_TICKS,
-    ROUTE_TO_BANK,
-    ROUTE_TO_TREES,
-    TREE_AREA,
-    TREE_OBJECT_ID,
-    TaskPhase,
-    WoodcutBankTask,
-)
+from osrs_bot.profile import DEFAULT_BINDING
+from osrs_bot.task import TaskPhase, WoodcutBankTask
 from osrs_bot.verification import Verifier
+
+
+DEFINITION = LUMBRIDGE_WEST_TREES_V1
+TREE_AREA = DEFINITION.resource.work_area.anchor
+BANK_ANCHOR = DEFINITION.bank.anchor
+TREE_OBJECT_ID = next(iter(DEFINITION.resource.selector.object_ids))
+BANK_OBJECT_ID = next(iter(DEFINITION.bank.selector.object_ids))
+LOG_ITEM_ID = next(iter(DEFINITION.resource.produced_item_ids))
+ROUTE_TO_BANK = DEFINITION.route_to_bank.steps
+ROUTE_TO_TREES = DEFINITION.route_to_resource.steps
+ROUTE_STABLE_TICKS = DEFINITION.verification.route_stable_ticks
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "golden_lumbridge_cycle.json"
@@ -127,7 +129,7 @@ def _tree(raw: dict[str, Any]) -> NearbyObject:
         geometry=GEOMETRY,
         scene_x=50,
         scene_y=50,
-        resource_candidate=True,
+        resource_candidate=False,
     )
 
 
@@ -146,7 +148,7 @@ def _route_target(raw: dict[str, Any]) -> NearbyObject:
             geometry=GEOMETRY,
             scene_x=50,
             scene_y=50,
-            route_candidate=True,
+            route_candidate=False,
         )
     return NearbyObject(
         key=f"golden:{raw['id']}",
@@ -159,7 +161,7 @@ def _route_target(raw: dict[str, Any]) -> NearbyObject:
         geometry=GEOMETRY,
         scene_x=50,
         scene_y=50,
-        route_candidate=True,
+        route_candidate=False,
     )
 
 
@@ -188,7 +190,7 @@ class GoldenLumbridgeCycleReplayTest(unittest.TestCase):
         cls.fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
     def setUp(self) -> None:
-        self.task = WoodcutBankTask()
+        self.task = WoodcutBankTask(DEFAULT_BINDING)
         self.verifier = Verifier()
         self.tick = 100
 
@@ -298,16 +300,37 @@ class GoldenLumbridgeCycleReplayTest(unittest.TestCase):
 
     def test_fixture_matches_the_frozen_task_and_route_contract(self) -> None:
         task = self.fixture["task"]
+        provenance = self.fixture["provenance"]
+        definition_provenance = DEFINITION.provenance
+        self.assertEqual(definition_provenance.fixture_schema, self.fixture["schema"])
+        self.assertEqual(definition_provenance.fixture_id, self.fixture["id"])
+        self.assertEqual(definition_provenance.evidence_date, provenance["evidenceDate"])
+        self.assertEqual(
+            definition_provenance.baseline_parent, provenance["baselineParent"]
+        )
+        self.assertEqual(
+            [(item.path, item.sha256) for item in definition_provenance.evidence],
+            [(item["path"], item["sha256"]) for item in provenance["evidence"]],
+        )
+        self.assertIs(DEFAULT_BINDING.definition, DEFINITION)
+        self.assertEqual(
+            DEFAULT_BINDING.profile.cycle_goal,
+            self.fixture["expected"]["cyclesCompleted"],
+        )
         self.assertEqual(
             [TREE_AREA.x, TREE_AREA.y, TREE_AREA.plane], task["treeArea"]
         )
         self.assertEqual(TREE_OBJECT_ID, task["tree"]["objectId"])
+        self.assertEqual(DEFINITION.resource.selector.name, task["tree"]["name"])
+        self.assertEqual(DEFINITION.resource.selector.action, task["tree"]["action"])
         self.assertEqual(LOG_ITEM_ID, task["tree"]["producedItemId"])
         self.assertEqual(
             [BANK_ANCHOR.x, BANK_ANCHOR.y, BANK_ANCHOR.plane],
             task["bankAnchor"],
         )
         self.assertEqual(BANK_OBJECT_ID, task["bank"]["objectId"])
+        self.assertEqual(DEFINITION.bank.selector.name, task["bank"]["name"])
+        self.assertEqual(DEFINITION.bank.selector.action, task["bank"]["action"])
 
         outbound = [_route_contract(step) for step in ROUTE_TO_BANK]
         inbound = [_route_contract(step) for step in ROUTE_TO_TREES]
@@ -377,8 +400,8 @@ class GoldenLumbridgeCycleReplayTest(unittest.TestCase):
             geometry=GEOMETRY,
             scene_x=50,
             scene_y=50,
-            route_candidate=True,
-            service_candidate=True,
+            route_candidate=False,
+            service_candidate=False,
         )
         closed = WidgetObservation(bank_known=True)
         self.tick += 1

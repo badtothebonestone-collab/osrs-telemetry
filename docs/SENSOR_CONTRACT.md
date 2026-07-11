@@ -40,7 +40,14 @@ loaded-scene observation.
 
 ## Dynamic geometry and menu evidence
 
-World-model censuses and tile projections are calculated on the RuneLite
+The canonical adapter requests one neutral `scene_object_census`; filtered
+resource/route/service censuses remain diagnostic endpoint capabilities, not
+task authorization. Scene rows omit candidate/type/skill labels, and scene
+projection scheduling uses only explicit request state, factual distance, and
+stable object identity. A same-tick request that needs projection capability
+missing from the cached world-model snapshot forces a capability refresh, so
+an earlier lower-capability query cannot suppress later geometry. World-model
+censuses and tile projections are calculated on the RuneLite
 client thread. They are merged only when source tick, session, process, and
 `geometryFrameId` match the captured sensor frame. Their distinct capture time
 must follow frame completion, precede response assembly (within clock-skew

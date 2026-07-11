@@ -47,6 +47,10 @@ class TaskContractTests(unittest.TestCase):
             decision.state = "complete"  # type: ignore[misc]
         with self.assertRaises(FrozenInstanceError):
             snapshot.status = TaskStatus.COMPLETE  # type: ignore[misc]
+        self.assertFalse(hasattr(request, "__dict__"))
+        self.assertFalse(hasattr(decision, "__dict__"))
+        self.assertFalse(hasattr(snapshot, "__dict__"))
+        self.assertFalse(hasattr(decision.action, "__dict__"))
 
     def test_observation_request_accepts_up_to_sixteen_unique_projections(self) -> None:
         projections = tuple(

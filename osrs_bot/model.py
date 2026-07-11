@@ -6,9 +6,12 @@ from enum import Enum
 
 
 MAX_FUTURE_CLOCK_SKEW_SECONDS = 2.0
+BANK_INTERFACE_NAME = "bank"
+DEPOSIT_INVENTORY_WIDGET_KEY = "deposit_inventory"
+CLOSE_BANK_WIDGET_KEY = "close_bank"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorldPoint:
     x: int
     y: int
@@ -20,13 +23,13 @@ class WorldPoint:
         return max(abs(self.x - other.x), abs(self.y - other.y))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ScreenPoint:
     x: int
     y: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ScreenBounds:
     x: int
     y: int
@@ -44,7 +47,7 @@ class ScreenBounds:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PlayerObservation:
     animation: int | None = None
     pose_animation: int | None = None
@@ -53,7 +56,7 @@ class PlayerObservation:
     run_energy_percent: float | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class InventoryItem:
     slot: int
     item_id: int
@@ -61,7 +64,7 @@ class InventoryItem:
     name: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class InventoryObservation:
     items: tuple[InventoryItem, ...] = ()
     slot_count: int = 28
@@ -81,7 +84,7 @@ class InventoryObservation:
         return frozenset(item.item_id for item in self.items)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TargetGeometry:
     available: bool = False
     on_screen: bool = False
@@ -93,7 +96,7 @@ class TargetGeometry:
     visible_area_ratio: float | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NearbyObject:
     key: str
     object_id: int
@@ -113,7 +116,7 @@ class NearbyObject:
         return option in self.actions
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MenuEntry:
     option: str
     target: str
@@ -124,7 +127,7 @@ class MenuEntry:
     row_bounds: ScreenBounds | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WidgetTarget:
     name: str
     visible: bool
@@ -132,7 +135,7 @@ class WidgetTarget:
     screen_bounds: ScreenBounds | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DialogueOption:
     index: int
     key: str | None
@@ -140,7 +143,7 @@ class DialogueOption:
     visible: bool = True
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WidgetObservation:
     bank_known: bool = False
     bank_open: bool = False
@@ -157,7 +160,7 @@ class WidgetObservation:
     dialogue_client_tick: int | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Observation:
     player: PlayerObservation
     location: WorldPoint | None
@@ -257,7 +260,7 @@ class VerificationKind(str, Enum):
     ROUTE_TRANSITION = "route_transition"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class VerificationSpec:
     kind: VerificationKind
     before_tick: int
@@ -275,7 +278,7 @@ class VerificationSpec:
     dialogue_option_contains: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class InventoryConstraint:
     allowed_item_ids: frozenset[int]
     require_nonempty: bool = True
@@ -292,7 +295,7 @@ class InventoryConstraint:
             raise ValueError("require_nonempty must be a bool")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class InterfaceConstraint:
     interface_name: str
     expected_plane: int
@@ -321,7 +324,7 @@ class InterfaceConstraint:
             raise ValueError("keyboard close support requires an open interface")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DialogueOptionConstraint:
     prompt_contains: str
     option_text: str
@@ -344,7 +347,7 @@ class DialogueOptionConstraint:
             raise ValueError("option_index must be a positive integer")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TaskConstraints:
     inventory: InventoryConstraint | None = None
     interface: InterfaceConstraint | None = None
@@ -357,7 +360,7 @@ class TaskConstraints:
             )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Action:
     kind: ActionKind
     label: str

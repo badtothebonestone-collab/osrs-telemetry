@@ -43,6 +43,11 @@ runtime logic.
   typed `Outcome`, and task-specific interface/dialogue/inventory requirements
   travel as immutable constraints that can narrow but never weaken engine
   safety invariants.
+- **D010 — Definition binding:** all proven Lumbridge facts live in exactly one
+  immutable built-in definition. One minimal validated profile selects it; one
+  separate bounded runtime configuration owns machine/session limits. The
+  definition supplies facts to the explicit FSM and never interprets its
+  transitions.
 
 ## Phases and acceptance
 
@@ -51,9 +56,9 @@ runtime logic.
 | 0. Freeze proven baseline | Complete (`beb9cbb`) | Full diff audited; Python/Java suites pass; terminal trace reaches `COMPLETE`; tracked golden replay passes; stale proof docs corrected; checkpoint committed/tagged. |
 | 1. Governing contract | Complete (`f4c091e`) | Product vision, architecture, rules, status, and this plan describe the OSRS-specific engine and prohibited expansion. |
 | 2. Coherent sensor truth | Complete (`b645d83`) | Atomic tick `SensorFrame`; source-based freshness; mixed/stale/missing/menu/schema tests; bounded live observe. |
-| 3. Minimal task seam | Complete | Runtime has no concrete woodcut imports/phase checks; typed outcomes; fake task runs unchanged runtime/safety/verifier. |
-| 4. One task/site definition | Next | One immutable Lumbridge definition and one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
-| 5. Arduino boundary | Pending | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
+| 3. Minimal task seam | Complete (`56b8b8b`) | Runtime has no concrete woodcut imports/phase checks; typed outcomes; fake task runs unchanged runtime/safety/verifier. |
+| 4. One task/site definition | Complete | One immutable Lumbridge definition and one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
+| 5. Arduino boundary | Next | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
 | 6. EngineFrame + overlay | Pending | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Pending | Read-only record/inspect commands produce hashed JSONL, manifest, timeline, screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Pending | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
@@ -138,6 +143,30 @@ runtime logic.
   Python tests passed, a forced fresh 39-test Java suite passed, and
   `git diff --check` passed.
 
+## Phase 4 completed work
+
+- Added exactly one deeply immutable/versioned built-in definition containing
+  the proven resource, bank, work area, routes, transitions, inventory
+  predicates, deadlines, dialogue expectations, and evidence provenance.
+- Bound the still-explicit `WoodcutBankTask` FSM to one validated default
+  profile. Unknown definitions, malformed identifiers, and cycle goals other
+  than the proven single cycle fail clearly; no profile loader was added.
+- Removed every Lumbridge coordinate, object/item ID, route, and task deadline
+  from `task.py`. Shared engine layers are import-tested against definition and
+  profile data.
+- Added immutable capped `RuntimeConfig` for endpoint/Arduino/polling and hard
+  runtime bounds. Profiles contain no safety or runtime switches.
+- Made the canonical RuneLite request use neutral `scene_object_census`; exact
+  selected-definition facts assign resource/route/bank meaning downstream.
+  Scene rows strip task-semantic labels and projection selection is
+  request/distance/key based. Golden replay entities pass with all upstream
+  candidate hints false.
+- Corrected a truncated 62-character bank-close evidence digest in the golden
+  fixture after verifying the retained trace's 64-character SHA-256.
+- Added `docs/DEFINITIONS_AND_PROFILES.md`. Final gate: golden replay 2 passed,
+  all 169 Python tests passed, a forced fresh 71-test Java suite passed, and
+  `git diff --check` passed.
+
 ## Prohibited during this mission
 
 - A second gameplay task or site, multiple woodcut areas, a generic navigation
@@ -161,7 +190,6 @@ runtime logic.
   must measure refresh/query timing and repeated provenance/timeout warnings.
 - Arduino callers and final firmware status proof are not yet centralized;
   Phase 5 owns that migration.
-- Lumbridge IDs, areas, routes, deadlines, and one-cycle goal still live beside
-  the explicit FSM. Phase 4 moves only those validated facts into one built-in
-  definition and binds one validated default profile.
+- There is intentionally no external/profile file loader or second definition;
+  the one validated in-code default is the only supported choice.
 - No EngineFrame, overlay, demonstration recorder, or frontend facade exists.

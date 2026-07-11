@@ -54,6 +54,29 @@ class ObservationParsingTests(unittest.TestCase):
         self.assertEqual(frame_match.group(1), load_fixture()["sensorFrame"]["schema"])
         self.assertTrue(parse_observation(load_fixture()).source_coherent)
 
+    def test_neutral_scene_census_produces_entity_facts(self) -> None:
+        payload = load_fixture()
+        payloads = payload["payloads"]
+        scene = copy.deepcopy(payloads["resource_object_census"])
+        scene["schema"] = "scene_object_census.v1"
+        scene["objects"] = [
+            *scene["objects"],
+            *payloads["service_object_census"]["objects"],
+        ]
+        payloads["scene_object_census"] = scene
+        for name in (
+            "resource_object_census",
+            "route_object_census",
+            "service_object_census",
+        ):
+            del payloads[name]
+
+        observation = parse_observation(payload)
+
+        self.assertIsNotNone(observation.object_by_key("tree:3193:3244:1276"))
+        self.assertIsNotNone(observation.object_by_key("bank:3208:3220:6943"))
+        self.assertTrue(observation.source_coherent)
+
     def test_always_hot_login_baseline_exposes_exact_client_without_a_scene(self) -> None:
         payload = load_fixture()
         payload["status"] = "WARN"
@@ -120,6 +143,9 @@ class ObservationParsingTests(unittest.TestCase):
         self.assertEqual(2, observation.inventory.quantity(1511))
         self.assertEqual("fixture-session", observation.session_id)
         self.assertEqual(ScreenBounds(1000, 2000, 800, 600), observation.canvas_bounds)
+        self.assertFalse(hasattr(observation, "__dict__"))
+        self.assertFalse(hasattr(observation.location, "__dict__"))
+        self.assertFalse(hasattr(observation.inventory, "__dict__"))
         with self.assertRaises(FrozenInstanceError):
             observation.tick = 175
 

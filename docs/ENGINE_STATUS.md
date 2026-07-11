@@ -2,9 +2,9 @@
 
 ## Current milestone
 
-**Phase 3 complete — minimal task seam and typed outcome path established.**
+**Phase 4 complete — one validated definition/profile binding established.**
 
-Current checkpoint subject: `engine: extract minimal task contract and typed outcomes`
+Current checkpoint subject: `engine: bind one validated Lumbridge task definition`
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -25,11 +25,19 @@ Regression command:
 - Snapshot response v2 distinguishes source capture time from HTTP assembly
   time. World/tile geometry and menu evidence have separately enforced source
   identities.
+- The canonical request now consumes one neutral scene-object census. Exact
+  selected-definition facts assign task meaning downstream; RuneLite candidate
+  hints are not authorization.
 - Runtime consumes only the structural `Task` contract: bounded observation
   request, opaque decision, typed verification application, and immutable
   status snapshot. It has no woodcut import, phase comparison, or progress
   access.
 - `WoodcutBankTask` explicitly models the one supported ordinary-tree cycle.
+- The FSM is bound to exactly one immutable `LUMBRIDGE_WEST_TREES_V1`
+  definition and one validated one-cycle default profile. All Lumbridge IDs,
+  coordinates, route facts, deadlines, predicates, and provenance live there.
+- Endpoint/Arduino/polling and runtime limits live separately in immutable,
+  finite, engine-capped `RuntimeConfig`.
 - The shared model has no log ID or woodcut phase. Task-specific item,
   interface, plane, and dialogue requirements are immutable action/spec
   constraints, while SafetyGate invariants remain non-overridable.
@@ -79,6 +87,8 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
   Java suite 39 passed across 6 suites with zero failures/errors/skips.
 - Phase 3 gate: golden replay 2 passed; 136 Python tests passed; forced fresh
   Java suite 39 passed across 6 suites with zero failures/errors/skips.
+- Phase 4 gate: golden replay 2 passed; 169 Python tests passed; forced fresh
+  Java suite 71 passed across 8 suites with zero failures/errors/skips.
 - The bounded Phase 2 live observation served response v2/frame v1 at the
   RuneLite login screen. Only baseline was available; inventory, activity,
   bank UI, and dialogue were explicitly unavailable. `observe` returned
@@ -92,10 +102,10 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
 - New-tick world-model refreshes have a 250 ms provider wait. Persistent loaded
   scene latency/timeout behavior is unmeasured and must be inspected in final
   live evidence rather than inferred from the login-screen check.
-- Lumbridge IDs, areas, route steps, deadlines, and the one-cycle goal still
-  live beside the task FSM. **Phase 4 is next** and will move only those facts
-  into one immutable built-in definition with one validated default profile.
+- There is intentionally no external profile loader, second definition, or
+  generic navigation/transition framework.
 - Arduino ownership and authoritative final firmware `STATUS` are not yet one
-  enforced boundary; Phase 5 owns that hardening.
-- The atomic sensor and minimal task contracts are implemented; definition,
-  input, diagnostics, recorder, and facade migrations remain phase-scoped.
+  enforced boundary. **Phase 5 is next** and owns that hardening.
+- Sensor, task, definition, profile, and runtime-configuration contracts are
+  implemented; input, diagnostics, recorder, and facade migrations remain
+  phase-scoped.

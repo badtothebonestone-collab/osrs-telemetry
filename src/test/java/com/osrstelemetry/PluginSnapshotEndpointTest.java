@@ -41,7 +41,8 @@ public class PluginSnapshotEndpointTest
 		Map<String, Object> schema = endpoint(new PluginLiveCache(gson)).schemaPayload();
 		assertEquals(
 				List.of("baseline", "inventory", "activity", "bank_ui", "dialogue_state", "interaction_hot",
-						"route_object_census", "resource_object_census", "service_object_census"),
+						"scene_object_census", "route_object_census", "resource_object_census",
+						"service_object_census"),
 				schema.get("supportedNeeds"));
 		assertEquals(List.of("GET /health", "GET /schema", "POST /snapshot"), schema.get("endpoints"));
 		assertEquals(List.of("hot"), schema.get("snapshotTiers"));
@@ -160,9 +161,10 @@ public class PluginSnapshotEndpointTest
 	}
 
 	@Test
-	public void worldModelProviderIsLimitedToThreeObjectCensuses()
+	public void worldModelProviderServesNeutralAndFilteredObjectCensusesWithFrameProvenance()
 	{
 		Map<String, Object> censuses = Map.of(
+				"scene_object_census", Map.of("objects", List.of()),
 				"resource_object_census", Map.of("objects", List.of()),
 				"route_object_census", Map.of("objects", List.of()),
 				"service_object_census", Map.of("objects", List.of()));
@@ -172,16 +174,38 @@ public class PluginSnapshotEndpointTest
 				(needs, request) -> worldModelResponse(SOURCE_TICK, GEOMETRY_FRAME_ID, censuses));
 
 		Map<String, Object> response = endpoint.snapshotPayload(request(
-				"resource_object_census", "route_object_census", "service_object_census"));
+				"scene_object_census", "resource_object_census", "route_object_census",
+				"service_object_census"));
 		JsonObject payloads = jsonObject(response.get("payloads"));
 
 		assertEquals("PASS", response.get("status"));
+		assertTrue(payloads.has("scene_object_census"));
 		assertTrue(payloads.has("resource_object_census"));
 		assertTrue(payloads.has("route_object_census"));
 		assertTrue(payloads.has("service_object_census"));
-		assertEquals(SOURCE_TICK, payloads.getAsJsonObject("route_object_census").get("sourceTick").getAsLong());
-		assertEquals(GEOMETRY_FRAME_ID, payloads.getAsJsonObject("route_object_census").get("geometryFrameId").getAsString());
-		Instant.parse(payloads.getAsJsonObject("route_object_census").get("capturedAtUtc").getAsString());
+		JsonObject sceneCensus = payloads.getAsJsonObject("scene_object_census");
+		assertEquals(SOURCE_TICK, sceneCensus.get("sourceTick").getAsLong());
+		assertEquals(SESSION_ID, sceneCensus.get("sessionId").getAsString());
+		assertEquals(CLIENT_PROCESS_ID, sceneCensus.get("clientProcessId").getAsLong());
+		assertEquals(GEOMETRY_FRAME_ID, sceneCensus.get("geometryFrameId").getAsString());
+		Instant.parse(sceneCensus.get("capturedAtUtc").getAsString());
+	}
+
+	@Test
+	public void missingSceneObjectCensusFailsClosed()
+	{
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null,
+				(needs, request) -> worldModelResponse(SOURCE_TICK, GEOMETRY_FRAME_ID, Map.of()));
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
+
+		assertEquals("FAIL", response.get("status"));
+		assertFalse(jsonObject(response.get("payloads")).has("scene_object_census"));
+		assertTrue(((List<?>) response.get("missingCapabilities")).contains("scene_object_census"));
+		assertTrue(((List<?>) response.get("warnings")).contains(
+				"world_model_payload_unavailable:scene_object_census"));
 	}
 
 	@Test
@@ -210,7 +234,7 @@ public class PluginSnapshotEndpointTest
 	}
 
 	@Test
-	public void worldModelSourceTickMismatchIsRejected()
+	public void sceneObjectCensusSourceTickMismatchIsRejected()
 	{
 		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
 				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
@@ -218,13 +242,13 @@ public class PluginSnapshotEndpointTest
 				(needs, request) -> worldModelResponse(
 						SOURCE_TICK - 1L,
 						GEOMETRY_FRAME_ID,
-						Map.of("route_object_census", Map.of("objects", List.of()))));
+						Map.of("scene_object_census", Map.of("objects", List.of()))));
 
-		Map<String, Object> response = endpoint.snapshotPayload(request("route_object_census"));
+		Map<String, Object> response = endpoint.snapshotPayload(request("scene_object_census"));
 
 		assertEquals("FAIL", response.get("status"));
-		assertFalse(jsonObject(response.get("payloads")).has("route_object_census"));
-		assertTrue(((List<?>) response.get("missingCapabilities")).contains("route_object_census"));
+		assertFalse(jsonObject(response.get("payloads")).has("scene_object_census"));
+		assertTrue(((List<?>) response.get("missingCapabilities")).contains("scene_object_census"));
 		assertTrue(((List<?>) response.get("warnings")).contains("world_model_provenance_mismatch"));
 		assertFalse(response.containsKey("worldModel"));
 	}

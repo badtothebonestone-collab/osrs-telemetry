@@ -13,7 +13,7 @@ class _ActionBlocked(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ExecutionResult:
     status: str
     reason: str

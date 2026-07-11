@@ -31,7 +31,7 @@
       },
       {
         "path": "_run_proofs/vertical_slice/20260710_165547/trace.jsonl",
-        "sha256": "560dc54a66b0c72f39447e2c76d42eb9dbadc69bea636edcd5a3f8745c55c7",
+        "sha256": "560dc54a66b0c72f39447e2c76d42eb9bdbcadc69bea636edcd5a3f8745c55c7",
         "proves": "verified Escape bank close and return-route start"
       },
       {

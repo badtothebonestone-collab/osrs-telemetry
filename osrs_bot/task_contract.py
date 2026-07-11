@@ -19,7 +19,7 @@ class TaskStatus(str, Enum):
     BLOCKED = "blocked"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ObservationRequest:
     tile_projections: tuple[tuple[str, WorldPoint], ...] = ()
 
@@ -47,7 +47,7 @@ class ObservationRequest:
             labels.add(label)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Decision:
     state: str
     reason: str
@@ -58,7 +58,7 @@ class Decision:
         _validate_nonempty_text(self.reason, "reason")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TaskSnapshot:
     task_id: str
     status: TaskStatus

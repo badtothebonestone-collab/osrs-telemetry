@@ -42,7 +42,7 @@ class LoginSafetyError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RuneLiteWindow:
     hwnd: int
     pid: int
@@ -50,7 +50,7 @@ class RuneLiteWindow:
     client_bounds: ScreenBounds
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LoginCandidate:
     name: str
     point: ScreenPoint
@@ -58,7 +58,7 @@ class LoginCandidate:
     confidence: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LoginClick:
     name: str
     point: ScreenPoint
@@ -68,7 +68,7 @@ class LoginClick:
     disarm_confirmed: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LoginResult:
     status: str
     reason: str

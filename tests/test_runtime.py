@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from osrs_bot.action import ExecutionResult
+from osrs_bot.configuration import DEFAULT_RUNTIME_CONFIG
 from osrs_bot.model import (
     Action,
     ActionKind,
@@ -643,7 +644,7 @@ class TaskRuntimeTests(unittest.TestCase):
             _Client(_observation(1), _observation(2)),
             task,
             _Verifier(None),
-            max_observations=2,
+            configuration=replace(DEFAULT_RUNTIME_CONFIG, max_observations=2),
             sleep=lambda _: None,
         )
 

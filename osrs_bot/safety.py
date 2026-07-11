@@ -6,6 +6,9 @@ from .model import (
     MAX_FUTURE_CLOCK_SKEW_SECONDS,
     Action,
     ActionKind,
+    BANK_INTERFACE_NAME,
+    CLOSE_BANK_WIDGET_KEY,
+    DEPOSIT_INVENTORY_WIDGET_KEY,
     DialogueOptionConstraint,
     InterfaceConstraint,
     InventoryConstraint,
@@ -18,13 +21,13 @@ from .model import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SafetyResult:
     allowed: bool
     reason: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SafetyGate:
     max_observation_age_seconds: float = 2.0
     max_menu_age_seconds: float = 2.0
@@ -378,7 +381,10 @@ class SafetyGate:
         constraints = action.task_constraints
         if action.kind is ActionKind.CLICK_WIDGET and constraints.interface is None:
             return _reject("interface_constraint_missing")
-        if action.target_key == "deposit_inventory" and constraints.inventory is None:
+        if (
+            action.target_key == DEPOSIT_INVENTORY_WIDGET_KEY
+            and constraints.inventory is None
+        ):
             return _reject("inventory_constraint_missing")
 
         if constraints.interface is not None:
@@ -405,7 +411,7 @@ class SafetyGate:
     def _validate_interface_constraint(
         constraint: InterfaceConstraint, observation: Observation
     ) -> SafetyResult:
-        if constraint.interface_name != "bank":
+        if constraint.interface_name != BANK_INTERFACE_NAME:
             return _reject("unsupported_interface_constraint")
         widgets = observation.widgets
         if not widgets.bank_known:
@@ -530,8 +536,8 @@ def _validate_exact_target(action: Action, target: NearbyObject) -> SafetyResult
 
 def _select_widget(action: Action, observation: Observation) -> tuple[str, WidgetTarget] | None:
     widgets = {
-        "deposit_inventory": observation.widgets.deposit_inventory,
-        "close_bank": observation.widgets.close_bank,
+        DEPOSIT_INVENTORY_WIDGET_KEY: observation.widgets.deposit_inventory,
+        CLOSE_BANK_WIDGET_KEY: observation.widgets.close_bank,
     }
     if action.target_key in widgets:
         widget = widgets[action.target_key]

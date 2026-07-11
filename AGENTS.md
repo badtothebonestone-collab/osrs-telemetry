@@ -11,6 +11,7 @@ Read in this order:
 5. `docs/ARCHITECTURE.md`
 6. `docs/SENSOR_CONTRACT.md`
 7. `docs/TASK_CONTRACT.md`
+8. `docs/DEFINITIONS_AND_PROFILES.md`
 
 `docs/RESCUE_CONTRACT.md` freezes the proven regression slice; it is no longer
 the active development phase.

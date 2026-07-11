@@ -40,8 +40,9 @@ strings are diagnostic only and never select a task transition.
    invariant.
 
 Task-specific dialogue tokens, interface plane/state, and permitted item IDs
-are supplied by `WoodcutBankTask`. The shared safety and verification modules
-contain no Lumbridge coordinates, Tree IDs, log IDs, or woodcut phases.
+are supplied to `WoodcutBankTask` by its validated definition binding. The
+shared safety and verification modules contain no Lumbridge coordinates, Tree
+IDs, log IDs, or woodcut phases.
 
 ## Current implementation
 

@@ -4,7 +4,10 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 
+from osrs_bot.definition import LUMBRIDGE_WEST_TREES_V1
 from osrs_bot.model import (
+    CLOSE_BANK_WIDGET_KEY,
+    DEPOSIT_INVENTORY_WIDGET_KEY,
     DialogueOption,
     ActionKind,
     InventoryItem,
@@ -20,25 +23,27 @@ from osrs_bot.model import (
     WidgetTarget,
     WorldPoint,
 )
-from osrs_bot.task import (
-    BANK_ANCHOR,
-    BANK_OBJECT_ID,
-    CHOP_DEADLINE_TICKS,
-    CLOSE_WIDGET_NAME,
-    DEPOSIT_WIDGET_NAME,
-    LOG_ITEM_ID,
-    ROUTE_TO_BANK,
-    ROUTE_TO_TREES,
-    TREE_AREA,
-    TaskPhase,
-    WoodcutBankTask,
-)
+from osrs_bot.profile import DEFAULT_BINDING
+from osrs_bot.task import TaskPhase, WoodcutBankTask
 from osrs_bot.verification import (
     Outcome,
     OutcomeKind,
     VerificationResult,
     VerificationStatus,
 )
+
+
+DEFINITION = LUMBRIDGE_WEST_TREES_V1
+TREE_AREA = DEFINITION.resource.work_area.anchor
+BANK_ANCHOR = DEFINITION.bank.anchor
+TREE_OBJECT_ID = next(iter(DEFINITION.resource.selector.object_ids))
+BANK_OBJECT_ID = next(iter(DEFINITION.bank.selector.object_ids))
+LOG_ITEM_ID = next(iter(DEFINITION.resource.produced_item_ids))
+ROUTE_TO_BANK = DEFINITION.route_to_bank.steps
+ROUTE_TO_TREES = DEFINITION.route_to_resource.steps
+CHOP_DEADLINE_TICKS = DEFINITION.verification.resource_deadline_ticks
+CLOSE_WIDGET_NAME = CLOSE_BANK_WIDGET_KEY
+DEPOSIT_WIDGET_NAME = DEPOSIT_INVENTORY_WIDGET_KEY
 
 
 def verification_pass(
@@ -159,13 +164,13 @@ def scene_object(
 
 def tree(**overrides: object) -> NearbyObject:
     values = {
-        "key": "tree:1276",
-        "object_id": 1276,
-        "name": "Tree",
-        "action": "Chop down",
+        "key": f"resource:{TREE_OBJECT_ID}",
+        "object_id": TREE_OBJECT_ID,
+        "name": DEFINITION.resource.selector.name,
+        "action": DEFINITION.resource.selector.action,
         "location": WorldPoint(3195, 3248, 0),
         "geometry": GEOMETRY,
-        "resource": True,
+        "resource": False,
     }
     values.update(overrides)
     return scene_object(**values)
@@ -183,7 +188,7 @@ def route_tile(step) -> NearbyObject:
         geometry=GEOMETRY,
         scene_x=49,
         scene_y=52,
-        route_candidate=True,
+        route_candidate=False,
     )
 
 
@@ -194,7 +199,7 @@ def route_object(step, **overrides: object) -> NearbyObject:
         "name": step.object_name,
         "action": step.action,
         "location": step.location,
-        "route": True,
+        "route": False,
     }
     values.update(overrides)
     return scene_object(**values)
@@ -204,11 +209,11 @@ def bank_object(**overrides: object) -> NearbyObject:
     values = {
         "key": "live:bank-booth",
         "object_id": BANK_OBJECT_ID,
-        "name": "Bank booth",
-        "action": "Bank",
+        "name": DEFINITION.bank.selector.name,
+        "action": DEFINITION.bank.selector.action,
         "location": BANK_ANCHOR,
-        "route": True,
-        "service": True,
+        "route": False,
+        "service": False,
     }
     values.update(overrides)
     return scene_object(**values)
@@ -239,6 +244,13 @@ def stair_dialogue() -> WidgetObservation:
 
 
 class WoodcutBankTaskTests(unittest.TestCase):
+    def test_task_uses_the_validated_default_binding(self) -> None:
+        task = WoodcutBankTask()
+
+        self.assertIs(task.binding, DEFAULT_BINDING)
+        self.assertIs(task.definition, DEFINITION)
+        self.assertEqual("woodcut_bank", task.snapshot().task_id)
+
     def test_find_tree_requires_exact_name_action_and_screen_geometry(self) -> None:
         invalid_geometry = TargetGeometry(
             available=True, on_screen=True, visible=True, actionable=True
@@ -253,7 +265,6 @@ class WoodcutBankTaskTests(unittest.TestCase):
             tree(action="Chop"),
             tree(geometry=invalid_geometry),
             tree(geometry=point_outside_bounds),
-            tree(resource=False),
         )
         for candidate in cases:
             with self.subTest(candidate=candidate):
@@ -266,7 +277,8 @@ class WoodcutBankTaskTests(unittest.TestCase):
         decision = task.decide(observation(objects=(tree(),)))
         self.assertEqual(TaskPhase.CHOP, task.progress.phase)
         self.assertEqual(ActionKind.WAIT, decision.action.kind)
-        self.assertEqual("tree:1276", task.progress.target_key)
+        self.assertEqual(tree().key, task.progress.target_key)
+        self.assertFalse(tree().resource_candidate)
 
     def test_find_tree_skips_aim_point_occluded_by_another_tree(self) -> None:
         occluded = tree(
@@ -382,7 +394,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(ActionKind.WAIT, missing.action.kind)
 
         invalid = route_tile(step)
-        invalid = NearbyObject(**{**invalid.__dict__, "object_id": 99})
+        invalid = replace(invalid, object_id=99)
         blocked = task.decide(
             observation(
                 location=approach,

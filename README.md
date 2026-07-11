@@ -6,10 +6,11 @@ proven regression baseline:
 > Lumbridge west ordinary Trees -> Lumbridge Castle bank -> return to Trees.
 
 It is not a general bot framework, planner, task language, learned policy, or
-anti-detection system. The current baseline implementation is:
+anti-detection system. The current engine shape is:
 
 ```text
 RuneLite plugin -> atomic SensorFrame -> snapshot v2 -> Observation
+               -> validated default Profile + Lumbridge definition
                -> Task protocol -> explicit WoodcutBankTask FSM
                -> Action + typed constraints -> SafetyGate
                -> ArduinoActionInterface -> Verifier -> typed Outcome
@@ -53,7 +54,7 @@ In another terminal, prove that the game scene is observable:
 
 The command exits successfully only when the current baseline checks report a
 fresh, loaded scene. Its JSON output contains the player location,
-inventory/log count, nearby-object count, menu count, bank state, source and
+neutral inventory items, nearby-object count, menu count, bank state, source and
 assembly timestamps, frame identity/coherence, and tick. Freshness is derived
 from the RuneLite capture time rather than the HTTP response time.
 
@@ -96,6 +97,9 @@ does not pretend that the ignored live traces contain full raw observations.
 - `src/main/java/com/osrstelemetry/`: RuneLite sensor and read-only snapshot endpoint.
 - `osrs_bot/model.py`: immutable observation and action contracts.
 - `osrs_bot/observation.py`: the only snapshot-to-Observation adapter.
+- `osrs_bot/definition.py`: the one immutable/versioned built-in task/site definition.
+- `osrs_bot/profile.py`: the minimal validated profile and default binding.
+- `osrs_bot/configuration.py`: bounded machine/session runtime configuration.
 - `osrs_bot/task_contract.py`: the minimal task/runtime protocol.
 - `osrs_bot/task.py`: the only supported explicit task state machine.
 - `osrs_bot/safety.py`: non-overridable engine invariants followed by typed
@@ -113,6 +117,7 @@ does not pretend that the ignored live traces contain full raw observations.
 - `docs/ARCHITECTURE.md`: contracts and state transitions.
 - `docs/SENSOR_CONTRACT.md`: atomic frame, freshness, geometry, and menu provenance.
 - `docs/TASK_CONTRACT.md`: minimal task seam, typed outcomes, and safety ownership.
+- `docs/DEFINITIONS_AND_PROFILES.md`: definition/profile/configuration ownership.
 - `docs/ENGINE_STATUS.md`: completed milestone, evidence boundary, and blockers.
 - `PLANS.md`: active phases, acceptance criteria, and decision log.
 - `docs/RESCUE_AUDIT.md`: archaeology findings and removal rationale.
@@ -130,8 +135,8 @@ does not pretend that the ignored live traces contain full raw observations.
 - The committed golden replay freezes the final-code FSM and verification
   sequence; it is not a replacement for future bounded live regression proof.
 - The current task performs exactly one full-inventory bank cycle and stops.
-- Lumbridge facts still live beside the explicit FSM until Phase 4 extracts the
-  one built-in definition and validated default profile.
+- Exactly one built-in definition/default profile is supported; there is no
+  user-editable profile loader or second site.
 
 Read `docs/PRODUCT_VISION.md`, `PLANS.md`, and `docs/ENGINE_STATUS.md` before
 extending the engine. `docs/RESCUE_CONTRACT.md` remains the frozen baseline

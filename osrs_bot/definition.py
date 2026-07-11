@@ -1,0 +1,550 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+import re
+
+from .model import WorldPoint
+
+
+_MIN_PLANE = 0
+_MAX_PLANE = 3
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def _require_text(field_name: str, value: object) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be nonblank text")
+
+
+def _require_positive_int(field_name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
+
+
+def _require_nonnegative_int(field_name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} must be a nonnegative integer")
+
+
+def _require_point(field_name: str, value: object) -> None:
+    if not isinstance(value, WorldPoint):
+        raise ValueError(f"{field_name} must be a WorldPoint")
+    _require_nonnegative_int(f"{field_name}.x", value.x)
+    _require_nonnegative_int(f"{field_name}.y", value.y)
+    if (
+        isinstance(value.plane, bool)
+        or not isinstance(value.plane, int)
+        or not _MIN_PLANE <= value.plane <= _MAX_PLANE
+    ):
+        raise ValueError(
+            f"{field_name}.plane must be an integer from {_MIN_PLANE} to {_MAX_PLANE}"
+        )
+
+
+def _require_bool(field_name: str, value: object) -> None:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a boolean")
+
+
+def _require_id_set(field_name: str, value: object) -> None:
+    if type(value) is not frozenset or not value:
+        raise ValueError(f"{field_name} must be a nonempty frozenset")
+    for item_id in value:
+        _require_positive_int(f"{field_name} member", item_id)
+
+
+def _require_text_tuple(field_name: str, value: object) -> None:
+    if type(value) is not tuple:
+        raise ValueError(f"{field_name} must be a tuple")
+    seen: set[str] = set()
+    for item in value:
+        _require_text(f"{field_name} member", item)
+        if item in seen:
+            raise ValueError(f"{field_name} must not contain duplicates")
+        seen.add(item)
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenanceEvidence:
+    path: str
+    sha256: str
+    proves: str
+
+    def __post_init__(self) -> None:
+        _require_text("path", self.path)
+        _require_text("proves", self.proves)
+        if not isinstance(self.sha256, str) or _SHA256_RE.fullmatch(self.sha256) is None:
+            raise ValueError("sha256 must be 64 lowercase hexadecimal characters")
+
+
+@dataclass(frozen=True, slots=True)
+class DefinitionProvenance:
+    fixture_schema: str
+    fixture_id: str
+    description: str
+    evidence_date: str
+    baseline_parent: str
+    proof_root: str
+    evidence_kind: str
+    limitations: str
+    evidence: tuple[ProvenanceEvidence, ...]
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "fixture_schema",
+            "fixture_id",
+            "description",
+            "evidence_date",
+            "proof_root",
+            "evidence_kind",
+            "limitations",
+        ):
+            _require_text(field_name, getattr(self, field_name))
+        if (
+            not isinstance(self.baseline_parent, str)
+            or _GIT_SHA_RE.fullmatch(self.baseline_parent) is None
+        ):
+            raise ValueError("baseline_parent must be a 40-character lowercase Git SHA")
+        if type(self.evidence) is not tuple or not self.evidence:
+            raise ValueError("evidence must be a nonempty tuple")
+        if any(not isinstance(item, ProvenanceEvidence) for item in self.evidence):
+            raise ValueError("evidence must contain only ProvenanceEvidence values")
+        paths = tuple(item.path for item in self.evidence)
+        if len(set(paths)) != len(paths):
+            raise ValueError("evidence paths must be unique")
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectSelector:
+    object_ids: frozenset[int]
+    name: str
+    action: str
+
+    def __post_init__(self) -> None:
+        _require_id_set("object_ids", self.object_ids)
+        _require_text("name", self.name)
+        _require_text("action", self.action)
+
+
+@dataclass(frozen=True, slots=True)
+class RadialWorkArea:
+    anchor: WorldPoint
+    radius: int
+
+    def __post_init__(self) -> None:
+        _require_point("anchor", self.anchor)
+        _require_positive_int("radius", self.radius)
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceDefinition:
+    selector: ObjectSelector
+    produced_item_ids: frozenset[int]
+    work_area: RadialWorkArea
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.selector, ObjectSelector):
+            raise ValueError("selector must be an ObjectSelector")
+        _require_id_set("produced_item_ids", self.produced_item_ids)
+        if not isinstance(self.work_area, RadialWorkArea):
+            raise ValueError("work_area must be a RadialWorkArea")
+
+
+@dataclass(frozen=True, slots=True)
+class BankDefinition:
+    selector: ObjectSelector
+    anchor: WorldPoint
+    interaction_radius: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.selector, ObjectSelector):
+            raise ValueError("selector must be an ObjectSelector")
+        _require_point("anchor", self.anchor)
+        _require_positive_int("interaction_radius", self.interaction_radius)
+
+
+class RouteStepKind(str, Enum):
+    WALK = "walk"
+    OBJECT = "object"
+
+
+@dataclass(frozen=True, slots=True)
+class FixedRouteStep:
+    step_id: str
+    kind: RouteStepKind
+    location: WorldPoint
+    arrival_radius: int
+    action: str
+    object_id: int | None = None
+    object_name: str | None = None
+    alternate_actions: tuple[str, ...] = ()
+    expected_plane: int | None = None
+
+    def __post_init__(self) -> None:
+        _require_text("step_id", self.step_id)
+        if not isinstance(self.kind, RouteStepKind):
+            raise ValueError("kind must be a RouteStepKind")
+        _require_point("location", self.location)
+        _require_positive_int("arrival_radius", self.arrival_radius)
+        _require_text("action", self.action)
+        _require_text_tuple("alternate_actions", self.alternate_actions)
+
+        if self.kind is RouteStepKind.WALK:
+            if self.action != "Walk here":
+                raise ValueError("walk route steps must use the exact Walk here action")
+            if (
+                self.object_id is not None
+                or self.object_name is not None
+                or self.alternate_actions
+                or self.expected_plane is not None
+            ):
+                raise ValueError("walk route steps cannot carry object transition facts")
+            return
+
+        _require_positive_int("object_id", self.object_id)
+        _require_text("object_name", self.object_name)
+        if (
+            isinstance(self.expected_plane, bool)
+            or not isinstance(self.expected_plane, int)
+            or not _MIN_PLANE <= self.expected_plane <= _MAX_PLANE
+        ):
+            raise ValueError(
+                f"expected_plane must be an integer from {_MIN_PLANE} to {_MAX_PLANE}"
+            )
+        if self.expected_plane == self.location.plane:
+            raise ValueError("object transition must change planes")
+
+    @property
+    def allowed_actions(self) -> tuple[str, ...]:
+        return (self.action, *self.alternate_actions)
+
+    @property
+    def is_walk(self) -> bool:
+        return self.kind is RouteStepKind.WALK
+
+    @property
+    def target_key(self) -> str:
+        return f"route:{self.step_id}"
+
+
+@dataclass(frozen=True, slots=True)
+class FixedRoute:
+    route_id: str
+    start_anchor: WorldPoint
+    destination_anchor: WorldPoint
+    steps: tuple[FixedRouteStep, ...]
+
+    def __post_init__(self) -> None:
+        _require_text("route_id", self.route_id)
+        _require_point("start_anchor", self.start_anchor)
+        _require_point("destination_anchor", self.destination_anchor)
+        if type(self.steps) is not tuple or not self.steps:
+            raise ValueError("steps must be a nonempty tuple")
+        if any(not isinstance(step, FixedRouteStep) for step in self.steps):
+            raise ValueError("steps must contain only FixedRouteStep values")
+        step_ids = tuple(step.step_id for step in self.steps)
+        if len(set(step_ids)) != len(step_ids):
+            raise ValueError("route step IDs must be unique")
+
+        current_plane = self.start_anchor.plane
+        for step in self.steps:
+            if step.location.plane != current_plane:
+                raise ValueError(
+                    f"route step {step.step_id} starts on plane {step.location.plane}, "
+                    f"but the preceding route state is plane {current_plane}"
+                )
+            if step.kind is RouteStepKind.OBJECT:
+                assert step.expected_plane is not None
+                current_plane = step.expected_plane
+
+        if self.steps[-1].location != self.destination_anchor:
+            raise ValueError("the final route step must equal the destination anchor")
+        if current_plane != self.destination_anchor.plane:
+            raise ValueError("the route's final transition plane must match its destination")
+
+
+@dataclass(frozen=True, slots=True)
+class InventoryPredicate:
+    allowed_item_ids: frozenset[int]
+    deposit_item_ids: frozenset[int]
+    require_only_allowed_items: bool
+    require_nonempty_deposit: bool
+    require_produced_item_when_full: bool
+
+    def __post_init__(self) -> None:
+        _require_id_set("allowed_item_ids", self.allowed_item_ids)
+        _require_id_set("deposit_item_ids", self.deposit_item_ids)
+        if not self.deposit_item_ids.issubset(self.allowed_item_ids):
+            raise ValueError("deposit_item_ids must be allowed by the inventory predicate")
+        for field_name in (
+            "require_only_allowed_items",
+            "require_nonempty_deposit",
+            "require_produced_item_when_full",
+        ):
+            _require_bool(field_name, getattr(self, field_name))
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationExpectations:
+    action_deadline_ticks: int
+    resource_deadline_ticks: int
+    route_stable_ticks: int
+    deposit_expected_quantity: int
+    transition_dialogue_prompt_contains: str
+    transition_up_option_contains: str
+    transition_down_option_contains: str
+
+    def __post_init__(self) -> None:
+        _require_positive_int("action_deadline_ticks", self.action_deadline_ticks)
+        _require_positive_int("resource_deadline_ticks", self.resource_deadline_ticks)
+        _require_positive_int("route_stable_ticks", self.route_stable_ticks)
+        _require_nonnegative_int("deposit_expected_quantity", self.deposit_expected_quantity)
+        for field_name in (
+            "transition_dialogue_prompt_contains",
+            "transition_up_option_contains",
+            "transition_down_option_contains",
+        ):
+            _require_text(field_name, getattr(self, field_name))
+
+
+@dataclass(frozen=True, slots=True)
+class TaskSiteDefinition:
+    definition_id: str
+    display_name: str
+    version: int
+    resource: ResourceDefinition
+    bank: BankDefinition
+    route_to_bank: FixedRoute
+    route_to_resource: FixedRoute
+    inventory: InventoryPredicate
+    verification: VerificationExpectations
+    provenance: DefinitionProvenance
+
+    def __post_init__(self) -> None:
+        _require_text("definition_id", self.definition_id)
+        _require_text("display_name", self.display_name)
+        _require_positive_int("version", self.version)
+        required_types = (
+            ("resource", self.resource, ResourceDefinition),
+            ("bank", self.bank, BankDefinition),
+            ("route_to_bank", self.route_to_bank, FixedRoute),
+            ("route_to_resource", self.route_to_resource, FixedRoute),
+            ("inventory", self.inventory, InventoryPredicate),
+            ("verification", self.verification, VerificationExpectations),
+            ("provenance", self.provenance, DefinitionProvenance),
+        )
+        for field_name, value, expected_type in required_types:
+            if not isinstance(value, expected_type):
+                raise ValueError(f"{field_name} must be a {expected_type.__name__}")
+
+        produced = self.resource.produced_item_ids
+        if not produced.issubset(self.inventory.allowed_item_ids):
+            raise ValueError("every produced item must be allowed by the inventory predicate")
+        if not produced.issubset(self.inventory.deposit_item_ids):
+            raise ValueError("every produced item must be included in the deposit predicate")
+        if self.route_to_bank.start_anchor != self.resource.work_area.anchor:
+            raise ValueError("the bank route must start at the resource anchor")
+        if self.route_to_bank.destination_anchor != self.bank.anchor:
+            raise ValueError("the bank route must end at the bank anchor")
+        if self.route_to_resource.start_anchor != self.bank.anchor:
+            raise ValueError("the resource route must start at the bank anchor")
+        if self.route_to_resource.destination_anchor != self.resource.work_area.anchor:
+            raise ValueError("the resource route must end at the resource anchor")
+        if self.route_to_bank.route_id == self.route_to_resource.route_id:
+            raise ValueError("route IDs must be unique")
+        all_step_ids = tuple(
+            step.step_id
+            for route in (self.route_to_bank, self.route_to_resource)
+            for step in route.steps
+        )
+        if len(set(all_step_ids)) != len(all_step_ids):
+            raise ValueError("route step IDs must be unique across the definition")
+
+
+def _walk(
+    step_id: str,
+    x: int,
+    y: int,
+    plane: int,
+    arrival_radius: int,
+) -> FixedRouteStep:
+    return FixedRouteStep(
+        step_id=step_id,
+        kind=RouteStepKind.WALK,
+        location=WorldPoint(x, y, plane),
+        arrival_radius=arrival_radius,
+        action="Walk here",
+    )
+
+
+def _transition(
+    step_id: str,
+    x: int,
+    y: int,
+    plane: int,
+    arrival_radius: int,
+    object_id: int,
+    action: str,
+    expected_plane: int,
+) -> FixedRouteStep:
+    return FixedRouteStep(
+        step_id=step_id,
+        kind=RouteStepKind.OBJECT,
+        location=WorldPoint(x, y, plane),
+        arrival_radius=arrival_radius,
+        action=action,
+        object_id=object_id,
+        object_name="Staircase",
+        alternate_actions=("Climb",),
+        expected_plane=expected_plane,
+    )
+
+
+_TREE_ANCHOR = WorldPoint(3196, 3240, 0)
+_BANK_ANCHOR = WorldPoint(3208, 3221, 2)
+
+
+LUMBRIDGE_WEST_TREES_V1 = TaskSiteDefinition(
+    definition_id="lumbridge_west_trees_v1",
+    display_name="Lumbridge West ordinary Trees to Lumbridge Castle bank",
+    version=1,
+    resource=ResourceDefinition(
+        selector=ObjectSelector(frozenset({1276}), "Tree", "Chop down"),
+        produced_item_ids=frozenset({1511}),
+        work_area=RadialWorkArea(_TREE_ANCHOR, 16),
+    ),
+    bank=BankDefinition(
+        selector=ObjectSelector(frozenset({18491}), "Bank booth", "Bank"),
+        anchor=_BANK_ANCHOR,
+        interaction_radius=6,
+    ),
+    route_to_bank=FixedRoute(
+        route_id="lumbridge_west_trees_to_castle_bank",
+        start_anchor=_TREE_ANCHOR,
+        destination_anchor=_BANK_ANCHOR,
+        steps=(
+            _walk("west_approach_bridge", 3200, 3238, 0, 2),
+            _walk("west_corridor_north", 3196, 3237, 0, 2),
+            _walk("west_wall_corner", 3196, 3234, 0, 1),
+            _walk("west_wall_descent_1", 3197, 3231, 0, 1),
+            _walk("west_wall_descent_2", 3198, 3228, 0, 1),
+            _walk("west_wall_descent_3", 3197, 3225, 0, 1),
+            _walk("west_wall_descent_4", 3197, 3222, 0, 1),
+            _walk("west_corridor_south", 3197, 3221, 0, 2),
+            _walk("south_corridor_entry", 3199, 3218, 0, 1),
+            _walk("south_corridor_west", 3202, 3215, 0, 2),
+            _walk("south_corridor_bridge", 3205, 3214, 0, 1),
+            _walk("south_corridor_safe", 3208, 3212, 0, 2),
+            _walk("south_stairs_approach", 3205, 3209, 0, 2),
+            _transition("ground_floor_stairs_up", 3204, 3207, 0, 4, 56230, "Climb-up", 1),
+            _transition("first_floor_stairs_up", 3204, 3207, 1, 4, 16672, "Climb-up", 2),
+            _walk("bank_floor_south_1", 3205, 3211, 2, 2),
+            _walk("bank_floor_south_2", 3205, 3215, 2, 2),
+            _walk("bank_floor_north", 3207, 3218, 2, 2),
+            _walk("bank_booth_approach", 3208, 3221, 2, 2),
+        ),
+    ),
+    route_to_resource=FixedRoute(
+        route_id="lumbridge_castle_bank_to_west_trees",
+        start_anchor=_BANK_ANCHOR,
+        destination_anchor=_TREE_ANCHOR,
+        steps=(
+            _walk("bank_floor_return_1", 3206, 3226, 2, 2),
+            _walk("bank_floor_return_2", 3206, 3228, 2, 1),
+            _transition("bank_floor_bottom", 3205, 3229, 2, 3, 56231, "Bottom-floor", 0),
+            _walk("ground_corridor_east_1", 3210, 3228, 0, 2),
+            _walk("ground_corridor_east_2", 3215, 3228, 0, 2),
+            _walk("ground_corridor_south_1", 3215, 3225, 0, 2),
+            _walk("ground_corridor_south_2", 3215, 3222, 0, 2),
+            _walk("ground_corridor_south_3", 3215, 3219, 0, 2),
+            _walk("ground_corridor_west", 3211, 3219, 0, 2),
+            _walk("ground_corridor_west_2", 3207, 3214, 0, 2),
+            _walk("south_corridor_return", 3203, 3214, 0, 2),
+            _walk("west_corridor_return_1", 3198, 3222, 0, 2),
+            _walk("west_corridor_return_2", 3199, 3234, 0, 2),
+            _walk("tree_lane_return", 3196, 3240, 0, 2),
+            _walk("west_trees", 3196, 3240, 0, 2),
+        ),
+    ),
+    inventory=InventoryPredicate(
+        allowed_item_ids=frozenset({1511}),
+        deposit_item_ids=frozenset({1511}),
+        require_only_allowed_items=True,
+        require_nonempty_deposit=True,
+        require_produced_item_when_full=True,
+    ),
+    verification=VerificationExpectations(
+        action_deadline_ticks=8,
+        resource_deadline_ticks=100,
+        route_stable_ticks=4,
+        deposit_expected_quantity=0,
+        transition_dialogue_prompt_contains="climb",
+        transition_up_option_contains="climb up",
+        transition_down_option_contains="climb down",
+    ),
+    provenance=DefinitionProvenance(
+        fixture_schema="osrs_bot.golden_cycle.v1",
+        fixture_id="woodcut-lumbridge-west-castle-bank-return",
+        description="Sanitized deterministic semantic replay of the proven ordinary-log cycle.",
+        evidence_date="2026-07-10",
+        baseline_parent="a843915c68b1c8ab2bcc0661ad467ec7bfa231b1",
+        proof_root="_run_proofs/vertical_slice",
+        evidence_kind="stitched bounded live component traces",
+        limitations=(
+            "The ignored live traces were resumed across bounded runs while source was changing. "
+            "They prove the component interactions and terminal COMPLETE state, but are not one "
+            "uninterrupted raw Observation or SafetyGate replay. This committed fixture freezes "
+            "the final semantic FSM and typed verification sequence without retaining process "
+            "IDs, session IDs, screen coordinates, or local paths."
+        ),
+        evidence=(
+            ProvenanceEvidence(
+                "_run_proofs/vertical_slice/20260710_152906/trace.jsonl",
+                "8f9ee6680b1c1b7ff0e27068b252f8ceea2a041bfcba4449fbf2c4250c99d32f",
+                "final log gain to a 28-log inventory and bank-route selection",
+            ),
+            ProvenanceEvidence(
+                "_run_proofs/vertical_slice/20260710_161528/trace.jsonl",
+                "059a5d6de13619a0f4bc3151f4539f89b5bf56a81dd0cf564cf787148a50f33b",
+                "ground-floor staircase transition to plane 1",
+            ),
+            ProvenanceEvidence(
+                "_run_proofs/vertical_slice/20260710_163433/trace.jsonl",
+                "5c3c824c2d80e423bd65dabefcafcd76a857dc66aaf97cc36d291c9fe14d6dd2",
+                "first-floor staircase transition to plane 2",
+            ),
+            ProvenanceEvidence(
+                "_run_proofs/vertical_slice/20260710_163648/trace.jsonl",
+                "6268071f25971427cad9be9f319bf6f89e96a7012fa83a698b20ff4105fe6707",
+                "exact bank open and verified 28-to-0 log deposit",
+            ),
+            ProvenanceEvidence(
+                "_run_proofs/vertical_slice/20260710_165547/trace.jsonl",
+                "560dc54a66b0c72f39447e2c76d42eb9bdbcadc69bea636edcd5a3f8745c55c7",
+                "verified Escape bank close and return-route start",
+            ),
+            ProvenanceEvidence(
+                "_run_proofs/vertical_slice/20260710_170631/trace.jsonl",
+                "acfa9336e5e278ed0828a076e047efd6acb6445fa2825fd603dfe9362167ebf0",
+                "bounded return-route continuation",
+            ),
+            ProvenanceEvidence(
+                "_run_proofs/vertical_slice/20260710_170659/trace.jsonl",
+                "5b9a32e6f0734eb7e9042137c92fbfa03dec69068be03aaba12a68dea1839906",
+                "bounded return-route continuation",
+            ),
+            ProvenanceEvidence(
+                "_run_proofs/vertical_slice/20260710_170818/trace.jsonl",
+                "acaccd0ced677d42f0f3a1a098b9c28a6b2b569e753152d29886f7b42c681530",
+                "arrival at the final tree-lane waypoint",
+            ),
+            ProvenanceEvidence(
+                "_run_proofs/vertical_slice/20260710_170849/trace.jsonl",
+                "86df453ec2470cb8acf744ea87b7c9f7cabb99309e4846d4397e7177bd7a7f9a",
+                "terminal COMPLETE state and acknowledged STOP_ALL/DISARM cleanup",
+            ),
+        ),
+    ),
+)

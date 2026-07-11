@@ -13,6 +13,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.ToIntFunction;
 import net.runelite.api.Client;
 import net.runelite.api.CollisionData;
 import net.runelite.api.CollisionDataFlag;
@@ -170,11 +171,20 @@ class WorldModelCache
 		boolean stale = latest == null || now - latest.wallTimeMillis > MIN_REFRESH_MILLIS;
 		boolean forced = options.fullDebug || options.forceRefresh;
 		Object requestedGeometryFrameId = identity == null ? null : identity.get("geometryFrameId");
+		boolean projectionUpgrade = latest != null && projectionRefreshRequired(
+				options.projectionRequested(),
+				latest.projectionCaptured,
+				latest.projectionCapHit,
+				latest.projectionBudget,
+				options.maxProjectionObjects(),
+				latest.projectionAnchorKey,
+				options.projectionAnchorKey());
 		boolean refresh = shouldRefreshSnapshot(
 				latest != null,
 				dirty,
 				stale,
 				forced,
+				projectionUpgrade,
 				latest == null ? Long.MIN_VALUE : latest.sourceTick,
 				tick,
 				latest == null ? null : latest.geometryFrameId,
@@ -200,6 +210,10 @@ class WorldModelCache
 		{
 			reason = "geometry_frame_changed";
 		}
+		else if (projectionUpgrade)
+		{
+			reason = "projection_capability_upgrade";
+		}
 		else
 		{
 			reason = "stale";
@@ -216,6 +230,7 @@ class WorldModelCache
 			boolean dirty,
 			boolean stale,
 			boolean forced,
+			boolean projectionUpgrade,
 			long cachedSourceTick,
 			long requestedSourceTick,
 			Object cachedGeometryFrameId,
@@ -225,8 +240,31 @@ class WorldModelCache
 				|| dirty
 				|| stale
 				|| forced
+				|| projectionUpgrade
 				|| cachedSourceTick != requestedSourceTick
 				|| !Objects.equals(cachedGeometryFrameId, requestedGeometryFrameId);
+	}
+
+	static boolean projectionRefreshRequired(
+			boolean projectionRequested,
+			boolean cachedProjectionCaptured,
+			boolean cachedProjectionCapHit,
+			int cachedProjectionBudget,
+			int requestedProjectionBudget,
+			String cachedProjectionAnchorKey,
+			String requestedProjectionAnchorKey)
+	{
+		if (!projectionRequested)
+		{
+			return false;
+		}
+		if (!cachedProjectionCaptured)
+		{
+			return true;
+		}
+		return cachedProjectionCapHit
+				&& (requestedProjectionBudget > cachedProjectionBudget
+				|| !Objects.equals(cachedProjectionAnchorKey, requestedProjectionAnchorKey));
 	}
 
 	private Snapshot buildSnapshot(
@@ -426,15 +464,18 @@ class WorldModelCache
 	private void applyObjectProjections(Client client, Snapshot snapshot, QueryOptions options)
 	{
 		ProjectionBudget projectionBudget = new ProjectionBudget(options.maxProjectionObjects());
+		snapshot.projectionCaptured = options.projectionRequested();
+		snapshot.projectionBudget = options.maxProjectionObjects();
+		snapshot.projectionAnchorKey = options.projectionAnchorKey();
 		List<Map<String, Object>> candidates = new ArrayList<>(snapshot.objects);
-		candidates.sort(Comparator
-				.comparingInt((Map<String, Object> object) -> projectionPriority(object, options, snapshot))
-				.thenComparingInt(object -> distanceToProjectionAnchor(object, options, snapshot))
-				.thenComparing(object -> String.valueOf(object.get("objectKey"))));
+		sortProjectionCandidates(
+				candidates,
+				options.radiusTiles,
+				object -> distanceToProjectionAnchor(object, options, snapshot));
 
 		for (Map<String, Object> record : candidates)
 		{
-			boolean project = shouldProjectRecord(record, options);
+			boolean project = shouldProjectRecord(options);
 			String key = String.valueOf(record.get("objectKey"));
 			if (project && projectionBudget.tryConsume())
 			{
@@ -449,27 +490,34 @@ class WorldModelCache
 		snapshot.projectionCapHit = projectionBudget.capHit;
 	}
 
-	private boolean shouldProjectRecord(Map<String, Object> record, QueryOptions options)
+	private boolean shouldProjectRecord(QueryOptions options)
 	{
-		return options.includeProjection || options.fullDebug || relevantObject(record);
+		return shouldProjectRecord(options.includeProjection || options.fullDebug);
 	}
 
-	private boolean relevantObject(Map<String, Object> record)
+	static boolean shouldProjectRecord(boolean projectionRequested)
 	{
-		return booleanValue(record.get("resourceCandidate"))
-				|| booleanValue(record.get("routeObjectCandidate"))
-				|| booleanValue(record.get("serviceObjectCandidate"));
+		return projectionRequested;
 	}
 
-	private int projectionPriority(Map<String, Object> record, QueryOptions options, Snapshot snapshot)
+	static void sortProjectionCandidates(
+			List<Map<String, Object>> candidates,
+			int radiusTiles,
+			ToIntFunction<Map<String, Object>> distance)
 	{
-		if (relevantObject(record))
-		{
-			return 0;
-		}
-		WorldTile anchor = projectionAnchor(options, snapshot);
-		int distance = distanceToProjectionAnchor(record, options, snapshot);
-		if (anchor != null && distance <= options.radiusTiles)
+		candidates.sort(Comparator
+				.comparingInt((Map<String, Object> object) -> projectionPriority(
+						object, radiusTiles, distance))
+				.thenComparingInt(distance)
+				.thenComparing(object -> String.valueOf(object.get("objectKey"))));
+	}
+
+	private static int projectionPriority(
+			Map<String, Object> record,
+			int radiusTiles,
+			ToIntFunction<Map<String, Object>> distance)
+	{
+		if (distance.applyAsInt(record) <= radiusTiles)
 		{
 			return 10;
 		}
@@ -885,7 +933,7 @@ class WorldModelCache
 		List<Map<String, Object>> items = new ArrayList<>();
 		for (Map<String, Object> item : filtered.subList(0, limit))
 		{
-			items.add(compactObject(item, options));
+			items.add(compactObject(item, options, filter != ObjectFilter.SCENE));
 		}
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("schema", filter.schema);
@@ -904,6 +952,27 @@ class WorldModelCache
 
 	private Map<String, Object> compactObject(Map<String, Object> source, QueryOptions options)
 	{
+		return compactObject(source, options, true);
+	}
+
+	private Map<String, Object> compactObject(
+			Map<String, Object> source,
+			QueryOptions options,
+			boolean includeSemanticFacts)
+	{
+		return compactObjectRow(
+				source,
+				options.includeProjection
+						|| options.fullDebug
+						|| source.get("projection") instanceof Map,
+				includeSemanticFacts);
+	}
+
+	static Map<String, Object> compactObjectRow(
+			Map<String, Object> source,
+			boolean includeProjection,
+			boolean includeSemanticFacts)
+	{
 		Map<String, Object> object = new LinkedHashMap<>();
 		for (String key : List.of(
 				"objectKey",
@@ -921,7 +990,16 @@ class WorldModelCache
 				"sceneY",
 				"localX",
 				"localY",
-				"distanceToPlayer",
+				"distanceToPlayer"))
+		{
+			if (source.containsKey(key))
+			{
+				object.put(key, source.get(key));
+			}
+		}
+		if (includeSemanticFacts)
+		{
+			for (String key : List.of(
 				"resourceCandidate",
 				"resourceType",
 				"routeObjectCandidate",
@@ -936,13 +1014,14 @@ class WorldModelCache
 				"targetTemporarilyLockedReason",
 				"visibleButNotExecutable",
 				"futureEligibleWhenLevelMet"))
-		{
-			if (source.containsKey(key))
 			{
-				object.put(key, source.get(key));
+				if (source.containsKey(key))
+				{
+					object.put(key, source.get(key));
+				}
 			}
 		}
-		if (options.includeProjection || options.fullDebug || source.get("projection") instanceof Map)
+		if (includeProjection)
 		{
 			object.put("projection", source.get("projection"));
 			object.put("projectionStatus", source.get("projection"));
@@ -1926,6 +2005,9 @@ class WorldModelCache
 		private String collisionHash;
 		private boolean objectCensusCapHit;
 		private boolean groundItemCapHit;
+		private boolean projectionCaptured;
+		private int projectionBudget;
+		private String projectionAnchorKey;
 		private boolean projectionCapHit;
 		private String refreshReason;
 		private long refreshDurationMillis;
@@ -2037,6 +2119,20 @@ class WorldModelCache
 		private int maxProjectionObjects()
 		{
 			return Math.min(HARD_MAX_PROJECTION_OBJECTS, Math.max(maxObjects, includeProjection ? maxObjects * 3 : DEFAULT_MAX_OBJECTS));
+		}
+
+		private boolean projectionRequested()
+		{
+			return includeProjection || fullDebug;
+		}
+
+		private String projectionAnchorKey()
+		{
+			if (center == null)
+			{
+				return "player";
+			}
+			return center.worldX + ":" + center.worldY + ":" + center.plane;
 		}
 
 		@SuppressWarnings("unchecked")
