@@ -7,7 +7,11 @@ import inspect
 import unittest
 
 import osrs_bot.action as action_module
-from osrs_bot.action import CoordinatedActionInterface, ExecutionResult
+from osrs_bot.action import (
+    CoordinatedActionInterface,
+    ExecutionResult,
+    UnsentActionDisposition,
+)
 from osrs_bot.input_coordinator import (
     ApprovedKeyIntent,
     ApprovedPointerIntent,
@@ -478,6 +482,10 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         self.assertFalse(result.sent)
         self.assertTrue(result.cleanup_confirmed)
         self.assertIsNone(coordinator.decisions[0].activation)
+        self.assertIs(
+            result.unsent_disposition,
+            UnsentActionDisposition.TARGET_EVIDENCE_INVALIDATED,
+        )
 
     def test_hover_validation_is_bound_to_actual_settled_point(self) -> None:
         actual = ScreenPoint(POINT.x + 3, POINT.y)
@@ -495,6 +503,10 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
 
         self.assertEqual("BLOCKED", result.status)
         self.assertIn("hover_pointer_mismatch", result.reason)
+        self.assertIs(
+            result.unsent_disposition,
+            UnsentActionDisposition.NONE,
+        )
         self.assertIsNone(coordinator.decisions[0].activation)
 
     def test_settled_pointer_inside_verified_region_preserves_canonical_aim(self) -> None:

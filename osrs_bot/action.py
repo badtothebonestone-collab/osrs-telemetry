@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import Callable
 
 from .input_coordinator import (
@@ -41,6 +42,11 @@ class _ActionBlocked(RuntimeError):
     pass
 
 
+class UnsentActionDisposition(str, Enum):
+    NONE = "none"
+    TARGET_EVIDENCE_INVALIDATED = "target_evidence_invalidated"
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionResult:
     """Gameplay disposition plus the coordinator's immutable wire receipt."""
@@ -52,6 +58,7 @@ class ExecutionResult:
     post_move_tick: int | None = None
     receipt: InputReceipt | None = None
     safety_checks: tuple[SafetyCheck, ...] = ()
+    unsent_disposition: UnsentActionDisposition = UnsentActionDisposition.NONE
 
     def __post_init__(self) -> None:
         if self.local_status not in {"BLOCKED", "ERROR", "NO_ACTION"}:
@@ -64,6 +71,10 @@ class ExecutionResult:
             isinstance(check, SafetyCheck) for check in self.safety_checks
         ):
             raise TypeError("safety_checks must be a tuple of SafetyCheck values")
+        if not isinstance(self.unsent_disposition, UnsentActionDisposition):
+            raise TypeError(
+                "unsent_disposition must be an UnsentActionDisposition"
+            )
 
     @property
     def status(self) -> str:
@@ -172,9 +183,10 @@ class CoordinatedActionInterface:
             )
 
         last_observation: list[Observation | None] = [None]
+        unsent_disposition = UnsentActionDisposition.NONE
         try:
             if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
-                receipt = self._execute_adaptive_target(
+                receipt, unsent_disposition = self._execute_adaptive_target(
                     action,
                     observation,
                     last_observation,
@@ -224,6 +236,7 @@ class CoordinatedActionInterface:
             ),
             receipt=receipt,
             safety_checks=tuple(safety_checks),
+            unsent_disposition=unsent_disposition,
         )
 
     def _execute_direct_pointer(
@@ -260,12 +273,13 @@ class CoordinatedActionInterface:
         observation: Observation,
         last_observation: list[Observation | None],
         safety_checks: list[SafetyCheck],
-    ) -> InputReceipt:
+    ) -> tuple[InputReceipt, UnsentActionDisposition]:
         intent = self._pointer_intent(action, observation)
         canvas = self._required_canvas(observation)
         context_minimum_tick: list[int | None] = [None]
         row_minimum_tick: list[int | None] = [None]
         validated_action: list[Action | None] = [None]
+        target_evidence_invalidated = [False]
 
         def decide_activation(
             _intent: ApprovedPointerIntent,
@@ -290,6 +304,8 @@ class CoordinatedActionInterface:
                     return PointerActivationDecision.deny("menu_sample_missing")
                 context_minimum_tick[0] = post.menu_client_tick
                 return PointerActivationDecision.context(context.reason)
+            if hover.reason == "hover_menu_mismatch":
+                target_evidence_invalidated[0] = True
             return PointerActivationDecision.deny(hover.reason)
 
         def resolve_row() -> ApprovedPointerIntent:
@@ -349,12 +365,18 @@ class CoordinatedActionInterface:
             last_observation[0] = row_observation
             return self._input_validation(result)
 
-        return self._coordinator.execute_adaptive_pointer(
+        receipt = self._coordinator.execute_adaptive_pointer(
             intent,
             decide_activation=decide_activation,
             resolve_row=resolve_row,
             validate_row=validate_row,
         )
+        disposition = (
+            UnsentActionDisposition.TARGET_EVIDENCE_INVALIDATED
+            if target_evidence_invalidated[0] and receipt.status == "BLOCKED"
+            else UnsentActionDisposition.NONE
+        )
+        return receipt, disposition
 
     def _execute_key(
         self,

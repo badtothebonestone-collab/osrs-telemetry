@@ -6,7 +6,11 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Protocol
 
-from .action import CoordinatedActionInterface, ExecutionResult
+from .action import (
+    CoordinatedActionInterface,
+    ExecutionResult,
+    UnsentActionDisposition,
+)
 from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
 from .engine_frame import (
     EngineFrame,
@@ -22,6 +26,31 @@ from .verification import VerificationResult, VerificationStatus, Verifier
 
 
 LIVE_FOCUS_HANDOFF_SECONDS = 15.0
+MAX_CONSECUTIVE_UNSENT_REPLANS = 1
+_PREACTIVATION_COMMANDS = frozenset(
+    {"STOP_ALL", "PING", "IDENTIFY", "CAPS", "STATUS", "ARM", "MOVE", "DISARM"}
+)
+
+
+def _may_replan_unsent_action(
+    execution: ExecutionResult,
+    consecutive_replans: int,
+) -> bool:
+    """Accept only a fully cleaned, pre-activation target-lifecycle rejection."""
+
+    receipt = execution.receipt
+    return bool(
+        consecutive_replans < MAX_CONSECUTIVE_UNSENT_REPLANS
+        and execution.status == "BLOCKED"
+        and execution.unsent_disposition
+        is UnsentActionDisposition.TARGET_EVIDENCE_INVALIDATED
+        and execution.cleanup_confirmed
+        and receipt is not None
+        and all(
+            command.command in _PREACTIVATION_COMMANDS
+            for command in receipt.commands
+        )
+    )
 
 
 def _verification_after_input(
@@ -358,6 +387,7 @@ class TaskRuntime:
         actions = 0
         last_tick: int | None = None
         last_decision: Decision | None = None
+        consecutive_unsent_replans = 0
         runtime_deadline = self._clock() + self._max_runtime_seconds
         focus_deadline = self._clock() + LIVE_FOCUS_HANDOFF_SECONDS
 
@@ -579,11 +609,43 @@ class TaskRuntime:
             self._frame_execution = execution
             verification = decision.action.verification
             if execution.sent:
+                consecutive_unsent_replans = 0
                 verification = _verification_after_input(
                     verification,
                     execution.post_move_tick,
                 )
                 self._frame_pending = verification
+            elif _may_replan_unsent_action(
+                execution,
+                consecutive_unsent_replans,
+            ):
+                try:
+                    self._task.discard_pending_action(execution.reason)
+                except Exception as error:
+                    failure_reason = (
+                        "unsent action replan failed: "
+                        f"{type(error).__name__}: {error}"
+                    )
+                    transition_error = self._apply_failure(failure_reason)
+                    reason = "task could not discard an unsent action"
+                    if transition_error is not None:
+                        reason += (
+                            "; task failure transition failed: "
+                            f"{transition_error}"
+                        )
+                    return self._result(
+                        "BLOCKED",
+                        reason,
+                        observations,
+                        actions,
+                        last_tick,
+                        decision,
+                        execution,
+                    )
+                consecutive_unsent_replans += 1
+                self._frame_pending = None
+                self._publish_frame(EngineStage.EXECUTED)
+                continue
             self._publish_frame(EngineStage.EXECUTED, task_snapshot=task_snapshot)
             if not execution.sent:
                 failure_reason = (

@@ -447,6 +447,47 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertIn("deadline expired", task.progress.failures[-1])
         self.assertEqual(ActionKind.WAIT, task.decide(state).action.kind)
 
+    def test_unsent_chop_proposal_discards_pending_target_for_fresh_selection(self) -> None:
+        task = WoodcutBankTask()
+        failed = tree(
+            key="resource:failed",
+            location=WorldPoint(3195, 3248, 0),
+        )
+        alternate = tree(
+            key="resource:alternate",
+            location=WorldPoint(3197, 3249, 0),
+        )
+        state = observation(objects=(failed, alternate), tick=20)
+        task.decide(state)
+        task.decide(state)
+
+        task.discard_pending_action("hover target changed before activation")
+
+        self.assertEqual(TaskPhase.FIND_TREE, task.progress.phase)
+        self.assertIsNone(task.progress.pending)
+        self.assertEqual([], task.progress.failures)
+
+        replanned = task.decide(replace(state, tick=21))
+
+        self.assertEqual(TaskPhase.CHOP.value, replanned.state)
+        self.assertEqual(alternate.key, task.progress.target_key)
+        rejected = {
+            candidate.target.key: candidate.rejection_codes
+            for candidate in replanned.evidence.rejected
+        }
+        self.assertEqual(
+            ("preactivation_target_invalidated",),
+            rejected[failed.key],
+        )
+
+    def test_discard_requires_a_pending_action_and_nonempty_reason(self) -> None:
+        task = WoodcutBankTask()
+
+        with self.assertRaises(ValueError):
+            task.discard_pending_action(" ")
+        with self.assertRaises(RuntimeError):
+            task.discard_pending_action("target changed")
+
     def test_only_current_walk_step_is_requested_and_strictly_accepted(self) -> None:
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.NAVIGATE_TO_BANK

@@ -92,6 +92,7 @@ class WoodcutBankTask:
         self._route_projection_wait_since_tick: int | None = None
         self._pending_camera_step_id: str | None = None
         self._return_route_reconciled_without_cycle_credit = False
+        self._unsent_target_suppression_key: str | None = None
 
     def observation_request(self) -> ObservationRequest:
         """Request only the current fixed walk target for projection."""
@@ -267,6 +268,47 @@ class WoodcutBankTask:
             return
         self._set_blocked(f"unsupported verification result: {pending.kind.value}")
 
+    def discard_pending_action(self, reason: str) -> None:
+        """Discard one proposal that the input boundary proved was never sent.
+
+        This is not a failed verification: no activation occurred, so there is
+        no game-state effect to verify.  Restore only the explicit phase that
+        can safely produce a new proposal from a fresh observation.
+        """
+
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("discard reason must be non-empty text")
+        pending = self.progress.pending
+        if pending is None:
+            raise RuntimeError("no pending action can be discarded")
+
+        discardable_kinds = frozenset(
+            {
+                VerificationKind.ITEM_QUANTITY_INCREASED,
+                VerificationKind.ITEM_QUANTITY_EQUALS,
+                VerificationKind.MOVED_CLOSER,
+                VerificationKind.PLANE_CHANGED,
+                VerificationKind.INTERFACE_OPENED,
+                VerificationKind.INTERFACE_CLOSED,
+                VerificationKind.ROUTE_TRANSITION,
+                VerificationKind.CAMERA_POSE_CHANGED,
+            }
+        )
+        if pending.kind not in discardable_kinds:
+            raise RuntimeError(
+                f"unsupported unsent verification kind: {pending.kind.value}"
+            )
+
+        self.progress.pending = None
+        if pending.kind is VerificationKind.ITEM_QUANTITY_INCREASED:
+            self._unsent_target_suppression_key = self.progress.target_key
+            self.progress.target_key = None
+            self.progress.phase = TaskPhase.FIND_TREE
+        elif pending.kind is VerificationKind.ITEM_QUANTITY_EQUALS:
+            self.progress.phase = TaskPhase.DEPOSIT_LOGS
+        elif pending.kind is VerificationKind.CAMERA_POSE_CHANGED:
+            self._pending_camera_step_id = None
+
     def _block_verification_outcome(
         self, pending: VerificationSpec, outcome: OutcomeKind
     ) -> None:
@@ -275,6 +317,8 @@ class WoodcutBankTask:
         )
 
     def _find_tree(self, observation: Observation) -> Decision:
+        suppressed_key = self._unsent_target_suppression_key
+        self._unsent_target_suppression_key = None
         if self.progress.cycles_completed >= self.binding.profile.cycle_goal:
             self.progress.phase = TaskPhase.COMPLETE
             return self._wait(observation, "profile cycle goal is complete")
@@ -313,6 +357,17 @@ class WoodcutBankTask:
             return self._block(observation, "player is outside the supported work area")
 
         candidates, rejected = self._classify_trees(observation)
+        if suppressed_key is not None:
+            suppressed = tuple(
+                target for target in candidates if target.key == suppressed_key
+            )
+            candidates = tuple(
+                target for target in candidates if target.key != suppressed_key
+            )
+            rejected += tuple(
+                (target, ("preactivation_target_invalidated",))
+                for target in suppressed
+            )
         evidence = self._object_decision_evidence(
             observation,
             action=self.definition.resource.selector.action,

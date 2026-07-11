@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from osrs_bot.action import ExecutionResult
+from osrs_bot.action import ExecutionResult, UnsentActionDisposition
 from osrs_bot.configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
 from osrs_bot.engine_frame import EngineFramePublisher, EngineStage
 from osrs_bot.input_coordinator import (
@@ -118,6 +118,58 @@ def _blocked_execution(action: Action, tick: int, reason: str) -> ExecutionResul
     )
 
 
+def _safe_unsent_execution(
+    action: Action,
+    tick: int,
+    reason: str,
+    *,
+    disposition: UnsentActionDisposition = (
+        UnsentActionDisposition.TARGET_EVIDENCE_INVALIDATED
+    ),
+    activation_commands: bool = False,
+    complete_cleanup: bool = True,
+) -> ExecutionResult:
+    command_names = (
+        ("ARM", "MOVE", "MOUSE_DOWN", "MOUSE_UP", "STOP_ALL", "DISARM", "STATUS")
+        if activation_commands
+        else ("ARM", "MOVE", "STOP_ALL", "DISARM", "STATUS")
+    )
+    commands = tuple(
+        _command(sequence, name)
+        for sequence, name in enumerate(command_names, start=1)
+    )
+    receipt = InputReceipt(
+        transaction_id="input-00000002",
+        mode="adaptive_pointer",
+        intent_ids=("runtime-unsent-test",),
+        status="BLOCKED",
+        reason=reason,
+        connected=True,
+        arm_acknowledged=True,
+        stop_all_acknowledged=complete_cleanup,
+        disarm_acknowledged=True,
+        firmware_status_acknowledged=True,
+        firmware_status=FirmwareSafetyStatus(False, 0, 0),
+        commands=commands,
+        unresolved_command_count=0,
+        failed_command_count=0,
+        ack_missing_count=0,
+        ledger_complete=True,
+        ledger_closed=True,
+        backend_closed=True,
+        errors=(reason,),
+    )
+    return ExecutionResult(
+        action=action,
+        pre_move_tick=tick,
+        local_status="BLOCKED",
+        local_reason=reason,
+        post_move_tick=tick + 1,
+        receipt=receipt,
+        unsent_disposition=disposition,
+    )
+
+
 def _observation(tick: int) -> Observation:
     timestamp = datetime.now(timezone.utc)
     session_id = "runtime-session"
@@ -177,6 +229,7 @@ class _Task:
         self.decisions = list(decisions)
         self.projections = projections
         self.applied: list[VerificationResult] = []
+        self.discarded: list[str] = []
         self.decide_calls = 0
         self.status = TaskStatus.RUNNING
         self.state = "ready"
@@ -206,6 +259,10 @@ class _Task:
             self.status = TaskStatus.RUNNING
             self.state = "verified"
 
+    def discard_pending_action(self, reason: str) -> None:
+        self.discarded.append(reason)
+        self.state = "replan"
+
     def snapshot(self) -> TaskSnapshot:
         return TaskSnapshot("fake-task", self.status, self.state, self.blocker)
 
@@ -226,6 +283,16 @@ class _ActionInterface:
     def execute(self, action: Action, observation: Observation) -> ExecutionResult:
         self.calls.append((action, observation))
         return self.result
+
+
+class _SequencedActionInterface:
+    def __init__(self, *results: ExecutionResult) -> None:
+        self.results = list(results)
+        self.calls: list[tuple[Action, Observation]] = []
+
+    def execute(self, action: Action, observation: Observation) -> ExecutionResult:
+        self.calls.append((action, observation))
+        return self.results.pop(0)
 
 
 class _RaisingActionInterface:
@@ -571,6 +638,98 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertEqual(1, len(interface.calls))
         self.assertIsNone(result.engine_frame.pending_verification)
         self.assertIs(result.engine_frame.last_verification.status, VerificationStatus.FAIL)
+
+    def test_safe_pre_activation_hover_mismatch_reobserves_once(self) -> None:
+        first, _ = _executable(10)
+        complete = Decision(
+            "complete",
+            "fresh evidence selected no further action",
+            Action(ActionKind.WAIT, "Wait", 11),
+        )
+        task = _Task([first, complete])
+        reason = "fresh_input_validation_denied: hover_menu_mismatch"
+        interface = _ActionInterface(
+            _safe_unsent_execution(first.action, 10, reason)
+        )
+        runtime = TaskRuntime(
+            _Client(_observation(10), _observation(11)),
+            task,
+            _Verifier(None),
+            interface,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("COMPLETE", result.status)
+        self.assertEqual([reason], task.discarded)
+        self.assertEqual([], task.applied)
+        self.assertEqual(1, result.actions)
+
+    def test_second_consecutive_unsent_hover_mismatch_blocks(self) -> None:
+        first, _ = _executable(10)
+        second, _ = _executable(11)
+        task = _Task([first, second])
+        reason = "fresh_input_validation_denied: hover_menu_mismatch"
+        interface = _SequencedActionInterface(
+            _safe_unsent_execution(first.action, 10, reason),
+            _safe_unsent_execution(second.action, 11, reason),
+        )
+        runtime = TaskRuntime(
+            _Client(_observation(10), _observation(11)),
+            task,
+            _Verifier(None),
+            interface,
+            sleep=lambda _: None,
+        )
+
+        result = runtime.run(execute=True)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual([reason], task.discarded)
+        self.assertEqual(1, len(task.applied))
+        self.assertIs(task.applied[0].status, VerificationStatus.FAIL)
+        self.assertEqual(2, result.actions)
+
+    def test_unsent_replan_requires_typed_disposition_cleanup_and_no_activation(self) -> None:
+        reason = "fresh_input_validation_denied: hover_menu_mismatch"
+        factories = (
+            lambda action: _safe_unsent_execution(
+                action,
+                10,
+                reason,
+                disposition=UnsentActionDisposition.NONE,
+            ),
+            lambda action: _safe_unsent_execution(
+                action,
+                10,
+                reason,
+                complete_cleanup=False,
+            ),
+            lambda action: _safe_unsent_execution(
+                action,
+                10,
+                reason,
+                activation_commands=True,
+            ),
+        )
+        for factory in factories:
+            with self.subTest(factory=factory):
+                decision, _ = _executable(10)
+                task = _Task([decision])
+                runtime = TaskRuntime(
+                    _Client(_observation(10)),
+                    task,
+                    _Verifier(None),
+                    _ActionInterface(factory(decision.action)),
+                    sleep=lambda _: None,
+                )
+
+                result = runtime.run(execute=True)
+
+                self.assertEqual("BLOCKED", result.status)
+                self.assertEqual([], task.discarded)
+                self.assertEqual(1, len(task.applied))
 
     def test_action_interface_exception_applies_one_typed_failure(self) -> None:
         decision, _ = _executable(10)

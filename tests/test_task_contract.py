@@ -42,6 +42,10 @@ class _FakeTask:
     def apply_verification(self, result: VerificationResult) -> None:
         self.verification = result
 
+    def discard_pending_action(self, reason: str) -> None:
+        if not reason:
+            raise ValueError("reason is required")
+
     def snapshot(self) -> TaskSnapshot:
         return TaskSnapshot("fake-task", TaskStatus.RUNNING, "waiting")
 
