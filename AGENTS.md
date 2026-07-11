@@ -14,6 +14,7 @@ Read in this order:
 8. `docs/DEFINITIONS_AND_PROFILES.md`
 9. `docs/INPUT_COORDINATOR.md`
 10. `docs/ENGINE_FRAME.md`
+11. `docs/DEMONSTRATIONS.md`
 
 `docs/RESCUE_CONTRACT.md` freezes the proven regression slice; it is no longer
 the active development phase.
@@ -114,5 +115,6 @@ With RuneLite closed:
 .\run.cmd test
 ```
 
-Read-only live commands are `run.cmd observe` and `run.cmd task`. Gameplay is
-explicitly opt-in through `run.cmd execute COMx`.
+Read-only live commands are `run.cmd observe`, `run.cmd task`, and
+`run.cmd record-demo NAME`; `run.cmd inspect-demo PATH` verifies finalized
+evidence offline. Gameplay is explicitly opt-in through `run.cmd execute COMx`.

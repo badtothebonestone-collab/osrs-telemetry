@@ -192,6 +192,99 @@ public class WorldModelCacheTest
 				true, true, true, 192, 192, "player", "3200:3200:0"));
 	}
 
+	@Test
+	public void actorCapabilityUpgradeIsExplicitAndBudgetAware()
+	{
+		assertFalse(WorldModelCache.actorRefreshRequired(
+				false, false, true, 0, 64, 12, 12));
+		assertTrue(WorldModelCache.actorRefreshRequired(
+				true, false, false, 0, 64, 12, 12));
+		assertFalse(WorldModelCache.actorRefreshRequired(
+				true, true, false, 16, 64, 12, 12));
+		assertFalse(WorldModelCache.actorRefreshRequired(
+				true, true, true, 16, 16, 12, 12));
+		assertTrue(WorldModelCache.actorRefreshRequired(
+				true, true, true, 16, 17, 12, 12));
+		assertTrue(WorldModelCache.actorRefreshRequired(
+				true, true, false, 64, 64, 12, 16));
+		assertTrue(WorldModelCache.shouldRefreshSnapshot(
+				true, false, false, false, false, true,
+				10L, 10L, "geometry-1", "geometry-1"));
+	}
+
+	@Test
+	public void actorCensusRowsAreBoundedNearbyNpcFactsWithoutNestedPlayerNames()
+	{
+		Map<String, Object> nearNpc = new LinkedHashMap<>();
+		nearNpc.put("type", "NPC");
+		nearNpc.put("index", 7);
+		nearNpc.put("id", 123);
+		nearNpc.put("name", "Guide");
+		nearNpc.put("actions", List.of("Talk-to"));
+		nearNpc.put("worldX", 3200);
+		nearNpc.put("worldY", 3230);
+		nearNpc.put("plane", 0);
+		nearNpc.put("distanceToPlayer", 2);
+		nearNpc.put("interacting", Map.of("name", "Private player name"));
+		Map<String, Object> secondNpc = Map.of(
+				"type", "NPC",
+				"index", 8,
+				"id", 124,
+				"name", "Banker",
+				"actions", List.of("Bank"),
+				"distanceToPlayer", 3);
+		Map<String, Object> player = Map.of(
+				"type", "PLAYER",
+				"index", 9,
+				"name", "Private player name",
+				"distanceToPlayer", 1);
+		Map<String, Object> farNpc = Map.of(
+				"type", "NPC",
+				"index", 10,
+				"id", 125,
+				"name", "Far guide",
+				"distanceToPlayer", 20);
+
+		List<Map<String, Object>> rows = WorldModelCache.boundedNpcActorRows(
+				List.of(player, secondNpc, farNpc, nearNpc), 8, 1);
+
+		assertEquals(1, rows.size());
+		assertEquals("NPC", rows.get(0).get("type"));
+		assertEquals(123, rows.get(0).get("id"));
+		assertEquals(List.of("Talk-to"), rows.get(0).get("actions"));
+		assertFalse(rows.get(0).containsKey("interacting"));
+		assertFalse(rows.get(0).containsValue("Private player name"));
+		assertTrue(WorldModelCache.boundedNpcActorRows(
+				List.of(nearNpc), 8, 0).isEmpty());
+	}
+
+	@Test
+	public void actorAndCollisionNeedsProduceBoundedReadOnlyPayloads()
+	{
+		WorldModelCache cache = new WorldModelCache();
+		Map<String, Object> response = cache.query(
+				null,
+				List.of("actor_census", "collision_window"),
+				Map.of("worldModel", Map.of(
+						"radiusTiles", 8,
+						"maxActors", 4,
+						"maxCollisionTiles", 16)),
+				55L,
+				89L,
+				Map.of(
+						"sessionId", "session-7",
+						"clientProcessId", 9876L,
+						"geometryFrameId", "geometry-7"));
+		Map<String, Object> payloads = map(response.get("payloads"));
+		Map<String, Object> actors = map(payloads.get("actor_census"));
+		Map<String, Object> collision = map(payloads.get("collision_window"));
+
+		assertEquals("world_model_actor_census.v1", actors.get("schema"));
+		assertEquals(List.of(), actors.get("actors"));
+		assertEquals("world_model_collision_window.v1", collision.get("schema"));
+		assertFalse((Boolean) collision.get("collisionAvailable"));
+	}
+
 	private static void assertProvenance(Map<String, Object> provenance)
 	{
 		assertEquals(55L, provenance.get("sourceTick"));

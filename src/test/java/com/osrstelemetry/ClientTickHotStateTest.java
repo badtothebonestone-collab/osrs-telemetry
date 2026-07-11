@@ -4,6 +4,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.Test;
@@ -51,7 +53,62 @@ public class ClientTickHotStateTest
 		assertEquals(2, clickedTail.size());
 		assertEquals("Walk here", ((Map<?, ?>) clickedTail.get(0)).get("option"));
 		assertEquals("Chop down", ((Map<?, ?>) clickedTail.get(1)).get("option"));
+		assertEquals(2L, ((Map<?, ?>) menuTail.get(0)).get("eventSequence"));
+		assertEquals(3L, ((Map<?, ?>) menuTail.get(1)).get("eventSequence"));
+		assertEquals(4L, ((Map<?, ?>) clickedTail.get(0)).get("eventSequence"));
+		assertEquals(5L, ((Map<?, ?>) clickedTail.get(1)).get("eventSequence"));
 		assertEquals(1L, ((Map<?, ?>) snapshot.get("latency")).get("droppedPostMenuSortSamples"));
+	}
+
+	@Test
+	public void eventSequenceIsMonotonicAcrossEveryHotLaneAndCannotBeSpoofed()
+	{
+		ClientTickHotState state = new ClientTickHotState(8);
+		Map<String, Object> callerSample = new LinkedHashMap<>();
+		callerSample.put("clientTick", 1L);
+		callerSample.put("wallTimeMillis", 1000L);
+		callerSample.put("eventSequence", 999L);
+		state.recordClientTick(callerSample);
+		state.recordPostMenuSort(Map.of("clientTick", 2L, "wallTimeMillis", 1000L));
+		state.recordMenuOptionClicked(Map.of("clientTick", 3L, "wallTimeMillis", 1000L));
+		state.recordClientTick(Map.of("clientTick", 4L, "wallTimeMillis", 1000L));
+
+		Map<String, Object> snapshot = state.snapshot(8, 8, 8, true, 16);
+		List<?> clientTail = (List<?>) snapshot.get("clientTickTail");
+		List<?> menuTail = (List<?>) snapshot.get("postMenuSortTail");
+		List<?> clickedTail = (List<?>) snapshot.get("clickedTail");
+
+		assertEquals(1L, ((Map<?, ?>) clientTail.get(0)).get("eventSequence"));
+		assertEquals(ClientTickHotState.LANE_CLIENT_TICK, ((Map<?, ?>) clientTail.get(0)).get("eventLane"));
+		assertEquals(2L, ((Map<?, ?>) menuTail.get(0)).get("eventSequence"));
+		assertEquals(ClientTickHotState.LANE_POST_MENU_SORT, ((Map<?, ?>) menuTail.get(0)).get("eventLane"));
+		assertEquals(3L, ((Map<?, ?>) clickedTail.get(0)).get("eventSequence"));
+		assertEquals(ClientTickHotState.LANE_MENU_OPTION_CLICKED, ((Map<?, ?>) clickedTail.get(0)).get("eventLane"));
+		assertEquals(4L, ((Map<?, ?>) clientTail.get(1)).get("eventSequence"));
+		assertEquals(4L, snapshot.get("eventSequence"));
+		assertEquals(4L, snapshot.get("latestEventSequence"));
+		assertEquals(4L, snapshot.get("clientTick"));
+		assertEquals(999L, callerSample.get("eventSequence"));
+	}
+
+	@Test
+	public void menuEntriesAreBoundedToSixteenInLatestAndTailSamples()
+	{
+		ClientTickHotState state = new ClientTickHotState(4);
+		List<Map<String, Object>> entries = new ArrayList<>();
+		for (int index = 0; index < 20; index++)
+		{
+			entries.add(Map.of("option", "Option " + index));
+		}
+		state.recordPostMenuSort(Map.of("clientTick", 1L, "entries", entries));
+
+		Map<String, Object> snapshot = state.snapshot(0, 1, 0, true, 1000);
+		Map<?, ?> latest = (Map<?, ?>) snapshot.get("postMenuSort");
+		List<?> tail = (List<?>) snapshot.get("postMenuSortTail");
+
+		assertEquals(16, ClientTickHotState.MAX_MENU_ENTRY_LIMIT);
+		assertEquals(16, ((List<?>) latest.get("entries")).size());
+		assertEquals(16, ((List<?>) ((Map<?, ?>) tail.get(0)).get("entries")).size());
 	}
 
 	@Test

@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Test;
 
 public class PluginSnapshotEndpointTest
@@ -41,12 +42,15 @@ public class PluginSnapshotEndpointTest
 		Map<String, Object> schema = endpoint(new PluginLiveCache(gson)).schemaPayload();
 		assertEquals(
 				List.of("baseline", "inventory", "activity", "bank_ui", "dialogue_state", "interaction_hot",
-						"scene_object_census", "route_object_census", "resource_object_census",
+						"client_tick_tail", "scene_object_census", "actor_census", "collision_window",
+						"route_object_census", "resource_object_census",
 						"service_object_census"),
 				schema.get("supportedNeeds"));
 		assertEquals(List.of("GET /health", "GET /schema", "POST /snapshot"), schema.get("endpoints"));
 		assertEquals(List.of("hot"), schema.get("snapshotTiers"));
 		assertTrue(((List<?>) schema.get("supportedSchemas")).contains(PluginSnapshotEndpoint.RESPONSE_SCHEMA));
+		assertTrue(((List<?>) schema.get("requestControls")).contains("maxClickedSamples"));
+		assertTrue(((List<?>) schema.get("worldModelQueryControls")).contains("worldModel.maxActors"));
 		assertTrue(String.valueOf(schema.get("readOnlyStatement")).contains("no configuration"));
 	}
 
@@ -161,6 +165,40 @@ public class PluginSnapshotEndpointTest
 	}
 
 	@Test
+	public void clientTickTailNeedReturnsAllThreeBoundedLanesWithDropEvidence()
+	{
+		ClientTickHotState hot = new ClientTickHotState(2);
+		for (long tick = 1L; tick <= 3L; tick++)
+		{
+			hot.recordClientTick(Map.of("clientTick", tick, "gameTickAtSample", SOURCE_TICK));
+			hot.recordPostMenuSort(Map.of("clientTick", tick, "gameTickAtSample", SOURCE_TICK, "topOption", "Option " + tick));
+			hot.recordMenuOptionClicked(Map.of("clientTick", tick, "gameTickAtSample", SOURCE_TICK, "option", "Click " + tick));
+		}
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false, hot);
+		JsonObject request = request("clientTickTail");
+		request.addProperty("maxClientTickSamples", 99);
+		request.addProperty("maxMenuSamples", 99);
+		request.addProperty("maxClickedSamples", 99);
+
+		Map<String, Object> response = endpoint.snapshotPayload(request);
+		JsonObject tail = jsonObject(response.get("payloads")).getAsJsonObject("client_tick_tail");
+
+		assertEquals("PASS", response.get("status"));
+		assertEquals(2, tail.getAsJsonArray("clientTickTail").size());
+		assertEquals(2, tail.getAsJsonArray("postMenuSortTail").size());
+		assertEquals(2, tail.getAsJsonArray("clickedTail").size());
+		assertEquals(4L, tail.getAsJsonArray("clientTickTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
+		assertEquals(5L, tail.getAsJsonArray("postMenuSortTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
+		assertEquals(6L, tail.getAsJsonArray("clickedTail").get(0).getAsJsonObject().get("eventSequence").getAsLong());
+		JsonObject latency = tail.getAsJsonObject("latency");
+		assertEquals(3L, latency.get("droppedSamples").getAsLong());
+		assertEquals(1L, latency.get("droppedClientTickSamples").getAsLong());
+		assertEquals(1L, latency.get("droppedPostMenuSortSamples").getAsLong());
+		assertEquals(1L, latency.get("droppedClickedSamples").getAsLong());
+	}
+
+	@Test
 	public void worldModelProviderServesNeutralAndFilteredObjectCensusesWithFrameProvenance()
 	{
 		Map<String, Object> censuses = Map.of(
@@ -189,6 +227,93 @@ public class PluginSnapshotEndpointTest
 		assertEquals(CLIENT_PROCESS_ID, sceneCensus.get("clientProcessId").getAsLong());
 		assertEquals(GEOMETRY_FRAME_ID, sceneCensus.get("geometryFrameId").getAsString());
 		Instant.parse(sceneCensus.get("capturedAtUtc").getAsString());
+	}
+
+	@Test
+	public void actorAndCollisionNeedsAreNormalizedBoundedAndStampedToTheAtomicFrame()
+	{
+		AtomicReference<List<String>> requestedNeeds = new AtomicReference<>();
+		Map<String, Object> actor = Map.of(
+				"type", "NPC",
+				"index", 12,
+				"id", 123,
+				"name", "Guide",
+				"actions", List.of("Talk-to"),
+				"distanceToPlayer", 2);
+		Map<String, Object> actorCensus = Map.of(
+				"schema", "world_model_actor_census.v1",
+				"count", 1,
+				"returned", 1,
+				"capHit", false,
+				"actors", List.of(actor));
+		Map<String, Object> collisionWindow = Map.of(
+				"schema", "world_model_collision_window.v1",
+				"collisionAvailable", true,
+				"cellCount", 1,
+				"cellCapHit", false,
+				"cells", List.of(Map.of(
+						"worldX", 3200,
+						"worldY", 3230,
+						"plane", 0,
+						"sceneX", 50,
+						"sceneY", 50,
+						"flags", 0,
+						"blockedMovement", false)));
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null,
+				(needs, request) ->
+				{
+					requestedNeeds.set(List.copyOf(needs));
+					return worldModelResponse(
+							SOURCE_TICK,
+							GEOMETRY_FRAME_ID,
+							Map.of(
+									"actor_census", actorCensus,
+									"collision_window", collisionWindow));
+				});
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("actorCensus", "collisionWindow"));
+		JsonObject payloads = jsonObject(response.get("payloads"));
+		JsonObject actors = payloads.getAsJsonObject("actor_census");
+		JsonObject collision = payloads.getAsJsonObject("collision_window");
+
+		assertEquals("PASS", response.get("status"));
+		assertEquals(List.of("actor_census", "collision_window"), requestedNeeds.get());
+		for (JsonObject payload : List.of(actors, collision))
+		{
+			assertEquals(SOURCE_TICK, payload.get("sourceTick").getAsLong());
+			assertEquals(SESSION_ID, payload.get("sessionId").getAsString());
+			assertEquals(CLIENT_PROCESS_ID, payload.get("clientProcessId").getAsLong());
+			assertEquals(GEOMETRY_FRAME_ID, payload.get("geometryFrameId").getAsString());
+			Instant.parse(payload.get("capturedAtUtc").getAsString());
+		}
+		assertEquals("NPC", actors.getAsJsonArray("actors").get(0).getAsJsonObject().get("type").getAsString());
+		assertEquals(1, collision.getAsJsonArray("cells").size());
+	}
+
+	@Test
+	public void actorAndCollisionEvidenceFromAnotherTickIsRejectedTogether()
+	{
+		PluginSnapshotEndpoint endpoint = new PluginSnapshotEndpoint(
+				canonicalCache(), gson, "127.0.0.1", 0, "", 50, 1024 * 1024, false,
+				new ClientTickHotState(4), null,
+				(needs, request) -> worldModelResponse(
+						SOURCE_TICK - 1L,
+						GEOMETRY_FRAME_ID,
+						Map.of(
+								"actor_census", Map.of("actors", List.of()),
+								"collision_window", Map.of("cells", List.of()))));
+
+		Map<String, Object> response = endpoint.snapshotPayload(request("actor_census", "collision_window"));
+		JsonObject payloads = jsonObject(response.get("payloads"));
+
+		assertEquals("FAIL", response.get("status"));
+		assertFalse(payloads.has("actor_census"));
+		assertFalse(payloads.has("collision_window"));
+		assertTrue(((List<?>) response.get("missingCapabilities")).contains("actor_census"));
+		assertTrue(((List<?>) response.get("missingCapabilities")).contains("collision_window"));
+		assertTrue(((List<?>) response.get("warnings")).contains("world_model_provenance_mismatch"));
 	}
 
 	@Test

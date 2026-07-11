@@ -56,6 +56,11 @@ runtime logic.
   `EngineFrame` from the real decision path. Task selection and ordered safety
   evidence are captured at their owners; overlay/readers may format that frame
   but never reselect, revalidate, or authorize actions.
+- **D013 — Demonstration evidence is not authority:** manual capture is a
+  bounded read-only consumer of the single endpoint. Artifacts are hashed and
+  self-describing; inspection verifies them before emitting world/entity/action
+  suggestions that are review-only, omit input coordinates, and can never
+  activate task data or bypass normal safety proof.
 
 ## Phases and acceptance
 
@@ -67,8 +72,8 @@ runtime logic.
 | 3. Minimal task seam | Complete (`56b8b8b`) | Runtime has no concrete woodcut imports/phase checks; typed outcomes; fake task runs unchanged runtime/safety/verifier. |
 | 4. One task/site definition | Complete (`0c8ec9e`) | One immutable Lumbridge definition and one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
 | 5. Arduino boundary | Complete (`8b71ebc`) | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
-| 6. EngineFrame + overlay | Complete | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
-| 7. Demonstration capture | Next | Read-only record/inspect commands produce hashed JSONL, manifest, timeline, screenshots, and reviewed semantic suggestions. |
+| 6. EngineFrame + overlay | Complete (`a166d59`) | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
+| 7. Demonstration capture | Complete (this checkpoint) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Pending | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
 | Final regression | Pending | Full suites/replay pass; bounded fresh live observation and safe default-cycle evidence; cleanup and audits confirmed. |
 
@@ -172,7 +177,7 @@ runtime logic.
 - Corrected a truncated 62-character bank-close evidence digest in the golden
   fixture after verifying the retained trace's 64-character SHA-256.
 - Added `docs/DEFINITIONS_AND_PROFILES.md`. Final gate: golden replay 2 passed,
-  all 169 Python tests passed, a forced fresh 71-test Java suite passed, and
+  all 169 Python tests passed, a forced fresh 42-test Java suite passed, and
   `git diff --check` passed.
 
 ## Phase 5 completed work
@@ -194,7 +199,7 @@ runtime logic.
   tests for ACKs, cleanup, unsafe status, ledger closure, context cancellation,
   pointer divergence, login, and runtime receipt propagation.
 - Added `docs/INPUT_COORDINATOR.md`. Final gate: golden replay 2 passed, all 220
-  Python tests passed, a forced fresh 71-test Java suite passed, and
+  Python tests passed, a forced fresh 42-test Java suite passed, and
   `git diff --check` passed.
 
 ## Phase 6 completed work
@@ -218,8 +223,33 @@ runtime logic.
   suppression, no input handlers, and failure isolation. Disabled mode creates
   no overlay thread or window.
 - Added `docs/ENGINE_FRAME.md`. Final gate: golden replay 2 passed, all 241
-  Python tests passed, a forced fresh 71-test Java suite passed, and
+  Python tests passed, a forced fresh 42-test Java suite passed, and
   `git diff --check` passed.
+
+## Phase 7 completed work
+
+- Reused the sole `POST /snapshot` endpoint for three bounded additive needs:
+  globally sequenced client/menu/click tails, NPC-only actor census, and the
+  existing collision window. Java hard-caps menu/tail/actor/collision rows and
+  binds world evidence to the atomic frame before exposure.
+- Added a read-only recorder that requires loaded-scene/session/PID proof,
+  deduplicates endpoint sequences, downsamples pointer evidence to 20 Hz,
+  records semantic hover/click plus before/after outcomes, stops on identity or
+  sequence reset, and optionally captures only verified-canvas crops outside a
+  bank-PIN surface.
+- Added self-contained JSONL, manifest, semantic summary, Markdown timeline,
+  screenshot, and SHA-256/byte-size artifacts. The manifest records commit,
+  dependencies, schemas, request controls, source provenance, observable gaps,
+  and explicit no-input/no-replay/no-activation rules.
+- Added an inspector that rejects unsafe paths/symlinks, oversized or unexpected
+  files, hash/size tampering, invalid schemas, and discontinuous recorder
+  sequences before deriving any suggestion. Valid suggestions contain reviewed
+  world/entity/action/plane facts only and omit screen/canvas/mouse coordinates.
+- Added `run.cmd record-demo NAME`, `run.cmd inspect-demo PATH`, focused Python
+  and Java wire tests, and `docs/DEMONSTRATIONS.md`.
+- Final gate: golden replay 2 passed, all 267 Python tests passed, the forced
+  fresh 51-test Java suite passed across 6 suites, and `git diff --check`
+  passed.
 
 ## Prohibited during this mission
 
@@ -247,6 +277,10 @@ runtime logic.
   authoritative safe firmware STATUS after input.
 - There is intentionally no external/profile file loader or second definition;
   the one validated in-code default is the only supported choice.
-- No demonstration recorder or frontend facade exists yet; the overlay remains
-  intentionally diagnostic-only and still needs final loaded-scene visual
-  comparison against the live EngineFrame.
+- The demonstration path intentionally cannot observe global raw mouse-button
+  or keyboard transitions; it records RuneLite semantic click evidence and
+  declares those coverage gaps in every manifest.
+- No frontend facade exists yet. The overlay remains intentionally
+  diagnostic-only and still needs final loaded-scene visual comparison against
+  the live EngineFrame; one short real demonstration also remains final
+  regression evidence.

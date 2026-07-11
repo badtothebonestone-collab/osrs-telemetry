@@ -10,10 +10,12 @@ if /I "%MODE%"=="observe" goto observe
 if /I "%MODE%"=="task" goto task
 if /I "%MODE%"=="login" goto login
 if /I "%MODE%"=="execute" goto execute
+if /I "%MODE%"=="record-demo" goto record_demo
+if /I "%MODE%"=="inspect-demo" goto inspect_demo
 if /I "%MODE%"=="replay" goto replay
 if /I "%MODE%"=="test" goto test
 
-echo Usage: run.cmd [plugin^|observe^|task [--overlay]^|login COMx^|execute COMx [--overlay]^|replay^|test] 1>&2
+echo Usage: run.cmd [plugin^|observe^|task [--overlay]^|login COMx^|execute COMx [--overlay]^|record-demo NAME [options]^|inspect-demo PATH^|replay^|test] 1>&2
 exit /b 2
 
 :plugin
@@ -42,6 +44,22 @@ if "%~2"=="" (
     exit /b 2
 )
 python -m osrs_bot task --execute --arduino-port "%~2" %~3 %~4
+exit /b %ERRORLEVEL%
+
+:record_demo
+if "%~2"=="" (
+    echo Demonstration capture requires a safe name, for example: run.cmd record-demo castle-stairs 1>&2
+    exit /b 2
+)
+python -m osrs_bot.demonstration record "%~2" %3 %4 %5 %6 %7 %8 %9
+exit /b %ERRORLEVEL%
+
+:inspect_demo
+if "%~2"=="" (
+    echo Demonstration inspection requires an artifact path. 1>&2
+    exit /b 2
+)
+python -m osrs_bot.demonstration inspect "%~2"
 exit /b %ERRORLEVEL%
 
 :replay

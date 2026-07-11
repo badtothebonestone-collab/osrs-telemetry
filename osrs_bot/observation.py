@@ -20,6 +20,11 @@ MAX_TILE_PROJECTIONS = 16
 CORE_FACT_NEEDS = ("baseline", "inventory", "activity", "bank_ui", "dialogue_state")
 CANONICAL_NEEDS = ("baseline", "inventory", "activity", "interaction_hot",
                    "scene_object_census", "bank_ui", "dialogue_state")
+DEMONSTRATION_NEEDS = CANONICAL_NEEDS + (
+    "client_tick_tail",
+    "actor_census",
+    "collision_window",
+)
 _TAG = re.compile(r"<[^>]*>")
 
 class ObservationError(RuntimeError):
@@ -28,6 +33,41 @@ class ObservationRequestError(ObservationError): pass
 class ObservationTransportError(ObservationError): pass
 class ObservationDecodeError(ObservationError): pass
 class ObservationSchemaError(ObservationError): pass
+
+
+@dataclass(frozen=True, slots=True)
+class DemonstrationEvidenceSnapshot:
+    observation: Observation
+    payload_json: str
+    request_json: str
+    fetched_at_utc: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.observation, Observation):
+            raise TypeError("observation must be Observation")
+        for field_name in ("payload_json", "request_json"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{field_name} must be non-empty canonical JSON")
+            try:
+                decoded = json.loads(value)
+            except (json.JSONDecodeError, ValueError) as error:
+                raise ValueError(f"{field_name} must be valid JSON") from error
+            if not isinstance(decoded, dict):
+                raise ValueError(f"{field_name} must encode an object")
+        if not isinstance(self.fetched_at_utc, datetime):
+            raise TypeError("fetched_at_utc must be datetime")
+        if (
+            self.fetched_at_utc.tzinfo is None
+            or self.fetched_at_utc.utcoffset() is None
+        ):
+            raise ValueError("fetched_at_utc must be timezone-aware")
+
+    def payload(self) -> dict[str, Any]:
+        return json.loads(self.payload_json)
+
+    def request(self) -> dict[str, Any]:
+        return json.loads(self.request_json)
 
 @dataclass(frozen=True, slots=True)
 class _CanvasTransform:
@@ -132,12 +172,36 @@ def build_snapshot_request(tile_projections: Iterable[tuple[str, WorldPoint]] | 
         "snapshotTier": "hot", "responseMode": "compact", "maxAgeTicks": 0,
         "maxSourceAgeMillis": 2000,
         "includeGeometry": True, "includeCollisionWindow": False, "includeWatchValues": False,
-        "includeMenuEntries": True, "maxMenuEntries": 16, "maxClientTickSamples": 0,
+        "includeMenuEntries": True, "menuEntryLimit": 16, "maxClientTickSamples": 0,
         "maxMenuSamples": 0, "maxClickedSamples": 0,
         "worldModel": {"radiusTiles": 32, "maxObjects": 64, "includeProjection": True, "includeCollision": False}}
     if tiles:
         request["tileProjectionRequests"] = [
             {"label": label, "worldX": point.x, "worldY": point.y, "plane": point.plane} for label, point in tiles]
+    return request
+
+
+def build_demonstration_request(
+    tile_projections: Iterable[tuple[str, WorldPoint]] | None = None,
+) -> dict[str, Any]:
+    request = build_snapshot_request(tile_projections)
+    request.update(
+        needs=list(DEMONSTRATION_NEEDS),
+        includeCollisionWindow=True,
+        maxClientTickSamples=64,
+        maxMenuSamples=32,
+        maxClickedSamples=32,
+        menuEntryLimit=16,
+    )
+    request["worldModel"] = {
+        "radiusTiles": 16,
+        "maxObjects": 64,
+        "includeProjection": True,
+        "includeCollision": True,
+        "maxCollisionTiles": 512,
+        "includeActors": True,
+        "maxActors": 64,
+    }
     return request
 
 def _canvas_transform(baseline: Mapping[str, Any]) -> _CanvasTransform | None:
@@ -566,6 +630,8 @@ def _dynamic_sources_coherent(
     coherent = True
     for name in (
         "scene_object_census",
+        "actor_census",
+        "collision_window",
         "resource_object_census",
         "route_object_census",
         "service_object_census",
@@ -721,7 +787,32 @@ class ObservationClient:
 
     def fetch(self, tile_projections: Iterable[tuple[str, WorldPoint]] | None = None) -> Observation:
         tiles = _normalize_tiles(tile_projections)
-        body = json.dumps(build_snapshot_request(tiles), separators=(",", ":"), allow_nan=False).encode("utf-8")
+        payload = self._post_snapshot(build_snapshot_request(tiles))
+        return parse_observation(payload, tiles)
+
+    def fetch_demonstration_evidence(
+        self,
+        tile_projections: Iterable[tuple[str, WorldPoint]] | None = None,
+    ) -> DemonstrationEvidenceSnapshot:
+        """Fetch additive read-only evidence for the manual demo recorder only."""
+        tiles = _normalize_tiles(tile_projections)
+        request_payload = build_demonstration_request(tiles)
+        payload = self._post_snapshot(request_payload)
+        canonical_payload = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        canonical_request = json.dumps(
+            request_payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        return DemonstrationEvidenceSnapshot(
+            observation=parse_observation(payload, tiles),
+            payload_json=canonical_payload,
+            request_json=canonical_request,
+            fetched_at_utc=datetime.now(timezone.utc),
+        )
+
+    def _post_snapshot(self, request_payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        body = json.dumps(request_payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
         headers = {"Accept": "application/json", "Content-Type": "application/json; charset=utf-8"}
         if self._auth_token:
             headers["X-Plugin-Snapshot-Token"] = self._auth_token
@@ -738,4 +829,6 @@ class ObservationClient:
             payload = json.loads(decoded, parse_constant=lambda constant: (_ for _ in ()).throw(ValueError(constant)))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise ObservationDecodeError("snapshot endpoint returned invalid JSON") from exc
-        return parse_observation(payload, tiles)
+        if not isinstance(payload, Mapping):
+            raise ObservationDecodeError("snapshot endpoint returned a non-object JSON value")
+        return payload

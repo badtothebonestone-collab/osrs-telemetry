@@ -79,6 +79,7 @@ public class TelemetryPlugin extends Plugin
 {
 	private static final int INVENTORY_SLOT_COUNT = 28;
 	private static final int DIALOGUE_WIDGET_SCAN_LIMIT = 160;
+	static final int HOT_MENU_ENTRY_LIMIT = ClientTickHotState.MAX_MENU_ENTRY_LIMIT;
 
 	@Inject
 	private Client client;
@@ -2458,7 +2459,9 @@ public class TelemetryPlugin extends Plugin
 
 		if (entries != null)
 		{
-			for (int i = entries.length - 1; i >= 0 && topEntries.size() < 5; i--)
+			for (int i = entries.length - 1;
+					i >= 0 && topEntries.size() < HOT_MENU_ENTRY_LIMIT;
+					i--)
 			{
 				MenuEntry entry = entries[i];
 				if (entry != null)

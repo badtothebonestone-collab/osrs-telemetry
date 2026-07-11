@@ -12,6 +12,8 @@ from unittest.mock import patch
 from osrs_bot.model import ScreenBounds, ScreenPoint, WorldPoint
 from osrs_bot.observation import (
     CANONICAL_NEEDS,
+    DEMONSTRATION_NEEDS,
+    DemonstrationEvidenceSnapshot,
     ObservationClient,
     ObservationDecodeError,
     ObservationSchemaError,
@@ -195,6 +197,39 @@ class ObservationParsingTests(unittest.TestCase):
 
         self.assertFalse(observation.source_coherent)
         self.assertFalse(observation.loaded_scene)
+
+    def test_demonstration_dynamic_evidence_must_match_atomic_frame(self) -> None:
+        payload = load_fixture()
+        provenance = payload["payloads"]["resource_object_census"]
+        common = {
+            "sourceTick": provenance["sourceTick"],
+            "capturedAtUtc": provenance["capturedAtUtc"],
+            "sessionId": provenance["sessionId"],
+            "clientProcessId": provenance["clientProcessId"],
+            "geometryFrameId": provenance["geometryFrameId"],
+        }
+        payload["payloads"]["actor_census"] = {
+            "schema": "world_model_actor_census.v1",
+            **common,
+            "actors": [],
+        }
+        payload["payloads"]["collision_window"] = {
+            "schema": "world_model_collision_window.v1",
+            **common,
+            "cells": [],
+        }
+        self.assertTrue(parse_observation(payload).source_coherent)
+
+        for name, field, value in (
+            ("actor_census", "sessionId", "other-session"),
+            ("collision_window", "sourceTick", 173),
+        ):
+            with self.subTest(name=name, field=field):
+                mismatched = copy.deepcopy(payload)
+                mismatched["payloads"][name][field] = value
+                observation = parse_observation(mismatched)
+                self.assertFalse(observation.source_coherent)
+                self.assertFalse(observation.loaded_scene)
 
     def test_dedupes_objects_strips_menu_tags_and_scales_safe_geometry(self) -> None:
         observation = parse_observation(load_fixture())
@@ -387,6 +422,8 @@ class ObservationClientTests(unittest.TestCase):
         self.assertEqual(0, request_payload["maxClientTickSamples"])
         self.assertEqual(0, request_payload["maxMenuSamples"])
         self.assertEqual(0, request_payload["maxClickedSamples"])
+        self.assertEqual(16, request_payload["menuEntryLimit"])
+        self.assertNotIn("maxMenuEntries", request_payload)
         self.assertEqual(
             [{"label": "route:castle-door", "worldX": 3205, "worldY": 3229, "plane": 0}],
             request_payload["tileProjectionRequests"],
@@ -408,6 +445,91 @@ class ObservationClientTests(unittest.TestCase):
         mocked_open.return_value = FakeResponse(b"{not valid json")
         with self.assertRaisesRegex(ObservationDecodeError, "invalid JSON"):
             ObservationClient().fetch()
+
+    @patch("osrs_bot.observation.urlopen")
+    def test_demonstration_fetch_reuses_endpoint_with_bounded_read_only_evidence(self, mocked_open) -> None:
+        payload = copy.deepcopy(load_fixture())
+        provenance = payload["payloads"]["resource_object_census"]
+        payload["payloads"]["client_tick_tail"] = {
+            "schema": "client_tick_hot.v1",
+            "sessionId": "fixture-session",
+            "clientProcessId": 1234,
+            "latestEventSequence": 12,
+            "clientTickTail": [{
+                "eventSequence": 10,
+                "eventLane": "client_tick",
+                "clientTick": 44,
+                "sessionId": "fixture-session",
+                "clientProcessId": 1234,
+            }],
+            "postMenuSortTail": [{
+                "eventSequence": 11,
+                "eventLane": "post_menu_sort",
+                "clientTick": 44,
+                "sessionId": "fixture-session",
+                "clientProcessId": 1234,
+            }],
+            "clickedTail": [{
+                "eventSequence": 12,
+                "eventLane": "menu_option_clicked",
+                "clientTick": 44,
+                "sessionId": "fixture-session",
+                "clientProcessId": 1234,
+            }],
+        }
+        common = {
+            "sourceTick": provenance["sourceTick"],
+            "capturedAtUtc": provenance["capturedAtUtc"],
+            "sessionId": provenance["sessionId"],
+            "clientProcessId": provenance["clientProcessId"],
+            "geometryFrameId": provenance["geometryFrameId"],
+        }
+        payload["payloads"]["actor_census"] = {
+            "schema": "world_model_actor_census.v1",
+            **common,
+            "actors": [],
+        }
+        payload["payloads"]["collision_window"] = {
+            "schema": "world_model_collision_window.v1",
+            **common,
+            "cells": [],
+        }
+        mocked_open.return_value = FakeResponse(json.dumps(payload).encode("utf-8"))
+
+        evidence = ObservationClient(auth_token="never-persist-this").fetch_demonstration_evidence()
+
+        self.assertIsInstance(evidence, DemonstrationEvidenceSnapshot)
+        self.assertTrue(evidence.observation.loaded_scene)
+        request = mocked_open.call_args.args[0]
+        request_payload = json.loads(request.data)
+        self.assertEqual(list(DEMONSTRATION_NEEDS), request_payload["needs"])
+        self.assertEqual(64, request_payload["maxClientTickSamples"])
+        self.assertEqual(32, request_payload["maxMenuSamples"])
+        self.assertEqual(32, request_payload["maxClickedSamples"])
+        self.assertEqual(16, request_payload["menuEntryLimit"])
+        self.assertTrue(request_payload["includeCollisionWindow"])
+        self.assertTrue(request_payload["worldModel"]["includeActors"])
+        self.assertTrue(request_payload["worldModel"]["includeCollision"])
+        self.assertEqual(512, request_payload["worldModel"]["maxCollisionTiles"])
+        self.assertEqual(
+            12,
+            evidence.payload()["payloads"]["client_tick_tail"][
+                "latestEventSequence"
+            ],
+        )
+        self.assertEqual(
+            "world_model_actor_census.v1",
+            evidence.payload()["payloads"]["actor_census"]["schema"],
+        )
+        self.assertNotIn("never-persist-this", evidence.request_json)
+        self.assertNotIn("never-persist-this", evidence.payload_json)
+
+        first = evidence.payload()
+        first["status"] = "MUTATED"
+        self.assertNotEqual("MUTATED", evidence.payload()["status"])
+        self.assertEqual(request_payload, evidence.request())
+        with self.assertRaises(FrozenInstanceError):
+            evidence.payload_json = "{}"  # type: ignore[misc]
 
 
 if __name__ == "__main__":

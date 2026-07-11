@@ -89,6 +89,12 @@ public class TelemetryPluginSensorContractTest
 	}
 
 	@Test
+	public void hotMenuSourceRetainsAtMostSixteenEntries()
+	{
+		assertEquals(16, TelemetryPlugin.HOT_MENU_ENTRY_LIMIT);
+	}
+
+	@Test
 	public void welcomeScreenCannotBeClaimedAsPlayableScene()
 	{
 		TickSnapshot snapshot = new TickSnapshot();

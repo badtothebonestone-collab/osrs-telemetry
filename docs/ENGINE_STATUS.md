@@ -2,9 +2,9 @@
 
 ## Current milestone
 
-**Phase 6 complete — one immutable diagnostic truth and passive overlay established.**
+**Phase 7 complete — bounded manual demonstration evidence and inspection established.**
 
-Current checkpoint subject: `diagnostics: publish EngineFrame and passive overlay`
+Current checkpoint subject: `demonstrations: capture read-only semantic evidence`
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -77,6 +77,28 @@ Regression command:
   alternatives amber, optional rejected red, plus compact status text. It
   suppresses stale geometry and verifies click-through/no-activate window
   styles before display. Overlay failure cannot alter engine control.
+- The sole snapshot endpoint now exposes bounded demonstration-only
+  client/menu/click tails with one global Java-assigned sequence, an NPC-only
+  actor census, and the existing collision window. Actor/collision provenance
+  must match the atomic frame before Python can consider the Observation
+  coherent.
+- `run.cmd record-demo NAME` records no input. It requires a loaded scene and
+  exact session/PID binding, rate-limits pointer evidence, records semantic
+  clicks plus before/after observations, stops on source identity/sequence
+  discontinuity, and limits screenshots to verified canvas regions outside a
+  bank-PIN surface.
+- Finalized demonstration artifacts contain JSONL, commit/dependency/schema and
+  session provenance, semantic JSON/Markdown summaries, optional images, and
+  SHA-256 plus byte-size evidence for the complete file set.
+- `run.cmd inspect-demo PATH` verifies safe paths, symlinks, file set/limits,
+  hashes, schemas, and recorder sequence before emitting any candidate. Valid
+  candidates contain review-only world/action/plane facts plus known object IDs
+  or NPC IDs correlated through census evidence. Scene/NPC/collision/menu caps
+  remain explicit; walk/player/widget/incomplete menu evidence cannot become an
+  entity candidate. Input coordinates are omitted, activation is never
+  automatic, and invalid evidence emits no suggestions.
+- Demonstration and screenshot modules import no runtime, task, safety, login,
+  input coordinator, Arduino, or software input authority.
 
 ## Governing direction
 
@@ -114,11 +136,13 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
 - Phase 3 gate: golden replay 2 passed; 136 Python tests passed; forced fresh
   Java suite 39 passed across 6 suites with zero failures/errors/skips.
 - Phase 4 gate: golden replay 2 passed; 169 Python tests passed; forced fresh
-  Java suite 71 passed across 8 suites with zero failures/errors/skips.
+  Java suite 42 passed across 6 suites with zero failures/errors/skips.
 - Phase 5 gate: golden replay 2 passed; 220 Python tests passed; forced fresh
-  Java suite 71 passed across 8 suites with zero failures/errors/skips.
+  Java suite 42 passed across 6 suites with zero failures/errors/skips.
 - Phase 6 gate: golden replay 2 passed; 241 Python tests passed; forced fresh
-  Java suite 71 passed across 8 suites with zero failures/errors/skips.
+  Java suite 42 passed across 6 suites with zero failures/errors/skips.
+- Phase 7 gate: golden replay 2 passed; 267 Python tests passed; forced fresh
+  Java suite 51 passed across 6 suites with zero failures/errors/skips.
 - The bounded Phase 2 live observation served response v2/frame v1 at the
   RuneLite login screen. Only baseline was available; inventory, activity,
   bank UI, and dialogue were explicitly unavailable. `observe` returned
@@ -139,6 +163,9 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
   firmware STATUS proof after live input.
 - The passive overlay is structurally and render-policy tested; final regression
   must still compare its visible geometry/text with a fresh loaded EngineFrame.
-- Sensor, task, definition, profile, runtime-configuration, input, and
-  diagnostic contracts are implemented. **Phase 7 is next**; recorder and
-  facade work remain phase-scoped.
+- The RuneLite endpoint does not expose global raw mouse-button or keyboard
+  transitions. Demonstration manifests declare those gaps and retain semantic
+  `MenuOptionClicked` evidence instead.
+- Sensor, task, definition, profile, runtime-configuration, input, diagnostic,
+  and demonstration contracts are implemented. **Phase 8 is next**; only the
+  thin facade remains before the bounded final regression.

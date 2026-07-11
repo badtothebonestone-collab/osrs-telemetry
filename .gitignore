@@ -13,6 +13,7 @@ __pycache__/
 *.log
 *.jsonl
 _run_proofs/
+demo_runs/
 interaction_geometry/live/
 .osrs-telemetry/
 credentials.properties

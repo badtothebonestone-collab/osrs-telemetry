@@ -35,7 +35,7 @@ task FSM, one safety gate, one Arduino session owner, one typed verification
 path, and one read-only diagnostic truth. Diagnostics have no control authority.
 
 The architecture is being migrated in bounded checkpoints. The current column
-describes the Phase 6 implementation; the target column names only contracts
+describes the Phase 7 implementation; the target column names only contracts
 still owned by later phases.
 
 | Layer | Current baseline | Governing target |
@@ -50,6 +50,7 @@ still owned by later phases.
 | Input | one `InputCoordinator`, deterministic pointer policy, private Arduino transport, immutable wire receipts | preserve the sole-owner boundary for every future caller |
 | Verification | one `Verifier` returning immutable typed `Outcome` values | preserve the same typed pathway |
 | Diagnostics | one immutable latest `EngineFrame` plus optional passive click-through overlay | preserve one no-authority status contract for recorder/frontend readers |
+| Demonstration evidence | bounded read-only recorder plus tamper-verifying semantic inspector | preserve append-only, no-replay, review-only evidence |
 | Frontend | `run.cmd` | thin application facade and future GUI consuming the same contracts |
 
 ## Ownership boundaries
@@ -93,6 +94,15 @@ resource/route/service censuses remain endpoint diagnostics. Scene rows omit
 candidate/type/skill labels, and projection selection uses only the explicit
 projection request, factual distance, and stable object key. Candidate labels
 neither bias scene geometry nor authorize task behavior.
+
+The same endpoint exposes demonstration-only bounded `client_tick_tail`,
+`actor_census`, and `collision_window` needs. Hot rows from client tick,
+post-menu-sort, and `MenuOptionClicked` share one monotonic sequence and retain
+per-lane drop counters. Actor rows are NPC-only; nested interacting-player data
+is omitted. Actor/collision evidence is exposed only after the endpoint binds
+its source tick, capture, session, process, and geometry frame to the atomic
+observation. These additive views do not create a second observation or input
+surface.
 
 ### Observation
 
@@ -272,18 +282,34 @@ make it click-through, non-focusable, layered, and tool-window-only. It has no
 input handlers, target selection, SafetyGate calls, or Arduino imports, and an
 overlay failure cannot alter runtime control.
 
-The future recorder, CLI facade, and GUI consume the same frame. Readers may
+The recorder, future CLI facade, and GUI consume immutable read contracts.
+Readers may
 format or filter it but may not reselect a target, recalculate safety, mutate
 the FSM, import Arduino control, or authorize input.
 
-## Demonstration and frontend targets
+## Demonstration evidence
 
-Manual demonstration recording is a read-only evidence path. It synchronizes
-RuneLite facts, pointer/events visible to the process, before/after observations,
-optional bounded images, annotations, hashes, and provenance into portable JSONL
-plus a manifest and timeline. Inspection may suggest definition or fixture
-changes, but raw coordinates are never replayed and suggestions never activate
-without normal review, tests, and safety proof.
+`osrs_bot.demonstration` is a read-only evidence path over the existing snapshot
+endpoint. It requires a coherent loaded `Observation`, then binds every poll to
+the same RuneLite session/process. Atomic-frame provenance also covers the
+bounded NPC census and collision window. Client, menu, and semantic-click tails
+share one Java-assigned monotonic sequence; overlap is deduplicated and a reset
+stops capture. Pointer samples are bounded to 20 Hz. Screenshots are read-only,
+bounded inside verified canvas geometry, and suppressed for a bank PIN.
+
+Finalization produces portable JSONL, manifest, semantic summary, concise
+timeline, optional crops, and SHA-256/size evidence. Inspection verifies the
+complete declared file set, paths, symlinks, limits, hashes, schemas, and
+contiguous recorder sequence before deriving anything. Invalid evidence yields
+no suggestions. Scene/NPC/collision/menu cap metadata remains explicit. Valid
+candidates contain authoritative world anchors, actions, plane transitions,
+known game-object IDs, or NPC IDs correlated through an exact same-tick census.
+Walk, player, widget, incomplete, and uncorrelated menu identifiers cannot
+become entity candidates. Input coordinates are omitted and every candidate is
+review-only and never automatically active. The recorder imports no runtime, safety, task,
+input, login, or Arduino authority.
+
+## Frontend target
 
 The frontend facade exposes only high-level lifecycle and read contracts: list
 supported tasks/definitions, inspect and validate profile fields, start, pause,

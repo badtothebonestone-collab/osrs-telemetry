@@ -15,6 +15,7 @@ RuneLite plugin -> atomic SensorFrame -> snapshot v2 -> Observation
                -> Action + typed constraints -> SafetyGate
                -> InputCoordinator -> Arduino -> Verifier -> typed Outcome
                -> immutable EngineFrame -> optional passive overlay
+manual control -> read-only demo evidence -> verified review suggestions
 ```
 
 There is one command surface: `run.cmd`.
@@ -79,6 +80,19 @@ Add the passive, click-through diagnostics without changing engine control:
 .\run.cmd execute COM6 --overlay
 ```
 
+Record a short manual route or interaction without injecting input, then verify
+and summarize the portable artifact:
+
+```powershell
+.\run.cmd record-demo castle-stairs --duration-seconds 45
+.\run.cmd inspect-demo .\demo_runs\20260710T170000000000Z_castle-stairs
+```
+
+The recorder uses the same snapshot endpoint, writes hashed JSONL/manifest/
+timeline/screenshots, and emits only review-required semantic suggestions. It
+never replays coordinates or activates task data. See
+`docs/DEMONSTRATIONS.md` for the evidence and trust boundary.
+
 No software mouse/keyboard fallback exists. The live runner is bounded, stops
 after one cycle, and fails closed when observation, geometry, target identity,
 hover menu, cleanup, or verification evidence is missing.
@@ -120,6 +134,9 @@ does not pretend that the ignored live traces contain full raw observations.
 - `osrs_bot/runtime.py`: task-agnostic bounded orchestration.
 - `osrs_bot/engine_frame.py`: the immutable latest runtime diagnostic truth.
 - `osrs_bot/debug_overlay.py`: optional passive EngineFrame-only Windows overlay.
+- `osrs_bot/demonstration.py`: bounded read-only recorder and tamper-verifying
+  semantic inspector.
+- `osrs_bot/screen_capture.py`: read-only, verified-canvas screenshot crops.
 - `osrs_bot/login.py`: bounded saved-session prompt assistance, outside the task engine.
 - `arduino/ArduinoHIDBridge/`: retained HID firmware.
 - `tests/`: focused Python tests for the active baseline.
@@ -132,6 +149,7 @@ does not pretend that the ignored live traces contain full raw observations.
 - `docs/DEFINITIONS_AND_PROFILES.md`: definition/profile/configuration ownership.
 - `docs/INPUT_COORDINATOR.md`: sole input owner, pointer, receipt, and cleanup contract.
 - `docs/ENGINE_FRAME.md`: diagnostic publication and passive overlay contract.
+- `docs/DEMONSTRATIONS.md`: artifact, inspection, and no-replay contract.
 - `docs/ENGINE_STATUS.md`: completed milestone, evidence boundary, and blockers.
 - `PLANS.md`: active phases, acceptance criteria, and decision log.
 - `docs/RESCUE_AUDIT.md`: archaeology findings and removal rationale.
@@ -151,6 +169,10 @@ does not pretend that the ignored live traces contain full raw observations.
 - The current task performs exactly one full-inventory bank cycle and stops.
 - Exactly one built-in definition/default profile is supported; there is no
   user-editable profile loader or second site.
+- Raw mouse-button and keyboard transitions are not available from RuneLite;
+  demonstration manifests state that gap and retain semantic menu-click proof.
+- A demonstration is one observed evidence bundle, not proof of a generally
+  correct route and never an executable replay.
 
 Read `docs/PRODUCT_VISION.md`, `PLANS.md`, and `docs/ENGINE_STATUS.md` before
 extending the engine. `docs/RESCUE_CONTRACT.md` remains the frozen baseline

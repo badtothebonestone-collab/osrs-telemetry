@@ -47,12 +47,17 @@ public class PluginSnapshotEndpoint implements Closeable
 			"bank_ui",
 			"dialogue_state",
 			"interaction_hot",
+			"client_tick_tail",
 			"scene_object_census",
+			"actor_census",
+			"collision_window",
 			"route_object_census",
 			"resource_object_census",
 			"service_object_census");
 	private static final List<String> WORLD_MODEL_NEEDS = Arrays.asList(
 			"scene_object_census",
+			"actor_census",
+			"collision_window",
 			"route_object_census",
 			"resource_object_census",
 			"service_object_census");
@@ -348,17 +353,34 @@ public class PluginSnapshotEndpoint implements Closeable
 				"maxProjectionRefs", maxProjectionRefs,
 				"maxResponseBytes", maxResponseBytes,
 				"maxRequestBodyBytes", MAX_REQUEST_BODY_BYTES,
-				"maxTileProjectionRequests", MAX_TILE_PROJECTION_REQUESTS));
+				"maxTileProjectionRequests", MAX_TILE_PROJECTION_REQUESTS,
+				"maxClientTickHotSamples", ClientTickHotState.DEFAULT_SAMPLE_CAP,
+				"maxMenuEntries", ClientTickHotState.MAX_MENU_ENTRY_LIMIT));
 		payload.put("projectionFieldModes", List.of("compact"));
-		payload.put("hotSamples", List.of("clientTickHot", "hoverMenu"));
+		payload.put("hotSamples", List.of(
+				"clientTickHot",
+				"hoverMenu",
+				"lastMenuOptionClicked",
+				"clientTickTail"));
 		payload.put("clientTickHotSchema", ClientTickHotState.SCHEMA);
-		payload.put("requestControls", List.of("tileProjectionRequests", "maxSourceAgeMillis"));
+		payload.put("requestControls", List.of(
+				"tileProjectionRequests",
+				"maxSourceAgeMillis",
+				"includeMenuEntries",
+				"menuEntryLimit",
+				"maxClientTickSamples",
+				"maxMenuSamples",
+				"maxClickedSamples"));
 		payload.put("tileProjectionSchema", "tile_projection_response.v1");
 		payload.put("worldModelSchema", WorldModelCache.SCHEMA);
 		payload.put("worldModelQueryControls", List.of(
 				"worldModel.maxObjects",
 				"worldModel.radiusTiles",
-				"worldModel.includeProjection"));
+				"worldModel.maxActors",
+				"worldModel.maxCollisionTiles",
+				"worldModel.includeProjection",
+				"worldModel.includeActors",
+				"worldModel.includeCollision"));
 		payload.put("readOnlyStatement", "Returns cached telemetry observations only. It has no configuration, game input, command, or game-state mutation endpoints.");
 		return payload;
 	}
@@ -606,7 +628,10 @@ public class PluginSnapshotEndpoint implements Closeable
 	private Map<String, Object> clientTickHotSnapshot(JsonObject request, boolean includeTail)
 	{
 		boolean includeMenuEntries = booleanValue(request, "includeMenuEntries", true);
-		int menuEntryLimit = intValue(request, "menuEntryLimit", 5);
+		int menuEntryLimit = intValue(
+				request,
+				"menuEntryLimit",
+				ClientTickHotState.DEFAULT_MENU_ENTRY_LIMIT);
 		if (clientTickHotState != null)
 		{
 			return clientTickHotState.snapshot(
@@ -1641,7 +1666,8 @@ public class PluginSnapshotEndpoint implements Closeable
 				if (element.isJsonPrimitive())
 				{
 					String need = normalizeNeed(element.getAsString());
-					if ("interaction_hot".equals(need) && !needs.contains(need))
+					if (("interaction_hot".equals(need) || "client_tick_tail".equals(need))
+							&& !needs.contains(need))
 					{
 						needs.add(need);
 					}
@@ -1688,6 +1714,7 @@ public class PluginSnapshotEndpoint implements Closeable
 				.replace("dialogueState", "dialogue_state")
 				.replace("worldModelSummary", "world_model_summary")
 				.replace("sceneObjectCensus", "scene_object_census")
+				.replace("actorCensus", "actor_census")
 				.replace("routeObjectCensus", "route_object_census")
 				.replace("resourceObjectCensus", "resource_object_census")
 				.replace("serviceObjectCensus", "service_object_census")

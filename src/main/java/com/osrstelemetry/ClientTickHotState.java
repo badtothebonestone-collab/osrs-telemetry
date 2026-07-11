@@ -10,7 +10,11 @@ class ClientTickHotState
 {
 	static final String SCHEMA = "client_tick_hot.v1";
 	static final int DEFAULT_SAMPLE_CAP = 128;
-	private static final int DEFAULT_MENU_ENTRY_LIMIT = 5;
+	static final int DEFAULT_MENU_ENTRY_LIMIT = 5;
+	static final int MAX_MENU_ENTRY_LIMIT = 16;
+	static final String LANE_CLIENT_TICK = "client_tick";
+	static final String LANE_POST_MENU_SORT = "post_menu_sort";
+	static final String LANE_MENU_OPTION_CLICKED = "menu_option_clicked";
 
 	private final int sampleCap;
 	private final ArrayDeque<Map<String, Object>> clientTickSamples = new ArrayDeque<>();
@@ -22,6 +26,7 @@ class ClientTickHotState
 	private long droppedClientTickSamples;
 	private long droppedPostMenuSortSamples;
 	private long droppedClickedSamples;
+	private long nextEventSequence;
 
 	ClientTickHotState()
 	{
@@ -35,7 +40,7 @@ class ClientTickHotState
 
 	synchronized void recordClientTick(Map<String, Object> sample)
 	{
-		Map<String, Object> copy = copySample(sample);
+		Map<String, Object> copy = sequencedSample(sample, LANE_CLIENT_TICK);
 		if (copy == null)
 		{
 			return;
@@ -46,7 +51,7 @@ class ClientTickHotState
 
 	synchronized void recordPostMenuSort(Map<String, Object> sample)
 	{
-		Map<String, Object> copy = copySample(sample);
+		Map<String, Object> copy = sequencedSample(sample, LANE_POST_MENU_SORT);
 		if (copy == null)
 		{
 			return;
@@ -57,7 +62,7 @@ class ClientTickHotState
 
 	synchronized void recordMenuOptionClicked(Map<String, Object> sample)
 	{
-		Map<String, Object> copy = copySample(sample);
+		Map<String, Object> copy = sequencedSample(sample, LANE_MENU_OPTION_CLICKED);
 		if (copy == null)
 		{
 			return;
@@ -84,7 +89,9 @@ class ClientTickHotState
 			int menuEntryLimit)
 	{
 		long now = System.currentTimeMillis();
-		int effectiveMenuEntryLimit = Math.max(0, menuEntryLimit <= 0 ? DEFAULT_MENU_ENTRY_LIMIT : menuEntryLimit);
+		int effectiveMenuEntryLimit = Math.min(
+				MAX_MENU_ENTRY_LIMIT,
+				Math.max(0, menuEntryLimit <= 0 ? DEFAULT_MENU_ENTRY_LIMIT : menuEntryLimit));
 		Map<String, Object> payload = new LinkedHashMap<>();
 		Map<String, Object> clientTick = trimmedSample(latestClientTick, includeMenuEntries, effectiveMenuEntryLimit);
 		Map<String, Object> postMenuSort = trimmedSample(latestPostMenuSort, includeMenuEntries, effectiveMenuEntryLimit);
@@ -99,6 +106,8 @@ class ClientTickHotState
 		payload.put("gameState", metadata == null ? null : metadata.get("gameState"));
 		payload.put("sampleSource", metadata == null ? null : metadata.get("sampleSource"));
 		payload.put("sourceEvent", metadata == null ? null : metadata.get("sourceEvent"));
+		payload.put("eventSequence", longValue(metadata, "eventSequence"));
+		payload.put("latestEventSequence", nextEventSequence);
 		payload.put("sessionId", metadata == null ? null : metadata.get("sessionId"));
 		payload.put("clientProcessId", metadata == null ? null : metadata.get("clientProcessId"));
 		payload.put("mouse", mousePayload(clientTick, postMenuSort, clicked));
@@ -200,18 +209,18 @@ class ClientTickHotState
 	private Map<String, Object> latestMetadataSample(Map<String, Object>... samples)
 	{
 		Map<String, Object> best = null;
-		Long bestTime = null;
+		Long bestSequence = null;
 		for (Map<String, Object> sample : samples)
 		{
 			if (sample == null)
 			{
 				continue;
 			}
-			Long wallTime = longValue(sample, "wallTimeMillis");
-			if (best == null || (wallTime != null && (bestTime == null || wallTime >= bestTime)))
+			Long sequence = longValue(sample, "eventSequence");
+			if (best == null || (sequence != null && (bestSequence == null || sequence > bestSequence)))
 			{
 				best = sample;
-				bestTime = wallTime;
+				bestSequence = sequence;
 			}
 		}
 		return best;
@@ -244,6 +253,18 @@ class ClientTickHotState
 	private Map<String, Object> copySample(Map<String, Object> sample)
 	{
 		return sample == null ? null : new LinkedHashMap<>(sample);
+	}
+
+	private Map<String, Object> sequencedSample(Map<String, Object> sample, String lane)
+	{
+		Map<String, Object> copy = copySample(sample);
+		if (copy == null)
+		{
+			return null;
+		}
+		copy.put("eventSequence", ++nextEventSequence);
+		copy.put("eventLane", lane);
+		return copy;
 	}
 
 	private Long firstLong(Map<String, Object>[] samples, String key)

@@ -27,6 +27,7 @@ import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.MenuEntry;
 import net.runelite.api.NPC;
+import net.runelite.api.NPCComposition;
 import net.runelite.api.ObjectComposition;
 import net.runelite.api.Perspective;
 import net.runelite.api.Player;
@@ -109,6 +110,12 @@ class WorldModelCache
 				case "scene_object_census":
 					payloads.put(need, objectCensusPayload(snapshot, options, ObjectFilter.SCENE));
 					break;
+				case "actor_census":
+					payloads.put(need, actorCensusPayload(snapshot, options));
+					break;
+				case "collision_window":
+					payloads.put(need, collisionWindowPayload(snapshot, options, true));
+					break;
 				case "route_object_census":
 					payloads.put(need, objectCensusPayload(snapshot, options, ObjectFilter.ROUTE));
 					break;
@@ -179,12 +186,21 @@ class WorldModelCache
 				options.maxProjectionObjects(),
 				latest.projectionAnchorKey,
 				options.projectionAnchorKey());
+		boolean actorUpgrade = latest != null && actorRefreshRequired(
+				options.actorCensusRequested(),
+				latest.actorsCaptured,
+				latest.actorCensusCapHit,
+				latest.actorBudget,
+				options.maxActors,
+				latest.actorRadiusTiles,
+				options.radiusTiles);
 		boolean refresh = shouldRefreshSnapshot(
 				latest != null,
 				dirty,
 				stale,
 				forced,
 				projectionUpgrade,
+				actorUpgrade,
 				latest == null ? Long.MIN_VALUE : latest.sourceTick,
 				tick,
 				latest == null ? null : latest.geometryFrameId,
@@ -214,6 +230,10 @@ class WorldModelCache
 		{
 			reason = "projection_capability_upgrade";
 		}
+		else if (actorUpgrade)
+		{
+			reason = "actor_capability_upgrade";
+		}
 		else
 		{
 			reason = "stale";
@@ -236,11 +256,37 @@ class WorldModelCache
 			Object cachedGeometryFrameId,
 			Object requestedGeometryFrameId)
 	{
+		return shouldRefreshSnapshot(
+				snapshotPresent,
+				dirty,
+				stale,
+				forced,
+				projectionUpgrade,
+				false,
+				cachedSourceTick,
+				requestedSourceTick,
+				cachedGeometryFrameId,
+				requestedGeometryFrameId);
+	}
+
+	static boolean shouldRefreshSnapshot(
+			boolean snapshotPresent,
+			boolean dirty,
+			boolean stale,
+			boolean forced,
+			boolean projectionUpgrade,
+			boolean actorUpgrade,
+			long cachedSourceTick,
+			long requestedSourceTick,
+			Object cachedGeometryFrameId,
+			Object requestedGeometryFrameId)
+	{
 		return !snapshotPresent
 				|| dirty
 				|| stale
 				|| forced
 				|| projectionUpgrade
+				|| actorUpgrade
 				|| cachedSourceTick != requestedSourceTick
 				|| !Objects.equals(cachedGeometryFrameId, requestedGeometryFrameId);
 	}
@@ -265,6 +311,24 @@ class WorldModelCache
 		return cachedProjectionCapHit
 				&& (requestedProjectionBudget > cachedProjectionBudget
 				|| !Objects.equals(cachedProjectionAnchorKey, requestedProjectionAnchorKey));
+	}
+
+	static boolean actorRefreshRequired(
+			boolean actorCensusRequested,
+			boolean cachedActorsCaptured,
+			boolean cachedActorCapHit,
+			int cachedActorBudget,
+			int requestedActorBudget,
+			int cachedRadiusTiles,
+			int requestedRadiusTiles)
+	{
+		if (!actorCensusRequested)
+		{
+			return false;
+		}
+		return !cachedActorsCaptured
+				|| cachedRadiusTiles != requestedRadiusTiles
+				|| (cachedActorCapHit && requestedActorBudget > cachedActorBudget);
 	}
 
 	private Snapshot buildSnapshot(
@@ -687,25 +751,36 @@ class WorldModelCache
 		{
 			return;
 		}
+		snapshot.actorsCaptured = true;
+		snapshot.actorBudget = options.maxActors;
+		snapshot.actorRadiusTiles = options.radiusTiles;
+		List<Map<String, Object>> npcActors = new ArrayList<>();
 		List<NPC> npcs = client.getNpcs();
 		for (NPC npc : npcs == null ? List.<NPC>of() : npcs)
 		{
-			if (npc == null || snapshot.actors.size() >= options.maxActors)
+			if (npc == null)
 			{
 				continue;
 			}
-			Map<String, Object> actor = new LinkedHashMap<>();
-			actor.put("type", "NPC");
-			actor.put("index", npc.getIndex());
-			actor.put("id", npc.getId());
-			actor.put("name", npc.getName());
-			WorldPoint world = npc.getWorldLocation();
-			actor.put("worldX", world == null ? null : world.getX());
-			actor.put("worldY", world == null ? null : world.getY());
-			actor.put("plane", world == null ? null : world.getPlane());
-			actor.put("animation", npc.getAnimation());
-			actor.put("interacting", actorRef(npc.getInteracting()));
-			snapshot.actors.add(actor);
+			npcActors.add(npcActorPayload(npc, snapshot));
+		}
+		npcActors.sort(Comparator
+				.comparingInt((Map<String, Object> actor) -> intValue(actor.get("distanceToPlayer"), 9999))
+				.thenComparingInt(actor -> intValue(actor.get("index"), Integer.MAX_VALUE)));
+		snapshot.npcWithinRadiusCount = 0;
+		for (Map<String, Object> actor : npcActors)
+		{
+			if (intValue(actor.get("distanceToPlayer"), 9999) <= options.radiusTiles)
+			{
+				snapshot.npcWithinRadiusCount++;
+			}
+		}
+		int npcLimit = Math.min(Math.max(0, options.maxActors), npcActors.size());
+		snapshot.actorCensusCapHit = snapshot.npcWithinRadiusCount > npcLimit;
+		snapshot.actors.addAll(npcActors.subList(0, npcLimit));
+		if (!options.fullDebug)
+		{
+			return;
 		}
 		int playerIndex = 0;
 		List<Player> players = client.getPlayers();
@@ -728,6 +803,54 @@ class WorldModelCache
 			actor.put("interacting", actorRef(player.getInteracting()));
 			snapshot.actors.add(actor);
 		}
+	}
+
+	private Map<String, Object> npcActorPayload(NPC npc, Snapshot snapshot)
+	{
+		Map<String, Object> actor = new LinkedHashMap<>();
+		NPCComposition composition = npc.getTransformedComposition();
+		if (composition == null)
+		{
+			composition = npc.getComposition();
+		}
+		WorldPoint world = npc.getWorldLocation();
+		LocalPoint local = npc.getLocalLocation();
+		int worldX = world == null ? -1 : world.getX();
+		int worldY = world == null ? -1 : world.getY();
+		int plane = world == null ? -1 : world.getPlane();
+		actor.put("type", "NPC");
+		actor.put("index", npc.getIndex());
+		actor.put("id", npc.getId());
+		actor.put("name", npc.getName());
+		actor.put("actions", actorActions(composition));
+		actor.put("worldX", world == null ? null : worldX);
+		actor.put("worldY", world == null ? null : worldY);
+		actor.put("plane", world == null ? null : plane);
+		actor.put("sceneX", local == null ? null : local.getSceneX());
+		actor.put("sceneY", local == null ? null : local.getSceneY());
+		actor.put("localX", local == null ? null : local.getX());
+		actor.put("localY", local == null ? null : local.getY());
+		actor.put("distanceToPlayer", distanceToPlayer(snapshot, worldX, worldY, plane));
+		actor.put("animation", npc.getAnimation());
+		actor.put("interacting", actorRef(npc.getInteracting()));
+		return actor;
+	}
+
+	private List<String> actorActions(NPCComposition composition)
+	{
+		List<String> actions = new ArrayList<>();
+		if (composition == null || composition.getActions() == null)
+		{
+			return actions;
+		}
+		for (String action : composition.getActions())
+		{
+			if (action != null && !action.isBlank())
+			{
+				actions.add(action);
+			}
+		}
+		return actions;
 	}
 
 	private Map<String, Object> actorRef(net.runelite.api.Actor actor)
@@ -948,6 +1071,76 @@ class WorldModelCache
 		payload.put("objects", items);
 		payload.put("source", "java_world_model_cache");
 		return payload;
+	}
+
+	private Map<String, Object> actorCensusPayload(Snapshot snapshot, QueryOptions options)
+	{
+		List<Map<String, Object>> actors = boundedNpcActorRows(
+				snapshot.actors,
+				options.radiusTiles,
+				options.maxActors);
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("schema", "world_model_actor_census.v1");
+		payload.put("sourceSchema", SCHEMA);
+		payload.put("tick", snapshot.sourceTick);
+		payload.put("clientTick", snapshot.clientTick);
+		payload.put("radiusTiles", options.radiusTiles);
+		payload.put("count", snapshot.npcWithinRadiusCount);
+		payload.put("returned", actors.size());
+		payload.put("capHit", snapshot.npcWithinRadiusCount > actors.size());
+		payload.put("actors", actors);
+		payload.put("source", "java_world_model_cache");
+		return payload;
+	}
+
+	static List<Map<String, Object>> boundedNpcActorRows(
+			List<Map<String, Object>> source,
+			int radiusTiles,
+			int maxActors)
+	{
+		List<Map<String, Object>> candidates = new ArrayList<>();
+		for (Map<String, Object> actor : source == null ? List.<Map<String, Object>>of() : source)
+		{
+			if (actor == null
+					|| !"NPC".equals(actor.get("type"))
+					|| intValue(actor.get("distanceToPlayer"), 9999) > Math.max(0, radiusTiles))
+			{
+				continue;
+			}
+			candidates.add(compactNpcActorRow(actor));
+		}
+		candidates.sort(Comparator
+				.comparingInt((Map<String, Object> actor) -> intValue(actor.get("distanceToPlayer"), 9999))
+				.thenComparingInt(actor -> intValue(actor.get("index"), Integer.MAX_VALUE)));
+		int limit = Math.min(Math.max(0, maxActors), candidates.size());
+		return new ArrayList<>(candidates.subList(0, limit));
+	}
+
+	private static Map<String, Object> compactNpcActorRow(Map<String, Object> source)
+	{
+		Map<String, Object> actor = new LinkedHashMap<>();
+		for (String key : List.of(
+				"type",
+				"index",
+				"id",
+				"name",
+				"actions",
+				"worldX",
+				"worldY",
+				"plane",
+				"sceneX",
+				"sceneY",
+				"localX",
+				"localY",
+				"distanceToPlayer",
+				"animation"))
+		{
+			if (source.containsKey(key))
+			{
+				actor.put(key, source.get(key));
+			}
+		}
+		return actor;
 	}
 
 	private Map<String, Object> compactObject(Map<String, Object> source, QueryOptions options)
@@ -1441,6 +1634,8 @@ class WorldModelCache
 		quality.put("collisionAvailable", snapshot.collisionAvailable);
 		quality.put("projectionAuditAvailable", !snapshot.objects.isEmpty());
 		quality.put("projectionCapHit", snapshot.projectionCapHit);
+		quality.put("actorsCaptured", snapshot.actorsCaptured);
+		quality.put("actorCensusCapHit", snapshot.actorCensusCapHit);
 		quality.put("loadedSceneOnly", true);
 		quality.put("fullWorldLoaded", false);
 		return quality;
@@ -1795,7 +1990,7 @@ class WorldModelCache
 		return value == null ? "" : String.valueOf(value);
 	}
 
-	private int intValue(Object value, int fallback)
+	private static int intValue(Object value, int fallback)
 	{
 		if (value instanceof Number)
 		{
@@ -2009,6 +2204,11 @@ class WorldModelCache
 		private int projectionBudget;
 		private String projectionAnchorKey;
 		private boolean projectionCapHit;
+		private boolean actorsCaptured;
+		private int actorBudget;
+		private int actorRadiusTiles;
+		private int npcWithinRadiusCount;
+		private boolean actorCensusCapHit;
 		private String refreshReason;
 		private long refreshDurationMillis;
 		private final List<Map<String, Object>> objects = new ArrayList<>();
@@ -2089,8 +2289,10 @@ class WorldModelCache
 				}
 			}
 			options.includeProjection = booleanValueStatic(first(worldModel.get("includeProjection"), requestValue(request, "includeProjection")));
-			options.includeCollision = booleanValueStatic(first(worldModel.get("includeCollision"), requestValue(request, "includeCollision")));
-			options.includeActors = booleanValueStatic(first(worldModel.get("includeActors"), requestValue(request, "includeActors")));
+			options.includeCollision = booleanValueStatic(first(worldModel.get("includeCollision"), requestValue(request, "includeCollision")))
+					|| (needs != null && needs.contains("collision_window"));
+			options.includeActors = booleanValueStatic(first(worldModel.get("includeActors"), requestValue(request, "includeActors")))
+					|| (needs != null && needs.contains("actor_census"));
 			options.forceRefresh = booleanValueStatic(worldModel.get("forceRefresh"));
 			options.fullDebug = needs != null && needs.contains("full_world_model_debug");
 			options.needsProjectionAudit = needs != null && (needs.contains("projection_audit") || needs.contains("view_quality_inputs"));
@@ -2119,6 +2321,11 @@ class WorldModelCache
 		private int maxProjectionObjects()
 		{
 			return Math.min(HARD_MAX_PROJECTION_OBJECTS, Math.max(maxObjects, includeProjection ? maxObjects * 3 : DEFAULT_MAX_OBJECTS));
+		}
+
+		private boolean actorCensusRequested()
+		{
+			return includeActors || fullDebug;
 		}
 
 		private boolean projectionRequested()
