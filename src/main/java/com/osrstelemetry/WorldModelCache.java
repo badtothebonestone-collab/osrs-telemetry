@@ -940,6 +940,9 @@ class WorldModelCache
 		Map<String, Object> projection = new LinkedHashMap<>();
 		List<String> warnings = new ArrayList<>();
 		Point canvasLocation = null;
+		Shape clickboxShape = null;
+		Shape convexHullShape = null;
+		Shape tileShape = null;
 		Rectangle clickbox = null;
 		Rectangle convexHull = null;
 		Rectangle tileBounds = null;
@@ -953,8 +956,10 @@ class WorldModelCache
 		}
 		try
 		{
-			Shape clickboxShape = clickboxShape(object);
-			clickbox = clickboxShape == null ? null : clickboxShape.getBounds();
+			Shape capturedClickbox = clickboxShape(object);
+			Rectangle capturedBounds = capturedClickbox == null ? null : capturedClickbox.getBounds();
+			clickboxShape = capturedClickbox;
+			clickbox = capturedBounds;
 		}
 		catch (RuntimeException e)
 		{
@@ -962,8 +967,10 @@ class WorldModelCache
 		}
 		try
 		{
-			Shape convex = convexHullShape(object);
-			convexHull = convex == null ? null : convex.getBounds();
+			Shape capturedHull = convexHullShape(object);
+			Rectangle capturedBounds = capturedHull == null ? null : capturedHull.getBounds();
+			convexHullShape = capturedHull;
+			convexHull = capturedBounds;
 		}
 		catch (RuntimeException e)
 		{
@@ -979,6 +986,7 @@ class WorldModelCache
 				{
 					polygon = Perspective.getCanvasTilePoly(client, local);
 				}
+				tileShape = polygon;
 				tileBounds = polygon == null ? null : polygon.getBounds();
 			}
 		}
@@ -989,7 +997,12 @@ class WorldModelCache
 		Rectangle bestBounds = firstNonNull(clickbox, convexHull, tileBounds);
 		boolean geometry = canvasLocation != null || bestBounds != null;
 		boolean visible = geometry && intersectsViewport(snapshot, canvasLocation, clickbox, convexHull, tileBounds);
-		Map<String, Object> aimPoint = aimPoint(canvasLocation, bestBounds);
+		Map<String, Object> aimPoint = aimPoint(
+				canvasLocation,
+				viewportRect(snapshot),
+				clickboxShape,
+				convexHullShape,
+				tileShape);
 		projection.put("schema", "world_model_projection.v1");
 		projection.put("geometryAvailable", geometry);
 		projection.put("onScreen", visible);
@@ -1870,17 +1883,116 @@ class WorldModelCache
 				Math.max(0, snapshot.viewportHeight));
 	}
 
-	private Map<String, Object> aimPoint(Point point, Rectangle bounds)
+	private Map<String, Object> aimPoint(
+			Point canvasLocation,
+			Rectangle viewport,
+			Shape clickbox,
+			Shape convexHull,
+			Shape canvasTile)
 	{
-		if (point != null)
+		String source = clickbox != null
+				? "clickboxInterior"
+				: (convexHull != null ? "convexHullInterior" : "canvasTileInterior");
+		return aimPointPayload(authoritativeAimPoint(
+				canvasLocation, viewport, clickbox, convexHull, canvasTile), source);
+	}
+
+	private Map<String, Object> aimPointPayload(Point point, String source)
+	{
+		return point == null ? null : Map.of(
+				"canvasX", point.getX(),
+				"canvasY", point.getY(),
+				"source", source);
+	}
+
+	static Point authoritativeAimPoint(
+			Point canvasLocation,
+			Rectangle viewport,
+			Shape clickbox,
+			Shape convexHull,
+			Shape canvasTile)
+	{
+		// Do not fall through from a present interaction shape to weaker
+		// geometry. Downstream bounds use the same clickbox -> hull -> tile
+		// precedence, so this also keeps the point and bounds paired.
+		Shape authoritative = clickbox != null
+				? clickbox
+				: (convexHull != null ? convexHull : canvasTile);
+		return interiorAimPoint(authoritative, viewport, canvasLocation);
+	}
+
+	static Point interiorAimPoint(Shape shape, Rectangle viewport, Point preferred)
+	{
+		try
 		{
-			return Map.of("canvasX", point.getX(), "canvasY", point.getY(), "source", "canvasLocation");
+			return interiorAimPointUnchecked(shape, viewport, preferred);
 		}
-		if (bounds != null)
+		catch (RuntimeException ignored)
 		{
-			return Map.of("canvasX", bounds.x + bounds.width / 2, "canvasY", bounds.y + bounds.height / 2, "source", "boundsCenter");
+			return null;
 		}
-		return null;
+	}
+
+	private static Point interiorAimPointUnchecked(
+			Shape shape, Rectangle viewport, Point preferred)
+	{
+		if (shape == null || viewport == null || viewport.isEmpty())
+		{
+			return null;
+		}
+		Rectangle visible = shape.getBounds().intersection(viewport);
+		if (visible.isEmpty())
+		{
+			return null;
+		}
+
+		if (preferred != null && containsAimPoint(
+				shape, viewport, preferred.getX(), preferred.getY()))
+		{
+			return preferred;
+		}
+		int centerX = visible.x + visible.width / 2;
+		int centerY = visible.y + visible.height / 2;
+		if (containsAimPoint(shape, viewport, centerX, centerY))
+		{
+			return new Point(centerX, centerY);
+		}
+
+		// Bound work per projected object while covering the visible shape from
+		// its center outward. Exact hover/menu validation remains authoritative.
+		final int samplesPerAxis = 17;
+		Point best = null;
+		long bestDistance = Long.MAX_VALUE;
+		for (int row = 0; row < samplesPerAxis; row++)
+		{
+			int y = visible.y + Math.min(
+					visible.height - 1,
+					(int) (((long) (2 * row + 1) * visible.height) / (2 * samplesPerAxis)));
+			for (int column = 0; column < samplesPerAxis; column++)
+			{
+				int x = visible.x + Math.min(
+						visible.width - 1,
+						(int) (((long) (2 * column + 1) * visible.width) / (2 * samplesPerAxis)));
+				if (!containsAimPoint(shape, viewport, x, y))
+				{
+					continue;
+				}
+				long dx = x - centerX;
+				long dy = y - centerY;
+				long distance = dx * dx + dy * dy;
+				if (best == null || distance < bestDistance)
+				{
+					best = new Point(x, y);
+					bestDistance = distance;
+				}
+			}
+		}
+		return best;
+	}
+
+	private static boolean containsAimPoint(Shape shape, Rectangle viewport, int x, int y)
+	{
+		return viewport.contains(x, y) && shape.contains(x, y);
 	}
 
 	private Map<String, Object> pointPayload(Point point)

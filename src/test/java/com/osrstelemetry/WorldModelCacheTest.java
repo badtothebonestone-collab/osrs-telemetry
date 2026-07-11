@@ -2,17 +2,120 @@ package com.osrstelemetry;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.awt.Polygon;
+import java.awt.Rectangle;
+import java.awt.Shape;
+import java.awt.geom.Area;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import net.runelite.api.Point;
 import org.junit.Test;
 
 public class WorldModelCacheTest
 {
+	@Test
+	public void aimPointUsesShapeInteriorInsteadOfUnverifiedCanvasLocation()
+	{
+		Rectangle clickbox = new Rectangle(100, 120, 80, 60);
+		Rectangle viewport = new Rectangle(0, 0, 400, 300);
+
+		Point point = WorldModelCache.interiorAimPoint(
+				clickbox, viewport, new Point(140, 250));
+
+		assertNotNull(point);
+		assertEquals(140, point.getX());
+		assertEquals(150, point.getY());
+		assertTrue(clickbox.contains(point.getX(), point.getY()));
+		assertTrue(viewport.contains(point.getX(), point.getY()));
+	}
+
+	@Test
+	public void aimPointRetainsOnlyValidPreferredPointAndClipsToViewport()
+	{
+		Rectangle viewport = new Rectangle(0, 0, 100, 100);
+		Rectangle shape = new Rectangle(80, 80, 40, 40);
+		Point preferred = new Point(85, 86);
+
+		Point retained = WorldModelCache.interiorAimPoint(shape, viewport, preferred);
+		assertNotNull(retained);
+		assertEquals(preferred.getX(), retained.getX());
+		assertEquals(preferred.getY(), retained.getY());
+
+		Point clipped = WorldModelCache.interiorAimPoint(
+				shape, viewport, new Point(110, 110));
+		assertNotNull(clipped);
+		assertTrue(shape.contains(clipped.getX(), clipped.getY()));
+		assertTrue(viewport.contains(clipped.getX(), clipped.getY()));
+	}
+
+	@Test
+	public void aimPointFindsConcaveVisibleInteriorOrFailsClosed()
+	{
+		Polygon concave = new Polygon(
+				new int[]{10, 90, 90, 30, 30, 10},
+				new int[]{10, 10, 30, 30, 90, 90},
+				6);
+		Rectangle viewport = new Rectangle(0, 0, 100, 100);
+
+		Point point = WorldModelCache.interiorAimPoint(
+				concave, viewport, new Point(60, 60));
+
+		assertNotNull(point);
+		assertTrue(concave.contains(point.getX(), point.getY()));
+		assertTrue(viewport.contains(point.getX(), point.getY()));
+		Point repeated = WorldModelCache.interiorAimPoint(
+				concave, viewport, new Point(60, 60));
+		assertEquals(point.getX(), repeated.getX());
+		assertEquals(point.getY(), repeated.getY());
+		assertNull(WorldModelCache.interiorAimPoint(
+				concave, new Rectangle(200, 200, 20, 20), null));
+	}
+
+	@Test
+	public void aimPointShapeFailureStaysLocalAndFailsClosed()
+	{
+		Shape throwing = new Area(new Rectangle(10, 10, 20, 20))
+		{
+			@Override
+			public boolean contains(double x, double y)
+			{
+				throw new IllegalStateException("shape failure");
+			}
+		};
+
+		assertNull(WorldModelCache.interiorAimPoint(
+				throwing, new Rectangle(0, 0, 100, 100), null));
+	}
+
+	@Test
+	public void aimPointNeverFallsThroughPresentAuthoritativeShape()
+	{
+		Rectangle viewport = new Rectangle(0, 0, 100, 100);
+		Rectangle outside = new Rectangle(200, 200, 20, 20);
+		Rectangle hull = new Rectangle(20, 20, 30, 30);
+		Rectangle tile = new Rectangle(60, 60, 20, 20);
+
+		assertNull(WorldModelCache.authoritativeAimPoint(
+				null, viewport, outside, hull, tile));
+		Point hullPoint = WorldModelCache.authoritativeAimPoint(
+				null, viewport, null, hull, tile);
+		assertNotNull(hullPoint);
+		assertTrue(hull.contains(hullPoint.getX(), hullPoint.getY()));
+		assertNull(WorldModelCache.authoritativeAimPoint(
+				null, viewport, null, outside, tile));
+		Point tilePoint = WorldModelCache.authoritativeAimPoint(
+				null, viewport, null, null, tile);
+		assertNotNull(tilePoint);
+		assertTrue(tile.contains(tilePoint.getX(), tilePoint.getY()));
+	}
+
 	@Test
 	public void refreshDecisionIncludesTickGeometryAndExistingTriggers()
 	{
