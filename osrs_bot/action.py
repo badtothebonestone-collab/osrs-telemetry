@@ -563,7 +563,7 @@ class CoordinatedActionInterface:
             "menu_sample_not_newer",
             "context_menu_not_open",
             "context_row_pointer_mismatch",
-        }
+        } | TRANSIENT_POST_MOVE_RETRY_REASONS
         observation = self._observe()
         evaluation = self._safety.evaluate_context_menu(
             action,

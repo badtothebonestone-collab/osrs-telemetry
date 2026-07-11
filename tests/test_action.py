@@ -731,6 +731,217 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
         )
         self.assertEqual([], coordinator.row_intents)
 
+    def test_final_context_row_retries_one_transient_warn_before_validation(self) -> None:
+        coordinator = FakeCoordinator()
+        target = route_target()
+        walk = MenuEntry("Walk here", "", "WALK", 0, 283, 160)
+        tree = MenuEntry(
+            "Chop down", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 44, 42
+        )
+        pre = observation(menus=(walk,), nearby_objects=(target,))
+        candidate = observation(
+            menus=(tree, walk), tick=11, nearby_objects=(target,)
+        )
+        menu_bounds = ScreenBounds(80, 80, 200, 100)
+        row_bounds = ScreenBounds(81, 114, 199, 15)
+        opened_entries = (
+            replace(tree, row_bounds=ScreenBounds(81, 99, 199, 15)),
+            replace(walk, row_bounds=row_bounds),
+        )
+        opened = observation(
+            menus=opened_entries,
+            tick=12,
+            menu_open=True,
+            menu_bounds=menu_bounds,
+            nearby_objects=(target,),
+        )
+        transient_row = replace(
+            observation(
+                menus=opened_entries,
+                tick=13,
+                menu_open=True,
+                menu_bounds=menu_bounds,
+                menu_point=row_bounds.center,
+                nearby_objects=(target,),
+            ),
+            status="WARN",
+        )
+        row = observation(
+            menus=opened_entries,
+            tick=14,
+            menu_open=True,
+            menu_bounds=menu_bounds,
+            menu_point=row_bounds.center,
+            nearby_objects=(target,),
+        )
+        samples = iter((candidate, opened, transient_row, row))
+        observed_ticks: list[int] = []
+        sleep_calls: list[float] = []
+
+        def observe() -> Observation:
+            sample = next(samples)
+            observed_ticks.append(sample.tick)
+            return sample
+
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            observe,
+            sleep=sleep_calls.append,
+            evidence_attempts=2,
+        )
+
+        result = interface.execute(walk_action(), pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(14, result.post_move_tick)
+        self.assertEqual([11, 12, 13, 14], observed_ticks)
+        self.assertEqual([0.1], sleep_calls)
+        context_checks = [
+            check
+            for check in result.safety_checks
+            if check.stage.startswith("context_menu.")
+        ]
+        failed_index = context_checks.index(
+            SafetyCheck("context_menu.observation", "observation_not_pass", False)
+        )
+        success_index = context_checks.index(
+            SafetyCheck("context_menu.complete", "context_row_safe", True)
+        )
+        self.assertLess(failed_index, success_index)
+
+    def test_persistent_final_context_row_warn_stays_bounded_and_cancels(self) -> None:
+        coordinator = FakeCoordinator()
+        target = route_target()
+        walk = MenuEntry("Walk here", "", "WALK", 0, 283, 160)
+        tree = MenuEntry(
+            "Chop down", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 44, 42
+        )
+        pre = observation(menus=(walk,), nearby_objects=(target,))
+        candidate = observation(
+            menus=(tree, walk), tick=11, nearby_objects=(target,)
+        )
+        menu_bounds = ScreenBounds(80, 80, 200, 100)
+        row_bounds = ScreenBounds(81, 114, 199, 15)
+        opened_entries = (
+            replace(tree, row_bounds=ScreenBounds(81, 99, 199, 15)),
+            replace(walk, row_bounds=row_bounds),
+        )
+        opened = observation(
+            menus=opened_entries,
+            tick=12,
+            menu_open=True,
+            menu_bounds=menu_bounds,
+            nearby_objects=(target,),
+        )
+        persistent_row = replace(
+            observation(
+                menus=opened_entries,
+                tick=13,
+                menu_open=True,
+                menu_bounds=menu_bounds,
+                menu_point=row_bounds.center,
+                nearby_objects=(target,),
+            ),
+            status="WARN",
+        )
+        samples = iter((candidate, opened, persistent_row, persistent_row))
+        observed_ticks: list[int] = []
+        sleep_calls: list[float] = []
+
+        def observe() -> Observation:
+            sample = next(samples)
+            observed_ticks.append(sample.tick)
+            return sample
+
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            observe,
+            sleep=sleep_calls.append,
+            evidence_attempts=2,
+        )
+
+        result = interface.execute(walk_action(), pre)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertIn("observation_not_pass", result.reason)
+        self.assertEqual([11, 12, 13, 13], observed_ticks)
+        self.assertEqual([0.1], sleep_calls)
+        self.assertTrue(result.receipt and result.receipt.context_cancel_attempted)
+        self.assertTrue(result.receipt and result.receipt.context_cancel_acknowledged)
+        self.assertTrue(result.cleanup_confirmed)
+        warn_checks = [
+            check
+            for check in result.safety_checks
+            if check
+            == SafetyCheck(
+                "context_menu.observation", "observation_not_pass", False
+            )
+        ]
+        self.assertEqual(2, len(warn_checks))
+
+    def test_nontransient_final_context_failure_never_retries(self) -> None:
+        coordinator = FakeCoordinator()
+        target = route_target()
+        walk = MenuEntry("Walk here", "", "WALK", 0, 283, 160)
+        tree = MenuEntry(
+            "Chop down", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 44, 42
+        )
+        pre = observation(menus=(walk,), nearby_objects=(target,))
+        candidate = observation(
+            menus=(tree, walk), tick=11, nearby_objects=(target,)
+        )
+        menu_bounds = ScreenBounds(80, 80, 200, 100)
+        row_bounds = ScreenBounds(81, 114, 199, 15)
+        entries = (
+            replace(tree, row_bounds=ScreenBounds(81, 99, 199, 15)),
+            replace(walk, row_bounds=row_bounds),
+        )
+        opened = observation(
+            menus=entries,
+            tick=12,
+            menu_open=True,
+            menu_bounds=menu_bounds,
+            nearby_objects=(target,),
+        )
+        changed_session = replace(
+            observation(
+                menus=entries,
+                tick=13,
+                menu_open=True,
+                menu_bounds=menu_bounds,
+                menu_point=row_bounds.center,
+                nearby_objects=(target,),
+            ),
+            session_id="other-session",
+        )
+        samples = iter((candidate, opened, changed_session))
+        observed_ticks: list[int] = []
+        sleep_calls: list[float] = []
+
+        def observe() -> Observation:
+            sample = next(samples)
+            observed_ticks.append(sample.tick)
+            return sample
+
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            observe,
+            sleep=sleep_calls.append,
+            evidence_attempts=3,
+        )
+
+        result = interface.execute(walk_action(), pre)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertIn("session_changed", result.reason)
+        self.assertEqual([11, 12, 13], observed_ticks)
+        self.assertEqual([], sleep_calls)
+        self.assertTrue(result.receipt and result.receipt.context_cancel_attempted)
+        self.assertTrue(result.cleanup_confirmed)
+
     def test_context_row_pointer_mismatch_blocks_left_activation_and_records_cancel(self) -> None:
         coordinator = FakeCoordinator()
         generic = MenuEntry("Chop", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52)
