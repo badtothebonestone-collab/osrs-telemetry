@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import ctypes
 import json
+import threading
 import unittest
+from unittest.mock import patch
 
+import osrs_bot.arduino as arduino_module
 from osrs_bot.arduino import ArduinoHIDError, _ArduinoHIDTransport
 
 
@@ -39,6 +43,179 @@ def _backend(serial: _FakeSerial | None = None) -> _ArduinoHIDTransport:
     backend = _ArduinoHIDTransport(port="COM-test", serial_lock_enabled=False)
     backend._serial = serial
     return backend
+
+
+class _FakeWinFunction:
+    def __init__(self, callback) -> None:  # type: ignore[no-untyped-def]
+        self.callback = callback
+        self.argtypes = None
+        self.restype = None
+        self.calls: list[tuple[object, ...]] = []
+
+    def __call__(self, *args):  # type: ignore[no-untyped-def]
+        self.calls.append(args)
+        return self.callback(*args)
+
+
+def _pointer_value(value: object) -> int:
+    raw = getattr(value, "value", value)
+    return int(raw)
+
+
+class _FakeCursorUser32:
+    def __init__(
+        self,
+        *,
+        context: int = 1234,
+        setter_effective: bool = True,
+    ) -> None:
+        self._default_context = context
+        self._thread_context = threading.local()
+        self.context = context
+        self.setter_effective = setter_effective
+        self.setter_threads: list[int] = []
+        self.GetThreadDpiAwarenessContext = _FakeWinFunction(
+            lambda: self.context
+        )
+        self.AreDpiAwarenessContextsEqual = _FakeWinFunction(
+            lambda left, right: _pointer_value(left) == _pointer_value(right)
+        )
+        self.SetThreadDpiAwarenessContext = _FakeWinFunction(
+            self._set_context
+        )
+        self.GetCursorPos = _FakeWinFunction(self._get_cursor_pos)
+        self.WindowFromPoint = _FakeWinFunction(lambda _point: 77)
+        self.GetAncestor = _FakeWinFunction(lambda child, _kind: child)
+        self.GetWindowThreadProcessId = _FakeWinFunction(
+            self._get_window_thread_process_id
+        )
+
+    @property
+    def context(self) -> int:
+        return int(getattr(self._thread_context, "value", self._default_context))
+
+    @context.setter
+    def context(self, value: int) -> None:
+        self._thread_context.value = int(value)
+
+    def _set_context(self, context: object) -> int:
+        self.setter_threads.append(threading.get_ident())
+        previous = self.context
+        if self.setter_effective:
+            self.context = _pointer_value(context)
+        return previous
+
+    def _get_cursor_pos(self, point_pointer: object) -> bool:
+        point = point_pointer._obj  # type: ignore[attr-defined]
+        per_monitor_v2 = (-4) & ((1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1)
+        if self.context == per_monitor_v2:
+            point.x, point.y = 3510, 2145
+        else:
+            point.x, point.y = 2006, 1226
+        return True
+
+    @staticmethod
+    def _get_window_thread_process_id(
+        _hwnd: object, pid_pointer: object
+    ) -> int:
+        pid_pointer._obj.value = 321  # type: ignore[attr-defined]
+        return 1
+
+
+class CursorDpiAwarenessTests(unittest.TestCase):
+    def test_cursor_sample_establishes_thread_device_pixel_context_first(self) -> None:
+        user32 = _FakeCursorUser32()
+
+        with patch.object(arduino_module.os, "name", "nt"):
+            position = arduino_module._cursor_position(user32)
+
+        self.assertEqual((3510, 2145), position)
+        self.assertEqual(1, len(user32.SetThreadDpiAwarenessContext.calls))
+        self.assertGreaterEqual(
+            len(user32.GetThreadDpiAwarenessContext.calls), 2
+        )
+
+    def test_each_cursor_sample_reverifies_current_thread_context(self) -> None:
+        user32 = _FakeCursorUser32()
+
+        with patch.object(arduino_module.os, "name", "nt"):
+            self.assertEqual((3510, 2145), arduino_module._cursor_position(user32))
+            user32.context = 1234
+            self.assertEqual((3510, 2145), arduino_module._cursor_position(user32))
+
+        self.assertEqual(2, len(user32.SetThreadDpiAwarenessContext.calls))
+
+    def test_existing_per_monitor_v2_context_skips_thread_setter(self) -> None:
+        per_monitor_v2 = (-4) & (
+            (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
+        )
+        user32 = _FakeCursorUser32(context=per_monitor_v2)
+
+        with patch.object(arduino_module.os, "name", "nt"):
+            self.assertEqual((3510, 2145), arduino_module._cursor_position(user32))
+
+        self.assertEqual([], user32.SetThreadDpiAwarenessContext.calls)
+
+    def test_fresh_worker_thread_establishes_its_own_device_pixel_context(self) -> None:
+        user32 = _FakeCursorUser32()
+        positions: list[tuple[int, int]] = []
+
+        with patch.object(arduino_module.os, "name", "nt"):
+            positions.append(arduino_module._cursor_position(user32))
+            worker = threading.Thread(
+                target=lambda: positions.append(
+                    arduino_module._cursor_position(user32)
+                )
+            )
+            worker.start()
+            worker.join(timeout=2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([(3510, 2145), (3510, 2145)], positions)
+        self.assertEqual(2, len(set(user32.setter_threads)))
+
+    def test_point_ownership_reverifies_the_same_device_pixel_context(self) -> None:
+        user32 = _FakeCursorUser32()
+
+        with patch.object(arduino_module.os, "name", "nt"):
+            point = arduino_module._cursor_position(user32)
+            user32.context = 1234
+            owner = arduino_module._window_info_at_point(point, user32)
+
+        self.assertEqual((3510, 2145), point)
+        self.assertEqual({"available": True, "hwnd": 77, "pid": 321}, owner)
+        self.assertEqual(2, len(user32.SetThreadDpiAwarenessContext.calls))
+        self.assertGreaterEqual(
+            len(user32.GetThreadDpiAwarenessContext.calls), 3
+        )
+
+    def test_ineffective_thread_context_change_fails_before_cursor_read(self) -> None:
+        user32 = _FakeCursorUser32(setter_effective=False)
+
+        with patch.object(arduino_module.os, "name", "nt"):
+            with self.assertRaisesRegex(
+                ArduinoHIDError,
+                "per-monitor-v2 cursor DPI awareness could not be established",
+            ):
+                arduino_module._cursor_position(user32)
+
+        self.assertEqual([], user32.GetCursorPos.calls)
+
+    def test_get_cursor_pos_failure_never_falls_back_to_origin(self) -> None:
+        per_monitor_v2 = (-4) & (
+            (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
+        )
+        user32 = _FakeCursorUser32(context=per_monitor_v2)
+        user32.GetCursorPos = _FakeWinFunction(lambda _point: False)
+
+        with patch.object(arduino_module.os, "name", "nt"):
+            with self.assertRaisesRegex(
+                ArduinoHIDError,
+                "Windows GetCursorPos failed",
+            ):
+                arduino_module._cursor_position(user32)
+
+        self.assertEqual(1, len(user32.GetCursorPos.calls))
 
 
 class ArduinoCommandLedgerTests(unittest.TestCase):

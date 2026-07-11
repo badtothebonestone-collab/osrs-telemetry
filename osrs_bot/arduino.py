@@ -363,14 +363,73 @@ def _expected_response_token(command: str) -> str | None:
     return mapping.get(name)
 
 
-def _cursor_position() -> tuple[int, int]:
+def _ensure_cursor_dpi_awareness(user32: Any) -> None:
+    """Put the calling thread in the device-pixel coordinate space.
+
+    Every cursor sample must verify the current thread instead of trusting a
+    process-global flag.  Live execution can enter through a worker thread or
+    a fresh CLI process, and DPI virtualization would otherwise make a real
+    cursor position look like a different in-window point.
+    """
+    if os.name != "nt":
+        raise ArduinoHIDError(
+            "DPI-aware cursor sampling is supported only on Windows"
+        )
+    context_getter = getattr(user32, "GetThreadDpiAwarenessContext", None)
+    contexts_equal = getattr(user32, "AreDpiAwarenessContextsEqual", None)
+    thread_setter = getattr(user32, "SetThreadDpiAwarenessContext", None)
+    if not all(
+        callable(function)
+        for function in (context_getter, contexts_equal, thread_setter)
+    ):
+        raise ArduinoHIDError(
+            "Windows per-monitor-v2 cursor DPI APIs are unavailable"
+        )
+
+    context_getter.argtypes = ()
+    context_getter.restype = ctypes.c_void_p
+    contexts_equal.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    contexts_equal.restype = ctypes.c_bool
+    thread_setter.argtypes = (ctypes.c_void_p,)
+    thread_setter.restype = ctypes.c_void_p
+
+    bits = ctypes.sizeof(ctypes.c_void_p) * 8
+    per_monitor_v2 = ctypes.c_void_p((-4) & ((1 << bits) - 1))
+
+    def is_per_monitor_v2_aware() -> bool:
+        active_context = context_getter()
+        return bool(active_context) and bool(
+            contexts_equal(active_context, per_monitor_v2)
+        )
+
+    if not is_per_monitor_v2_aware():
+        previous_context = thread_setter(per_monitor_v2)
+        if not previous_context or not is_per_monitor_v2_aware():
+            raise ArduinoHIDError(
+                "Windows per-monitor-v2 cursor DPI awareness could not be "
+                "established"
+            )
+
+
+def _cursor_position(user32: Any | None = None) -> tuple[int, int]:
     try:
+        user32 = user32 or ctypes.windll.user32  # type: ignore[attr-defined]
+        _ensure_cursor_dpi_awareness(user32)
         point = wintypes.POINT()
-        if ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):  # type: ignore[attr-defined]
+        getter = getattr(user32, "GetCursorPos", None)
+        if not callable(getter):
+            raise ArduinoHIDError("Windows GetCursorPos is unavailable")
+        getter.argtypes = (ctypes.POINTER(wintypes.POINT),)
+        getter.restype = wintypes.BOOL
+        if getter(ctypes.byref(point)):
             return int(point.x), int(point.y)
-    except Exception:  # noqa: BLE001
-        pass
-    return (0, 0)
+        raise ArduinoHIDError("Windows GetCursorPos failed")
+    except ArduinoHIDError:
+        raise
+    except Exception as error:  # noqa: BLE001
+        raise ArduinoHIDError(
+            f"DPI-aware Windows cursor sampling failed: {error}"
+        ) from error
 
 
 def _rect_from_region(region: dict[str, Any] | None) -> dict[str, int] | None:
@@ -455,11 +514,14 @@ def _foreground_window_info() -> dict[str, Any]:
         return {"available": False, "error": f"{type(error).__name__}: {error}"}
 
 
-def _window_info_at_point(point: tuple[int, int]) -> dict[str, Any]:
+def _window_info_at_point(
+    point: tuple[int, int], user32: Any | None = None
+) -> dict[str, Any]:
     if os.name != "nt":
         return {"available": False}
     try:
-        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        user32 = user32 or ctypes.windll.user32  # type: ignore[attr-defined]
+        _ensure_cursor_dpi_awareness(user32)
         user32.WindowFromPoint.argtypes = (wintypes.POINT,)
         user32.WindowFromPoint.restype = wintypes.HWND
         user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)

@@ -5,6 +5,7 @@ import unittest
 from dataclasses import FrozenInstanceError, replace
 from typing import Any
 
+from osrs_bot.arduino import ArduinoHIDError
 from osrs_bot.input_coordinator import (
     ApprovedKeyIntent,
     ApprovedPointerIntent,
@@ -58,6 +59,7 @@ class FakeBackend:
         release_delayed_y_on_position_call: int | None = None,
         foreground_hwnds: list[int] | None = None,
         point_owner_hwnds: list[int] | None = None,
+        position_error: Exception | None = None,
     ) -> None:
         self.position = start
         self.fail_commands = set(fail_commands or ())
@@ -88,6 +90,7 @@ class FakeBackend:
         self.move_call_count = 0
         self.foreground_hwnds = list(foreground_hwnds or ())
         self.point_owner_hwnds = list(point_owner_hwnds or ())
+        self.position_error = position_error
         self.last_foreground_hwnd = 77
         self.last_point_owner_hwnd = 77
         self.positions: list[tuple[int, int]] = [start]
@@ -151,6 +154,8 @@ class FakeBackend:
         return {}
 
     def _current_position(self) -> tuple[int, int]:
+        if self.position_error is not None:
+            raise self.position_error
         self.position_call_count += 1
         release_x = (
             self.delayed_x
@@ -1218,6 +1223,31 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertIn("cursor_feedback", receipt.reason)
         self.assertNotIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.stop_all_acknowledged)
+
+    def test_dpi_cursor_failure_sends_no_input_and_proves_safe_cleanup(self) -> None:
+        backend = FakeBackend(
+            position_error=ArduinoHIDError(
+                "Windows per-monitor-v2 cursor DPI awareness could not be "
+                "established"
+            )
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertIn("cursor DPI awareness could not be established", receipt.reason)
+        self.assertFalse(any(event.startswith("move:") for event in backend.events))
+        self.assertNotIn("mouse_down:left", backend.events)
+        self.assertNotIn("mouse_up:left", backend.events)
+        self.assertTrue(receipt.stop_all_acknowledged)
+        self.assertTrue(receipt.disarm_acknowledged)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+        self.assertEqual(0, receipt.unresolved_command_count)
+        self.assertTrue(receipt.ledger_closed)
+        self.assertTrue(receipt.backend_closed)
 
     def test_feedback_divergence_is_corrected_by_a_bounded_replan(self) -> None:
         backend = FakeBackend(divergent_move_count=1)
