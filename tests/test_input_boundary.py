@@ -127,6 +127,12 @@ class AutomatedInputBoundaryTests(unittest.TestCase):
             self.assertNotIn("ArduinoHID", source, name)
             self.assertNotIn("_ArduinoHIDTransport", source, name)
 
+    def test_state_changing_commands_never_auto_retry_after_watchdog_rejection(self) -> None:
+        source = (PACKAGE / "arduino.py").read_text(encoding="utf-8")
+        self.assertNotIn("recover_watchdog_disarm", source)
+        self.assertNotIn("def _ensure_armed", source)
+        self.assertNotIn("REJECTED_RETRYABLE", source)
+
 
 if __name__ == "__main__":
     unittest.main()

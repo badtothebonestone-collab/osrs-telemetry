@@ -141,6 +141,7 @@ class FakeBackend:
         self.calls: list[object] = []
         self.fail_at = fail_at
         self.position = start
+        self.armed = False
         self.records: list[dict[str, object]] = []
         self.sequence = 0
 
@@ -201,6 +202,7 @@ class FakeBackend:
     def _arm(self) -> dict[str, object]:
         self._call("arm")
         self._record("ARM", fail_name="arm")
+        self.armed = True
         return {}
 
     def _assert_foreground(self, titles: list[str], *, expected_pid: int) -> None:
@@ -227,17 +229,19 @@ class FakeBackend:
     def _stop_all(self) -> dict[str, object]:
         self._call("stop_all")
         self._record("STOP_ALL", fail_name="stop_all")
+        self.armed = False
         return {}
 
     def _disarm(self) -> dict[str, object]:
         self._call("disarm")
         self._record("DISARM", fail_name="disarm")
+        self.armed = False
         return {}
 
     def _firmware_status(self) -> dict[str, object]:
         self._call("firmware_status")
         self._record("STATUS", fail_name="firmware_status")
-        return {"armed": False, "keysDown": 0, "mouseButtonsDown": 0}
+        return {"armed": self.armed, "keysDown": 0, "mouseButtonsDown": 0}
 
     def _close(self) -> None:
         self._call("close")

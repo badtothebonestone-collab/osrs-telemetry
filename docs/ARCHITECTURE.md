@@ -206,7 +206,9 @@ approved intents to the sole `InputCoordinator`. The coordinator then:
    and MOVE caps, and actual-feedback correction, then accepts only a complete-
    plan settled endpoint inside the caller's explicit activation region;
 4. passes that actual stable device-pixel endpoint to the caller's
-   lane-specific validator for fresh evidence;
+   lane-specific validator under a checked firmware-watchdog lease; if that
+   validator outlives the lease, performs at most one explicit safe rearm and
+   reruns the same semantic validator, while a second expiry blocks input;
 5. requires a newer menu sample whose top/default entry, scene parameters, and
    pointer position match the intended target;
 6. when the exact action is a unique lower context entry, opens the menu,
@@ -221,7 +223,8 @@ The immutable `InputReceipt` is successful only when the activation and final
 cleanup sequence are present in order, every command is terminal and
 acknowledged, no ledger entry is unresolved, the final firmware state is safe,
 and both ledger and transport close. The raw transport methods are private and
-only the coordinator imports them. There is no software-input fallback.
+only the coordinator imports them. A state-changing firmware rejection is
+never retried implicitly. There is no software-input fallback.
 
 ### Saved-session login assistance
 

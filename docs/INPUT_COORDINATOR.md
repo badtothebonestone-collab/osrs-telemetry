@@ -37,6 +37,9 @@ cleanup proof must end with `STOP_ALL -> DISARM -> STATUS`, and STATUS must say
 `armed=false`, `keysDown=0`, and `mouseButtonsDown=0`. Missing acknowledgement,
 rejection, timeout, unresolved command, malformed status, incomplete ledger,
 or close failure makes the receipt unsuccessful. ARM secrets are redacted.
+The transport never retries a state-changing command after firmware rejection;
+in particular, `ERR NOT_ARMED` records one rejected write, performs fail-safe
+cleanup, and returns an unsuccessful receipt.
 
 Even after a blocked validator or action failure, any attempted connection
 runs all available cleanup operations and records their individual results.
@@ -94,6 +97,19 @@ verified transit and activation bounds before and after that validation. The
 validator must still prove the exact hover/default action or open-menu row at
 that actual point. Context-menu failures attempt an acknowledged Escape before
 normal cleanup.
+
+The coordinator treats the firmware watchdog as a short activation lease. It
+checks or explicitly refreshes that lease before each lane-specific validator,
+then checks it again after validation. If the validator outlives the lease, the
+coordinator may perform one explicit protocol-safe rearm and must rerun the
+same pointer, key, activation-choice, or context-row validator on fresh
+evidence. If that revalidation also outlives the lease, activation blocks. The
+final preactivation check is status-only: it cannot rearm or retry beneath
+already-validated semantics. Context-menu Escape cancellation may explicitly
+rearm because it releases an opened menu before normal cleanup. An accepted or
+ambiguously completed written context-menu button-down marks the menu as
+possibly open, so a rejected or unacknowledged release still triggers that
+cancellation path; an explicit button-down rejection does not send Escape.
 
 ## Supported callers
 

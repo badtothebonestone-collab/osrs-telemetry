@@ -26,7 +26,6 @@ _TERMINAL = {
     "WRITE_FAIL",
     "ACK_TIMEOUT_OR_READ_FAIL",
     "REJECTED",
-    "REJECTED_RETRYABLE",
     "UNEXPECTED_RESPONSE",
 }
 
@@ -53,12 +52,8 @@ class FakeBackend:
         self.fail_commands = set(fail_commands or ())
         self.missing_ack_commands = set(missing_ack_commands or ())
         self.pending_commands = set(pending_commands or ())
-        self.final_status = {
-            "armed": False,
-            "keysDown": 0,
-            "mouseButtonsDown": 0,
-            **(unsafe_status or {}),
-        }
+        self.armed = False
+        self.status_overrides = dict(unsafe_status or {})
         self.connect_fails = connect_fails
         self.close_fails = close_fails
         self.end_ledger_fails = end_ledger_fails
@@ -124,6 +119,7 @@ class FakeBackend:
     def _arm(self) -> dict[str, Any]:
         self.events.append("arm")
         self._record("ARM")
+        self.armed = True
         return {}
 
     def _current_position(self) -> tuple[int, int]:
@@ -177,17 +173,24 @@ class FakeBackend:
     def _stop_all(self) -> dict[str, Any]:
         self.events.append("stop_all")
         self._record("STOP_ALL")
+        self.armed = False
         return {}
 
     def _disarm(self) -> dict[str, Any]:
         self.events.append("disarm")
         self._record("DISARM")
+        self.armed = False
         return {}
 
     def _firmware_status(self) -> dict[str, Any]:
         self.events.append("firmware_status")
         self._record("STATUS")
-        return dict(self.final_status)
+        return {
+            "armed": self.armed,
+            "keysDown": 0,
+            "mouseButtonsDown": 0,
+            **self.status_overrides,
+        }
 
     def _close(self) -> None:
         self.events.append("close")
@@ -308,8 +311,12 @@ class InputCoordinatorTests(unittest.TestCase):
             [command.command for command in receipt.commands],
             [
                 "ARM",
+                "STATUS",
                 "MOVE",
                 "MOVE",
+                "STATUS",
+                "STATUS",
+                "STATUS",
                 "MOUSE_DOWN",
                 "MOUSE_UP",
                 "STOP_ALL",
@@ -323,7 +330,17 @@ class InputCoordinatorTests(unittest.TestCase):
         )
         self.assertEqual(
             [event for event in backend.events if event in {"stop_all", "disarm", "firmware_status", "ledger_end", "close"}],
-            ["stop_all", "disarm", "firmware_status", "ledger_end", "close"],
+            [
+                "firmware_status",
+                "firmware_status",
+                "firmware_status",
+                "firmware_status",
+                "stop_all",
+                "disarm",
+                "firmware_status",
+                "ledger_end",
+                "close",
+            ],
         )
         encoded = json.dumps(receipt.to_dict(), sort_keys=True)
         self.assertIn('"successful": true', encoded)
@@ -352,7 +369,16 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertLess(backend.events.index("key_validator"), backend.events.index("press:ESC"))
         self.assertEqual(
             [command.command for command in receipt.commands],
-            ["ARM", "KEY_PRESS", "STOP_ALL", "DISARM", "STATUS"],
+            [
+                "ARM",
+                "STATUS",
+                "STATUS",
+                "STATUS",
+                "KEY_PRESS",
+                "STOP_ALL",
+                "DISARM",
+                "STATUS",
+            ],
         )
 
     def test_denied_fresh_validator_blocks_activation_but_still_proves_cleanup(self) -> None:
@@ -369,6 +395,87 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertTrue(receipt.disarm_acknowledged)
         self.assertTrue(receipt.firmware_status_acknowledged)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_watchdog_disarm_during_validation_rearms_before_activation(self) -> None:
+        backend = FakeBackend()
+        validation_count = 0
+
+        def validate(
+            _intent: ApprovedPointerIntent,
+            _actual: ScreenPoint,
+        ) -> InputValidation:
+            nonlocal validation_count
+            validation_count += 1
+            backend.events.append("slow_validator_completed")
+            if validation_count == 1:
+                backend.armed = False
+            return InputValidation.allow("fresh evidence survived validation")
+
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(), validate=validate
+        )
+
+        self.assertTrue(receipt.successful)
+        commands = [command.command for command in receipt.commands]
+        self.assertEqual(2, validation_count)
+        self.assertEqual(2, commands.count("ARM"))
+        self.assertEqual(7, commands.count("STATUS"))
+        second_arm = [index for index, name in enumerate(commands) if name == "ARM"][1]
+        self.assertLess(second_arm, commands.index("MOUSE_DOWN"))
+        self.assertEqual(0, receipt.failed_command_count)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_second_watchdog_expiry_during_revalidation_blocks_without_click(self) -> None:
+        backend = FakeBackend()
+        validation_count = 0
+
+        def validate(
+            _intent: ApprovedPointerIntent,
+            _actual: ScreenPoint,
+        ) -> InputValidation:
+            nonlocal validation_count
+            validation_count += 1
+            backend.armed = False
+            return InputValidation.allow("validator completed")
+
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(), validate=validate
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertEqual(2, validation_count)
+        self.assertIn("after_firmware_revalidation", receipt.reason)
+        self.assertNotIn("mouse_down:left", backend.events)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_key_watchdog_rearm_forces_fresh_revalidation(self) -> None:
+        backend = FakeBackend()
+        intent = ApprovedKeyIntent(
+            "escape-dialogue",
+            InputPurpose.GAMEPLAY_KEY,
+            "ESC",
+            321,
+        )
+        validation_count = 0
+
+        def validate(_intent: ApprovedKeyIntent) -> InputValidation:
+            nonlocal validation_count
+            validation_count += 1
+            if validation_count == 1:
+                backend.armed = False
+            return InputValidation.allow("dialogue still present")
+
+        receipt = coordinator(backend).execute_key(intent, validate=validate)
+
+        self.assertTrue(receipt.successful)
+        self.assertEqual(2, validation_count)
+        commands = [command.command for command in receipt.commands]
+        self.assertEqual(2, commands.count("ARM"))
+        self.assertLess(
+            [index for index, name in enumerate(commands) if name == "ARM"][1],
+            commands.index("KEY_PRESS"),
+        )
+        self.assertEqual(0, receipt.failed_command_count)
 
     def test_context_menu_is_one_transaction_with_two_fresh_validators(self) -> None:
         backend = FakeBackend()
@@ -407,6 +514,115 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertLess(backend.events.index("mouse_up:right"), backend.events.index("resolve_row"))
         self.assertLess(backend.events.index("row_validator"), backend.events.index("mouse_down:left"))
 
+    def test_watchdog_disarm_during_context_resolver_rearms_before_row_move(self) -> None:
+        backend = FakeBackend()
+        open_intent = pointer_intent(
+            intent_id="context-open",
+            purpose=InputPurpose.CONTEXT_MENU,
+            target=ScreenPoint(12, 10),
+            button=MouseButton.RIGHT,
+        )
+
+        def resolve_row() -> ApprovedPointerIntent:
+            backend.armed = False
+            return pointer_intent(
+                intent_id="context-row",
+                purpose=InputPurpose.CONTEXT_ROW,
+                target=ScreenPoint(12, 12),
+            )
+
+        receipt = coordinator(backend).execute_context_menu(
+            open_intent,
+            validate_hover=lambda _intent, _actual: InputValidation.allow(),
+            resolve_row=resolve_row,
+            validate_row=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertTrue(receipt.successful)
+        commands = [command.command for command in receipt.commands]
+        self.assertEqual(2, commands.count("ARM"))
+        right_up = commands.index("MOUSE_UP")
+        second_arm = [index for index, name in enumerate(commands) if name == "ARM"][1]
+        row_move = commands.index("MOVE", right_up + 1)
+        self.assertLess(right_up, second_arm)
+        self.assertLess(second_arm, row_move)
+        self.assertEqual(0, receipt.failed_command_count)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_context_hover_watchdog_rearm_forces_fresh_revalidation(self) -> None:
+        backend = FakeBackend()
+        open_intent = pointer_intent(
+            intent_id="context-open",
+            purpose=InputPurpose.CONTEXT_MENU,
+            button=MouseButton.RIGHT,
+        )
+        hover_count = 0
+
+        def validate_hover(
+            _intent: ApprovedPointerIntent,
+            _actual: ScreenPoint,
+        ) -> InputValidation:
+            nonlocal hover_count
+            hover_count += 1
+            if hover_count == 1:
+                backend.armed = False
+            return InputValidation.allow("hover remains exact")
+
+        receipt = coordinator(backend).execute_context_menu(
+            open_intent,
+            validate_hover=validate_hover,
+            resolve_row=lambda: pointer_intent(
+                intent_id="context-row",
+                purpose=InputPurpose.CONTEXT_ROW,
+                target=ScreenPoint(12, 12),
+            ),
+            validate_row=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertTrue(receipt.successful)
+        self.assertEqual(2, hover_count)
+        self.assertEqual(
+            2,
+            [command.command for command in receipt.commands].count("ARM"),
+        )
+
+    def test_context_row_watchdog_rearm_forces_fresh_revalidation(self) -> None:
+        backend = FakeBackend()
+        open_intent = pointer_intent(
+            intent_id="context-open",
+            purpose=InputPurpose.CONTEXT_MENU,
+            button=MouseButton.RIGHT,
+        )
+        row_count = 0
+
+        def validate_row(
+            _intent: ApprovedPointerIntent,
+            _actual: ScreenPoint,
+        ) -> InputValidation:
+            nonlocal row_count
+            row_count += 1
+            if row_count == 1:
+                backend.armed = False
+            return InputValidation.allow("row remains exact")
+
+        receipt = coordinator(backend).execute_context_menu(
+            open_intent,
+            validate_hover=lambda _intent, _actual: InputValidation.allow(),
+            resolve_row=lambda: pointer_intent(
+                intent_id="context-row",
+                purpose=InputPurpose.CONTEXT_ROW,
+                target=ScreenPoint(12, 12),
+            ),
+            validate_row=validate_row,
+        )
+
+        self.assertTrue(receipt.successful)
+        self.assertEqual(2, row_count)
+        self.assertEqual(
+            2,
+            [command.command for command in receipt.commands].count("ARM"),
+        )
+
     def test_context_failure_after_right_click_records_esc_cancellation(self) -> None:
         backend = FakeBackend()
         open_intent = pointer_intent(
@@ -433,6 +649,92 @@ class InputCoordinatorTests(unittest.TestCase):
         commands = [command.command for command in receipt.commands]
         self.assertLess(commands.index("KEY_PRESS"), commands.index("STOP_ALL"))
         self.assertLess(backend.events.index("press:ESC"), backend.events.index("stop_all"))
+
+    def test_disarmed_context_cancel_rearms_before_escape(self) -> None:
+        backend = FakeBackend()
+        open_intent = pointer_intent(
+            intent_id="context-open",
+            purpose=InputPurpose.CONTEXT_MENU,
+            button=MouseButton.RIGHT,
+        )
+
+        def fail_resolver() -> ApprovedPointerIntent:
+            backend.armed = False
+            raise RuntimeError("menu sample unavailable")
+
+        receipt = coordinator(backend).execute_context_menu(
+            open_intent,
+            validate_hover=lambda _intent, _actual: InputValidation.allow(),
+            resolve_row=fail_resolver,
+            validate_row=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("BLOCKED", receipt.status)
+        self.assertTrue(receipt.context_cancel_acknowledged)
+        commands = [command.command for command in receipt.commands]
+        self.assertEqual(2, commands.count("ARM"))
+        second_arm = [index for index, name in enumerate(commands) if name == "ARM"][1]
+        self.assertLess(second_arm, commands.index("KEY_PRESS"))
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_partial_context_right_click_still_attempts_escape_cancellation(self) -> None:
+        open_intent = pointer_intent(
+            intent_id="context-open",
+            purpose=InputPurpose.CONTEXT_MENU,
+            button=MouseButton.RIGHT,
+        )
+        for label, backend in (
+            ("release_rejected", FakeBackend(fail_commands={"MOUSE_UP"})),
+            (
+                "release_ack_missing",
+                FakeBackend(missing_ack_commands={"MOUSE_UP"}),
+            ),
+        ):
+            with self.subTest(label=label):
+                receipt = coordinator(backend).execute_context_menu(
+                    open_intent,
+                    validate_hover=lambda _intent, _actual: InputValidation.allow(),
+                    resolve_row=lambda: (_ for _ in ()).throw(
+                        AssertionError("row resolver must not run")
+                    ),
+                    validate_row=lambda _intent, _actual: InputValidation.allow(),
+                )
+
+                self.assertEqual("ERROR", receipt.status)
+                self.assertTrue(receipt.context_cancel_attempted)
+                self.assertTrue(receipt.context_cancel_acknowledged)
+                commands = [command.command for command in receipt.commands]
+                self.assertLess(
+                    commands.index("MOUSE_DOWN"), commands.index("KEY_PRESS")
+                )
+                self.assertLess(
+                    commands.index("KEY_PRESS"), commands.index("STOP_ALL")
+                )
+                self.assertTrue(
+                    receipt.firmware_status and receipt.firmware_status.safe
+                )
+
+    def test_rejected_context_button_down_does_not_send_escape(self) -> None:
+        backend = FakeBackend(fail_commands={"MOUSE_DOWN"})
+        open_intent = pointer_intent(
+            intent_id="context-open",
+            purpose=InputPurpose.CONTEXT_MENU,
+            button=MouseButton.RIGHT,
+        )
+
+        receipt = coordinator(backend).execute_context_menu(
+            open_intent,
+            validate_hover=lambda _intent, _actual: InputValidation.allow(),
+            resolve_row=lambda: (_ for _ in ()).throw(
+                AssertionError("row resolver must not run")
+            ),
+            validate_row=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("ERROR", receipt.status)
+        self.assertFalse(receipt.context_cancel_attempted)
+        self.assertNotIn("KEY_PRESS", [command.command for command in receipt.commands])
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
     def test_context_cancel_ack_failure_is_explicit(self) -> None:
         backend = FakeBackend(missing_ack_commands={"KEY_PRESS"})
@@ -843,6 +1145,39 @@ class InputCoordinatorTests(unittest.TestCase):
             backend.events.index("mouse_down:left"),
         )
 
+    def test_adaptive_watchdog_revalidation_uses_second_activation_decision(self) -> None:
+        backend = FakeBackend()
+        decision_count = 0
+
+        def decide(
+            _intent: ApprovedPointerIntent,
+            _actual: ScreenPoint,
+        ) -> PointerActivationDecision:
+            nonlocal decision_count
+            decision_count += 1
+            if decision_count == 1:
+                backend.armed = False
+                return PointerActivationDecision.context("first sample")
+            return PointerActivationDecision.direct("fresh second sample")
+
+        receipt = coordinator(backend).execute_adaptive_pointer(
+            pointer_intent(),
+            decide_activation=decide,
+            resolve_row=lambda: (_ for _ in ()).throw(
+                AssertionError("stale context decision must not govern")
+            ),
+            validate_row=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertTrue(receipt.successful)
+        self.assertEqual(2, decision_count)
+        self.assertIn("mouse_down:left", backend.events)
+        self.assertNotIn("mouse_down:right", backend.events)
+        self.assertEqual(
+            2,
+            [command.command for command in receipt.commands].count("ARM"),
+        )
+
     def test_adaptive_pointer_context_branch_stays_in_one_transaction(self) -> None:
         backend = FakeBackend()
         receipt = coordinator(backend).execute_adaptive_pointer(
@@ -866,6 +1201,47 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertEqual(backend.events.count("arm"), 1)
         self.assertIn("mouse_down:right", backend.events)
         self.assertIn("mouse_down:left", backend.events)
+
+    def test_partial_adaptive_right_click_still_attempts_escape_cancellation(self) -> None:
+        backend = FakeBackend(fail_commands={"MOUSE_UP"})
+
+        receipt = coordinator(backend).execute_adaptive_pointer(
+            pointer_intent(),
+            decide_activation=lambda _intent, _actual: (
+                PointerActivationDecision.context("exact lower row")
+            ),
+            resolve_row=lambda: (_ for _ in ()).throw(
+                AssertionError("row resolver must not run")
+            ),
+            validate_row=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("ERROR", receipt.status)
+        self.assertTrue(receipt.context_cancel_attempted)
+        self.assertTrue(receipt.context_cancel_acknowledged)
+        commands = [command.command for command in receipt.commands]
+        self.assertLess(commands.index("MOUSE_DOWN"), commands.index("KEY_PRESS"))
+        self.assertLess(commands.index("KEY_PRESS"), commands.index("STOP_ALL"))
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_rejected_adaptive_button_down_does_not_send_escape(self) -> None:
+        backend = FakeBackend(fail_commands={"MOUSE_DOWN"})
+
+        receipt = coordinator(backend).execute_adaptive_pointer(
+            pointer_intent(),
+            decide_activation=lambda _intent, _actual: (
+                PointerActivationDecision.context("exact lower row")
+            ),
+            resolve_row=lambda: (_ for _ in ()).throw(
+                AssertionError("row resolver must not run")
+            ),
+            validate_row=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertEqual("ERROR", receipt.status)
+        self.assertFalse(receipt.context_cancel_attempted)
+        self.assertNotIn("KEY_PRESS", [command.command for command in receipt.commands])
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
     def test_each_wire_ack_failure_is_unsuccessful_and_cleanup_continues(self) -> None:
         for command in (

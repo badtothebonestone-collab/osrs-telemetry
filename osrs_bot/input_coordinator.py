@@ -453,7 +453,6 @@ class InputReceipt:
             command.status not in {
                 "PASS",
                 "REJECTED",
-                "REJECTED_RETRYABLE",
                 "UNEXPECTED_RESPONSE",
                 "WRITE_FAIL",
                 "ACK_TIMEOUT_OR_READ_FAIL",
@@ -669,7 +668,6 @@ def _evidence_from_mapping(
         command.status not in {
             "PASS",
             "REJECTED",
-            "REJECTED_RETRYABLE",
             "UNEXPECTED_RESPONSE",
             "WRITE_FAIL",
             "ACK_TIMEOUT_OR_READ_FAIL",
@@ -913,12 +911,17 @@ class InputCoordinator:
         def body(transaction: _Transaction) -> None:
             actual = self._move(transaction, intent)
             self._validate_pointer(
-                transaction.backend,
+                transaction,
                 intent,
                 actual,
                 validate,
             )
-            self._click(transaction, intent.button)
+            self._click(
+                transaction,
+                intent.button,
+                intent=intent,
+                actual=actual,
+            )
 
         return self._execute("pointer", (intent.intent_id,), body)
 
@@ -934,10 +937,25 @@ class InputCoordinator:
             raise TypeError("validate must be callable")
 
         def body(transaction: _Transaction) -> None:
+            def validate_key() -> InputValidation:
+                self._assert_foreground(
+                    transaction.backend, intent.expected_pid
+                )
+                decision = validate(intent)
+                self._assert_foreground(
+                    transaction.backend, intent.expected_pid
+                )
+                return decision
+
+            self._validated_under_firmware_lease(
+                transaction,
+                validate_key,
+                self._require_validation,
+            )
             self._assert_foreground(transaction.backend, intent.expected_pid)
-            decision = validate(intent)
-            self._require_validation(decision)
-            self._assert_foreground(transaction.backend, intent.expected_pid)
+            self._assert_firmware_armed(
+                transaction, phase="before_key_activation"
+            )
             acknowledged, _ = transaction.invoke(
                 "KEY_PRESS", lambda: transaction.backend._press(intent.key)
             )
@@ -967,16 +985,24 @@ class InputCoordinator:
         row_id: list[str] = []
 
         def body(transaction: _Transaction) -> None:
+            def mark_menu_possibly_open() -> None:
+                state.context_cancel_attempted = False
+                menu_open[0] = True
+
             actual = self._move(transaction, open_intent)
             self._validate_pointer(
-                transaction.backend,
+                transaction,
                 open_intent,
                 actual,
                 validate_hover,
             )
-            self._click(transaction, MouseButton.RIGHT)
-            state.context_cancel_attempted = False
-            menu_open[0] = True
+            self._click(
+                transaction,
+                MouseButton.RIGHT,
+                intent=open_intent,
+                actual=actual,
+                on_down_written=mark_menu_possibly_open,
+            )
 
             try:
                 row_intent = resolve_row()
@@ -1001,12 +1027,17 @@ class InputCoordinator:
             row_id.append(row_intent.intent_id)
             actual = self._move(transaction, row_intent)
             self._validate_pointer(
-                transaction.backend,
+                transaction,
                 row_intent,
                 actual,
                 validate_row,
             )
-            self._click(transaction, MouseButton.LEFT)
+            self._click(
+                transaction,
+                MouseButton.LEFT,
+                intent=row_intent,
+                actual=actual,
+            )
             menu_open[0] = False
 
         state = _TransactionState("", "context_menu", (open_intent.intent_id,))
@@ -1082,35 +1113,56 @@ class InputCoordinator:
         state = _TransactionState("", "adaptive_pointer", (intent.intent_id,))
 
         def body(transaction: _Transaction) -> None:
+            def mark_menu_possibly_open() -> None:
+                menu_open[0] = True
+
             actual = self._move(transaction, intent)
-            self._assert_foreground(transaction.backend, intent.expected_pid)
-            self._assert_cursor_stable_in_target(
-                transaction.backend,
-                intent,
-                actual,
-                phase="before_activation_validation",
-            )
-            decision = decide_activation(intent, actual)
-            self._assert_foreground(transaction.backend, intent.expected_pid)
-            self._assert_cursor_stable_in_target(
-                transaction.backend,
-                intent,
-                actual,
-                phase="after_activation_validation",
-            )
-            if not isinstance(decision, PointerActivationDecision):
-                raise _TransactionAbort(
-                    "activation validator returned an invalid result"
+
+            def validate_activation() -> PointerActivationDecision:
+                self._assert_foreground(
+                    transaction.backend, intent.expected_pid
                 )
-            self._require_validation(decision.validation)
+                self._assert_cursor_stable_in_target(
+                    transaction.backend,
+                    intent,
+                    actual,
+                    phase="before_activation_validation",
+                )
+                decision = decide_activation(intent, actual)
+                self._assert_foreground(
+                    transaction.backend, intent.expected_pid
+                )
+                self._assert_cursor_stable_in_target(
+                    transaction.backend,
+                    intent,
+                    actual,
+                    phase="after_activation_validation",
+                )
+                return decision
+
+            decision = self._validated_under_firmware_lease(
+                transaction,
+                validate_activation,
+                self._require_pointer_activation_decision,
+            )
             if decision.activation is PointerActivation.DIRECT_LEFT:
-                self._click(transaction, MouseButton.LEFT)
+                self._click(
+                    transaction,
+                    MouseButton.LEFT,
+                    intent=intent,
+                    actual=actual,
+                )
                 return
             if decision.activation is not PointerActivation.CONTEXT_MENU:
                 raise _TransactionAbort("activation validator selected no input")
 
-            self._click(transaction, MouseButton.RIGHT)
-            menu_open[0] = True
+            self._click(
+                transaction,
+                MouseButton.RIGHT,
+                intent=intent,
+                actual=actual,
+                on_down_written=mark_menu_possibly_open,
+            )
             try:
                 row_intent = resolve_row()
             except Exception as error:  # evidence resolver blocks, then ESCs
@@ -1134,12 +1186,17 @@ class InputCoordinator:
             row_id.append(row_intent.intent_id)
             actual = self._move(transaction, row_intent)
             self._validate_pointer(
-                transaction.backend,
+                transaction,
                 row_intent,
                 actual,
                 validate_row,
             )
-            self._click(transaction, MouseButton.LEFT)
+            self._click(
+                transaction,
+                MouseButton.LEFT,
+                intent=row_intent,
+                actual=actual,
+            )
             menu_open[0] = False
 
         receipt = self._execute(
@@ -1222,6 +1279,11 @@ class InputCoordinator:
                             if context_pid is None:
                                 raise RuntimeError("context PID unavailable")
                             self._assert_foreground(backend, context_pid)
+                            self._ensure_firmware_armed(transaction)
+                            self._assert_foreground(backend, context_pid)
+                            self._assert_firmware_armed(
+                                transaction, phase="before_context_cancel"
+                            )
                             state.context_cancel_acknowledged, _ = transaction.invoke(
                                 "KEY_PRESS", lambda: backend._press("ESC")
                             )
@@ -1287,6 +1349,7 @@ class InputCoordinator:
         self, transaction: _Transaction, intent: ApprovedPointerIntent
     ) -> ScreenPoint:
         backend = transaction.backend
+        self._ensure_firmware_armed(transaction)
         self._assert_foreground(backend, intent.expected_pid)
         start = self._current_position(backend)
         if not intent.movement_bounds.contains(start):
@@ -1582,28 +1645,37 @@ class InputCoordinator:
 
     def _validate_pointer(
         self,
-        backend: _Backend,
+        transaction: _Transaction,
         intent: ApprovedPointerIntent,
         actual: ScreenPoint,
         validate: PointerValidator,
     ) -> None:
-        # Deliberately after all movement and immediately before activation.
-        self._assert_foreground(backend, intent.expected_pid)
-        self._assert_cursor_stable_in_target(
-            backend,
-            intent,
-            actual,
-            phase="before_pointer_validation",
+        backend = transaction.backend
+
+        def validate_pointer() -> InputValidation:
+            # Deliberately after all movement and immediately before activation.
+            self._assert_foreground(backend, intent.expected_pid)
+            self._assert_cursor_stable_in_target(
+                backend,
+                intent,
+                actual,
+                phase="before_pointer_validation",
+            )
+            decision = validate(intent, actual)
+            self._assert_foreground(backend, intent.expected_pid)
+            self._assert_cursor_stable_in_target(
+                backend,
+                intent,
+                actual,
+                phase="after_pointer_validation",
+            )
+            return decision
+
+        self._validated_under_firmware_lease(
+            transaction,
+            validate_pointer,
+            self._require_validation,
         )
-        decision = validate(intent, actual)
-        self._assert_foreground(backend, intent.expected_pid)
-        self._assert_cursor_stable_in_target(
-            backend,
-            intent,
-            actual,
-            phase="after_pointer_validation",
-        )
-        self._require_validation(decision)
 
     def _assert_cursor_stable_in_target(
         self,
@@ -1621,11 +1693,43 @@ class InputCoordinator:
         if not intent.target_bounds.contains(current):
             raise _TransactionAbort(f"cursor_left_verified_target_{phase}")
 
-    def _click(self, transaction: _Transaction, button: MouseButton) -> None:
+    def _click(
+        self,
+        transaction: _Transaction,
+        button: MouseButton,
+        *,
+        intent: ApprovedPointerIntent | None = None,
+        actual: ScreenPoint | None = None,
+        on_down_written: Callable[[], None] | None = None,
+    ) -> None:
+        self._assert_firmware_armed(
+            transaction, phase="before_pointer_activation"
+        )
+        if intent is not None or actual is not None:
+            if intent is None or actual is None:
+                raise _TransactionAbort("pointer activation context is incomplete")
+            self._assert_foreground(transaction.backend, intent.expected_pid)
+            self._assert_cursor_stable_in_target(
+                transaction.backend,
+                intent,
+                actual,
+                phase="after_firmware_lease_check",
+            )
+        before_ids = {
+            command.command_id for command in transaction.snapshot.commands
+        }
         down_acknowledged, _ = transaction.invoke(
             "MOUSE_DOWN",
             lambda: transaction.backend._mouse_down(button=button.value),
         )
+        if on_down_written is not None and any(
+            command.command_id not in before_ids
+            and command.command == "MOUSE_DOWN"
+            and command.write_ok
+            and command.status != "REJECTED"
+            for command in transaction.snapshot.commands
+        ):
+            on_down_written()
         if down_acknowledged:
             self._sleep(self._click_hold_seconds)
         # Always attempt the matching release.  STOP_ALL remains the final
@@ -1636,6 +1740,92 @@ class InputCoordinator:
         )
         if not down_acknowledged or not up_acknowledged:
             raise _TransactionAbort("mouse_click_not_fully_acknowledged")
+
+    def _ensure_firmware_armed(self, transaction: _Transaction) -> bool:
+        acknowledged, raw_status = transaction.invoke(
+            "STATUS", transaction.backend._firmware_status
+        )
+        if not acknowledged:
+            raise _TransactionAbort("preactivation_status_not_acknowledged")
+        try:
+            status = self._firmware_status(raw_status)
+        except (TypeError, ValueError) as error:
+            raise _TransactionAbort(
+                f"preactivation_status_invalid: {error}"
+            ) from error
+        if status.keys_down != 0 or status.mouse_buttons_down != 0:
+            raise _TransactionAbort("preactivation_firmware_holds_input")
+        if status.armed:
+            return False
+
+        arm_acknowledged, _ = transaction.invoke(
+            "ARM", transaction.backend._arm
+        )
+        if not arm_acknowledged:
+            raise _TransactionAbort("preactivation_rearm_not_acknowledged")
+        acknowledged, raw_status = transaction.invoke(
+            "STATUS", transaction.backend._firmware_status
+        )
+        if not acknowledged:
+            raise _TransactionAbort(
+                "preactivation_rearm_status_not_acknowledged"
+            )
+        try:
+            status = self._firmware_status(raw_status)
+        except (TypeError, ValueError) as error:
+            raise _TransactionAbort(
+                f"preactivation_rearm_status_invalid: {error}"
+            ) from error
+        if (
+            not status.armed
+            or status.keys_down != 0
+            or status.mouse_buttons_down != 0
+        ):
+            raise _TransactionAbort("preactivation_rearm_not_safe")
+        return True
+
+    def _assert_firmware_armed(
+        self, transaction: _Transaction, *, phase: str
+    ) -> None:
+        acknowledged, raw_status = transaction.invoke(
+            "STATUS", transaction.backend._firmware_status
+        )
+        if not acknowledged:
+            raise _TransactionAbort(f"{phase}_status_not_acknowledged")
+        try:
+            status = self._firmware_status(raw_status)
+        except (TypeError, ValueError) as error:
+            raise _TransactionAbort(f"{phase}_status_invalid: {error}") from error
+        if (
+            not status.armed
+            or status.keys_down != 0
+            or status.mouse_buttons_down != 0
+        ):
+            raise _TransactionAbort(f"{phase}_firmware_not_safe")
+
+    def _validated_under_firmware_lease(
+        self,
+        transaction: _Transaction,
+        validate: Callable[[], Any],
+        require: Callable[[object], None],
+    ) -> Any:
+        self._ensure_firmware_armed(transaction)
+        decision = validate()
+        require(decision)
+        if self._ensure_firmware_armed(transaction):
+            decision = validate()
+            require(decision)
+            self._assert_firmware_armed(
+                transaction, phase="after_firmware_revalidation"
+            )
+        return decision
+
+    def _require_pointer_activation_decision(self, decision: object) -> None:
+        if not isinstance(decision, PointerActivationDecision):
+            raise _TransactionAbort(
+                "activation validator returned an invalid result"
+            )
+        self._require_validation(decision.validation)
 
     @staticmethod
     def _require_validation(decision: object) -> None:

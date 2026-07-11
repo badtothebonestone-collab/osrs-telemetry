@@ -35,22 +35,11 @@ DEFAULT_CURSOR_START_REGION_TOLERANCE_PX = 8
 DEFAULT_COMMAND_TIMEOUT_MS = 2000
 DEFAULT_SERIAL_LOCK_TIMEOUT_MS = 1500
 DEFAULT_SERIAL_LOCK_STALE_MS = 120000
-ARM_REQUIRED_COMMANDS = {
-    "MOVE",
-    "MOUSE_DOWN",
-    "MOUSE_UP",
-    "CLICK",
-    "KEY_DOWN",
-    "KEY_UP",
-    "KEY_PRESS",
-    "HOLD_KEYS",
-}
 _COMMAND_TERMINAL_STATUSES = {
     "PASS",
     "WRITE_FAIL",
     "ACK_TIMEOUT_OR_READ_FAIL",
     "REJECTED",
-    "REJECTED_RETRYABLE",
     "UNEXPECTED_RESPONSE",
 }
 _PROCESS_SERIAL_LOCKS: dict[str, threading.Lock] = {}
@@ -73,8 +62,6 @@ class ArduinoHIDStatus:
     command_count: int = 0
     ack_failures: int = 0
     timeouts: int = 0
-    watchdog_rearms: int = 0
-    session_rearms: int = 0
     last_error: str | None = None
     identity: dict[str, Any] = field(default_factory=dict)
     capabilities: dict[str, Any] = field(default_factory=dict)
@@ -101,8 +88,6 @@ class ArduinoHIDStatus:
             "commandCount": self.command_count,
             "ackFailures": self.ack_failures,
             "timeouts": self.timeouts,
-            "watchdogRearms": self.watchdog_rearms,
-            "sessionRearms": self.session_rearms,
             "lastError": self.last_error,
             "identity": dict(self.identity),
             "capabilities": dict(self.capabilities),
@@ -376,10 +361,6 @@ def _expected_response_token(command: str) -> str | None:
         "HOLD_KEYS": "HOLD_KEYS",
     }
     return mapping.get(name)
-
-
-def _not_armed_error(line: str) -> bool:
-    return "NOT_ARMED" in str(line or "").upper().split()
 
 
 def _cursor_position() -> tuple[int, int]:
@@ -736,7 +717,6 @@ class _ArduinoHIDTransport:
                 in {
                     "PASS",
                     "REJECTED",
-                    "REJECTED_RETRYABLE",
                     "UNEXPECTED_RESPONSE",
                 }
                 or raw.get("ackLine")
@@ -875,14 +855,12 @@ class _ArduinoHIDTransport:
         *,
         require_ack: bool = True,
         expected_token: str | None = None,
-        recover_watchdog_disarm: bool = False,
     ) -> str:
         if self._serial is None:
             raise ArduinoHIDError(
                 "Arduino serial connection is not open; the input coordinator must connect explicitly"
             )
         name = _command_name(command)
-        can_recover_watchdog_disarm = bool(recover_watchdog_disarm and self._armed and name in ARM_REQUIRED_COMMANDS)
         write_trace = self._write_line(command)
         expected = expected_token or _expected_response_token(command)
         last_line = ""
@@ -903,21 +881,11 @@ class _ArduinoHIDTransport:
             payload_token = _line_payload_token(line)
             if token == "ERR":
                 rejected = dict(self._status.last_command_trace or write_trace)
-                rejected["status"] = (
-                    "REJECTED_RETRYABLE"
-                    if can_recover_watchdog_disarm and _not_armed_error(line)
-                    else "REJECTED"
-                )
+                rejected["status"] = "REJECTED"
                 rejected["responseToken"] = token
                 rejected["payloadToken"] = payload_token
                 rejected["error"] = "firmware rejected command"
                 self._append_command_trace(rejected)
-                if can_recover_watchdog_disarm and _not_armed_error(line):
-                    self._status.last_error = f"ERR {payload_token}"
-                    self._arm(self.session_token)
-                    self._status.watchdog_rearms += 1
-                    self._status.session_rearms += 1
-                    return self._send(command, require_ack=require_ack, expected_token=expected, recover_watchdog_disarm=False)
                 self._status.ack_failures += 1
                 self._status.last_error = f"ERR {payload_token}"
                 self._status.armed = False
@@ -970,7 +938,6 @@ class _ArduinoHIDTransport:
             command,
             require_ack=require_ack,
             expected_token=expected_token,
-            recover_watchdog_disarm=True,
         )
 
     def _move_relative(self, dx: int, dy: int) -> dict[str, Any]:
@@ -1142,15 +1109,6 @@ class _ArduinoHIDTransport:
     def _require_armed(self) -> None:
         if self.fail_closed and not self._armed:
             raise ArduinoHIDError("Arduino HID backend is not armed")
-
-    def _ensure_armed(self) -> bool:
-        if self._armed:
-            return True
-        if not self._live_session_active:
-            return False
-        self._arm(self.session_token)
-        self._status.session_rearms += 1
-        return bool(self._armed)
 
     def _current_position(self) -> tuple[int, int]:
         position = _cursor_position()

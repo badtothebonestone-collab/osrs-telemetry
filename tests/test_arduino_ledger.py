@@ -127,6 +127,23 @@ class ArduinoCommandLedgerTests(unittest.TestCase):
         self.assertFalse(failure_evidence["records"][0]["ackReceived"])
         self.assertEqual(0, failure_evidence["unresolvedCount"])
 
+    def test_not_armed_rejection_never_retries_state_changing_command(self) -> None:
+        serial = _FakeSerial([b"ERR NOT_ARMED\n", b"OK STOP_ALL\n"])
+        backend = _backend(serial)
+        backend._status.armed = True
+        backend._begin_command_ledger()
+
+        with self.assertRaisesRegex(ArduinoHIDError, "rejected MOVE"):
+            backend._move_relative(1, 0)
+        evidence = backend._end_command_ledger()
+
+        self.assertEqual(1, serial.writes.count(b"MOVE 1 0\n"))
+        self.assertEqual(1, serial.writes.count(b"STOP_ALL\n"))
+        self.assertFalse(any(write.startswith(b"ARM ") for write in serial.writes))
+        self.assertEqual("REJECTED", evidence["records"][0]["status"])
+        self.assertEqual("MOVE", evidence["records"][0]["command"])
+        self.assertFalse(backend._status.armed)
+
     def test_send_never_implicitly_opens_a_serial_session(self) -> None:
         backend = _backend(None)
 
