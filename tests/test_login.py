@@ -285,6 +285,7 @@ def build_helper(
     cursor_start: tuple[int, int] = (150, 500),
     foreground_hwnd: int = 77,
     cursor_change_calls: list[int | None] | None = None,
+    loaded_scene_detector=None,
     clock: FakeClock | None = None,
 ) -> LoginPromptHelper:
     clock = clock or FakeClock()
@@ -318,6 +319,7 @@ def build_helper(
         point_owner=lambda window, point: window.client_bounds.contains(point),
         screenshot=lambda bounds: Image.new("RGB", (bounds.width, bounds.height), (20, 20, 20)),
         detector=detector,
+        loaded_scene_detector=loaded_scene_detector or detector,
         monotonic=clock.monotonic,
         sleep=clock.sleep,
         poll_seconds=0.1,
@@ -784,6 +786,90 @@ class LoginHelperTests(unittest.TestCase):
         result = helper.run()
         self.assertTrue(result.successful)
         self.assertEqual(backends, [])
+
+    def test_loaded_scene_candidate_cap_uses_exact_read_only_fallback(self) -> None:
+        primary_calls = 0
+        fallback_calls = 0
+
+        def capped(_image: Image.Image) -> tuple[LoginCandidate, ...]:
+            nonlocal primary_calls
+            primary_calls += 1
+            raise login_module.LoginCandidateLimitError(
+                "login template anchor candidates exceed the bounded limit"
+            )
+
+        def exhaustive(_image: Image.Image) -> tuple[LoginCandidate, ...]:
+            nonlocal fallback_calls
+            fallback_calls += 1
+            return ()
+
+        backends: list[FakeBackend] = []
+        helper = build_helper(
+            FakeObservations(
+                [
+                    observation("LOGGED_IN", 9, loaded=True),
+                    observation("LOGGED_IN", 10, loaded=True),
+                ]
+            ),
+            capped,
+            loaded_scene_detector=exhaustive,
+            backends=backends,
+        )
+
+        result = helper.run()
+
+        self.assertTrue(result.successful)
+        self.assertEqual(2, primary_calls)
+        self.assertEqual(2, fallback_calls)
+        self.assertEqual([], backends)
+
+    def test_login_screen_candidate_cap_never_uses_loaded_scene_fallback(self) -> None:
+        fallback_calls = 0
+
+        def capped(_image: Image.Image) -> tuple[LoginCandidate, ...]:
+            raise login_module.LoginCandidateLimitError(
+                "login template anchor candidates exceed the bounded limit"
+            )
+
+        def exhaustive(_image: Image.Image) -> tuple[LoginCandidate, ...]:
+            nonlocal fallback_calls
+            fallback_calls += 1
+            return ()
+
+        helper = build_helper(
+            FakeObservations([observation("LOGIN_SCREEN", 1)]),
+            capped,
+            loaded_scene_detector=exhaustive,
+        )
+
+        result = helper.run()
+
+        self.assertFalse(result.successful)
+        self.assertIn("LoginCandidateLimitError", result.reason)
+        self.assertEqual(0, fallback_calls)
+
+    def test_loaded_scene_fallback_candidate_cannot_authorize_input(self) -> None:
+        def capped(_image: Image.Image) -> tuple[LoginCandidate, ...]:
+            raise login_module.LoginCandidateLimitError(
+                "login template anchor candidates exceed the bounded limit"
+            )
+
+        backends: list[FakeBackend] = []
+        helper = build_helper(
+            FakeObservations([observation("LOGGED_IN", 9, loaded=True)]),
+            capped,
+            loaded_scene_detector=lambda _image: (WELCOME,),
+            backends=backends,
+        )
+
+        result = helper.run()
+
+        self.assertFalse(result.successful)
+        self.assertIn(
+            "loaded-scene fallback found a supported prompt but cannot authorize input",
+            result.reason,
+        )
+        self.assertEqual([], backends)
 
     def test_loaded_telemetry_does_not_skip_a_visible_welcome_prompt(self) -> None:
         source = FakeObservations(

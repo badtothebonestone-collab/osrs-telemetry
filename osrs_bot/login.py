@@ -32,6 +32,9 @@ MAX_TEMPLATE_SEARCH_ZONE_PIXELS = 4_000_000
 MAX_TEMPLATE_ANCHOR_CANDIDATES = 20_000
 MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES_PER_SCALE = 100_000
 MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES = 600_000
+MAX_LOADED_SCENE_TEMPLATE_ANCHOR_CANDIDATES = 1_000_000
+MAX_LOADED_SCENE_TEMPLATE_FIRST_ANCHOR_CANDIDATES_PER_SCALE = 2_000_000
+MAX_LOADED_SCENE_TEMPLATE_FIRST_ANCHOR_CANDIDATES = 8_000_000
 SUPPORTED_SURFACES = ("play_now", "click_here_to_play", "disconnected_ok")
 _TEMPLATE_SURFACES = ("play_now", "click_here_to_play")
 TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "login"
@@ -51,6 +54,10 @@ class _ObservationSource(Protocol):
 
 
 class LoginSafetyError(RuntimeError):
+    pass
+
+
+class LoginCandidateLimitError(LoginSafetyError):
     pass
 
 
@@ -187,12 +194,12 @@ def _anchor_candidate_origins(
         for anchor_hits in range(len(anchors) - 1, len(anchors) + 1)
     )
     if anchor_candidate_count > candidate_limit:
-        raise LoginSafetyError(
+        raise LoginCandidateLimitError(
             "login template anchor candidates exceed the bounded limit"
         )
     first_anchor_candidate_count = first_anchor_bytes.count(b"\x01")
     if first_anchor_candidate_count > first_candidate_limit:
-        raise LoginSafetyError(
+        raise LoginCandidateLimitError(
             "login template first-anchor candidates exceed the bounded limit"
         )
     origins: set[tuple[int, int]] = set()
@@ -213,6 +220,12 @@ def _best_template_match(
     image: Image.Image,
     template: Image.Image,
     zone: tuple[int, int, int, int],
+    *,
+    anchor_candidate_limit: int = MAX_TEMPLATE_ANCHOR_CANDIDATES,
+    first_anchor_candidate_limit_per_scale: int = (
+        MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES_PER_SCALE
+    ),
+    first_anchor_candidate_limit: int = MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES,
 ) -> tuple[int, int, int, int, float] | None:
     """Locate the white OSRS label shape without trusting background animation."""
 
@@ -248,8 +261,8 @@ def _best_template_match(
     bright_mask_image = Image.frombytes(
         "L", (zone_width, zone_height), bytes(bright_mask)
     )
-    remaining_anchor_candidates = MAX_TEMPLATE_ANCHOR_CANDIDATES
-    remaining_first_anchor_candidates = MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES
+    remaining_anchor_candidates = anchor_candidate_limit
+    remaining_first_anchor_candidates = first_anchor_candidate_limit
 
     for needle in _scaled_templates(template):
         width, height = needle.size
@@ -291,7 +304,7 @@ def _best_template_match(
                 origin_y=top,
                 candidate_limit=remaining_anchor_candidates,
                 first_candidate_limit=min(
-                    MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES_PER_SCALE,
+                    first_anchor_candidate_limit_per_scale,
                     remaining_first_anchor_candidates,
                 ),
             )
@@ -403,10 +416,13 @@ def _disconnected_dialog_candidate(
     )
 
 
-def detect_login_surfaces(
+def _detect_login_surfaces_with_limits(
     screenshot: Image.Image,
     *,
-    template_dir: Path = TEMPLATE_DIR,
+    template_dir: Path,
+    anchor_candidate_limit: int,
+    first_anchor_candidate_limit_per_scale: int,
+    first_anchor_candidate_limit: int,
 ) -> tuple[LoginCandidate, ...]:
     """Return only visually proven, already-authenticated RuneLite prompts."""
 
@@ -426,7 +442,16 @@ def detect_login_surfaces(
             round(screenshot.width * x2),
             round(screenshot.height * y2),
         )
-        match = _best_template_match(screenshot, template, zone)
+        match = _best_template_match(
+            screenshot,
+            template,
+            zone,
+            anchor_candidate_limit=anchor_candidate_limit,
+            first_anchor_candidate_limit_per_scale=(
+                first_anchor_candidate_limit_per_scale
+            ),
+            first_anchor_candidate_limit=first_anchor_candidate_limit,
+        )
         if match is None:
             continue
         x, y, width, height, confidence = match
@@ -443,6 +468,42 @@ def detect_login_surfaces(
         if disconnected is not None:
             candidates.append(disconnected)
     return tuple(sorted(candidates, key=lambda item: item.confidence, reverse=True))
+
+
+def detect_login_surfaces(
+    screenshot: Image.Image,
+    *,
+    template_dir: Path = TEMPLATE_DIR,
+) -> tuple[LoginCandidate, ...]:
+    """Return only visually proven, already-authenticated RuneLite prompts."""
+
+    return _detect_login_surfaces_with_limits(
+        screenshot,
+        template_dir=template_dir,
+        anchor_candidate_limit=MAX_TEMPLATE_ANCHOR_CANDIDATES,
+        first_anchor_candidate_limit_per_scale=(
+            MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES_PER_SCALE
+        ),
+        first_anchor_candidate_limit=MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES,
+    )
+
+
+def detect_loaded_scene_login_surfaces(
+    screenshot: Image.Image,
+) -> tuple[LoginCandidate, ...]:
+    """Run the exact detector with a larger read-only loaded-world budget."""
+
+    return _detect_login_surfaces_with_limits(
+        screenshot,
+        template_dir=TEMPLATE_DIR,
+        anchor_candidate_limit=MAX_LOADED_SCENE_TEMPLATE_ANCHOR_CANDIDATES,
+        first_anchor_candidate_limit_per_scale=(
+            MAX_LOADED_SCENE_TEMPLATE_FIRST_ANCHOR_CANDIDATES_PER_SCALE
+        ),
+        first_anchor_candidate_limit=(
+            MAX_LOADED_SCENE_TEMPLATE_FIRST_ANCHOR_CANDIDATES
+        ),
+    )
 
 
 class _WinPoint(ctypes.Structure):
@@ -636,6 +697,9 @@ class LoginPromptHelper:
         point_owner: Callable[[RuneLiteWindow, ScreenPoint], bool] = point_belongs_to_window,
         screenshot: Callable[[ScreenBounds], Image.Image] = capture_client,
         detector: Callable[[Image.Image], tuple[LoginCandidate, ...]] = detect_login_surfaces,
+        loaded_scene_detector: Callable[
+            [Image.Image], tuple[LoginCandidate, ...]
+        ] = detect_loaded_scene_login_surfaces,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         poll_seconds: float = 1.0,
@@ -650,6 +714,7 @@ class LoginPromptHelper:
         self._point_owner = point_owner
         self._screenshot = screenshot
         self._detector = detector
+        self._loaded_scene_detector = loaded_scene_detector
         self._monotonic = monotonic
         self._sleep = sleep
         self._poll_seconds = max(0.05, float(poll_seconds))
@@ -688,7 +753,18 @@ class LoginPromptHelper:
                 if not self._focus_window(window):
                     raise LoginSafetyError("exact RuneLite telemetry window could not be focused")
                 image = self._screenshot(window.client_bounds)
-                candidates = self._detector(image)
+                try:
+                    candidates = self._detector(image)
+                except LoginCandidateLimitError:
+                    if not observation.loaded_scene:
+                        raise
+                    fallback_candidates = self._loaded_scene_detector(image)
+                    if fallback_candidates:
+                        raise LoginSafetyError(
+                            "loaded-scene fallback found a supported prompt but "
+                            "cannot authorize input"
+                        )
+                    candidates = ()
             except Exception as error:
                 return self._result("BLOCKED", f"window_proof_failed: {type(error).__name__}: {error}", False, started, clicks)
 
