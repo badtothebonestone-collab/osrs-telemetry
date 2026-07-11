@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from osrs_bot.input_coordinator import InputCoordinator
 from osrs_bot.login import (
     LoginCandidate,
     LoginPromptHelper,
@@ -92,47 +93,114 @@ class FakeObservations:
 
 
 class FakeBackend:
-    def __init__(self, *, fail_at: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_at: str | None = None,
+        start: tuple[int, int] = (150, 500),
+    ) -> None:
         self.calls: list[object] = []
         self.fail_at = fail_at
+        self.position = start
+        self.records: list[dict[str, object]] = []
+        self.sequence = 0
 
     def _call(self, name: str, value: object | None = None) -> None:
         self.calls.append(name if value is None else (name, value))
         if self.fail_at == name:
             raise RuntimeError(f"failed at {name}")
 
-    def connect(self) -> None:
+    def _record(self, command: str, *, fail_name: str | None = None) -> None:
+        self.sequence += 1
+        failed = fail_name is not None and self.fail_at == fail_name
+        self.records.append(
+            {
+                "schema": "arduino_command_evidence.v1",
+                "commandId": f"cmd-{self.sequence:08d}",
+                "sequence": self.sequence,
+                "command": command,
+                "status": "REJECTED" if failed else "PASS",
+                "writeOk": True,
+                "ackReceived": True,
+                "accepted": not failed,
+                "firmwareAck": {
+                    "responseToken": "OK" if not failed else "ERR",
+                    "payloadToken": command,
+                },
+                "error": f"failed at {fail_name}" if failed else None,
+                "timeoutClassification": None,
+                "retryCount": 0,
+            }
+        )
+        if failed:
+            raise RuntimeError(f"failed at {fail_name}")
+
+    def _begin_command_ledger(self) -> None:
+        self.records = []
+
+    def _command_evidence(self) -> dict[str, object]:
+        failed = sum(record["status"] != "PASS" for record in self.records)
+        missing = sum(not record["ackReceived"] for record in self.records)
+        return {
+            "schema": "arduino_command_ledger.v1",
+            "records": [dict(record) for record in self.records],
+            "unresolvedCount": 0,
+            "failedCount": failed,
+            "ackMissingCount": missing,
+        }
+
+    def _end_command_ledger(self) -> dict[str, object]:
+        return self._command_evidence()
+
+    def _connect(self) -> None:
         self._call("connect")
 
-    def configure_movement_safety(self, **kwargs: object) -> None:
-        self._call("configure", kwargs)
-
-    def current_position(self) -> tuple[int, int]:
+    def _current_position(self) -> tuple[int, int]:
         self._call("current_position")
-        return (1500, 500)
+        return self.position
 
-    def arm(self) -> None:
+    def _arm(self) -> dict[str, object]:
         self._call("arm")
+        self._record("ARM", fail_name="arm")
+        return {}
 
-    def assert_foreground(self, titles: list[str], *, expected_pid: int) -> None:
+    def _assert_foreground(self, titles: list[str], *, expected_pid: int) -> None:
         self._call("foreground", expected_pid)
 
-    def move_to_absolute(self, point: dict[str, int], **kwargs: object) -> None:
-        self._call("move", point)
+    def _move_relative(self, dx: int, dy: int) -> dict[str, object]:
+        self._call("move", {"dx": dx, "dy": dy})
+        self._record("MOVE", fail_name="move")
+        self.position = (self.position[0] + dx, self.position[1] + dy)
+        return {}
 
-    def mouse_down(self, *, button: str) -> None:
+    def _mouse_down(self, *, button: str) -> None:
         self._call("mouse_down")
+        self._record("MOUSE_DOWN", fail_name="mouse_down")
 
-    def mouse_up(self, *, button: str) -> None:
+    def _mouse_up(self, *, button: str) -> None:
         self._call("mouse_up")
+        self._record("MOUSE_UP", fail_name="mouse_up")
 
-    def stop_all(self) -> None:
+    def _press(self, key: str) -> None:
+        self._call("press", key)
+        self._record("KEY_PRESS", fail_name="press")
+
+    def _stop_all(self) -> dict[str, object]:
         self._call("stop_all")
+        self._record("STOP_ALL", fail_name="stop_all")
+        return {}
 
-    def disarm(self) -> None:
+    def _disarm(self) -> dict[str, object]:
         self._call("disarm")
+        self._record("DISARM", fail_name="disarm")
+        return {}
 
-    def close(self) -> None:
+    def _firmware_status(self) -> dict[str, object]:
+        self._call("firmware_status")
+        self._record("STATUS", fail_name="firmware_status")
+        return {"armed": False, "keysDown": 0, "mouseButtonsDown": 0}
+
+    def _close(self) -> None:
         self._call("close")
 
 
@@ -152,20 +220,25 @@ def build_helper(
     *,
     backends: list[FakeBackend] | None = None,
     fail_at: str | None = None,
+    cursor_start: tuple[int, int] = (150, 500),
     clock: FakeClock | None = None,
 ) -> LoginPromptHelper:
     clock = clock or FakeClock()
     collection = backends if backends is not None else []
 
     def backend_factory() -> FakeBackend:
-        backend = FakeBackend(fail_at=fail_at)
+        backend = FakeBackend(fail_at=fail_at, start=cursor_start)
         collection.append(backend)
         return backend
 
+    coordinator = InputCoordinator(
+        backend_factory,
+        sleep=clock.sleep,
+        pointer_timestep_seconds=0.02,
+    )
     return LoginPromptHelper(
         source,
-        arduino_port="COM6",
-        backend_factory=backend_factory,
+        coordinator,
         window_finder=lambda pid: WINDOW,
         focus_window=lambda window: True,
         point_owner=lambda window, point: window.client_bounds.contains(point),
@@ -297,14 +370,16 @@ class LoginHelperTests(unittest.TestCase):
             self.assertIn("mouse_up", backend.calls)
             self.assertIn("stop_all", backend.calls)
             self.assertIn("disarm", backend.calls)
+            self.assertIn("firmware_status", backend.calls)
             self.assertEqual(backend.calls[-1], "close")
-            configurations = [
-                item[1]
-                for item in backend.calls
-                if isinstance(item, tuple) and item[0] == "configure"
-            ]
-            self.assertEqual(2, len(configurations))
-            self.assertGreater(configurations[0]["allowed_region"]["width"], WINDOW.client_bounds.width)
+        self.assertTrue(all(click.receipt.successful for click in result.clicks))
+        self.assertTrue(
+            all(
+                click.receipt.firmware_status
+                and click.receipt.firmware_status.safe
+                for click in result.clicks
+            )
+        )
 
     def test_loaded_scene_returns_without_hardware_connection(self) -> None:
         backends: list[FakeBackend] = []
@@ -385,6 +460,24 @@ class LoginHelperTests(unittest.TestCase):
         self.assertEqual(result.reason, "candidate_outside_exact_runelite_client")
         self.assertEqual(backends, [])
 
+    def test_cursor_must_start_inside_the_verified_runelite_canvas(self) -> None:
+        backends: list[FakeBackend] = []
+        helper = build_helper(
+            FakeObservations([observation("LOGIN_SCREEN", 1)]),
+            lambda image: (PLAY,),
+            backends=backends,
+            cursor_start=(1500, 500),
+        )
+
+        result = helper.run()
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertIn("cursor_start_outside_verified", result.reason)
+        self.assertNotIn("mouse_down", backends[0].calls)
+        self.assertIn("stop_all", backends[0].calls)
+        self.assertIn("firmware_status", backends[0].calls)
+        self.assertFalse(result.clicks[-1].sent)
+
     def test_click_failure_still_stops_and_disarms(self) -> None:
         backends: list[FakeBackend] = []
         helper = build_helper(
@@ -395,10 +488,11 @@ class LoginHelperTests(unittest.TestCase):
         )
         result = helper.run()
         self.assertEqual(result.status, "ERROR")
-        self.assertIn("login_click_failed", result.reason)
+        self.assertIn("login_click_error", result.reason)
         self.assertIn("stop_all", backends[0].calls)
         self.assertIn("disarm", backends[0].calls)
         self.assertEqual(backends[0].calls[-1], "close")
+        self.assertFalse(result.clicks[-1].receipt.successful)
 
     def test_prompt_disappearing_after_move_blocks_click_and_cleans_up(self) -> None:
         backends: list[FakeBackend] = []
@@ -409,7 +503,7 @@ class LoginHelperTests(unittest.TestCase):
             backends=backends,
         )
         result = helper.run()
-        self.assertEqual(result.status, "ERROR")
+        self.assertEqual(result.status, "BLOCKED")
         self.assertIn("prompt disappeared", result.reason)
         self.assertNotIn("mouse_down", backends[0].calls)
         self.assertIn("stop_all", backends[0].calls)
@@ -427,7 +521,8 @@ class LoginHelperTests(unittest.TestCase):
                 )
                 result = helper.run()
                 self.assertEqual(result.status, "ERROR")
-                self.assertIn("login_click_cleanup_not_confirmed", result.reason)
+                self.assertIn(f"{failure}_failed", result.reason)
+                self.assertFalse(result.clicks[-1].receipt.successful)
 
     def test_unchanged_prompt_is_clicked_only_once(self) -> None:
         source = FakeObservations([observation("LOGIN_SCREEN", 1)], repeat_last=True)

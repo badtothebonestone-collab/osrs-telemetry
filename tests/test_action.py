@@ -1,14 +1,29 @@
 from __future__ import annotations
 
-import unittest
-from dataclasses import replace
+import ast
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timezone
+import inspect
+import unittest
 
-from osrs_bot.action import ArduinoActionInterface
-from osrs_bot.arduino import ArduinoHIDBackend, ArduinoHIDError
+import osrs_bot.action as action_module
+from osrs_bot.action import CoordinatedActionInterface, ExecutionResult
+from osrs_bot.input_coordinator import (
+    ApprovedKeyIntent,
+    ApprovedPointerIntent,
+    CommandEvidence,
+    FirmwareSafetyStatus,
+    InputPurpose,
+    InputReceipt,
+    InputCoordinator,
+    InputValidation,
+    PointerActivation,
+    PointerActivationDecision,
+)
 from osrs_bot.model import (
     Action,
     ActionKind,
+    CLOSE_BANK_WIDGET_KEY,
     DialogueOption,
     DialogueOptionConstraint,
     InterfaceConstraint,
@@ -22,12 +37,14 @@ from osrs_bot.model import (
     TargetGeometry,
     TaskConstraints,
     WidgetObservation,
+    WidgetTarget,
     WorldPoint,
 )
 from osrs_bot.safety import SafetyGate
 
 
 POINT = ScreenPoint(110, 110)
+CANVAS = ScreenBounds(50, 50, 500, 400)
 
 
 def observation(
@@ -37,6 +54,8 @@ def observation(
     menu_open: bool = False,
     menu_bounds: ScreenBounds | None = None,
     menu_point: ScreenPoint = POINT,
+    widgets: WidgetObservation | None = None,
+    location: WorldPoint = WorldPoint(3192, 3244, 0),
 ) -> Observation:
     timestamp = datetime.now(timezone.utc)
     session_id = "session-1"
@@ -61,17 +80,17 @@ def observation(
         ),
         scene_x=49,
         scene_y=52,
-        resource_candidate=True,
+        resource_candidate=False,
     )
     return Observation(
         player=PlayerObservation(),
-        location=WorldPoint(3192, 3244, 0),
-        plane=0,
+        location=location,
+        plane=location.plane,
         inventory=InventoryObservation(known=True),
         nearby_objects=(tree,),
         menus=menus,
-        widgets=WidgetObservation(bank_known=True),
-        canvas_bounds=ScreenBounds(50, 50, 500, 400),
+        widgets=widgets or WidgetObservation(bank_known=True),
+        canvas_bounds=CANVAS,
         game_state="LOGGED_IN",
         timestamp=timestamp,
         tick=tick,
@@ -115,101 +134,285 @@ def tree_action() -> Action:
     )
 
 
-class FakeBackend:
-    def __init__(self, fail_at: str | None = None) -> None:
+def command_evidence(sequence: int, command: str) -> CommandEvidence:
+    return CommandEvidence(
+        command_id=f"cmd-{sequence:08d}",
+        sequence=sequence,
+        command=command,
+        status="PASS",
+        write_ok=True,
+        ack_received=True,
+        accepted=True,
+        response_token="OK",
+        payload_token=command,
+    )
+
+
+def input_receipt(
+    *,
+    mode: str = "pointer",
+    status: str = "PASS",
+    reason: str = "input_transaction_succeeded",
+    intent_ids: tuple[str, ...] = ("gameplay",),
+    commands: tuple[str, ...] = (
+        "ARM",
+        "MOVE",
+        "MOUSE_DOWN",
+        "MOUSE_UP",
+        "STOP_ALL",
+        "DISARM",
+        "STATUS",
+    ),
+    cleanup: bool = True,
+    context_cancel_attempted: bool = False,
+    context_cancel_acknowledged: bool = False,
+) -> InputReceipt:
+    evidence = tuple(
+        command_evidence(index, command)
+        for index, command in enumerate(commands, start=1)
+    )
+    return InputReceipt(
+        transaction_id="input-00000001",
+        mode=mode,
+        intent_ids=intent_ids,
+        status=status,
+        reason=reason,
+        connected=True,
+        arm_acknowledged=True,
+        stop_all_acknowledged=True,
+        disarm_acknowledged=cleanup,
+        firmware_status_acknowledged=cleanup,
+        firmware_status=FirmwareSafetyStatus(False, 0, 0) if cleanup else None,
+        commands=evidence,
+        unresolved_command_count=0,
+        failed_command_count=0,
+        ack_missing_count=0,
+        ledger_complete=True,
+        ledger_closed=True,
+        backend_closed=True,
+        context_cancel_attempted=context_cancel_attempted,
+        context_cancel_acknowledged=context_cancel_acknowledged,
+        errors=() if status == "PASS" else (reason,),
+    )
+
+
+class FakeCoordinator:
+    def __init__(self, *, forced_receipt: InputReceipt | None = None) -> None:
         self.calls: list[str] = []
-        self.buttons: list[str] = []
-        self.fail_at = fail_at
-        self.move_kwargs: dict[str, object] = {}
+        self.pointer_intents: list[ApprovedPointerIntent] = []
+        self.key_intents: list[ApprovedKeyIntent] = []
+        self.decisions: list[PointerActivationDecision] = []
+        self.row_intents: list[ApprovedPointerIntent] = []
+        self.forced_receipt = forced_receipt
 
-    def _call(self, name: str) -> None:
-        self.calls.append(name)
-        if self.fail_at == name:
-            raise RuntimeError(name)
+    @staticmethod
+    def _denied(
+        reason: str,
+        *,
+        intent_ids: tuple[str, ...],
+        mode: str = "pointer",
+    ) -> InputReceipt:
+        return input_receipt(
+            mode=mode,
+            status="BLOCKED",
+            reason=f"fresh_input_validation_denied: {reason}",
+            intent_ids=intent_ids,
+            commands=("ARM", "MOVE", "STOP_ALL", "DISARM", "STATUS"),
+        )
 
-    def connect(self) -> None:
-        self._call("connect")
+    def execute_pointer(self, intent, *, validate):  # type: ignore[no-untyped-def]
+        self.calls.append("pointer")
+        self.pointer_intents.append(intent)
+        decision = validate(intent)
+        if self.forced_receipt is not None:
+            return self.forced_receipt
+        if not isinstance(decision, InputValidation) or not decision.allowed:
+            reason = decision.reason if isinstance(decision, InputValidation) else "invalid"
+            return self._denied(reason, intent_ids=(intent.intent_id,))
+        return input_receipt(intent_ids=(intent.intent_id,))
 
-    def configure_movement_safety(self, **_: object) -> None:
-        self._call("configure")
+    def execute_key(self, intent, *, validate):  # type: ignore[no-untyped-def]
+        self.calls.append("key")
+        self.key_intents.append(intent)
+        decision = validate(intent)
+        if self.forced_receipt is not None:
+            return self.forced_receipt
+        if not isinstance(decision, InputValidation) or not decision.allowed:
+            reason = decision.reason if isinstance(decision, InputValidation) else "invalid"
+            return self._denied(
+                reason,
+                intent_ids=(intent.intent_id,),
+                mode="key",
+            )
+        return input_receipt(
+            mode="key",
+            intent_ids=(intent.intent_id,),
+            commands=("ARM", "KEY_PRESS", "STOP_ALL", "DISARM", "STATUS"),
+        )
 
-    def arm(self) -> None:
-        self._call("arm")
+    def execute_adaptive_pointer(
+        self,
+        intent,
+        *,
+        decide_activation,
+        resolve_row,
+        validate_row,
+    ):  # type: ignore[no-untyped-def]
+        self.calls.append("adaptive")
+        self.pointer_intents.append(intent)
+        decision = decide_activation(intent)
+        self.decisions.append(decision)
+        if self.forced_receipt is not None:
+            return self.forced_receipt
+        if not isinstance(decision, PointerActivationDecision) or not decision.validation.allowed:
+            reason = (
+                decision.validation.reason
+                if isinstance(decision, PointerActivationDecision)
+                else "invalid"
+            )
+            return self._denied(
+                reason,
+                intent_ids=(intent.intent_id,),
+                mode="adaptive_pointer",
+            )
+        if decision.activation is PointerActivation.DIRECT_LEFT:
+            return input_receipt(
+                mode="adaptive_pointer",
+                intent_ids=(intent.intent_id,),
+            )
 
-    def move_to_absolute(self, *_: object, **kwargs: object) -> None:
-        self.move_kwargs = kwargs
-        self._call("move")
+        try:
+            row_intent = resolve_row()
+            self.row_intents.append(row_intent)
+            row_validation = validate_row(row_intent)
+        except Exception as error:  # mirror coordinator fail-closed cancellation
+            reason = f"context_row_resolution_blocked: {error}"
+            return input_receipt(
+                mode="adaptive_pointer",
+                status="BLOCKED",
+                reason=reason,
+                intent_ids=(intent.intent_id,),
+                commands=(
+                    "ARM",
+                    "MOVE",
+                    "MOUSE_DOWN",
+                    "MOUSE_UP",
+                    "KEY_PRESS",
+                    "STOP_ALL",
+                    "DISARM",
+                    "STATUS",
+                ),
+                context_cancel_attempted=True,
+                context_cancel_acknowledged=True,
+            )
+        intent_ids = (intent.intent_id, row_intent.intent_id)
+        if not row_validation.allowed:
+            return input_receipt(
+                mode="adaptive_pointer",
+                status="BLOCKED",
+                reason=f"fresh_input_validation_denied: {row_validation.reason}",
+                intent_ids=intent_ids,
+                commands=(
+                    "ARM",
+                    "MOVE",
+                    "MOUSE_DOWN",
+                    "MOUSE_UP",
+                    "MOVE",
+                    "KEY_PRESS",
+                    "STOP_ALL",
+                    "DISARM",
+                    "STATUS",
+                ),
+                context_cancel_attempted=True,
+                context_cancel_acknowledged=True,
+            )
+        return input_receipt(
+            mode="adaptive_pointer",
+            intent_ids=intent_ids,
+            commands=(
+                "ARM",
+                "MOVE",
+                "MOUSE_DOWN",
+                "MOUSE_UP",
+                "MOVE",
+                "MOUSE_DOWN",
+                "MOUSE_UP",
+                "STOP_ALL",
+                "DISARM",
+                "STATUS",
+            ),
+        )
 
-    def mouse_down(self, **kwargs: object) -> None:
-        self.buttons.append(str(kwargs.get("button")))
-        self._call("mouse_down")
 
-    def mouse_up(self, **_: object) -> None:
-        self._call("mouse_up")
-
-    def press(self, _: str) -> None:
-        self._call("press")
-
-    def assert_foreground(self, _: object, **__: object) -> None:
-        self._call("foreground")
-
-    def stop_all(self) -> None:
-        self._call("stop_all")
-
-    def disarm(self) -> None:
-        self._call("disarm")
-
-    def close(self) -> None:
-        self._call("close")
-
-    def status(self) -> dict[str, object]:
-        return {"calls": list(self.calls)}
-
-
-class ArduinoActionInterfaceTest(unittest.TestCase):
+class CoordinatedActionInterfaceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.pre = observation(menus=())
         self.hover = observation(
-            menus=(MenuEntry("Chop down", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52),),
+            menus=(
+                MenuEntry(
+                    "Chop down",
+                    "Tree",
+                    "GAME_OBJECT_FIRST_OPTION",
+                    1276,
+                    49,
+                    52,
+                ),
+            ),
             tick=11,
         )
 
-    def interface(self, backend: FakeBackend, post: Observation) -> ArduinoActionInterface:
-        return ArduinoActionInterface(
-            backend,  # type: ignore[arg-type]
+    def interface(
+        self,
+        coordinator: FakeCoordinator,
+        post: Observation,
+    ) -> CoordinatedActionInterface:
+        return CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
             SafetyGate(max_observation_age_seconds=10),
             lambda: post,
             sleep=lambda _: None,
         )
 
-    def test_pointer_action_requires_fresh_hover_then_confirms_cleanup(self) -> None:
-        backend = FakeBackend()
-        result = self.interface(backend, self.hover).execute(tree_action(), self.pre)
-
-        self.assertEqual("SENT", result.status)
-        self.assertTrue(result.stop_all_confirmed)
-        self.assertTrue(result.disarm_confirmed)
-        self.assertEqual(1, backend.move_kwargs["tolerance_px"])
-        self.assertEqual(
-            ["connect", "configure", "arm", "move", "foreground", "mouse_down", "mouse_up", "stop_all", "disarm", "close"],
-            backend.calls,
+    def test_object_uses_fresh_adaptive_decision_and_carries_cleanup_receipt(self) -> None:
+        coordinator = FakeCoordinator()
+        result = self.interface(coordinator, self.hover).execute(
+            tree_action(), self.pre
         )
 
-    def test_hover_mismatch_blocks_click_and_still_cleans_up(self) -> None:
-        backend = FakeBackend()
+        self.assertEqual("SENT", result.status)
+        self.assertEqual("action_sent", result.reason)
+        self.assertEqual(11, result.post_move_tick)
+        self.assertTrue(result.stop_all_confirmed)
+        self.assertTrue(result.disarm_confirmed)
+        self.assertTrue(result.cleanup_confirmed)
+        self.assertIsInstance(result.receipt, InputReceipt)
+        self.assertEqual(["adaptive"], coordinator.calls)
+        self.assertEqual(PointerActivation.DIRECT_LEFT, coordinator.decisions[0].activation)
+        intent = coordinator.pointer_intents[0]
+        self.assertEqual(InputPurpose.GAMEPLAY_OBJECT, intent.purpose)
+        self.assertEqual(POINT, intent.target)
+        self.assertEqual(CANVAS, intent.movement_bounds)
+        self.assertEqual(ScreenBounds(100, 100, 30, 30), intent.target_bounds)
+        self.assertEqual(1234, intent.expected_pid)
+
+    def test_fresh_hover_mismatch_denies_activation_but_preserves_cleanup_proof(self) -> None:
+        coordinator = FakeCoordinator()
         no_hover = observation(menus=(), tick=11)
-        result = self.interface(backend, no_hover).execute(tree_action(), self.pre)
+        result = self.interface(coordinator, no_hover).execute(
+            tree_action(), self.pre
+        )
 
         self.assertEqual("BLOCKED", result.status)
-        self.assertEqual("hover_menu_mismatch", result.reason)
-        self.assertNotIn("mouse_down", backend.calls)
-        self.assertEqual(["stop_all", "disarm", "close"], backend.calls[-3:])
+        self.assertIn("hover_menu_mismatch", result.reason)
+        self.assertFalse(result.sent)
+        self.assertTrue(result.cleanup_confirmed)
+        self.assertIsNone(coordinator.decisions[0].activation)
 
-    def test_waits_boundedly_for_exact_hover_menu_after_pointer_arrives(self) -> None:
-        backend = FakeBackend()
+    def test_fresh_hover_polling_is_bounded_before_direct_activation(self) -> None:
+        coordinator = FakeCoordinator()
         samples = iter((observation(menus=(), tick=11), self.hover))
-        interface = ArduinoActionInterface(
-            backend,  # type: ignore[arg-type]
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
             SafetyGate(max_observation_age_seconds=10),
             lambda: next(samples),
             sleep=lambda _: None,
@@ -219,16 +422,13 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
         result = interface.execute(tree_action(), self.pre)
 
         self.assertEqual("SENT", result.status)
-        self.assertIn("mouse_down", backend.calls)
+        self.assertEqual(11, result.post_move_tick)
+        self.assertEqual(PointerActivation.DIRECT_LEFT, coordinator.decisions[0].activation)
 
-    def test_selects_one_exact_lower_context_entry_and_cleans_up(self) -> None:
-        backend = FakeBackend()
-        generic = MenuEntry(
-            "Chop", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52
-        )
-        exact = MenuEntry(
-            "Chop down", "Tree", "GAME_OBJECT_SECOND_OPTION", 1276, 49, 52
-        )
+    def test_context_row_is_resolved_then_revalidated_from_new_exact_evidence(self) -> None:
+        coordinator = FakeCoordinator()
+        generic = MenuEntry("Chop", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52)
+        exact = MenuEntry("Chop down", "Tree", "GAME_OBJECT_SECOND_OPTION", 1276, 49, 52)
         candidate = observation(menus=(generic, exact), tick=11)
         menu_bounds = ScreenBounds(80, 80, 200, 100)
         row_bounds = ScreenBounds(81, 114, 199, 15)
@@ -250,8 +450,8 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
             menu_point=row_bounds.center,
         )
         samples = iter((candidate, opened, row))
-        interface = ArduinoActionInterface(
-            backend,  # type: ignore[arg-type]
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
             SafetyGate(max_observation_age_seconds=10),
             lambda: next(samples),
             sleep=lambda _: None,
@@ -260,34 +460,37 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
         result = interface.execute(tree_action(), self.pre)
 
         self.assertEqual("SENT", result.status)
-        self.assertEqual(["right", "left"], backend.buttons)
-        self.assertEqual(2, backend.calls.count("move"))
-        self.assertEqual(["stop_all", "disarm", "close"], backend.calls[-3:])
+        self.assertEqual(13, result.post_move_tick)
+        self.assertEqual(PointerActivation.CONTEXT_MENU, coordinator.decisions[0].activation)
+        self.assertEqual(1, len(coordinator.row_intents))
+        row_intent = coordinator.row_intents[0]
+        self.assertEqual(InputPurpose.CONTEXT_ROW, row_intent.purpose)
+        self.assertEqual(row_bounds.center, row_intent.target)
+        self.assertEqual(row_bounds, row_intent.target_bounds)
+        self.assertEqual(2, len(result.receipt.intent_ids if result.receipt else ()))
 
-    def test_context_cleanup_escape_is_skipped_after_focus_changes(self) -> None:
-        class FocusChangesBackend(FakeBackend):
-            def __init__(self) -> None:
-                super().__init__()
-                self.foreground_checks = 0
-
-            def assert_foreground(self, _: object, **__: object) -> None:
-                self.foreground_checks += 1
-                self.calls.append("foreground")
-                if self.foreground_checks == 2:
-                    raise RuntimeError("focus changed")
-
-        backend = FocusChangesBackend()
-        generic = MenuEntry(
-            "Chop", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52
-        )
-        exact = MenuEntry(
-            "Chop down", "Tree", "GAME_OBJECT_SECOND_OPTION", 1276, 49, 52
-        )
+    def test_context_row_pointer_mismatch_blocks_left_activation_and_records_cancel(self) -> None:
+        coordinator = FakeCoordinator()
+        generic = MenuEntry("Chop", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52)
+        exact = MenuEntry("Chop down", "Tree", "GAME_OBJECT_SECOND_OPTION", 1276, 49, 52)
         candidate = observation(menus=(generic, exact), tick=11)
-        still_closed = observation(menus=(generic, exact), tick=12)
-        samples = iter((candidate, still_closed))
-        interface = ArduinoActionInterface(
-            backend,  # type: ignore[arg-type]
+        menu_bounds = ScreenBounds(80, 80, 200, 100)
+        row_bounds = ScreenBounds(81, 114, 199, 15)
+        entries = (
+            replace(generic, row_bounds=ScreenBounds(81, 99, 199, 15)),
+            replace(exact, row_bounds=row_bounds),
+        )
+        opened = observation(menus=entries, tick=12, menu_open=True, menu_bounds=menu_bounds)
+        wrong_row = observation(
+            menus=entries,
+            tick=13,
+            menu_open=True,
+            menu_bounds=menu_bounds,
+            menu_point=ScreenPoint(90, 90),
+        )
+        samples = iter((candidate, opened, wrong_row))
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
             SafetyGate(max_observation_age_seconds=10),
             lambda: next(samples),
             sleep=lambda _: None,
@@ -297,59 +500,117 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
         result = interface.execute(tree_action(), self.pre)
 
         self.assertEqual("BLOCKED", result.status)
-        self.assertEqual("context_menu_not_open", result.reason)
-        self.assertEqual(["right"], backend.buttons)
-        self.assertNotIn("press", backend.calls)
-        self.assertEqual(2, backend.foreground_checks)
-        self.assertEqual(["stop_all", "disarm", "close"], backend.calls[-3:])
+        self.assertIn("context_row_pointer_mismatch", result.reason)
+        self.assertTrue(result.receipt and result.receipt.context_cancel_attempted)
+        self.assertTrue(result.receipt and result.receipt.context_cancel_acknowledged)
 
-    def test_failed_cleanup_overrides_a_blocked_post_move_result(self) -> None:
-        no_hover = observation(menus=(), tick=11)
-        for cleanup_call in ("stop_all", "disarm"):
-            with self.subTest(cleanup_call=cleanup_call):
-                backend = FakeBackend(fail_at=cleanup_call)
-                result = self.interface(backend, no_hover).execute(
-                    tree_action(), self.pre
-                )
+    def test_context_resolver_failure_exposes_hidden_escape_wire_receipt(self) -> None:
+        coordinator = FakeCoordinator()
+        generic = MenuEntry("Chop", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52)
+        exact = MenuEntry("Chop down", "Tree", "GAME_OBJECT_SECOND_OPTION", 1276, 49, 52)
+        candidate = observation(menus=(generic, exact), tick=11)
+        still_closed = observation(menus=(generic, exact), tick=12)
+        samples = iter((candidate, still_closed))
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            lambda: next(samples),
+            sleep=lambda _: None,
+            evidence_attempts=1,
+        )
 
-                self.assertEqual("ERROR", result.status)
-                self.assertIn("cleanup_not_confirmed", result.reason)
-                self.assertIn("hover_menu_mismatch", result.reason)
-                self.assertNotIn("mouse_down", backend.calls)
-
-    def test_preflight_block_never_connects_hardware(self) -> None:
-        backend = FakeBackend()
-        stale = replace(self.pre, fresh=False)
-        result = self.interface(backend, self.hover).execute(tree_action(), stale)
+        result = interface.execute(tree_action(), self.pre)
 
         self.assertEqual("BLOCKED", result.status)
-        self.assertEqual([], backend.calls)
+        self.assertIn("context_menu_not_open", result.reason)
+        self.assertEqual(12, result.post_move_tick)
+        self.assertIsNotNone(result.receipt)
+        assert result.receipt is not None
+        self.assertTrue(result.receipt.context_cancel_attempted)
+        self.assertTrue(result.receipt.context_cancel_acknowledged)
+        commands = [evidence.command for evidence in result.receipt.commands]
+        self.assertLess(commands.index("KEY_PRESS"), commands.index("STOP_ALL"))
+        self.assertTrue(result.cleanup_confirmed)
 
-    def test_backend_failure_still_runs_stop_and_disarm(self) -> None:
-        backend = FakeBackend(fail_at="mouse_down")
-        result = self.interface(backend, self.hover).execute(tree_action(), self.pre)
+    def test_real_coordinator_carries_hidden_escape_and_cleanup_evidence(self) -> None:
+        # Reuse the transport-faithful ledger fake exercised by the coordinator
+        # suite; this test proves the action callback triggers that real path.
+        from tests.test_input_coordinator import FakeBackend as LedgerBackend
+
+        generic = MenuEntry("Chop", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52)
+        exact = MenuEntry("Chop down", "Tree", "GAME_OBJECT_SECOND_OPTION", 1276, 49, 52)
+
+        def coordinator_pid(sample: Observation) -> Observation:
+            return replace(sample, client_process_id=321, menu_process_id=321)
+
+        pre = coordinator_pid(self.pre)
+        candidate = coordinator_pid(observation(menus=(generic, exact), tick=11))
+        still_closed = coordinator_pid(observation(menus=(generic, exact), tick=12))
+        samples = iter((candidate, still_closed))
+        backend = LedgerBackend(start=(POINT.x, POINT.y))
+        coordinator = InputCoordinator(
+            lambda: backend,
+            sleep=lambda _: None,
+            pointer_timestep_seconds=0.02,
+        )
+        interface = CoordinatedActionInterface(
+            coordinator,
+            SafetyGate(max_observation_age_seconds=10),
+            lambda: next(samples),
+            sleep=lambda _: None,
+            evidence_attempts=1,
+        )
+
+        result = interface.execute(tree_action(), pre)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertIsNotNone(result.receipt)
+        assert result.receipt is not None
+        self.assertTrue(result.receipt.context_cancel_attempted)
+        self.assertTrue(result.receipt.context_cancel_acknowledged)
+        self.assertTrue(result.cleanup_confirmed)
+        commands = [evidence.command for evidence in result.receipt.commands]
+        self.assertLess(commands.index("KEY_PRESS"), commands.index("STOP_ALL"))
+        self.assertLess(backend.events.index("press:ESC"), backend.events.index("stop_all"))
+
+    def test_error_receipt_overrides_successful_fresh_action_validation(self) -> None:
+        forced = input_receipt(
+            status="ERROR",
+            reason="disarm_not_acknowledged",
+            cleanup=False,
+        )
+        coordinator = FakeCoordinator(forced_receipt=forced)
+
+        result = self.interface(coordinator, self.hover).execute(
+            tree_action(), self.pre
+        )
 
         self.assertEqual("ERROR", result.status)
-        self.assertEqual(["stop_all", "disarm", "close"], backend.calls[-3:])
+        self.assertEqual("disarm_not_acknowledged", result.reason)
+        self.assertFalse(result.sent)
+        self.assertFalse(result.disarm_confirmed)
+        self.assertFalse(result.cleanup_confirmed)
+        self.assertIs(forced, result.receipt)
 
-    def test_real_backend_never_hides_failed_disarm_ack(self) -> None:
-        backend = ArduinoHIDBackend(port="COM-test", serial_lock_enabled=False)
-        backend._serial = object()  # exercise the connected disarm contract
-        backend._status.armed = True
+    def test_preflight_block_and_wait_never_submit_input(self) -> None:
+        coordinator = FakeCoordinator()
+        stale = replace(self.pre, fresh=False)
+        blocked = self.interface(coordinator, self.hover).execute(tree_action(), stale)
+        wait = Action(
+            ActionKind.WAIT,
+            "wait",
+            10,
+            source_session_id="session-1",
+        )
+        no_action = self.interface(coordinator, self.hover).execute(wait, self.pre)
 
-        def send(command: str, **_: object) -> str:
-            if command == "DISARM":
-                raise TimeoutError("no ack")
-            return "ACK"
+        self.assertEqual("BLOCKED", blocked.status)
+        self.assertIsNone(blocked.receipt)
+        self.assertEqual("NO_ACTION", no_action.status)
+        self.assertIsNone(no_action.receipt)
+        self.assertEqual([], coordinator.calls)
 
-        backend._send = send  # type: ignore[method-assign]
-
-        with self.assertRaises(ArduinoHIDError):
-            backend.disarm()
-        self.assertTrue(backend._status.stop_all_sent)
-        self.assertIn("no ack", backend._status.last_error or "")
-
-    def test_key_action_rechecks_dialogue_and_foreground_after_arm(self) -> None:
+    def test_dialogue_key_rechecks_fresh_option_and_submits_typed_key_intent(self) -> None:
         widgets = WidgetObservation(
             bank_known=True,
             dialogue_active=True,
@@ -359,10 +620,8 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
             dialogue_number_keys=True,
             dialogue_client_tick=500,
         )
-        fresh = replace(
-            self.hover,
-            widgets=replace(widgets, dialogue_client_tick=501),
-        )
+        pre = replace(self.pre, widgets=widgets)
+        fresh = replace(self.hover, widgets=replace(widgets, dialogue_client_tick=501))
         action = Action(
             ActionKind.PRESS_KEY,
             "Choose climb up",
@@ -380,17 +639,18 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
                 )
             ),
         )
-        backend = FakeBackend(fail_at="foreground")
+        coordinator = FakeCoordinator()
 
-        result = self.interface(backend, fresh).execute(
-            action, replace(self.pre, widgets=widgets)
-        )
+        result = self.interface(coordinator, fresh).execute(action, pre)
 
-        self.assertEqual("ERROR", result.status)
-        self.assertNotIn("press", backend.calls)
-        self.assertEqual(["stop_all", "disarm", "close"], backend.calls[-3:])
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(["key"], coordinator.calls)
+        intent = coordinator.key_intents[0]
+        self.assertEqual(InputPurpose.GAMEPLAY_KEY, intent.purpose)
+        self.assertEqual("1", intent.key)
+        self.assertEqual(501, fresh.widgets.dialogue_client_tick)
 
-    def test_key_action_waits_boundedly_for_a_new_dialogue_sample(self) -> None:
+    def test_dialogue_key_waits_boundedly_for_new_widget_evidence(self) -> None:
         widgets = WidgetObservation(
             bank_known=True,
             dialogue_active=True,
@@ -401,10 +661,8 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
             dialogue_client_tick=500,
         )
         stale = replace(self.hover, widgets=widgets)
-        fresh = replace(
-            self.hover, widgets=replace(widgets, dialogue_client_tick=501)
-        )
-        samples = iter((stale, stale, stale, fresh))
+        fresh = replace(self.hover, widgets=replace(widgets, dialogue_client_tick=501))
+        samples = iter((stale, stale, fresh))
         action = Action(
             ActionKind.PRESS_KEY,
             "Choose climb up",
@@ -417,14 +675,12 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
             source_session_id="session-1",
             source_dialogue_client_tick=500,
             task_constraints=TaskConstraints(
-                dialogue=DialogueOptionConstraint(
-                    "climb", "Climb up the stairs.", 1, "1"
-                )
+                dialogue=DialogueOptionConstraint("climb", "Climb up the stairs.", 1, "1")
             ),
         )
-        backend = FakeBackend()
-        interface = ArduinoActionInterface(
-            backend,  # type: ignore[arg-type]
+        coordinator = FakeCoordinator()
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
             SafetyGate(max_observation_age_seconds=10),
             lambda: next(samples),
             sleep=lambda _: None,
@@ -433,22 +689,18 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
         result = interface.execute(action, replace(self.pre, widgets=widgets))
 
         self.assertEqual("SENT", result.status)
-        self.assertIn("press", backend.calls)
+        self.assertEqual(11, result.post_move_tick)
 
-    def test_bank_escape_waits_for_a_new_bank_tick_then_cleans_up(self) -> None:
+    def test_bank_escape_rechecks_interface_then_submits_coordinator_key(self) -> None:
         widgets = WidgetObservation(
             bank_known=True,
             bank_open=True,
             bank_readable=True,
             keyboard_close_possible=True,
         )
-        pre = replace(
-            self.pre,
-            location=WorldPoint(3208, 3220, 2),
-            plane=2,
-            widgets=widgets,
-        )
-        fresh = replace(pre, tick=11)
+        location = WorldPoint(3208, 3220, 2)
+        pre = observation(menus=(), widgets=widgets, location=location)
+        fresh = observation(menus=(), tick=11, widgets=widgets, location=location)
         action = Action(
             ActionKind.PRESS_KEY,
             "Close bank with Escape",
@@ -465,13 +717,88 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
                 )
             ),
         )
-        backend = FakeBackend()
+        coordinator = FakeCoordinator()
 
-        result = self.interface(backend, fresh).execute(action, pre)
+        result = self.interface(coordinator, fresh).execute(action, pre)
 
         self.assertEqual("SENT", result.status)
-        self.assertIn("press", backend.calls)
-        self.assertEqual(["stop_all", "disarm", "close"], backend.calls[-3:])
+        self.assertEqual("ESCAPE", coordinator.key_intents[0].key)
+        self.assertEqual(11, result.post_move_tick)
+
+    def test_widget_pointer_rechecks_exact_widget_and_uses_widget_bounds(self) -> None:
+        close = WidgetTarget(
+            "Close bank",
+            True,
+            POINT,
+            ScreenBounds(100, 100, 30, 30),
+        )
+        widgets = WidgetObservation(
+            bank_known=True,
+            bank_open=True,
+            bank_readable=True,
+            close_bank=close,
+        )
+        location = WorldPoint(3208, 3220, 2)
+        pre = observation(menus=(), widgets=widgets, location=location)
+        fresh = observation(menus=(), tick=11, widgets=widgets, location=location)
+        action = Action(
+            ActionKind.CLICK_WIDGET,
+            "Close bank",
+            10,
+            option="Close bank",
+            target_key=CLOSE_BANK_WIDGET_KEY,
+            target_name="Close bank",
+            target_id=0,
+            screen_point=POINT,
+            source_menu_client_tick=1010,
+            source_session_id="session-1",
+            task_constraints=TaskConstraints(
+                interface=InterfaceConstraint("bank", 2, True, require_readable=True)
+            ),
+        )
+        coordinator = FakeCoordinator()
+
+        result = self.interface(coordinator, fresh).execute(action, pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(["pointer"], coordinator.calls)
+        intent = coordinator.pointer_intents[0]
+        self.assertEqual(InputPurpose.GAMEPLAY_WIDGET, intent.purpose)
+        self.assertEqual(close.screen_bounds, intent.target_bounds)
+
+    def test_execution_result_is_immutable_and_has_no_mutable_backend_status(self) -> None:
+        coordinator = FakeCoordinator()
+        result = self.interface(coordinator, self.hover).execute(tree_action(), self.pre)
+
+        self.assertFalse(hasattr(result, "__dict__"))
+        self.assertFalse(hasattr(result, "backend_status"))
+        self.assertIsInstance(result.receipt, InputReceipt)
+        self.assertFalse(hasattr(result.receipt, "__dict__"))
+        with self.assertRaises(FrozenInstanceError):
+            result.receipt = None  # type: ignore[misc]
+
+    def test_action_module_cannot_import_or_call_raw_input_boundary(self) -> None:
+        source = inspect.getsource(action_module)
+        tree = ast.parse(source)
+        imported_modules = {
+            node.module or ""
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        }
+
+        self.assertTrue(any(module.endswith("input_coordinator") for module in imported_modules))
+        self.assertFalse(any(module.endswith("arduino") for module in imported_modules))
+        for forbidden in (
+            "._backend",
+            ".connect(",
+            ".arm(",
+            ".move_to_absolute(",
+            ".mouse_down(",
+            ".mouse_up(",
+            ".press(",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
 
 
 if __name__ == "__main__":

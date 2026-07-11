@@ -45,6 +45,14 @@ ARM_REQUIRED_COMMANDS = {
     "KEY_PRESS",
     "HOLD_KEYS",
 }
+_COMMAND_TERMINAL_STATUSES = {
+    "PASS",
+    "WRITE_FAIL",
+    "ACK_TIMEOUT_OR_READ_FAIL",
+    "REJECTED",
+    "REJECTED_RETRYABLE",
+    "UNEXPECTED_RESPONSE",
+}
 _PROCESS_SERIAL_LOCKS: dict[str, threading.Lock] = {}
 _PROCESS_SERIAL_LOCKS_GUARD = threading.Lock()
 
@@ -518,7 +526,7 @@ def _cursor_moved_expected_direction(
     return any(checks)
 
 
-class ArduinoHIDBackend:
+class _ArduinoHIDTransport:
     name = "arduino"
     arduino_hid_backend = True
     live_input_backend = True
@@ -573,28 +581,32 @@ class ArduinoHIDBackend:
         self._live_session_active = False
         self._movement_safety: dict[str, Any] | None = None
         self.last_movement_trace: dict[str, Any] | None = None
+        self._command_sequence = 0
+        self._command_ledger_active = False
+        self._command_ledger_order: list[int] = []
+        self._command_ledger_records: dict[int, dict[str, Any]] = {}
 
     def __del__(self) -> None:
         try:
             if self._serial is not None:
                 try:
-                    self.stop_all()
+                    self._stop_all()
                 except Exception:
                     pass
-            if self.armed:
-                self.disarm()
-            self.close()
+            if self._armed:
+                self._disarm()
+            self._close()
         except Exception:  # noqa: BLE001
             pass
 
     @property
-    def armed(self) -> bool:
+    def _armed(self) -> bool:
         return bool(self._status.armed)
 
-    def status(self) -> dict[str, Any]:
+    def _status_snapshot(self) -> dict[str, Any]:
         return self._status.to_dict()
 
-    def connect(self) -> None:
+    def _connect(self) -> None:
         if self._serial is not None:
             return
         if not self.port:
@@ -640,24 +652,39 @@ class ArduinoHIDBackend:
         except Exception as error:  # noqa: BLE001
             self._status.connected = False
             self._status.last_error = f"{type(error).__name__}: {error}"
-            self.close()
+            self._close()
             raise
 
-    def close(self) -> None:
+    def _close(self) -> None:
         serial_obj = self._serial
         self._serial = None
         self._status.connected = False
         self._status.armed = False
         self._live_session_active = False
+        close_error: Exception | None = None
         if serial_obj is not None:
             try:
                 serial_obj.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as error:  # noqa: BLE001
+                close_error = error
+                self._status.last_error = (
+                    f"serial_close_failed: {type(error).__name__}: {error}"
+                )
         if self._serial_lock is not None:
-            self._serial_lock.release()
-            self._status.serial_lock = self._serial_lock.to_dict()
-            self._serial_lock = None
+            serial_lock = self._serial_lock
+            try:
+                serial_lock.release()
+                self._status.serial_lock = serial_lock.to_dict()
+            except Exception as error:  # noqa: BLE001
+                if close_error is None:
+                    close_error = error
+                self._status.last_error = (
+                    f"serial_lock_release_failed: {type(error).__name__}: {error}"
+                )
+            finally:
+                self._serial_lock = None
+        if close_error is not None:
+            raise ArduinoHIDError("Arduino serial transport close failed") from close_error
 
     def _reset_serial_buffers(self) -> None:
         if self._serial is None:
@@ -675,14 +702,96 @@ class ArduinoHIDBackend:
         self._status.command_trace.append(dict(trace))
         if len(self._status.command_trace) > 32:
             self._status.command_trace = self._status.command_trace[-32:]
+        command_id = trace.get("commandId")
+        if (
+            self._command_ledger_active
+            and isinstance(command_id, int)
+            and not isinstance(command_id, bool)
+        ):
+            if command_id not in self._command_ledger_records:
+                self._command_ledger_order.append(command_id)
+            self._command_ledger_records[command_id] = dict(trace)
+
+    def _begin_command_ledger(self) -> None:
+        """Begin one coordinator-owned wire-command ledger."""
+
+        if self._command_ledger_active:
+            raise ArduinoHIDError("Arduino command ledger is already active")
+        self._command_ledger_active = True
+        self._command_ledger_order = []
+        self._command_ledger_records = {}
+
+    def _command_evidence(self) -> dict[str, Any]:
+        """Return a redacted, non-truncating snapshot of the active ledger."""
+
+        records: list[dict[str, Any]] = []
+        for command_id in self._command_ledger_order:
+            raw = self._command_ledger_records[command_id]
+            status = str(raw.get("status") or "PENDING")
+            command_name = str(raw.get("commandName") or "UNKNOWN")
+            response_token = raw.get("responseToken")
+            payload_token = raw.get("payloadToken")
+            ack_received = bool(
+                status
+                in {
+                    "PASS",
+                    "REJECTED",
+                    "REJECTED_RETRYABLE",
+                    "UNEXPECTED_RESPONSE",
+                }
+                or raw.get("ackLine")
+            )
+            record: dict[str, Any] = {
+                "schema": "arduino_command_evidence.v1",
+                "commandId": f"cmd-{command_id:08d}",
+                "sequence": command_id,
+                "command": command_name,
+                "status": status,
+                "writeOk": status not in {"PENDING", "WRITE_FAIL"},
+                "ackReceived": ack_received,
+                "accepted": status == "PASS",
+                "firmwareAck": {
+                    "responseToken": response_token,
+                    "payloadToken": payload_token,
+                }
+                if ack_received
+                else None,
+                "error": (
+                    "ARM command failed"
+                    if command_name == "ARM" and raw.get("error")
+                    else raw.get("error")
+                ),
+                "timeoutClassification": raw.get("timeoutClassification"),
+                "retryCount": int(raw.get("retryCount") or 0),
+            }
+            records.append(record)
+        unresolved = sum(
+            1 for record in records if record["status"] not in _COMMAND_TERMINAL_STATUSES
+        )
+        failed = sum(1 for record in records if record["status"] != "PASS")
+        ack_missing = sum(1 for record in records if not record["ackReceived"])
+        return {
+            "schema": "arduino_command_ledger.v1",
+            "records": records,
+            "unresolvedCount": unresolved,
+            "failedCount": failed,
+            "ackMissingCount": ack_missing,
+        }
+
+    def _end_command_ledger(self) -> dict[str, Any]:
+        evidence = self._command_evidence()
+        self._command_ledger_active = False
+        return evidence
 
     def _write_line(self, command: str) -> dict[str, Any]:
         if self._serial is None:
             raise ArduinoHIDError("Arduino serial connection is not open")
         encoded = (command.strip() + "\n").encode("utf-8")
         name = _command_name(command)
+        self._command_sequence += 1
         trace: dict[str, Any] = {
             "schema": "arduino_serial_command_trace.v1",
+            "commandId": self._command_sequence,
             "serialOwner": self.serial_owner,
             "port": self.port,
             "baud": self.baud,
@@ -768,19 +877,23 @@ class ArduinoHIDBackend:
         expected_token: str | None = None,
         recover_watchdog_disarm: bool = False,
     ) -> str:
-        self.connect() if self._serial is None else None
+        if self._serial is None:
+            raise ArduinoHIDError(
+                "Arduino serial connection is not open; the input coordinator must connect explicitly"
+            )
         name = _command_name(command)
-        can_recover_watchdog_disarm = bool(recover_watchdog_disarm and self.armed and name in ARM_REQUIRED_COMMANDS)
+        can_recover_watchdog_disarm = bool(recover_watchdog_disarm and self._armed and name in ARM_REQUIRED_COMMANDS)
         write_trace = self._write_line(command)
         expected = expected_token or _expected_response_token(command)
         last_line = ""
         for _attempt in range(6):
             try:
                 line = self._read_line()
-            except Exception:
+            except Exception as error:
                 failed = dict(self._status.last_command_trace or write_trace)
                 failed["status"] = "ACK_TIMEOUT_OR_READ_FAIL"
                 failed["timeoutClassification"] = _command_timeout_classification(name, phase="read")
+                failed["error"] = f"{type(error).__name__}: {error}"
                 self._append_command_trace(failed)
                 if str(command).strip().split(" ", 1)[0].upper() != "STOP_ALL":
                     self._best_effort_stop_all()
@@ -789,19 +902,36 @@ class ArduinoHIDBackend:
             token = _line_token(line)
             payload_token = _line_payload_token(line)
             if token == "ERR":
+                rejected = dict(self._status.last_command_trace or write_trace)
+                rejected["status"] = (
+                    "REJECTED_RETRYABLE"
+                    if can_recover_watchdog_disarm and _not_armed_error(line)
+                    else "REJECTED"
+                )
+                rejected["responseToken"] = token
+                rejected["payloadToken"] = payload_token
+                rejected["error"] = "firmware rejected command"
+                self._append_command_trace(rejected)
                 if can_recover_watchdog_disarm and _not_armed_error(line):
-                    self._status.last_error = line
-                    self.arm(self.session_token)
+                    self._status.last_error = f"ERR {payload_token}"
+                    self._arm(self.session_token)
                     self._status.watchdog_rearms += 1
                     self._status.session_rearms += 1
                     return self._send(command, require_ack=require_ack, expected_token=expected, recover_watchdog_disarm=False)
                 self._status.ack_failures += 1
-                self._status.last_error = line
+                self._status.last_error = f"ERR {payload_token}"
                 self._status.armed = False
                 if name != "STOP_ALL":
                     self._best_effort_stop_all()
-                raise ArduinoHIDError(f"Arduino rejected command {command!r}: {line}")
+                raise ArduinoHIDError(
+                    f"Arduino rejected {name} (response={token}, payload={payload_token})"
+                )
             if not require_ack:
+                success = dict(self._status.last_command_trace or write_trace)
+                success["status"] = "PASS"
+                success["responseToken"] = token
+                success["payloadToken"] = payload_token
+                self._append_command_trace(success)
                 self._status.last_error = None
                 return line
             if token in ACK_TOKENS and (expected is None or payload_token == expected):
@@ -815,11 +945,24 @@ class ArduinoHIDBackend:
             if token == "OK" and payload_token in {"BOOT", "WATCHDOG_STOP"}:
                 continue
         self._status.ack_failures += 1
-        self._status.last_error = f"unexpected response: {last_line}"
+        unexpected_token = _line_token(last_line)
+        unexpected_payload = _line_payload_token(last_line)
+        self._status.last_error = (
+            f"unexpected response token={unexpected_token} payload={unexpected_payload}"
+        )
         self._status.armed = False
+        unexpected = dict(self._status.last_command_trace or write_trace)
+        unexpected["status"] = "UNEXPECTED_RESPONSE"
+        unexpected["responseToken"] = unexpected_token
+        unexpected["payloadToken"] = unexpected_payload
+        unexpected["error"] = "unexpected firmware response"
+        self._append_command_trace(unexpected)
         if name != "STOP_ALL":
             self._best_effort_stop_all()
-        raise ArduinoHIDError(f"Arduino command {command!r} returned unexpected response: {last_line}")
+        raise ArduinoHIDError(
+            f"Arduino {name} returned an unexpected response "
+            f"(response={unexpected_token}, payload={unexpected_payload})"
+        )
 
     def _send_armed(self, command: str, *, require_ack: bool = True, expected_token: str | None = None) -> str:
         self._require_armed()
@@ -830,10 +973,14 @@ class ArduinoHIDBackend:
             recover_watchdog_disarm=True,
         )
 
-    def diagnostic_move_relative(self, dx: int, dy: int) -> dict[str, Any]:
+    def _move_relative(self, dx: int, dy: int) -> dict[str, Any]:
         self._require_armed()
         dx_i = int(dx)
         dy_i = int(dy)
+        if dx_i == 0 and dy_i == 0:
+            raise ArduinoHIDError("relative movement must change at least one axis")
+        if abs(dx_i) > 20 or abs(dy_i) > 20:
+            raise ArduinoHIDError("relative movement exceeds the firmware 20px axis limit")
         command = f"MOVE {dx_i} {dy_i}"
         ack = self._send_armed(command, require_ack=True, expected_token="MOVE")
         return {
@@ -845,22 +992,22 @@ class ArduinoHIDBackend:
             "ackOk": True,
         }
 
-    def ping(self) -> str:
+    def _ping(self) -> str:
         return self._send("PING", require_ack=True, expected_token="PONG")
 
-    def identify(self) -> dict[str, Any]:
+    def _identify(self) -> dict[str, Any]:
         line = self._send("IDENTIFY", require_ack=True, expected_token="IDENTIFY")
         self._status.identity = _fields_from_line(line)
         self._status.identified = True
         self._status.protocol = str(self._status.identity.get("protocol") or "") or None
         return dict(self._status.identity)
 
-    def capabilities(self) -> dict[str, Any]:
+    def _capabilities(self) -> dict[str, Any]:
         line = self._send("CAPS", require_ack=True, expected_token="CAPS")
         self._status.capabilities = _fields_from_line(line)
         return dict(self._status.capabilities)
 
-    def firmware_status(self) -> dict[str, Any]:
+    def _firmware_status(self) -> dict[str, Any]:
         line = self._send("STATUS", require_ack=True, expected_token="STATUS")
         status = _fields_from_line(line)
         for field in ("keysDown", "mouseButtonsDown", "lastCommandAgeMs", "watchdogMs"):
@@ -875,7 +1022,7 @@ class ArduinoHIDBackend:
             self._status.armed = armed
         return dict(self._status.firmware_status)
 
-    def port_health(self) -> dict[str, Any]:
+    def _port_health(self) -> dict[str, Any]:
         started = time.monotonic()
         payload: dict[str, Any] = {
             "schema": "arduino_port_health.v1",
@@ -897,12 +1044,12 @@ class ArduinoHIDBackend:
         }
         trace_start = len(self._status.command_trace)
         try:
-            self.connect()
+            self._connect()
             payload["lock"] = dict(self._status.serial_lock)
-            payload["ping"] = self.ping()
-            payload["identify"] = self.identify()
-            payload["caps"] = self.capabilities()
-            payload["status"] = self.firmware_status()
+            payload["ping"] = self._ping()
+            payload["identify"] = self._identify()
+            payload["caps"] = self._capabilities()
+            payload["status"] = self._firmware_status()
         except Exception as error:  # noqa: BLE001
             payload["portHealth"] = "FAIL"
             payload["warnings"].append(f"{type(error).__name__}: {error}")
@@ -914,10 +1061,10 @@ class ArduinoHIDBackend:
             payload["writeLatencyMs"] = max(write_latencies) if write_latencies else None
             payload["ackLatencyMs"] = max(ack_latencies) if ack_latencies else None
             payload["durationMs"] = int(round((time.monotonic() - started) * 1000))
-            payload["backendStatus"] = self.status()
+            payload["backendStatus"] = self._status_snapshot()
         return payload
 
-    def stop_all(self) -> dict[str, Any]:
+    def _stop_all(self) -> dict[str, Any]:
         try:
             self._send("STOP_ALL", require_ack=True, expected_token="STOP_ALL")
             self._status.stop_all_sent = True
@@ -927,7 +1074,7 @@ class ArduinoHIDBackend:
             self._status.last_error = f"{type(error).__name__}: {error}"
             self._status.armed = False
             raise
-        return self.status()
+        return self._status_snapshot()
 
     def _verify_protocol(self) -> None:
         protocol = str(self._status.identity.get("protocol") or "")
@@ -953,19 +1100,19 @@ class ArduinoHIDBackend:
             except (TypeError, ValueError):
                 raise ArduinoHIDError(f"Arduino firmware reported invalid watchdogMs={watchdog!r}") from None
 
-    def arm(self, session_token: str | None = None) -> dict[str, Any]:
+    def _arm(self, session_token: str | None = None) -> dict[str, Any]:
         token = session_token or self.session_token
         self.session_token = token
         self._status.session_token_hash = _token_hash(token)
         try:
-            self.stop_all()
+            self._stop_all()
         except Exception:
             if self.fail_closed:
                 raise
-        self.ping()
-        self.identify()
-        self.capabilities()
-        firmware_status = self.firmware_status()
+        self._ping()
+        self._identify()
+        self._capabilities()
+        firmware_status = self._firmware_status()
         if firmware_status.get("armed"):
             raise ArduinoHIDError("Arduino firmware was armed before ARM; refusing live session")
         if int(firmware_status.get("keysDown") or 0) != 0 or int(firmware_status.get("mouseButtonsDown") or 0) != 0:
@@ -974,43 +1121,43 @@ class ArduinoHIDBackend:
         self._send(f"ARM {token}", require_ack=True)
         self._status.armed = True
         self._live_session_active = True
-        return self.status()
+        return self._status_snapshot()
 
-    def disarm(self) -> dict[str, Any]:
+    def _disarm(self) -> dict[str, Any]:
         if self._serial is not None:
             try:
                 self._send("DISARM", require_ack=True)
             except Exception as error:  # noqa: BLE001
                 self._status.last_error = f"{type(error).__name__}: {error}"
                 try:
-                    self.stop_all()
+                    self._stop_all()
                 except Exception:
                     pass
                 self._live_session_active = False
                 raise ArduinoHIDError("Arduino DISARM was not acknowledged") from error
         self._status.armed = False
         self._live_session_active = False
-        return self.status()
+        return self._status_snapshot()
 
     def _require_armed(self) -> None:
-        if self.fail_closed and not self.armed:
+        if self.fail_closed and not self._armed:
             raise ArduinoHIDError("Arduino HID backend is not armed")
 
-    def ensure_armed(self) -> bool:
-        if self.armed:
+    def _ensure_armed(self) -> bool:
+        if self._armed:
             return True
         if not self._live_session_active:
             return False
-        self.arm(self.session_token)
+        self._arm(self.session_token)
         self._status.session_rearms += 1
-        return bool(self.armed)
+        return bool(self._armed)
 
-    def current_position(self) -> tuple[int, int]:
+    def _current_position(self) -> tuple[int, int]:
         position = _cursor_position()
         self._tracked_position = position
         return position
 
-    def configure_movement_safety(
+    def _legacy_configure_movement_safety(
         self,
         *,
         allowed_region: dict[str, Any] | None = None,
@@ -1047,28 +1194,28 @@ class ArduinoHIDBackend:
         }
         return dict(self._movement_safety)
 
-    def movement_safety(self) -> dict[str, Any] | None:
+    def _legacy_movement_safety(self) -> dict[str, Any] | None:
         if not isinstance(self._movement_safety, dict):
             return None
         return dict(self._movement_safety)
 
-    def clear_movement_safety(self) -> None:
+    def _legacy_clear_movement_safety(self) -> None:
         self._movement_safety = None
 
     def _abort_movement(self, reason: str, trace: dict[str, Any]) -> None:
         try:
-            self.stop_all()
+            self._stop_all()
         except Exception as error:  # noqa: BLE001
             trace.setdefault("cleanupWarnings", []).append(f"stop_all failed: {type(error).__name__}: {error}")
         try:
-            self.disarm()
+            self._disarm()
             trace["disarmedOnAbort"] = True
         except Exception as error:  # noqa: BLE001
             trace.setdefault("cleanupWarnings", []).append(f"disarm failed: {type(error).__name__}: {error}")
         self.last_movement_trace = trace
         _movement_abort_trace(reason, trace)
 
-    def move_to_absolute(
+    def _legacy_move_to_absolute(
         self,
         target_screen_point: dict[str, Any] | tuple[int, int],
         *,
@@ -1139,7 +1286,7 @@ class ArduinoHIDBackend:
             self._abort_movement("target_outside_allowed_region", trace)
         if not trace["foregroundWindowAllowed"]:
             self._abort_movement("foreground_window_not_allowed", trace)
-        current = self.current_position()
+        current = self._current_position()
         trace["cursorPositionBefore"] = {"x": current[0], "y": current[1]}
         trace["cursorInsideAllowedRegion"] = _point_in_region(current, region, margin=0)
         trace["cursorNearAllowedRegion"] = _point_near_region(
@@ -1212,7 +1359,7 @@ class ArduinoHIDBackend:
                 if poll_index > 0:
                     self.sleep_func(poll_ms / 1000.0)
                 elapsed_ms = ack_elapsed_ms + (poll_index * poll_ms)
-                position = self.current_position()
+                position = self._current_position()
                 current_monitor = monitor_status()
                 delta = input_integrity_delta(before_monitor, current_monitor) if before_monitor is not None or current_monitor is not None else {}
                 cursor_dx, cursor_dy = _cursor_delta_tuple(before_position, position)
@@ -1380,7 +1527,7 @@ class ArduinoHIDBackend:
                     self._abort_movement("move_chunk_no_effect_abort", trace)
             if not accepted:
                 self._abort_movement("move_chunk_no_effect_abort", trace)
-        final = self.current_position()
+        final = self._current_position()
         trace["cursorPositionAfter"] = {"x": final[0], "y": final[1]}
         trace["foregroundWindowAfter"] = _foreground_window_info()
         trace["positionErrorPx"] = max(abs(int(final[0]) - int(target["x"])), abs(int(final[1]) - int(target["y"])))
@@ -1426,7 +1573,7 @@ class ArduinoHIDBackend:
         target_x = int(x)
         target_y = int(y)
         for _attempt in range(ENDPOINT_CORRECTION_ATTEMPTS):
-            actual_x, actual_y = self.current_position()
+            actual_x, actual_y = self._current_position()
             dx = target_x - int(actual_x)
             dy = target_y - int(actual_y)
             if max(abs(dx), abs(dy)) <= ENDPOINT_CORRECTION_TOLERANCE_PX:
@@ -1434,21 +1581,21 @@ class ArduinoHIDBackend:
                 return
             self._move_relative_chunked(dx, dy, duration_ms=0)
             self.sleep_func(0.01)
-        self._tracked_position = self.current_position()
+        self._tracked_position = self._current_position()
 
-    def move_relative(self, dx: int, dy: int, *, duration_ms: int = 0) -> None:
+    def _legacy_move_relative(self, dx: int, dy: int, *, duration_ms: int = 0) -> None:
         self._move_relative_chunked(int(dx), int(dy), duration_ms=duration_ms)
         if self._tracked_position is not None:
             self._tracked_position = (self._tracked_position[0] + int(dx), self._tracked_position[1] + int(dy))
 
     def _move_to(self, x: int, y: int, *, duration_ms: int = 0) -> None:
-        current = self.current_position()
+        current = self._current_position()
         dx = int(x) - int(current[0])
         dy = int(y) - int(current[1])
         self._move_relative_chunked(dx, dy, duration_ms=duration_ms)
         self._correct_to_endpoint(int(x), int(y))
 
-    def move(self, plan: Any) -> None:
+    def _legacy_move(self, plan: Any) -> None:
         self._require_armed()
         safety = self._movement_safety if isinstance(self._movement_safety, dict) and self._movement_safety.get("enabled") else None
         if safety:
@@ -1457,7 +1604,7 @@ class ArduinoHIDBackend:
             target_point = click_point if click_point is not None else (points[-1] if points else None)
             if target_point is None:
                 return
-            self.move_to_absolute(
+            self._legacy_move_to_absolute(
                 {"x": int(target_point.x), "y": int(target_point.y)},
                 allowed_region=safety.get("allowedRegion"),
                 allowed_foreground_titles=safety.get("allowedForegroundTitles"),
@@ -1480,26 +1627,26 @@ class ArduinoHIDBackend:
             target_y = int(point.y)
             timestamp = int(getattr(point, "timestamp_ms", 0) or 0)
             duration = max(0, timestamp - last_time)
-            current = self.current_position()
+            current = self._current_position()
             self._move_relative_chunked(target_x - current[0], target_y - current[1], duration_ms=duration)
-            current = self.current_position()
+            current = self._current_position()
             self._tracked_position = current
             last_time = timestamp
         click_point = getattr(plan, "click_point", None)
         if click_point is not None:
             self._correct_to_endpoint(int(click_point.x), int(click_point.y))
 
-    def mouse_down(self, *, button: str = "left") -> None:
+    def _mouse_down(self, *, button: str = "left") -> None:
         self._send_armed(f"MOUSE_DOWN {button}", require_ack=True)
 
-    def mouse_up(self, *, button: str = "left") -> None:
+    def _mouse_up(self, *, button: str = "left") -> None:
         self._send_armed(f"MOUSE_UP {button}", require_ack=True)
 
-    def click_at(self, x: int, y: int, *, button: str = "left", hold_ms: int = 0) -> None:
+    def _legacy_click_at(self, x: int, y: int, *, button: str = "left", hold_ms: int = 0) -> None:
         self._require_armed()
         safety = self._movement_safety if isinstance(self._movement_safety, dict) and self._movement_safety.get("enabled") else None
         if safety:
-            self.move_to_absolute(
+            self._legacy_move_to_absolute(
                 {"x": int(x), "y": int(y)},
                 allowed_region=safety.get("allowedRegion"),
                 allowed_foreground_titles=safety.get("allowedForegroundTitles"),
@@ -1519,20 +1666,20 @@ class ArduinoHIDBackend:
             self._move_to(int(x), int(y), duration_ms=0)
         self._send_armed(f"CLICK {button} {max(0, int(hold_ms or 0))}", require_ack=True)
 
-    def move_and_click(self, plan: Any, *, button: str = "left") -> None:
-        self.move(plan)
-        self.click_at(int(plan.click_point.x), int(plan.click_point.y), button=button)
+    def _legacy_move_and_click(self, plan: Any, *, button: str = "left") -> None:
+        self._legacy_move(plan)
+        self._legacy_click_at(int(plan.click_point.x), int(plan.click_point.y), button=button)
 
-    def key_down(self, key: str) -> None:
+    def _legacy_key_down(self, key: str) -> None:
         self._send_armed(f"KEY_DOWN {key}", require_ack=True)
 
-    def key_up(self, key: str) -> None:
+    def _legacy_key_up(self, key: str) -> None:
         self._send_armed(f"KEY_UP {key}", require_ack=True)
 
-    def press(self, key: str) -> None:
+    def _press(self, key: str) -> None:
         self._send_armed(f"KEY_PRESS {key} 50", require_ack=True)
 
-    def assert_foreground(
+    def _assert_foreground(
         self,
         allowed_titles: list[str] | tuple[str, ...],
         *,

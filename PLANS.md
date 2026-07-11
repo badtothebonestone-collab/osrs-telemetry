@@ -48,6 +48,10 @@ runtime logic.
   separate bounded runtime configuration owns machine/session limits. The
   definition supplies facts to the explicit FSM and never interprets its
   transitions.
+- **D011 — Input ownership and proof:** gameplay and login retain different
+  fresh validators but submit typed intents to one `InputCoordinator`. The
+  Arduino transport is private; a receipt is successful only with ordered
+  activation/ACK evidence and final `STOP_ALL -> DISARM -> STATUS` proof.
 
 ## Phases and acceptance
 
@@ -57,9 +61,9 @@ runtime logic.
 | 1. Governing contract | Complete (`f4c091e`) | Product vision, architecture, rules, status, and this plan describe the OSRS-specific engine and prohibited expansion. |
 | 2. Coherent sensor truth | Complete (`b645d83`) | Atomic tick `SensorFrame`; source-based freshness; mixed/stale/missing/menu/schema tests; bounded live observe. |
 | 3. Minimal task seam | Complete (`56b8b8b`) | Runtime has no concrete woodcut imports/phase checks; typed outcomes; fake task runs unchanged runtime/safety/verifier. |
-| 4. One task/site definition | Complete | One immutable Lumbridge definition and one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
-| 5. Arduino boundary | Next | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
-| 6. EngineFrame + overlay | Pending | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
+| 4. One task/site definition | Complete (`0c8ec9e`) | One immutable Lumbridge definition and one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
+| 5. Arduino boundary | Complete | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
+| 6. EngineFrame + overlay | Next | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Pending | Read-only record/inspect commands produce hashed JSONL, manifest, timeline, screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Pending | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
 | Final regression | Pending | Full suites/replay pass; bounded fresh live observation and safe default-cycle evidence; cleanup and audits confirmed. |
@@ -167,6 +171,28 @@ runtime logic.
   all 169 Python tests passed, a forced fresh 71-test Java suite passed, and
   `git diff --check` passed.
 
+## Phase 5 completed work
+
+- Added one non-reentrant `InputCoordinator` transaction for gameplay and
+  saved-session login. No production module other than the coordinator imports
+  the private Arduino transport or calls its raw operations.
+- Replaced the gameplay session owner with `CoordinatedActionInterface` and
+  migrated prompt clicks plus bank-close/dialogue Escape to typed coordinator
+  intents while preserving fresh exact hover/menu/widget validation.
+- Added a pure deterministic relative pointer policy with exact arrival,
+  target-aware braking, bounded velocity/acceleration, verified-canvas
+  containment, bounded feedback correction, and no randomization.
+- Added a non-truncating redacted Arduino command ledger and immutable input
+  receipts. Success requires ordered activation evidence followed by
+  acknowledged `STOP_ALL`, `DISARM`, and wire `STATUS` proving disarmed with
+  zero held keys/buttons and no unresolved or failed command evidence.
+- Added recursive import/call/software-fallback boundary tests and full failure
+  tests for ACKs, cleanup, unsafe status, ledger closure, context cancellation,
+  pointer divergence, login, and runtime receipt propagation.
+- Added `docs/INPUT_COORDINATOR.md`. Final gate: golden replay 2 passed, all 220
+  Python tests passed, a forced fresh 71-test Java suite passed, and
+  `git diff --check` passed.
+
 ## Prohibited during this mission
 
 - A second gameplay task or site, multiple woodcut areas, a generic navigation
@@ -188,8 +214,9 @@ runtime logic.
 - Each new source tick forces a world-model refresh behind a 250 ms provider
   wait. Static review did not prove a failure, but final loaded-scene evidence
   must measure refresh/query timing and repeated provenance/timeout warnings.
-- Arduino callers and final firmware status proof are not yet centralized;
-  Phase 5 owns that migration.
+- Phase 5 hardware behavior is exhaustively fake-transport tested; the final
+  bounded live regression must still capture a real successful receipt and
+  authoritative safe firmware STATUS after input.
 - There is intentionally no external/profile file loader or second definition;
   the one validated in-code default is the only supported choice.
 - No EngineFrame, overlay, demonstration recorder, or frontend facade exists.

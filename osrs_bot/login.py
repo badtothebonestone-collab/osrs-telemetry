@@ -5,13 +5,20 @@ import ctypes
 import json
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from PIL import Image, ImageGrab, ImageStat
 
-from .arduino import ArduinoHIDBackend
+from .input_coordinator import (
+    ApprovedPointerIntent,
+    InputCoordinator,
+    InputPurpose,
+    InputReceipt,
+    InputValidation,
+    MouseButton,
+)
 from .model import Observation, ScreenBounds, ScreenPoint
 from .observation import ObservationClient
 
@@ -64,8 +71,21 @@ class LoginClick:
     point: ScreenPoint
     source_game_state: str
     source_tick: int
-    stop_all_confirmed: bool
-    disarm_confirmed: bool
+    receipt: InputReceipt
+
+    @property
+    def sent(self) -> bool:
+        return self.receipt.successful
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "point": {"x": self.point.x, "y": self.point.y},
+            "sourceGameState": self.source_game_state,
+            "sourceTick": self.source_tick,
+            "sent": self.sent,
+            "receipt": self.receipt.to_dict(),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,15 +101,13 @@ class LoginResult:
         return self.status == "PASS" and self.loaded_scene
 
     def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
-        value["loadedScene"] = value.pop("loaded_scene")
-        value["elapsedSeconds"] = round(value.pop("elapsed_seconds"), 3)
-        for click in value["clicks"]:
-            click["sourceGameState"] = click.pop("source_game_state")
-            click["sourceTick"] = click.pop("source_tick")
-            click["stopAllConfirmed"] = click.pop("stop_all_confirmed")
-            click["disarmConfirmed"] = click.pop("disarm_confirmed")
-        return value
+        return {
+            "status": self.status,
+            "reason": self.reason,
+            "loadedScene": self.loaded_scene,
+            "elapsedSeconds": round(self.elapsed_seconds, 3),
+            "clicks": [click.to_dict() for click in self.clicks],
+        }
 
 
 def _bright(pixel: tuple[int, int, int]) -> bool:
@@ -400,9 +418,8 @@ class LoginPromptHelper:
     def __init__(
         self,
         observation_source: _ObservationSource,
+        coordinator: InputCoordinator,
         *,
-        arduino_port: str,
-        backend_factory: Callable[[], Any] | None = None,
         window_finder: Callable[[int], RuneLiteWindow] = find_runelite_window,
         focus_window: Callable[[RuneLiteWindow], bool] = focus_exact_window,
         point_owner: Callable[[RuneLiteWindow, ScreenPoint], bool] = point_belongs_to_window,
@@ -413,12 +430,10 @@ class LoginPromptHelper:
         poll_seconds: float = 1.0,
         transition_seconds: float = TRANSITION_SECONDS,
     ) -> None:
-        if not arduino_port:
-            raise ValueError("arduino_port is required")
+        if not isinstance(coordinator, InputCoordinator):
+            raise TypeError("coordinator must be InputCoordinator")
         self._observations = observation_source
-        self._backend_factory = backend_factory or (
-            lambda: ArduinoHIDBackend(port=arduino_port, serial_owner="osrs-login-helper")
-        )
+        self._coordinator = coordinator
         self._window_finder = window_finder
         self._focus_window = focus_window
         self._point_owner = point_owner
@@ -499,11 +514,26 @@ class LoginPromptHelper:
             candidate = self._to_screen_candidate(local, window.client_bounds)
             if not self._safe_candidate(window, candidate):
                 return self._result("BLOCKED", "candidate_outside_exact_runelite_client", False, started, clicks)
-            click, error = self._click(window, candidate, observation)
-            if click is not None:
-                clicks.append(click)
-            if error:
-                return self._result("ERROR", error, False, started, clicks)
+            try:
+                click, receipt = self._click(window, candidate, observation)
+            except (LoginSafetyError, TypeError, ValueError) as error:
+                return self._result(
+                    "BLOCKED",
+                    f"login_click_intent_invalid: {type(error).__name__}: {error}",
+                    False,
+                    started,
+                    clicks,
+                )
+            clicks.append(click)
+            if not receipt.successful:
+                result_status = "BLOCKED" if receipt.status == "BLOCKED" else "ERROR"
+                return self._result(
+                    result_status,
+                    f"login_click_{receipt.status.lower()}: {receipt.reason}",
+                    False,
+                    started,
+                    clicks,
+                )
 
             transitioned, latest = self._wait_for_transition(
                 observation, local.name, window, min(deadline, self._monotonic() + self._transition_seconds)
@@ -548,87 +578,73 @@ class LoginPromptHelper:
         window: RuneLiteWindow,
         candidate: LoginCandidate,
         observation: Observation,
-    ) -> tuple[LoginClick | None, str | None]:
-        backend = self._backend_factory()
-        connected = False
-        stop_all_confirmed = False
-        disarm_confirmed = False
-        sent = False
-        error: str | None = None
-        try:
-            backend.connect()
-            connected = True
-            bounds = window.client_bounds
-            region = {"x": bounds.x, "y": bounds.y, "width": bounds.width, "height": bounds.height}
-            start_x, start_y = backend.current_position()
-            transit_region = self._transit_region(bounds, ScreenPoint(start_x, start_y))
-            backend.configure_movement_safety(
-                allowed_region=transit_region,
-                allowed_foreground_titles=["RuneLite"],
-                enabled=True,
-                margin_px=0,
+    ) -> tuple[LoginClick, InputReceipt]:
+        canvas = observation.canvas_bounds
+        if canvas is None:
+            raise LoginSafetyError("verified RuneLite canvas bounds are unavailable")
+        if observation.client_process_id != window.pid:
+            raise LoginSafetyError("RuneLite window PID does not match telemetry")
+        match = candidate.match_bounds
+        match_corners = (
+            ScreenPoint(match.x, match.y),
+            ScreenPoint(match.x + match.width - 1, match.y + match.height - 1),
+        )
+        if not canvas.contains(candidate.point) or not all(
+            canvas.contains(point) for point in match_corners
+        ):
+            raise LoginSafetyError(
+                "recognized prompt is outside the verified RuneLite canvas"
             )
-            backend.arm()
-            backend.assert_foreground(["RuneLite"], expected_pid=window.pid)
-            backend.move_to_absolute(
-                {"x": candidate.point.x, "y": candidate.point.y},
-                allowed_region=transit_region,
-                allowed_foreground_titles=["RuneLite"],
-                margin_px=0,
-            )
-            # The cross-monitor transit never clicks. Once inside RuneLite,
-            # restore the strict client-only constraint before revalidation.
-            backend.configure_movement_safety(
-                allowed_region=region,
-                allowed_foreground_titles=["RuneLite"],
-                enabled=True,
-                margin_px=CLIENT_MARGIN_PX,
-            )
-            post_move = self._detector(self._screenshot(window.client_bounds))
+
+        intent = ApprovedPointerIntent(
+            intent_id=f"login:{candidate.name}:{observation.tick}",
+            purpose=InputPurpose.LOGIN_PROMPT,
+            target=candidate.point,
+            movement_bounds=canvas,
+            target_bounds=candidate.match_bounds,
+            expected_pid=window.pid,
+            button=MouseButton.LEFT,
+        )
+
+        def validate(approved: ApprovedPointerIntent) -> InputValidation:
+            if approved != intent:
+                return InputValidation.deny("login intent identity changed")
+            try:
+                post_move = self._detector(self._screenshot(window.client_bounds))
+            except Exception as error:  # noqa: BLE001 - fail closed in receipt
+                return InputValidation.deny(
+                    f"login prompt revalidation failed: {type(error).__name__}"
+                )
             if len(post_move) != 1:
-                raise LoginSafetyError("recognized prompt disappeared or became ambiguous after pointer movement")
-            refreshed = self._to_screen_candidate(post_move[0], window.client_bounds)
-            if not self._same_candidate(candidate, refreshed) or not self._safe_candidate(window, refreshed):
-                raise LoginSafetyError("recognized prompt changed after pointer movement")
-            backend.assert_foreground(["RuneLite"], expected_pid=window.pid)
-            if not self._point_owner(window, candidate.point):
-                raise LoginSafetyError("click point no longer belongs to the exact RuneLite window")
-            backend.mouse_down(button="left")
-            self._sleep(0.06)
-            backend.mouse_up(button="left")
-            sent = True
-        except Exception as exc:
-            error = f"login_click_failed: {type(exc).__name__}: {exc}"
-        finally:
-            if connected:
-                try:
-                    backend.stop_all()
-                    stop_all_confirmed = True
-                except Exception:
-                    stop_all_confirmed = False
-                try:
-                    backend.disarm()
-                    disarm_confirmed = True
-                except Exception:
-                    disarm_confirmed = False
-                try:
-                    backend.close()
-                except Exception:
-                    pass
-        click = None
-        if sent:
-            click = LoginClick(
-                candidate.name,
-                candidate.point,
-                observation.game_state,
-                observation.tick,
-                stop_all_confirmed,
-                disarm_confirmed,
+                return InputValidation.deny(
+                    "recognized prompt disappeared or became ambiguous after pointer movement"
+                )
+            refreshed = self._to_screen_candidate(
+                post_move[0], window.client_bounds
             )
-        if connected and (not stop_all_confirmed or not disarm_confirmed):
-            prior = f"; prior={error}" if error else ""
-            error = f"login_click_cleanup_not_confirmed{prior}"
-        return click, error
+            if (
+                not self._same_candidate(candidate, refreshed)
+                or not self._safe_candidate(window, refreshed)
+                or not refreshed.match_bounds.contains(intent.target)
+            ):
+                return InputValidation.deny(
+                    "recognized prompt changed after pointer movement"
+                )
+            if not self._point_owner(window, intent.target):
+                return InputValidation.deny(
+                    "click point no longer belongs to the exact RuneLite window"
+                )
+            return InputValidation.allow("login prompt identity revalidated")
+
+        receipt = self._coordinator.execute_pointer(intent, validate=validate)
+        click = LoginClick(
+            candidate.name,
+            candidate.point,
+            observation.game_state,
+            observation.tick,
+            receipt,
+        )
+        return click, receipt
 
     @staticmethod
     def _to_screen_candidate(candidate: LoginCandidate, bounds: ScreenBounds) -> LoginCandidate:
@@ -681,14 +697,6 @@ class LoginPromptHelper:
             <= 6
         )
 
-    @staticmethod
-    def _transit_region(bounds: ScreenBounds, start: ScreenPoint) -> dict[str, int]:
-        left = min(bounds.x, start.x)
-        top = min(bounds.y, start.y)
-        right = max(bounds.x + bounds.width, start.x + 1)
-        bottom = max(bounds.y + bounds.height, start.y + 1)
-        return {"x": left, "y": top, "width": right - left, "height": bottom - top}
-
     def _result(
         self,
         status: str,
@@ -715,7 +723,11 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     client = ObservationClient(args.endpoint, auth_token=args.auth_token, timeout_seconds=3.0)
-    helper = LoginPromptHelper(client, arduino_port=args.arduino_port)
+    coordinator = InputCoordinator.for_arduino_port(
+        args.arduino_port,
+        serial_owner="osrs-login-helper",
+    )
+    helper = LoginPromptHelper(client, coordinator)
     result = helper.run(max_clicks=args.max_clicks, timeout_seconds=args.timeout_seconds)
     print(json.dumps(result.to_dict(), indent=2))
     return 0 if result.successful else 2

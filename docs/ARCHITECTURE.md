@@ -35,7 +35,7 @@ task FSM, one safety gate, one Arduino session owner, one typed verification
 path, and one read-only diagnostic truth. Diagnostics have no control authority.
 
 The architecture is being migrated in bounded checkpoints. The current column
-describes the Phase 4 implementation; the target column names only contracts
+describes the Phase 5 implementation; the target column names only contracts
 still owned by later phases.
 
 | Layer | Current baseline | Governing target |
@@ -47,7 +47,7 @@ still owned by later phases.
 | Decision | opaque `Decision.state` + `Action` + `VerificationSpec` + typed task constraints | stable task-neutral intent contracts consumed by diagnostics/frontends |
 | Safety | one `SafetyGate`, explicitly split between engine invariants and typed task constraints | preserve the same non-overridable boundary |
 | Runtime configuration | immutable endpoint/Arduino/poll/bound values with engine caps | same contract consumed by the future facade |
-| Input | `ArduinoActionInterface` and login helper own sessions | one `InputCoordinator`, separate pointer policy, internal transport methods |
+| Input | one `InputCoordinator`, deterministic pointer policy, private Arduino transport, immutable wire receipts | preserve the sole-owner boundary for every future caller |
 | Verification | one `Verifier` returning immutable typed `Outcome` values | preserve the same typed pathway |
 | Diagnostics | CLI result dictionaries and traces | one immutable `EngineFrame` |
 | Frontend | `run.cmd` | thin application facade and future GUI consuming the same contracts |
@@ -175,21 +175,29 @@ state/plane/readability, exact dialogue choice, and permitted inventory. These
 constraints can only narrow an action. Bank plane and staircase wording are not
 shared safety constants.
 
-`ArduinoActionInterface` then:
+`CoordinatedActionInterface` and the saved-session login helper submit typed
+approved intents to the sole `InputCoordinator`. The coordinator then:
 
-1. connects and arms the Arduino;
-2. constrains movement to the observed RuneLite canvas;
-3. moves to the exact observed screen point;
-4. fetches a fresh observation;
+1. opens one private Arduino transport, command ledger, and armed transaction;
+2. constrains deterministic relative movement to the observed RuneLite canvas;
+3. moves to the exact observed screen point with bounded velocity,
+   acceleration, braking, and feedback corrections;
+4. asks the caller's lane-specific validator for fresh evidence;
 5. requires a newer menu sample whose top/default entry, scene parameters, and
    pointer position match the intended target;
 6. when the exact action is a unique lower context entry, opens the menu,
    derives that row from RuneLite menu geometry, moves to it, revalidates the
    fresh open-menu sample and pointer, and clicks it once;
-7. otherwise clicks the exact default entry once; and
-8. runs `STOP_ALL`, `DISARM`, and close in a `finally` block.
+7. otherwise clicks the exact default entry or submits the one approved key;
+8. records each command and firmware acknowledgement without truncation; and
+9. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
+   wire `STATUS` proving disarmed with zero held inputs before closing.
 
-There is no software-input fallback.
+The immutable `InputReceipt` is successful only when the activation and final
+cleanup sequence are present in order, every command is terminal and
+acknowledged, no ledger entry is unresolved, the final firmware state is safe,
+and both ledger and transport close. The raw transport methods are private and
+only the coordinator imports them. There is no software-input fallback.
 
 ### Saved-session login assistance
 
@@ -197,8 +205,9 @@ There is no software-input fallback.
 planner or recovery framework. It recognizes only the retained Play Now and
 Click here to play visual templates plus the narrowly bounded historical
 idle-disconnect OK geometry, binds the exact telemetry process and RuneLite
-client window, revalidates the prompt after moving the Arduino mouse, and
-verifies a telemetry transition afterward. It never types text. Continue,
+client window, submits the prompt through `InputCoordinator`, revalidates it
+after moving the Arduino mouse, and verifies a telemetry transition afterward.
+It never types text. Continue,
 credential, MFA, unknown, and ambiguous surfaces fail closed.
 
 ### Verification and runtime
@@ -223,7 +232,7 @@ exact Escape close intent and only when RuneLite explicitly reports keyboard
 close support. The normal post-action bank-closed verification still applies.
 
 `python -m osrs_bot task` stops at the first proposal. `--execute` is the only
-task mode that constructs an Arduino backend. The runtime stops on completion,
+task mode that constructs an `InputCoordinator`. The runtime stops on completion,
 block, transport failure, verification failure, or a configured bound.
 
 ### Golden replay

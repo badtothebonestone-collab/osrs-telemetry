@@ -2,9 +2,9 @@
 
 ## Current milestone
 
-**Phase 4 complete — one validated definition/profile binding established.**
+**Phase 5 complete — one Arduino input owner and proof boundary established.**
 
-Current checkpoint subject: `engine: bind one validated Lumbridge task definition`
+Current checkpoint subject: `input: centralize Arduino ownership and proof`
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -50,6 +50,19 @@ Regression command:
 - Live component traces physically reached all of those milestones on
   2026-07-10 and ended at `COMPLETE` with acknowledged `STOP_ALL`/`DISARM`.
 - All live gameplay input remains Arduino-only; no software fallback exists.
+- Gameplay and saved-session login now submit immutable approved intents to one
+  `InputCoordinator`; neither can open an Arduino session or call raw input.
+- `CoordinatedActionInterface` preserves exact post-move hover/menu/widget
+  checks, context-row revalidation, and the verified bank-close Escape path.
+- The deterministic pointer policy produces only bounded relative motion inside
+  the verified canvas, with velocity/acceleration caps and target-aware braking.
+- Every connected transaction records a non-truncated command/ACK ledger and
+  attempts `STOP_ALL`, `DISARM`, and wire `STATUS`. Success requires the final
+  firmware report to prove disarmed with zero held keys/buttons and no missing,
+  failed, or unresolved command evidence.
+- The Arduino transport and raw operations are private. Recursive static
+  boundary tests reject another production importer/caller and reject software
+  input modules.
 
 ## Governing direction
 
@@ -60,9 +73,8 @@ Regression command:
 - Profiles and definitions can never weaken engine invariants.
 - RuneLite API facts remain authoritative. Vision may supplement or veto but
   cannot replace semantic API truth. No model dependency is active.
-- One future `InputCoordinator` owns every Arduino session; one future
-  `EngineFrame` owns diagnostic truth. Neither is falsely claimed as implemented
-  yet.
+- One implemented `InputCoordinator` owns every Arduino session. A future
+  `EngineFrame` still owns the next diagnostic-truth milestone.
 - A future LLM may read offline evidence but has no runtime control authority.
 - Static definitions, active FSM state, run history, and demonstration evidence
   remain separate; unsafe ephemeral state is never restored after restart.
@@ -89,6 +101,8 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
   Java suite 39 passed across 6 suites with zero failures/errors/skips.
 - Phase 4 gate: golden replay 2 passed; 169 Python tests passed; forced fresh
   Java suite 71 passed across 8 suites with zero failures/errors/skips.
+- Phase 5 gate: golden replay 2 passed; 220 Python tests passed; forced fresh
+  Java suite 71 passed across 8 suites with zero failures/errors/skips.
 - The bounded Phase 2 live observation served response v2/frame v1 at the
   RuneLite login screen. Only baseline was available; inventory, activity,
   bank UI, and dialogue were explicitly unavailable. `observe` returned
@@ -104,8 +118,9 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
   live evidence rather than inferred from the login-screen check.
 - There is intentionally no external profile loader, second definition, or
   generic navigation/transition framework.
-- Arduino ownership and authoritative final firmware `STATUS` are not yet one
-  enforced boundary. **Phase 5 is next** and owns that hardening.
-- Sensor, task, definition, profile, and runtime-configuration contracts are
-  implemented; input, diagnostics, recorder, and facade migrations remain
-  phase-scoped.
+- The sole input boundary is implemented and fake-transport tested. The final
+  bounded live regression must still retain a real successful receipt and safe
+  firmware STATUS proof after live input.
+- Sensor, task, definition, profile, runtime-configuration, and input contracts
+  are implemented. **Phase 6 is next**; diagnostics, recorder, and facade work
+  remain phase-scoped.

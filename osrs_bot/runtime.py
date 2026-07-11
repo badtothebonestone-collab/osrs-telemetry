@@ -4,8 +4,9 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from .action import ArduinoActionInterface, ExecutionResult
+from .action import CoordinatedActionInterface, ExecutionResult
 from .configuration import DEFAULT_RUNTIME_CONFIG, RuntimeConfig
+from .input_coordinator import InputCoordinator
 from .model import Action, ActionKind, Observation
 from .observation import ObservationClient
 from .task_contract import Decision, Task, TaskSnapshot, TaskStatus
@@ -81,6 +82,12 @@ class RuntimeResult:
                 "postMoveTick": self.execution.post_move_tick,
                 "stopAllConfirmed": self.execution.stop_all_confirmed,
                 "disarmConfirmed": self.execution.disarm_confirmed,
+                "cleanupConfirmed": self.execution.cleanup_confirmed,
+                "receipt": (
+                    self.execution.receipt.to_dict()
+                    if self.execution.receipt is not None
+                    else None
+                ),
             }
         return payload
 
@@ -490,15 +497,17 @@ def build_live_runtime(
     *,
     configuration: RuntimeConfig,
 ) -> TaskRuntime:
-    from .arduino import ArduinoHIDBackend
     from .safety import SafetyGate
 
     configuration.validated_for_mode(execute=True)
     assert configuration.arduino_port is not None
     safety = SafetyGate()
-    backend = ArduinoHIDBackend(port=configuration.arduino_port, fail_closed=True)
+    coordinator = InputCoordinator.for_arduino_port(
+        configuration.arduino_port,
+        serial_owner="osrs-gameplay-runtime",
+    )
     observe = lambda: client.fetch(task.observation_request().tile_projections)
-    action_interface = ArduinoActionInterface(backend, safety, observe)
+    action_interface = CoordinatedActionInterface(coordinator, safety, observe)
     return TaskRuntime(
         client,
         task,

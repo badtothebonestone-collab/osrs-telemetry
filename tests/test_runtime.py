@@ -8,6 +8,11 @@ from pathlib import Path
 
 from osrs_bot.action import ExecutionResult
 from osrs_bot.configuration import DEFAULT_RUNTIME_CONFIG
+from osrs_bot.input_coordinator import (
+    CommandEvidence,
+    FirmwareSafetyStatus,
+    InputReceipt,
+)
 from osrs_bot.model import (
     Action,
     ActionKind,
@@ -39,6 +44,74 @@ from osrs_bot.verification import (
     VerificationStatus,
     Verifier,
 )
+
+
+def _command(sequence: int, name: str) -> CommandEvidence:
+    return CommandEvidence(
+        command_id=f"cmd-{sequence:08d}",
+        sequence=sequence,
+        command=name,
+        status="PASS",
+        write_ok=True,
+        ack_received=True,
+        accepted=True,
+        response_token="OK",
+        payload_token=name,
+    )
+
+
+def _successful_receipt() -> InputReceipt:
+    commands = tuple(
+        _command(sequence, name)
+        for sequence, name in enumerate(
+            ("ARM", "MOUSE_DOWN", "MOUSE_UP", "STOP_ALL", "DISARM", "STATUS"),
+            start=1,
+        )
+    )
+    return InputReceipt(
+        transaction_id="input-00000001",
+        mode="pointer",
+        intent_ids=("runtime-test",),
+        status="PASS",
+        reason="input_transaction_succeeded",
+        connected=True,
+        arm_acknowledged=True,
+        stop_all_acknowledged=True,
+        disarm_acknowledged=True,
+        firmware_status_acknowledged=True,
+        firmware_status=FirmwareSafetyStatus(False, 0, 0),
+        commands=commands,
+        unresolved_command_count=0,
+        failed_command_count=0,
+        ack_missing_count=0,
+        ledger_complete=True,
+        ledger_closed=True,
+        backend_closed=True,
+    )
+
+
+def _sent_execution(
+    action: Action,
+    pre_tick: int,
+    post_tick: int | None = None,
+) -> ExecutionResult:
+    return ExecutionResult(
+        action=action,
+        pre_move_tick=pre_tick,
+        local_status="ERROR",
+        local_reason="coordinator_receipt_unavailable",
+        post_move_tick=post_tick,
+        receipt=_successful_receipt(),
+    )
+
+
+def _blocked_execution(action: Action, tick: int, reason: str) -> ExecutionResult:
+    return ExecutionResult(
+        action=action,
+        pre_move_tick=tick,
+        local_status="BLOCKED",
+        local_reason=reason,
+    )
 
 
 def _observation(tick: int) -> Observation:
@@ -275,7 +348,7 @@ class _SafetyCheckedTransportStub:
         self.calls += 1
         pre = self.gate.validate_pre_move(action, observation)
         if not pre.allowed:
-            return ExecutionResult("BLOCKED", pre.reason, action, observation.tick)
+            return _blocked_execution(action, observation.tick, pre.reason)
         post_tick = observation.tick + 1
         post = replace(
             observation,
@@ -289,16 +362,8 @@ class _SafetyCheckedTransportStub:
         )
         after_move = self.gate.validate_post_move(action, post)
         if not after_move.allowed:
-            return ExecutionResult("BLOCKED", after_move.reason, action, observation.tick)
-        return ExecutionResult(
-            "SENT",
-            "safety_checked_transport_stub",
-            action,
-            observation.tick,
-            post_tick,
-            stop_all_confirmed=True,
-            disarm_confirmed=True,
-        )
+            return _blocked_execution(action, observation.tick, after_move.reason)
+        return _sent_execution(action, observation.tick, post_tick)
 
 
 class _IncrementingClient:
@@ -376,15 +441,7 @@ class _PendingThenPassVerifier:
 
 class _AlwaysSentInterface:
     def execute(self, action: Action, observation: Observation) -> ExecutionResult:
-        return ExecutionResult(
-            "SENT",
-            "action_sent",
-            action,
-            observation.tick,
-            observation.tick + 1,
-            stop_all_confirmed=True,
-            disarm_confirmed=True,
-        )
+        return _sent_execution(action, observation.tick, observation.tick + 1)
 
 
 def _wait(tick: int, state: str = "waiting") -> Decision:
@@ -476,9 +533,7 @@ class TaskRuntimeTests(unittest.TestCase):
     def test_failed_execution_applies_one_typed_failure(self) -> None:
         decision, _ = _executable(10)
         task = _Task([decision])
-        execution = ExecutionResult(
-            "BLOCKED", "hover_menu_mismatch", decision.action, 10
-        )
+        execution = _blocked_execution(decision.action, 10, "hover_menu_mismatch")
         interface = _ActionInterface(execution)
         runtime = TaskRuntime(
             _Client(_observation(10)),
@@ -527,7 +582,7 @@ class TaskRuntimeTests(unittest.TestCase):
         )
         task = _Task([decision])
         interface = _ActionInterface(
-            ExecutionResult("SENT", "should_not_run", decision.action, 10)
+            _sent_execution(decision.action, 10)
         )
         runtime = TaskRuntime(
             _Client(_observation(10)),
@@ -549,7 +604,7 @@ class TaskRuntimeTests(unittest.TestCase):
     def test_live_mode_waits_for_focus_before_mutating_the_task(self) -> None:
         decision, _ = _executable(11)
         task = _Task([decision])
-        execution = ExecutionResult("BLOCKED", "test stop", decision.action, 11)
+        execution = _blocked_execution(decision.action, 11, "test stop")
         runtime = TaskRuntime(
             _Client(
                 replace(_observation(10), client_focused=False),
@@ -571,15 +626,7 @@ class TaskRuntimeTests(unittest.TestCase):
         decision, _ = _executable(10)
         complete = _wait(12, "complete")
         task = _Task([decision, complete])
-        execution = ExecutionResult(
-            "SENT",
-            "action_sent",
-            decision.action,
-            10,
-            11,
-            stop_all_confirmed=True,
-            disarm_confirmed=True,
-        )
+        execution = _sent_execution(decision.action, 10, 11)
         passed = VerificationResult(
             VerificationStatus.PASS,
             "log_gained",
@@ -604,9 +651,7 @@ class TaskRuntimeTests(unittest.TestCase):
     def test_failed_verification_is_applied_once_and_blocks(self) -> None:
         decision, _ = _executable(10)
         task = _Task([decision])
-        execution = ExecutionResult(
-            "SENT", "action_sent", decision.action, 10, 11
-        )
+        execution = _sent_execution(decision.action, 10, 11)
         failed = VerificationResult(VerificationStatus.FAIL, "deadline_exceeded")
         runtime = TaskRuntime(
             _Client(_observation(10), _observation(11)),

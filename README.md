@@ -13,7 +13,7 @@ RuneLite plugin -> atomic SensorFrame -> snapshot v2 -> Observation
                -> validated default Profile + Lumbridge definition
                -> Task protocol -> explicit WoodcutBankTask FSM
                -> Action + typed constraints -> SafetyGate
-               -> ArduinoActionInterface -> Verifier -> typed Outcome
+               -> InputCoordinator -> Arduino -> Verifier -> typed Outcome
 ```
 
 There is one command surface: `run.cmd`.
@@ -104,8 +104,10 @@ does not pretend that the ignored live traces contain full raw observations.
 - `osrs_bot/task.py`: the only supported explicit task state machine.
 - `osrs_bot/safety.py`: non-overridable engine invariants followed by typed
   task-constraint validation.
-- `osrs_bot/action.py`: the only gameplay input pathway; saved-session login is
-  the other current Arduino session owner until Phase 5 centralizes both.
+- `osrs_bot/action.py`: gameplay validation and typed intent construction.
+- `osrs_bot/input_coordinator.py`: sole Arduino session owner and immutable
+  command/ACK/cleanup receipts for gameplay and login.
+- `osrs_bot/pointer.py`: pure deterministic bounded relative-motion policy.
 - `osrs_bot/verification.py`: the only post-action verifier and typed outcomes.
 - `osrs_bot/runtime.py`: task-agnostic bounded orchestration.
 - `osrs_bot/login.py`: bounded saved-session prompt assistance, outside the task engine.
@@ -118,6 +120,7 @@ does not pretend that the ignored live traces contain full raw observations.
 - `docs/SENSOR_CONTRACT.md`: atomic frame, freshness, geometry, and menu provenance.
 - `docs/TASK_CONTRACT.md`: minimal task seam, typed outcomes, and safety ownership.
 - `docs/DEFINITIONS_AND_PROFILES.md`: definition/profile/configuration ownership.
+- `docs/INPUT_COORDINATOR.md`: sole input owner, pointer, receipt, and cleanup contract.
 - `docs/ENGINE_STATUS.md`: completed milestone, evidence boundary, and blockers.
 - `PLANS.md`: active phases, acceptance criteria, and decision log.
 - `docs/RESCUE_AUDIT.md`: archaeology findings and removal rationale.

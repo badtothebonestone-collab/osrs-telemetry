@@ -12,6 +12,7 @@ Read in this order:
 6. `docs/SENSOR_CONTRACT.md`
 7. `docs/TASK_CONTRACT.md`
 8. `docs/DEFINITIONS_AND_PROFILES.md`
+9. `docs/INPUT_COORDINATOR.md`
 
 `docs/RESCUE_CONTRACT.md` freezes the proven regression slice; it is no longer
 the active development phase.
@@ -64,7 +65,8 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
 - Require exact target identity, verified canvas geometry, exact post-move menu
   evidence, and a later typed verification for every action.
 - Every connected attempt must end with confirmed `STOP_ALL`, `DISARM`, and
-  authoritative safe firmware status.
+  authoritative wire `STATUS` proving disarmed, zero held keys, zero held mouse
+  buttons, and no unresolved command evidence.
 - Fail closed. Missing proof is not permission to add a fallback.
 - Dry-run, replay, overlay, diagnostics, and demonstration capture must not
   inject input or open hardware sessions.

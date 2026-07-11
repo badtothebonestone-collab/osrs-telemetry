@@ -2,11 +2,30 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
-from .arduino import ArduinoHIDBackend
-from .model import Action, ActionKind, MenuEntry, Observation, ScreenBounds, ScreenPoint
-from .safety import SafetyGate
+from .input_coordinator import (
+    ApprovedKeyIntent,
+    ApprovedPointerIntent,
+    InputCoordinator,
+    InputPurpose,
+    InputReceipt,
+    InputValidation,
+    MouseButton,
+    PointerActivationDecision,
+)
+from .model import (
+    Action,
+    ActionKind,
+    CLOSE_BANK_WIDGET_KEY,
+    DEPOSIT_INVENTORY_WIDGET_KEY,
+    MenuEntry,
+    Observation,
+    ScreenBounds,
+    ScreenPoint,
+    WidgetTarget,
+)
+from .safety import SafetyGate, SafetyResult
 
 
 class _ActionBlocked(RuntimeError):
@@ -15,31 +34,90 @@ class _ActionBlocked(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ExecutionResult:
-    status: str
-    reason: str
+    """Gameplay disposition plus the coordinator's immutable wire receipt."""
+
     action: Action
     pre_move_tick: int
+    local_status: str
+    local_reason: str
     post_move_tick: int | None = None
-    stop_all_confirmed: bool = False
-    disarm_confirmed: bool = False
-    backend_status: dict[str, Any] | None = None
+    receipt: InputReceipt | None = None
+
+    def __post_init__(self) -> None:
+        if self.local_status not in {"BLOCKED", "ERROR", "NO_ACTION"}:
+            raise ValueError("local_status must describe a non-coordinator result")
+        if not isinstance(self.local_reason, str) or not self.local_reason.strip():
+            raise ValueError("local_reason must be non-empty")
+        if self.receipt is not None and not isinstance(self.receipt, InputReceipt):
+            raise TypeError("receipt must be InputReceipt or None")
+
+    @property
+    def status(self) -> str:
+        receipt = self.receipt
+        if receipt is None:
+            return self.local_status
+        if receipt.status == "PASS" and receipt.successful:
+            return "SENT"
+        if receipt.status == "BLOCKED":
+            return "BLOCKED"
+        # An ERROR receipt, or an internally inconsistent PASS receipt, always
+        # overrides any successful action-layer validation.
+        return "ERROR"
+
+    @property
+    def reason(self) -> str:
+        receipt = self.receipt
+        if receipt is None:
+            return self.local_reason
+        if receipt.status == "PASS" and receipt.successful:
+            return "action_sent"
+        if receipt.status == "PASS":
+            return f"receipt_not_successful: {receipt.reason}"
+        return receipt.reason
 
     @property
     def sent(self) -> bool:
         return self.status == "SENT"
 
+    @property
+    def stop_all_confirmed(self) -> bool:
+        return bool(self.receipt and self.receipt.stop_all_acknowledged)
 
-class ArduinoActionInterface:
-    """The only live action path.
+    @property
+    def disarm_confirmed(self) -> bool:
+        return bool(self.receipt and self.receipt.disarm_acknowledged)
 
-    Every pointer action is checked, moved through the Arduino, checked again
-    against a fresh hover observation, and only then clicked. Cleanup runs for
-    every connected attempt, including blocked and failed attempts.
+    @property
+    def cleanup_confirmed(self) -> bool:
+        receipt = self.receipt
+        return bool(
+            receipt
+            and receipt.stop_all_acknowledged
+            and receipt.disarm_acknowledged
+            and receipt.firmware_status_acknowledged
+            and receipt.firmware_status is not None
+            and receipt.firmware_status.safe
+            and receipt.unresolved_command_count == 0
+            and receipt.failed_command_count == 0
+            and receipt.ack_missing_count == 0
+            and receipt.ledger_complete
+            and receipt.ledger_closed
+            and receipt.backend_closed
+            and all(command.successful for command in receipt.commands)
+        )
+
+
+class CoordinatedActionInterface:
+    """Submit gameplay intents through the sole automated-input owner.
+
+    SafetyGate approves immutable task evidence before submission. Pointer and
+    key callbacks then reobserve immediately before activation; this layer has
+    no transport, session, or raw input access of its own.
     """
 
     def __init__(
         self,
-        backend: ArduinoHIDBackend,
+        coordinator: InputCoordinator,
         safety: SafetyGate,
         observe: Callable[[], Observation],
         *,
@@ -47,7 +125,9 @@ class ArduinoActionInterface:
         evidence_attempts: int = 12,
         evidence_delay_seconds: float = 0.1,
     ) -> None:
-        self._backend = backend
+        if not callable(observe):
+            raise TypeError("observe must be callable")
+        self._coordinator = coordinator
         self._safety = safety
         self._observe = observe
         self._sleep = sleep
@@ -57,138 +137,236 @@ class ArduinoActionInterface:
     def execute(self, action: Action, observation: Observation) -> ExecutionResult:
         preflight = self._safety.validate_pre_move(action, observation)
         if not preflight.allowed:
-            return ExecutionResult(
-                status="BLOCKED",
-                reason=preflight.reason,
-                action=action,
-                pre_move_tick=observation.tick,
+            return self._local_result(
+                action,
+                observation,
+                "BLOCKED",
+                preflight.reason,
             )
 
-        if action.kind == ActionKind.WAIT:
-            return ExecutionResult(
-                status="NO_ACTION",
-                reason="wait_action",
-                action=action,
-                pre_move_tick=observation.tick,
+        if action.kind is ActionKind.WAIT:
+            return self._local_result(
+                action,
+                observation,
+                "NO_ACTION",
+                "wait_action",
             )
 
-        connected = False
-        post_move: Observation | None = None
-        status = "ERROR"
-        reason = "action_not_sent"
-        stop_all_confirmed = False
-        disarm_confirmed = False
-
+        last_observation: list[Observation | None] = [None]
         try:
-            self._backend.connect()
-            connected = True
-            if self._is_pointer_action(action):
-                canvas = self._required_canvas(observation)
-                region = self._region(canvas)
-                self._backend.configure_movement_safety(
-                    allowed_region=region,
-                    allowed_foreground_titles=["RuneLite"],
-                    enabled=True,
-                    margin_px=1,
-                )
-
-            self._backend.arm()
-
-            if self._is_pointer_action(action):
-                assert action.screen_point is not None
-                canvas = self._required_canvas(observation)
-                point = {"x": action.screen_point.x, "y": action.screen_point.y}
-                self._backend.move_to_absolute(
-                    point,
-                    allowed_region=self._region(canvas),
-                    allowed_foreground_titles=["RuneLite"],
-                    tolerance_px=1,
-                    margin_px=1,
-                )
-                post_move, hover_check, context_check = self._await_post_move(
+            if action.kind is ActionKind.INTERACT_OBJECT:
+                receipt = self._execute_adaptive_object(
                     action,
-                    {"menu_sample_not_newer", "hover_pointer_mismatch", "hover_menu_mismatch"},
+                    observation,
+                    last_observation,
                 )
-                if hover_check.allowed:
-                    self._backend.assert_foreground(
-                        ["RuneLite"], expected_pid=post_move.client_process_id
-                    )
-                    self._click("left")
-                elif context_check.allowed:
-                    post_move = self._select_context_entry(
-                        action, post_move, canvas
-                    )
-                else:
-                    raise _ActionBlocked(hover_check.reason)
-            elif action.kind == ActionKind.PRESS_KEY:
-                if not action.key:
-                    raise ValueError("press_key action has no key")
-                interface = action.task_constraints.interface
-                retry_reason = (
-                    "interface_sample_not_newer"
-                    if interface is not None and interface.require_keyboard_close
-                    else "dialogue_sample_not_newer"
+            elif action.kind in {ActionKind.WALK, ActionKind.CLICK_WIDGET}:
+                receipt = self._execute_direct_pointer(
+                    action,
+                    observation,
+                    last_observation,
                 )
-                post_move, key_check, _ = self._await_post_move(
-                    action, {retry_reason}
+            elif action.kind is ActionKind.PRESS_KEY:
+                receipt = self._execute_key(
+                    action,
+                    observation,
+                    last_observation,
                 )
-                if not key_check.allowed:
-                    raise _ActionBlocked(key_check.reason)
-                self._backend.assert_foreground(
-                    ["RuneLite"], expected_pid=post_move.client_process_id
-                )
-                self._backend.press(action.key)
             else:
                 raise ValueError(f"unsupported live action: {action.kind.value}")
-
-            status = "SENT"
-            reason = "action_sent"
-        except _ActionBlocked as error:
-            status = "BLOCKED"
-            reason = str(error)
-        except Exception as error:  # fail closed at the hardware boundary
-            status = "ERROR"
-            reason = f"{type(error).__name__}: {error}"
-        finally:
-            if connected:
-                try:
-                    self._backend.stop_all()
-                    stop_all_confirmed = True
-                except Exception:
-                    stop_all_confirmed = False
-                try:
-                    self._backend.disarm()
-                    disarm_confirmed = True
-                except Exception:
-                    disarm_confirmed = False
-                try:
-                    self._backend.close()
-                except Exception:
-                    pass
-
-        if connected and (not stop_all_confirmed or not disarm_confirmed):
-            prior = f"{status.lower()}: {reason}"
-            status = "ERROR"
-            reason = f"cleanup_not_confirmed ({prior})"
+            if not isinstance(receipt, InputReceipt):
+                raise TypeError("InputCoordinator returned no immutable InputReceipt")
+        except Exception as error:  # fail closed before or at the coordinator API
+            return ExecutionResult(
+                action=action,
+                pre_move_tick=observation.tick,
+                local_status="ERROR",
+                local_reason=f"{type(error).__name__}: {error}",
+                post_move_tick=(
+                    last_observation[0].tick
+                    if last_observation[0] is not None
+                    else None
+                ),
+            )
 
         return ExecutionResult(
-            status=status,
-            reason=reason,
             action=action,
             pre_move_tick=observation.tick,
-            post_move_tick=post_move.tick if post_move is not None else None,
-            stop_all_confirmed=stop_all_confirmed,
-            disarm_confirmed=disarm_confirmed,
-            backend_status=self._safe_status(),
+            local_status="ERROR",
+            local_reason="coordinator_receipt_unavailable",
+            post_move_tick=(
+                last_observation[0].tick
+                if last_observation[0] is not None
+                else None
+            ),
+            receipt=receipt,
+        )
+
+    def _execute_direct_pointer(
+        self,
+        action: Action,
+        observation: Observation,
+        last_observation: list[Observation | None],
+    ) -> InputReceipt:
+        intent = self._pointer_intent(action, observation)
+
+        def validate(_intent: ApprovedPointerIntent) -> InputValidation:
+            post, result, _ = self._await_post_move(
+                action,
+                {
+                    "menu_sample_not_newer",
+                    "hover_pointer_mismatch",
+                    "hover_menu_mismatch",
+                },
+            )
+            last_observation[0] = post
+            return self._input_validation(result)
+
+        return self._coordinator.execute_pointer(intent, validate=validate)
+
+    def _execute_adaptive_object(
+        self,
+        action: Action,
+        observation: Observation,
+        last_observation: list[Observation | None],
+    ) -> InputReceipt:
+        intent = self._pointer_intent(action, observation)
+        canvas = self._required_canvas(observation)
+        context_minimum_tick: list[int | None] = [None]
+        row_minimum_tick: list[int | None] = [None]
+
+        def decide_activation(
+            _intent: ApprovedPointerIntent,
+        ) -> PointerActivationDecision:
+            post, hover, context = self._await_post_move(
+                action,
+                {
+                    "menu_sample_not_newer",
+                    "hover_pointer_mismatch",
+                    "hover_menu_mismatch",
+                },
+            )
+            last_observation[0] = post
+            if hover.allowed:
+                return PointerActivationDecision.direct(hover.reason)
+            if context.allowed:
+                if post.menu_client_tick is None:
+                    return PointerActivationDecision.deny("menu_sample_missing")
+                context_minimum_tick[0] = post.menu_client_tick
+                return PointerActivationDecision.context(context.reason)
+            return PointerActivationDecision.deny(hover.reason)
+
+        def resolve_row() -> ApprovedPointerIntent:
+            minimum_tick = context_minimum_tick[0]
+            if minimum_tick is None:
+                raise _ActionBlocked("menu_sample_missing")
+            opened, result = self._await_context_menu(
+                action,
+                minimum_tick=minimum_tick,
+            )
+            last_observation[0] = opened
+            if not result.allowed:
+                raise _ActionBlocked(result.reason)
+            entry = self._exact_context_entry(action, opened)
+            if entry is None or entry.row_bounds is None:
+                raise _ActionBlocked("context_row_bounds_missing")
+            if opened.menu_client_tick is None:
+                raise _ActionBlocked("menu_sample_missing")
+            point = entry.row_bounds.center
+            if not canvas.contains(point):
+                raise _ActionBlocked("context_row_outside_canvas")
+            row_minimum_tick[0] = opened.menu_client_tick
+            return ApprovedPointerIntent(
+                intent_id=self._intent_id(action, "context-row"),
+                purpose=InputPurpose.CONTEXT_ROW,
+                target=point,
+                movement_bounds=canvas,
+                target_bounds=self._bounded_target_region(
+                    entry.row_bounds,
+                    point,
+                    canvas,
+                ),
+                expected_pid=self._required_pid(opened),
+                button=MouseButton.LEFT,
+            )
+
+        def validate_row(row_intent: ApprovedPointerIntent) -> InputValidation:
+            minimum_tick = row_minimum_tick[0]
+            if minimum_tick is None:
+                return InputValidation.deny("menu_sample_missing")
+            row_observation, result = self._await_context_menu(
+                action,
+                minimum_tick=minimum_tick,
+                row_point=row_intent.target,
+            )
+            last_observation[0] = row_observation
+            return self._input_validation(result)
+
+        return self._coordinator.execute_adaptive_pointer(
+            intent,
+            decide_activation=decide_activation,
+            resolve_row=resolve_row,
+            validate_row=validate_row,
+        )
+
+    def _execute_key(
+        self,
+        action: Action,
+        observation: Observation,
+        last_observation: list[Observation | None],
+    ) -> InputReceipt:
+        if not action.key:
+            raise ValueError("press_key action has no key")
+        intent = ApprovedKeyIntent(
+            intent_id=self._intent_id(action, "key"),
+            purpose=InputPurpose.GAMEPLAY_KEY,
+            key=action.key,
+            expected_pid=self._required_pid(observation),
+        )
+        interface = action.task_constraints.interface
+        retry_reason = (
+            "interface_sample_not_newer"
+            if interface is not None and interface.require_keyboard_close
+            else "dialogue_sample_not_newer"
+        )
+
+        def validate(_intent: ApprovedKeyIntent) -> InputValidation:
+            post, result, _ = self._await_post_move(action, {retry_reason})
+            last_observation[0] = post
+            return self._input_validation(result)
+
+        return self._coordinator.execute_key(intent, validate=validate)
+
+    def _pointer_intent(
+        self,
+        action: Action,
+        observation: Observation,
+    ) -> ApprovedPointerIntent:
+        if action.screen_point is None:
+            raise ValueError("pointer action has no verified screen point")
+        canvas = self._required_canvas(observation)
+        purpose = (
+            InputPurpose.GAMEPLAY_WIDGET
+            if action.kind is ActionKind.CLICK_WIDGET
+            else InputPurpose.GAMEPLAY_OBJECT
+        )
+        return ApprovedPointerIntent(
+            intent_id=self._intent_id(action, "target"),
+            purpose=purpose,
+            target=action.screen_point,
+            movement_bounds=canvas,
+            target_bounds=self._bounded_target_region(
+                self._target_bounds(action, observation),
+                action.screen_point,
+                canvas,
+            ),
+            expected_pid=self._required_pid(observation),
+            button=MouseButton.LEFT,
         )
 
     @staticmethod
-    def _is_pointer_action(action: Action) -> bool:
-        return action.kind in {
-            ActionKind.INTERACT_OBJECT,
-            ActionKind.WALK,
-            ActionKind.CLICK_WIDGET,
-        }
+    def _intent_id(action: Action, suffix: str) -> str:
+        return f"gameplay-{action.source_tick}-{action.kind.value}-{suffix}"
 
     @staticmethod
     def _required_canvas(observation: Observation) -> ScreenBounds:
@@ -197,21 +375,82 @@ class ArduinoActionInterface:
         return observation.canvas_bounds
 
     @staticmethod
-    def _region(bounds: ScreenBounds) -> dict[str, int]:
-        return {
-            "x": bounds.x,
-            "y": bounds.y,
-            "width": bounds.width,
-            "height": bounds.height,
+    def _required_pid(observation: Observation) -> int:
+        process_id = observation.client_process_id
+        if process_id is None or process_id <= 0:
+            raise ValueError("client process unavailable")
+        return process_id
+
+    @classmethod
+    def _target_bounds(
+        cls,
+        action: Action,
+        observation: Observation,
+    ) -> ScreenBounds | None:
+        if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
+            target = observation.object_by_key(action.target_key)
+            return target.geometry.screen_bounds if target is not None else None
+        if action.kind is ActionKind.CLICK_WIDGET:
+            widget = cls._selected_widget(action, observation)
+            return widget.screen_bounds if widget is not None else None
+        return None
+
+    @staticmethod
+    def _selected_widget(
+        action: Action,
+        observation: Observation,
+    ) -> WidgetTarget | None:
+        widgets = {
+            DEPOSIT_INVENTORY_WIDGET_KEY: observation.widgets.deposit_inventory,
+            CLOSE_BANK_WIDGET_KEY: observation.widgets.close_bank,
         }
-
-    def _safe_status(self) -> dict[str, Any] | None:
-        try:
-            return self._backend.status()
-        except Exception:
+        if action.target_key in widgets:
+            return widgets[action.target_key]
+        if action.target_key is not None:
             return None
+        matches = tuple(
+            widget
+            for widget in widgets.values()
+            if widget is not None and widget.name == action.target_name
+        )
+        return matches[0] if len(matches) == 1 else None
 
-    def _await_post_move(self, action: Action, retry_reasons: set[str]):
+    @staticmethod
+    def _bounded_target_region(
+        target_bounds: ScreenBounds | None,
+        point: ScreenPoint,
+        canvas: ScreenBounds,
+    ) -> ScreenBounds:
+        if target_bounds is None:
+            return ScreenBounds(point.x, point.y, 1, 1)
+        left = max(target_bounds.x, canvas.x)
+        top = max(target_bounds.y, canvas.y)
+        right = min(
+            target_bounds.x + target_bounds.width,
+            canvas.x + canvas.width,
+        )
+        bottom = min(
+            target_bounds.y + target_bounds.height,
+            canvas.y + canvas.height,
+        )
+        if right <= left or bottom <= top:
+            raise ValueError("verified target bounds do not intersect canvas")
+        bounded = ScreenBounds(left, top, right - left, bottom - top)
+        if not bounded.contains(point):
+            raise ValueError("verified target point is outside bounded target region")
+        return bounded
+
+    @staticmethod
+    def _input_validation(result: SafetyResult) -> InputValidation:
+        if result.allowed:
+            return InputValidation.allow(result.reason)
+        return InputValidation.deny(result.reason)
+
+    def _await_post_move(
+        self,
+        action: Action,
+        retry_reasons: set[str],
+    ) -> tuple[Observation, SafetyResult, SafetyResult]:
         observation = self._observe()
         result = self._safety.validate_post_move(action, observation)
         context = self._safety.validate_context_candidate(action, observation)
@@ -224,64 +463,13 @@ class ArduinoActionInterface:
             context = self._safety.validate_context_candidate(action, observation)
         return observation, result, context
 
-    def _select_context_entry(
-        self, action: Action, hover: Observation, canvas: ScreenBounds
-    ) -> Observation:
-        minimum_tick = hover.menu_client_tick
-        if minimum_tick is None:
-            raise _ActionBlocked("menu_sample_missing")
-        self._backend.assert_foreground(
-            ["RuneLite"], expected_pid=hover.client_process_id
-        )
-        self._click("right")
-        try:
-            opened, result = self._await_context_menu(
-                action, minimum_tick=minimum_tick
-            )
-            if not result.allowed:
-                raise _ActionBlocked(result.reason)
-            entry = self._exact_context_entry(action, opened)
-            if entry is None or entry.row_bounds is None:
-                raise _ActionBlocked("context_row_bounds_missing")
-            point = entry.row_bounds.center
-            self._backend.move_to_absolute(
-                {"x": point.x, "y": point.y},
-                allowed_region=self._region(canvas),
-                allowed_foreground_titles=["RuneLite"],
-                tolerance_px=1,
-                margin_px=1,
-            )
-            row_observation, row_result = self._await_context_menu(
-                action,
-                minimum_tick=opened.menu_client_tick,
-                row_point=point,
-            )
-            if not row_result.allowed:
-                raise _ActionBlocked(row_result.reason)
-            self._backend.assert_foreground(
-                ["RuneLite"], expected_pid=row_observation.client_process_id
-            )
-            self._click("left")
-            return row_observation
-        except Exception:
-            try:
-                self._backend.assert_foreground(
-                    ["RuneLite"], expected_pid=hover.client_process_id
-                )
-                self._backend.press("ESC")
-            except Exception:
-                pass
-            raise
-
     def _await_context_menu(
         self,
         action: Action,
         *,
-        minimum_tick: int | None,
+        minimum_tick: int,
         row_point: ScreenPoint | None = None,
-    ):
-        if minimum_tick is None:
-            raise _ActionBlocked("menu_sample_missing")
+    ) -> tuple[Observation, SafetyResult]:
         retry_reasons = {
             "menu_sample_not_newer",
             "context_menu_not_open",
@@ -307,17 +495,14 @@ class ArduinoActionInterface:
             )
         return observation, result
 
-    def _click(self, button: str) -> None:
-        self._backend.mouse_down(button=button)
-        self._sleep(0.06)
-        self._backend.mouse_up(button=button)
-
     @staticmethod
     def _exact_context_entry(
-        action: Action, observation: Observation
+        action: Action,
+        observation: Observation,
     ) -> MenuEntry | None:
         matches = [
-            entry for entry in observation.menus
+            entry
+            for entry in observation.menus
             if entry.option == action.option
             and entry.target == action.target_name
             and entry.identifier == action.target_id
@@ -325,3 +510,17 @@ class ArduinoActionInterface:
             and entry.param1 == action.target_param1
         ]
         return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _local_result(
+        action: Action,
+        observation: Observation,
+        status: str,
+        reason: str,
+    ) -> ExecutionResult:
+        return ExecutionResult(
+            action=action,
+            pre_move_tick=observation.tick,
+            local_status=status,
+            local_reason=reason,
+        )
