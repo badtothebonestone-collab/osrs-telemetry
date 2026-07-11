@@ -79,13 +79,23 @@ def _frame(*, observation_tick: int = 50):
 class _Native:
     def __init__(self) -> None:
         self.style = 0
+        self.root_hwnd = 456
+        self.resolved: list[int] = []
+        self.style_reads: list[int] = []
+        self.style_writes: list[int] = []
         self.positioned: list[tuple[int, ScreenBounds]] = []
         self.shown: list[tuple[int, int]] = []
 
-    def get_extended_style(self, _hwnd: int) -> int:
+    def get_root_window(self, hwnd: int) -> int:
+        self.resolved.append(hwnd)
+        return self.root_hwnd
+
+    def get_extended_style(self, hwnd: int) -> int:
+        self.style_reads.append(hwnd)
         return self.style
 
-    def set_extended_style(self, _hwnd: int, style: int) -> None:
+    def set_extended_style(self, hwnd: int, style: int) -> None:
+        self.style_writes.append(hwnd)
         self.style = style
 
     def position_topmost_no_activate(self, hwnd: int, bounds: ScreenBounds) -> None:
@@ -129,10 +139,28 @@ class DebugOverlayTests(unittest.TestCase):
         proof = configure_passive_window(123, bounds, native=native)
 
         self.assertTrue(proof.valid)
+        self.assertEqual(456, proof.hwnd)
+        self.assertEqual([123], native.resolved)
+        self.assertEqual([456, 456], native.style_reads)
+        self.assertEqual([456], native.style_writes)
         self.assertEqual(PASSIVE_EX_STYLE_MASK, native.style & PASSIVE_EX_STYLE_MASK)
         self.assertTrue(native.style & WS_EX_NOACTIVATE)
-        self.assertEqual([(123, bounds)], native.positioned)
-        self.assertEqual([(123, SW_SHOWNOACTIVATE)], native.shown)
+        self.assertEqual([(456, bounds)], native.positioned)
+        self.assertEqual([(456, SW_SHOWNOACTIVATE)], native.shown)
+
+    def test_missing_top_level_host_fails_before_styles_or_show(self) -> None:
+        native = _Native()
+        native.root_hwnd = 0
+
+        with self.assertRaisesRegex(RuntimeError, "top-level window"):
+            configure_passive_window(
+                123, ScreenBounds(10, 20, 300, 200), native=native
+            )
+
+        self.assertEqual([], native.positioned)
+        self.assertEqual([], native.shown)
+        self.assertEqual([], native.style_reads)
+        self.assertEqual([], native.style_writes)
 
     def test_runtime_render_failure_is_surfaced_during_cleanup(self) -> None:
         publisher = EngineFramePublisher()

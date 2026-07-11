@@ -31,6 +31,7 @@ SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
 HWND_TOPMOST = -1
+GA_ROOT = 2
 _DPI_AWARENESS_SET = False
 
 
@@ -160,11 +161,14 @@ def configure_passive_window(
     if not isinstance(bounds, ScreenBounds):
         raise TypeError("bounds must be ScreenBounds")
     adapter = native or _Win32Adapter()
-    current = int(adapter.get_extended_style(hwnd))
-    adapter.set_extended_style(hwnd, current | PASSIVE_EX_STYLE_MASK)
-    applied = int(adapter.get_extended_style(hwnd))
+    host_hwnd = int(adapter.get_root_window(hwnd))
+    if host_hwnd <= 0:
+        raise RuntimeError("passive overlay top-level window could not be resolved")
+    current = int(adapter.get_extended_style(host_hwnd))
+    adapter.set_extended_style(host_hwnd, current | PASSIVE_EX_STYLE_MASK)
+    applied = int(adapter.get_extended_style(host_hwnd))
     proof = PassiveWindowProof(
-        hwnd=hwnd,
+        hwnd=host_hwnd,
         extended_style=applied,
         click_through=bool(applied & WS_EX_TRANSPARENT),
         non_focusable=bool(applied & WS_EX_NOACTIVATE),
@@ -173,8 +177,8 @@ def configure_passive_window(
     )
     if not proof.valid:
         raise RuntimeError("passive overlay window styles could not be verified")
-    adapter.position_topmost_no_activate(hwnd, bounds)
-    adapter.show_no_activate(hwnd)
+    adapter.position_topmost_no_activate(host_hwnd, bounds)
+    adapter.show_no_activate(host_hwnd)
     return proof
 
 
@@ -209,6 +213,11 @@ class _Win32Adapter:
         self._user32.SetWindowPos.restype = wintypes.BOOL
         self._user32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
         self._user32.ShowWindow.restype = wintypes.BOOL
+        self._user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+        self._user32.GetAncestor.restype = wintypes.HWND
+
+    def get_root_window(self, hwnd: int) -> int:
+        return int(self._user32.GetAncestor(hwnd, GA_ROOT) or 0)
 
     def get_extended_style(self, hwnd: int) -> int:
         return int(self._get(hwnd, self.GWL_EXSTYLE))
