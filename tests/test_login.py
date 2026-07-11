@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image
 
+from osrs_bot import login as login_module
 from osrs_bot.input_coordinator import InputCoordinator
 from osrs_bot.login import (
     LoginCandidate,
@@ -23,6 +27,41 @@ from osrs_bot.model import (
     WidgetObservation,
     WorldPoint,
 )
+
+
+class FakeWinFunction:
+    def __init__(self, callback) -> None:
+        self.callback = callback
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args):
+        return self.callback(*args)
+
+
+class FakeDpiUser32:
+    def __init__(
+        self,
+        *,
+        per_monitor_v2: bool,
+        setter_result: bool = True,
+        per_monitor_v2_after_set: bool = True,
+    ) -> None:
+        self.per_monitor_v2 = per_monitor_v2
+        self.setter_result = setter_result
+        self.per_monitor_v2_after_set = per_monitor_v2_after_set
+        self.setter_calls = 0
+        self.GetThreadDpiAwarenessContext = FakeWinFunction(lambda: 1234)
+        self.AreDpiAwarenessContextsEqual = FakeWinFunction(
+            lambda _active, _expected: self.per_monitor_v2
+        )
+        self.SetProcessDpiAwarenessContext = FakeWinFunction(self._set_context)
+
+    def _set_context(self, _context) -> bool:
+        self.setter_calls += 1
+        if self.setter_result:
+            self.per_monitor_v2 = self.per_monitor_v2_after_set
+        return self.setter_result
 
 
 def observation(
@@ -312,6 +351,126 @@ class LoginDetectionTests(unittest.TestCase):
         self.assertEqual([candidate.name for candidate in candidates], ["play_now"])
 
 
+class DpiAwarenessTests(unittest.TestCase):
+    def setUp(self) -> None:
+        login_module._DPI_AWARENESS_SET = False
+
+    def tearDown(self) -> None:
+        login_module._DPI_AWARENESS_SET = False
+
+    def _enable_with(self, user32: object) -> None:
+        with (
+            patch.object(login_module.os, "name", "nt"),
+            patch.object(
+                login_module.ctypes,
+                "windll",
+                SimpleNamespace(user32=user32),
+            ),
+        ):
+            login_module._enable_windows_dpi_awareness()
+
+    def test_existing_per_monitor_v2_context_is_verified_without_resetting_it(self) -> None:
+        user32 = FakeDpiUser32(per_monitor_v2=True)
+
+        self._enable_with(user32)
+
+        self.assertTrue(login_module._DPI_AWARENESS_SET)
+        self.assertEqual(0, user32.setter_calls)
+
+    def test_successful_setter_is_followed_by_active_context_verification(self) -> None:
+        user32 = FakeDpiUser32(per_monitor_v2=False)
+
+        self._enable_with(user32)
+
+        self.assertTrue(login_module._DPI_AWARENESS_SET)
+        self.assertEqual(1, user32.setter_calls)
+
+    def test_cached_success_does_not_skip_current_thread_verification(self) -> None:
+        user32 = FakeDpiUser32(per_monitor_v2=True)
+        self._enable_with(user32)
+        user32.per_monitor_v2 = False
+        user32.setter_result = False
+
+        with self.assertRaisesRegex(
+            login_module.LoginSafetyError,
+            "per-monitor-v2 DPI awareness could not be established",
+        ):
+            self._enable_with(user32)
+
+        self.assertFalse(login_module._DPI_AWARENESS_SET)
+        self.assertEqual(1, user32.setter_calls)
+
+    def test_failed_or_ineffective_setter_fails_closed_and_remains_retryable(self) -> None:
+        user32 = FakeDpiUser32(per_monitor_v2=False, setter_result=False)
+
+        for expected_calls in (1, 2):
+            with self.assertRaisesRegex(
+                login_module.LoginSafetyError,
+                "per-monitor-v2 DPI awareness could not be established",
+            ):
+                self._enable_with(user32)
+            self.assertFalse(login_module._DPI_AWARENESS_SET)
+            self.assertEqual(expected_calls, user32.setter_calls)
+
+    def test_setter_success_without_active_per_monitor_v2_still_fails(self) -> None:
+        user32 = FakeDpiUser32(
+            per_monitor_v2=False,
+            setter_result=True,
+            per_monitor_v2_after_set=False,
+        )
+
+        with self.assertRaisesRegex(
+            login_module.LoginSafetyError,
+            "per-monitor-v2 DPI awareness could not be established",
+        ):
+            self._enable_with(user32)
+
+        self.assertFalse(login_module._DPI_AWARENESS_SET)
+        self.assertEqual(1, user32.setter_calls)
+
+    def test_missing_context_verification_api_fails_closed(self) -> None:
+        user32 = SimpleNamespace(
+            SetProcessDpiAwarenessContext=FakeWinFunction(lambda _context: True)
+        )
+
+        with self.assertRaisesRegex(
+            login_module.LoginSafetyError,
+            "per-monitor-v2 DPI awareness APIs are unavailable",
+        ):
+            self._enable_with(user32)
+        self.assertFalse(login_module._DPI_AWARENESS_SET)
+
+
+class ClientCaptureTests(unittest.TestCase):
+    def test_capture_reverifies_dpi_context_and_uses_exact_device_bounds(self) -> None:
+        image = Image.new("RGBA", (1000, 700), (20, 20, 20, 255))
+        with (
+            patch.object(login_module, "_enable_windows_dpi_awareness") as awareness,
+            patch.object(login_module.ImageGrab, "grab", return_value=image) as grab,
+        ):
+            captured = login_module.capture_client(WINDOW.client_bounds)
+
+        awareness.assert_called_once_with()
+        grab.assert_called_once_with(bbox=(100, 100, 1100, 800), all_screens=True)
+        self.assertEqual("RGB", captured.mode)
+        self.assertEqual((1000, 700), captured.size)
+
+    def test_capture_size_mismatch_fails_before_detection(self) -> None:
+        with (
+            patch.object(login_module, "_enable_windows_dpi_awareness"),
+            patch.object(
+                login_module.ImageGrab,
+                "grab",
+                return_value=Image.new("RGB", (999, 700)),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                login_module.LoginSafetyError,
+                "screenshot dimensions do not match exact Win32 bounds",
+            ):
+                login_module.capture_client(WINDOW.client_bounds)
+
+
 class LoginHelperTests(unittest.TestCase):
     def test_disconnect_then_two_prompt_path_is_bounded_and_verified(self) -> None:
         source = FakeObservations(
@@ -460,7 +619,7 @@ class LoginHelperTests(unittest.TestCase):
         self.assertEqual(result.reason, "candidate_outside_exact_runelite_client")
         self.assertEqual(backends, [])
 
-    def test_cursor_must_start_inside_the_verified_runelite_canvas(self) -> None:
+    def test_cursor_must_start_inside_the_exact_runelite_client(self) -> None:
         backends: list[FakeBackend] = []
         helper = build_helper(
             FakeObservations([observation("LOGIN_SCREEN", 1)]),
@@ -477,6 +636,28 @@ class LoginHelperTests(unittest.TestCase):
         self.assertIn("stop_all", backends[0].calls)
         self.assertIn("firmware_status", backends[0].calls)
         self.assertFalse(result.clicks[-1].sent)
+
+    def test_login_prompt_remains_safe_when_pregame_canvas_is_unavailable(self) -> None:
+        source = FakeObservations(
+            [
+                replace(observation("LOGIN_SCREEN", 1), canvas_bounds=None),
+                observation("LOGGING_IN", 2),
+                observation("LOGGED_IN", 3, loaded=True),
+                observation("LOGGED_IN", 4, loaded=True),
+                observation("LOGGED_IN", 5, loaded=True),
+            ]
+        )
+        detections = iter(((PLAY,), (PLAY,), (), ()))
+        backends: list[FakeBackend] = []
+        helper = build_helper(source, lambda image: next(detections), backends=backends)
+
+        result = helper.run(timeout_seconds=10)
+
+        self.assertTrue(result.successful)
+        self.assertEqual(["play_now"], [click.name for click in result.clicks])
+        self.assertTrue(result.clicks[0].receipt.successful)
+        self.assertIn("stop_all", backends[0].calls)
+        self.assertIn("disarm", backends[0].calls)
 
     def test_click_failure_still_stops_and_disarms(self) -> None:
         backends: list[FakeBackend] = []

@@ -135,6 +135,7 @@ public class TickSnapshot
         public Integer clientWindowHeight;
         public Double displayScaleX;
         public Double displayScaleY;
+        public String coordinateSpace;
         public Boolean isCanvasShowing;
         public Boolean isClientFocused;
         public Long clientProcessId;

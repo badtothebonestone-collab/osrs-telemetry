@@ -327,17 +327,51 @@ def _user32() -> Any:
 def _enable_windows_dpi_awareness() -> None:
     """Keep Win32 bounds, screenshots, and Arduino cursor coordinates aligned."""
     global _DPI_AWARENESS_SET
-    if _DPI_AWARENESS_SET or os.name != "nt":
+    if os.name != "nt":
         return
-    _DPI_AWARENESS_SET = True
     try:
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        context_getter = getattr(user32, "GetThreadDpiAwarenessContext", None)
+        contexts_equal = getattr(user32, "AreDpiAwarenessContextsEqual", None)
+        setter = getattr(user32, "SetProcessDpiAwarenessContext", None)
+        if not all(callable(function) for function in (context_getter, contexts_equal, setter)):
+            raise LoginSafetyError(
+                "Windows per-monitor-v2 DPI awareness APIs are unavailable"
+            )
+
+        context_getter.argtypes = ()
+        context_getter.restype = ctypes.c_void_p
+        contexts_equal.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+        contexts_equal.restype = ctypes.c_bool
+        setter.argtypes = (ctypes.c_void_p,)
+        setter.restype = ctypes.c_bool
+
         bits = ctypes.sizeof(ctypes.c_void_p) * 8
         per_monitor_v2 = ctypes.c_void_p((-4) & ((1 << bits) - 1))
-        setter = getattr(ctypes.windll.user32, "SetProcessDpiAwarenessContext", None)
-        if setter and setter(per_monitor_v2):
-            return
-        ctypes.windll.user32.SetProcessDPIAware()
+
+        def is_per_monitor_v2_aware() -> bool:
+            active_context = context_getter()
+            return bool(active_context) and bool(
+                contexts_equal(active_context, per_monitor_v2)
+            )
+
+        if not is_per_monitor_v2_aware():
+            # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 is a documented
+            # negative pseudo-handle whose pointer width must be preserved.
+            # A false setter result can also mean a manifest established the
+            # context first, so the verified active context is authoritative.
+            setter(per_monitor_v2)
+            if not is_per_monitor_v2_aware():
+                raise LoginSafetyError(
+                    "Windows per-monitor-v2 DPI awareness could not be established"
+                )
+
+        _DPI_AWARENESS_SET = True
+    except LoginSafetyError:
+        _DPI_AWARENESS_SET = False
+        raise
     except Exception as error:
+        _DPI_AWARENESS_SET = False
         raise LoginSafetyError(f"Windows DPI awareness could not be established: {error}") from error
 
 
@@ -408,10 +442,17 @@ def point_belongs_to_window(window: RuneLiteWindow, point: ScreenPoint) -> bool:
 
 
 def capture_client(bounds: ScreenBounds) -> Image.Image:
-    return ImageGrab.grab(
+    _enable_windows_dpi_awareness()
+    image = ImageGrab.grab(
         bbox=(bounds.x, bounds.y, bounds.x + bounds.width, bounds.y + bounds.height),
         all_screens=True,
-    ).convert("RGB")
+    )
+    expected_size = (bounds.width, bounds.height)
+    if image.size != expected_size:
+        raise LoginSafetyError(
+            "RuneLite client screenshot dimensions do not match exact Win32 bounds"
+        )
+    return image.convert("RGB")
 
 
 class LoginPromptHelper:
@@ -579,9 +620,6 @@ class LoginPromptHelper:
         candidate: LoginCandidate,
         observation: Observation,
     ) -> tuple[LoginClick, InputReceipt]:
-        canvas = observation.canvas_bounds
-        if canvas is None:
-            raise LoginSafetyError("verified RuneLite canvas bounds are unavailable")
         if observation.client_process_id != window.pid:
             raise LoginSafetyError("RuneLite window PID does not match telemetry")
         match = candidate.match_bounds
@@ -589,18 +627,18 @@ class LoginPromptHelper:
             ScreenPoint(match.x, match.y),
             ScreenPoint(match.x + match.width - 1, match.y + match.height - 1),
         )
-        if not canvas.contains(candidate.point) or not all(
-            canvas.contains(point) for point in match_corners
+        if not window.client_bounds.contains(candidate.point) or not all(
+            window.client_bounds.contains(point) for point in match_corners
         ):
             raise LoginSafetyError(
-                "recognized prompt is outside the verified RuneLite canvas"
+                "recognized prompt is outside the exact RuneLite client"
             )
 
         intent = ApprovedPointerIntent(
             intent_id=f"login:{candidate.name}:{observation.tick}",
             purpose=InputPurpose.LOGIN_PROMPT,
             target=candidate.point,
-            movement_bounds=canvas,
+            movement_bounds=window.client_bounds,
             target_bounds=candidate.match_bounds,
             expected_pid=window.pid,
             button=MouseButton.LEFT,

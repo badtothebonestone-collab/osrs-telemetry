@@ -4,7 +4,10 @@
 
 **Phase 8 complete — thin frontend contracts and cooperative lifecycle established.**
 
-Current checkpoint subject: `app: expose thin frontend contracts`
+Final regression is in progress. Offline device-pixel hardening gates pass;
+fresh loaded-scene proof remains.
+
+Current hardening checkpoint subject: `sensor: bind input geometry to device pixels`
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -28,6 +31,9 @@ Regression command:
 - The canonical request now consumes one neutral scene-object census. Exact
   selected-definition facts assign task meaning downstream; RuneLite candidate
   hints are not authorization.
+- Available input geometry is explicitly Win32 virtual-desktop device pixels.
+  RuneLite converts AWT user bounds with one proven monitor transform and
+  Python rejects missing or different coordinate-space declarations.
 - Runtime consumes only the structural `Task` contract: bounded observation
   request, opaque decision, typed verification application, and immutable
   status snapshot. It has no woodcut import, phase comparison, or progress
@@ -52,6 +58,11 @@ Regression command:
 - All live gameplay input remains Arduino-only; no software fallback exists.
 - Gameplay and saved-session login now submit immutable approved intents to one
   `InputCoordinator`; neither can open an Arduino session or call raw input.
+- Gameplay pointer transit remains inside the loaded-scene telemetry canvas.
+  Before scene geometry exists, saved-session login alone may use the exact
+  visible PID-owned Win32 client, after exact per-monitor-v2 proof and only when
+  the cursor already begins inside that client. Screenshot dimensions must
+  still match the native client bounds exactly.
 - `CoordinatedActionInterface` preserves exact post-move hover/menu/widget
   checks, context-row revalidation, and the verified bank-close Escape path.
 - The deterministic pointer policy produces only bounded relative motion inside
@@ -165,6 +176,10 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
 - Phase 8 gate: golden replay 2 passed; 301 Python tests passed; forced fresh
   Java suite 51 passed across 6 suites with zero failures/errors/skips; facade
   catalog, profile-schema, and default-profile validation commands succeeded.
+- Final-regression device-pixel hardening gate: golden replay 2 passed; 311
+  Python tests passed; forced fresh Java suite 55 passed across 6 suites with
+  zero failures/errors/skips; an actual Windows subprocess verified exact
+  per-monitor-v2 awareness.
 - The bounded Phase 2 live observation served response v2/frame v1 at the
   RuneLite login screen. Only baseline was available; inventory, activity,
   bank UI, and dialogue were explicitly unavailable. `observe` returned

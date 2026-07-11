@@ -64,6 +64,7 @@
         "canvasHeight": 600,
         "sourceCanvasWidth": 400,
         "sourceCanvasHeight": 300,
+        "coordinateSpace": "device_pixels",
         "canvasScreenX": 1000,
         "canvasScreenY": 2000,
         "isCanvasShowing": true,

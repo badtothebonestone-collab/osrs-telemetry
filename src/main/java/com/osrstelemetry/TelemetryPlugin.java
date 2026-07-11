@@ -598,6 +598,7 @@ public class TelemetryPlugin extends Plugin
 				String.valueOf(geometry == null ? null : geometry.clientWindowHeight),
 				String.valueOf(geometry == null ? null : geometry.displayScaleX),
 				String.valueOf(geometry == null ? null : geometry.displayScaleY),
+				String.valueOf(geometry == null ? null : geometry.coordinateSpace),
 				String.valueOf(geometry == null ? null : geometry.isCanvasShowing),
 				String.valueOf(geometry == null ? null : geometry.isClientFocused));
 		return "geometry-" + hashName(signature);
@@ -727,6 +728,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("clientWindowHeight", geometry == null ? null : geometry.clientWindowHeight);
 		payload.put("displayScaleX", geometry == null ? null : geometry.displayScaleX);
 		payload.put("displayScaleY", geometry == null ? null : geometry.displayScaleY);
+		payload.put("coordinateSpace", geometry == null ? null : geometry.coordinateSpace);
 		payload.put("isCanvasShowing", geometry == null ? null : geometry.isCanvasShowing);
 		payload.put("isClientFocused", geometry == null ? null : geometry.isClientFocused);
 		payload.put("clientProcessId", geometry == null || geometry.clientProcessId == null
@@ -1052,39 +1054,55 @@ public class TelemetryPlugin extends Plugin
 		geometry.isClientFocused = canvas.isFocusOwner();
 
 		GraphicsConfiguration graphicsConfiguration = canvas.getGraphicsConfiguration();
-		if (graphicsConfiguration != null)
+		if (graphicsConfiguration == null)
 		{
-			AffineTransform transform = graphicsConfiguration.getDefaultTransform();
-			if (transform != null)
-			{
-				geometry.displayScaleX = transform.getScaleX();
-				geometry.displayScaleY = transform.getScaleY();
-			}
+			geometry.reason = "display_configuration_unavailable";
+			return geometry;
 		}
-
-		Window window = SwingUtilities.getWindowAncestor(canvas);
-		if (window != null)
+		AffineTransform deviceTransform = graphicsConfiguration.getDefaultTransform();
+		Rectangle monitorBounds = graphicsConfiguration.getBounds();
+		if (!usableDeviceTransform(deviceTransform, monitorBounds))
 		{
-			Rectangle bounds = window.getBounds();
-			if (bounds != null)
-			{
-				geometry.clientWindowX = bounds.x;
-				geometry.clientWindowY = bounds.y;
-				geometry.clientWindowWidth = bounds.width;
-				geometry.clientWindowHeight = bounds.height;
-			}
-			geometry.isClientFocused = window.isFocused();
+			geometry.reason = "display_transform_unavailable";
+			return geometry;
 		}
+		geometry.displayScaleX = deviceTransform.getScaleX();
+		geometry.displayScaleY = deviceTransform.getScaleY();
 
 		try
 		{
-			java.awt.Point location = canvas.getLocationOnScreen();
-			if (location != null)
+			Window window = SwingUtilities.getWindowAncestor(canvas);
+			if (window != null)
 			{
-				geometry.canvasScreenX = location.x;
-				geometry.canvasScreenY = location.y;
+				Rectangle bounds = window.getBounds();
+				if (bounds != null)
+				{
+					Rectangle deviceBounds = devicePixelBounds(
+							bounds, deviceTransform, monitorBounds);
+					geometry.clientWindowX = deviceBounds.x;
+					geometry.clientWindowY = deviceBounds.y;
+					geometry.clientWindowWidth = deviceBounds.width;
+					geometry.clientWindowHeight = deviceBounds.height;
+				}
+				geometry.isClientFocused = window.isFocused();
+			}
+
+			java.awt.Point location = canvas.getLocationOnScreen();
+			if (location != null && size != null)
+			{
+				Rectangle deviceBounds = devicePixelBounds(
+						new Rectangle(location.x, location.y, size.width, size.height),
+						deviceTransform,
+						monitorBounds);
+				geometry.canvasScreenX = deviceBounds.x;
+				geometry.canvasScreenY = deviceBounds.y;
+				geometry.canvasWidth = deviceBounds.width;
+				geometry.canvasHeight = deviceBounds.height;
+				geometry.coordinateSpace = "device_pixels";
 				geometry.geometryAvailable = geometry.canvasWidth != null && geometry.canvasHeight != null
-						&& geometry.canvasWidth > 0 && geometry.canvasHeight > 0;
+						&& geometry.canvasWidth > 0 && geometry.canvasHeight > 0
+						&& geometry.sourceCanvasWidth != null && geometry.sourceCanvasWidth > 0
+						&& geometry.sourceCanvasHeight != null && geometry.sourceCanvasHeight > 0;
 				geometry.reason = geometry.geometryAvailable ? "available" : "canvas_size_unavailable";
 			}
 		}
@@ -1096,10 +1114,68 @@ public class TelemetryPlugin extends Plugin
 		catch (RuntimeException e)
 		{
 			geometry.geometryAvailable = false;
-			geometry.reason = "canvas_location_unavailable";
+			geometry.coordinateSpace = null;
+			geometry.reason = "device_pixel_conversion_failed";
 		}
 
 		return geometry;
+	}
+
+	static boolean usableDeviceTransform(AffineTransform transform, Rectangle monitorBounds)
+	{
+		if (transform == null || monitorBounds == null
+				|| monitorBounds.width <= 0 || monitorBounds.height <= 0)
+		{
+			return false;
+		}
+		double scaleX = transform.getScaleX();
+		double scaleY = transform.getScaleY();
+		return Double.isFinite(scaleX) && scaleX > 0.0 && scaleX <= 16.0
+				&& Double.isFinite(scaleY) && scaleY > 0.0 && scaleY <= 16.0
+				&& Math.abs(transform.getShearX()) < 0.000000001
+				&& Math.abs(transform.getShearY()) < 0.000000001
+				&& Math.abs(transform.getTranslateX()) < 0.000000001
+				&& Math.abs(transform.getTranslateY()) < 0.000000001;
+	}
+
+	static Rectangle devicePixelBounds(
+			Rectangle userBounds,
+			AffineTransform transform,
+			Rectangle monitorBounds)
+	{
+		if (userBounds == null || userBounds.width <= 0 || userBounds.height <= 0
+				|| !usableDeviceTransform(transform, monitorBounds)
+				|| !monitorBounds.contains(userBounds))
+		{
+			throw new IllegalArgumentException(
+					"bounds must fit one monitor with a usable device transform");
+		}
+		long left = monitorBounds.x + scaleDevicePixels(
+				(long) userBounds.x - monitorBounds.x,
+				transform.getScaleX());
+		long top = monitorBounds.y + scaleDevicePixels(
+				(long) userBounds.y - monitorBounds.y,
+				transform.getScaleY());
+		long width = scaleDevicePixels(userBounds.width, transform.getScaleX());
+		long height = scaleDevicePixels(userBounds.height, transform.getScaleY());
+		if (left < Integer.MIN_VALUE || top < Integer.MIN_VALUE
+				|| left > Integer.MAX_VALUE || top > Integer.MAX_VALUE
+				|| width <= 0 || height <= 0
+				|| width > Integer.MAX_VALUE || height > Integer.MAX_VALUE)
+		{
+			throw new IllegalArgumentException("device pixel bounds are invalid");
+		}
+		return new Rectangle((int) left, (int) top, (int) width, (int) height);
+	}
+
+	private static long scaleDevicePixels(long value, double scale)
+	{
+		double scaled = value * scale;
+		if (!Double.isFinite(scaled))
+		{
+			throw new IllegalArgumentException("scaled device coordinate is not finite");
+		}
+		return (long) Math.ceil(scaled - 0.5d);
 	}
 
 	private void captureBankUi(TickSnapshot snapshot)

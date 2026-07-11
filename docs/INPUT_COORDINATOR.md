@@ -46,11 +46,22 @@ click evidence rather than summarized into a mutable backend dictionary.
 ## Pointer policy
 
 `osrs_bot.pointer.plan_pointer_motion` is a pure deterministic policy. It emits
-only relative deltas inside the verified RuneLite canvas, with bounded
+only relative deltas inside the caller's verified transit region, with bounded
 per-command displacement, velocity, acceleration, and target-aware braking.
 It reaches the exact target at rest and contains no randomization or transport
 access. The private transport independently rejects zero moves and deltas over
 20 pixels on either axis.
+
+Gameplay transit is confined to the loaded-scene telemetry canvas in Win32
+device pixels. Before a game tick can provide canvas geometry, saved-session
+login transit may use only the exact visible PID-owned Win32 RuneLite client
+bounds. A single supported prompt must be detected and revalidated from that
+same client screenshot, its point must still belong to that window, and the
+cursor must already be inside the client. This pregame exception never applies
+to gameplay, credentials, MFA, text entry, or a bank PIN.
+The helper verifies that its active Windows thread is per-monitor-v2 DPI aware
+before trusting native bounds, screenshots, or cursor feedback; inability to
+prove that coordinate context blocks before any hardware connection.
 
 The coordinator checks focus/PID and actual cursor feedback throughout the
 trajectory. Any correction is another bounded deterministic plan. Immediately

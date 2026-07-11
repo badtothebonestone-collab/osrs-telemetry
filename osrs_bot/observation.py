@@ -208,6 +208,12 @@ def _canvas_transform(baseline: Mapping[str, Any]) -> _CanvasTransform | None:
     raw = _mapping(baseline.get("inputGeometry"), "payloads.baseline.inputGeometry", optional=True)
     if not raw or not _boolean(raw.get("geometryAvailable"), "inputGeometry.geometryAvailable"):
         return None
+    if raw.get("schema") != "input_geometry.v1":
+        raise ObservationSchemaError("inputGeometry schema must be input_geometry.v1")
+    if raw.get("coordinateSpace") != "device_pixels":
+        raise ObservationSchemaError(
+            "inputGeometry coordinateSpace must be device_pixels"
+        )
     x = _integer(raw.get("canvasScreenX"), "inputGeometry.canvasScreenX")
     y = _integer(raw.get("canvasScreenY"), "inputGeometry.canvasScreenY")
     width = _integer(raw.get("canvasWidth"), "inputGeometry.canvasWidth")

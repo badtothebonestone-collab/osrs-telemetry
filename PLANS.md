@@ -67,6 +67,13 @@ runtime logic.
   capture IDs for commands, and acknowledges pause/safe stop only at runtime
   boundaries that cannot abandon input cleanup or typed verification.
 
+- **D015 — One physical input coordinate space:** actionable telemetry geometry
+  is Win32 virtual-desktop device pixels. RuneLite converts AWT user bounds
+  with a proven single-monitor transform; Python rejects any other coordinate
+  contract. Saved-session pregame assistance may use the exact PID-owned Win32
+  client only after proving per-monitor-v2 awareness; gameplay remains confined
+  to loaded-scene telemetry canvas bounds.
+
 ## Phases and acceptance
 
 | Phase | Status | Acceptance |
@@ -79,8 +86,8 @@ runtime logic.
 | 5. Arduino boundary | Complete (`8b71ebc`) | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
 | 6. EngineFrame + overlay | Complete (`a166d59`) | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Complete (`51dbaaf`) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
-| 8. Frontend contracts | Complete (this checkpoint) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
-| Final regression | Pending | Full suites/replay pass; bounded fresh live observation and safe default-cycle evidence; cleanup and audits confirmed. |
+| 8. Frontend contracts | Complete (`0f21773`) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
+| Final regression | In progress | Offline suites/replay pass; bounded fresh live observation, safe default-cycle evidence, visual overlay comparison, demonstration, and cleanup remain. |
 
 ## Phase 0 completed work
 
@@ -282,6 +289,30 @@ runtime logic.
 - Final gate: golden replay 2 passed, all 301 Python tests passed, the forced
   fresh 51-test Java suite passed across 6 suites, facade catalog/schema/profile
   commands succeeded, and `git diff --check` passed.
+
+## Final regression hardening in progress
+
+- Made RuneLite publish available canvas/window bounds only as Win32
+  virtual-desktop device pixels. AWT user-space origin and extents are scaled
+  separately with the monitor origin and Windows/JDK rounding; missing,
+  spanning, non-axis-aligned, nonfinite, or otherwise unproven transforms fail
+  closed.
+- Kept projection source-canvas dimensions separate from displayed device-pixel
+  bounds, included the coordinate space in geometry identity, and made Python
+  reject available geometry without the exact schema and coordinate-space
+  declaration.
+- Kept gameplay transit inside loaded-scene telemetry canvas bounds. The narrow
+  saved-session login exception uses the exact visible PID-owned Win32 client,
+  requires the cursor to begin inside it, verifies exact per-monitor-v2 DPI
+  awareness at every native boundary, and rejects a screenshot whose dimensions
+  differ from that client.
+- Offline hardening gate: golden replay 2 passed; all 311 Python tests passed;
+  a forced fresh Java run executed 55 tests across 6 suites with zero failures,
+  errors, or skips; an actual Windows subprocess verified per-monitor-v2; and
+  `git diff --check` passed.
+- No gameplay action was permitted from the login screen. The final loaded-scene
+  observation, one safe default cycle, live overlay comparison, short manual
+  demonstration, and exact process/input cleanup proof remain required.
 
 ## Prohibited during this mission
 

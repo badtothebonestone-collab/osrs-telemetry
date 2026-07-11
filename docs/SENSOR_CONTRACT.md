@@ -40,6 +40,16 @@ loaded-scene observation.
 
 ## Dynamic geometry and menu evidence
 
+`input_geometry.v1` publishes actionable screen geometry only in Win32 virtual
+desktop device pixels (`coordinateSpace=device_pixels`). RuneLite's AWT user
+coordinates are converted with the proven per-monitor scale anchored at that
+monitor's nonzero or negative origin. The display transform must be finite,
+positive, axis-aligned, and proven for one containing monitor; missing,
+spanning, or invalid transform evidence makes geometry unavailable. Native
+projection coordinates retain their separate source-canvas dimensions, while
+the published canvas bounds are physical device pixels. Python rejects any
+available geometry whose schema or coordinate space is missing or different.
+
 The canonical adapter requests one neutral `scene_object_census`; filtered
 resource/route/service censuses remain diagnostic endpoint capabilities, not
 task authorization. Scene rows omit candidate/type/skill labels, and scene

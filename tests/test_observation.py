@@ -246,6 +246,22 @@ class ObservationParsingTests(unittest.TestCase):
         self.assertEqual("Chop down", observation.menus[0].option)
         self.assertEqual("Tree", observation.menus[0].target)
 
+    def test_actionable_geometry_requires_exact_device_pixel_coordinate_space(self) -> None:
+        for coordinate_space in (None, "awt_user_space", "logical_pixels"):
+            with self.subTest(coordinate_space=coordinate_space):
+                payload = load_fixture()
+                geometry = payload["payloads"]["baseline"]["inputGeometry"]
+                if coordinate_space is None:
+                    geometry.pop("coordinateSpace")
+                else:
+                    geometry["coordinateSpace"] = coordinate_space
+
+                with self.assertRaisesRegex(
+                    ObservationSchemaError,
+                    "coordinateSpace must be device_pixels",
+                ):
+                    parse_observation(payload)
+
     def test_unnamed_census_object_is_omitted_without_losing_named_objects(self) -> None:
         payload = load_fixture()
         unnamed = dict(payload["payloads"]["resource_object_census"]["objects"][0])
