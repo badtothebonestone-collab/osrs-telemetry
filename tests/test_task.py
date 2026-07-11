@@ -555,6 +555,69 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(ActionKind.WAIT, settled.action.kind)
         self.assertEqual(1, task.progress.route_index)
 
+    def test_fresh_task_reconciles_empty_inventory_on_exact_return_route(self) -> None:
+        task = WoodcutBankTask()
+        location = WorldPoint(3214, 3228, 0)
+
+        resumed = task.decide(observation(location=location, inv=inventory()))
+
+        self.assertEqual(ActionKind.WAIT, resumed.action.kind)
+        self.assertEqual(TaskPhase.NAVIGATE_TO_TREES, task.progress.phase)
+        self.assertEqual(4, task.progress.route_index)
+        self.assertIsNone(task.progress.pending)
+        self.assertIsNone(task.progress.target_key)
+        self.assertEqual(
+            "reobserved empty inventory on the validated return route",
+            resumed.reason,
+        )
+
+        arrived = task.decide(
+            observation(location=location, inv=inventory(), tick=11)
+        )
+        self.assertEqual(ActionKind.WAIT, arrived.action.kind)
+        self.assertEqual(5, task.progress.route_index)
+
+        task.progress.route_index = len(ROUTE_TO_TREES)
+        completed_resume = task.decide(
+            observation(location=TREE_AREA, inv=inventory(), tick=12)
+        )
+        self.assertEqual(ActionKind.WAIT, completed_resume.action.kind)
+        self.assertEqual(TaskPhase.FIND_TREE, task.progress.phase)
+        self.assertEqual(0, task.progress.cycles_completed)
+        self.assertEqual(0, task.progress.route_index)
+
+    def test_return_route_reconciliation_uses_furthest_matching_step(self) -> None:
+        task = WoodcutBankTask()
+        location = WorldPoint(3206, 3227, 2)
+        expected = max(
+            index
+            for index, step in enumerate(ROUTE_TO_TREES)
+            if location.plane == step.location.plane
+            and location.distance_to(step.location) <= step.arrival_radius
+        )
+
+        task.decide(observation(location=location, inv=inventory()))
+
+        self.assertEqual(TaskPhase.NAVIGATE_TO_TREES, task.progress.phase)
+        self.assertEqual(expected, task.progress.route_index)
+
+    def test_return_route_reconciliation_rejects_ambiguous_inventory_or_location(self) -> None:
+        for label, location, inv in (
+            (
+                "partial logs",
+                WorldPoint(3214, 3228, 0),
+                inventory(logs=1),
+            ),
+            ("off route", WorldPoint(3300, 3300, 0), inventory()),
+            ("wrong plane", WorldPoint(3215, 3228, 1), inventory()),
+        ):
+            with self.subTest(label=label):
+                task = WoodcutBankTask()
+                decision = task.decide(observation(location=location, inv=inv))
+
+                self.assertEqual(TaskPhase.BLOCKED, task.progress.phase)
+                self.assertEqual("player is outside the supported work area", decision.reason)
+
     def test_route_projection_camera_recovery_is_typed_bounded_and_resumable(self) -> None:
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.NAVIGATE_TO_BANK

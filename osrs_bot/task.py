@@ -91,6 +91,7 @@ class WoodcutBankTask:
         self._camera_recovery_attempts = 0
         self._route_projection_wait_since_tick: int | None = None
         self._pending_camera_step_id: str | None = None
+        self._return_route_reconciled_without_cycle_credit = False
 
     def observation_request(self) -> ObservationRequest:
         """Request only the current fixed walk target for projection."""
@@ -294,6 +295,21 @@ class WoodcutBankTask:
             observation.plane != work_area.anchor.plane
             or observation.location.distance_to(work_area.anchor) > work_area.radius
         ):
+            resume_index = self._return_route_resume_index(observation)
+            if resume_index is not None:
+                self.progress.target_key = None
+                self.progress.pending = None
+                self.progress.phase = TaskPhase.NAVIGATE_TO_TREES
+                self.progress.route_index = resume_index
+                self._return_route_reconciled_without_cycle_credit = True
+                self._movement_verified = False
+                self._route_settle_location = None
+                self._route_settle_since_tick = None
+                self._reset_camera_recovery()
+                return self._wait(
+                    observation,
+                    "reobserved empty inventory on the validated return route",
+                )
             return self._block(observation, "player is outside the supported work area")
 
         candidates, rejected = self._classify_trees(observation)
@@ -322,6 +338,20 @@ class WoodcutBankTask:
                 rejected=rejected,
             ),
         )
+
+    def _return_route_resume_index(
+        self, observation: Observation
+    ) -> int | None:
+        if observation.inventory.occupied_slots != 0 or observation.inventory.items:
+            return None
+        matches = [
+            index
+            for index, step in enumerate(self.definition.route_to_resource.steps)
+            if observation.plane == step.location.plane
+            and observation.location.distance_to(step.location)
+            <= step.arrival_radius
+        ]
+        return max(matches) if matches else None
 
     def _chop(self, observation: Observation) -> Decision:
         if observation.inventory.full:
@@ -1117,6 +1147,11 @@ class WoodcutBankTask:
         if self.progress.phase == TaskPhase.NAVIGATE_TO_BANK:
             self.progress.phase = TaskPhase.OPEN_BANK
         elif self.progress.phase == TaskPhase.NAVIGATE_TO_TREES:
+            if self._return_route_reconciled_without_cycle_credit:
+                self._return_route_reconciled_without_cycle_credit = False
+                self.progress.route_index = 0
+                self.progress.phase = TaskPhase.FIND_TREE
+                return
             self.progress.cycles_completed += 1
             self.progress.phase = (
                 TaskPhase.COMPLETE
