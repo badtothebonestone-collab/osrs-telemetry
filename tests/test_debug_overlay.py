@@ -182,6 +182,30 @@ class DebugOverlayTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, source)
 
+    def test_overlay_collects_tk_objects_on_the_host_thread(self) -> None:
+        path = ROOT / "osrs_bot" / "debug_overlay.py"
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        run = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_run"
+        )
+        finally_nodes = [
+            node.finalbody
+            for node in ast.walk(run)
+            if isinstance(node, ast.Try) and node.finalbody
+        ]
+        self.assertTrue(finally_nodes)
+        cleanup_source = "\n".join(
+            ast.unparse(statement)
+            for body in finally_nodes
+            for statement in body
+        )
+        self.assertIn("root.destroy()", cleanup_source)
+        self.assertNotIn("gc.collect()", cleanup_source)
+
 
 if __name__ == "__main__":
     unittest.main()

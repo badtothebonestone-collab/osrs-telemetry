@@ -294,6 +294,8 @@ class DebugOverlay:
 
     def _run(self) -> None:
         root: Any | None = None
+        canvas: Any | None = None
+        poll: Any | None = None
         try:
             _enable_per_monitor_dpi_awareness()
             import tkinter as tk
@@ -330,7 +332,10 @@ class DebugOverlay:
                 nonlocal last_sequence, bounds
                 try:
                     if self._stop.is_set():
-                        root.destroy()
+                        # Leave the callback before destroying Tcl. Tk's
+                        # registered callback wrapper can then unregister on
+                        # its owning thread and mainloop returns normally.
+                        root.quit()
                         return
                     frame = self._publisher.latest()
                     if frame is not None and frame.sequence != last_sequence:
@@ -367,6 +372,18 @@ class DebugOverlay:
                 except Exception:
                     pass
             self._started.set()
+        finally:
+            # Tk owns thread-affine Tcl async handlers. Destroy after mainloop
+            # has returned, then release the root/canvas/callback references on
+            # this same host thread rather than at interpreter shutdown.
+            if root is not None:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+            poll = None
+            canvas = None
+            root = None
 
     @staticmethod
     def _render(canvas: Any, scene: OverlayScene, canvas_bounds: ScreenBounds) -> None:
