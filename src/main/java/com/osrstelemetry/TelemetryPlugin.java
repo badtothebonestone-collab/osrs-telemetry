@@ -66,6 +66,7 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.gameval.ItemID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
 
@@ -78,6 +79,7 @@ import net.runelite.client.callback.ClientThread;
 public class TelemetryPlugin extends Plugin
 {
 	private static final int INVENTORY_SLOT_COUNT = 28;
+	private static final int EMPTY_INVENTORY_WIDGET_ITEM_ID = ItemID.BLANKOBJECT;
 	private static final int DIALOGUE_WIDGET_SCAN_LIMIT = 160;
 	static final int HOT_MENU_ENTRY_LIMIT = ClientTickHotState.MAX_MENU_ENTRY_LIMIT;
 
@@ -2733,8 +2735,11 @@ public class TelemetryPlugin extends Plugin
 			int slotIndex = slotIndexes[i];
 			int itemId = itemIds[i];
 			int quantity = quantities[i];
-			boolean empty = itemId == -1 && quantity == 0;
-			boolean filled = itemId > 0 && quantity > 0;
+			boolean empty = (itemId == -1 && quantity == 0)
+					|| (itemId == EMPTY_INVENTORY_WIDGET_ITEM_ID && quantity == 1);
+			boolean filled = itemId > 0
+					&& itemId != EMPTY_INVENTORY_WIDGET_ITEM_ID
+					&& quantity > 0;
 			if (slotIndex < 0
 					|| slotIndex >= INVENTORY_SLOT_COUNT
 					|| seen[slotIndex]
@@ -2745,8 +2750,8 @@ public class TelemetryPlugin extends Plugin
 			seen[slotIndex] = true;
 			TickSnapshot.InventorySlot slot = new TickSnapshot.InventorySlot();
 			slot.slot = slotIndex;
-			slot.itemId = itemId;
-			slot.quantity = quantity;
+			slot.itemId = empty ? -1 : itemId;
+			slot.quantity = empty ? 0 : quantity;
 			slots[slotIndex] = slot;
 		}
 		for (int i = 0; i < INVENTORY_SLOT_COUNT; i++)

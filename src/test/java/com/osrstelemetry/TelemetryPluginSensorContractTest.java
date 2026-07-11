@@ -162,6 +162,26 @@ public class TelemetryPluginSensorContractTest
 	}
 
 	@Test
+	public void visibleBlankObjectInventoryWidgetProvesKnownEmptySlots()
+	{
+		int[] itemIds = new int[28];
+		int[] quantities = new int[28];
+		java.util.Arrays.fill(itemIds, 6512);
+		java.util.Arrays.fill(quantities, 1);
+		TickSnapshot.InventorySlot[] slots =
+				TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+						true, 28, inventoryIndexes(), itemIds, quantities);
+
+		assertEquals(28, slots.length);
+		for (int i = 0; i < slots.length; i++)
+		{
+			assertEquals(i, slots[i].slot);
+			assertEquals(-1, slots[i].itemId);
+			assertEquals(0, slots[i].quantity);
+		}
+	}
+
+	@Test
 	public void visibleInventoryWidgetRetainsPositiveItemEvidence()
 	{
 		int[] indexes = inventoryIndexes();
@@ -206,6 +226,14 @@ public class TelemetryPluginSensorContractTest
 		positiveWithoutQuantity[0] = 1351;
 		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
 				true, 28, indexes, positiveWithoutQuantity, quantities));
+		int[] malformedBlankIds = itemIds.clone();
+		malformedBlankIds[0] = 6512;
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				true, 28, indexes, malformedBlankIds, quantities));
+		int[] malformedBlankQuantities = quantities.clone();
+		malformedBlankQuantities[0] = 2;
+		assertNull(TelemetryPlugin.inventorySlotsFromVisibleWidgetEvidence(
+				true, 28, indexes, malformedBlankIds, malformedBlankQuantities));
 
 		int[] duplicateIndexes = indexes.clone();
 		duplicateIndexes[27] = 0;

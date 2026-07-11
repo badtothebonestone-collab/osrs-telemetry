@@ -45,10 +45,13 @@ null, the plugin may recover inventory evidence only from the first exact
 visible IF3 inventory view in this order: ordinary inventory, bank-side
 inventory, then deposit-box inventory. A widget fallback is available only
 when its direct dynamic-child array contains exactly 28 non-null slots with
-unique indexes `0..27`. Every slot must be either the exact empty sentinel
-`itemId=-1, quantity=0` or a positive item ID with positive quantity. Missing,
-extra, duplicate, out-of-range, or malformed slot evidence leaves the inventory
-fact unavailable; absence is never synthesized as an empty inventory.
+unique indexes `0..27`. Every slot must be either an exact empty sentinel or a
+positive, non-placeholder item ID with positive quantity. RuneLite exposes
+empty IF3 inventory children as either `itemId=-1, quantity=0` or the gameval
+`BLANKOBJECT` placeholder (`itemId=6512, quantity=1`); both are normalized to
+`-1,0` before publication. Any other use of the placeholder is malformed.
+Missing, extra, duplicate, out-of-range, or malformed slot evidence leaves the
+inventory fact unavailable; absence is never synthesized as an empty inventory.
 
 The inventory fact records its selected source as `item_container`,
 `inventory_widget`, `bank_side_widget`, or `deposit_inventory_widget`. A
