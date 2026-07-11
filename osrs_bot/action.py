@@ -34,6 +34,9 @@ from .safety import (
 )
 
 
+TRANSIENT_POST_MOVE_RETRY_REASONS = frozenset({"observation_not_pass"})
+
+
 class _ActionBlocked(RuntimeError):
     pass
 
@@ -511,6 +514,9 @@ class CoordinatedActionInterface:
         *,
         settled_pointer: ScreenPoint | None = None,
     ) -> tuple[Observation, SafetyResult, SafetyResult]:
+        bounded_retry_reasons = (
+            set(retry_reasons) | TRANSIENT_POST_MOVE_RETRY_REASONS
+        )
         observation = self._observe()
         result_evaluation = self._safety.evaluate_post_move(
             action, observation, settled_pointer=settled_pointer
@@ -523,7 +529,11 @@ class CoordinatedActionInterface:
         result = result_evaluation.result
         context = context_evaluation.result
         for _ in range(1, self._evidence_attempts):
-            if result.allowed or context.allowed or result.reason not in retry_reasons:
+            if (
+                result.allowed
+                or context.allowed
+                or result.reason not in bounded_retry_reasons
+            ):
                 break
             self._sleep(self._evidence_delay_seconds)
             observation = self._observe()

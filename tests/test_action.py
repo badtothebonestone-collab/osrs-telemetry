@@ -501,6 +501,58 @@ class CoordinatedActionInterfaceTest(unittest.TestCase):
             hover_checks,
         )
 
+    def test_transient_post_move_warn_is_reobserved_before_activation(self) -> None:
+        coordinator = FakeCoordinator()
+        transient = replace(self.hover, status="WARN")
+        samples = iter((transient, self.hover))
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            lambda: next(samples),
+            sleep=lambda _: None,
+            evidence_attempts=2,
+        )
+
+        result = interface.execute(tree_action(), self.pre)
+
+        self.assertEqual("SENT", result.status)
+        self.assertEqual(
+            PointerActivation.DIRECT_LEFT,
+            coordinator.decisions[0].activation,
+        )
+        self.assertIn(
+            SafetyCheck(
+                "post_move.observation", "observation_not_pass", False
+            ),
+            result.safety_checks,
+        )
+
+    def test_persistent_post_move_warn_stays_bounded_and_blocks(self) -> None:
+        coordinator = FakeCoordinator()
+        transient = replace(self.hover, status="WARN")
+        calls = 0
+
+        def observe() -> Observation:
+            nonlocal calls
+            calls += 1
+            return transient
+
+        interface = CoordinatedActionInterface(
+            coordinator,  # type: ignore[arg-type]
+            SafetyGate(max_observation_age_seconds=10),
+            observe,
+            sleep=lambda _: None,
+            evidence_attempts=2,
+        )
+
+        result = interface.execute(tree_action(), self.pre)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertIn("observation_not_pass", result.reason)
+        self.assertEqual(2, calls)
+        self.assertIsNone(coordinator.decisions[0].activation)
+        self.assertTrue(result.cleanup_confirmed)
+
     def test_context_row_is_resolved_then_revalidated_from_new_exact_evidence(self) -> None:
         coordinator = FakeCoordinator()
         generic = MenuEntry("Chop", "Tree", "GAME_OBJECT_FIRST_OPTION", 1276, 49, 52)
