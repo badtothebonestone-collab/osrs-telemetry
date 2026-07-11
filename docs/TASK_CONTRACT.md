@@ -1,17 +1,23 @@
 # Minimal Task Contract
 
-Phase 3 exposes only the seam needed for another explicit OSRS task FSM. It is
-not a task language, planner, behavior tree, or data-driven transition system.
+The shared contract exposes only the seam needed for another explicit OSRS task
+FSM. It is not a task language, planner, behavior tree, or data-driven
+transition system.
 
 ## Runtime-facing protocol
 
-Every task implements four operations from `osrs_bot.task_contract`:
+Every task implements five operations from `osrs_bot.task_contract`:
 
 - `observation_request()` returns the bounded tile projections needed for the
   next decision.
 - `decide(observation)` returns an opaque task state, a diagnostic reason, and
   one immutable `Action`.
 - `apply_verification(result)` consumes a typed `VerificationResult`.
+- `discard_pending_action(reason, *, target_invalidated)` forgets one proposal
+  only after the runtime has typed it as safely unsent. `target_invalidated=true`
+  allows the concrete resource task to suppress that exact stale key for one
+  alternate selection; cursor-state invalidation passes `false`, preserves the
+  target, and merely reobserves from the resumable phase.
 - `snapshot()` returns task identity, opaque state, optional blocker, and one
   of `RUNNING`, `COMPLETE`, or `BLOCKED`.
 
@@ -22,22 +28,34 @@ IDs, route, bank floor, or dialogue wording. Executable actions without a
 ## Typed outcomes
 
 `Verifier` emits one immutable outcome: item quantity increased/equaled,
-moved closer, arrived, plane changed, interface opened/closed, or dialogue
-option appeared. A passing result cannot exist without a typed outcome. Reason
-strings are diagnostic only and never select a task transition.
+moved closer, arrived, plane changed, interface opened/closed, dialogue option
+appeared, or camera pose changed. A passing result cannot exist without a typed
+outcome. Reason strings--including the reason passed to
+`discard_pending_action`--are diagnostic only and never select a task
+transition. The runtime may call that discard seam only for typed
+`TARGET_EVIDENCE_INVALIDATED` or `CURSOR_STATE_INVALIDATED`, a matching blocked
+receipt/failure kind, zero activation commands, a preactivation-only ledger,
+authoritative safe cleanup, and its one-consecutive-replan bound still
+available. Repetition blocks rather than silently following manual cursor
+motion or stale target evidence.
 
 ## Safety ownership
 
 `SafetyGate` evaluates two deliberately separate layers:
 
 1. Engine invariants: coherent fresh source evidence, loaded scene, session and
-   process binding, foreground focus, exact tick/menu evidence, PIN refusal,
-   target identity, verified geometry, canvas bounds, and exact hover/menu
-   proof. Tasks and future profiles cannot disable these checks.
+   process binding, foreground focus, PIN refusal, and exact tick evidence.
+   Pointer actions additionally require target identity, verified geometry,
+   canvas bounds, and exact lane-appropriate hover/menu or widget proof; key
+   actions require their exact permitted key shape. Tasks and future profiles
+   cannot disable these checks.
 2. Immutable task constraints on the action: required interface state and
-   plane, exact dialogue choice, and allowed inventory contents. Constraints
-   can only narrow an action; they cannot authorize one that failed an engine
-   invariant.
+   plane, exact dialogue choice, allowed inventory contents, and camera pose.
+   A `CameraConstraint` binds the exact projected target and source location,
+   geometry frame, starting yaw, left/right key direction, and bounded hold.
+   The later typed camera outcome requires a stationary player, a newer
+   geometry frame, and yaw movement in that direction. Constraints can only
+   narrow an action; they cannot authorize one that failed an engine invariant.
 
 Task-specific dialogue tokens, interface plane/state, and permitted item IDs
 are supplied to `WoodcutBankTask` by its validated definition binding. The

@@ -111,7 +111,8 @@ and produces one immutable `Observation`:
 
 ```text
 player, location, plane, inventory, nearby_objects, menus, widgets,
-game_state, source timestamp, assembly timestamp, frame identity, tick
+game_state, camera yaw/pitch, source timestamp, assembly timestamp,
+frame identity, tick, canvas bounds, optional client-window bounds
 ```
 
 Source coherence, freshness, canvas bounds, warnings, and missing capabilities
@@ -124,6 +125,14 @@ menu bounds and deterministic visible row bounds used by the input path.
 Actions and verifications are bound to the plugin session; live input is also
 bound to the exact telemetry-owning RuneLite process.
 
+The optional device-pixel client window is all-or-none, has positive dimensions,
+and must contain the canvas. It is ownership and movement-only cursor-ingress
+evidence, never an activation region. Object aim points are likewise paired to
+authoritative geometry: the point must be inside the viewport and the first
+present API shape in clickbox -> convex hull -> canvas tile order. A present
+shape never falls through to weaker geometry, and `canvasLocation` alone is
+diagnostic unless that shape contains it.
+
 `LOGGED_IN` alone is not loaded-scene proof. The plugin requires a local player
 and an explicitly absent Welcome to Gielinor panel before publishing
 `scenePlayable=true`; `Observation.loaded_scene` requires that bit as well.
@@ -132,13 +141,13 @@ No downstream module reads raw JSON or a plugin cache.
 
 ### Task
 
-`osrs_bot.task_contract` exposes exactly four operations: request bounded
-observation projections, decide from one immutable observation, apply one typed
-verification result, and publish an immutable running/complete/blocked
-snapshot. Task state is opaque to runtime. Runtime does not import the concrete
-task, compare its phases, or inspect its mutable progress. An executable action
-without a verification specification is rejected before an input boundary is
-called.
+`osrs_bot.task_contract` exposes five operations: request bounded observation
+projections, decide from one immutable observation, apply one typed verification
+result, discard a proposal that the input boundary proves was never activated,
+and publish an immutable running/complete/blocked snapshot. Task state is opaque
+to runtime. Runtime does not import the concrete task, compare its phases, or
+inspect its mutable progress. An executable action without a verification
+specification is rejected before an input boundary is called.
 
 `WoodcutBankTask` is an explicit state machine:
 
@@ -161,10 +170,13 @@ predicates, tick expectations, and evidence provenance. The profile owns only
 the selected definition and one-cycle goal. Neither owns mutable FSM state or
 engine safety controls.
 
-The two definition routes are fixed tuples of walk targets and staircase interactions.
-Only the current walk target is requested from RuneLite. Missing or temporarily
-non-actionable projection evidence waits without input; a present labeled
-projection with contradictory identity blocks. No planner substitutes a route.
+The two definition routes are fixed tuples of walk targets and staircase
+interactions. Only the current walk target is requested from RuneLite. Missing
+projection evidence waits without input, and a present labeled projection with
+contradictory identity blocks. A stable exact target whose projection remains
+non-actionable may enter the definition-owned camera-recovery lane: shortest
+fixed-point yaw direction, 250 ms key hold, at most eight typed and verified
+camera-pose changes. No planner substitutes a route or camera strategy.
 
 Staircases accept a live direct `Climb-up`/`Climb-down` action when it is the
 default. If the live default is generic `Climb`, the explicit `STAIR_DIALOGUE`
@@ -199,24 +211,34 @@ layer carries those values, including bounded retry attempts, in
 approved intents to the sole `InputCoordinator`. The coordinator then:
 
 1. opens one private Arduino transport, command ledger, and armed transaction;
-2. constrains deterministic relative movement to the observed RuneLite canvas;
-3. selects bounded command-space waypoints toward the exact observed screen
-   point, runs the pure exact planner for each waypoint with bounded velocity,
+2. samples the actual current cursor and point owner in the calling thread's
+   proven per-monitor-v2 device-pixel context, never from command history;
+3. when that fresh cursor is just outside the canvas but still inside the exact
+   pinned client on one axis, performs only the bounded movement-only ingress
+   and proves stable canvas headroom before continuing; unsupported displacement
+   blocks without activation;
+4. retains the canonical action identity/aim separately from the actual settled
+   cursor, selects bounded command-space waypoints toward the exact observed
+   screen point, runs the pure exact planner for each waypoint with bounded velocity,
    acceleration, braking, four-sided transfer headroom, transaction-wide plan
    and MOVE caps, and actual-feedback correction, then accepts only a complete-
    plan settled endpoint inside the caller's explicit activation region;
-4. passes that actual stable device-pixel endpoint to the caller's
+5. if an acknowledged MOVE has an unchanged ordinary sample, polls once more
+   without another MOVE and independently validates both sample intervals before
+   applying the existing bounded delayed/no-effect accounting;
+6. passes that actual stable device-pixel endpoint to the caller's
    lane-specific validator under a checked firmware-watchdog lease; if that
    validator outlives the lease, performs at most one explicit safe rearm and
    reruns the same semantic validator, while a second expiry blocks input;
-5. requires a newer menu sample whose top/default entry, scene parameters, and
-   pointer position match the intended target;
-6. when the exact action is a unique lower context entry, opens the menu,
+7. for pointer lanes, requires a newer menu sample whose top/default entry,
+   scene parameters, and pointer position match the intended target; typed key
+   lanes instead require their exact camera/interface/dialogue constraint;
+8. when the exact action is a unique lower context entry, opens the menu,
    derives that row from RuneLite menu geometry, moves to it, revalidates the
    fresh open-menu sample and pointer, and clicks it once;
-7. otherwise clicks the exact default entry or submits the one approved key;
-8. records each command and firmware acknowledgement without truncation; and
-9. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
+9. otherwise clicks the exact default entry or submits the one approved key;
+10. records each command and firmware acknowledgement without truncation; and
+11. ends every attempted connection with acknowledged `STOP_ALL`, `DISARM`, and
    wire `STATUS` proving disarmed with zero held inputs before closing.
 
 The immutable `InputReceipt` is successful only when the activation and final
@@ -225,6 +247,17 @@ acknowledged, no ledger entry is unresolved, the final firmware state is safe,
 and both ledger and transport close. The raw transport methods are private and
 only the coordinator imports them. A state-changing firmware rejection is
 never retried implicitly. There is no software-input fallback.
+
+The action layer may emit typed `TARGET_EVIDENCE_INVALIDATED` when an adaptive
+object/walk proposal exhausts bounded fresh hover reobservation before
+activation, or `CURSOR_STATE_INVALIDATED` when real cursor/ownership/bounds
+evidence changes. Runtime may discard at most one consecutive such proposal,
+and only when the immutable receipt proves the matching failure kind, complete
+safe cleanup, and a preactivation-only ledger. Target invalidation suppresses
+the exact resource key for one fresh alternate; cursor invalidation preserves
+the target and merely reobserves. Reason text is diagnostic and never selects
+the transition. Any activation, incomplete cleanup, mismatch, or repetition
+blocks.
 
 ### Saved-session login assistance
 
@@ -237,22 +270,35 @@ after moving the Arduino mouse, and verifies a telemetry transition afterward.
 It never types text. Continue,
 credential, MFA, unknown, and ambiguous surfaces fail closed.
 
+If the normal prompt matcher reaches its work cap on a coherent loaded scene, a
+larger but still bounded read-only fallback scans only the two exact retained
+templates. It excludes the broad disconnect heuristic and cannot authorize
+input. Template absence can support loaded-scene PASS only after two increasing
+ticks from the same PID/session; a scan-aged observation is refreshed and must
+be coherent and no older than two seconds.
+
 ### Verification and runtime
 
-`Verifier` evaluates only observations later than the action tick and fails at
-the declared tick deadline. A passing result must include one stable typed
-outcome. Task-specific item IDs and dialogue expectations are supplied in the
-verification specification rather than embedded in shared control flow. The
-runtime adds a wall-clock and observation bound so a frozen client cannot wait
-forever.
+`Verifier` evaluates only observations later than the action baseline and fails
+at the declared tick deadline. After a sent action, runtime shifts that baseline
+to the final preactivation observation so bounded pointer motion and semantic
+revalidation do not consume the post-action proof window. A passing result must
+include one stable typed outcome. Task-specific item IDs and dialogue
+expectations are supplied in the verification specification rather than
+embedded in shared control flow. The runtime adds a wall-clock and observation
+bound so a frozen client cannot wait forever.
 
 `RuntimeConfig` separately validates endpoint/token/Arduino/polling and hard
 observation/action/runtime/verification limits. Its finite engine-owned caps
-cannot be changed by a profile or task definition.
+cannot be changed by a profile or task definition. The default action budget is
+100, above the frozen 64-action ideal and observed 82-action complete cycle,
+under the unchanged hard maximum of 500.
 
-Walk verification passes after authoritative movement closer or arrival. The
-task then waits until player location is stable for four game ticks before it
-advances the waypoint, preventing repeated clicks while pathing.
+Walk verification passes after authoritative movement closer or arrival. Route
+movement owns a 20-tick definition deadline, distinct from the eight-tick
+ordinary action deadline. The task then waits until player location is stable
+for four game ticks before it advances the waypoint, preventing repeated clicks
+while pathing.
 
 When the bank-close widget lacks usable geometry, the task may emit only the
 exact Escape close intent and only when RuneLite explicitly reports keyboard
@@ -276,18 +322,20 @@ or SafetyGate evidence.
 The real runtime publishes one immutable `EngineFrame` after observation,
 decision, execution, verification, and terminal boundaries. It contains
 task/state, definition/profile IDs, route progress, selected target identity
-and geometry, eligible and rejected candidates with codes, ordered safety
-checks, pending and last verification, typed outcome, execution receipt, final
-cleanup state, and current blocker. The atomic publisher retains only the
-latest monotonic frame; it is not a history store.
+and geometry, eligible and rejected candidates with codes, camera pose,
+decision reason, typed action key/hold evidence, ordered safety checks, pending
+and last verification, typed outcome, execution receipt, final cleanup state,
+and current blocker. The atomic publisher retains only the latest monotonic
+frame; it is not a history store.
 
 The optional overlay consumes this exact frame. It uses green for the selected
 target, amber for eligible alternatives, and optional red for rejected
 candidates. It suppresses rectangles when source tick/geometry provenance no
-longer matches the displayed Observation. Its verified Win32 extended styles
-make it click-through, non-focusable, layered, and tool-window-only. It has no
-input handlers, target selection, SafetyGate calls, or Arduino imports, and an
-overlay failure cannot alter runtime control.
+longer matches the displayed Observation. The actual root top-level host owns
+the verified Win32 click-through, non-focusable, layered, and tool-window-only
+styles; Tcl creation and teardown remain on that host thread. It has no input
+handlers, target selection, SafetyGate calls, or Arduino imports, and an overlay
+failure cannot alter runtime control.
 
 The recorder, implemented CLI facade, and future GUI consume immutable read
 contracts. Readers may
@@ -364,3 +412,10 @@ After restart, never restore pending verification, source/client ticks, menu
 samples, old screen coordinates/clickboxes, session-bound targets, or armed
 input state. Reobserve the game, validate a fresh profile/definition binding,
 and reconcile the FSM before any new action.
+
+The sole narrow reconciliation derives new state from current evidence rather
+than restoring it: a structurally empty inventory outside the work area may
+resume only the furthest matching anchor/radius on the exact built-in return
+route, with matching plane. Partial, off-route, or wrong-plane states still
+block. Completing that historical return grants no cycle credit; the active
+process must perform a new full cycle.

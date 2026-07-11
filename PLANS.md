@@ -84,6 +84,73 @@ runtime logic.
   Gameplay uses at most three pixels around the approved safe point; login may
   use the freshly recognized prompt bounds.
 
+- **D017 — Inventory truth is structural:** the authoritative inventory fact is
+  normalized before task use. A visible exact 28-slot inventory may prove an
+  empty inventory when item rows are absent, and RuneLite `BLANKOBJECT` slots
+  are never treated as held items.
+- **D018 — Watchdog recovery is explicit and bounded:** post-move validation
+  runs under a firmware-watchdog lease. At most one safe rearm plus complete
+  semantic revalidation is allowed; a second expiry or any state-changing
+  rejection blocks without an implicit retry.
+- **D019 — Login ambiguity work is capped:** recognized prompt matching still
+  scans the complete configured search region and fails on ambiguity, but pixel
+  and candidate work have hard limits so adversarial or noisy frames cannot
+  create unbounded login processing.
+- **D020 — Canonical target and settled pointer remain distinct:** the immutable
+  action retains its authoritative aim identity while fresh safety proof binds
+  to the actual settled device-pixel endpoint. Transient frame warnings and
+  reprojection jitter receive only bounded reobservation; they never relax
+  identity, menu, geometry, or focus proof.
+- **D021 — Camera recovery is task-specific input:** a stable unavailable route
+  projection may request the shortest fixed-point yaw arc using 250 ms left or
+  right holds, at most eight verified turns, and a typed camera-pose outcome.
+  Missing evidence still waits, contradictory identity still blocks, and no
+  generic navigation or camera planner exists.
+- **D022 — Verification starts after preactivation work:** a sent action rebases
+  its tick budget to the final preactivation observation. Ordinary actions keep
+  the eight-tick definition deadline; route movement uses a separate 20-tick
+  deadline. An intercepted walk target may select only one exact lower `Walk
+  here`/`WALK` context row.
+- **D023 — Unsent target invalidation is not a failed action:** the action layer
+  emits a typed invalidation only when fresh exact hover proof fails before any
+  activation. Runtime may discard one consecutive proposal only with a fully
+  safe receipt whose ledger contains preactivation commands exclusively; the
+  task suppresses that exact resource key for one fresh selection. A second
+  consecutive invalidation blocks. Fresh restart reconciliation is separately
+  limited to an exact return-route anchor with structurally empty inventory and
+  never grants cycle credit for the historical return.
+
+- **D024 — Object aim points stay inside API shapes:** object activation uses
+  the first present RuneLite shape in clickbox -> convex hull -> canvas tile
+  order and chooses a point inside that actual shape and the viewport.
+  `canvasLocation` alone is not authorization.
+- **D025 — Live restart and resource recovery remain task-specific:** one
+  verified resource no-yield may discard the old tree and reselect once; a
+  second no-yield blocks. Fresh full/empty inventory may reconcile only to the
+  furthest exact outbound/return route anchor, with no restored verification or
+  historical cycle credit.
+- **D026 — Cursor truth is observed, never remembered:** every cursor and
+  point-owner sample establishes per-monitor-v2 device pixels on its current
+  thread. A fresh cursor outside the canvas may enter through a movement-only,
+  exact-client, one-axis bounded lane; unsupported displacement becomes typed
+  cursor-state invalidation and may receive one safe reobservation without
+  suppressing the target.
+- **D027 — Serial ACK is not Windows cursor proof:** an acknowledged MOVE with
+  an unchanged ordinary sample receives one additional no-input poll before any
+  new MOVE. Both the first and incremental samples independently enforce
+  direction, gain, bounds, focus, and uncommanded-axis rules; persistent
+  no-effect remains bounded and fail-closed.
+- **D028 — Loaded-scene login proof is absence-only:** if the normal prompt
+  matcher caps on a coherent loaded scene, one larger bounded scan may search
+  only the exact retained templates. The broad disconnect heuristic remains a
+  `LOGIN_SCREEN` path. PASS still needs two increasing same-identity loaded
+  ticks and a refreshed current proof after a slow scan.
+- **D029 — The default runtime budget fits the fixed cycle:** the frozen ideal
+  FSM has 64 executable actions, while the fresh live cycle completed in 82
+  after normal bounded overhead. The default is 100 actions under the unchanged
+  hard cap of 500; this changes no per-action safety, verification, input, or
+  cleanup bound.
+
 ## Phases and acceptance
 
 | Phase | Status | Acceptance |
@@ -97,7 +164,7 @@ runtime logic.
 | 6. EngineFrame + overlay | Complete (`a166d59`) | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Complete (`51dbaaf`) | Read-only record/inspect commands produce verified hashed JSONL, manifest, timeline, bounded screenshots, and reviewed semantic suggestions. |
 | 8. Frontend contracts | Complete (`0f21773`) | Minimal facade proves list/validate/start/pause/stop/status/demo operations without duplicating task or safety logic. |
-| Final regression | In progress | Offline suites/replay pass; bounded fresh live observation, safe default-cycle evidence, visual overlay comparison, demonstration, and cleanup remain. |
+| Final regression | In progress | Fresh current-checkpoint observation, one uninterrupted default cycle, the forced offline gate, and this documentation checkpoint pass; only the user-performed short demonstration, artifact inspection, and post-demo endpoint cleanup remain. |
 
 ## Phase 0 completed work
 
@@ -311,11 +378,13 @@ runtime logic.
   bounds, included the coordinate space in geometry identity, and made Python
   reject available geometry without the exact schema and coordinate-space
   declaration.
-- Kept gameplay transit inside loaded-scene telemetry canvas bounds. The narrow
-  saved-session login exception uses the exact visible PID-owned Win32 client,
-  requires the cursor to begin inside it, verifies exact per-monitor-v2 DPI
-  awareness at every native boundary, and rejects a screenshot whose dimensions
-  differ from that client.
+- Kept normal gameplay transit inside loaded-scene telemetry canvas bounds. The
+  exact visible PID-owned Win32 client is an outer movement-only recovery region
+  for a freshly sampled cursor displaced just outside the canvas. The bounded
+  lane never activates, requires exact point ownership and per-monitor-v2
+  device-pixel proof, and hands off to the ordinary canvas planner only after a
+  stable inset. Saved-session login uses the same exact-client boundary and
+  rejects a screenshot whose dimensions differ from it.
 - Offline hardening gate: golden replay 2 passed; all 311 Python tests passed;
   a forced fresh Java run executed 55 tests across 6 suites with zero failures,
   errors, or skips; an actual Windows subprocess verified per-monitor-v2; and
@@ -345,9 +414,68 @@ runtime logic.
   and transaction-wide plan/step caps; golden replay 2 passed; and a forced
   fresh Java run executed 71 tests across 8 suites with zero failures, errors,
   or skips.
-- No gameplay action was permitted from the login screen. The final loaded-scene
-  observation, one safe default cycle, live overlay comparison, short manual
-  demonstration, and exact process/input cleanup proof remain required.
+- Subsequent checkpoints `18c352e` through `2a26199` added visible-empty
+  inventory proof and blank-slot normalization; bounded watchdog and login
+  matcher work; same-thread overlay teardown and top-level click-through host
+  styling; canonical-versus-settled pointer evidence; bounded transient warning
+  and reprojection retries; typed camera recovery; post-input verification
+  rebasing; unique lower-context `Walk here`; the 20-tick route movement
+  deadline; isolated no-effect calibration/replanning caps; exact return-route
+  restart reconciliation without cycle credit; and typed preactivation target
+  invalidation with one fresh alternate selection.
+- Live regression proved a fresh coherent loaded scene at
+  `(3214,3228,0)`, reconciled the exact empty-inventory return route, visually
+  compared the passive overlay at route steps `9/15`, `12/15`, and `13/15`, and
+  observed typed camera-pose and arrival outcomes with `cleanup: safe`.
+- The same bounded process completed the historical return without credit,
+  entered the genuine `cycles 0/1` harvest, collected six logs, and then
+  correctly withheld activation when the selected tree's fresh hover evidence
+  changed during pointer transit. Its receipt proved `STOP_ALL`, `DISARM`, safe
+  zero-held firmware state, zero unresolved commands, and no click sent. That
+  evidence produced checkpoint `2a26199`; the replacement path is typed,
+  one-consecutive, preactivation-only, and alternate-target tested.
+- Checkpoints `9528edf` through `0571c37` then added one verified resource
+  no-yield retry, typed pointer-transfer diagnostics, one delayed-report credit,
+  one-axis cursor headroom recovery, bounded projection-invalidated replanning,
+  exact outbound restart reconciliation, and API-shape-interior object aim
+  points.
+- Checkpoints `7df39e5`, `004517b`, and `07aef8c` made manual cursor displacement
+  a freshly observed state rather than implicit history: bounded client-to-
+  canvas ingress, per-thread per-monitor-v2 cursor/owner sampling, and one extra
+  no-input poll for a late Windows cursor report. `b673fd6` and `81b1657` bound
+  dense loaded-scene template absence proof without letting the disconnect
+  heuristic authorize or veto a coherent loaded world.
+- The cursor diagnosis reproduced the same untouched physical point as
+  `(2006,1226)` in a DPI-virtualized process and `(3510,2145)` after per-monitor-
+  v2 awareness, exactly the display's 1.75 scale. The apparent loss of location
+  was coordinate virtualization, while actual manual movement is now handled as
+  fresh external cursor state.
+- A fresh process completed login safely but the first qualifying cycle reached
+  the old 80-action default at return step `10/15` after 624.9 seconds. It had
+  already harvested, banked, deposited to empty, and passed the earlier cursor
+  no-effect boundary; the final receipt and runtime cleanup were safe. Checkpoint
+  `aaa0290` corrected the stale 52-action runtime model to the real 64-action
+  ideal and raised only the default budget to 100 under the unchanged 500 cap.
+- Fresh current-checkpoint PID `11440`, session
+  `plugin-11440-1783810438162`, then began with coherent empty-inventory route
+  reconciliation and completed one uninterrupted default-profile cycle in
+  698.2 seconds, 1,994 observations, and 82 actions. It returned to
+  `west_trees`, published `cycles 1/1`, and ended with acknowledged `STOP_ALL`,
+  `DISARM`, disarmed zero-held firmware status, zero unresolved commands, and
+  closed ledger/backend. All default bounds held: 82/100 actions, 1,994/4,800
+  observations, and 698.2/1,200 seconds. The intact ignored proof is under
+  `_run_proofs/final_regression/20260711_cursor_reacquire_complete_cycle/`.
+- Forced closeout gate: all 457 Python tests pass, golden replay 2/2 passes,
+  `python -m compileall` and `git diff --check` pass, and a fresh Java rerun
+  executed 71 tests across 8 suites with zero failures, errors, or skips.
+- The post-cycle observation still passed fresh/coherent with no warnings.
+  About 47 seconds after terminal completion (10 seconds after that observation),
+  RuneLite emitted repeated OpenGL out-of-memory/invalid-operation errors and
+  the Gradle-wrapper JVM, PID `500`, failed a native allocation. The launch stack
+  then ended; RuneLite PID `11440` and listener `8893` are absent. Logs are
+  retained beside the proof. This occurred after terminal engine/input cleanup
+  and does not invalidate the cycle, but the manual demonstration needs a fresh
+  client.
 
 ## Prohibited during this mission
 
@@ -363,22 +491,23 @@ runtime logic.
 
 ## Remaining limitations
 
-- The live corpus is stitched and lacks complete raw observations, command/ACK
-  receipts, and immutable source provenance.
-- The last Phase 2 live check stopped at the login screen; it proves incomplete
-  frame handling, not a loaded gameplay observation.
-- Each new source tick forces a world-model refresh behind a 250 ms provider
-  wait. Static review did not prove a failure, but final loaded-scene evidence
-  must measure refresh/query timing and repeated provenance/timeout warnings.
-- Phase 5 hardware behavior is exhaustively fake-transport tested; the final
-  bounded live regression must still capture a real successful receipt and
-  authoritative safe firmware STATUS after input.
+- The original baseline corpus is stitched and lacks complete raw observations,
+  command/ACK receipts, and immutable source provenance. The 2026-07-11 final
+  proof is a separate uninterrupted current-checkpoint cycle with its complete
+  terminal JSON and receipts preserved in ignored local evidence.
+- Each new source tick can still force a world-model refresh behind a 250 ms
+  provider wait. The final pre/post observations were fresh, coherent, and
+  warning-free, but this remains a latency cost rather than a second cache.
+- The later RuneLite GPU errors and Gradle-wrapper PID `500` native-memory
+  failure are launch-stack stability limitations, not engine/input cleanup
+  failures. Their error and replay logs remain in the ignored proof directory.
 - There is intentionally no external/profile file loader or second definition;
   the one validated in-code default is the only supported choice.
 - The demonstration path intentionally cannot observe global raw mouse-button
   or keyboard transitions; it records RuneLite semantic click evidence and
   declares those coverage gaps in every manifest.
 - The implemented facade intentionally has no full GUI, daemon, or IPC layer.
-  The overlay still needs final loaded-scene visual comparison against the live
-  EngineFrame; one short real demonstration also remains final-regression
-  evidence.
+  The overlay has been visually compared against live route, camera, target,
+  verification, and cleanup evidence. One short user-performed demonstration
+  and its inspected artifact plus post-demo client cleanup remain final-
+  regression evidence.

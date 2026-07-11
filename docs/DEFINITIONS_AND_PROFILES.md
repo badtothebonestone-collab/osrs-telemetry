@@ -15,7 +15,8 @@ by the golden cycle:
 - fixed outbound and return route steps, staircase identities/actions, and
   expected plane transitions;
 - permitted/deposited inventory item predicates;
-- action/resource deadlines and route-settle requirement;
+- separate action, route-movement, and resource deadlines plus the route-settle
+  requirement;
 - exact route-dialogue expectations; and
 - baseline fixture identity, evidence hashes, and limitations.
 
@@ -27,6 +28,12 @@ the produced item are rejected.
 The definition supplies facts only. `WoodcutBankTask` still owns all mutable
 progress, target selection, and explicit FSM transitions. There is no generic
 navigator or data-driven transition interpreter.
+
+`action_deadline_ticks` bounds ordinary typed actions, while
+`movement_deadline_ticks` separately gives a sent route walk enough ticks to
+prove `MOVED_CLOSER`; it does not enlarge every action's window.
+`resource_deadline_ticks` remains the longer bounded wait for a produced item.
+The built-in values are 8, 20, and 100 ticks respectively.
 
 ## Profile
 
@@ -55,6 +62,11 @@ port, polling, and observation/action/runtime/verification bounds. Values are
 finite, positive, immutable, and capped by engine-owned maxima; execute mode
 requires an Arduino port. It contains no task IDs, object facts, routes, or
 safety switches.
+
+The default action budget is 100, sized above the frozen 64-action ideal and the
+observed 82-action complete live cycle. The engine hard maximum remains 500.
+These are runtime configuration bounds, not profile fields: the default profile
+cannot change either value or any per-action invariant.
 
 ## Neutral sensor facts
 

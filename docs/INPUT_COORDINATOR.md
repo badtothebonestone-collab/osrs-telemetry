@@ -69,6 +69,14 @@ verified target and canvas intersection clipped to three device pixels around
 the SafetyGate-approved point; saved-session login may use the complete freshly
 recognized prompt bounds inside the exact client.
 
+Cursor position is external mutable state, not coordinator history. Every
+backend cursor sample establishes per-monitor-v2 awareness on the calling
+thread immediately before `GetCursorPos`; point ownership independently does
+the same before `WindowFromPoint`. A fresh CLI thread and an application worker
+therefore see the same physical device-pixel point. Missing APIs, an ineffective
+thread-context change, or a failed cursor read blocks and never substitutes
+`(0,0)` or the last commanded location.
+
 An unknown axis begins with one HID-count probe. Before every MOVE, all four
 directions on both screen axes must contain an explicit envelope of eight device
 pixels per HID count across the complete planner path; this also contains a
@@ -78,16 +86,39 @@ larger response aborts before activation. Containment remains conditional on
 the declared eight-pixel physical-transfer envelope; an unbounded or faulty
 external transfer cannot be made safe by software alone.
 
-Gameplay transit is confined to the loaded-scene telemetry canvas in Win32
-device pixels. Before a game tick can provide canvas geometry, saved-session
-login transit may use only the exact visible PID-owned Win32 RuneLite client
-bounds. A single supported prompt must be detected and revalidated from that
-same client screenshot, its point must still belong to that window, and the
-cursor must already be inside the client. This pregame exception never applies
-to gameplay, credentials, MFA, text entry, or a bank PIN.
-The helper verifies that its active Windows thread is per-monitor-v2 DPI aware
-before trusting native bounds, screenshots, or cursor feedback; inability to
-prove that coordinate context blocks before any hardware connection.
+If the ordinary post-MOVE sample is unchanged on any commanded axis, the
+coordinator waits one more deterministic timestep and samples again without
+sending another MOVE. Direction, gain, uncommanded-axis, movement bounds, and
+foreground checks apply independently to both the first prefix and the
+incremental second sample, so unrelated/manual motion cannot mask a bad report.
+Only a combined zero-effect observation enters the existing isolated retry
+lane: that axis remains uncalibrated and a needed correction plan uses a larger
+bounded probe. A second consecutive zero-effect sample on the same axis aborts.
+Successful transfer resets that axis's consecutive count, but the complete
+transaction may contain at most eight isolated zero-effect events; the ninth
+aborts. These retries consume the same 64-plan and 512-MOVE transaction caps and
+never authorize activation without a settled point and fresh validation.
+
+Normal gameplay transit is confined to the loaded-scene telemetry canvas in
+Win32 device pixels. The optional telemetry client-window bounds form only an
+outer movement-only reacquisition region. A freshly sampled cursor just outside
+the canvas may enter when it is still owned by the exact pinned RuneLite root
+HWND/PID, lies outside on exactly one axis, is no more than 64 device pixels from
+the canvas, and has the required cross-axis and four-sided transfer headroom.
+At most 72 one-count inward MOVEs may reach a stable eight-pixel inset. Cross-
+axis motion, wrong direction, excess gain, no progress/effect, ownership/focus
+change, multiple outside axes, or insufficient outer-edge headroom blocks before
+activation. Only then does the ordinary canvas planner start from the newly
+observed point. This supports a manual cursor handoff or window resize without
+turning the whole desktop into an input region.
+
+Before a game tick can provide canvas geometry, saved-session login uses the
+same exact visible PID-owned Win32 RuneLite client boundary. A single supported
+prompt must be detected and revalidated from that same client screenshot, and
+the final point must still belong to that window. This pregame exception never
+applies to credentials, MFA, text entry, or a bank PIN. The helper also verifies
+its active Windows thread is per-monitor-v2 DPI aware before trusting native
+bounds or screenshots; inability to prove that context blocks before hardware.
 Both the initial and post-move login checks still scan the complete configured
 zones for every supported authenticated template, so ambiguity is never
 narrowed to an earlier candidate. Within one fresh screenshot only, the matcher
@@ -97,6 +128,14 @@ zone, more than 20,000 high-anchor-score origins, or excessive first-anchor
 density blocks instead of becoming a no-match or disconnect candidate. These
 are fail-closed work caps; supported live geometry is separately measured
 inside the firmware lease rather than claimed as a universal latency bound.
+
+When that normal matcher caps on an otherwise coherent loaded scene, the helper
+may perform one larger but still bounded scan for the two exact retained login
+templates. This fallback is read-only and absence-only: it excludes the broad
+disconnect-dialog heuristic, cannot authorize input, and can contribute to PASS
+only with two increasing loaded ticks from the same PID/session. If the scan
+ages its observation beyond two seconds, the loaded proof is refreshed and must
+remain current, coherent, same-identity, and non-regressing.
 
 The coordinator checks focus/PID and actual cursor feedback throughout the
 trajectory. Every correction is another bounded deterministic plan. Immediately
@@ -119,6 +158,20 @@ rearm because it releases an opened menu before normal cleanup. An accepted or
 ambiguously completed written context-menu button-down marks the menu as
 possibly open, so a rejected or unacknowledged release still triggers that
 cancellation path; an explicit button-down rejection does not send Escape.
+
+## Unsent target invalidation
+
+The adaptive gameplay action layer has two typed, safely unsent dispositions.
+`TARGET_EVIDENCE_INVALIDATED` means fresh exact hover proof changed before any
+activation; the resource task may suppress that exact pending key for one fresh
+alternate selection. `CURSOR_STATE_INVALIDATED` means the observed physical
+cursor/ownership/bounds state changed; it permits one fresh reobservation but
+does not suppress the target. Runtime accepts either only when the receipt is
+blocked, cleanup is authoritative and safe, the failure kind matches the typed
+disposition, and the complete ledger contains preactivation/cleanup commands--
+never mouse activation or a key press. Neither is input success or a verification
+result. Any activation command, incomplete cleanup, mismatched denial, or second
+consecutive invalidation fails closed instead of replanning.
 
 ## Supported callers
 

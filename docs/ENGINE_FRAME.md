@@ -17,13 +17,17 @@ the FSM advances.
 - task ID, state, status, definition/profile IDs, and bounded route/cycle
   progress from the task's normal snapshot operation;
 - source tick, capture time, frame/geometry identity, session, process, and
-  canvas bounds from the immutable Observation;
+  canvas bounds plus camera yaw/pitch from the immutable Observation;
+- the actual immutable decision, including its diagnostic reason and action;
+  serialized key actions retain the exact key and hold duration;
 - the actual selected target and the eligible/rejected candidates produced by
   the task's selection path, including stable rejection codes;
 - ordered `SafetyCheck` values produced by the safety evaluations actually
   used before activation, including bounded retries;
 - pending verification and the latest `VerificationResult`/typed `Outcome`;
-- the last immutable `InputReceipt`; and
+- the last immutable `InputReceipt`, including its exact reason, typed
+  `failureKind` (such as `cursor_state_invalidated`), complete command/ACK
+  ledger, and final firmware status; and
 - cleanup evidence derived from command/ACK counts and final firmware state,
   plus the current blocker.
 
@@ -57,11 +61,15 @@ Absolute geometry is drawn only when its source tick and geometry-frame ID
 still match the frame's displayed Observation. Stale geometry is suppressed;
 the overlay does not reproject or replace it.
 
-The Windows host has no input bindings and verifies `WS_EX_TRANSPARENT`,
-`WS_EX_NOACTIVATE`, `WS_EX_TOOLWINDOW`, and `WS_EX_LAYERED` before showing the
-topmost window without activation. It imports no Arduino, coordinator,
+The Windows host has no input bindings. It resolves Tk's HWND to the top-level
+root window, applies and verifies `WS_EX_TRANSPARENT`, `WS_EX_NOACTIVATE`,
+`WS_EX_TOOLWINDOW`, and `WS_EX_LAYERED` on that root, then positions and shows
+the topmost window without activation. It imports no Arduino, coordinator,
 Observation client, task selection, or SafetyGate code. Startup/render failure
-warns and leaves the engine running. With `--overlay` omitted, no overlay
+hides and destroys any created window so frozen stale evidence is not left
+visible, warns, and leaves the engine running. Normal stop exits the callback
+and Tk mainloop before destroying the root and releasing callback/canvas
+references on the overlay's owning thread. With `--overlay` omitted, no overlay
 window or thread is created.
 
 Examples:

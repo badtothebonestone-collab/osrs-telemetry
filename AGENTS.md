@@ -2,20 +2,11 @@
 
 ## Governing context
 
-Read in this order:
-
-1. `AGENTS.md`
-2. `docs/PRODUCT_VISION.md`
-3. `PLANS.md`
-4. `docs/ENGINE_STATUS.md`
-5. `docs/ARCHITECTURE.md`
-6. `docs/SENSOR_CONTRACT.md`
-7. `docs/TASK_CONTRACT.md`
-8. `docs/DEFINITIONS_AND_PROFILES.md`
-9. `docs/INPUT_COORDINATOR.md`
-10. `docs/ENGINE_FRAME.md`
-11. `docs/DEMONSTRATIONS.md`
-12. `docs/FRONTEND_CONTRACT.md`
+At the start of an engine work session, read `AGENTS.md`, `PLANS.md`, and
+`docs/ENGINE_STATUS.md`. Read `docs/PRODUCT_VISION.md` and
+`docs/ARCHITECTURE.md` for new or cross-cutting work, then load only the contract
+documents for the boundary being changed. Do not mechanically load every design
+document for a narrow fix.
 
 `docs/RESCUE_CONTRACT.md` freezes the proven regression slice; it is no longer
 the active development phase.
@@ -67,25 +58,47 @@ veto an unsafe visual condition; it may never replace authoritative API facts.
   freshness, PID/session/focus binding, exact identity, geometry, hover/menu
   proof, PIN refusal, required verification, runtime/action bounds, or cleanup.
 - Require a fresh loaded scene before gameplay. `LOGGED_IN` alone is not proof.
-- Require exact target identity, verified canvas geometry, exact post-move menu
-  evidence, and a later typed verification for every action.
+- At every pointer transaction, sample the real current Win32 cursor in the
+  calling thread's proven per-monitor-v2 device-pixel context. Never infer its
+  location from a prior command. A manually displaced cursor may use only the
+  bounded movement-only client-to-canvas ingress; otherwise return typed
+  cursor-state invalidation without activation. One fully safe, preactivation-
+  only invalidation may be reobserved; repetition blocks.
+- A firmware MOVE acknowledgement proves command handling, not Windows cursor
+  arrival. One late report may receive an additional no-input poll while all
+  direction, gain, ownership, focus, and bounds checks remain in force;
+  persistent no-effect blocks.
+- Require exact target identity, verified canvas geometry, and exact post-move
+  lane evidence for every pointer activation: object hover/menu or widget
+  geometry/state as appropriate. Typed key actions instead require their exact
+  engine-owned key shape and task constraint. Every sent pointer or key action
+  requires a later typed verification.
+- An object aim point is authorized only inside the first present RuneLite API
+  shape in clickbox -> convex hull -> canvas tile order and inside the viewport.
+  `canvasLocation` is diagnostic evidence unless that authoritative shape also
+  contains it. Exact post-move hover/menu evidence remains the final veto.
 - Every connected attempt must end with confirmed `STOP_ALL`, `DISARM`, and
   authoritative wire `STATUS` proving disarmed, zero held keys, zero held mouse
   buttons, and no unresolved command evidence.
-- Fail closed. Missing proof is not permission to add a fallback.
+- Fail closed. Missing authorization proof is not permission to add an input-
+  capable fallback.
 - Dry-run, replay, overlay, diagnostics, and demonstration capture must not
   inject input or open hardware sessions.
 
 `run.cmd login COMx` may click only the retained idle-disconnect OK,
 saved-session Play Now, and Click here to play surfaces. All other
-login/recovery surfaces fail closed.
+login/recovery surfaces fail closed. A coherent loaded scene may use a bounded
+template-only absence check after the normal matcher caps, but that check cannot
+use the disconnect heuristic or authorize input.
 
 ## Architecture and development
 
-- Use `run.cmd` as the public entrypoint until the application facade replaces
-  it without duplicating engine logic.
-- Everything downstream of the plugin consumes immutable engine contracts; do
-  not read plugin caches or raw response dictionaries elsewhere.
+- Keep `run.cmd` as the public wrapper over the existing application facade; it
+  must not duplicate engine logic or compose a second runtime path.
+- Production control downstream of the observation adapter consumes immutable
+  engine contracts; it must not read plugin caches or raw response dictionaries.
+  Bounded read-only diagnostics and the demonstration recorder may inspect or
+  preserve raw payload evidence, but never use it as a second control path.
 - Keep task logic, safety, RuneLite parsing, Arduino control, verification, and
   state ownership out of future GUI/overlay code.
 - Overlay and status readers may only render immutable `EngineFrame` evidence.
@@ -106,22 +119,28 @@ login/recovery surfaces fail closed.
 ## Work and validation discipline
 
 - Keep `PLANS.md` and `docs/ENGINE_STATUS.md` current after every milestone.
-- One phase, one coherent diff, one checkpoint commit. Do not push unless asked.
-- Run focused tests, the full Python/Java suites, and `run.cmd replay` after each
-  phase. Inspect the diff for prohibited expansion before committing.
+- Keep each completed milestone in one coherent checkpoint commit; closely
+  related hardening fixes may share that checkpoint. Do not push unless asked.
+- Use focused tests while iterating. At each checkpoint, run the full affected-
+  language suite plus `run.cmd replay`; at phase and final gates run both Python
+  and Java. Inspect the diff for prohibited expansion before committing.
 - Use live validation only for evidence replay cannot provide. Keep it bounded;
   after a repeated equivalent failure, preserve evidence and patch the failing
   boundary before another run.
 - After any live input, prove cleanup with `STOP_ALL`, `DISARM`, and safe status.
 
-With RuneLite closed:
+The final gate commands are:
 
 ```powershell
 .\run.cmd replay
 .\run.cmd test
 ```
 
-Read-only live commands are `run.cmd observe`, `run.cmd task`, and
+Qualifying live proof must use a newly launched client built from the current
+checkpoint. An existing client may still support bounded read-only diagnosis,
+but never proves later source edits.
+
+Non-input live commands are `run.cmd observe`, `run.cmd task`, and
 `run.cmd record-demo NAME`; `run.cmd inspect-demo PATH` verifies finalized
 evidence offline. `run.cmd app catalog|profile-schema|validate-profile` exposes
 the frontend contract. Gameplay is explicitly opt-in through

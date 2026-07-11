@@ -70,6 +70,22 @@ projection coordinates retain their separate source-canvas dimensions, while
 the published canvas bounds are physical device pixels. Python rejects any
 available geometry whose schema or coordinate space is missing or different.
 
+`clientWindowX`, `clientWindowY`, `clientWindowWidth`, and
+`clientWindowHeight` are optional only as one all-or-none group. Dimensions must
+be positive and the resulting device-pixel window must contain the complete
+canvas; partial or contradictory bounds reject the observation. This outer
+window is not gameplay transit or activation authority. It is only the pinned
+RuneLite ownership/reacquisition envelope used to move a freshly observed
+manually displaced cursor into the stricter canvas lane.
+
+For a projected object, `aimPoint` must be inside both the viewport and the
+first present authoritative API shape in clickbox -> convex hull -> canvas tile
+order. A present stronger shape never falls through to weaker geometry.
+`canvasLocation` is retained only when that shape itself contains it; otherwise
+RuneLite performs one bounded interior search and marks the projection
+non-actionable when no interior point exists. Bounds and point therefore use the
+same shape precedence, with fresh hover/menu validation still the final veto.
+
 The canonical adapter requests one neutral `scene_object_census`; filtered
 resource/route/service censuses remain diagnostic endpoint capabilities, not
 task authorization. Scene rows omit candidate/type/skill labels, and scene

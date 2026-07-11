@@ -182,11 +182,14 @@ begin/end are exposed for a future GUI; no GUI or background service is built.
 - Bank PIN entry, credential entry, recovery planning, and generalized tasks are out of scope.
 - Login assistance covers only the recognized idle-disconnect OK, saved-session Play Now,
   and Click here to play prompts.
-- The physical cycle was proven through bounded continuation runs while the
-  route was being hardened. That evidence is stitched rather than one
-  uninterrupted process, and it did not retain complete raw Observation frames.
+- The original physical baseline was proven through bounded continuation runs
+  while the route was being hardened. That historical evidence is stitched and
+  did not retain complete raw Observation frames. A separate 2026-07-11
+  current-checkpoint process later completed the default profile uninterrupted
+  in 82 actions with safe terminal cleanup; its compact artifact retains only
+  the final gameplay transaction rather than every intermediate receipt.
 - The committed golden replay freezes the final-code FSM and verification
-  sequence; it is not a replacement for future bounded live regression proof.
+  sequence. It complements, rather than replaces, the bounded live proof.
 - The current task performs exactly one full-inventory bank cycle and stops.
 - Exactly one built-in definition/default profile is supported; there is no
   user-editable profile loader or second site.

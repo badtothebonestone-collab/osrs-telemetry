@@ -114,6 +114,7 @@ Phase 0 therefore preserves two complementary artifacts:
   the final task code through 28 log gains, both fixed routes, typed bank
   outcomes, one completed cycle, and terminal `COMPLETE`.
 
-This is the regression baseline. A future bounded uninterrupted run remains
-valuable additional evidence, but the old claim that the route and bank path
-were never completed is no longer accurate.
+This remains the historical regression baseline. A separate 2026-07-11
+current-checkpoint run later completed the default profile uninterrupted with
+safe terminal cleanup; `docs/ENGINE_STATUS.md` records that stronger evidence.
+The classification of the original component corpus above remains unchanged.
