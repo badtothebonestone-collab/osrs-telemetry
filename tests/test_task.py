@@ -42,6 +42,7 @@ LOG_ITEM_ID = next(iter(DEFINITION.resource.produced_item_ids))
 ROUTE_TO_BANK = DEFINITION.route_to_bank.steps
 ROUTE_TO_TREES = DEFINITION.route_to_resource.steps
 CHOP_DEADLINE_TICKS = DEFINITION.verification.resource_deadline_ticks
+MOVEMENT_DEADLINE_TICKS = DEFINITION.verification.movement_deadline_ticks
 CLOSE_WIDGET_NAME = CLOSE_BANK_WIDGET_KEY
 DEPOSIT_WIDGET_NAME = DEPOSIT_INVENTORY_WIDGET_KEY
 
@@ -528,6 +529,10 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(SCREEN, decision.evidence.selected.point)
         self.assertEqual("test-frame-10", decision.evidence.selected.geometry_frame_id)
         self.assertEqual(VerificationKind.MOVED_CLOSER, task.progress.pending.kind)
+        self.assertEqual(
+            10 + MOVEMENT_DEADLINE_TICKS,
+            task.progress.pending.deadline_tick,
+        )
         task.apply_verification(verification_pass(OutcomeKind.MOVED_CLOSER))
         self.assertEqual(0, task.progress.route_index)
 

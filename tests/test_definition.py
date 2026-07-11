@@ -88,6 +88,7 @@ class BuiltinDefinitionFactTests(unittest.TestCase):
         self.assertTrue(definition.inventory.require_produced_item_when_full)
 
         self.assertEqual(8, definition.verification.action_deadline_ticks)
+        self.assertEqual(20, definition.verification.movement_deadline_ticks)
         self.assertEqual(100, definition.verification.resource_deadline_ticks)
         self.assertEqual(4, definition.verification.route_stable_ticks)
         self.assertEqual(0, definition.verification.deposit_expected_quantity)
@@ -241,6 +242,8 @@ class DefinitionValidationTests(unittest.TestCase):
             lambda: replace(object_step, arrival_radius=0),
             lambda: replace(self.definition.verification, action_deadline_ticks=True),
             lambda: replace(self.definition.verification, action_deadline_ticks=0),
+            lambda: replace(self.definition.verification, movement_deadline_ticks=True),
+            lambda: replace(self.definition.verification, movement_deadline_ticks=0),
             lambda: replace(self.definition.verification, resource_deadline_ticks=-1),
             lambda: replace(self.definition.verification, route_stable_ticks=False),
             lambda: replace(self.definition.verification, deposit_expected_quantity=-1),

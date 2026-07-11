@@ -438,7 +438,7 @@ class WoodcutBankTask:
                 before_tick=observation.tick,
                 deadline_tick=(
                     observation.tick
-                    + self.definition.verification.action_deadline_ticks
+                    + self.definition.verification.movement_deadline_ticks
                 ),
                 before_location=observation.location,
                 target_location=step.location,

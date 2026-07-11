@@ -289,6 +289,7 @@ class InventoryPredicate:
 @dataclass(frozen=True, slots=True)
 class VerificationExpectations:
     action_deadline_ticks: int
+    movement_deadline_ticks: int
     resource_deadline_ticks: int
     route_stable_ticks: int
     deposit_expected_quantity: int
@@ -298,6 +299,7 @@ class VerificationExpectations:
 
     def __post_init__(self) -> None:
         _require_positive_int("action_deadline_ticks", self.action_deadline_ticks)
+        _require_positive_int("movement_deadline_ticks", self.movement_deadline_ticks)
         _require_positive_int("resource_deadline_ticks", self.resource_deadline_ticks)
         _require_positive_int("route_stable_ticks", self.route_stable_ticks)
         _require_nonnegative_int("deposit_expected_quantity", self.deposit_expected_quantity)
@@ -477,6 +479,7 @@ LUMBRIDGE_WEST_TREES_V1 = TaskSiteDefinition(
     ),
     verification=VerificationExpectations(
         action_deadline_ticks=8,
+        movement_deadline_ticks=20,
         resource_deadline_ticks=100,
         route_stable_ticks=4,
         deposit_expected_quantity=0,
