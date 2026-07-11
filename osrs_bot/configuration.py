@@ -25,7 +25,7 @@ class RuntimeConfig:
     arduino_port: str | None = None
     poll_seconds: float = 0.25
     max_observations: int = 4_800
-    max_actions: int = 80
+    max_actions: int = 100
     max_runtime_seconds: float = 1_200.0
     verification_timeout_seconds: float = 75.0
 

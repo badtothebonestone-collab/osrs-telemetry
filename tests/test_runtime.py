@@ -488,9 +488,9 @@ class _IncrementingClient:
 
 
 class _LongCycleTask:
-    """Budget model: 28 chops plus 24 route/bank/return actions."""
+    """Budget model: 28 chops plus 36 route/bank/return actions."""
 
-    def __init__(self, action_count: int = 52) -> None:
+    def __init__(self, action_count: int = 64) -> None:
         self.action_count = action_count
         self.completed = 0
         self.status = TaskStatus.RUNNING
@@ -1289,9 +1289,9 @@ class TaskRuntimeTests(unittest.TestCase):
         result = runtime.run(execute=True)
 
         self.assertEqual("COMPLETE", result.status)
-        self.assertEqual(52, result.actions)
+        self.assertEqual(64, result.actions)
         self.assertGreater(result.observations, 240)
-        self.assertEqual(52, task.completed)
+        self.assertEqual(64, task.completed)
 
     def test_safe_stop_before_observation_never_fetches_or_decides(self) -> None:
         control = RuntimeControl()

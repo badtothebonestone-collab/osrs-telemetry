@@ -24,7 +24,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.assertEqual(config.request_timeout_seconds, 3.0)
         self.assertEqual(config.poll_seconds, 0.25)
         self.assertEqual(config.max_observations, 4_800)
-        self.assertEqual(config.max_actions, 80)
+        self.assertEqual(config.max_actions, 100)
         self.assertEqual(config.max_runtime_seconds, 1_200.0)
         self.assertEqual(config.verification_timeout_seconds, 75.0)
         self.assertIsNone(config.arduino_port)
