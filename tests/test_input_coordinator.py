@@ -1369,6 +1369,128 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
 
+    def test_intermediate_delayed_report_is_polled_before_another_move(self) -> None:
+        backend = FakeBackend(
+            start=(100, 250),
+            delayed_x_move_indices={2},
+            release_delayed_x_on_position_call=5,
+        )
+        intent = ApprovedPointerIntent(
+            intent_id="intermediate-delayed-report",
+            purpose=InputPurpose.GAMEPLAY_OBJECT,
+            target=ScreenPoint(400, 250),
+            movement_bounds=ScreenBounds(0, 0, 500, 500),
+            target_bounds=ScreenBounds(397, 247, 7, 7),
+            expected_pid=321,
+        )
+
+        receipt = coordinator(backend).execute_pointer(
+            intent,
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertTrue(receipt.successful)
+        move_indices = [
+            index
+            for index, event in enumerate(backend.events)
+            if event.startswith("move:")
+        ]
+        self.assertGreaterEqual(len(move_indices), 3)
+        between_second_and_third = backend.events[
+            move_indices[1] + 1 : move_indices[2]
+        ]
+        self.assertGreaterEqual(
+            sum(
+                event.startswith("position:")
+                for event in between_second_and_third
+            ),
+            2,
+        )
+        self.assertIn("mouse_down:left", backend.events)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_delayed_poll_cannot_mask_wrong_initial_direction(self) -> None:
+        class MaskedInitialDirectionBackend(FakeBackend):
+            def _current_position(self) -> tuple[int, int]:
+                self.position_call_count += 1
+                samples = {
+                    1: (100, 100),
+                    2: (99, 100),
+                    3: (101, 101),
+                }
+                self.position = samples.get(
+                    self.position_call_count, self.position
+                )
+                self.positions.append(self.position)
+                self.events.append(
+                    f"position:{self.position[0]},{self.position[1]}"
+                )
+                return self.position
+
+        backend = MaskedInitialDirectionBackend(start=(100, 100))
+
+        receipt = coordinator(backend).execute_pointer(
+            ApprovedPointerIntent(
+                intent_id="masked-initial-direction",
+                purpose=InputPurpose.GAMEPLAY_OBJECT,
+                target=ScreenPoint(104, 104),
+                movement_bounds=ScreenBounds(0, 0, 300, 300),
+                target_bounds=ScreenBounds(104, 104, 1, 1),
+                expected_pid=321,
+            ),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertIn(
+            "cursor_feedback_direction_mismatch_x:initial_sample",
+            receipt.reason,
+        )
+        self.assertEqual(2, backend.position_call_count)
+        self.assertNotIn("mouse_down:left", backend.events)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_delayed_poll_cannot_mask_wrong_incremental_direction(self) -> None:
+        class MaskedDelayedDirectionBackend(FakeBackend):
+            def _current_position(self) -> tuple[int, int]:
+                self.position_call_count += 1
+                samples = {
+                    1: (100, 100),
+                    2: (100, 102),
+                    3: (101, 101),
+                }
+                self.position = samples.get(
+                    self.position_call_count, self.position
+                )
+                self.positions.append(self.position)
+                self.events.append(
+                    f"position:{self.position[0]},{self.position[1]}"
+                )
+                return self.position
+
+        backend = MaskedDelayedDirectionBackend(start=(100, 100))
+
+        receipt = coordinator(backend).execute_pointer(
+            ApprovedPointerIntent(
+                intent_id="masked-delayed-direction",
+                purpose=InputPurpose.GAMEPLAY_OBJECT,
+                target=ScreenPoint(104, 104),
+                movement_bounds=ScreenBounds(0, 0, 300, 300),
+                target_bounds=ScreenBounds(104, 104, 1, 1),
+                expected_pid=321,
+            ),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertIn(
+            "cursor_feedback_direction_mismatch_y:delayed_sample",
+            receipt.reason,
+        )
+        self.assertEqual(3, backend.position_call_count)
+        self.assertNotIn("mouse_down:left", backend.events)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
     def test_delayed_report_still_blocks_above_combined_transfer_budget(self) -> None:
         class ExcessiveDelayedBackend(FakeBackend):
             def _move_relative(self, dx: int, dy: int) -> dict[str, Any]:

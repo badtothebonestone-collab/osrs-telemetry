@@ -1553,6 +1553,54 @@ class InputCoordinator:
                     raise _cursor_state_invalidated(
                         "cursor_left_verified_movement_bounds"
                     )
+                if (
+                    (step.dx != 0 and actual.x == before.x)
+                    or (step.dy != 0 and actual.y == before.y)
+                ):
+                    self._assert_feedback_sample_delta(
+                        transaction=transaction,
+                        commanded=step.dx,
+                        delayed_command=x_delayed_command,
+                        observed=actual.x - before.x,
+                        axis="x",
+                        phase="initial_sample",
+                    )
+                    self._assert_feedback_sample_delta(
+                        transaction=transaction,
+                        commanded=step.dy,
+                        delayed_command=y_delayed_command,
+                        observed=actual.y - before.y,
+                        axis="y",
+                        phase="initial_sample",
+                    )
+                    # A HID report may reach Windows just after the ordinary
+                    # timestep.  Poll once more without sending another MOVE;
+                    # all normal direction, gain, bounds, and foreground
+                    # checks still apply to the combined observation below.
+                    initial_sample = actual
+                    self._sleep(plan.timestep_seconds)
+                    actual = self._current_position(backend)
+                    self._assert_pointer_foreground(transaction, intent)
+                    if not intent.movement_bounds.contains(actual):
+                        raise _cursor_state_invalidated(
+                            "cursor_left_verified_movement_bounds"
+                        )
+                    self._assert_feedback_sample_delta(
+                        transaction=transaction,
+                        commanded=step.dx,
+                        delayed_command=x_delayed_command,
+                        observed=actual.x - initial_sample.x,
+                        axis="x",
+                        phase="delayed_sample",
+                    )
+                    self._assert_feedback_sample_delta(
+                        transaction=transaction,
+                        commanded=step.dy,
+                        delayed_command=y_delayed_command,
+                        observed=actual.y - initial_sample.y,
+                        axis="y",
+                        phase="delayed_sample",
+                    )
                 (
                     x_calibrated,
                     x_no_effect_retries,
@@ -2053,7 +2101,13 @@ class InputCoordinator:
                 )
             if no_effect_retries < MAX_CONSECUTIVE_AXIS_NO_EFFECT_RETRIES:
                 return False, no_effect_retries + 1, commanded
-            raise _TransactionAbort(f"cursor_feedback_no_effect_{axis}")
+            raise _TransactionAbort(
+                f"cursor_feedback_no_effect_{axis}:"
+                f"commanded={commanded}:observed=0:"
+                f"delayed={delayed_command}:"
+                f"plan={transaction.pointer_plan_count}:"
+                f"step={transaction.pointer_step_count}"
+            )
         if (commanded > 0) != (observed > 0):
             raise _cursor_state_invalidated(
                 f"cursor_feedback_direction_mismatch_{axis}"
@@ -2075,6 +2129,42 @@ class InputCoordinator:
                 f"step={transaction.pointer_step_count}"
             )
         return True, 0, 0
+
+    @staticmethod
+    def _assert_feedback_sample_delta(
+        *,
+        transaction: _Transaction,
+        commanded: int,
+        delayed_command: int,
+        observed: int,
+        axis: str,
+        phase: str,
+    ) -> None:
+        supported = commanded if commanded != 0 else delayed_command
+        if supported == 0:
+            if observed != 0:
+                raise _cursor_state_invalidated(
+                    f"cursor_feedback_uncommanded_axis_{axis}:{phase}"
+                )
+            return
+        if observed == 0:
+            return
+        if (supported > 0) != (observed > 0):
+            raise _cursor_state_invalidated(
+                f"cursor_feedback_direction_mismatch_{axis}:{phase}"
+            )
+        supported_magnitude = abs(commanded) + abs(delayed_command)
+        if (
+            abs(observed)
+            > supported_magnitude * MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT
+        ):
+            raise _TransactionAbort(
+                f"cursor_transfer_gain_exceeded_{axis}:"
+                f"phase={phase}:commanded={commanded}:"
+                f"observed={observed}:delayed={delayed_command}:"
+                f"plan={transaction.pointer_plan_count}:"
+                f"step={transaction.pointer_step_count}"
+            )
 
     def _validate_pointer(
         self,
