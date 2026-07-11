@@ -1,5 +1,5 @@
 """Minimal OSRS woodcut-and-bank vertical slice."""
 
-from .model import Observation, TaskPhase
+from .model import Observation
 
-__all__ = ["Observation", "TaskPhase"]
+__all__ = ["Observation"]

@@ -38,6 +38,11 @@ runtime logic.
   `sensor_frame.v1`; HTTP assembly time is never evidence time. Menu evidence
   is separately stamped, and request-time world/tile geometry is accepted only
   when tick, session, process, capture age, and geometry frame match.
+- **D009 — Minimal task seam:** runtime sees only `Task`, `Decision`, and
+  `TaskSnapshot`; task state is opaque. Passing verification always carries a
+  typed `Outcome`, and task-specific interface/dialogue/inventory requirements
+  travel as immutable constraints that can narrow but never weaken engine
+  safety invariants.
 
 ## Phases and acceptance
 
@@ -45,9 +50,9 @@ runtime logic.
 |---|---|---|
 | 0. Freeze proven baseline | Complete (`beb9cbb`) | Full diff audited; Python/Java suites pass; terminal trace reaches `COMPLETE`; tracked golden replay passes; stale proof docs corrected; checkpoint committed/tagged. |
 | 1. Governing contract | Complete (`f4c091e`) | Product vision, architecture, rules, status, and this plan describe the OSRS-specific engine and prohibited expansion. |
-| 2. Coherent sensor truth | Complete | Atomic tick `SensorFrame`; source-based freshness; mixed/stale/missing/menu/schema tests; bounded live observe. |
-| 3. Minimal task seam | Pending | Runtime has no concrete woodcut imports/phase checks; typed outcomes; fake task runs unchanged runtime/safety/verifier. |
-| 4. One task/site definition | Pending | One immutable Lumbridge definition and one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
+| 2. Coherent sensor truth | Complete (`b645d83`) | Atomic tick `SensorFrame`; source-based freshness; mixed/stale/missing/menu/schema tests; bounded live observe. |
+| 3. Minimal task seam | Complete | Runtime has no concrete woodcut imports/phase checks; typed outcomes; fake task runs unchanged runtime/safety/verifier. |
+| 4. One task/site definition | Next | One immutable Lumbridge definition and one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
 | 5. Arduino boundary | Pending | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
 | 6. EngineFrame + overlay | Pending | One immutable diagnostic truth; passive click-through overlay mirrors it and has no control authority. |
 | 7. Demonstration capture | Pending | Read-only record/inspect commands produce hashed JSONL, manifest, timeline, screenshots, and reviewed semantic suggestions. |
@@ -113,6 +118,26 @@ runtime logic.
   8893 was verified closed. This is fail-closed contract evidence, not gameplay
   proof.
 
+## Phase 3 completed work
+
+- Added a four-operation structural `Task` protocol with bounded observation
+  requests, opaque decisions, immutable snapshots, and typed terminal status.
+- Removed `TaskPhase`, `TaskProgress`, log IDs, and log-count convenience from
+  shared models. The explicit woodcut FSM now owns them.
+- Made runtime depend only on the protocol; it never imports the woodcut task,
+  compares its phases, or reads mutable progress. A fake task exercises the
+  same runtime without engine changes.
+- Replaced task-specific verification strings with immutable typed outcomes and
+  generic item, movement, plane, interface, and dialogue specifications.
+- Split SafetyGate evaluation into non-overridable engine invariants and typed
+  interface/dialogue/inventory constraints attached by the task. Removed the
+  global bank-state requirement and shared `climb`/plane-2 assumptions.
+- Rejected every executable action missing verification before dry-run success
+  or any input-interface invocation.
+- Added `docs/TASK_CONTRACT.md`. Final gate: golden replay 2 passed, all 136
+  Python tests passed, a forced fresh 39-test Java suite passed, and
+  `git diff --check` passed.
+
 ## Prohibited during this mission
 
 - A second gameplay task or site, multiple woodcut areas, a generic navigation
@@ -136,4 +161,7 @@ runtime logic.
   must measure refresh/query timing and repeated provenance/timeout warnings.
 - Arduino callers and final firmware status proof are not yet centralized;
   Phase 5 owns that migration.
+- Lumbridge IDs, areas, routes, deadlines, and one-cycle goal still live beside
+  the explicit FSM. Phase 4 moves only those validated facts into one built-in
+  definition and binds one validated default profile.
 - No EngineFrame, overlay, demonstration recorder, or frontend facade exists.

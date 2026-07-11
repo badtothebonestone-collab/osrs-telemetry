@@ -11,18 +11,29 @@ from osrs_bot.model import (
     Observation,
     PlayerObservation,
     ScreenBounds,
-    Verification,
     VerificationKind,
+    VerificationSpec,
     WidgetObservation,
     WorldPoint,
 )
-from osrs_bot.verification import VerificationStatus, Verifier
+from osrs_bot.verification import (
+    Outcome,
+    OutcomeKind,
+    VerificationResult,
+    VerificationStatus,
+    Verifier,
+)
 
 
-def logs(count: int, *, known: bool = True) -> InventoryObservation:
+ITEM_ID = 42
+
+
+def item_inventory(
+    quantity: int, *, item_id: int = ITEM_ID, known: bool = True
+) -> InventoryObservation:
     items = (
-        (InventoryItem(slot=0, item_id=1511, quantity=count),)
-        if count > 0
+        (InventoryItem(slot=0, item_id=item_id, quantity=quantity),)
+        if quantity > 0
         else ()
     )
     return InventoryObservation(
@@ -48,7 +59,7 @@ def observation(
         player=PlayerObservation(),
         location=location,
         plane=location.plane,
-        inventory=inventory or logs(1),
+        inventory=inventory or item_inventory(1),
         nearby_objects=(),
         menus=(),
         widgets=widgets or WidgetObservation(),
@@ -75,7 +86,7 @@ def observation(
     )
 
 
-def specification(kind: VerificationKind, **changes: object) -> Verification:
+def specification(kind: VerificationKind, **changes: object) -> VerificationSpec:
     values = {
         "kind": kind,
         "before_tick": 100,
@@ -83,41 +94,89 @@ def specification(kind: VerificationKind, **changes: object) -> Verification:
         "source_session_id": "session-1",
     }
     values.update(changes)
-    return Verification(**values)
+    return VerificationSpec(**values)
 
 
 class VerifierTest(unittest.TestCase):
     def setUp(self) -> None:
         self.verifier = Verifier(max_observation_age_seconds=2.0)
 
-    def test_none_passes_without_an_observation_outcome(self) -> None:
-        result = self.verifier.evaluate(
-            Verification(VerificationKind.NONE, before_tick=100, deadline_tick=100),
-            observation(tick=100),
+    def test_pass_requires_a_typed_outcome(self) -> None:
+        with self.assertRaises(ValueError):
+            VerificationResult(VerificationStatus.PASS, "missing_outcome")
+        present = VerificationResult(
+            VerificationStatus.PASS,
+            OutcomeKind.ARRIVED.value,
+            Outcome(OutcomeKind.ARRIVED, 101),
         )
 
-        self.assertEqual(result.status, VerificationStatus.PASS)
-        self.assertTrue(result.passed)
+        self.assertTrue(present.passed)
 
     def test_waits_for_an_observation_later_than_the_action(self) -> None:
         result = self.verifier.evaluate(
-            specification(VerificationKind.LOG_GAINED, before_log_count=1),
-            observation(tick=100, inventory=logs(2)),
+            specification(
+                VerificationKind.ITEM_QUANTITY_INCREASED,
+                item_id=ITEM_ID,
+                before_quantity=1,
+            ),
+            observation(tick=100, inventory=item_inventory(2)),
         )
 
-        self.assertEqual(result.status, VerificationStatus.PENDING)
-        self.assertEqual(result.reason, "awaiting_later_observation")
+        self.assertEqual(VerificationStatus.PENDING, result.status)
+        self.assertEqual("awaiting_later_observation", result.reason)
+        self.assertIsNone(result.outcome)
 
-    def test_passes_log_gained(self) -> None:
+    def test_emits_item_quantity_increased(self) -> None:
         result = self.verifier.evaluate(
-            specification(VerificationKind.LOG_GAINED, before_log_count=1),
-            observation(inventory=logs(2)),
+            specification(
+                VerificationKind.ITEM_QUANTITY_INCREASED,
+                item_id=ITEM_ID,
+                before_quantity=1,
+            ),
+            observation(inventory=item_inventory(2)),
         )
 
-        self.assertEqual(result.status, VerificationStatus.PASS)
-        self.assertEqual(result.reason, "log_gained")
+        self.assertTrue(result.passed)
+        self.assertEqual("item_quantity_increased", result.reason)
+        self.assertEqual(Outcome(OutcomeKind.ITEM_QUANTITY_INCREASED, 101), result.outcome)
 
-    def test_passes_moved_closer_and_arrival(self) -> None:
+    def test_emits_item_quantity_equals_without_an_interface(self) -> None:
+        spec = specification(
+            VerificationKind.ITEM_QUANTITY_EQUALS,
+            item_id=ITEM_ID,
+            expected_quantity=0,
+        )
+
+        result = self.verifier.evaluate(spec, observation(inventory=item_inventory(0)))
+        unmatched = self.verifier.evaluate(spec, observation(inventory=item_inventory(1)))
+
+        self.assertTrue(result.passed)
+        self.assertEqual(OutcomeKind.ITEM_QUANTITY_EQUALS, result.outcome.kind)
+        self.assertTrue(unmatched.pending)
+
+    def test_bank_item_quantity_equals_requires_readable_open_interface(self) -> None:
+        spec = specification(
+            VerificationKind.ITEM_QUANTITY_EQUALS,
+            item_id=ITEM_ID,
+            expected_quantity=0,
+            interface_name="bank",
+            expected_plane=0,
+        )
+        readable = WidgetObservation(bank_known=True, bank_open=True, bank_readable=True)
+        unreadable = WidgetObservation(bank_known=True, bank_open=True, bank_readable=False)
+
+        result = self.verifier.evaluate(
+            spec, observation(inventory=item_inventory(0), widgets=readable)
+        )
+        pending = self.verifier.evaluate(
+            spec, observation(inventory=item_inventory(0), widgets=unreadable)
+        )
+
+        self.assertTrue(result.passed)
+        self.assertEqual(OutcomeKind.ITEM_QUANTITY_EQUALS, result.outcome.kind)
+        self.assertTrue(pending.pending)
+
+    def test_emits_moved_closer_and_arrived(self) -> None:
         spec = specification(
             VerificationKind.MOVED_CLOSER,
             before_location=WorldPoint(3200, 3200, 0),
@@ -135,13 +194,13 @@ class VerifierTest(unittest.TestCase):
             spec, observation(location=WorldPoint(3200, 3200, 0))
         )
 
-        self.assertEqual(closer.reason, "moved_closer")
-        self.assertEqual(arrived.reason, "arrived")
+        self.assertEqual(OutcomeKind.MOVED_CLOSER, closer.outcome.kind)
+        self.assertEqual(OutcomeKind.ARRIVED, arrived.outcome.kind)
         self.assertTrue(closer.passed)
         self.assertTrue(arrived.passed)
         self.assertTrue(unchanged.pending)
 
-    def test_passes_arrival_even_when_the_baseline_was_already_at_target(self) -> None:
+    def test_emits_arrived_when_baseline_was_already_at_target(self) -> None:
         target = WorldPoint(3205, 3200, 0)
         spec = specification(
             VerificationKind.MOVED_CLOSER,
@@ -153,9 +212,9 @@ class VerifierTest(unittest.TestCase):
         result = self.verifier.evaluate(spec, observation(location=target))
 
         self.assertTrue(result.passed)
-        self.assertEqual(result.reason, "arrived")
+        self.assertEqual(OutcomeKind.ARRIVED, result.outcome.kind)
 
-    def test_passes_plane_changed(self) -> None:
+    def test_emits_plane_changed(self) -> None:
         result = self.verifier.evaluate(
             specification(
                 VerificationKind.PLANE_CHANGED,
@@ -166,43 +225,67 @@ class VerifierTest(unittest.TestCase):
         )
 
         self.assertTrue(result.passed)
-        self.assertEqual(result.reason, "plane_changed")
+        self.assertEqual(OutcomeKind.PLANE_CHANGED, result.outcome.kind)
 
-    def test_route_transition_accepts_plane_change_or_exact_climb_dialogue(self) -> None:
+    def test_route_transition_emits_plane_or_dialogue_outcome(self) -> None:
         spec = specification(
-            VerificationKind.ROUTE_TRANSITION_READY,
+            VerificationKind.ROUTE_TRANSITION,
             before_location=WorldPoint(3205, 3229, 0),
             expected_plane=1,
+            dialogue_prompt_contains="direction",
+            dialogue_option_contains="ascend",
         )
         dialogue = WidgetObservation(
             dialogue_active=True,
             dialogue_type="options",
-            dialogue_prompt="Climb up or down the stairs?",
-            dialogue_options=(DialogueOption(1, "1", "Climb up the stairs."),),
+            dialogue_prompt="Choose a direction",
+            dialogue_options=(DialogueOption(1, "1", "Ascend to the next floor"),),
             dialogue_number_keys=True,
         )
 
-        opened = self.verifier.evaluate(spec, observation(widgets=dialogue))
+        appeared = self.verifier.evaluate(spec, observation(widgets=dialogue))
         changed = self.verifier.evaluate(
             spec, observation(location=WorldPoint(3205, 3229, 1))
         )
 
-        self.assertEqual("dialogue_open", opened.reason)
-        self.assertEqual("plane_changed", changed.reason)
-        self.assertTrue(opened.passed)
+        self.assertEqual(OutcomeKind.DIALOGUE_OPTION_APPEARED, appeared.outcome.kind)
+        self.assertEqual(OutcomeKind.PLANE_CHANGED, changed.outcome.kind)
+        self.assertTrue(appeared.passed)
         self.assertTrue(changed.passed)
 
-    def test_passes_bank_open_only_when_readable(self) -> None:
-        open_readable = WidgetObservation(bank_known=True, bank_open=True, bank_readable=True)
-        open_unreadable = WidgetObservation(bank_known=True, bank_open=True, bank_readable=False)
-        spec = specification(VerificationKind.BANK_OPEN, expected_plane=0)
+    def test_emits_interface_opened_only_when_bank_is_readable(self) -> None:
+        spec = specification(
+            VerificationKind.INTERFACE_OPENED,
+            interface_name="bank",
+            expected_plane=0,
+        )
+        readable = WidgetObservation(bank_known=True, bank_open=True, bank_readable=True)
+        unreadable = WidgetObservation(bank_known=True, bank_open=True, bank_readable=False)
 
-        passed = self.verifier.evaluate(spec, observation(widgets=open_readable))
-        pending = self.verifier.evaluate(spec, observation(widgets=open_unreadable))
+        result = self.verifier.evaluate(spec, observation(widgets=readable))
+        pending = self.verifier.evaluate(spec, observation(widgets=unreadable))
 
-        self.assertTrue(passed.passed)
-        self.assertEqual(passed.reason, "bank_open")
+        self.assertTrue(result.passed)
+        self.assertEqual(OutcomeKind.INTERFACE_OPENED, result.outcome.kind)
         self.assertTrue(pending.pending)
+
+    def test_emits_interface_closed_only_when_bank_state_is_known(self) -> None:
+        spec = specification(
+            VerificationKind.INTERFACE_CLOSED,
+            interface_name="bank",
+            expected_plane=0,
+        )
+
+        result = self.verifier.evaluate(
+            spec, observation(widgets=WidgetObservation(bank_known=True, bank_open=False))
+        )
+        unknown = self.verifier.evaluate(
+            spec, observation(widgets=WidgetObservation(bank_known=False, bank_open=False))
+        )
+
+        self.assertTrue(result.passed)
+        self.assertEqual(OutcomeKind.INTERFACE_CLOSED, result.outcome.kind)
+        self.assertTrue(unknown.pending)
 
     def test_bank_pin_fails_immediately(self) -> None:
         widgets = WidgetObservation(
@@ -213,78 +296,48 @@ class VerifierTest(unittest.TestCase):
         )
 
         result = self.verifier.evaluate(
-            specification(VerificationKind.BANK_OPEN, expected_plane=0),
+            specification(
+                VerificationKind.INTERFACE_OPENED,
+                interface_name="bank",
+                expected_plane=0,
+            ),
             observation(widgets=widgets),
         )
 
         self.assertTrue(result.failed)
-        self.assertEqual(result.reason, "bank_pin_open")
+        self.assertEqual("bank_pin_open", result.reason)
+        self.assertIsNone(result.outcome)
 
     def test_session_change_fails_instead_of_proving_an_action(self) -> None:
-        spec = specification(VerificationKind.LOG_GAINED, before_log_count=1)
+        spec = specification(
+            VerificationKind.ITEM_QUANTITY_INCREASED,
+            item_id=ITEM_ID,
+            before_quantity=1,
+        )
 
         result = self.verifier.evaluate(
             spec,
-            replace(observation(inventory=logs(2)), session_id="new-session"),
+            replace(observation(inventory=item_inventory(2)), session_id="new-session"),
         )
 
         self.assertTrue(result.failed)
         self.assertEqual("session_changed", result.reason)
 
-    def test_passes_logs_deposited_only_when_no_logs_remain(self) -> None:
-        spec = specification(
-            VerificationKind.LOGS_DEPOSITED,
-            before_log_count=3,
-            expected_plane=0,
-        )
+    def test_unmet_condition_is_pending_before_deadline(self) -> None:
         result = self.verifier.evaluate(
-            spec,
-            observation(
-                inventory=logs(0),
-                widgets=WidgetObservation(bank_known=True, bank_open=True, bank_readable=True),
+            specification(
+                VerificationKind.ITEM_QUANTITY_INCREASED,
+                item_id=ITEM_ID,
+                before_quantity=1,
             ),
-        )
-        partial = self.verifier.evaluate(
-            spec,
-            observation(
-                inventory=logs(1),
-                widgets=WidgetObservation(bank_known=True, bank_open=True, bank_readable=True),
-            ),
-        )
-
-        self.assertTrue(result.passed)
-        self.assertEqual(result.reason, "logs_deposited")
-        self.assertTrue(partial.pending)
-
-    def test_passes_bank_closed(self) -> None:
-        result = self.verifier.evaluate(
-            specification(VerificationKind.BANK_CLOSED, expected_plane=0),
-            observation(widgets=WidgetObservation(bank_known=True, bank_open=False)),
-        )
-
-        self.assertTrue(result.passed)
-        self.assertEqual(result.reason, "bank_closed")
-
-    def test_unknown_bank_capture_cannot_prove_bank_closed(self) -> None:
-        result = self.verifier.evaluate(
-            specification(VerificationKind.BANK_CLOSED, expected_plane=0),
-            observation(widgets=WidgetObservation(bank_known=False, bank_open=False)),
+            observation(tick=104, inventory=item_inventory(1)),
         )
 
         self.assertTrue(result.pending)
         self.assertEqual("condition_not_met", result.reason)
 
-    def test_unmet_condition_is_pending_before_deadline(self) -> None:
-        result = self.verifier.evaluate(
-            specification(VerificationKind.LOG_GAINED, before_log_count=1),
-            observation(tick=104, inventory=logs(1)),
-        )
-
-        self.assertTrue(result.pending)
-        self.assertEqual(result.reason, "condition_not_met")
-
     def test_unusable_observations_are_pending_before_deadline(self) -> None:
-        base = observation(tick=104, inventory=logs(2))
+        base = observation(tick=104, inventory=item_inventory(2))
         cases = {
             "non-pass": replace(base, status="WARN"),
             "snapshot stale": replace(base, fresh=False),
@@ -297,76 +350,145 @@ class VerifierTest(unittest.TestCase):
                 base, timestamp=datetime.now(timezone.utc) + timedelta(hours=1)
             ),
         }
-        spec = specification(VerificationKind.LOG_GAINED, before_log_count=1)
+        spec = specification(
+            VerificationKind.ITEM_QUANTITY_INCREASED,
+            item_id=ITEM_ID,
+            before_quantity=1,
+        )
         for label, candidate in cases.items():
             with self.subTest(label=label):
                 result = self.verifier.evaluate(spec, candidate)
                 self.assertTrue(result.pending)
-                self.assertEqual(result.reason, "observation_not_usable")
+                self.assertEqual("observation_not_usable", result.reason)
 
     def test_condition_can_pass_on_the_deadline_tick(self) -> None:
         result = self.verifier.evaluate(
-            specification(VerificationKind.LOG_GAINED, before_log_count=1),
-            observation(tick=105, inventory=logs(2)),
+            specification(
+                VerificationKind.ITEM_QUANTITY_INCREASED,
+                item_id=ITEM_ID,
+                before_quantity=1,
+            ),
+            observation(tick=105, inventory=item_inventory(2)),
         )
 
         self.assertTrue(result.passed)
+        self.assertEqual(105, result.outcome.observed_tick)
 
     def test_unmet_or_unusable_condition_fails_at_deadline(self) -> None:
-        spec = specification(VerificationKind.LOG_GAINED, before_log_count=1)
-        unmet = self.verifier.evaluate(spec, observation(tick=105, inventory=logs(1)))
+        spec = specification(
+            VerificationKind.ITEM_QUANTITY_INCREASED,
+            item_id=ITEM_ID,
+            before_quantity=1,
+        )
+        unmet = self.verifier.evaluate(
+            spec, observation(tick=105, inventory=item_inventory(1))
+        )
         stale = self.verifier.evaluate(
-            spec, replace(observation(tick=105, inventory=logs(2)), fresh=False)
+            spec, replace(observation(tick=105, inventory=item_inventory(2)), fresh=False)
         )
 
         self.assertTrue(unmet.failed)
         self.assertTrue(stale.failed)
-        self.assertEqual(unmet.reason, "deadline_exceeded")
-        self.assertEqual(stale.reason, "deadline_exceeded")
+        self.assertEqual("deadline_exceeded", unmet.reason)
+        self.assertEqual("deadline_exceeded", stale.reason)
 
     def test_success_seen_only_after_deadline_fails_closed(self) -> None:
         result = self.verifier.evaluate(
-            specification(VerificationKind.LOG_GAINED, before_log_count=1),
-            observation(tick=106, inventory=logs(2)),
+            specification(
+                VerificationKind.ITEM_QUANTITY_INCREASED,
+                item_id=ITEM_ID,
+                before_quantity=1,
+            ),
+            observation(tick=106, inventory=item_inventory(2)),
         )
 
         self.assertTrue(result.failed)
-        self.assertEqual(result.reason, "deadline_exceeded")
+        self.assertEqual("deadline_exceeded", result.reason)
 
-    def test_unknown_inventory_cannot_prove_inventory_outcomes(self) -> None:
-        unknown = logs(0, known=False)
-        gained = self.verifier.evaluate(
-            specification(VerificationKind.LOG_GAINED, before_log_count=0),
+    def test_unknown_inventory_cannot_prove_item_outcomes(self) -> None:
+        unknown = item_inventory(0, known=False)
+        increased = self.verifier.evaluate(
+            specification(
+                VerificationKind.ITEM_QUANTITY_INCREASED,
+                item_id=ITEM_ID,
+                before_quantity=0,
+            ),
             observation(inventory=unknown),
         )
-        deposited = self.verifier.evaluate(
+        equals = self.verifier.evaluate(
             specification(
-                VerificationKind.LOGS_DEPOSITED,
-                before_log_count=1,
-                expected_plane=0,
+                VerificationKind.ITEM_QUANTITY_EQUALS,
+                item_id=ITEM_ID,
+                expected_quantity=0,
             ),
             observation(inventory=unknown),
         )
 
-        self.assertTrue(gained.pending)
-        self.assertTrue(deposited.pending)
+        self.assertTrue(increased.pending)
+        self.assertTrue(equals.pending)
 
     def test_invalid_specs_fail_immediately(self) -> None:
         cases = {
-            "deadline": Verification(
-                VerificationKind.BANK_OPEN, before_tick=100, deadline_tick=100
+            "deadline": VerificationSpec(
+                VerificationKind.ITEM_QUANTITY_INCREASED,
+                before_tick=100,
+                deadline_tick=100,
+                item_id=ITEM_ID,
+                before_quantity=0,
+                source_session_id="session-1",
             ),
-            "log baseline": specification(VerificationKind.LOG_GAINED),
-            "deposit baseline": specification(
-                VerificationKind.LOGS_DEPOSITED, before_log_count=0
+            "session": specification(
+                VerificationKind.ITEM_QUANTITY_INCREASED,
+                item_id=ITEM_ID,
+                before_quantity=0,
+                source_session_id=None,
+            ),
+            "item id": specification(
+                VerificationKind.ITEM_QUANTITY_INCREASED,
+                item_id=0,
+                before_quantity=0,
+            ),
+            "quantity baseline": specification(
+                VerificationKind.ITEM_QUANTITY_INCREASED,
+                item_id=ITEM_ID,
+            ),
+            "expected quantity": specification(
+                VerificationKind.ITEM_QUANTITY_EQUALS,
+                item_id=ITEM_ID,
+            ),
+            "item interface": specification(
+                VerificationKind.ITEM_QUANTITY_EQUALS,
+                item_id=ITEM_ID,
+                expected_quantity=0,
+                interface_name="other",
+            ),
+            "bank item plane": specification(
+                VerificationKind.ITEM_QUANTITY_EQUALS,
+                item_id=ITEM_ID,
+                expected_quantity=0,
+                interface_name="bank",
             ),
             "movement": specification(VerificationKind.MOVED_CLOSER),
             "plane": specification(VerificationKind.PLANE_CHANGED),
-            "unsupported": Verification("other", before_tick=100, deadline_tick=105),
+            "unchanged plane": specification(
+                VerificationKind.PLANE_CHANGED,
+                before_location=WorldPoint(1, 1, 0),
+                expected_plane=0,
+            ),
+            "interface": specification(
+                VerificationKind.INTERFACE_OPENED,
+                expected_plane=0,
+            ),
+            "route": specification(VerificationKind.ROUTE_TRANSITION),
+            "unsupported": VerificationSpec(
+                "other", before_tick=100, deadline_tick=105, source_session_id="session-1"
+            ),
         }
         for label, spec in cases.items():
             with self.subTest(label=label):
-                self.assertTrue(self.verifier.evaluate(spec, observation()).failed)
+                result = self.verifier.evaluate(spec, observation())
+                self.assertTrue(result.failed)
+                self.assertIsNone(result.outcome)
 
 
 if __name__ == "__main__":

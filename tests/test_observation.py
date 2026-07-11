@@ -117,7 +117,7 @@ class ObservationParsingTests(unittest.TestCase):
         self.assertTrue(observation.source_coherent)
         self.assertTrue(observation.menu_fresh)
         self.assertEqual(879, observation.player.animation)
-        self.assertEqual(2, observation.inventory.log_count)
+        self.assertEqual(2, observation.inventory.quantity(1511))
         self.assertEqual("fixture-session", observation.session_id)
         self.assertEqual(ScreenBounds(1000, 2000, 800, 600), observation.canvas_bounds)
         with self.assertRaises(FrozenInstanceError):

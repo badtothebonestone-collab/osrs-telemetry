@@ -10,8 +10,9 @@ anti-detection system. The current baseline implementation is:
 
 ```text
 RuneLite plugin -> atomic SensorFrame -> snapshot v2 -> Observation
-               -> WoodcutBankTask -> SafetyGate
-               -> ArduinoActionInterface -> Verifier
+               -> Task protocol -> explicit WoodcutBankTask FSM
+               -> Action + typed constraints -> SafetyGate
+               -> ArduinoActionInterface -> Verifier -> typed Outcome
 ```
 
 There is one command surface: `run.cmd`.
@@ -95,12 +96,14 @@ does not pretend that the ignored live traces contain full raw observations.
 - `src/main/java/com/osrstelemetry/`: RuneLite sensor and read-only snapshot endpoint.
 - `osrs_bot/model.py`: immutable observation and action contracts.
 - `osrs_bot/observation.py`: the only snapshot-to-Observation adapter.
-- `osrs_bot/task.py`: the only supported task state machine.
-- `osrs_bot/safety.py`: pre-move and post-move validation.
+- `osrs_bot/task_contract.py`: the minimal task/runtime protocol.
+- `osrs_bot/task.py`: the only supported explicit task state machine.
+- `osrs_bot/safety.py`: non-overridable engine invariants followed by typed
+  task-constraint validation.
 - `osrs_bot/action.py`: the only gameplay input pathway; saved-session login is
   the other current Arduino session owner until Phase 5 centralizes both.
-- `osrs_bot/verification.py`: the only post-action verifier.
-- `osrs_bot/runtime.py`: bounded orchestration of those components.
+- `osrs_bot/verification.py`: the only post-action verifier and typed outcomes.
+- `osrs_bot/runtime.py`: task-agnostic bounded orchestration.
 - `osrs_bot/login.py`: bounded saved-session prompt assistance, outside the task engine.
 - `arduino/ArduinoHIDBridge/`: retained HID firmware.
 - `tests/`: focused Python tests for the active baseline.
@@ -109,6 +112,7 @@ does not pretend that the ignored live traces contain full raw observations.
 - `docs/PRODUCT_VISION.md`: governing product scope and future user experience.
 - `docs/ARCHITECTURE.md`: contracts and state transitions.
 - `docs/SENSOR_CONTRACT.md`: atomic frame, freshness, geometry, and menu provenance.
+- `docs/TASK_CONTRACT.md`: minimal task seam, typed outcomes, and safety ownership.
 - `docs/ENGINE_STATUS.md`: completed milestone, evidence boundary, and blockers.
 - `PLANS.md`: active phases, acceptance criteria, and decision log.
 - `docs/RESCUE_AUDIT.md`: archaeology findings and removal rationale.
@@ -126,6 +130,8 @@ does not pretend that the ignored live traces contain full raw observations.
 - The committed golden replay freezes the final-code FSM and verification
   sequence; it is not a replacement for future bounded live regression proof.
 - The current task performs exactly one full-inventory bank cycle and stops.
+- Lumbridge facts still live beside the explicit FSM until Phase 4 extracts the
+  one built-in definition and validated default profile.
 
 Read `docs/PRODUCT_VISION.md`, `PLANS.md`, and `docs/ENGINE_STATUS.md` before
 extending the engine. `docs/RESCUE_CONTRACT.md` remains the frozen baseline

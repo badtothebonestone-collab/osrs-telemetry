@@ -2,9 +2,9 @@
 
 ## Current milestone
 
-**Phase 2 complete — atomic source-coherent sensor truth established.**
+**Phase 3 complete — minimal task seam and typed outcome path established.**
 
-Current checkpoint subject: `sensor: publish coherent atomic observation frames`
+Current checkpoint subject: `engine: extract minimal task contract and typed outcomes`
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -25,7 +25,17 @@ Regression command:
 - Snapshot response v2 distinguishes source capture time from HTTP assembly
   time. World/tile geometry and menu evidence have separately enforced source
   identities.
+- Runtime consumes only the structural `Task` contract: bounded observation
+  request, opaque decision, typed verification application, and immutable
+  status snapshot. It has no woodcut import, phase comparison, or progress
+  access.
 - `WoodcutBankTask` explicitly models the one supported ordinary-tree cycle.
+- The shared model has no log ID or woodcut phase. Task-specific item,
+  interface, plane, and dialogue requirements are immutable action/spec
+  constraints, while SafetyGate invariants remain non-overridable.
+- Verification passes carry one typed `Outcome`; diagnostic reason strings do
+  not select state transitions. A non-woodcut waypoint fake passes through the
+  real runtime, SafetyGate, and Verifier without engine changes.
 - Exact Tree `1276`, fixed outbound/return route steps, both upward stairs,
   exact bank booth, deposit-all-logs, verified Escape close, and terminal
   `COMPLETE` are represented in the committed golden replay.
@@ -67,6 +77,8 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
   forced fresh 22-test Java run successfully.
 - Phase 2 gate: golden replay 2 passed; 123 Python tests passed; forced fresh
   Java suite 39 passed across 6 suites with zero failures/errors/skips.
+- Phase 3 gate: golden replay 2 passed; 136 Python tests passed; forced fresh
+  Java suite 39 passed across 6 suites with zero failures/errors/skips.
 - The bounded Phase 2 live observation served response v2/frame v1 at the
   RuneLite login screen. Only baseline was available; inventory, activity,
   bank UI, and dialogue were explicitly unavailable. `observe` returned
@@ -80,9 +92,10 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
 - New-tick world-model refreshes have a 250 ms provider wait. Persistent loaded
   scene latency/timeout behavior is unmeasured and must be inspected in final
   live evidence rather than inferred from the login-screen check.
-- Runtime/task contracts are still woodcut-specific. **Phase 3 is next** and
-  will extract only the minimal explicit task seam.
+- Lumbridge IDs, areas, route steps, deadlines, and the one-cycle goal still
+  live beside the task FSM. **Phase 4 is next** and will move only those facts
+  into one immutable built-in definition with one validated default profile.
 - Arduino ownership and authoritative final firmware `STATUS` are not yet one
   enforced boundary; Phase 5 owns that hardening.
-- The atomic sensor contract is implemented; task, input, diagnostics,
-  recorder, and facade migrations remain phase-scoped.
+- The atomic sensor and minimal task contracts are implemented; definition,
+  input, diagnostics, recorder, and facade migrations remain phase-scoped.

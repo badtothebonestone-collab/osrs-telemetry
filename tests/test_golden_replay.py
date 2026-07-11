@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from osrs_bot.model import (
-    LOG_ITEM_ID,
     ActionKind,
     InventoryItem,
     InventoryObservation,
@@ -17,7 +16,6 @@ from osrs_bot.model import (
     ScreenBounds,
     ScreenPoint,
     TargetGeometry,
-    TaskPhase,
     WidgetObservation,
     WidgetTarget,
     WorldPoint,
@@ -25,11 +23,13 @@ from osrs_bot.model import (
 from osrs_bot.task import (
     BANK_ANCHOR,
     BANK_OBJECT_ID,
+    LOG_ITEM_ID,
     ROUTE_STABLE_TICKS,
     ROUTE_TO_BANK,
     ROUTE_TO_TREES,
     TREE_AREA,
     TREE_OBJECT_ID,
+    TaskPhase,
     WoodcutBankTask,
 )
 from osrs_bot.verification import Verifier
@@ -197,7 +197,7 @@ class GoldenLumbridgeCycleReplayTest(unittest.TestCase):
         self.assertIsNotNone(specification)
         result = self.verifier.evaluate(specification, after)
         self.assertTrue(result.passed, result.reason)
-        self.task.apply_verification(True, result.reason)
+        self.task.apply_verification(result)
         return result.reason
 
     def _replay_route(
@@ -346,7 +346,10 @@ class GoldenLumbridgeCycleReplayTest(unittest.TestCase):
 
             self.tick += 1
             gained = _observation(TREE_AREA, self.tick, logs=logs + 1)
-            self.assertEqual("log_gained", self._apply_verified(decision, gained))
+            self.assertEqual(
+                "item_quantity_increased",
+                self._apply_verified(decision, gained),
+            )
 
         self.assertEqual(
             self.fixture["expected"]["chopActions"], chop_actions
@@ -405,7 +408,8 @@ class GoldenLumbridgeCycleReplayTest(unittest.TestCase):
             BANK_ANCHOR, self.tick, logs=28, widgets=opened
         )
         self.assertEqual(
-            "bank_open", self._apply_verified(open_decision, opened_observation)
+            "interface_opened",
+            self._apply_verified(open_decision, opened_observation),
         )
 
         deposit_decision = self.task.decide(opened_observation)
@@ -415,7 +419,7 @@ class GoldenLumbridgeCycleReplayTest(unittest.TestCase):
             BANK_ANCHOR, self.tick, logs=0, widgets=opened
         )
         self.assertEqual(
-            "logs_deposited",
+            "item_quantity_equals",
             self._apply_verified(deposit_decision, deposited),
         )
 
@@ -440,7 +444,8 @@ class GoldenLumbridgeCycleReplayTest(unittest.TestCase):
             widgets=WidgetObservation(bank_known=True, bank_open=False),
         )
         self.assertEqual(
-            "bank_closed", self._apply_verified(close_decision, bank_closed)
+            "interface_closed",
+            self._apply_verified(close_decision, bank_closed),
         )
         self.assertEqual(TaskPhase.NAVIGATE_TO_TREES, self.task.progress.phase)
 

@@ -8,6 +8,9 @@ from osrs_bot.model import (
     Action,
     ActionKind,
     DialogueOption,
+    DialogueOptionConstraint,
+    InterfaceConstraint,
+    InventoryConstraint,
     InventoryItem,
     InventoryObservation,
     MenuEntry,
@@ -17,6 +20,7 @@ from osrs_bot.model import (
     ScreenBounds,
     ScreenPoint,
     TargetGeometry,
+    TaskConstraints,
     WidgetObservation,
     WidgetTarget,
     WorldPoint,
@@ -246,9 +250,6 @@ class SafetyGateTest(unittest.TestCase):
             "missing capability": replace(base, missing_capabilities=("inventory",)),
             "not focused": replace(base, client_focused=False),
             "process unknown": replace(base, client_process_id=None),
-            "bank state unknown": replace(
-                base, widgets=replace(base.widgets, bank_known=False)
-            ),
             "too old": replace(
                 base, timestamp=datetime.now(timezone.utc) - timedelta(seconds=10)
             ),
@@ -264,6 +265,15 @@ class SafetyGateTest(unittest.TestCase):
                 self.assertFalse(
                     self.gate.validate_pre_move(tree_action(), candidate).allowed
                 )
+
+    def test_unrelated_object_action_does_not_require_bank_state(self) -> None:
+        candidate = replace(
+            observation(), widgets=WidgetObservation(bank_known=False)
+        )
+
+        result = self.gate.validate_pre_move(tree_action(), candidate)
+
+        self.assertTrue(result.allowed)
 
     def test_rejects_incoherent_source_frame_explicitly(self) -> None:
         result = self.gate.validate_pre_move(
@@ -570,6 +580,10 @@ class SafetyGateTest(unittest.TestCase):
             screen_point=point,
             source_menu_client_tick=1100,
             source_session_id="session-1",
+            task_constraints=TaskConstraints(
+                inventory=InventoryConstraint(frozenset({1511})),
+                interface=InterfaceConstraint("bank", 2, True, require_readable=True),
+            ),
         )
 
         safe = replace(
@@ -607,20 +621,59 @@ class SafetyGateTest(unittest.TestCase):
             screen_point=point,
             source_menu_client_tick=1100,
             source_session_id="session-1",
+            task_constraints=TaskConstraints(
+                inventory=InventoryConstraint(frozenset({1511})),
+                interface=InterfaceConstraint("bank", 2, True, require_readable=True),
+            ),
         )
 
-        for candidate in (inventory(known=False), inventory()):
-            with self.subTest(known=candidate.known):
-                self.assertFalse(
-                    self.gate.validate_pre_move(
-                        action,
-                        replace(
-                            observation(items=candidate, widgets=widgets),
-                            location=WorldPoint(3208, 3220, 2),
-                            plane=2,
-                        ),
-                    ).allowed
+        for candidate, reason in (
+            (inventory(known=False), "inventory_unknown"),
+            (inventory(), "constrained_inventory_empty"),
+        ):
+            with self.subTest(known=candidate.known, reason=reason):
+                result = self.gate.validate_pre_move(
+                    action,
+                    replace(
+                        observation(items=candidate, widgets=widgets),
+                        location=WorldPoint(3208, 3220, 2),
+                        plane=2,
+                    ),
                 )
+                self.assertFalse(result.allowed)
+                self.assertEqual(reason, result.reason)
+
+        missing_constraint = replace(
+            action,
+            task_constraints=TaskConstraints(
+                interface=InterfaceConstraint("bank", 2, True, require_readable=True)
+            ),
+        )
+        result = self.gate.validate_pre_move(
+            missing_constraint,
+            replace(
+                observation(items=inventory(1511), widgets=widgets),
+                location=WorldPoint(3208, 3220, 2),
+                plane=2,
+            ),
+        )
+        self.assertEqual("inventory_constraint_missing", result.reason)
+
+        missing_interface = replace(
+            action,
+            task_constraints=TaskConstraints(
+                inventory=InventoryConstraint(frozenset({1511}))
+            ),
+        )
+        result = self.gate.validate_pre_move(
+            missing_interface,
+            replace(
+                observation(items=inventory(1511), widgets=widgets),
+                location=WorldPoint(3208, 3220, 2),
+                plane=2,
+            ),
+        )
+        self.assertEqual("interface_constraint_missing", result.reason)
 
     def test_widget_post_move_does_not_require_object_hover_menu(self) -> None:
         point = ScreenPoint(700, 40)
@@ -641,6 +694,9 @@ class SafetyGateTest(unittest.TestCase):
             screen_point=point,
             source_menu_client_tick=1100,
             source_session_id="session-1",
+            task_constraints=TaskConstraints(
+                interface=InterfaceConstraint("bank", 2, True)
+            ),
         )
 
         result = self.gate.validate_post_move(
@@ -654,30 +710,35 @@ class SafetyGateTest(unittest.TestCase):
 
         self.assertTrue(result.allowed)
 
-    def test_stair_dialogue_allows_only_the_exact_numbered_choice(self) -> None:
+    def test_dialogue_constraint_allows_only_the_exact_numbered_choice(self) -> None:
         widgets = WidgetObservation(
             bank_known=True,
             dialogue_active=True,
             dialogue_type="options",
-            dialogue_prompt="Climb up or down the stairs?",
+            dialogue_prompt="Which passage should be entered?",
             dialogue_options=(
-                DialogueOption(1, "1", "Climb up the stairs."),
-                DialogueOption(2, "2", "Climb down the stairs."),
+                DialogueOption(1, "1", "Enter eastern passage."),
+                DialogueOption(2, "2", "Enter western passage."),
             ),
             dialogue_number_keys=True,
             dialogue_client_tick=500,
         )
         action = Action(
             ActionKind.PRESS_KEY,
-            "Choose climb up",
+            "Choose eastern passage",
             100,
-            option="Climb up the stairs.",
+            option="Enter eastern passage.",
             target_key="dialogue:1",
-            target_name="Climb up the stairs.",
+            target_name="Enter eastern passage.",
             target_id=1,
             key="1",
             source_session_id="session-1",
             source_dialogue_client_tick=500,
+            task_constraints=TaskConstraints(
+                dialogue=DialogueOptionConstraint(
+                    "passage", "Enter eastern passage.", 1, "1"
+                )
+            ),
         )
 
         self.assertTrue(
@@ -707,6 +768,11 @@ class SafetyGateTest(unittest.TestCase):
             target_id=0,
             key="escape",
             source_session_id="session-1",
+            task_constraints=TaskConstraints(
+                interface=InterfaceConstraint(
+                    "bank", 2, True, require_keyboard_close=True
+                )
+            ),
         )
         before = replace(
             observation(tick=100, widgets=widgets),
@@ -717,7 +783,7 @@ class SafetyGateTest(unittest.TestCase):
 
         self.assertTrue(self.gate.validate_pre_move(action, before).allowed)
         self.assertEqual(
-            "bank_sample_not_newer",
+            "interface_sample_not_newer",
             self.gate.validate_post_move(action, before).reason,
         )
         self.assertTrue(self.gate.validate_post_move(action, after).allowed)
@@ -730,7 +796,7 @@ class SafetyGateTest(unittest.TestCase):
             widgets=replace(widgets, keyboard_close_possible=False),
         )
         self.assertEqual(
-            "bank_keyboard_close_unavailable",
+            "interface_keyboard_close_unavailable",
             self.gate.validate_pre_move(action, unavailable).reason,
         )
 

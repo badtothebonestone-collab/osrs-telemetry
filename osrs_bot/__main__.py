@@ -14,7 +14,7 @@ from .runtime import (
     TaskRuntime,
     build_live_runtime,
 )
-from .task import WoodcutBankTask
+from .task import LOG_ITEM_ID, WoodcutBankTask
 from .verification import Verifier
 
 
@@ -78,7 +78,7 @@ def _observation_summary(observation) -> dict[str, object]:
             "known": observation.inventory.known,
             "occupiedSlots": observation.inventory.occupied_slots,
             "freeSlots": observation.inventory.free_slots,
-            "ordinaryLogs": observation.inventory.log_count,
+            "ordinaryLogs": observation.inventory.quantity(LOG_ITEM_ID),
         },
         "nearbyObjects": len(observation.nearby_objects),
         "menuEntries": len(observation.menus),

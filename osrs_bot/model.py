@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from enum import Enum
 
 
-LOG_ITEM_ID = 1511
 MAX_FUTURE_CLOCK_SKEW_SECONDS = 2.0
 
 
@@ -72,10 +71,6 @@ class InventoryObservation:
 
     def quantity(self, item_id: int) -> int:
         return sum(item.quantity for item in self.items if item.item_id == item_id)
-
-    @property
-    def log_count(self) -> int:
-        return self.quantity(LOG_ITEM_ID)
 
     @property
     def full(self) -> bool:
@@ -244,21 +239,6 @@ class Observation:
         return next((item for item in self.nearby_objects if item.key == key), None)
 
 
-class TaskPhase(str, Enum):
-    FIND_TREE = "find_tree"
-    CHOP = "chop"
-    VERIFY_LOGS = "verify_logs"
-    NAVIGATE_TO_BANK = "navigate_to_bank"
-    OPEN_BANK = "open_bank"
-    DEPOSIT_LOGS = "deposit_logs"
-    VERIFY_DEPOSIT = "verify_deposit"
-    CLOSE_BANK = "close_bank"
-    NAVIGATE_TO_TREES = "navigate_to_trees"
-    STAIR_DIALOGUE = "stair_dialogue"
-    COMPLETE = "complete"
-    BLOCKED = "blocked"
-
-
 class ActionKind(str, Enum):
     WAIT = "wait"
     INTERACT_OBJECT = "interact_object"
@@ -268,27 +248,113 @@ class ActionKind(str, Enum):
 
 
 class VerificationKind(str, Enum):
-    NONE = "none"
-    LOG_GAINED = "log_gained"
+    ITEM_QUANTITY_INCREASED = "item_quantity_increased"
+    ITEM_QUANTITY_EQUALS = "item_quantity_equals"
     MOVED_CLOSER = "moved_closer"
     PLANE_CHANGED = "plane_changed"
-    BANK_OPEN = "bank_open"
-    LOGS_DEPOSITED = "logs_deposited"
-    BANK_CLOSED = "bank_closed"
-    ROUTE_TRANSITION_READY = "route_transition_ready"
+    INTERFACE_OPENED = "interface_opened"
+    INTERFACE_CLOSED = "interface_closed"
+    ROUTE_TRANSITION = "route_transition"
 
 
 @dataclass(frozen=True)
-class Verification:
+class VerificationSpec:
     kind: VerificationKind
     before_tick: int
     deadline_tick: int
-    before_log_count: int | None = None
+    item_id: int | None = None
+    before_quantity: int | None = None
+    expected_quantity: int | None = None
     before_location: WorldPoint | None = None
     target_location: WorldPoint | None = None
     expected_plane: int | None = None
     source_session_id: str | None = None
     target_radius: int | None = None
+    interface_name: str | None = None
+    dialogue_prompt_contains: str | None = None
+    dialogue_option_contains: str | None = None
+
+
+@dataclass(frozen=True)
+class InventoryConstraint:
+    allowed_item_ids: frozenset[int]
+    require_nonempty: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.allowed_item_ids or any(
+            not isinstance(item_id, int)
+            or isinstance(item_id, bool)
+            or item_id <= 0
+            for item_id in self.allowed_item_ids
+        ):
+            raise ValueError("allowed_item_ids must contain positive item IDs")
+        if not isinstance(self.require_nonempty, bool):
+            raise ValueError("require_nonempty must be a bool")
+
+
+@dataclass(frozen=True)
+class InterfaceConstraint:
+    interface_name: str
+    expected_plane: int
+    expected_open: bool
+    require_readable: bool = False
+    require_keyboard_close: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.interface_name, str) or not self.interface_name.strip():
+            raise ValueError("interface_name must be a non-empty string")
+        if (
+            not isinstance(self.expected_plane, int)
+            or isinstance(self.expected_plane, bool)
+            or self.expected_plane < 0
+        ):
+            raise ValueError("expected_plane must be a non-negative integer")
+        if not isinstance(self.expected_open, bool):
+            raise ValueError("expected_open must be a bool")
+        if not isinstance(self.require_readable, bool):
+            raise ValueError("require_readable must be a bool")
+        if not isinstance(self.require_keyboard_close, bool):
+            raise ValueError("require_keyboard_close must be a bool")
+        if self.require_readable and not self.expected_open:
+            raise ValueError("a readable interface must be expected open")
+        if self.require_keyboard_close and not self.expected_open:
+            raise ValueError("keyboard close support requires an open interface")
+
+
+@dataclass(frozen=True)
+class DialogueOptionConstraint:
+    prompt_contains: str
+    option_text: str
+    option_index: int
+    option_key: str
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("prompt_contains", self.prompt_contains),
+            ("option_text", self.option_text),
+            ("option_key", self.option_key),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a non-empty string")
+        if (
+            not isinstance(self.option_index, int)
+            or isinstance(self.option_index, bool)
+            or self.option_index <= 0
+        ):
+            raise ValueError("option_index must be a positive integer")
+
+
+@dataclass(frozen=True)
+class TaskConstraints:
+    inventory: InventoryConstraint | None = None
+    interface: InterfaceConstraint | None = None
+    dialogue: DialogueOptionConstraint | None = None
+
+    def __post_init__(self) -> None:
+        if self.interface is not None and self.dialogue is not None:
+            raise ValueError(
+                "an action cannot carry interface and dialogue constraints together"
+            )
 
 
 @dataclass(frozen=True)
@@ -302,27 +368,10 @@ class Action:
     target_id: int | None = None
     screen_point: ScreenPoint | None = None
     key: str | None = None
-    verification: Verification | None = None
+    verification: VerificationSpec | None = None
     source_menu_client_tick: int | None = None
     target_param0: int | None = None
     target_param1: int | None = None
     source_session_id: str | None = None
     source_dialogue_client_tick: int | None = None
-
-
-@dataclass(frozen=True)
-class Decision:
-    phase: TaskPhase
-    reason: str
-    action: Action
-
-
-@dataclass
-class TaskProgress:
-    phase: TaskPhase = TaskPhase.FIND_TREE
-    route_index: int = 0
-    target_key: str | None = None
-    pending: Verification | None = None
-    cycles_completed: int = 0
-    failures: list[str] = field(default_factory=list)
-    resume_phase: TaskPhase | None = None
+    task_constraints: TaskConstraints = field(default_factory=TaskConstraints)

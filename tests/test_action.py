@@ -10,6 +10,8 @@ from osrs_bot.model import (
     Action,
     ActionKind,
     DialogueOption,
+    DialogueOptionConstraint,
+    InterfaceConstraint,
     InventoryObservation,
     MenuEntry,
     NearbyObject,
@@ -18,6 +20,7 @@ from osrs_bot.model import (
     ScreenBounds,
     ScreenPoint,
     TargetGeometry,
+    TaskConstraints,
     WidgetObservation,
     WorldPoint,
 )
@@ -371,6 +374,11 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
             key="1",
             source_session_id="session-1",
             source_dialogue_client_tick=500,
+            task_constraints=TaskConstraints(
+                dialogue=DialogueOptionConstraint(
+                    "climb", "Climb up the stairs.", 1, "1"
+                )
+            ),
         )
         backend = FakeBackend(fail_at="foreground")
 
@@ -408,6 +416,11 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
             key="1",
             source_session_id="session-1",
             source_dialogue_client_tick=500,
+            task_constraints=TaskConstraints(
+                dialogue=DialogueOptionConstraint(
+                    "climb", "Climb up the stairs.", 1, "1"
+                )
+            ),
         )
         backend = FakeBackend()
         interface = ArduinoActionInterface(
@@ -446,6 +459,11 @@ class ArduinoActionInterfaceTest(unittest.TestCase):
             target_id=0,
             key="escape",
             source_session_id="session-1",
+            task_constraints=TaskConstraints(
+                interface=InterfaceConstraint(
+                    "bank", 2, True, require_keyboard_close=True
+                )
+            ),
         )
         backend = FakeBackend()
 

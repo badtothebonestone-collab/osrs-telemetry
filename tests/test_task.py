@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 
 from osrs_bot.model import (
     DialogueOption,
-    LOG_ITEM_ID,
     ActionKind,
     InventoryItem,
     InventoryObservation,
@@ -16,7 +15,6 @@ from osrs_bot.model import (
     ScreenBounds,
     ScreenPoint,
     TargetGeometry,
-    TaskPhase,
     VerificationKind,
     WidgetObservation,
     WidgetTarget,
@@ -28,11 +26,33 @@ from osrs_bot.task import (
     CHOP_DEADLINE_TICKS,
     CLOSE_WIDGET_NAME,
     DEPOSIT_WIDGET_NAME,
+    LOG_ITEM_ID,
     ROUTE_TO_BANK,
     ROUTE_TO_TREES,
     TREE_AREA,
+    TaskPhase,
     WoodcutBankTask,
 )
+from osrs_bot.verification import (
+    Outcome,
+    OutcomeKind,
+    VerificationResult,
+    VerificationStatus,
+)
+
+
+def verification_pass(
+    kind: OutcomeKind, reason: str = "verified", tick: int = 11
+) -> VerificationResult:
+    return VerificationResult(
+        VerificationStatus.PASS,
+        reason,
+        Outcome(kind, tick),
+    )
+
+
+def verification_fail(reason: str) -> VerificationResult:
+    return VerificationResult(VerificationStatus.FAIL, reason)
 
 
 SCREEN = ScreenPoint(1400, 2200)
@@ -306,22 +326,27 @@ class WoodcutBankTaskTests(unittest.TestCase):
         task.decide(first)
         decision = task.decide(first)
 
-        self.assertEqual(TaskPhase.VERIFY_LOGS, decision.phase)
+        self.assertEqual(TaskPhase.VERIFY_LOGS.value, decision.state)
         self.assertEqual(ActionKind.INTERACT_OBJECT, decision.action.kind)
         self.assertEqual("Chop down", decision.action.option)
         self.assertEqual(SCREEN, decision.action.screen_point)
-        self.assertEqual(VerificationKind.LOG_GAINED, task.progress.pending.kind)
-        self.assertEqual(0, task.progress.pending.before_log_count)
+        self.assertEqual(
+            VerificationKind.ITEM_QUANTITY_INCREASED,
+            task.progress.pending.kind,
+        )
+        self.assertEqual(0, task.progress.pending.before_quantity)
         self.assertEqual(20 + CHOP_DEADLINE_TICKS, task.progress.pending.deadline_tick)
 
         waiting = task.decide(observation(objects=(tree(),), tick=21))
         self.assertEqual(ActionKind.WAIT, waiting.action.kind)
-        task.apply_verification(True, "ordinary log count increased")
+        task.apply_verification(
+            verification_pass(OutcomeKind.ITEM_QUANTITY_INCREASED)
+        )
         self.assertEqual(TaskPhase.FIND_TREE, task.progress.phase)
         self.assertIsNone(task.progress.pending)
 
         full = task.decide(observation(inv=inventory(logs=28, full=True), tick=22))
-        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, full.phase)
+        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK.value, full.state)
         self.assertEqual(ActionKind.WAIT, full.action.kind)
 
     def test_failed_external_verification_blocks_terminally(self) -> None:
@@ -329,7 +354,9 @@ class WoodcutBankTaskTests(unittest.TestCase):
         state = observation(objects=(tree(),))
         task.decide(state)
         task.decide(state)
-        task.apply_verification(False, "deadline expired without log gain")
+        task.apply_verification(
+            verification_fail("deadline expired without log gain")
+        )
 
         self.assertEqual(TaskPhase.BLOCKED, task.progress.phase)
         self.assertIn("deadline expired", task.progress.failures[-1])
@@ -340,7 +367,10 @@ class WoodcutBankTaskTests(unittest.TestCase):
         task.progress.phase = TaskPhase.NAVIGATE_TO_BANK
         step = ROUTE_TO_BANK[0]
         approach = WorldPoint(3195, 3252, 0)
-        self.assertEqual(((step.target_key, step.location),), task.requested_tile_projections())
+        self.assertEqual(
+            ((step.target_key, step.location),),
+            task.observation_request().tile_projections,
+        )
 
         missing = task.decide(
             observation(
@@ -348,7 +378,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 inv=inventory(logs=28, full=True),
             )
         )
-        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, missing.phase)
+        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK.value, missing.state)
         self.assertEqual(ActionKind.WAIT, missing.action.kind)
 
         invalid = route_tile(step)
@@ -360,7 +390,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 objects=(invalid,),
             )
         )
-        self.assertEqual(TaskPhase.BLOCKED, blocked.phase)
+        self.assertEqual(TaskPhase.BLOCKED.value, blocked.state)
         self.assertEqual(ActionKind.WAIT, blocked.action.kind)
 
         task = WoodcutBankTask()
@@ -373,7 +403,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 objects=(unavailable,),
             )
         )
-        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, waiting.phase)
+        self.assertEqual(TaskPhase.NAVIGATE_TO_BANK.value, waiting.state)
         self.assertEqual(ActionKind.WAIT, waiting.action.kind)
 
         task = WoodcutBankTask()
@@ -388,7 +418,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(ActionKind.WALK, decision.action.kind)
         self.assertEqual(SCREEN, decision.action.screen_point)
         self.assertEqual(VerificationKind.MOVED_CLOSER, task.progress.pending.kind)
-        task.apply_verification(True, "distance decreased")
+        task.apply_verification(verification_pass(OutcomeKind.MOVED_CLOSER))
         self.assertEqual(0, task.progress.route_index)
 
         arrived = task.decide(
@@ -429,7 +459,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
                         objects=(bad_target,),
                     )
                 )
-                self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, decision.phase)
+                self.assertEqual(TaskPhase.NAVIGATE_TO_BANK.value, decision.state)
                 self.assertEqual(ActionKind.WAIT, decision.action.kind)
 
         task = WoodcutBankTask()
@@ -449,11 +479,11 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(step.action, decision.action.option)
         self.assertEqual(1, decision.action.verification.expected_plane)
         self.assertEqual(
-            VerificationKind.ROUTE_TRANSITION_READY,
+            VerificationKind.ROUTE_TRANSITION,
             decision.action.verification.kind,
         )
-        self.assertEqual((), task.requested_tile_projections())
-        task.apply_verification(True, "plane_changed")
+        self.assertEqual((), task.observation_request().tile_projections)
+        task.apply_verification(verification_pass(OutcomeKind.PLANE_CHANGED))
         self.assertEqual(stair_index + 1, task.progress.route_index)
 
         second = ROUTE_TO_BANK[stair_index + 1]
@@ -464,7 +494,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 objects=(route_object(second),),
             )
         )
-        task.apply_verification(True, "plane_changed")
+        task.apply_verification(verification_pass(OutcomeKind.PLANE_CHANGED))
         self.assertEqual(stair_index + 2, task.progress.route_index)
 
     def test_generic_climb_uses_exact_direction_dialogue(self) -> None:
@@ -481,7 +511,9 @@ class WoodcutBankTaskTests(unittest.TestCase):
             )
         )
 
-        task.apply_verification(True, "dialogue_open")
+        task.apply_verification(
+            verification_pass(OutcomeKind.DIALOGUE_OPTION_APPEARED)
+        )
         choice = task.decide(
             observation(
                 location=step.location,
@@ -491,11 +523,15 @@ class WoodcutBankTaskTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(TaskPhase.STAIR_DIALOGUE, choice.phase)
+        self.assertEqual(TaskPhase.STAIR_DIALOGUE.value, choice.state)
         self.assertEqual(ActionKind.PRESS_KEY, choice.action.kind)
         self.assertEqual("1", choice.action.key)
         self.assertEqual("Climb up the stairs.", choice.action.target_name)
-        task.apply_verification(True, "plane_changed")
+        self.assertEqual(
+            "Climb up the stairs.",
+            choice.action.task_constraints.dialogue.option_text,
+        )
+        task.apply_verification(verification_pass(OutcomeKind.PLANE_CHANGED))
         self.assertEqual(TaskPhase.NAVIGATE_TO_BANK, task.progress.phase)
         self.assertEqual(stair_index + 1, task.progress.route_index)
 
@@ -509,7 +545,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 objects=(bank_object(object_id=10355),),
             )
         )
-        self.assertEqual(TaskPhase.BLOCKED, invalid.phase)
+        self.assertEqual(TaskPhase.BLOCKED.value, invalid.state)
 
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.OPEN_BANK
@@ -522,8 +558,12 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
         self.assertEqual(ActionKind.INTERACT_OBJECT, decision.action.kind)
         self.assertEqual(BANK_OBJECT_ID, decision.action.target_id)
-        self.assertEqual(VerificationKind.BANK_OPEN, task.progress.pending.kind)
-        task.apply_verification(True, "readable bank opened")
+        self.assertFalse(decision.action.task_constraints.interface.expected_open)
+        self.assertEqual(
+            VerificationKind.INTERFACE_OPENED,
+            task.progress.pending.kind,
+        )
+        task.apply_verification(verification_pass(OutcomeKind.INTERFACE_OPENED))
         self.assertEqual(TaskPhase.DEPOSIT_LOGS, task.progress.phase)
 
     def test_bank_pin_and_non_log_inventory_fail_closed(self) -> None:
@@ -537,7 +577,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 widgets=pin,
             )
         )
-        self.assertEqual(TaskPhase.BLOCKED, result.phase)
+        self.assertEqual(TaskPhase.BLOCKED.value, result.state)
 
         task = WoodcutBankTask()
         task.progress.phase = TaskPhase.DEPOSIT_LOGS
@@ -548,7 +588,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 widgets=bank_widgets(),
             )
         )
-        self.assertEqual(TaskPhase.BLOCKED, mixed.phase)
+        self.assertEqual(TaskPhase.BLOCKED.value, mixed.state)
         self.assertEqual(ActionKind.WAIT, mixed.action.kind)
 
     def test_deposit_all_logs_then_close_bank_via_verified_actions(self) -> None:
@@ -561,11 +601,19 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 widgets=bank_widgets(),
             )
         )
-        self.assertEqual(TaskPhase.VERIFY_DEPOSIT, decision.phase)
+        self.assertEqual(TaskPhase.VERIFY_DEPOSIT.value, decision.state)
         self.assertEqual(ActionKind.CLICK_WIDGET, decision.action.kind)
         self.assertEqual(DEPOSIT_WIDGET_NAME, decision.action.target_key)
-        self.assertEqual(VerificationKind.LOGS_DEPOSITED, task.progress.pending.kind)
-        task.apply_verification(True, "inventory has no logs")
+        self.assertEqual(
+            frozenset({LOG_ITEM_ID}),
+            decision.action.task_constraints.inventory.allowed_item_ids,
+        )
+        self.assertTrue(decision.action.task_constraints.interface.require_readable)
+        self.assertEqual(
+            VerificationKind.ITEM_QUANTITY_EQUALS,
+            task.progress.pending.kind,
+        )
+        task.apply_verification(verification_pass(OutcomeKind.ITEM_QUANTITY_EQUALS))
         self.assertEqual(TaskPhase.CLOSE_BANK, task.progress.phase)
 
         close = task.decide(
@@ -573,8 +621,11 @@ class WoodcutBankTaskTests(unittest.TestCase):
         )
         self.assertEqual(ActionKind.CLICK_WIDGET, close.action.kind)
         self.assertEqual(CLOSE_WIDGET_NAME, close.action.target_key)
-        self.assertEqual(VerificationKind.BANK_CLOSED, task.progress.pending.kind)
-        task.apply_verification(True, "bank widget closed")
+        self.assertEqual(
+            VerificationKind.INTERFACE_CLOSED,
+            task.progress.pending.kind,
+        )
+        task.apply_verification(verification_pass(OutcomeKind.INTERFACE_CLOSED))
         self.assertEqual(TaskPhase.NAVIGATE_TO_TREES, task.progress.phase)
         self.assertEqual(0, task.progress.route_index)
 
@@ -588,13 +639,13 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 widgets=bank_widgets(),
             )
         )
-        self.assertEqual(TaskPhase.DEPOSIT_LOGS, opened.phase)
+        self.assertEqual(TaskPhase.DEPOSIT_LOGS.value, opened.state)
 
         task.progress.phase = TaskPhase.CLOSE_BANK
         closed = task.decide(
             observation(location=BANK_ANCHOR, widgets=bank_widgets(open=False))
         )
-        self.assertEqual(TaskPhase.NAVIGATE_TO_TREES, closed.phase)
+        self.assertEqual(TaskPhase.NAVIGATE_TO_TREES.value, closed.state)
 
     def test_close_bank_uses_verified_escape_when_button_geometry_is_absent(self) -> None:
         task = WoodcutBankTask()
@@ -612,7 +663,13 @@ class WoodcutBankTaskTests(unittest.TestCase):
         self.assertEqual(ActionKind.PRESS_KEY, decision.action.kind)
         self.assertEqual("escape", decision.action.key)
         self.assertEqual("close_bank_keyboard", decision.action.target_key)
-        self.assertEqual(VerificationKind.BANK_CLOSED, task.progress.pending.kind)
+        self.assertTrue(
+            decision.action.task_constraints.interface.require_keyboard_close
+        )
+        self.assertEqual(
+            VerificationKind.INTERFACE_CLOSED,
+            task.progress.pending.kind,
+        )
 
     def test_verified_return_phase_does_not_reopen_inventory_uncertainty(self) -> None:
         task = WoodcutBankTask()
@@ -658,7 +715,7 @@ class WoodcutBankTaskTests(unittest.TestCase):
 
         for step in ROUTE_TO_TREES:
             expected = ((step.target_key, step.location),) if step.is_walk else ()
-            self.assertEqual(expected, task.requested_tile_projections())
+            self.assertEqual(expected, task.observation_request().tile_projections)
             if step.is_walk:
                 decision = task.decide(observation(location=step.location))
                 self.assertEqual(ActionKind.WAIT, decision.action.kind)
@@ -667,12 +724,14 @@ class WoodcutBankTaskTests(unittest.TestCase):
                     observation(location=step.location, objects=(route_object(step),))
                 )
                 self.assertEqual(ActionKind.INTERACT_OBJECT, decision.action.kind)
-                task.apply_verification(True, "plane_changed")
+                task.apply_verification(
+                    verification_pass(OutcomeKind.PLANE_CHANGED)
+                )
 
         self.assertEqual(TaskPhase.COMPLETE, task.progress.phase)
         self.assertEqual(1, task.progress.cycles_completed)
         terminal = task.decide(observation(location=TREE_AREA, objects=(tree(),)))
-        self.assertEqual(TaskPhase.COMPLETE, terminal.phase)
+        self.assertEqual(TaskPhase.COMPLETE.value, terminal.state)
         self.assertEqual(ActionKind.WAIT, terminal.action.kind)
 
     def test_verification_phase_without_pending_is_blocked(self) -> None:
@@ -681,11 +740,13 @@ class WoodcutBankTaskTests(unittest.TestCase):
                 task = WoodcutBankTask()
                 task.progress.phase = phase
                 result = task.decide(observation())
-                self.assertEqual(TaskPhase.BLOCKED, result.phase)
+                self.assertEqual(TaskPhase.BLOCKED.value, result.state)
 
     def test_apply_verification_without_action_is_rejected(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "no action verification"):
-            WoodcutBankTask().apply_verification(True, "impossible")
+            WoodcutBankTask().apply_verification(
+                verification_pass(OutcomeKind.ITEM_QUANTITY_INCREASED)
+            )
 
 
 if __name__ == "__main__":

@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .model import (
-    LOG_ITEM_ID,
     MAX_FUTURE_CLOCK_SKEW_SECONDS,
     Action,
     ActionKind,
+    DialogueOptionConstraint,
+    InterfaceConstraint,
+    InventoryConstraint,
     MenuEntry,
     NearbyObject,
     Observation,
@@ -52,7 +54,10 @@ class SafetyGate:
             sample = self._validate_source_menu_sample(action, observation)
             if not sample.allowed:
                 return sample
-        if action.kind is ActionKind.PRESS_KEY and not _is_bank_close_key(action):
+        if (
+            action.kind is ActionKind.PRESS_KEY
+            and action.task_constraints.dialogue is not None
+        ):
             if (
                 action.source_dialogue_client_tick is None
                 or observation.widgets.dialogue_client_tick is None
@@ -60,9 +65,12 @@ class SafetyGate:
                 return _reject("dialogue_sample_missing")
             if action.source_dialogue_client_tick != observation.widgets.dialogue_client_tick:
                 return _reject("dialogue_sample_mismatch")
-        action_result = self._validate_action(action, observation)
+        action_result = self._validate_engine_action_invariants(action, observation)
         if not action_result.allowed:
             return action_result
+        constraint_result = self._validate_task_constraints(action, observation)
+        if not constraint_result.allowed:
+            return constraint_result
         return _allow("pre_move_safe")
 
     def validate_post_move(
@@ -117,9 +125,12 @@ class SafetyGate:
             return _reject("menu_sample_not_newer")
         if not observation.menu_open:
             return _reject("context_menu_not_open")
-        action_result = self._validate_action(action, observation)
+        action_result = self._validate_engine_action_invariants(action, observation)
         if not action_result.allowed:
             return action_result
+        constraint_result = self._validate_task_constraints(action, observation)
+        if not constraint_result.allowed:
+            return constraint_result
         matches = _matching_menu_entries(action, observation)
         if len(matches) != 1:
             return _reject("context_option_not_unique")
@@ -168,10 +179,10 @@ class SafetyGate:
             if not _points_close(observation.menu_mouse_screen_point, action.screen_point):
                 return _reject("hover_pointer_mismatch")
         if action.kind is ActionKind.PRESS_KEY:
-            if _is_bank_close_key(action):
+            if _interface_close_constraint(action) is not None:
                 if observation.tick <= action.source_tick:
-                    return _reject("bank_sample_not_newer")
-            else:
+                    return _reject("interface_sample_not_newer")
+            elif action.task_constraints.dialogue is not None:
                 if (
                     action.source_dialogue_client_tick is None
                     or observation.widgets.dialogue_client_tick is None
@@ -179,9 +190,12 @@ class SafetyGate:
                     return _reject("dialogue_sample_missing")
                 if observation.widgets.dialogue_client_tick <= action.source_dialogue_client_tick:
                     return _reject("dialogue_sample_not_newer")
-        action_result = self._validate_action(action, observation)
+        action_result = self._validate_engine_action_invariants(action, observation)
         if not action_result.allowed:
             return action_result
+        constraint_result = self._validate_task_constraints(action, observation)
+        if not constraint_result.allowed:
+            return constraint_result
         return _allow("post_move_base_safe")
 
     def _validate_observation(self, observation: Observation) -> SafetyResult:
@@ -201,8 +215,6 @@ class SafetyGate:
             return _reject("observation_too_old")
         if not observation.loaded_scene:
             return _reject("scene_not_loaded")
-        if not observation.widgets.bank_known:
-            return _reject("bank_state_unknown")
         if observation.widgets.bank_pin_open:
             return _reject("bank_pin_open")
         if not observation.client_focused:
@@ -219,7 +231,7 @@ class SafetyGate:
             return _reject("session_changed")
         return _allow("session_bound")
 
-    def _validate_action(
+    def _validate_engine_action_invariants(
         self, action: Action, observation: Observation
     ) -> SafetyResult:
         if action.kind in {ActionKind.INTERACT_OBJECT, ActionKind.WALK}:
@@ -227,61 +239,39 @@ class SafetyGate:
         if action.kind is ActionKind.CLICK_WIDGET:
             return self._validate_widget_action(action, observation)
         if action.kind is ActionKind.PRESS_KEY:
-            if _is_bank_close_key(action):
-                return self._validate_bank_close_key(action, observation)
-            return self._validate_dialogue_key(action, observation)
+            return self._validate_key_action(action)
         if action.kind is ActionKind.WAIT:
             return _allow("wait_safe")
         return _reject("unsupported_action")
 
     @staticmethod
-    def _validate_dialogue_key(
-        action: Action, observation: Observation
-    ) -> SafetyResult:
-        if action.key not in {str(value) for value in range(1, 10)}:
-            return _reject("unsafe_key")
-        widgets = observation.widgets
-        if (
-            not widgets.dialogue_active
-            or widgets.dialogue_type != "options"
-            or not widgets.dialogue_number_keys
-            or "climb" not in widgets.dialogue_prompt.lower()
-        ):
-            return _reject("dialogue_not_ready")
-        matches = [
-            option for option in widgets.dialogue_options
-            if option.visible
-            and option.key == action.key
-            and option.index == action.target_id
-            and option.text == action.option
-            and option.text == action.target_name
-            and action.target_key == f"dialogue:{option.index}"
-        ]
-        if len(matches) != 1:
-            return _reject("dialogue_option_mismatch")
-        return _allow("dialogue_key_safe")
-
-    @staticmethod
-    def _validate_bank_close_key(
-        action: Action, observation: Observation
-    ) -> SafetyResult:
-        if action.key not in {"esc", "escape"}:
-            return _reject("unsafe_key")
-        if (
-            action.option != "Close bank"
-            or action.target_name != "Close bank"
-            or action.target_key != "close_bank_keyboard"
-            or action.target_id != 0
-        ):
-            return _reject("bank_close_identity_mismatch")
-        widgets = observation.widgets
-        if observation.plane != 2:
-            return _reject("bank_plane_mismatch")
-        if not widgets.bank_open:
-            return _reject("bank_not_open")
-        if not widgets.keyboard_close_possible:
-            return _reject("bank_keyboard_close_unavailable")
-        return _allow("bank_close_key_safe")
+    def _validate_key_action(action: Action) -> SafetyResult:
+        dialogue = action.task_constraints.dialogue
+        interface = _interface_close_constraint(action)
+        if dialogue is not None:
+            if action.key not in {str(value) for value in range(1, 10)}:
+                return _reject("unsafe_key")
+            if (
+                action.key != dialogue.option_key
+                or action.option != dialogue.option_text
+                or action.target_name != dialogue.option_text
+                or action.target_id != dialogue.option_index
+                or action.target_key != f"dialogue:{dialogue.option_index}"
+            ):
+                return _reject("dialogue_option_mismatch")
+            return _allow("dialogue_key_shape_safe")
+        if interface is not None:
+            if action.key not in {"esc", "escape"}:
+                return _reject("unsafe_key")
+            if (
+                not action.option
+                or action.option != action.target_name
+                or action.target_id != 0
+                or not action.target_key
+            ):
+                return _reject("interface_close_identity_mismatch")
+            return _allow("interface_close_key_shape_safe")
+        return _reject("key_constraint_missing")
 
     def _validate_source_menu_sample(
         self, action: Action, observation: Observation
@@ -362,15 +352,7 @@ class SafetyGate:
         selected = _select_widget(action, observation)
         if selected is None:
             return _reject("target_missing")
-        widget_key, widget = selected
-        if not observation.widgets.bank_known:
-            return _reject("bank_state_unknown")
-        if observation.plane != 2:
-            return _reject("bank_plane_mismatch")
-        if not observation.widgets.bank_open:
-            return _reject("bank_not_open")
-        if widget_key == "deposit_inventory" and not observation.widgets.bank_readable:
-            return _reject("bank_not_readable")
+        _, widget = selected
         if not widget.visible:
             return _reject("widget_not_visible")
         if action.option != widget.name:
@@ -388,15 +370,94 @@ class SafetyGate:
         )
         if not point_result.allowed:
             return point_result
-        if widget_key == "deposit_inventory":
-            inventory = observation.inventory
-            if not inventory.known:
-                return _reject("inventory_unknown")
-            if inventory.log_count <= 0:
-                return _reject("no_logs_to_deposit")
-            if any(item.item_id != LOG_ITEM_ID for item in inventory.items):
-                return _reject("unsafe_deposit_inventory")
         return _allow("widget_safe")
+
+    def _validate_task_constraints(
+        self, action: Action, observation: Observation
+    ) -> SafetyResult:
+        constraints = action.task_constraints
+        if action.kind is ActionKind.CLICK_WIDGET and constraints.interface is None:
+            return _reject("interface_constraint_missing")
+        if action.target_key == "deposit_inventory" and constraints.inventory is None:
+            return _reject("inventory_constraint_missing")
+
+        if constraints.interface is not None:
+            interface = self._validate_interface_constraint(
+                constraints.interface, observation
+            )
+            if not interface.allowed:
+                return interface
+        if constraints.inventory is not None:
+            inventory = self._validate_inventory_constraint(
+                constraints.inventory, observation
+            )
+            if not inventory.allowed:
+                return inventory
+        if constraints.dialogue is not None:
+            dialogue = self._validate_dialogue_constraint(
+                constraints.dialogue, observation
+            )
+            if not dialogue.allowed:
+                return dialogue
+        return _allow("task_constraints_satisfied")
+
+    @staticmethod
+    def _validate_interface_constraint(
+        constraint: InterfaceConstraint, observation: Observation
+    ) -> SafetyResult:
+        if constraint.interface_name != "bank":
+            return _reject("unsupported_interface_constraint")
+        widgets = observation.widgets
+        if not widgets.bank_known:
+            return _reject("interface_state_unknown")
+        if observation.plane != constraint.expected_plane:
+            return _reject("interface_plane_mismatch")
+        if widgets.bank_open is not constraint.expected_open:
+            return _reject("interface_state_mismatch")
+        if constraint.require_readable and not widgets.bank_readable:
+            return _reject("interface_not_readable")
+        if constraint.require_keyboard_close and not widgets.keyboard_close_possible:
+            return _reject("interface_keyboard_close_unavailable")
+        return _allow("interface_constraint_satisfied")
+
+    @staticmethod
+    def _validate_inventory_constraint(
+        constraint: InventoryConstraint, observation: Observation
+    ) -> SafetyResult:
+        inventory = observation.inventory
+        if not inventory.known:
+            return _reject("inventory_unknown")
+        held = [item for item in inventory.items if item.quantity > 0]
+        if constraint.require_nonempty and not held:
+            return _reject("constrained_inventory_empty")
+        if any(item.item_id not in constraint.allowed_item_ids for item in held):
+            return _reject("unsafe_deposit_inventory")
+        return _allow("inventory_constraint_satisfied")
+
+    @staticmethod
+    def _validate_dialogue_constraint(
+        constraint: DialogueOptionConstraint, observation: Observation
+    ) -> SafetyResult:
+        widgets = observation.widgets
+        if (
+            not widgets.dialogue_active
+            or widgets.dialogue_type != "options"
+            or not widgets.dialogue_number_keys
+            or constraint.prompt_contains.lower()
+            not in widgets.dialogue_prompt.lower()
+        ):
+            return _reject("dialogue_not_ready")
+        matches = [
+            option
+            for option in widgets.dialogue_options
+            if option.visible
+            and option.key == constraint.option_key
+            and option.index == constraint.option_index
+            and option.text == constraint.option_text
+        ]
+        if len(matches) != 1:
+            return _reject("dialogue_option_mismatch")
+        return _allow("dialogue_constraint_satisfied")
 
     @staticmethod
     def _validate_hover_menu(
@@ -433,11 +494,15 @@ def _menu_entry_matches(action: Action, entry: MenuEntry) -> bool:
     )
 
 
-def _is_bank_close_key(action: Action) -> bool:
-    return (
+def _interface_close_constraint(action: Action) -> InterfaceConstraint | None:
+    constraint = action.task_constraints.interface
+    if (
         action.kind is ActionKind.PRESS_KEY
-        and action.target_key == "close_bank_keyboard"
-    )
+        and constraint is not None
+        and constraint.require_keyboard_close
+    ):
+        return constraint
+    return None
 
 
 def _matching_menu_entries(

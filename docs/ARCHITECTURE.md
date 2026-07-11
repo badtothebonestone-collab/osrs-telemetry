@@ -34,19 +34,19 @@ There is one observation truth, one runtime orchestrator, one active explicit
 task FSM, one safety gate, one Arduino session owner, one typed verification
 path, and one read-only diagnostic truth. Diagnostics have no control authority.
 
-The architecture is being migrated in bounded checkpoints. Names below marked
-**current** exist in the Phase 0 baseline; names marked **target** are governing
-contracts for a later phase and must not be described as implemented early.
+The architecture is being migrated in bounded checkpoints. The current column
+describes the Phase 3 implementation; the target column names only contracts
+still owned by later phases.
 
 | Layer | Current baseline | Governing target |
 |---|---|---|
 | Sensor | atomic game-tick `SensorFrame` plus separately stamped client/menu evidence | preserve the same single source contract while adding no second endpoint |
 | Observation | immutable source-coherent `Observation` | preserve the same single truth for task-neutral seams |
-| Task | concrete `WoodcutBankTask` | minimal task protocol with explicit task-specific FSM implementations |
-| Decision | `Action` + `Verification` | task-neutral `ActionIntent` + `VerificationSpec` |
-| Safety | one `SafetyGate` | engine invariants separated from typed task constraints |
+| Task | minimal `Task` protocol plus concrete `WoodcutBankTask` FSM | preserve the protocol while binding one validated built-in definition/profile |
+| Decision | opaque `Decision.state` + `Action` + `VerificationSpec` + typed task constraints | stable task-neutral intent contracts consumed by diagnostics/frontends |
+| Safety | one `SafetyGate`, explicitly split between engine invariants and typed task constraints | preserve the same non-overridable boundary |
 | Input | `ArduinoActionInterface` and login helper own sessions | one `InputCoordinator`, separate pointer policy, internal transport methods |
-| Verification | string outcome from one `Verifier` | stable typed `Outcome` |
+| Verification | one `Verifier` returning immutable typed `Outcome` values | preserve the same typed pathway |
 | Diagnostics | CLI result dictionaries and traces | one immutable `EngineFrame` |
 | Frontend | `run.cmd` | thin application facade and future GUI consuming the same contracts |
 
@@ -66,7 +66,7 @@ The first implementation contains exactly one built-in Lumbridge definition and
 one default profile. Adding a definition does not create a generic planner: it
 provides validated facts to a still-explicit task FSM.
 
-## Current baseline implementation
+## Current implementation
 
 ### Sensor
 
@@ -114,6 +114,14 @@ No downstream module reads raw JSON or a plugin cache.
 
 ### Task
 
+`osrs_bot.task_contract` exposes exactly four operations: request bounded
+observation projections, decide from one immutable observation, apply one typed
+verification result, and publish an immutable running/complete/blocked
+snapshot. Task state is opaque to runtime. Runtime does not import the concrete
+task, compare its phases, or inspect its mutable progress. An executable action
+without a verification specification is rejected before an input boundary is
+called.
+
 `WoodcutBankTask` is an explicit state machine:
 
 ```text
@@ -139,13 +147,19 @@ default. If the live default is generic `Climb`, the explicit `STAIR_DIALOGUE`
 state selects exactly one matching numbered up/down option and verifies the
 plane change.
 
-The task emits an `Action` and a `Verification` specification. It never sends
-the action and never decides whether its own verification passed.
+The task emits an `Action` and a generic `VerificationSpec`. It never sends the
+action and never evaluates its own verification. It consumes only typed
+outcomes from the shared verifier.
 
 ### Safety and action
 
-`SafetyGate` checks the source tick, scene freshness, target identity, geometry,
-screen bounds, widget state, and all-log deposit constraint before movement.
+`SafetyGate` first checks non-overridable engine invariants: coherent/fresh
+source evidence, loaded scene, session/process/focus binding, source tick, PIN
+refusal, exact identity, geometry, canvas bounds, and menu provenance. It then
+checks immutable task constraints carried by the action: expected interface
+state/plane/readability, exact dialogue choice, and permitted inventory. These
+constraints can only narrow an action. Bank plane and staircase wording are not
+shared safety constants.
 
 `ArduinoActionInterface` then:
 
@@ -176,8 +190,11 @@ credential, MFA, unknown, and ambiguous surfaces fail closed.
 ### Verification and runtime
 
 `Verifier` evaluates only observations later than the action tick and fails at
-the declared tick deadline. The runtime adds a wall-clock and observation bound
-so a frozen client cannot wait forever.
+the declared tick deadline. A passing result must include one stable typed
+outcome. Task-specific item IDs and dialogue expectations are supplied in the
+verification specification rather than embedded in shared control flow. The
+runtime adds a wall-clock and observation bound so a frozen client cannot wait
+forever.
 
 Walk verification passes after authoritative movement closer or arrival. The
 task then waits until player location is stable for four game ticks before it

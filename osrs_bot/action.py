@@ -123,9 +123,10 @@ class ArduinoActionInterface:
             elif action.kind == ActionKind.PRESS_KEY:
                 if not action.key:
                     raise ValueError("press_key action has no key")
+                interface = action.task_constraints.interface
                 retry_reason = (
-                    "bank_sample_not_newer"
-                    if action.target_key == "close_bank_keyboard"
+                    "interface_sample_not_newer"
+                    if interface is not None and interface.require_keyboard_close
                     else "dialogue_sample_not_newer"
                 )
                 post_move, key_check, _ = self._await_post_move(

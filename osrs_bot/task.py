@@ -1,20 +1,52 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 
 from .model import (
-    LOG_ITEM_ID,
     Action,
     ActionKind,
-    Decision,
+    DialogueOptionConstraint,
+    InterfaceConstraint,
+    InventoryConstraint,
     NearbyObject,
     Observation,
-    TaskPhase,
-    TaskProgress,
-    Verification,
+    TaskConstraints,
     VerificationKind,
+    VerificationSpec,
     WorldPoint,
 )
+from .task_contract import Decision, ObservationRequest, TaskSnapshot, TaskStatus
+from .verification import OutcomeKind, VerificationResult
+
+
+LOG_ITEM_ID = 1511
+
+
+class TaskPhase(str, Enum):
+    FIND_TREE = "find_tree"
+    CHOP = "chop"
+    VERIFY_LOGS = "verify_logs"
+    NAVIGATE_TO_BANK = "navigate_to_bank"
+    OPEN_BANK = "open_bank"
+    DEPOSIT_LOGS = "deposit_logs"
+    VERIFY_DEPOSIT = "verify_deposit"
+    CLOSE_BANK = "close_bank"
+    NAVIGATE_TO_TREES = "navigate_to_trees"
+    STAIR_DIALOGUE = "stair_dialogue"
+    COMPLETE = "complete"
+    BLOCKED = "blocked"
+
+
+@dataclass
+class TaskProgress:
+    phase: TaskPhase = TaskPhase.FIND_TREE
+    route_index: int = 0
+    target_key: str | None = None
+    pending: VerificationSpec | None = None
+    cycles_completed: int = 0
+    failures: list[str] = field(default_factory=list)
+    resume_phase: TaskPhase | None = None
 
 
 TREE_AREA = WorldPoint(3196, 3240, 0)
@@ -109,15 +141,34 @@ class WoodcutBankTask:
         self._route_settle_location: WorldPoint | None = None
         self._route_settle_since_tick: int | None = None
 
-    def requested_tile_projections(self) -> tuple[tuple[str, WorldPoint], ...]:
-        """Return only the current fixed walk target for snapshot projection."""
+    def observation_request(self) -> ObservationRequest:
+        """Request only the current fixed walk target for projection."""
         route = self._current_route()
         if route is None or self.progress.route_index >= len(route):
-            return ()
+            return ObservationRequest()
         step = route[self.progress.route_index]
         if not step.is_walk:
-            return ()
-        return ((step.target_key, step.location),)
+            return ObservationRequest()
+        return ObservationRequest(((step.target_key, step.location),))
+
+    def snapshot(self) -> TaskSnapshot:
+        if self.progress.phase is TaskPhase.COMPLETE:
+            status = TaskStatus.COMPLETE
+        elif self.progress.phase is TaskPhase.BLOCKED:
+            status = TaskStatus.BLOCKED
+        else:
+            status = TaskStatus.RUNNING
+        blocker = (
+            self.progress.failures[-1]
+            if status is TaskStatus.BLOCKED and self.progress.failures
+            else None
+        )
+        return TaskSnapshot(
+            task_id="woodcut_bank_lumbridge_v1",
+            status=status,
+            state=self.progress.phase.value,
+            blocker=blocker,
+        )
 
     def decide(self, observation: Observation) -> Decision:
         if self.progress.phase in {TaskPhase.COMPLETE, TaskPhase.BLOCKED}:
@@ -174,42 +225,48 @@ class WoodcutBankTask:
             return self._choose_stair_direction(observation)
         return self._block(observation, "unknown task phase")
 
-    def apply_verification(self, passed: bool, reason: str) -> None:
+    def apply_verification(self, result: VerificationResult) -> None:
         """Apply the sole external verifier's result to the pending action."""
         pending = self.progress.pending
         if pending is None:
             raise RuntimeError("no action verification is pending")
         self.progress.pending = None
 
-        if not passed:
+        if not result.passed or result.outcome is None:
             self.progress.phase = TaskPhase.BLOCKED
-            self.progress.failures.append(f"verification failed: {reason}")
+            self.progress.failures.append(f"verification failed: {result.reason}")
             return
 
-        if pending.kind == VerificationKind.LOG_GAINED:
+        outcome = result.outcome.kind
+
+        if pending.kind is VerificationKind.ITEM_QUANTITY_INCREASED:
+            if outcome is not OutcomeKind.ITEM_QUANTITY_INCREASED:
+                return self._block_verification_outcome(pending, outcome)
             self.progress.target_key = None
             self.progress.phase = TaskPhase.FIND_TREE
             return
-        if pending.kind == VerificationKind.MOVED_CLOSER:
+        if pending.kind is VerificationKind.MOVED_CLOSER:
+            if outcome not in {OutcomeKind.MOVED_CLOSER, OutcomeKind.ARRIVED}:
+                return self._block_verification_outcome(pending, outcome)
             self._movement_verified = True
             self._route_settle_location = None
             self._route_settle_since_tick = None
             return
-        if pending.kind == VerificationKind.ROUTE_TRANSITION_READY:
-            if reason == "dialogue_open":
+        if pending.kind is VerificationKind.ROUTE_TRANSITION:
+            if outcome is OutcomeKind.DIALOGUE_OPTION_APPEARED:
                 self.progress.resume_phase = self.progress.phase
                 self.progress.phase = TaskPhase.STAIR_DIALOGUE
                 return
-            if reason != "plane_changed":
-                self.progress.phase = TaskPhase.BLOCKED
-                self.progress.failures.append(f"unexpected route transition proof: {reason}")
-                return
+            if outcome is not OutcomeKind.PLANE_CHANGED:
+                return self._block_verification_outcome(pending, outcome)
             self.progress.route_index += 1
             route = self._current_route()
             if route is not None and self.progress.route_index >= len(route):
                 self._finish_route()
             return
-        if pending.kind == VerificationKind.PLANE_CHANGED:
+        if pending.kind is VerificationKind.PLANE_CHANGED:
+            if outcome is not OutcomeKind.PLANE_CHANGED:
+                return self._block_verification_outcome(pending, outcome)
             if self.progress.phase is not TaskPhase.STAIR_DIALOGUE or self.progress.resume_phase is None:
                 self.progress.phase = TaskPhase.BLOCKED
                 self.progress.failures.append("plane proof arrived outside stair dialogue")
@@ -221,25 +278,39 @@ class WoodcutBankTask:
             if route is not None and self.progress.route_index >= len(route):
                 self._finish_route()
             return
-        if pending.kind == VerificationKind.BANK_OPEN:
+        if pending.kind is VerificationKind.INTERFACE_OPENED:
+            if outcome is not OutcomeKind.INTERFACE_OPENED:
+                return self._block_verification_outcome(pending, outcome)
             self.progress.phase = TaskPhase.DEPOSIT_LOGS
             return
-        if pending.kind == VerificationKind.LOGS_DEPOSITED:
+        if pending.kind is VerificationKind.ITEM_QUANTITY_EQUALS:
+            if outcome is not OutcomeKind.ITEM_QUANTITY_EQUALS:
+                return self._block_verification_outcome(pending, outcome)
             self.progress.phase = TaskPhase.CLOSE_BANK
             return
-        if pending.kind == VerificationKind.BANK_CLOSED:
+        if pending.kind is VerificationKind.INTERFACE_CLOSED:
+            if outcome is not OutcomeKind.INTERFACE_CLOSED:
+                return self._block_verification_outcome(pending, outcome)
             self.progress.phase = TaskPhase.NAVIGATE_TO_TREES
             self.progress.route_index = 0
             return
         self.progress.phase = TaskPhase.BLOCKED
         self.progress.failures.append(f"unsupported verification result: {pending.kind.value}")
 
+    def _block_verification_outcome(
+        self, pending: VerificationSpec, outcome: OutcomeKind
+    ) -> None:
+        self.progress.phase = TaskPhase.BLOCKED
+        self.progress.failures.append(
+            f"unexpected {outcome.value} outcome for {pending.kind.value}"
+        )
+
     def _find_tree(self, observation: Observation) -> Decision:
         if self.progress.cycles_completed >= 1:
             self.progress.phase = TaskPhase.COMPLETE
             return self._wait(observation, "one banking cycle is complete")
         if observation.inventory.full:
-            if observation.inventory.log_count == 0:
+            if observation.inventory.quantity(LOG_ITEM_ID) == 0:
                 return self._block(observation, "inventory is full without ordinary logs")
             self.progress.phase = TaskPhase.NAVIGATE_TO_BANK
             self.progress.route_index = 0
@@ -277,11 +348,12 @@ class WoodcutBankTask:
             self.progress.phase = TaskPhase.FIND_TREE
             return self._wait(observation, "selected Tree is no longer exactly actionable")
 
-        verification = Verification(
-            VerificationKind.LOG_GAINED,
+        verification = VerificationSpec(
+            VerificationKind.ITEM_QUANTITY_INCREASED,
             before_tick=observation.tick,
             deadline_tick=observation.tick + CHOP_DEADLINE_TICKS,
-            before_log_count=observation.inventory.log_count,
+            item_id=LOG_ITEM_ID,
+            before_quantity=observation.inventory.quantity(LOG_ITEM_ID),
             source_session_id=observation.session_id,
         )
         self.progress.phase = TaskPhase.VERIFY_LOGS
@@ -335,7 +407,7 @@ class WoodcutBankTask:
                     observation,
                     f"waiting for actionable route projection {step.step_id}",
                 )
-            verification = Verification(
+            verification = VerificationSpec(
                 VerificationKind.MOVED_CLOSER,
                 before_tick=observation.tick,
                 deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
@@ -366,13 +438,19 @@ class WoodcutBankTask:
         )
         if route_option is None:
             return self._block(observation, f"route action unavailable for {step.step_id}")
-        verification = Verification(
-            VerificationKind.ROUTE_TRANSITION_READY,
+        verification = VerificationSpec(
+            VerificationKind.ROUTE_TRANSITION,
             before_tick=observation.tick,
             deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
             before_location=observation.location,
             expected_plane=step.expected_plane,
             source_session_id=observation.session_id,
+            dialogue_prompt_contains="climb",
+            dialogue_option_contains=(
+                "climb up"
+                if step.expected_plane > observation.plane
+                else "climb down"
+            ),
         )
         return self._emit_action(
             observation, ActionKind.INTERACT_OBJECT,
@@ -407,7 +485,7 @@ class WoodcutBankTask:
         if len(matches) != 1:
             return self._block(observation, f"exact climb {direction} dialogue option is unavailable")
         selected = matches[0]
-        verification = Verification(
+        verification = VerificationSpec(
             VerificationKind.PLANE_CHANGED,
             before_tick=observation.tick,
             deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
@@ -417,7 +495,7 @@ class WoodcutBankTask:
         )
         self.progress.pending = verification
         return Decision(
-            self.progress.phase,
+            self.progress.phase.value,
             f"choose exact climb {direction} dialogue option",
             Action(
                 ActionKind.PRESS_KEY,
@@ -431,6 +509,14 @@ class WoodcutBankTask:
                 verification=verification,
                 source_session_id=observation.session_id,
                 source_dialogue_client_tick=widgets.dialogue_client_tick,
+                task_constraints=TaskConstraints(
+                    dialogue=DialogueOptionConstraint(
+                        prompt_contains="climb",
+                        option_text=selected.text,
+                        option_index=selected.index,
+                        option_key=selected.key,
+                    )
+                ),
             ),
         )
 
@@ -461,18 +547,22 @@ class WoodcutBankTask:
         if not targets:
             return self._block(observation, "exact Lumbridge bank booth is unavailable")
         target = sorted(targets, key=lambda item: item.key)[0]
-        verification = Verification(
-            VerificationKind.BANK_OPEN,
+        verification = VerificationSpec(
+            VerificationKind.INTERFACE_OPENED,
             before_tick=observation.tick,
             deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
             before_location=observation.location,
             expected_plane=2,
             source_session_id=observation.session_id,
+            interface_name="bank",
         )
         return self._emit_action(
             observation, ActionKind.INTERACT_OBJECT, "Open Lumbridge Castle bank",
             "open exact Lumbridge Castle bank booth", BANK_ACTION, verification,
             target=target,
+            task_constraints=TaskConstraints(
+                interface=InterfaceConstraint("bank", BANK_ANCHOR.plane, False)
+            ),
         )
 
     def _deposit_logs(self, observation: Observation) -> Decision:
@@ -485,7 +575,7 @@ class WoodcutBankTask:
         if not observation.widgets.bank_open or not observation.widgets.bank_readable:
             return self._block(observation, "readable bank must remain open before deposit")
         held = [item for item in observation.inventory.items if item.quantity > 0]
-        if not held or observation.inventory.log_count <= 0:
+        if not held or observation.inventory.quantity(LOG_ITEM_ID) <= 0:
             return self._block(observation, "there are no ordinary logs to deposit")
         if any(item.item_id != LOG_ITEM_ID for item in held):
             return self._block(observation, "deposit-inventory requires an all-1511 inventory")
@@ -497,13 +587,15 @@ class WoodcutBankTask:
         if point is None:
             return self._block(observation, "deposit-inventory widget has no geometry")
 
-        verification = Verification(
-            VerificationKind.LOGS_DEPOSITED,
+        verification = VerificationSpec(
+            VerificationKind.ITEM_QUANTITY_EQUALS,
             before_tick=observation.tick,
             deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
-            before_log_count=observation.inventory.log_count,
+            item_id=LOG_ITEM_ID,
+            expected_quantity=0,
             expected_plane=2,
             source_session_id=observation.session_id,
+            interface_name="bank",
         )
         self.progress.phase = TaskPhase.VERIFY_DEPOSIT
         return self._emit_action(
@@ -511,6 +603,12 @@ class WoodcutBankTask:
             "deposit all ordinary logs", DEPOSIT_WIDGET_NAME, verification,
             target_key=DEPOSIT_WIDGET_NAME, target_name=target.name,
             screen_point=point,
+            task_constraints=TaskConstraints(
+                inventory=InventoryConstraint(frozenset({LOG_ITEM_ID})),
+                interface=InterfaceConstraint(
+                    "bank", BANK_ANCHOR.plane, True, require_readable=True
+                ),
+            ),
         )
 
     def _close_bank(self, observation: Observation) -> Decision:
@@ -524,12 +622,13 @@ class WoodcutBankTask:
             self.progress.phase = TaskPhase.NAVIGATE_TO_TREES
             self.progress.route_index = 0
             return self._wait(observation, "bank is already closed")
-        verification = Verification(
-            VerificationKind.BANK_CLOSED,
+        verification = VerificationSpec(
+            VerificationKind.INTERFACE_CLOSED,
             before_tick=observation.tick,
             deadline_tick=observation.tick + ACTION_DEADLINE_TICKS,
             expected_plane=2,
             source_session_id=observation.session_id,
+            interface_name="bank",
         )
         target = observation.widgets.close_bank
         point = (
@@ -544,7 +643,7 @@ class WoodcutBankTask:
                 return self._block(observation, "close-bank input is unavailable")
             self.progress.pending = verification
             return Decision(
-                self.progress.phase,
+                self.progress.phase.value,
                 "close bank with verified Escape support",
                 Action(
                     ActionKind.PRESS_KEY,
@@ -557,6 +656,14 @@ class WoodcutBankTask:
                     key="escape",
                     verification=verification,
                     source_session_id=observation.session_id,
+                    task_constraints=TaskConstraints(
+                        interface=InterfaceConstraint(
+                            "bank",
+                            BANK_ANCHOR.plane,
+                            True,
+                            require_keyboard_close=True,
+                        )
+                    ),
                 ),
             )
 
@@ -565,6 +672,9 @@ class WoodcutBankTask:
             "close bank before return route", CLOSE_WIDGET_NAME, verification,
             target_key=CLOSE_WIDGET_NAME, target_name=target.name,
             screen_point=point,
+            task_constraints=TaskConstraints(
+                interface=InterfaceConstraint("bank", BANK_ANCHOR.plane, True)
+            ),
         )
 
     def _emit_action(
@@ -574,12 +684,13 @@ class WoodcutBankTask:
         label: str,
         reason: str,
         option: str,
-        verification: Verification,
+        verification: VerificationSpec,
         *,
         target: NearbyObject | None = None,
         target_key: str | None = None,
         target_name: str | None = None,
         screen_point=None,
+        task_constraints: TaskConstraints | None = None,
     ) -> Decision:
         self.progress.pending = verification
         if target is not None:
@@ -594,8 +705,9 @@ class WoodcutBankTask:
             target_param0=target.scene_x if target is not None else None,
             target_param1=target.scene_y if target is not None else None,
             source_session_id=observation.session_id,
+            task_constraints=task_constraints or TaskConstraints(),
         )
-        return Decision(self.progress.phase, reason, action)
+        return Decision(self.progress.phase.value, reason, action)
 
     def _current_route(self) -> tuple[_FixedRouteStep, ...] | None:
         phase = self.progress.resume_phase if self.progress.phase is TaskPhase.STAIR_DIALOGUE else self.progress.phase
@@ -712,7 +824,7 @@ class WoodcutBankTask:
 
     def _wait(self, observation: Observation, reason: str) -> Decision:
         return Decision(
-            self.progress.phase,
+            self.progress.phase.value,
             reason,
             Action(
                 ActionKind.WAIT,
