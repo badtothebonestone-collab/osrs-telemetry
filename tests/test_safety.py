@@ -77,6 +77,10 @@ def observation(
     menu_open: bool = False,
     menu_bounds: ScreenBounds | None = None,
 ) -> Observation:
+    timestamp = datetime.now(timezone.utc)
+    session_id = "session-1"
+    process_id = 1234
+    frame_id = f"test-frame-{tick}"
     return Observation(
         player=PlayerObservation(),
         location=WorldPoint(3197, 3200, 0),
@@ -87,19 +91,28 @@ def observation(
         widgets=widgets or WidgetObservation(bank_known=True),
         canvas_bounds=CANVAS,
         game_state="LOGGED_IN",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=timestamp,
         tick=tick,
         status="PASS",
         fresh=True,
         cache_wall_clock_fresh=True,
         scene_playable=True,
-        session_id="session-1",
+        session_id=session_id,
         menu_client_tick=1000 + tick if menu_client_tick is None else menu_client_tick,
         menu_mouse_screen_point=menu_point,
         menu_open=menu_open,
         menu_bounds=menu_bounds,
         client_focused=True,
-        client_process_id=1234,
+        client_process_id=process_id,
+        assembled_at=timestamp,
+        frame_id=frame_id,
+        geometry_frame_id=frame_id,
+        source_coherent=True,
+        menu_fresh=True,
+        menu_source_tick=tick,
+        menu_timestamp=timestamp,
+        menu_session_id=session_id,
+        menu_process_id=process_id,
     )
 
 
@@ -211,6 +224,9 @@ class SafetyGateTest(unittest.TestCase):
             tick=103,
             menu_client_tick=1103,
             menu_mouse_screen_point=row_point,
+            frame_id="test-frame-103",
+            geometry_frame_id="test-frame-103",
+            menu_source_tick=103,
         )
         self.assertTrue(
             self.gate.validate_context_menu(
@@ -248,6 +264,48 @@ class SafetyGateTest(unittest.TestCase):
                 self.assertFalse(
                     self.gate.validate_pre_move(tree_action(), candidate).allowed
                 )
+
+    def test_rejects_incoherent_source_frame_explicitly(self) -> None:
+        result = self.gate.validate_pre_move(
+            tree_action(), replace(observation(), source_coherent=False)
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual("source_incoherent", result.reason)
+
+    def test_rejects_stale_or_unbound_menu_provenance(self) -> None:
+        base = observation()
+        cases = {
+            "stale flag": (
+                replace(base, menu_fresh=False),
+                "menu_evidence_stale",
+            ),
+            "stale timestamp": (
+                replace(
+                    base,
+                    menu_timestamp=base.timestamp - timedelta(seconds=10),
+                ),
+                "menu_evidence_too_old",
+            ),
+            "source tick mismatch": (
+                replace(base, menu_source_tick=base.tick - 1),
+                "menu_source_tick_mismatch",
+            ),
+            "session mismatch": (
+                replace(base, menu_session_id="session-2"),
+                "menu_session_mismatch",
+            ),
+            "process mismatch": (
+                replace(base, menu_process_id=4321),
+                "menu_process_mismatch",
+            ),
+        }
+
+        for label, (candidate, expected_reason) in cases.items():
+            with self.subTest(label=label):
+                result = self.gate.validate_pre_move(tree_action(), candidate)
+                self.assertFalse(result.allowed)
+                self.assertEqual(expected_reason, result.reason)
 
     def test_future_dated_observation_has_an_explicit_block_reason(self) -> None:
         candidate = replace(

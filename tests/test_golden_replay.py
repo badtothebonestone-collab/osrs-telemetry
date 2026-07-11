@@ -79,6 +79,9 @@ def _observation(
     objects: tuple[NearbyObject, ...] = (),
     widgets: WidgetObservation | None = None,
 ) -> Observation:
+    timestamp = datetime.now(timezone.utc)
+    process_id = 4242
+    frame_id = f"golden-frame-{tick}"
     return Observation(
         player=PlayerObservation(),
         location=location,
@@ -89,7 +92,7 @@ def _observation(
         widgets=widgets or WidgetObservation(bank_known=True),
         canvas_bounds=ScreenBounds(0, 0, 800, 600),
         game_state="LOGGED_IN",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=timestamp,
         tick=tick,
         status="PASS",
         fresh=True,
@@ -99,7 +102,16 @@ def _observation(
         menu_client_tick=10_000 + tick,
         menu_mouse_screen_point=POINT,
         client_focused=True,
-        client_process_id=4242,
+        client_process_id=process_id,
+        assembled_at=timestamp,
+        frame_id=frame_id,
+        geometry_frame_id=frame_id,
+        source_coherent=True,
+        menu_fresh=True,
+        menu_source_tick=tick,
+        menu_timestamp=timestamp,
+        menu_session_id=SESSION_ID,
+        menu_process_id=process_id,
     )
 
 

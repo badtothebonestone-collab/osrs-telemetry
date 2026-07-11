@@ -188,6 +188,15 @@ class Observation:
     menu_bounds: ScreenBounds | None = None
     client_focused: bool = False
     client_process_id: int | None = None
+    assembled_at: datetime | None = None
+    frame_id: str | None = None
+    geometry_frame_id: str | None = None
+    source_coherent: bool = False
+    menu_fresh: bool = False
+    menu_source_tick: int | None = None
+    menu_timestamp: datetime | None = None
+    menu_session_id: str | None = None
+    menu_process_id: int | None = None
 
     @property
     def loaded_scene(self) -> bool:
@@ -198,6 +207,7 @@ class Observation:
             and self.tick >= 0
             and self.fresh
             and self.cache_wall_clock_fresh
+            and self.source_coherent
             and self.scene_playable
             and self.timestamp_not_future
             and not self.missing_capabilities
@@ -218,6 +228,15 @@ class Observation:
             return self.age_seconds >= -MAX_FUTURE_CLOCK_SKEW_SECONDS
         except (AttributeError, TypeError, ValueError, OverflowError):
             return False
+
+    @property
+    def menu_age_seconds(self) -> float | None:
+        if self.menu_timestamp is None:
+            return None
+        stamp = self.menu_timestamp
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - stamp).total_seconds()
 
     def object_by_key(self, key: str | None) -> NearbyObject | None:
         if not key:

@@ -17,6 +17,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -77,13 +78,6 @@ import net.runelite.client.callback.ClientThread;
 public class TelemetryPlugin extends Plugin
 {
 	private static final int INVENTORY_SLOT_COUNT = 28;
-	private static final String PACKET_BASELINE = "live_baseline_packet.v1";
-	private static final String PACKET_INVENTORY = "live_inventory_packet.v1";
-	private static final String PACKET_ACTIVITY = "live_activity_packet.v1";
-	private static final String PACKET_BANK_UI = "live_bank_ui_packet.v1";
-	private static final String PACKET_DIALOGUE_STATE = "live_dialogue_state_packet.v1";
-	// Wire name retained for existing snapshot clients; the payload now reports cache/sensor health only.
-	private static final String PACKET_SENSOR_HEALTH = "live_writer_health_packet.v1";
 	private static final int DIALOGUE_WIDGET_SCAN_LIMIT = 160;
 
 	@Inject
@@ -267,7 +261,7 @@ public class TelemetryPlugin extends Plugin
 			snapshot.snapshotBuildDurationMillis = elapsedMillis(snapshotStartNanos);
 			try
 			{
-				publishCompactLivePackets(snapshot);
+				publishCompactLivePackets(snapshot, snapshotStartNanos);
 			}
 			catch (RuntimeException e)
 			{
@@ -394,13 +388,9 @@ public class TelemetryPlugin extends Plugin
 		clientTickHotState.recordMenuOptionClicked(payload);
 	}
 
-	private void publishCompactLivePackets(TickSnapshot snapshot)
+	private void publishCompactLivePackets(TickSnapshot snapshot, long captureStartedNanos)
 	{
-		updateLiveCache(PACKET_BASELINE, snapshot, baselinePayload(snapshot));
-		updateLiveCache(PACKET_INVENTORY, snapshot, inventoryPayload(snapshot));
-		updateLiveCache(PACKET_ACTIVITY, snapshot, activityPayload(snapshot));
-		updateLiveCache(PACKET_BANK_UI, snapshot, bankUiPayload(snapshot));
-		updateLiveCache(PACKET_DIALOGUE_STATE, snapshot, dialogueStatePayload(snapshot));
+		publishSensorFrame(snapshot, captureStartedNanos, false);
 	}
 
 	private void publishGameStateBaseline(GameState gameState)
@@ -409,6 +399,7 @@ public class TelemetryPlugin extends Plugin
 		{
 			return;
 		}
+		long captureStartedNanos = System.nanoTime();
 		TickSnapshot snapshot = new TickSnapshot();
 		List<String> captureErrors = new ArrayList<>();
 		snapshot.schemaVersion = "0.1.0";
@@ -418,23 +409,205 @@ public class TelemetryPlugin extends Plugin
 		safeCapture(captureErrors, "cameraViewport", () -> captureCameraViewport(snapshot));
 		safeCapture(captureErrors, "welcomeScreen", () -> captureWelcomeScreen(snapshot));
 		snapshot.captureErrors = captureErrors.toArray(new String[0]);
-		updateLiveCache(PACKET_BASELINE, snapshot, baselinePayload(snapshot));
+		snapshot.snapshotBuildDurationMillis = elapsedMillis(captureStartedNanos);
+		publishSensorFrame(snapshot, captureStartedNanos, true);
 	}
 
-	private void updateLiveCache(String packetType, TickSnapshot snapshot, Map<String, Object> payload)
-	{
-		updateLiveCache(liveCache, packetType, snapshot, payload);
-	}
-
-	static boolean updateLiveCache(
-			PluginLiveCache cache,
-			String packetType,
+	private void publishSensorFrame(
 			TickSnapshot snapshot,
-			Map<String, Object> payload)
+			long captureStartedNanos,
+			boolean baselineOnly)
 	{
-		return cache != null
-				&& snapshot != null
-				&& cache.update(packetType, snapshot.tickId, snapshot.timestampUtc, payload);
+		if (liveCache == null || snapshot == null)
+		{
+			return;
+		}
+		String completedAtUtc = Instant.now().toString();
+		String sessionId = pluginInstanceId;
+		long processId = ProcessHandle.current().pid();
+		String geometryFrameId = geometryFrameId(snapshot);
+		String frameId = (sessionId == null ? "plugin-unidentified" : sessionId)
+				+ ":" + snapshot.tickId + ":" + captureStartedNanos;
+		List<String> captureErrors = snapshot.captureErrors == null
+				? List.of()
+				: Arrays.asList(snapshot.captureErrors);
+		boolean loggedIn = "LOGGED_IN".equals(snapshot.gameState);
+		boolean baselineAvailable = baselineCaptureAvailable(snapshot, captureErrors);
+		boolean inventoryAvailable = !baselineOnly
+				&& loggedIn
+				&& snapshot.inventory != null
+				&& !captureErrors.contains("inventory");
+		boolean activityAvailable = !baselineOnly
+				&& loggedIn
+				&& snapshot.localPlayer != null
+				&& snapshot.status != null
+				&& !captureErrors.contains("localPlayer")
+				&& !captureErrors.contains("status");
+		boolean bankUiAvailable = !baselineOnly
+				&& loggedIn
+				&& snapshot.bankUi != null
+				&& !captureErrors.contains("bankUi");
+		boolean dialogueAvailable = !baselineOnly
+				&& loggedIn
+				&& snapshot.dialogueState != null
+				&& !captureErrors.contains("dialogueState");
+
+		SensorFrame.Builder builder = SensorFrame.builder(
+				frameId,
+				snapshot.tickId,
+				captureStartedNanos,
+				snapshot.timestampUtc)
+				.completedAtUtc(completedAtUtc)
+				.captureDurationMillis(snapshot.snapshotBuildDurationMillis == null
+						? 0L
+						: snapshot.snapshotBuildDurationMillis)
+				.sessionId(sessionId)
+				.clientProcessId(processId)
+				.geometryFrameId(geometryFrameId);
+		SensorFrame frame;
+		try
+		{
+			builder.fact(gson, SensorFrame.FACT_BASELINE, snapshot.tickId, completedAtUtc,
+					baselineAvailable, factErrors(captureErrors, baselineAvailable, "baseline", baselineOnly),
+					baselinePayload(snapshot));
+			builder.fact(gson, SensorFrame.FACT_INVENTORY, snapshot.tickId, completedAtUtc,
+					inventoryAvailable, factErrors(captureErrors, inventoryAvailable, "inventory", baselineOnly),
+					inventoryPayload(snapshot));
+			builder.fact(gson, SensorFrame.FACT_ACTIVITY, snapshot.tickId, completedAtUtc,
+					activityAvailable, factErrors(captureErrors, activityAvailable, "activity", baselineOnly),
+					activityPayload(snapshot));
+			builder.fact(gson, SensorFrame.FACT_BANK_UI, snapshot.tickId, completedAtUtc,
+					bankUiAvailable, factErrors(captureErrors, bankUiAvailable, "bankUi", baselineOnly),
+					bankUiPayload(snapshot));
+			builder.fact(gson, SensorFrame.FACT_DIALOGUE_STATE, snapshot.tickId, completedAtUtc,
+					dialogueAvailable, factErrors(captureErrors, dialogueAvailable, "dialogueState", baselineOnly),
+					dialogueStatePayload(snapshot));
+			frame = builder.build();
+		}
+		catch (RuntimeException e)
+		{
+			log.warn("Sensor frame payload assembly failed; publishing an unavailable replacement", e);
+			frame = unavailableSensorFrame(
+					snapshot,
+					captureStartedNanos,
+					completedAtUtc,
+					geometryFrameId,
+					"frame_payload_assembly_failed:" + e.getClass().getSimpleName());
+		}
+		if (!liveCache.publish(frame))
+		{
+			log.warn("Failed to publish atomic sensor frame {}", frameId);
+		}
+	}
+
+	private SensorFrame unavailableSensorFrame(
+			TickSnapshot snapshot,
+			long captureStartedNanos,
+			String completedAtUtc,
+			String geometryFrameId,
+			String reason)
+	{
+		String capturedAtUtc = snapshot.timestampUtc == null
+				? completedAtUtc
+				: snapshot.timestampUtc;
+		String sessionId = pluginInstanceId;
+		long processId = ProcessHandle.current().pid();
+		SensorFrame.Builder builder = SensorFrame.builder(
+				(sessionId == null ? "plugin-unidentified" : sessionId)
+						+ ":" + snapshot.tickId + ":failed:" + captureStartedNanos,
+				snapshot.tickId,
+				captureStartedNanos,
+				capturedAtUtc)
+				.completedAtUtc(completedAtUtc)
+				.sessionId(sessionId)
+				.clientProcessId(processId)
+				.geometryFrameId(geometryFrameId);
+		for (String factName : SensorFrame.CORE_FACT_NAMES)
+		{
+			builder.fact(
+					gson,
+					factName,
+					snapshot.tickId,
+					completedAtUtc,
+					false,
+					List.of(reason),
+					Map.of());
+		}
+		return builder.build();
+	}
+
+	private List<String> factErrors(
+			List<String> captureErrors,
+			boolean available,
+			String section,
+			boolean baselineOnly)
+	{
+		if (available)
+		{
+			return List.of();
+		}
+		List<String> errors = new ArrayList<>();
+		if (captureErrors != null)
+		{
+			for (String error : captureErrors)
+			{
+				if (error != null && (error.equals(section)
+						|| ("baseline".equals(section)
+						&& ("gameState".equals(error)
+						|| "cameraViewport".equals(error)
+						|| "welcomeScreen".equals(error)))
+						|| ("activity".equals(section)
+						&& ("localPlayer".equals(error) || "status".equals(error)))))
+				{
+					errors.add("capture_failed:" + error);
+				}
+			}
+		}
+		if (errors.isEmpty())
+		{
+			errors.add(baselineOnly && !"baseline".equals(section)
+					? "not_captured_for_game_state"
+					: "capture_unavailable");
+		}
+		return List.copyOf(errors);
+	}
+
+	private String geometryFrameId(TickSnapshot snapshot)
+	{
+		TickSnapshot.InputGeometrySnapshot geometry = snapshot == null ? null : snapshot.inputGeometry;
+		String signature = String.join("|",
+				String.valueOf(snapshot == null ? null : snapshot.cameraX),
+				String.valueOf(snapshot == null ? null : snapshot.cameraY),
+				String.valueOf(snapshot == null ? null : snapshot.cameraZ),
+				String.valueOf(snapshot == null ? null : snapshot.cameraYaw),
+				String.valueOf(snapshot == null ? null : snapshot.cameraPitch),
+				String.valueOf(snapshot == null ? null : snapshot.viewportWidth),
+				String.valueOf(snapshot == null ? null : snapshot.viewportHeight),
+				String.valueOf(snapshot == null ? null : snapshot.viewportXOffset),
+				String.valueOf(snapshot == null ? null : snapshot.viewportYOffset),
+				String.valueOf(geometry == null ? null : geometry.canvasScreenX),
+				String.valueOf(geometry == null ? null : geometry.canvasScreenY),
+				String.valueOf(geometry == null ? null : geometry.canvasWidth),
+				String.valueOf(geometry == null ? null : geometry.canvasHeight),
+				String.valueOf(geometry == null ? null : geometry.sourceCanvasWidth),
+				String.valueOf(geometry == null ? null : geometry.sourceCanvasHeight),
+				String.valueOf(geometry == null ? null : geometry.clientWindowX),
+				String.valueOf(geometry == null ? null : geometry.clientWindowY),
+				String.valueOf(geometry == null ? null : geometry.clientWindowWidth),
+				String.valueOf(geometry == null ? null : geometry.clientWindowHeight),
+				String.valueOf(geometry == null ? null : geometry.displayScaleX),
+				String.valueOf(geometry == null ? null : geometry.displayScaleY),
+				String.valueOf(geometry == null ? null : geometry.isCanvasShowing),
+				String.valueOf(geometry == null ? null : geometry.isClientFocused));
+		return "geometry-" + hashName(signature);
+	}
+
+	private String currentGeometryFrameId()
+	{
+		TickSnapshot current = new TickSnapshot();
+		current.tickId = tickId;
+		captureCameraViewport(current);
+		return geometryFrameId(current);
 	}
 
 	private Map<String, Object> baselinePayload(TickSnapshot snapshot)
@@ -456,6 +629,18 @@ public class TelemetryPlugin extends Plugin
 				&& "LOGGED_IN".equals(snapshot.gameState)
 				&& snapshot.localPlayer != null
 				&& Boolean.FALSE.equals(snapshot.welcomeScreenVisible);
+	}
+
+	static boolean baselineCaptureAvailable(
+			TickSnapshot snapshot,
+			List<String> captureErrors)
+	{
+		List<String> errors = captureErrors == null ? List.of() : captureErrors;
+		return snapshot != null
+				&& snapshot.gameState != null
+				&& !errors.contains("gameState")
+				&& !errors.contains("cameraViewport")
+				&& !errors.contains("welcomeScreen");
 	}
 
 	private Map<String, Object> playerPayload(TickSnapshot snapshot)
@@ -1675,6 +1860,7 @@ public class TelemetryPlugin extends Plugin
 			{
 				Map<String, Object> identity = new LinkedHashMap<>();
 				addSessionIdentity(identity);
+				identity.put("geometryFrameId", currentGeometryFrameId());
 				future.complete(worldModelCache.query(client, needs == null ? List.of() : needs, request == null ? Map.of() : request, tickId, clientTickId, identity));
 			}
 			catch (RuntimeException e)
@@ -1699,6 +1885,11 @@ public class TelemetryPlugin extends Plugin
 	private Map<String, Object> worldModelFailurePayload(List<String> needs, String reason)
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
+		Map<String, Object> metadata = new LinkedHashMap<>();
+		metadata.put("sourceTick", tickId);
+		metadata.put("capturedAtUtc", Instant.now().toString());
+		addSessionIdentity(metadata);
+		metadata.put("geometryFrameId", "geometry-unavailable");
 		Map<String, Object> quality = new LinkedHashMap<>();
 		quality.put("worldModelAvailable", false);
 		quality.put("worldModelAgeMs", null);
@@ -1710,6 +1901,7 @@ public class TelemetryPlugin extends Plugin
 		payload.put("status", "WARN");
 		payload.put("needs", needs == null ? List.of() : List.copyOf(needs));
 		payload.put("payloads", Map.of());
+		payload.put("metadata", metadata);
 		payload.put("quality", quality);
 		payload.put("warnings", List.of(reason));
 		return payload;
@@ -1721,7 +1913,11 @@ public class TelemetryPlugin extends Plugin
 		payload.put("schema", "tile_projection_response.v1");
 		payload.put("status", "WARN");
 		payload.put("tick", tickId);
+		payload.put("sourceTick", tickId);
 		payload.put("clientTick", clientTickId);
+		payload.put("capturedAtUtc", Instant.now().toString());
+		addSessionIdentity(payload);
+		payload.put("geometryFrameId", "geometry-unavailable");
 		payload.put("tiles", List.of());
 		payload.put("warnings", List.of(reason));
 		return payload;
@@ -1747,7 +1943,11 @@ public class TelemetryPlugin extends Plugin
 		payload.put("schema", "tile_projection_response.v1");
 		payload.put("status", allPass ? "PASS" : "WARN");
 		payload.put("tick", tickId);
+		payload.put("sourceTick", tickId);
 		payload.put("clientTick", clientTickId);
+		payload.put("capturedAtUtc", Instant.now().toString());
+		addSessionIdentity(payload);
+		payload.put("geometryFrameId", currentGeometryFrameId());
 		payload.put("gameState", client.getGameState() == null ? null : client.getGameState().name());
 		payload.put("tiles", tiles);
 		return payload;
@@ -1857,6 +2057,7 @@ public class TelemetryPlugin extends Plugin
 		}
 		return payload;
 	}
+
 
 	static boolean bankUiKnown(TickSnapshot snapshot)
 	{

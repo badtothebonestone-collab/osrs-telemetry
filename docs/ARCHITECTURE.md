@@ -40,8 +40,8 @@ contracts for a later phase and must not be described as implemented early.
 
 | Layer | Current baseline | Governing target |
 |---|---|---|
-| Sensor | plugin cache packets assembled by `/snapshot` | atomic game-tick `SensorFrame` plus separately stamped client/menu evidence |
-| Observation | immutable `Observation` | same single truth, with freshness derived from source evidence |
+| Sensor | atomic game-tick `SensorFrame` plus separately stamped client/menu evidence | preserve the same single source contract while adding no second endpoint |
+| Observation | immutable source-coherent `Observation` | preserve the same single truth for task-neutral seams |
 | Task | concrete `WoodcutBankTask` | minimal task protocol with explicit task-specific FSM implementations |
 | Decision | `Action` + `Verification` | task-neutral `ActionIntent` + `VerificationSpec` |
 | Safety | one `SafetyGate` | engine invariants separated from typed task constraints |
@@ -70,14 +70,21 @@ provides validated facts to a still-explicit task FSM.
 
 ### Sensor
 
-The RuneLite plugin owns the only live telemetry cache. Its localhost service
-exposes exactly three read-only routes:
+The RuneLite plugin owns the only live telemetry cache. `PluginLiveCache`
+publishes one immutable `SensorFrame` through one atomic reference; partial or
+login captures replace the prior frame and explicitly mark missing facts. Its
+localhost service exposes exactly three read-only routes:
 
 - `GET /health`
 - `GET /schema`
 - `POST /snapshot`
 
 The endpoint does not apply configuration or accept gameplay commands.
+`plugin_snapshot_response.v2` separates frame capture time from
+`assembledAtUtc`. Core facts share one frame tick/session/process identity.
+World-model and tile geometry must also match the frame's camera/window
+fingerprint before the endpoint merges them. Menu evidence is independently
+stamped from its real post-menu-sort sample.
 
 ### Observation
 
@@ -86,11 +93,11 @@ and produces one immutable `Observation`:
 
 ```text
 player, location, plane, inventory, nearby_objects, menus, widgets,
-game_state, timestamp, tick
+game_state, source timestamp, assembly timestamp, frame identity, tick
 ```
 
-Freshness, canvas bounds, warnings, and missing capabilities travel with the
-same object because they determine whether any action is safe. Object census
+Source coherence, freshness, canvas bounds, warnings, and missing capabilities
+travel with the same object because they determine whether any action is safe. Object census
 rows are deduplicated by stable object key. Canvas coordinates are converted to
 screen coordinates once, at this boundary. Menu samples preserve the explicit
 top/default entry, scene parameters, client-tick sequence, and sampled pointer.

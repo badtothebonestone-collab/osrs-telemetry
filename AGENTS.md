@@ -9,6 +9,7 @@ Read in this order:
 3. `PLANS.md`
 4. `docs/ENGINE_STATUS.md`
 5. `docs/ARCHITECTURE.md`
+6. `docs/SENSOR_CONTRACT.md`
 
 `docs/RESCUE_CONTRACT.md` freezes the proven regression slice; it is no longer
 the active development phase.
@@ -31,7 +32,7 @@ are not project goals.
 
 ## Sources of truth
 
-The following list is the governing target architecture. Current Phase 0
+The following list is the governing target architecture. Current milestone
 exceptions are explicit in `docs/ENGINE_STATUS.md` and must be removed by their
 assigned milestones rather than hidden in documentation.
 

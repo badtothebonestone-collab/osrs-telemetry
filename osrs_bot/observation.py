@@ -4,7 +4,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from math import ceil, floor
 from typing import Any
@@ -14,8 +14,10 @@ from urllib.request import Request, urlopen
 from .model import DialogueOption, InventoryItem, InventoryObservation, MenuEntry, NearbyObject, Observation
 from .model import PlayerObservation, ScreenBounds, ScreenPoint, TargetGeometry, WidgetObservation, WidgetTarget, WorldPoint
 
-RESPONSE_SCHEMA = "plugin_snapshot_response.v1"
+RESPONSE_SCHEMA = "plugin_snapshot_response.v2"
+SENSOR_FRAME_SCHEMA = "sensor_frame.v1"
 MAX_TILE_PROJECTIONS = 16
+CORE_FACT_NEEDS = ("baseline", "inventory", "activity", "bank_ui", "dialogue_state")
 CANONICAL_NEEDS = ("baseline", "inventory", "activity", "interaction_hot",
                    "resource_object_census", "route_object_census", "service_object_census", "bank_ui", "dialogue_state")
 _TAG = re.compile(r"<[^>]*>")
@@ -127,7 +129,8 @@ def build_snapshot_request(tile_projections: Iterable[tuple[str, WorldPoint]] | 
     tiles = _normalize_tiles(tile_projections)
     request: dict[str, Any] = {
         "schema": "plugin_snapshot_request.v1", "needs": list(CANONICAL_NEEDS),
-        "snapshotTier": "hot", "responseMode": "compact", "maxAgeTicks": 2,
+        "snapshotTier": "hot", "responseMode": "compact", "maxAgeTicks": 0,
+        "maxSourceAgeMillis": 2000,
         "includeGeometry": True, "includeCollisionWindow": False, "includeWatchValues": False,
         "includeMenuEntries": True, "maxMenuEntries": 16, "maxClientTickSamples": 0,
         "maxMenuSamples": 0, "maxClickedSamples": 0,
@@ -425,20 +428,196 @@ def _widgets(payloads: Mapping[str, Any], transform: _CanvasTransform | None) ->
                              dialogue_options=tuple(options), dialogue_number_keys=number_keys,
                              dialogue_client_tick=dialogue_client_tick)
 
-def _timestamp(value: Any) -> datetime:
+def _timestamp(value: Any, path: str) -> datetime:
     if not isinstance(value, str):
-        raise ObservationSchemaError("generatedAtUtc must be a string")
+        raise ObservationSchemaError(f"{path} must be a string")
     try:
         timestamp = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
     except ValueError as exc:
-        raise ObservationSchemaError("generatedAtUtc is not a valid timestamp") from exc
+        raise ObservationSchemaError(f"{path} is not a valid timestamp") from exc
     return timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True)
+class _FrameContract:
+    frame_id: str
+    geometry_frame_id: str | None
+    source_tick: int
+    captured_at: datetime
+    completed_at: datetime
+    session_id: str | None
+    client_process_id: int | None
+    coherent: bool
+
+
+def _optional_string(value: Any, path: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ObservationSchemaError(f"{path} must be a string")
+    return value or None
+
+
+def _frame_contract(root: Mapping[str, Any], payloads: Mapping[str, Any]) -> _FrameContract:
+    frame = _mapping(root.get("sensorFrame"), "sensorFrame")
+    if frame.get("schema") != SENSOR_FRAME_SCHEMA:
+        raise ObservationSchemaError(f"expected sensorFrame schema {SENSOR_FRAME_SCHEMA!r}")
+    frame_id = frame.get("frameId")
+    if not isinstance(frame_id, str) or not frame_id.strip():
+        raise ObservationSchemaError("sensorFrame.frameId must be a non-empty string")
+    source_tick = _integer(frame.get("sourceTick"), "sensorFrame.sourceTick")
+    latest_tick = _integer(root.get("latestTick"), "latestTick")
+    captured_at = _timestamp(frame.get("capturedAtUtc"), "sensorFrame.capturedAtUtc")
+    completed_at = _timestamp(frame.get("completedAtUtc"), "sensorFrame.completedAtUtc")
+    if completed_at < captured_at:
+        raise ObservationSchemaError("sensorFrame.completedAtUtc precedes capturedAtUtc")
+    coherent = _boolean(frame.get("coherent"), "sensorFrame.coherent")
+    complete = _boolean(frame.get("complete"), "sensorFrame.complete")
+    if source_tick != latest_tick:
+        coherent = False
+
+    facts = _mapping(frame.get("facts"), "sensorFrame.facts")
+    for fact_name in CORE_FACT_NEEDS:
+        fact = _mapping(facts.get(fact_name), f"sensorFrame.facts.{fact_name}")
+        fact_tick = _integer(
+            fact.get("sourceTick"), f"sensorFrame.facts.{fact_name}.sourceTick"
+        )
+        fact_captured = _timestamp(
+            fact.get("capturedAtUtc"),
+            f"sensorFrame.facts.{fact_name}.capturedAtUtc",
+        )
+        available = _boolean(
+            fact.get("available"), f"sensorFrame.facts.{fact_name}.available"
+        )
+        _string_tuple(
+            fact.get("errors"), f"sensorFrame.facts.{fact_name}.errors"
+        )
+        if fact_tick != source_tick or not (captured_at <= fact_captured <= completed_at):
+            coherent = False
+        if available != (fact_name in payloads):
+            coherent = False
+        if not available:
+            complete = False
+
+    session_id = _optional_string(frame.get("sessionId"), "sensorFrame.sessionId")
+    client_process_id = _integer(
+        frame.get("clientProcessId"), "sensorFrame.clientProcessId", optional=True
+    )
+    geometry_frame_id = _optional_string(
+        frame.get("geometryFrameId"), "sensorFrame.geometryFrameId"
+    )
+    return _FrameContract(
+        frame_id=frame_id,
+        geometry_frame_id=geometry_frame_id,
+        source_tick=source_tick,
+        captured_at=captured_at,
+        completed_at=completed_at,
+        session_id=session_id,
+        client_process_id=client_process_id,
+        coherent=coherent and complete,
+    )
+
+
+def _menu_contract(
+    payloads: Mapping[str, Any],
+    freshness: Mapping[str, Any],
+    frame: _FrameContract,
+) -> tuple[bool, int | None, datetime | None, str | None, int | None]:
+    interaction = _payload(payloads, "interaction_hot")
+    if not interaction:
+        return False, None, None, None, None
+    source_tick = _integer(
+        interaction.get("sourceTick"), "interaction_hot.sourceTick", optional=True
+    )
+    captured_at = (
+        _timestamp(interaction.get("capturedAtUtc"), "interaction_hot.capturedAtUtc")
+        if interaction.get("capturedAtUtc") is not None
+        else None
+    )
+    session_id = _optional_string(
+        interaction.get("sessionId"), "interaction_hot.sessionId"
+    )
+    process_id = _integer(
+        interaction.get("clientProcessId"),
+        "interaction_hot.clientProcessId",
+        optional=True,
+    )
+    raw_fresh = _boolean(freshness.get("menuFresh"), "freshness.menuFresh")
+    bound = bool(
+        raw_fresh
+        and source_tick == frame.source_tick
+        and captured_at is not None
+        and session_id == frame.session_id
+        and process_id == frame.client_process_id
+    )
+    return bound, source_tick, captured_at, session_id, process_id
+
+
+def _dynamic_sources_coherent(
+    payloads: Mapping[str, Any],
+    frame: _FrameContract,
+    assembled_at: datetime,
+    max_source_age_millis: int,
+) -> bool:
+    coherent = True
+    for name in (
+        "resource_object_census",
+        "route_object_census",
+        "service_object_census",
+        "tile_projection",
+    ):
+        payload = _payload(payloads, name)
+        if not payload:
+            continue
+        source_tick = _integer(
+            payload.get("sourceTick", payload.get("tick")),
+            f"payloads.{name}.sourceTick",
+            optional=True,
+        )
+        session_id = _optional_string(
+            payload.get("sessionId"), f"payloads.{name}.sessionId"
+        )
+        process_id = _integer(
+            payload.get("clientProcessId"),
+            f"payloads.{name}.clientProcessId",
+            optional=True,
+        )
+        geometry_frame_id = _optional_string(
+            payload.get("geometryFrameId"),
+            f"payloads.{name}.geometryFrameId",
+        )
+        captured_at = (
+            _timestamp(
+                payload.get("capturedAtUtc"),
+                f"payloads.{name}.capturedAtUtc",
+            )
+            if payload.get("capturedAtUtc") is not None
+            else None
+        )
+        capture_age_millis = (
+            (assembled_at - captured_at).total_seconds() * 1000.0
+            if captured_at is not None
+            else None
+        )
+        coherent &= bool(
+            source_tick == frame.source_tick
+            and session_id == frame.session_id
+            and process_id == frame.client_process_id
+            and geometry_frame_id == frame.geometry_frame_id
+            and captured_at is not None
+            and captured_at >= frame.completed_at
+            and captured_at <= assembled_at + timedelta(seconds=2)
+            and capture_age_millis is not None
+            and -2000.0 <= capture_age_millis <= max_source_age_millis
+        )
+    return coherent
 
 def parse_observation(value: Mapping[str, Any], tile_projections: Iterable[tuple[str, WorldPoint]] | None = None) -> Observation:
     root = _mapping(value, "snapshot response")
     if root.get("schema") != RESPONSE_SCHEMA:
         raise ObservationSchemaError(f"expected schema {RESPONSE_SCHEMA!r}")
     payloads = _mapping(root.get("payloads"), "payloads")
+    frame = _frame_contract(root, payloads)
     baseline = _payload(payloads, "baseline")
     input_geometry = _mapping(
         baseline.get("inputGeometry"), "payloads.baseline.inputGeometry",
@@ -466,30 +645,62 @@ def parse_observation(value: Mapping[str, Any], tile_projections: Iterable[tuple
     if not isinstance(game_state, str) or not isinstance(status, str):
         raise ObservationSchemaError("gameState and status must be strings")
     interaction = _payload(payloads, "interaction_hot")
-    session_id = interaction.get("sessionId")
-    if session_id is not None and not isinstance(session_id, str):
-        raise ObservationSchemaError("interaction_hot.sessionId must be a string")
+    assembled_at = _timestamp(root.get("assembledAtUtc"), "assembledAtUtc")
+    max_source_age_millis = _integer(
+        freshness.get("maxSourceAgeMillis"),
+        "freshness.maxSourceAgeMillis",
+    )
+    if max_source_age_millis < 0:
+        raise ObservationSchemaError("freshness.maxSourceAgeMillis must be non-negative")
+    menu_fresh, menu_source_tick, menu_timestamp, menu_session_id, menu_process_id = _menu_contract(
+        payloads, freshness, frame
+    )
+    observed_process_id = _integer(
+        input_geometry.get("clientProcessId", frame.client_process_id),
+        "inputGeometry.clientProcessId",
+        optional=True,
+    ) if input_geometry else frame.client_process_id
+    geometry_source_tick = _integer(
+        input_geometry.get("sourceTick"),
+        "inputGeometry.sourceTick",
+        optional=True,
+    ) if input_geometry else None
+    source_coherent = bool(
+        frame.coherent
+        and _boolean(freshness.get("frameCoherent"), "freshness.frameCoherent")
+        and frame.session_id
+        and frame.client_process_id is not None
+        and frame.client_process_id > 0
+        and frame.geometry_frame_id
+        and observed_process_id == frame.client_process_id
+        and geometry_source_tick == frame.source_tick
+        and _dynamic_sources_coherent(
+            payloads,
+            frame,
+            assembled_at,
+            max_source_age_millis,
+        )
+    )
     menus, menu_client_tick, menu_mouse_point, menu_open, menu_bounds = _menu_state(payloads, transform)
     return Observation(player=player, location=location, plane=location.plane if location else None,
                        inventory=_inventory(payloads), nearby_objects=_nearby_objects(payloads, transform, location, dict(tiles)),
                        menus=menus, widgets=_widgets(payloads, transform),
                        canvas_bounds=transform.canvas_bounds if transform else None, game_state=game_state,
-                       timestamp=_timestamp(root.get("generatedAtUtc")), tick=_integer(root.get("latestTick"), "latestTick"), status=status,
+                       timestamp=frame.captured_at, tick=frame.source_tick, status=status,
                        fresh=_boolean(freshness.get("fresh"), "freshness.fresh"),
-                       cache_wall_clock_fresh=_boolean(freshness.get("cacheWallClockFresh"), "freshness.cacheWallClockFresh"),
+                       cache_wall_clock_fresh=_boolean(freshness.get("sourceCaptureFresh"), "freshness.sourceCaptureFresh"),
                        scene_playable=_boolean(baseline.get("scenePlayable"), "baseline.scenePlayable"),
-                       session_id=session_id, warnings=_string_tuple(root.get("warnings"), "warnings"),
+                       session_id=frame.session_id, warnings=_string_tuple(root.get("warnings"), "warnings"),
                        missing_capabilities=_string_tuple(root.get("missingCapabilities"), "missingCapabilities"),
                        menu_client_tick=menu_client_tick, menu_mouse_screen_point=menu_mouse_point,
                        menu_open=menu_open, menu_bounds=menu_bounds,
                        client_focused=_boolean(input_geometry.get("isClientFocused"), "inputGeometry.isClientFocused") if input_geometry else False,
-                       client_process_id=_integer(
-                           input_geometry.get("clientProcessId", interaction.get("clientProcessId")),
-                           "inputGeometry.clientProcessId", optional=True,
-                       ) if input_geometry else _integer(
-                           interaction.get("clientProcessId"),
-                           "interaction_hot.clientProcessId", optional=True,
-                       ))
+                       client_process_id=observed_process_id,
+                       assembled_at=assembled_at, frame_id=frame.frame_id,
+                       geometry_frame_id=frame.geometry_frame_id,
+                       source_coherent=source_coherent, menu_fresh=menu_fresh,
+                       menu_source_tick=menu_source_tick, menu_timestamp=menu_timestamp,
+                       menu_session_id=menu_session_id, menu_process_id=menu_process_id)
 
 class ObservationClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8893", *, auth_token: str | None = None,

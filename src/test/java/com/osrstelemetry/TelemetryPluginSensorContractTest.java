@@ -12,14 +12,22 @@ import org.junit.Test;
 public class TelemetryPluginSensorContractTest
 {
 	@Test
-	public void tickPayloadPublishesDirectlyToLiveCache()
+	public void sensorFramePublishesDirectlyToLiveCache()
 	{
-		PluginLiveCache cache = new PluginLiveCache(new Gson());
-		TickSnapshot snapshot = new TickSnapshot();
-		snapshot.tickId = 7L;
-		snapshot.timestampUtc = "2026-07-10T12:00:00Z";
+		Gson gson = new Gson();
+		PluginLiveCache cache = new PluginLiveCache(gson);
+		SensorFrame frame = SensorFrame.builder(
+				"test-frame-7",
+				7L,
+				1L,
+				"2026-07-10T12:00:00Z")
+				.completedAtUtc("2026-07-10T12:00:00Z")
+				.fact(gson, SensorFrame.FACT_BASELINE, 7L,
+						"2026-07-10T12:00:00Z", true, java.util.List.of(),
+						Map.of("gameState", "LOGGED_IN"))
+				.build();
 
-		assertTrue(TelemetryPlugin.updateLiveCache(cache, "live_baseline_packet.v1", snapshot, Map.of("gameState", "LOGGED_IN")));
+		assertTrue(cache.publish(frame));
 		assertEquals(7L, cache.get("live_baseline_packet.v1").tick);
 		assertEquals(1L, cache.getUpdates());
 	}
@@ -92,6 +100,20 @@ public class TelemetryPluginSensorContractTest
 		assertFalse(TelemetryPlugin.scenePlayable(snapshot));
 		snapshot.welcomeScreenVisible = false;
 		assertTrue(TelemetryPlugin.scenePlayable(snapshot));
+	}
+
+	@Test
+	public void baselineAvailabilityRequiresEveryOwnedCaptureSection()
+	{
+		TickSnapshot snapshot = new TickSnapshot();
+		snapshot.gameState = "LOGIN_SCREEN";
+
+		assertTrue(TelemetryPlugin.baselineCaptureAvailable(snapshot, java.util.List.of()));
+		assertFalse(TelemetryPlugin.baselineCaptureAvailable(snapshot, java.util.List.of("gameState")));
+		assertFalse(TelemetryPlugin.baselineCaptureAvailable(snapshot, java.util.List.of("cameraViewport")));
+		assertFalse(TelemetryPlugin.baselineCaptureAvailable(snapshot, java.util.List.of("welcomeScreen")));
+		snapshot.gameState = null;
+		assertFalse(TelemetryPlugin.baselineCaptureAvailable(snapshot, java.util.List.of()));
 	}
 
 	@Test

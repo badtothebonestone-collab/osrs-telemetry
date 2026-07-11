@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import unittest
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
@@ -40,32 +41,49 @@ class FakeResponse:
 
 
 class ObservationParsingTests(unittest.TestCase):
+    def test_python_contract_tracks_java_response_and_frame_schemas(self) -> None:
+        root = Path(__file__).parents[1]
+        endpoint_source = (root / "src/main/java/com/osrstelemetry/PluginSnapshotEndpoint.java").read_text(encoding="utf-8")
+        frame_source = (root / "src/main/java/com/osrstelemetry/SensorFrame.java").read_text(encoding="utf-8")
+        response_match = re.search(r'RESPONSE_SCHEMA\s*=\s*"([^"]+)"', endpoint_source)
+        frame_match = re.search(r'SCHEMA\s*=\s*"([^"]+)"', frame_source)
+
+        self.assertIsNotNone(response_match)
+        self.assertIsNotNone(frame_match)
+        self.assertEqual(response_match.group(1), load_fixture()["schema"])
+        self.assertEqual(frame_match.group(1), load_fixture()["sensorFrame"]["schema"])
+        self.assertTrue(parse_observation(load_fixture()).source_coherent)
+
     def test_always_hot_login_baseline_exposes_exact_client_without_a_scene(self) -> None:
-        payload = {
-            "schema": "plugin_snapshot_response.v1",
-            "status": "WARN",
-            "generatedAtUtc": datetime.now(timezone.utc).isoformat(),
-            "latestTick": 42,
-            "freshness": {"fresh": True, "cacheWallClockFresh": True},
-            "warnings": ["scene payloads unavailable at login"],
-            "missingCapabilities": ["inventory"],
-            "payloads": {
-                "baseline": {
-                    "gameState": "LOGIN_SCREEN",
-                    "player": {},
-                    "inputGeometry": {
-                        "geometryAvailable": False,
-                        "isClientFocused": True,
-                        "clientProcessId": 4242,
-                    },
-                },
-                "interaction_hot": {
-                    "gameState": "LOGIN_SCREEN",
-                    "sessionId": "plugin-4242-test",
-                    "clientProcessId": 4242,
-                },
+        payload = load_fixture()
+        payload["status"] = "WARN"
+        payload["warnings"] = ["scene payloads unavailable at login"]
+        payload["missingCapabilities"] = ["inventory", "activity", "bank_ui", "dialogue_state"]
+        payload["payloads"]["baseline"] = {
+            "gameState": "LOGIN_SCREEN",
+            "scenePlayable": False,
+            "player": {},
+            "inputGeometry": {
+                "geometryAvailable": False,
+                "isClientFocused": True,
+                "clientProcessId": 4242,
             },
         }
+        for name in ("inventory", "activity", "bank_ui", "dialogue_state"):
+            del payload["payloads"][name]
+            payload["sensorFrame"]["facts"][name]["available"] = False
+            payload["sensorFrame"]["facts"][name]["errors"] = ["unavailable_at_login"]
+        payload["sensorFrame"].update({
+            "complete": False,
+            "sessionId": "plugin-4242-test",
+            "clientProcessId": 4242,
+            "availableFacts": ["baseline"],
+            "unavailableFacts": ["inventory", "activity", "bank_ui", "dialogue_state"],
+        })
+        payload["payloads"]["interaction_hot"].update({
+            "sessionId": "plugin-4242-test",
+            "clientProcessId": 4242,
+        })
 
         observation = parse_observation(payload)
 
@@ -86,6 +104,18 @@ class ObservationParsingTests(unittest.TestCase):
         self.assertTrue(observation.loaded_scene)
         self.assertEqual(WorldPoint(3192, 3244, 0), observation.location)
         self.assertEqual(174, observation.tick)
+        self.assertEqual("fixture-session:174", observation.frame_id)
+        self.assertEqual("fixture-geometry-174", observation.geometry_frame_id)
+        self.assertEqual(
+            datetime.fromisoformat("2026-07-10T16:06:57.694873+00:00"),
+            observation.timestamp,
+        )
+        self.assertEqual(
+            datetime.fromisoformat("2026-07-10T16:06:57.700000+00:00"),
+            observation.assembled_at,
+        )
+        self.assertTrue(observation.source_coherent)
+        self.assertTrue(observation.menu_fresh)
         self.assertEqual(879, observation.player.animation)
         self.assertEqual(2, observation.inventory.log_count)
         self.assertEqual("fixture-session", observation.session_id)
@@ -99,6 +129,45 @@ class ObservationParsingTests(unittest.TestCase):
 
         observation = parse_observation(payload)
 
+        self.assertFalse(observation.loaded_scene)
+
+    def test_fact_tick_mismatch_invalidates_source_coherence(self) -> None:
+        payload = load_fixture()
+        payload["sensorFrame"]["facts"]["inventory"]["sourceTick"] = 173
+
+        observation = parse_observation(payload)
+
+        self.assertFalse(observation.source_coherent)
+        self.assertFalse(observation.loaded_scene)
+
+    def test_baseline_process_identity_must_match_frame_owner(self) -> None:
+        payload = load_fixture()
+        payload["payloads"]["baseline"]["inputGeometry"]["clientProcessId"] = 9999
+
+        observation = parse_observation(payload)
+
+        self.assertEqual(9999, observation.client_process_id)
+        self.assertFalse(observation.source_coherent)
+        self.assertFalse(observation.loaded_scene)
+
+    def test_dynamic_geometry_from_another_frame_fails_closed(self) -> None:
+        payload = load_fixture()
+        payload["payloads"]["resource_object_census"]["geometryFrameId"] = "old-camera"
+
+        observation = parse_observation(payload)
+
+        self.assertFalse(observation.source_coherent)
+        self.assertFalse(observation.loaded_scene)
+
+    def test_dynamic_capture_before_frame_completion_fails_closed(self) -> None:
+        payload = load_fixture()
+        payload["payloads"]["route_object_census"]["capturedAtUtc"] = (
+            "2026-07-10T16:06:57.695000000Z"
+        )
+
+        observation = parse_observation(payload)
+
+        self.assertFalse(observation.source_coherent)
         self.assertFalse(observation.loaded_scene)
 
     def test_dedupes_objects_strips_menu_tags_and_scales_safe_geometry(self) -> None:
@@ -287,6 +356,8 @@ class ObservationClientTests(unittest.TestCase):
         self.assertEqual("POST", request.method)
         self.assertEqual("http://127.0.0.1:8893/snapshot", request.full_url)
         self.assertEqual(list(CANONICAL_NEEDS), request_payload["needs"])
+        self.assertEqual(0, request_payload["maxAgeTicks"])
+        self.assertEqual(2000, request_payload["maxSourceAgeMillis"])
         self.assertEqual(0, request_payload["maxClientTickSamples"])
         self.assertEqual(0, request_payload["maxMenuSamples"])
         self.assertEqual(0, request_payload["maxClickedSamples"])

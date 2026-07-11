@@ -24,6 +24,10 @@ from osrs_bot.verification import VerificationResult, VerificationStatus
 
 
 def _observation(tick: int) -> Observation:
+    timestamp = datetime.now(timezone.utc)
+    session_id = "runtime-session"
+    process_id = 1234
+    frame_id = f"test-frame-{tick}"
     return Observation(
         player=PlayerObservation(),
         location=WorldPoint(3192, 3244, 0),
@@ -34,14 +38,24 @@ def _observation(tick: int) -> Observation:
         widgets=WidgetObservation(),
         canvas_bounds=None,
         game_state="LOGGED_IN",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=timestamp,
         tick=tick,
         status="PASS",
         fresh=True,
         cache_wall_clock_fresh=True,
         scene_playable=True,
+        session_id=session_id,
         client_focused=True,
-        client_process_id=1234,
+        client_process_id=process_id,
+        assembled_at=timestamp,
+        frame_id=frame_id,
+        geometry_frame_id=frame_id,
+        source_coherent=True,
+        menu_fresh=True,
+        menu_source_tick=tick,
+        menu_timestamp=timestamp,
+        menu_session_id=session_id,
+        menu_process_id=process_id,
     )
 
 

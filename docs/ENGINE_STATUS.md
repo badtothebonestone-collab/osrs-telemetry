@@ -2,9 +2,9 @@
 
 ## Current milestone
 
-**Phase 1 complete — modular OSRS engine governing contract established.**
+**Phase 2 complete — atomic source-coherent sensor truth established.**
 
-Current checkpoint subject: `docs: establish modular engine governing contract`
+Current checkpoint subject: `sensor: publish coherent atomic observation frames`
 
 Frozen baseline: commit `beb9cbb`, tag
 `baseline-proven-woodcut-bank-return-2026-07-10`.
@@ -19,6 +19,12 @@ Regression command:
 
 - RuneLite publishes the single snapshot consumed as one immutable
   `Observation`.
+- The plugin publishes one immutable `sensor_frame.v1` atomically. Core facts
+  cannot be assembled across publications, and unavailable captures replace
+  old facts explicitly.
+- Snapshot response v2 distinguishes source capture time from HTTP assembly
+  time. World/tile geometry and menu evidence have separately enforced source
+  identities.
 - `WoodcutBankTask` explicitly models the one supported ordinary-tree cycle.
 - Exact Tree `1276`, fixed outbound/return route steps, both upward stairs,
   exact bank booth, deposit-all-logs, verified Escape close, and terminal
@@ -59,16 +65,24 @@ The golden fixture records this caveat and hashes the key ignored artifacts.
   open/deposit/close, 15-step return route, one completed cycle.
 - Phase 1 documentation gate repeated the replay, all 116 Python tests, and a
   forced fresh 22-test Java run successfully.
+- Phase 2 gate: golden replay 2 passed; 123 Python tests passed; forced fresh
+  Java suite 39 passed across 6 suites with zero failures/errors/skips.
+- The bounded Phase 2 live observation served response v2/frame v1 at the
+  RuneLite login screen. Only baseline was available; inventory, activity,
+  bank UI, and dialogue were explicitly unavailable. `observe` returned
+  `loadedScene=false`, and the launched client/port were closed afterward.
 - `git diff --check`: passed.
 
 ## Current blockers and next work
 
-- Source facts can still be assembled from different/stale ticks while the HTTP
-  response looks new. **Phase 2 is next** and must make source evidence coherent
-  before broader task seams.
-- Runtime/task contracts are still woodcut-specific; Phase 3 will extract only
-  the minimal explicit task seam.
+- The Phase 2 live check did not reach a loaded scene, so fresh loaded-game
+  observation and safe default-cycle proof remain final-regression work.
+- New-tick world-model refreshes have a 250 ms provider wait. Persistent loaded
+  scene latency/timeout behavior is unmeasured and must be inspected in final
+  live evidence rather than inferred from the login-screen check.
+- Runtime/task contracts are still woodcut-specific. **Phase 3 is next** and
+  will extract only the minimal explicit task seam.
 - Arduino ownership and authoritative final firmware `STATUS` are not yet one
   enforced boundary; Phase 5 owns that hardening.
-- Phase 1 changed documentation only; runtime behavior remains the frozen Phase
-  0 baseline until Phase 2 begins.
+- The atomic sensor contract is implemented; task, input, diagnostics,
+  recorder, and facade migrations remain phase-scoped.

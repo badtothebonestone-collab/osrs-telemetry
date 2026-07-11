@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from .model import (
     LOG_ITEM_ID,
+    MAX_FUTURE_CLOCK_SKEW_SECONDS,
     Action,
     ActionKind,
     MenuEntry,
@@ -24,10 +25,13 @@ class SafetyResult:
 @dataclass(frozen=True)
 class SafetyGate:
     max_observation_age_seconds: float = 2.0
+    max_menu_age_seconds: float = 2.0
 
     def __post_init__(self) -> None:
         if self.max_observation_age_seconds < 0:
             raise ValueError("max_observation_age_seconds must be non-negative")
+        if self.max_menu_age_seconds < 0:
+            raise ValueError("max_menu_age_seconds must be non-negative")
 
     def validate_pre_move(
         self, action: Action, observation: Observation
@@ -102,6 +106,9 @@ class SafetyGate:
             return session
         if observation.tick < action.source_tick:
             return _reject("tick_mismatch")
+        menu_source = self._validate_menu_source(action, observation)
+        if not menu_source.allowed:
+            return menu_source
         if action.kind is not ActionKind.INTERACT_OBJECT:
             return _reject("context_selection_unsupported")
         if observation.menu_client_tick is None:
@@ -149,6 +156,9 @@ class SafetyGate:
             ActionKind.WALK,
             ActionKind.CLICK_WIDGET,
         }:
+            menu_source = self._validate_menu_source(action, observation)
+            if not menu_source.allowed:
+                return menu_source
             if action.source_menu_client_tick is None or observation.menu_client_tick is None:
                 return _reject("menu_sample_missing")
             if observation.menu_client_tick <= action.source_menu_client_tick:
@@ -175,6 +185,8 @@ class SafetyGate:
         return _allow("post_move_base_safe")
 
     def _validate_observation(self, observation: Observation) -> SafetyResult:
+        if not observation.source_coherent:
+            return _reject("source_incoherent")
         if observation.status != "PASS":
             return _reject("observation_not_pass")
         if not observation.fresh or not observation.cache_wall_clock_fresh:
@@ -271,15 +283,48 @@ class SafetyGate:
             return _reject("bank_keyboard_close_unavailable")
         return _allow("bank_close_key_safe")
 
-    @staticmethod
     def _validate_source_menu_sample(
-        action: Action, observation: Observation
+        self, action: Action, observation: Observation
     ) -> SafetyResult:
+        menu_source = self._validate_menu_source(action, observation)
+        if not menu_source.allowed:
+            return menu_source
         if action.source_menu_client_tick is None or observation.menu_client_tick is None:
             return _reject("menu_sample_missing")
         if action.source_menu_client_tick != observation.menu_client_tick:
             return _reject("menu_sample_mismatch")
         return _allow("menu_sample_bound")
+
+    def _validate_menu_source(
+        self, action: Action, observation: Observation
+    ) -> SafetyResult:
+        if not observation.menu_fresh:
+            return _reject("menu_evidence_stale")
+        if observation.menu_source_tick is None:
+            return _reject("menu_source_tick_missing")
+        if observation.menu_source_tick != observation.tick:
+            return _reject("menu_source_tick_mismatch")
+        if not observation.menu_session_id:
+            return _reject("menu_session_missing")
+        if observation.menu_session_id != observation.session_id:
+            return _reject("menu_session_mismatch")
+        if observation.menu_session_id != action.source_session_id:
+            return _reject("menu_session_changed")
+        if observation.menu_process_id is None or observation.menu_process_id <= 0:
+            return _reject("menu_process_missing")
+        if observation.menu_process_id != observation.client_process_id:
+            return _reject("menu_process_mismatch")
+        try:
+            age = observation.menu_age_seconds
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return _reject("menu_timestamp_invalid")
+        if age is None:
+            return _reject("menu_timestamp_missing")
+        if age < -MAX_FUTURE_CLOCK_SKEW_SECONDS:
+            return _reject("menu_timestamp_future")
+        if age > self.max_menu_age_seconds:
+            return _reject("menu_evidence_too_old")
+        return _allow("menu_source_bound")
 
     def _validate_object_action(
         self, action: Action, observation: Observation

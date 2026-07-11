@@ -31,6 +31,9 @@ def observation(
     loaded: bool = False,
     pid: int | None = 4242,
 ) -> Observation:
+    timestamp = datetime.now(timezone.utc)
+    session_id = "login-session"
+    frame_id = f"test-frame-{tick}"
     return Observation(
         player=PlayerObservation(),
         location=WorldPoint(3192, 3244, 0) if loaded else None,
@@ -41,14 +44,24 @@ def observation(
         widgets=WidgetObservation(),
         canvas_bounds=ScreenBounds(100, 100, 1000, 700),
         game_state=game_state,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=timestamp,
         tick=tick,
         status="PASS",
         fresh=True,
         cache_wall_clock_fresh=True,
         scene_playable=loaded,
+        session_id=session_id,
         client_focused=True,
         client_process_id=pid,
+        assembled_at=timestamp,
+        frame_id=frame_id,
+        geometry_frame_id=frame_id,
+        source_coherent=True,
+        menu_fresh=True,
+        menu_source_tick=tick,
+        menu_timestamp=timestamp,
+        menu_session_id=session_id,
+        menu_process_id=pid,
     )
 
 

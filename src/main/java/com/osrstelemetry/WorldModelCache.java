@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import net.runelite.api.Client;
 import net.runelite.api.CollisionData;
@@ -151,6 +152,7 @@ class WorldModelCache
 		response.put("status", snapshot.available ? (warnings.isEmpty() ? "PASS" : "WARN") : "FAIL");
 		response.put("needs", List.copyOf(needs));
 		response.put("payloads", payloads);
+		response.put("metadata", metadataPayload(snapshot));
 		response.put("quality", qualityPayload(snapshot));
 		response.put("warnings", warnings);
 		response.put("sizing", sizing);
@@ -167,16 +169,64 @@ class WorldModelCache
 		long now = System.currentTimeMillis();
 		boolean stale = latest == null || now - latest.wallTimeMillis > MIN_REFRESH_MILLIS;
 		boolean forced = options.fullDebug || options.forceRefresh;
-		if (latest != null && !dirty && !stale && !forced)
+		Object requestedGeometryFrameId = identity == null ? null : identity.get("geometryFrameId");
+		boolean refresh = shouldRefreshSnapshot(
+				latest != null,
+				dirty,
+				stale,
+				forced,
+				latest == null ? Long.MIN_VALUE : latest.sourceTick,
+				tick,
+				latest == null ? null : latest.geometryFrameId,
+				requestedGeometryFrameId);
+		if (!refresh)
 		{
 			return latest;
 		}
-		String reason = forced ? "forced_query" : dirtyReason;
+		String reason;
+		if (forced)
+		{
+			reason = "forced_query";
+		}
+		else if (dirty)
+		{
+			reason = dirtyReason;
+		}
+		else if (latest != null && latest.sourceTick != tick)
+		{
+			reason = "source_tick_changed";
+		}
+		else if (latest != null && !Objects.equals(latest.geometryFrameId, requestedGeometryFrameId))
+		{
+			reason = "geometry_frame_changed";
+		}
+		else
+		{
+			reason = "stale";
+		}
 		Snapshot snapshot = buildSnapshot(client, options, tick, clientTick, identity, reason);
 		latest = snapshot;
 		dirty = false;
 		dirtyReason = null;
 		return snapshot;
+	}
+
+	static boolean shouldRefreshSnapshot(
+			boolean snapshotPresent,
+			boolean dirty,
+			boolean stale,
+			boolean forced,
+			long cachedSourceTick,
+			long requestedSourceTick,
+			Object cachedGeometryFrameId,
+			Object requestedGeometryFrameId)
+	{
+		return !snapshotPresent
+				|| dirty
+				|| stale
+				|| forced
+				|| cachedSourceTick != requestedSourceTick
+				|| !Objects.equals(cachedGeometryFrameId, requestedGeometryFrameId);
 	}
 
 	private Snapshot buildSnapshot(
@@ -189,15 +239,20 @@ class WorldModelCache
 	{
 		long started = System.nanoTime();
 		Snapshot snapshot = new Snapshot();
+		Map<String, Object> sourceIdentity = identity == null ? Map.of() : identity;
+		Instant capturedAt = Instant.now();
 		snapshot.schema = SCHEMA;
 		snapshot.refreshSequence = ++refreshSequence;
-		snapshot.tick = tick;
+		snapshot.sourceTick = tick;
 		snapshot.clientTick = clientTick;
-		snapshot.wallTimeMillis = System.currentTimeMillis();
-		snapshot.generatedAtUtc = Instant.now().toString();
+		snapshot.wallTimeMillis = capturedAt.toEpochMilli();
+		snapshot.capturedAtUtc = capturedAt.toString();
+		snapshot.generatedAtUtc = snapshot.capturedAtUtc;
 		snapshot.refreshReason = refreshReason == null ? "unknown" : refreshReason;
-		snapshot.sessionPath = stringValue(identity.get("sessionPath"));
-		snapshot.sessionId = stringValue(identity.get("sessionId"));
+		snapshot.sessionPath = stringValue(sourceIdentity.get("sessionPath"));
+		snapshot.sessionId = stringValue(sourceIdentity.get("sessionId"));
+		snapshot.clientProcessId = sourceIdentity.get("clientProcessId");
+		snapshot.geometryFrameId = sourceIdentity.get("geometryFrameId");
 		if (client == null)
 		{
 			snapshot.available = false;
@@ -835,7 +890,7 @@ class WorldModelCache
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("schema", filter.schema);
 		payload.put("sourceSchema", SCHEMA);
-		payload.put("tick", snapshot.tick);
+		payload.put("tick", snapshot.sourceTick);
 		payload.put("clientTick", snapshot.clientTick);
 		payload.put("filter", filter.name().toLowerCase(Locale.ROOT));
 		payload.put("count", filtered.size());
@@ -900,7 +955,7 @@ class WorldModelCache
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("schema", "pathing_frontier.v1");
 		payload.put("sourceSchema", SCHEMA);
-		payload.put("tick", snapshot.tick);
+		payload.put("tick", snapshot.sourceTick);
 		payload.put("collisionAvailable", snapshot.collisionAvailable);
 		Map<String, Object> collision = collisionWindowPayload(snapshot, options, false);
 		payload.put("collisionWindow", collision);
@@ -1213,10 +1268,14 @@ class WorldModelCache
 		metadata.put("schema", SCHEMA);
 		metadata.put("sessionPath", snapshot.sessionPath);
 		metadata.put("sessionId", snapshot.sessionId);
+		metadata.put("clientProcessId", snapshot.clientProcessId);
+		metadata.put("geometryFrameId", snapshot.geometryFrameId);
 		metadata.put("gameState", snapshot.gameState);
-		metadata.put("tick", snapshot.tick);
+		metadata.put("tick", snapshot.sourceTick);
+		metadata.put("sourceTick", snapshot.sourceTick);
 		metadata.put("clientTick", snapshot.clientTick);
 		metadata.put("wallTimeMillis", snapshot.wallTimeMillis);
+		metadata.put("capturedAtUtc", snapshot.capturedAtUtc);
 		metadata.put("generatedAtUtc", snapshot.generatedAtUtc);
 		metadata.put("plane", snapshot.plane);
 		metadata.put("baseX", snapshot.baseX);
@@ -1291,8 +1350,12 @@ class WorldModelCache
 		Map<String, Object> quality = new LinkedHashMap<>();
 		quality.put("worldModelAvailable", snapshot.available);
 		quality.put("worldModelAgeMs", Math.max(0L, System.currentTimeMillis() - snapshot.wallTimeMillis));
-		quality.put("sourceTick", snapshot.tick);
+		quality.put("capturedAtUtc", snapshot.capturedAtUtc);
+		quality.put("sourceTick", snapshot.sourceTick);
 		quality.put("clientTick", snapshot.clientTick);
+		quality.put("sessionId", snapshot.sessionId);
+		quality.put("clientProcessId", snapshot.clientProcessId);
+		quality.put("geometryFrameId", snapshot.geometryFrameId);
 		quality.put("refreshSequence", snapshot.refreshSequence);
 		quality.put("refreshReason", snapshot.refreshReason);
 		quality.put("objectCensusCapHit", snapshot.objectCensusCapHit);
@@ -1814,12 +1877,15 @@ class WorldModelCache
 		private String schema;
 		private boolean available;
 		private long refreshSequence;
-		private long tick;
+		private long sourceTick;
 		private long clientTick;
 		private long wallTimeMillis;
+		private String capturedAtUtc;
 		private String generatedAtUtc;
 		private String sessionPath;
 		private String sessionId;
+		private Object clientProcessId;
+		private Object geometryFrameId;
 		private String gameState;
 		private int plane = -1;
 		private Integer baseX;

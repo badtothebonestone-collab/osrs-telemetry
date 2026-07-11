@@ -34,7 +34,7 @@ public class PluginSnapshotEndpoint implements Closeable
 {
 	static final String HEALTH_SCHEMA = "plugin_snapshot_health.v1";
 	static final String REQUEST_SCHEMA = "plugin_snapshot_request.v1";
-	static final String RESPONSE_SCHEMA = "plugin_snapshot_response.v1";
+	static final String RESPONSE_SCHEMA = "plugin_snapshot_response.v2";
 	static final int MAX_REQUEST_BODY_BYTES = 16 * 1024;
 	static final int MAX_TILE_PROJECTION_REQUESTS = 16;
 	static final long CACHE_FRESHNESS_THRESHOLD_MILLIS = 5_000L;
@@ -290,18 +290,36 @@ public class PluginSnapshotEndpoint implements Closeable
 	Map<String, Object> healthPayload()
 	{
 		Map<String, Object> payload = new LinkedHashMap<>();
-		Map<String, Object> cacheHealth = cacheHealth();
+		PluginLiveCache.FrameSnapshot publication = liveCache == null ? null : liveCache.snapshot();
+		SensorFrame frame = publication == null ? null : publication.getFrame();
+		Map<String, Object> cacheHealth = liveCache == null
+				? Map.of()
+				: liveCache.health(publication);
 		CacheFreshness cacheFreshness = cacheFreshness(cacheHealth);
 		List<String> warnings = endpointWarnings();
 		warnings.addAll(cacheFreshness.healthWarnings);
+		long frameAgeMillis = frame == null ? -1L : frame.ageMillis();
+		boolean frameFresh = frame != null
+				&& frameAgeMillis >= -2_000L
+				&& frameAgeMillis <= CACHE_FRESHNESS_THRESHOLD_MILLIS;
+		boolean frameHealthy = frame != null
+				&& frame.isCoherent()
+				&& frame.isComplete()
+				&& frameFresh;
+		if (!frameHealthy)
+		{
+			warnings.add("sensor_frame_incomplete_incoherent_or_stale");
+		}
 		payload.put("schema", HEALTH_SCHEMA);
 		payload.put("enabled", true);
-		payload.put("status", liveCache == null ? "FAIL" : (cacheFreshness.healthWarn ? "WARN" : "PASS"));
-		payload.put("latestTick", liveCache == null ? -1L : liveCache.getLatestTick());
-		payload.put("latestSequence", liveCache == null ? -1L : liveCache.getLatestSequence());
-		payload.put("cachedPacketTypes", liveCache == null ? List.of() : liveCache.packetTypes());
+		payload.put("status", liveCache == null ? "FAIL" : (frameHealthy ? "PASS" : "WARN"));
+		payload.put("latestTick", frame == null ? -1L : frame.getSourceTick());
+		payload.put("latestSequence", publication == null ? -1L : publication.getSequence());
+		payload.put("cachedPacketTypes", publication == null ? List.of() : publication.packetTypes());
 		payload.put("cacheAgeMillisByType", cacheHealth.get("liveCacheAgeMillisByType"));
 		payload.put("cacheWallClockFresh", cacheFreshness.anyFreshPacket);
+		payload.put("sourceCaptureFresh", frameFresh);
+		payload.put("sensorFrame", sensorFrameMetadata(frame, Instant.now()));
 		payload.put("allCachedPacketsStale", cacheFreshness.allPacketsStale);
 		payload.put("cacheFreshnessThresholdMillis", CACHE_FRESHNESS_THRESHOLD_MILLIS);
 		payload.put("maxCacheAgeMillis", cacheFreshness.maxCacheAgeMillis);
@@ -320,6 +338,7 @@ public class PluginSnapshotEndpoint implements Closeable
 		Map<String, Object> payload = new LinkedHashMap<>();
 		payload.put("schema", "plugin_snapshot_schema.v1");
 		payload.put("supportedSchemas", List.of(HEALTH_SCHEMA, REQUEST_SCHEMA, RESPONSE_SCHEMA));
+		payload.put("sensorFrameSchema", SensorFrame.SCHEMA);
 		payload.put("supportedNeeds", SUPPORTED_NEEDS);
 		payload.put("endpoints", List.of("GET /health", "GET /schema", "POST /snapshot"));
 		payload.put("snapshotTiers", List.of("hot"));
@@ -331,7 +350,7 @@ public class PluginSnapshotEndpoint implements Closeable
 		payload.put("projectionFieldModes", List.of("compact"));
 		payload.put("hotSamples", List.of("clientTickHot", "hoverMenu"));
 		payload.put("clientTickHotSchema", ClientTickHotState.SCHEMA);
-		payload.put("requestControls", List.of("tileProjectionRequests"));
+		payload.put("requestControls", List.of("tileProjectionRequests", "maxSourceAgeMillis"));
 		payload.put("tileProjectionSchema", "tile_projection_response.v1");
 		payload.put("worldModelSchema", WorldModelCache.SCHEMA);
 		payload.put("worldModelQueryControls", List.of(
@@ -345,10 +364,18 @@ public class PluginSnapshotEndpoint implements Closeable
 	Map<String, Object> snapshotPayload(JsonObject request)
 	{
 		long startNanos = System.nanoTime();
+		Instant assemblyStartedAt = Instant.now();
 		String requestId = stringValue(request, "requestId", null);
 		int requestedProjectionRefs = intValue(request, "maxProjectionRefs", maxProjectionRefs);
 		int effectiveProjectionRefs = Math.max(0, Math.min(maxProjectionRefs, requestedProjectionRefs));
-		long maxAgeTicks = longValue(request, "maxAgeTicks", -1L);
+		long maxAgeTicks = longValue(request, "maxAgeTicks", 0L);
+		long requestedSourceAgeMillis = longValue(
+				request,
+				"maxSourceAgeMillis",
+				CACHE_FRESHNESS_THRESHOLD_MILLIS);
+		long maxSourceAgeMillis = Math.max(
+				0L,
+				Math.min(CACHE_FRESHNESS_THRESHOLD_MILLIS, requestedSourceAgeMillis));
 		boolean includeGeometry = booleanValue(request, "includeGeometry", false);
 		boolean includeCollisionWindow = booleanValue(request, "includeCollisionWindow", true);
 		boolean includeWatchValues = booleanValue(request, "includeWatchValues", false);
@@ -359,21 +386,23 @@ public class PluginSnapshotEndpoint implements Closeable
 		List<String> needs = requestedNeeds(request, includeCollisionWindow, includeWatchValues);
 		List<String> hotNeeds = requestedHotNeeds(request);
 		List<String> worldModelNeeds = requestedWorldModelNeeds(request);
-		Map<String, Object> clientTickHot = clientTickHotSnapshot(request, false);
-		Map<String, Object> cacheHealth = cacheHealth();
-		CacheFreshness cacheFreshness = cacheFreshness(cacheHealth);
+		PluginLiveCache.FrameSnapshot publication = liveCache == null ? null : liveCache.snapshot();
+		SensorFrame frame = publication == null ? null : publication.getFrame();
+		Map<String, Object> clientTickHot = enrichClientTickHot(
+				clientTickHotSnapshot(request, false));
 		List<Map<String, Object>> tileProjectionRequests = tileProjectionRequests(request);
 		Map<String, Object> response = new LinkedHashMap<>();
 		Map<String, JsonElement> payloads = new LinkedHashMap<>();
 		Map<String, Object> freshness = new LinkedHashMap<>();
-		Map<String, Long> ageTicksByNeed = new LinkedHashMap<>();
-		Map<String, Long> ageMillisByNeed = new LinkedHashMap<>();
 		List<String> missingCapabilities = new ArrayList<>();
 		List<String> warnings = new ArrayList<>();
 		Map<String, Object> responseSizing = new LinkedHashMap<>();
-		long latestTick = liveCache == null ? -1L : liveCache.getLatestTick();
+		long latestTick = frame == null ? -1L : frame.getSourceTick();
+		long sourceAgeMillis = -1L;
+		boolean sourceCaptureFresh = false;
+		boolean frameCoherent = frame != null && frame.isCoherent() && frame.isComplete();
 		boolean stale = false;
-		PriorityContext priorityContext = projectionPriorityContext(snapshotHints);
+		PriorityContext priorityContext = projectionPriorityContext(snapshotHints, frame);
 
 		responseSizing.put("maxResponseBytes", maxResponseBytes);
 		responseSizing.put("requestedProjectionRefs", requestedProjectionRefs);
@@ -385,53 +414,35 @@ public class PluginSnapshotEndpoint implements Closeable
 		responseSizing.put("snapshotHints", snapshotHints.toMap());
 		responseSizing.put("tileProjectionRequestCount", tileProjectionRequests.size());
 
-		if (liveCache == null)
+		if (frame == null)
 		{
-			warnings.add("plugin live cache unavailable");
+			warnings.add("sensor_frame_unavailable");
 		}
 		else
 		{
 			for (String need : needs)
 			{
-				String packetType = NEED_TO_PACKET_TYPE.get(need);
-				if (packetType == null)
+				if (!SensorFrame.isCoreFact(need))
 				{
 					missingCapabilities.add(need);
 					warnings.add("unsupported need: " + need);
 					continue;
 				}
-
-				PluginLiveCache.CachedPayload cached = liveCache.get(packetType);
-				if (cached == null)
+				SensorFrame.Fact fact = frame.getFact(need);
+				if (fact == null || !fact.isAvailable())
 				{
 					missingCapabilities.add(need);
-					warnings.add("missing cached payload: " + need + " (" + packetType + ")");
+					warnings.add("sensor_fact_unavailable:" + need);
 					continue;
 				}
-				if ("projection".equals(need))
-				{
-					responseSizing.put("cachedProjectionBytes", cached.sizeBytes);
-				}
-
-				long ageTicks = latestTick >= 0L ? Math.max(0L, latestTick - cached.tick) : -1L;
-				ageTicksByNeed.put(need, ageTicks);
-				if (maxAgeTicks >= 0L && ageTicks > maxAgeTicks)
+				if (fact.getSourceTick() != frame.getSourceTick())
 				{
 					stale = true;
-					warnings.add(need + " cache age exceeded maxAgeTicks");
+					missingCapabilities.add(need);
+					warnings.add("sensor_fact_tick_mismatch:" + need);
+					continue;
 				}
-				Long ageMillis = cacheFreshness.ageMillisByType.get(packetType);
-				if (ageMillis != null)
-				{
-					ageMillisByNeed.put(need, ageMillis);
-					if (ageMillis > CACHE_FRESHNESS_THRESHOLD_MILLIS)
-					{
-						stale = true;
-						warnings.add(need + " cache age exceeded maxAgeMillis");
-					}
-				}
-
-				JsonElement payload = parsePayload(cached.payloadJson);
+				JsonElement payload = parsePayload(fact.getPayloadJson());
 				payload = compactPayloadForResponse(
 						need,
 						payload,
@@ -444,19 +455,7 @@ public class PluginSnapshotEndpoint implements Closeable
 				payloads.put(need, payload);
 			}
 		}
-		if (liveCache != null)
-		{
-			if (!cacheFreshness.hasPacketTypes)
-			{
-				stale = true;
-				warnings.add("plugin live cache has no payloads");
-			}
-			else if (cacheFreshness.allPacketsStale)
-			{
-				stale = true;
-				warnings.add(STALE_REASON_ALL_PACKETS);
-			}
-		}
+		boolean menuFresh = false;
 		if (hotNeeds.contains("interaction_hot"))
 		{
 			payloads.put("interaction_hot", gson.toJsonTree(clientTickHot));
@@ -465,41 +464,97 @@ public class PluginSnapshotEndpoint implements Closeable
 		{
 			payloads.put("client_tick_tail", gson.toJsonTree(clientTickHotSnapshot(request, true)));
 		}
-		Map<String, Object> tileProjections = tileProjectionPayload(tileProjectionRequests, warnings, missingCapabilities);
+		Map<String, Object> tileProjections = tileProjectionPayload(
+				tileProjectionRequests,
+				frame,
+				maxSourceAgeMillis,
+				warnings,
+				missingCapabilities);
 		if (tileProjections != null)
 		{
 			payloads.put("tile_projection", gson.toJsonTree(tileProjections));
 		}
-		Map<String, Object> worldModel = worldModelPayload(worldModelNeeds, request, warnings, missingCapabilities, responseSizing);
+		Map<String, Object> worldModel = worldModelPayload(
+				worldModelNeeds,
+				request,
+				frame,
+				maxSourceAgeMillis,
+				warnings,
+				missingCapabilities,
+				responseSizing);
 		if (worldModel != null)
 		{
 			@SuppressWarnings("unchecked")
 			Map<String, Object> worldPayloads = worldModel.get("payloads") instanceof Map
 					? (Map<String, Object>) worldModel.get("payloads")
 					: Map.of();
+			@SuppressWarnings("unchecked")
+			Map<String, Object> worldMetadata = worldModel.get("metadata") instanceof Map
+					? (Map<String, Object>) worldModel.get("metadata")
+					: Map.of();
+			String dynamicCapturedAtUtc = String.valueOf(
+					worldMetadata.getOrDefault("capturedAtUtc", ""));
 			for (String need : worldModelNeeds)
 			{
 				Object value = worldPayloads.get(need);
 				if (value != null)
 				{
-					payloads.put(need, gson.toJsonTree(value));
+					JsonElement stamped = stampDynamicPayload(
+							value,
+							frame,
+							dynamicCapturedAtUtc);
+					payloads.put(need, stamped);
+				}
+				else
+				{
+					missingCapabilities.add(need);
+					warnings.add("world_model_payload_unavailable:" + need);
 				}
 			}
 		}
 
+		Instant assembledAt = Instant.now();
+		sourceAgeMillis = frame == null
+				? -1L
+				: Duration.between(Instant.parse(frame.getCapturedAtUtc()), assembledAt).toMillis();
+		sourceCaptureFresh = frame != null
+				&& sourceAgeMillis >= -2_000L
+				&& sourceAgeMillis <= maxSourceAgeMillis;
+		if (!frameCoherent)
+		{
+			stale = true;
+			warnings.add("sensor_frame_incomplete_or_incoherent");
+		}
+		if (!sourceCaptureFresh)
+		{
+			stale = true;
+			warnings.add(sourceAgeMillis < -2_000L
+					? "sensor_frame_timestamp_future"
+					: "sensor_frame_source_stale");
+		}
+		menuFresh = menuEvidenceMatchesFrame(
+				clientTickHot,
+				frame,
+				assembledAt,
+				maxSourceAgeMillis);
+		if (hotNeeds.contains("interaction_hot") && !menuFresh)
+		{
+			missingCapabilities.add("interaction_hot");
+			warnings.add("menu_evidence_provenance_mismatch_or_stale");
+		}
+
 		freshness.put("latestTick", latestTick);
 		freshness.put("maxAgeTicks", maxAgeTicks);
-		freshness.put("fresh", !stale);
-		freshness.put("ageTicksByNeed", ageTicksByNeed);
-		freshness.put("ageMillisByNeed", ageMillisByNeed);
-		freshness.put("cacheWallClockFresh", cacheFreshness.anyFreshPacket);
-		freshness.put("allCachedPacketsStale", cacheFreshness.allPacketsStale);
-		freshness.put("cacheFreshnessThresholdMillis", CACHE_FRESHNESS_THRESHOLD_MILLIS);
-		freshness.put("maxCacheAgeMillis", cacheFreshness.maxCacheAgeMillis);
-		freshness.put("staleReasons", cacheFreshness.staleReasons);
+		freshness.put("maxSourceAgeMillis", maxSourceAgeMillis);
+		freshness.put("sourceAgeMillis", sourceAgeMillis);
+		freshness.put("sourceCaptureFresh", sourceCaptureFresh);
+		freshness.put("cacheWallClockFresh", sourceCaptureFresh);
+		freshness.put("frameCoherent", frameCoherent);
+		freshness.put("menuFresh", menuFresh);
+		freshness.put("fresh", !stale && frameCoherent);
 
 		String status = "PASS";
-		if (liveCache == null || payloads.isEmpty())
+		if (frame == null || payloads.isEmpty())
 		{
 			status = "FAIL";
 		}
@@ -510,8 +565,15 @@ public class PluginSnapshotEndpoint implements Closeable
 
 		response.put("schema", RESPONSE_SCHEMA);
 		response.put("requestId", requestId);
-		response.put("generatedAtUtc", Instant.now().toString());
+		response.put("assembledAtUtc", assembledAt.toString());
+		response.put("assemblyStartedAtUtc", assemblyStartedAt.toString());
 		response.put("latestTick", latestTick);
+		response.put("sensorFrame", sensorFrameMetadata(frame, assembledAt));
+		response.put("publication", publication == null
+				? Map.of()
+				: Map.of(
+						"sequence", publication.getSequence(),
+						"publishedAtUtc", publication.getPublishedAtUtc()));
 		response.put("snapshotTier", snapshotTier);
 		response.put("status", status);
 		response.put("freshness", freshness);
@@ -536,7 +598,6 @@ public class PluginSnapshotEndpoint implements Closeable
 		response.put("warnings", warnings);
 		response.put("serviceTimingMillis", elapsedMillis(startNanos));
 		response.put("responseSizing", responseSizing);
-		response.put("cacheHealth", cacheHealth);
 		return response;
 	}
 
@@ -575,6 +636,197 @@ public class PluginSnapshotEndpoint implements Closeable
 		return payload;
 	}
 
+	private Map<String, Object> enrichClientTickHot(Map<String, Object> source)
+	{
+		Map<String, Object> result = source == null
+				? new LinkedHashMap<>()
+				: new LinkedHashMap<>(source);
+		Map<?, ?> menu = result.get("postMenuSort") instanceof Map
+				? (Map<?, ?>) result.get("postMenuSort")
+				: Map.of();
+		// Action safety is bound to the actual post-menu-sort sample, not to a
+		// newer generic client-tick sample that happens to share this envelope.
+		Object sourceTick = menu.get("gameTickAtSample");
+		Object wallTimeMillis = menu.get("wallTimeMillis");
+		Object sessionId = menu.get("sessionId");
+		Object clientProcessId = menu.get("clientProcessId");
+		if (sourceTick instanceof Number)
+		{
+			result.put("sourceTick", ((Number) sourceTick).longValue());
+		}
+		if (wallTimeMillis instanceof Number)
+		{
+			result.put(
+					"capturedAtUtc",
+					Instant.ofEpochMilli(((Number) wallTimeMillis).longValue()).toString());
+		}
+		if (sessionId instanceof String && !((String) sessionId).isBlank())
+		{
+			result.put("sessionId", sessionId);
+		}
+		if (clientProcessId instanceof Number)
+		{
+			result.put("clientProcessId", ((Number) clientProcessId).longValue());
+		}
+		return result;
+	}
+
+	private boolean menuEvidenceMatchesFrame(
+			Map<String, Object> hot,
+			SensorFrame frame,
+			Instant assembledAt,
+			long maxSourceAgeMillis)
+	{
+		Object tick = hot == null ? null : hot.get("sourceTick");
+		Object processId = hot == null ? null : hot.get("clientProcessId");
+		if (frame == null
+				|| !(tick instanceof Number)
+				|| ((Number) tick).longValue() != frame.getSourceTick()
+				|| !java.util.Objects.equals(hot.get("sessionId"), frame.getSessionId())
+				|| !(processId instanceof Number)
+				|| frame.getClientProcessId() == null
+				|| ((Number) processId).longValue() != frame.getClientProcessId())
+		{
+			return false;
+		}
+		Object capturedAtUtc = hot.get("capturedAtUtc");
+		if (!(capturedAtUtc instanceof String))
+		{
+			return false;
+		}
+		try
+		{
+			long ageMillis = Duration.between(
+					Instant.parse((String) capturedAtUtc),
+					assembledAt).toMillis();
+			return ageMillis >= -2_000L && ageMillis <= maxSourceAgeMillis;
+		}
+		catch (RuntimeException e)
+		{
+			return false;
+		}
+	}
+
+	private boolean sourceIdentityMatches(
+			Map<?, ?> source,
+			SensorFrame frame,
+			Instant validationAt,
+			long maxSourceAgeMillis)
+	{
+		if (source == null || frame == null)
+		{
+			return false;
+		}
+		Object tick = source.get("sourceTick");
+		Object processId = source.get("clientProcessId");
+		Object capturedAtUtc = source.get("capturedAtUtc");
+		boolean captureFresh = false;
+		if (capturedAtUtc instanceof String)
+		{
+			try
+			{
+				Instant capturedAt = Instant.parse((String) capturedAtUtc);
+				long ageMillis = Duration.between(
+						capturedAt,
+						validationAt).toMillis();
+				captureFresh = ageMillis >= -2_000L
+						&& ageMillis <= maxSourceAgeMillis
+						&& !capturedAt.isBefore(Instant.parse(frame.getCompletedAtUtc()));
+			}
+			catch (RuntimeException ignored)
+			{
+				captureFresh = false;
+			}
+		}
+		return captureFresh
+				&& tick instanceof Number
+				&& ((Number) tick).longValue() == frame.getSourceTick()
+				&& java.util.Objects.equals(source.get("sessionId"), frame.getSessionId())
+				&& processId instanceof Number
+				&& frame.getClientProcessId() != null
+				&& ((Number) processId).longValue() == frame.getClientProcessId()
+				&& java.util.Objects.equals(source.get("geometryFrameId"), frame.getGeometryFrameId());
+	}
+
+	private void stampSourceIdentity(Map<String, Object> target, SensorFrame frame)
+	{
+		if (target == null || frame == null)
+		{
+			return;
+		}
+		target.put("sourceTick", frame.getSourceTick());
+		target.put("sessionId", frame.getSessionId());
+		target.put("clientProcessId", frame.getClientProcessId());
+		target.put("geometryFrameId", frame.getGeometryFrameId());
+	}
+
+	private JsonElement stampDynamicPayload(
+			Object value,
+			SensorFrame frame,
+			String capturedAtUtc)
+	{
+		JsonElement result = gson.toJsonTree(value);
+		if (result != null && result.isJsonObject() && frame != null)
+		{
+			JsonObject object = result.getAsJsonObject();
+			object.addProperty("sourceTick", frame.getSourceTick());
+			object.addProperty("sessionId", frame.getSessionId());
+			if (frame.getClientProcessId() != null)
+			{
+				object.addProperty("clientProcessId", frame.getClientProcessId());
+			}
+			object.addProperty("geometryFrameId", frame.getGeometryFrameId());
+			object.addProperty("capturedAtUtc", capturedAtUtc);
+		}
+		return result;
+	}
+
+	private Map<String, Object> sensorFrameMetadata(SensorFrame frame, Instant assembledAt)
+	{
+		Instant stamp = assembledAt == null ? Instant.now() : assembledAt;
+		Map<String, Object> metadata = frame == null
+				? new LinkedHashMap<>()
+				: new LinkedHashMap<>(frame.metadata());
+		metadata.putIfAbsent("schema", SensorFrame.SCHEMA);
+		metadata.putIfAbsent("frameId", "sensor-frame-unavailable");
+		metadata.putIfAbsent("sourceTick", -1L);
+		metadata.putIfAbsent("captureStartedMonotonicNanos", -1L);
+		metadata.putIfAbsent("capturedAtUtc", stamp.toString());
+		metadata.putIfAbsent("completedAtUtc", stamp.toString());
+		metadata.putIfAbsent("captureDurationMillis", 0L);
+		metadata.putIfAbsent("sessionId", null);
+		metadata.putIfAbsent("clientProcessId", null);
+		metadata.putIfAbsent("geometryFrameId", null);
+		metadata.putIfAbsent("coherent", false);
+		metadata.putIfAbsent("complete", false);
+		metadata.putIfAbsent("availableFacts", List.of());
+		metadata.putIfAbsent("unavailableFacts", SensorFrame.CORE_FACT_NAMES);
+		Map<String, Object> facts = new LinkedHashMap<>();
+		Object existingFacts = metadata.get("facts");
+		if (existingFacts instanceof Map)
+		{
+			for (Map.Entry<?, ?> entry : ((Map<?, ?>) existingFacts).entrySet())
+			{
+				facts.put(String.valueOf(entry.getKey()), entry.getValue());
+			}
+		}
+		long sourceTick = frame == null ? -1L : frame.getSourceTick();
+		String capturedAtUtc = frame == null ? stamp.toString() : frame.getCapturedAtUtc();
+		for (String factName : SensorFrame.CORE_FACT_NAMES)
+		{
+			facts.putIfAbsent(
+					factName,
+					Map.of(
+							"sourceTick", sourceTick,
+							"capturedAtUtc", capturedAtUtc,
+							"available", false,
+							"errors", List.of("not_captured"),
+							"sizeBytes", 0L));
+		}
+		metadata.put("facts", facts);
+		return metadata;
+	}
+
 	private List<Map<String, Object>> tileProjectionRequests(JsonObject request)
 	{
 		if (request == null || !request.has("tileProjectionRequests") || !request.get("tileProjectionRequests").isJsonArray())
@@ -606,6 +858,8 @@ public class PluginSnapshotEndpoint implements Closeable
 
 	private Map<String, Object> tileProjectionPayload(
 			List<Map<String, Object>> requests,
+			SensorFrame frame,
+			long maxSourceAgeMillis,
 			List<String> warnings,
 			List<String> missingCapabilities)
 	{
@@ -641,6 +895,17 @@ public class PluginSnapshotEndpoint implements Closeable
 			normalized.putIfAbsent("schema", "tile_projection_response.v1");
 			normalized.putIfAbsent("status", "PASS");
 			normalized.putIfAbsent("tiles", List.of());
+			if (!sourceIdentityMatches(
+					normalized,
+					frame,
+					Instant.now(),
+					maxSourceAgeMillis))
+			{
+				missingCapabilities.add("tile_projection");
+				warnings.add("tile_projection_provenance_mismatch");
+				return null;
+			}
+			stampSourceIdentity(normalized, frame);
 			return normalized;
 		}
 		catch (RuntimeException e)
@@ -658,6 +923,8 @@ public class PluginSnapshotEndpoint implements Closeable
 	private Map<String, Object> worldModelPayload(
 			List<String> needs,
 			JsonObject request,
+			SensorFrame frame,
+			long maxSourceAgeMillis,
 			List<String> warnings,
 			List<String> missingCapabilities,
 			Map<String, Object> responseSizing)
@@ -681,6 +948,24 @@ public class PluginSnapshotEndpoint implements Closeable
 			{
 				missingCapabilities.add("world_model");
 				warnings.add("world model query returned no payload");
+				return null;
+			}
+			Object metadata = payload.get("metadata");
+			if (!(metadata instanceof Map)
+					|| !sourceIdentityMatches(
+							(Map<?, ?>) metadata,
+							frame,
+							Instant.now(),
+							maxSourceAgeMillis))
+			{
+				for (String need : needs)
+				{
+					if (!missingCapabilities.contains(need))
+					{
+						missingCapabilities.add(need);
+					}
+				}
+				warnings.add("world_model_provenance_mismatch");
 				return null;
 			}
 			responseSizing.put("worldModelNeeds", List.copyOf(needs));
@@ -1283,8 +1568,7 @@ public class PluginSnapshotEndpoint implements Closeable
 	private Map<String, Object> responseTooLargePayload(Map<String, Object> response, int estimatedBytes)
 	{
 		Map<String, Object> tooLarge = errorPayload("response_too_large", "snapshot response exceeded pluginSnapshotMaxResponseBytes");
-		tooLarge.put("schema", RESPONSE_SCHEMA);
-		tooLarge.put("generatedAtUtc", Instant.now().toString());
+		tooLarge.put("assembledAtUtc", Instant.now().toString());
 		tooLarge.put("status", "FAIL");
 		tooLarge.put("warnings", List.of("responseTooLarge"));
 		tooLarge.put("maxResponseBytes", maxResponseBytes);
@@ -1489,20 +1773,20 @@ public class PluginSnapshotEndpoint implements Closeable
 		return parsed == null ? JsonNull.INSTANCE : parsed;
 	}
 
-	private PriorityContext projectionPriorityContext(SnapshotHints hints)
+	private PriorityContext projectionPriorityContext(SnapshotHints hints, SensorFrame frame)
 	{
-		if (liveCache == null)
+		if (frame == null)
 		{
 			return new PriorityContext(null, null, null, hints);
 		}
-		PluginLiveCache.CachedPayload cached = liveCache.get("live_baseline_packet.v1");
-		if (cached == null)
+		SensorFrame.Fact baselineFact = frame.getFact(SensorFrame.FACT_BASELINE);
+		if (baselineFact == null || !baselineFact.isAvailable())
 		{
 			return new PriorityContext(null, null, null, hints);
 		}
 		try
 		{
-			JsonElement parsed = parsePayload(cached.payloadJson);
+			JsonElement parsed = parsePayload(baselineFact.getPayloadJson());
 			if (!parsed.isJsonObject())
 			{
 				return new PriorityContext(null, null, null, hints);

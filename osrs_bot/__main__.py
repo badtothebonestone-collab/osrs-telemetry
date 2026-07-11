@@ -52,6 +52,18 @@ def _observation_summary(observation) -> dict[str, object]:
         "scenePlayable": observation.scene_playable,
         "fresh": observation.fresh,
         "cacheWallClockFresh": observation.cache_wall_clock_fresh,
+        "sourceCoherent": observation.source_coherent,
+        "sourceCapturedAtUtc": observation.timestamp.isoformat(),
+        "assembledAtUtc": (
+            observation.assembled_at.isoformat()
+            if observation.assembled_at is not None
+            else None
+        ),
+        "sourceAgeSeconds": observation.age_seconds,
+        "frameId": observation.frame_id,
+        "geometryFrameId": observation.geometry_frame_id,
+        "menuFresh": observation.menu_fresh,
+        "menuSourceTick": observation.menu_source_tick,
         "gameState": observation.game_state,
         "clientFocused": observation.client_focused,
         "clientProcessId": observation.client_process_id,

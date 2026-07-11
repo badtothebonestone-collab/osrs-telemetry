@@ -35,6 +35,10 @@ def observation(
     menu_bounds: ScreenBounds | None = None,
     menu_point: ScreenPoint = POINT,
 ) -> Observation:
+    timestamp = datetime.now(timezone.utc)
+    session_id = "session-1"
+    process_id = 1234
+    frame_id = f"test-frame-{tick}"
     tree = NearbyObject(
         key="tree-1",
         object_id=1276,
@@ -66,19 +70,28 @@ def observation(
         widgets=WidgetObservation(bank_known=True),
         canvas_bounds=ScreenBounds(50, 50, 500, 400),
         game_state="LOGGED_IN",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=timestamp,
         tick=tick,
         status="PASS",
         fresh=True,
         cache_wall_clock_fresh=True,
         scene_playable=True,
-        session_id="session-1",
+        session_id=session_id,
         menu_client_tick=1000 + tick,
         menu_mouse_screen_point=menu_point,
         menu_open=menu_open,
         menu_bounds=menu_bounds,
         client_focused=True,
-        client_process_id=1234,
+        client_process_id=process_id,
+        assembled_at=timestamp,
+        frame_id=frame_id,
+        geometry_frame_id=frame_id,
+        source_coherent=True,
+        menu_fresh=True,
+        menu_source_tick=tick,
+        menu_timestamp=timestamp,
+        menu_session_id=session_id,
+        menu_process_id=process_id,
     )
 
 

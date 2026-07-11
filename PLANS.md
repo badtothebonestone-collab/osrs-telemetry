@@ -34,13 +34,18 @@ runtime logic.
   may consume or supplement read-only evidence at defined offline seams but
   never replace API facts or participate in runtime control.
 
+- **D008 — Sensor source contract:** gameplay facts publish as one immutable
+  `sensor_frame.v1`; HTTP assembly time is never evidence time. Menu evidence
+  is separately stamped, and request-time world/tile geometry is accepted only
+  when tick, session, process, capture age, and geometry frame match.
+
 ## Phases and acceptance
 
 | Phase | Status | Acceptance |
 |---|---|---|
 | 0. Freeze proven baseline | Complete (`beb9cbb`) | Full diff audited; Python/Java suites pass; terminal trace reaches `COMPLETE`; tracked golden replay passes; stale proof docs corrected; checkpoint committed/tagged. |
-| 1. Governing contract | Complete | Product vision, architecture, rules, status, and this plan describe the OSRS-specific engine and prohibited expansion. |
-| 2. Coherent sensor truth | Next | Atomic tick `SensorFrame`; source-based freshness; mixed/stale/missing/menu/schema tests; bounded live observe. |
+| 1. Governing contract | Complete (`f4c091e`) | Product vision, architecture, rules, status, and this plan describe the OSRS-specific engine and prohibited expansion. |
+| 2. Coherent sensor truth | Complete | Atomic tick `SensorFrame`; source-based freshness; mixed/stale/missing/menu/schema tests; bounded live observe. |
 | 3. Minimal task seam | Pending | Runtime has no concrete woodcut imports/phase checks; typed outcomes; fake task runs unchanged runtime/safety/verifier. |
 | 4. One task/site definition | Pending | One immutable Lumbridge definition and one validated default profile; unsafe/malformed values fail closed; replay unchanged. |
 | 5. Arduino boundary | Pending | One `InputCoordinator`; no production bypass; bounded pointer policy; command/ACK plus authoritative final firmware status. |
@@ -83,6 +88,31 @@ runtime logic.
 - Re-ran the golden replay, all 116 Python tests, and a forced fresh 22-test
   Java suite successfully before the Phase 1 commit.
 
+## Phase 2 completed work
+
+- Replaced independently updated cache payload truth with one atomic immutable
+  `SensorFrame` containing baseline, inventory, activity, bank UI, and dialogue
+  facts plus per-fact provenance and explicit availability.
+- Made login and capture-failure frames replace prior complete frames without
+  carrying facts forward.
+- Versioned the endpoint response to `plugin_snapshot_response.v2`, separated
+  `assembledAtUtc` from source capture time, and based freshness on the source.
+- Bound world-model and tile geometry to source tick, session, process, recent
+  capture time, and a camera/window `geometryFrameId`; bound menu evidence to
+  the real post-menu-sort sample.
+- Updated the immutable Python observation and safety gate to preserve and
+  enforce frame/menu provenance. Added `docs/SENSOR_CONTRACT.md` and a
+  cross-language Java-schema/Python-parser fixture test.
+- Validation: golden replay 2 passed; all 123 Python tests passed; a forced
+  fresh Java run executed 39 tests across 6 suites with no failures, errors, or
+  skips; `git diff --check` passed.
+- Bounded read-only live check: the new endpoint served response v2/frame v1,
+  but RuneLite was at `LOGIN_SCREEN`. It published only baseline, explicitly
+  marked the other four facts unavailable, returned `WARN`, and `observe`
+  refused loaded-scene status. The launched dev client was then closed and port
+  8893 was verified closed. This is fail-closed contract evidence, not gameplay
+  proof.
+
 ## Prohibited during this mission
 
 - A second gameplay task or site, multiple woodcut areas, a generic navigation
@@ -99,8 +129,11 @@ runtime logic.
 
 - The live corpus is stitched and lacks complete raw observations, command/ACK
   receipts, and immutable source provenance.
-- Source freshness is still based partly on assembled response time; Phase 2 is
-  the next safety-critical implementation milestone.
+- The last Phase 2 live check stopped at the login screen; it proves incomplete
+  frame handling, not a loaded gameplay observation.
+- Each new source tick forces a world-model refresh behind a 250 ms provider
+  wait. Static review did not prove a failure, but final loaded-scene evidence
+  must measure refresh/query timing and repeated provenance/timeout warnings.
 - Arduino callers and final firmware status proof are not yet centralized;
   Phase 5 owns that migration.
 - No EngineFrame, overlay, demonstration recorder, or frontend facade exists.

@@ -132,6 +132,8 @@ class WoodcutBankTask:
             return self._wait(observation, "player location is incomplete")
         if not observation.session_id:
             return self._wait(observation, "session identity is unavailable")
+        if not observation.menu_fresh:
+            return self._wait(observation, "client menu evidence is stale")
         if observation.menu_client_tick is None:
             return self._wait(observation, "client menu sample is unavailable")
         if observation.location.plane != observation.plane:

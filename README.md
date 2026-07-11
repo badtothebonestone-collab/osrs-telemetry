@@ -9,8 +9,9 @@ It is not a general bot framework, planner, task language, learned policy, or
 anti-detection system. The current baseline implementation is:
 
 ```text
-RuneLite plugin -> snapshot -> Observation -> WoodcutBankTask
-               -> SafetyGate -> ArduinoActionInterface -> Verifier
+RuneLite plugin -> atomic SensorFrame -> snapshot v2 -> Observation
+               -> WoodcutBankTask -> SafetyGate
+               -> ArduinoActionInterface -> Verifier
 ```
 
 There is one command surface: `run.cmd`.
@@ -51,9 +52,9 @@ In another terminal, prove that the game scene is observable:
 
 The command exits successfully only when the current baseline checks report a
 fresh, loaded scene. Its JSON output contains the player location,
-inventory/log count, nearby-object count, menu count, bank state, assembled
-timestamp freshness, and tick. Atomic source-coherent freshness is the next
-safety milestone and is not claimed by this command yet.
+inventory/log count, nearby-object count, menu count, bank state, source and
+assembly timestamps, frame identity/coherence, and tick. Freshness is derived
+from the RuneLite capture time rather than the HTTP response time.
 
 Ask the task engine for its first action without sending input:
 
@@ -107,6 +108,7 @@ does not pretend that the ignored live traces contain full raw observations.
   route contract, and deterministic replay facts.
 - `docs/PRODUCT_VISION.md`: governing product scope and future user experience.
 - `docs/ARCHITECTURE.md`: contracts and state transitions.
+- `docs/SENSOR_CONTRACT.md`: atomic frame, freshness, geometry, and menu provenance.
 - `docs/ENGINE_STATUS.md`: completed milestone, evidence boundary, and blockers.
 - `PLANS.md`: active phases, acceptance criteria, and decision log.
 - `docs/RESCUE_AUDIT.md`: archaeology findings and removal rationale.
