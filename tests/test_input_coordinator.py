@@ -49,6 +49,8 @@ class FakeBackend:
         device_pixel_scale: float = 1.0,
         no_effect_x_move_count: int = 0,
         no_effect_y_move_count: int = 0,
+        no_effect_x_move_indices: set[int] | None = None,
+        no_effect_y_move_indices: set[int] | None = None,
     ) -> None:
         self.position = start
         self.fail_commands = set(fail_commands or ())
@@ -67,6 +69,9 @@ class FakeBackend:
         self.device_pixel_scale = device_pixel_scale
         self.no_effect_x_move_count = no_effect_x_move_count
         self.no_effect_y_move_count = no_effect_y_move_count
+        self.no_effect_x_move_indices = set(no_effect_x_move_indices or ())
+        self.no_effect_y_move_indices = set(no_effect_y_move_indices or ())
+        self.move_call_count = 0
         self.positions: list[tuple[int, int]] = [start]
         self.key_presses: list[tuple[str, int]] = []
         self.events: list[str] = []
@@ -134,12 +139,19 @@ class FakeBackend:
     def _move_relative(self, dx: int, dy: int) -> dict[str, Any]:
         self.events.append(f"move:{dx},{dy}")
         self._record("MOVE")
-        if dx and self.no_effect_x_move_count > 0:
+        self.move_call_count += 1
+        if dx and (
+            self.no_effect_x_move_count > 0
+            or self.move_call_count in self.no_effect_x_move_indices
+        ):
             dx = 0
-            self.no_effect_x_move_count -= 1
-        if dy and self.no_effect_y_move_count > 0:
+            self.no_effect_x_move_count = max(0, self.no_effect_x_move_count - 1)
+        if dy and (
+            self.no_effect_y_move_count > 0
+            or self.move_call_count in self.no_effect_y_move_indices
+        ):
             dy = 0
-            self.no_effect_y_move_count -= 1
+            self.no_effect_y_move_count = max(0, self.no_effect_y_move_count - 1)
         if self.device_pixel_scale != 1.0:
             dx = self._scaled_delta(dx)
             dy = self._scaled_delta(dy)
@@ -835,6 +847,56 @@ class InputCoordinatorTests(unittest.TestCase):
         self.assertEqual(
             ["move:1,1", "move:2,1"],
             [event for event in backend.events if event.startswith("move:")],
+        )
+        self.assertNotIn("mouse_down:left", backend.events)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_one_calibrated_axis_no_effect_uses_a_bounded_replan(self) -> None:
+        backend = FakeBackend(
+            start=(50, 50),
+            no_effect_x_move_indices={3},
+        )
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(target=ScreenPoint(70, 70)),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertTrue(receipt.successful)
+        self.assertEqual((70, 70), backend.position)
+        self.assertGreaterEqual(backend.move_call_count, 4)
+        self.assertIn("mouse_down:left", backend.events)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_consecutive_calibrated_axis_no_effect_blocks_before_click(self) -> None:
+        backend = FakeBackend(
+            start=(50, 50),
+            no_effect_x_move_indices={3, 4},
+        )
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(target=ScreenPoint(70, 70)),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertIn("cursor_feedback_no_effect_x", receipt.reason)
+        self.assertEqual(4, backend.move_call_count)
+        self.assertNotIn("mouse_down:left", backend.events)
+        self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)
+
+    def test_intermittent_no_effect_events_share_a_transaction_cap(self) -> None:
+        backend = FakeBackend(
+            start=(50, 50),
+            no_effect_x_move_indices=set(range(3, 40, 2)),
+        )
+        receipt = coordinator(backend).execute_pointer(
+            pointer_intent(target=ScreenPoint(80, 80)),
+            validate=lambda _intent, _actual: InputValidation.allow(),
+        )
+
+        self.assertFalse(receipt.successful)
+        self.assertIn(
+            "cursor_feedback_no_effect_transaction_limit_exceeded",
+            receipt.reason,
         )
         self.assertNotIn("mouse_down:left", backend.events)
         self.assertTrue(receipt.firmware_status and receipt.firmware_status.safe)

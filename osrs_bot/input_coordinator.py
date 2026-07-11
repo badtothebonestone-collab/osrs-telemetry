@@ -24,7 +24,8 @@ MAX_POINTER_FEEDBACK_PLANS = 64
 MAX_FEEDBACK_PLAN_AXIS_DELTA = 64
 MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT = 4
 CURSOR_TRANSFER_HEADROOM_DEVICE_PX_PER_HID_COUNT = 8
-MAX_INITIAL_AXIS_NO_EFFECT_RETRIES = 1
+MAX_CONSECUTIVE_AXIS_NO_EFFECT_RETRIES = 1
+MAX_TRANSACTION_NO_EFFECT_EVENTS = 8
 DEFAULT_POINTER_TIMESTEP_SECONDS = 0.02
 DEFAULT_CLICK_HOLD_SECONDS = 0.06
 _COMMAND_ID = re.compile(r"^cmd-[0-9]{8,}$")
@@ -708,6 +709,7 @@ class _Transaction:
         self.ledger_complete = True
         self.pointer_plan_count = 0
         self.pointer_step_count = 0
+        self.pointer_no_effect_count = 0
 
     def add_error(self, reason: object) -> None:
         text = _clean_text(reason, fallback="unknown_input_error")
@@ -1472,6 +1474,7 @@ class InputCoordinator:
                 if not intent.movement_bounds.contains(actual):
                     raise _TransactionAbort("cursor_left_verified_movement_bounds")
                 x_calibrated, x_no_effect_retries = self._validate_axis_transfer(
+                    transaction=transaction,
                     commanded=step.dx,
                     observed=actual.x - before.x,
                     calibrated=x_calibrated,
@@ -1479,6 +1482,7 @@ class InputCoordinator:
                     axis="x",
                 )
                 y_calibrated, y_no_effect_retries = self._validate_axis_transfer(
+                    transaction=transaction,
                     commanded=step.dy,
                     observed=actual.y - before.y,
                     calibrated=y_calibrated,
@@ -1537,6 +1541,7 @@ class InputCoordinator:
                 1,
                 abs(remaining) // MAX_SUPPORTED_DEVICE_PX_PER_HID_COUNT,
             )
+            magnitude = max(magnitude, 1 + no_effect_retries)
             magnitude = min(magnitude, MAX_FEEDBACK_PLAN_AXIS_DELTA)
         clearance = upper - coordinate if direction > 0 else coordinate - lower
         safe_magnitude = (
@@ -1629,6 +1634,7 @@ class InputCoordinator:
     @staticmethod
     def _validate_axis_transfer(
         *,
+        transaction: _Transaction,
         commanded: int,
         observed: int,
         calibrated: bool,
@@ -1642,10 +1648,15 @@ class InputCoordinator:
                 )
             return calibrated, no_effect_retries
         if observed == 0:
+            transaction.pointer_no_effect_count += 1
             if (
-                not calibrated
-                and no_effect_retries < MAX_INITIAL_AXIS_NO_EFFECT_RETRIES
+                transaction.pointer_no_effect_count
+                > MAX_TRANSACTION_NO_EFFECT_EVENTS
             ):
+                raise _TransactionAbort(
+                    "cursor_feedback_no_effect_transaction_limit_exceeded"
+                )
+            if no_effect_retries < MAX_CONSECUTIVE_AXIS_NO_EFFECT_RETRIES:
                 return False, no_effect_retries + 1
             raise _TransactionAbort(f"cursor_feedback_no_effect_{axis}")
         if (commanded > 0) != (observed > 0):
