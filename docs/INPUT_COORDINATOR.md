@@ -93,7 +93,10 @@ zones for every supported authenticated template, so ambiguity is never
 narrowed to an earlier candidate. Within one fresh screenshot only, the matcher
 indexes each zone's bright pixels once and reuses that bounded index across its
 allowed template scales. An invalid or greater-than-four-million-pixel search
-zone blocks instead of becoming a no-match or disconnect candidate.
+zone, more than 20,000 high-anchor-score origins, or excessive first-anchor
+density blocks instead of becoming a no-match or disconnect candidate. These
+are fail-closed work caps; supported live geometry is separately measured
+inside the firmware lease rather than claimed as a universal latency bound.
 
 The coordinator checks focus/PID and actual cursor feedback throughout the
 trajectory. Every correction is another bounded deterministic plan. Immediately

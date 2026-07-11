@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from array import array
 import ctypes
 import json
 import os
@@ -10,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from PIL import Image, ImageGrab, ImageStat
+from PIL import Image, ImageChops, ImageGrab, ImageStat
 
 from .input_coordinator import (
     ApprovedPointerIntent,
@@ -29,6 +28,9 @@ MAX_LOGIN_SECONDS = 180.0
 TRANSITION_SECONDS = 15.0
 CLIENT_MARGIN_PX = 8
 MAX_TEMPLATE_SEARCH_ZONE_PIXELS = 4_000_000
+MAX_TEMPLATE_ANCHOR_CANDIDATES = 20_000
+MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES_PER_SCALE = 100_000
+MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES = 400_000
 SUPPORTED_SURFACES = ("play_now", "click_here_to_play", "disconnected_ok")
 _TEMPLATE_SURFACES = ("play_now", "click_here_to_play")
 TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "login"
@@ -132,6 +134,79 @@ def _scaled_templates(template: Image.Image) -> tuple[Image.Image, ...]:
     return tuple(output)
 
 
+def _anchor_candidate_origins(
+    bright_mask: Image.Image,
+    anchors: tuple[tuple[int, int], ...],
+    *,
+    origin_width: int,
+    origin_height: int,
+    origin_x: int = 0,
+    origin_y: int = 0,
+    candidate_limit: int = MAX_TEMPLATE_ANCHOR_CANDIDATES,
+    first_candidate_limit: int = MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES_PER_SCALE,
+) -> tuple[set[tuple[int, int]], bytes, int, int]:
+    """Return the original first-anchor superset plus its fast hit scores."""
+
+    if (
+        bright_mask.mode != "L"
+        or not anchors
+        or len(anchors) > 255
+        or origin_width <= 0
+        or origin_height <= 0
+        or candidate_limit <= 0
+        or first_candidate_limit <= 0
+    ):
+        raise LoginSafetyError("login template anchor evidence is invalid")
+    anchor_score = Image.new("L", (origin_width, origin_height), 0)
+    for anchor_x, anchor_y in anchors:
+        anchor_score = ImageChops.add(
+            anchor_score,
+            bright_mask.crop(
+                (
+                    anchor_x,
+                    anchor_y,
+                    anchor_x + origin_width,
+                    anchor_y + origin_height,
+                )
+            ),
+        )
+    score_bytes = anchor_score.tobytes()
+    first_anchor_x, first_anchor_y = anchors[0]
+    first_anchor_bytes = bright_mask.crop(
+        (
+            first_anchor_x,
+            first_anchor_y,
+            first_anchor_x + origin_width,
+            first_anchor_y + origin_height,
+        )
+    ).tobytes()
+    anchor_candidate_count = sum(
+        score_bytes.count(bytes((anchor_hits,)))
+        for anchor_hits in range(len(anchors) - 1, len(anchors) + 1)
+    )
+    if anchor_candidate_count > candidate_limit:
+        raise LoginSafetyError(
+            "login template anchor candidates exceed the bounded limit"
+        )
+    first_anchor_candidate_count = first_anchor_bytes.count(b"\x01")
+    if first_anchor_candidate_count > first_candidate_limit:
+        raise LoginSafetyError(
+            "login template first-anchor candidates exceed the bounded limit"
+        )
+    origins: set[tuple[int, int]] = set()
+    score_index = first_anchor_bytes.find(b"\x01")
+    while score_index >= 0:
+        local_y, local_x = divmod(score_index, origin_width)
+        origins.add((origin_x + local_x, origin_y + local_y))
+        score_index = first_anchor_bytes.find(b"\x01", score_index + 1)
+    return (
+        origins,
+        score_bytes,
+        anchor_candidate_count,
+        first_anchor_candidate_count,
+    )
+
+
 def _best_template_match(
     image: Image.Image,
     template: Image.Image,
@@ -159,12 +234,20 @@ def _best_template_match(
     # The search region is identical for every allowed template scale. Build
     # its bright-pixel index once so fresh post-move validation stays inside
     # the firmware lease without narrowing the full ambiguity scan.
-    bright_screen_indices = array("I")
+    zone_width = right - left
+    zone_height = bottom - top
+    bright_mask = bytearray((right - left) * (bottom - top))
     for screen_y in range(top, bottom):
-        row_offset = screen_y * haystack.width
+        mask_row_offset = (screen_y - top) * zone_width
         for screen_x in range(left, right):
             if _bright(hay_pixels[screen_x, screen_y]):
-                bright_screen_indices.append(row_offset + screen_x)
+                mask_index = mask_row_offset + screen_x - left
+                bright_mask[mask_index] = 1
+    bright_mask_image = Image.frombytes(
+        "L", (zone_width, zone_height), bytes(bright_mask)
+    )
+    remaining_anchor_candidates = MAX_TEMPLATE_ANCHOR_CANDIDATES
+    remaining_first_anchor_candidates = MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES
 
     for needle in _scaled_templates(template):
         width, height = needle.size
@@ -189,41 +272,68 @@ def _best_template_match(
             if not _bright(needle_pixels[x, y])
         ]
         negative_samples = _even_samples(negative, 96)
-        anchor_x, anchor_y = anchors[0]
-        candidate_origins: set[tuple[int, int]] = set()
-        for screen_index in bright_screen_indices:
-            screen_y, screen_x = divmod(screen_index, haystack.width)
-            if (
-                left + anchor_x <= screen_x <= right - width + anchor_x
-                and top + anchor_y <= screen_y <= bottom - height + anchor_y
-            ):
-                candidate_origins.add(
-                    (screen_x - anchor_x, screen_y - anchor_y)
-                )
-
-        for x, y in candidate_origins:
-            anchor_hits = sum(
-                1 for px, py in anchors if _bright(hay_pixels[x + px, y + py])
+        origin_width = zone_width - width + 1
+        origin_height = zone_height - height + 1
+        (
+            candidate_origins,
+            anchor_scores,
+            anchor_candidate_count,
+            first_anchor_candidate_count,
+        ) = (
+            _anchor_candidate_origins(
+                bright_mask_image,
+                anchors,
+                origin_width=origin_width,
+                origin_height=origin_height,
+                origin_x=left,
+                origin_y=top,
+                candidate_limit=remaining_anchor_candidates,
+                first_candidate_limit=min(
+                    MAX_TEMPLATE_FIRST_ANCHOR_CANDIDATES_PER_SCALE,
+                    remaining_first_anchor_candidates,
+                ),
             )
-            if anchor_hits < len(anchors) - 1:
+        )
+        remaining_anchor_candidates -= anchor_candidate_count
+        remaining_first_anchor_candidates -= first_anchor_candidate_count
+
+        positive_offsets = tuple(
+            py * zone_width + px for px, py in positive_samples
+        )
+        negative_offsets = tuple(
+            py * zone_width + px for px, py in negative_samples
+        )
+        for x, y in candidate_origins:
+            anchor_score_index = (
+                (y - top) * origin_width + x - left
+            )
+            if anchor_scores[anchor_score_index] < len(anchors) - 1:
                 continue
+            mask_origin = (y - top) * zone_width + x - left
             positive_ratio = sum(
-                1 for px, py in positive_samples if _bright(hay_pixels[x + px, y + py])
+                1
+                for offset in positive_offsets
+                if bright_mask[mask_origin + offset]
             ) / len(positive_samples)
             if positive_ratio < 0.86:
                 continue
             negative_ratio = sum(
-                1 for px, py in negative_samples if not _bright(hay_pixels[x + px, y + py])
+                1
+                for offset in negative_offsets
+                if not bright_mask[mask_origin + offset]
             ) / max(1, len(negative_samples))
             # A solid bright rectangle satisfies every positive sample but is
             # not text. Require the dark gaps that define the glyph shape.
             if negative_ratio < 0.75:
                 continue
             patch_bright_ratio = sum(
-                1
-                for patch_y in range(y, y + height)
-                for patch_x in range(x, x + width)
-                if _bright(hay_pixels[patch_x, patch_y])
+                sum(
+                    bright_mask[
+                        mask_origin + patch_y * zone_width:
+                        mask_origin + patch_y * zone_width + width
+                    ]
+                )
+                for patch_y in range(height)
             ) / (width * height)
             if not (
                 template_bright_ratio * 0.55

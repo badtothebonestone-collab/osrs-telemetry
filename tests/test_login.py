@@ -295,6 +295,108 @@ def build_helper(
 
 
 class LoginDetectionTests(unittest.TestCase):
+    def test_anchor_mask_matches_original_first_anchor_and_hit_gate(self) -> None:
+        width, height = 20, 15
+        anchors = tuple((x, y) for y in range(3) for x in range(3))
+        mask = bytearray(width * height)
+        first_dark_origin = (1, 1)
+        accepted_origin = (10, 8)
+        for index, (anchor_x, anchor_y) in enumerate(anchors):
+            if index != 0:
+                x = first_dark_origin[0] + anchor_x
+                y = first_dark_origin[1] + anchor_y
+                mask[y * width + x] = 1
+            if index != len(anchors) - 1:
+                x = accepted_origin[0] + anchor_x
+                y = accepted_origin[1] + anchor_y
+                mask[y * width + x] = 1
+        image = Image.frombytes("L", (width, height), bytes(mask))
+        origin_width = width - max(x for x, _y in anchors)
+        origin_height = height - max(y for _x, y in anchors)
+        expected = {
+            (origin_x, origin_y)
+            for origin_y in range(origin_height)
+            for origin_x in range(origin_width)
+            if mask[(origin_y + anchors[0][1]) * width + origin_x + anchors[0][0]]
+            and sum(
+                bool(mask[(origin_y + anchor_y) * width + origin_x + anchor_x])
+                for anchor_x, anchor_y in anchors
+            )
+            >= len(anchors) - 1
+        }
+
+        (
+            candidate_origins,
+            anchor_scores,
+            _candidate_count,
+            _first_candidate_count,
+        ) = (
+            login_module._anchor_candidate_origins(
+                image,
+                anchors,
+                origin_width=origin_width,
+                origin_height=origin_height,
+            )
+        )
+        actual = {
+            (origin_x, origin_y)
+            for origin_x, origin_y in candidate_origins
+            if anchor_scores[origin_y * origin_width + origin_x]
+            >= len(anchors) - 1
+        }
+
+        self.assertEqual(expected, actual)
+        self.assertNotIn(first_dark_origin, candidate_origins)
+        self.assertIn(accepted_origin, candidate_origins)
+
+    def test_dense_anchor_candidates_fail_closed_before_scoring(self) -> None:
+        width, height = 200, 150
+        anchors = tuple((x, y) for y in range(3) for x in range(3))
+        mask = Image.new("L", (width, height), 1)
+
+        with self.assertRaisesRegex(
+            login_module.LoginSafetyError,
+            "anchor candidates exceed the bounded limit",
+        ):
+            login_module._anchor_candidate_origins(
+                mask,
+                anchors,
+                origin_width=width - 2,
+                origin_height=height - 2,
+            )
+
+    def test_first_anchor_candidate_density_fails_closed_before_set_growth(self) -> None:
+        width, height = 360, 120
+        origin_width, origin_height = 150, 100
+        anchors = (
+            (0, 0),
+            (200, 0),
+            (200, 10),
+            (200, 20),
+            (200, 30),
+            (200, 40),
+            (200, 50),
+            (200, 60),
+            (200, 70),
+        )
+        mask = bytearray(width * height)
+        for y in range(origin_height):
+            for x in range(origin_width):
+                mask[y * width + x] = 1
+        image = Image.frombytes("L", (width, height), bytes(mask))
+
+        with self.assertRaisesRegex(
+            login_module.LoginSafetyError,
+            "first-anchor candidates exceed the bounded limit",
+        ):
+            login_module._anchor_candidate_origins(
+                image,
+                anchors,
+                origin_width=origin_width,
+                origin_height=origin_height,
+                first_candidate_limit=10_000,
+            )
+
     def test_detects_each_genuine_supported_template(self) -> None:
         placements = {
             "play_now": (470, 330),
@@ -311,11 +413,17 @@ class LoginDetectionTests(unittest.TestCase):
 
     def test_unknown_or_credential_like_surface_is_never_a_candidate(self) -> None:
         screenshot = Image.new("RGB", (1200, 800), (25, 25, 25))
+        self.assertEqual(detect_login_surfaces(screenshot), ())
+
         # Input-box-like rectangles are intentionally not actionable evidence.
         for x in range(400, 800):
             for y in range(300, 340):
                 screenshot.putpixel((x, y), (220, 220, 220))
-        self.assertEqual(detect_login_surfaces(screenshot), ())
+        with self.assertRaisesRegex(
+            login_module.LoginSafetyError,
+            "anchor candidates exceed the bounded limit",
+        ):
+            detect_login_surfaces(screenshot)
 
     def test_full_detector_preserves_cross_template_ambiguity(self) -> None:
         screenshot = Image.new("RGB", (1200, 800), (55, 18, 14))
